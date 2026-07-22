@@ -3058,3 +3058,49 @@ stable -- but the branch resisted construction: over 573 kernels the bridge hold
 stranded list is never non-empty, and eight further shapes aimed at it (a dead-arm store, tied cross-file helper
 stores plain, guarded on a promoting flag, in a zero-trip loop, across two leaves) all reported the in-graph
 violation instead. Recorded in the code as a failed search, explicitly not as a mechanism.
+
+
+CONSULT X9 FALSIFIED MY CLAIMED CAMPAIGN OUTCOME, and the witness is four lines longer than the one it replaces:
+
+    class WidenedInvariantCell:
+        def __init__(self) -> None: self.a = [1.0 + 2**-30, 0.0, 0.0, 0.0]
+        def step(self, x: float) -> float:
+            r = 10.0 if self.a[0] > 1.0 else 20.0
+            self.a = [self.a[0], x, self.a[1], self.a[2]]
+            return r
+
+Cell `a[0]` NEVER VARIES, yet it is promoted and miscompiles -- Python 10.0, E8M23 20.0, with a `state_a_0` port.
+Verified independently here. The cause is the BOUNDED WHOLE-LEAF WIDENING FALLBACK, which residualizes every
+non-Boolean cell -- and that fallback is precisely what was added to stop the per-cell fold's round explosion on
+delay lines. The FIR fix traded this correctness case for termination, and nobody noticed because the two were
+measured separately.
+
+SO "EVERY SPURIOUS-PROMOTION ROUTE IS CLOSED" IS FALSE, and it was mine. This is a genuine spurious promotion --
+a cell the user's program never varies, forced into a target-width carrier -- and therefore a DEFECT, distinct
+from the chartered scalar case. It also contradicts DESIGN.md's unqualified per-cell invariant-state promise.
+
+THE HONEST WORDING, which the campaign should use from here: Stage 4 closed the enumerated stale and speculative
+promotion routes and made ordinary state settlement per-cell, so read-only leaves and invariant cells fold and
+their dead slots disappear while analysis stays precise. It did NOT close the bounded whole-leaf widening
+fallback, which can still force an invariant non-Boolean cell into a target-width carrier. And separately, a
+genuinely varying float slot is target-width BY CHARTER, so an inexact reset may differ from host Python.
+
+X9'S RULING ON THE CHARTER CASE: do not pass the format into the frontend, and do not defer the primary
+diagnostic to individual backends. Check every optimized logical float `StateSlot` while lowering to MIR, where
+both the reset and the configured float format are in hand, and diagnose BEFORE redundant-slot alias removal,
+since HIR slots are logical cells and LIR may delete physical aliases. No explicit representability obligation is
+needed -- every carried float reset is inherently a candidate.
+
+AND IT REFUTED THE COMPARISON-GATING IDEA I PROPOSED, by measurement rather than argument. Gating on "the reset
+participates in a comparison" has false positives (`0.1 > 0` participates and does not flip) and worse
+completeness holes: arithmetic between the read and the comparison can cause the flip, numeric outputs and error
+sidebands change without any comparison, and reset influence CROSSES TRANSACTIONS. It built that last one --
+copy an inexact-reset cell into an exact-reset one, compare the second on the following transaction: Python
+[20, 10] against E8M23 [20, 20]. A sound sensitivity analysis would need a fixed point across every
+live-out-to-next-read edge plus every observable output, control decision and error sink.
+
+BLAST RADIUS, MEASURED over all 36 frozen cases: 35 logical carried float cells, of which exactly TWO have
+target-inexact resets, both in one case (`ekf1_stateful_shipped-e8m36`, cells `x_0` and `P_urt_5`), and that
+design contains no comparator at all. So a default WARNING costs one warning and no rejection, while a hard
+rejection would break that case, the shipped EKF in two formats, and its six synthesis targets. Warning is the
+ruling.
