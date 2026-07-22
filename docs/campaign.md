@@ -2533,3 +2533,42 @@ moved first and would still leave ~2,900 lines, so it is a separate step, flagge
 A REPORTED GATE WAS WRONG AGAIN, caught by re-running it: M3 reported mypy clean, and mypy failed on an unused
 `type: ignore` the change had made redundant. One line, no consequence -- but it is the fourth handoff this
 session whose self-reported gate did not survive being re-run.
+
+
+M4 IS LANDED. `holoso/_frontend/_fir/_consume.py` holds the use-specific consumption operations as pure
+functions over facts, one per use, each doctrine stated exactly once: `_analyze.py` now decides WHICH
+consumption a construct is and `_consume.py` decides whether it is legal. `_analyze.py` shrank 3,195 -> 2,836
+lines, reversing M3's growth and moving back toward the soft limit. Verified in the maintainer's tree: corpus
+151/151 BYTE-IDENTICAL, 638 targeted tests, mypy clean over 209 files, black clean, M2/M3 witnesses untouched.
+Duplicated message templates across the frontend fell 22 -> 17, and an AST diff shows 12 string literals
+disappeared with ZERO diagnostics lost -- every disappearance a redundant copy.
+
+THE PLAN'S PREMISE WAS STALE AND THE STEP CORRECTED IT. The brief (from the original audit, and repeated by me
+in the dispatch) said 0-d arrays "scalarize for binary ops, comparison and casts", which is why a single global
+predicate would be wrong. Post-trim they do NOT scalarize: `admit()` returns None for any 0-d ndarray, so one
+never becomes a fact at all, and every probed consumption reports the DOOR's refusal. It is a CREATION-DOOR
+doctrine, not a consumption one. The consumption framing was right for the other three.
+
+A PRE-EXISTING SILENT ACCEPTANCE, found by mutation testing rather than by review. The array-level boolean
+guard has a unique claim only at ZERO elements: with one or more, the leafwise rule refuses anyway. At zero,
+the guard is the only thing standing -- and without it `np.array([], dtype=bool) * 2.0` was SILENTLY ACCEPTED.
+Nothing pinned it. Two other unpinned enforcement sites got witnesses too; five were found by a second
+per-USE mutation pass after the first per-DOCTRINE pass came back 11/11 clean, which is the useful lesson:
+passing at the granularity you designed for says nothing about the granularity below it.
+
+TWO DISCREPANCIES REPORTED RATHER THAN UNIFIED, both preserved verbatim because unifying either is a behaviour
+change. The four 0-d doors disagree on their PREDICATE -- two test the exact type, matching `admit`'s own
+gate, and two test `isinstance` -- so a 0-d ndarray SUBCLASS gets a different message depending on which door
+it reaches. `_operand_type` has a dedicated "ndarray subclass" message, which suggests `isinstance` is the
+latent defect, but that is a ruling for another step. And two sites say "runtime integer array arithmetic"
+versus "...construction" for one doctrine; a typed use enum keeps both renderings byte-identical while siting
+the doctrine once.
+
+TWO SITES REMAIN UNPINNED, WITH THEIR SEARCH SPACE STATED: `subscript_index`'s `Known(StaticRecord)` disjunct
+(normalization turns every record into an aggregate, so no path was found that produces one) and
+`elementwise_unary`'s runtime-integer guard (every route to a runtime-int array refuses earlier). Neither was
+deleted, because "I could not construct a witness" is not "unreachable".
+
+The seam sweep is green against its record: the three routes are still open at 10.0 -> 30.0, 12.0 -> 22.0 and
+10.0 -> 20.0, and the family tallies match TODO.md exactly. M5 -- fresh resolution -- is the step that closes
+them, and is next.

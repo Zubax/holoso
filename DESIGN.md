@@ -323,6 +323,40 @@ unconsumed. In the library call-shape table first match decides which of a call'
 reported, so a spelling's arity rule precedes its operand rule and the matrix product's operand refusal
 precedes the shared array-operand one.
 
+### Value consumption operations
+
+What a value may be USED AS is decided in `_consume.py`, one operation per use, and each doctrine is stated at
+exactly one of them. A single global "is this value legal" predicate would be wrong, because the same value is
+admitted by one consumption and refused by another, and that asymmetry is the substance rather than an
+exception to a rule:
+
+| value          | refused by                                    | admitted by                                     |
+| -------------- | --------------------------------------------- | ----------------------------------------------- |
+| boolean        | arithmetic operand, array index               | `& \| ^`, comparison, truth, explicit casts     |
+| record         | subscript key, sliced/multi-axis source, attribute receiver | field access, integer projection  |
+| runtime integer array | elementwise arithmetic, `np.array` construction | float arrays, fully static integer arrays |
+| 0-d array      | every door where a Python object becomes a fact | nothing: the domain does not carry one        |
+
+The operations are pure functions over facts and reach no analyzer state, which is why they are not analyzer
+methods: no consumption rule depends on where the fixpoint has got to. `_analyze.py` decides WHICH consumption
+a construct is and supplies the facts; `_consume.py` decides whether that consumption is legal and what it
+yields.
+
+Two consequences worth stating. Arithmetic consumes its operand kinds TOGETHER rather than one at a time, so a
+`bool * object` still reports the object -- deriving every kind before judging any is what preserves the more
+specific diagnosis. And the array-level guards are ARRAY-WIDE, mirroring what numpy checks before touching any
+element: with even one element the leafwise scalar rule refuses again, so the array-level guard's unique claim
+is the EMPTY array, and that is the shape its witness must use.
+
+Array results are built by one constructor that maps every ordinal through the consumption's own leaf rule and
+pins the invariant `ArrayLayout` cannot check for itself -- a leaf's kind IS the array's dtype. The 0-d doctrine
+is a CREATION-DOOR doctrine, not a consumption one: `admit` refuses the object, `ArrayLayout` asserts the empty
+shape away, so a 0-d array never becomes a fact and no consumption ever sees one. The doors do not agree on
+their predicate -- the builder's global load and the attribute snapshot test the exact type, matching `admit`'s
+own gate, while the call-result and default-argument doors test `isinstance` and so refuse a 0-d ndarray
+SUBCLASS as 0-dimensional where the others let it through as a reference. That divergence is recorded rather
+than unified, since either predicate changes behaviour at two of the four doors.
+
 ### The route plan
 
 Cell routing is a TOTAL typed plan, in `_plan.py`, keyed by a phase-local `PlanSite` of `(block, op index)` over

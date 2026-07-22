@@ -75,7 +75,6 @@ from ._ir import (
 )
 from ._fact import (
     AggregateFact,
-    ArrayDType,
     ArrayLayout,
     AtomicFact,
     BoundFact,
@@ -99,7 +98,6 @@ from ._fact import (
     leaf_count,
     materialize_static,
     normalize_static,
-    numpy_kinded,
     outer_arity,
     record_of,
 )
@@ -116,7 +114,6 @@ from ._fold import (
     FoldRefusal,
     admit_call,
     construction_schema,
-    contains_record,
     is_unimplemented_library,
     range_size,
 )
@@ -132,17 +129,13 @@ from ._analysis_support import (
     _contract_structure,
     _coreachable,
     _crossing_object,
-    _fits_float64,
-    _has_truth_override,
     _identity_place,
     _is_array_fact,
     _is_list_fact,
     _join_atoms,
-    _layout_dtypes,
     _mro_attribute_of,
     _numeric_sem,
     _scalar_sem,
-    _rectangular_shape,
     _reject_attribute_hooks,
     _remap_op,
     _remap_terminator,
@@ -158,6 +151,23 @@ from ._analysis_support import (
     render_interpolation,
     schema_of_fact,
 )
+from ._consume import (
+    array_factory,
+    array_index_element,
+    arithmetic_operands,
+    attribute_receiver,
+    crossing_fact,
+    elementwise_binary,
+    elementwise_unary,
+    fold_binary,
+    fold_bitwise,
+    reject_zero_dimensional,
+    reshape_dimensions,
+    spanning_subscript_source,
+    subscript_index,
+    truth_value,
+    unary_residual,
+)
 from ._plan import (
     CallLowering,
     CallPlan,
@@ -168,7 +178,7 @@ from ._plan import (
     SourceSelection,
     produce_route_plans,
 )
-from ._opsem import BinOp, UnOp, static_binop, static_compare, static_truth, static_unop
+from ._opsem import BinOp, static_binop, static_compare, static_truth, static_unop
 from ..._hir import BoolType, FloatIsFinite, FloatIsInf, FloatIsNegInf, FloatIsPosInf
 from ._value import (
     MetaInt,
@@ -195,7 +205,6 @@ _MAX_BLOCKS = 200_000
 _MAX_VISITS = 1_000_000
 
 _BITWISE_OPS = frozenset({BinOp.LSHIFT, BinOp.RSHIFT, BinOp.BITAND, BinOp.BITOR, BinOp.BITXOR})
-_ELEMENTWISE_OPS = frozenset({BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV})
 
 
 @dataclass(frozen=True, slots=True)
@@ -966,7 +975,7 @@ class Analyzer:
             return hit[1], hit[2]
         value = getattr(owner, name)
         if type(value) is np.ndarray and value.ndim == 0:
-            raise AnalysisRejection("a 0-dimensional array is not supported; use the scalar directly", origin)
+            reject_zero_dimensional(origin)
         admitted = admit(value)
         self._component_reads[key] = (owner, value, admitted)
         return value, admitted
@@ -1308,8 +1317,8 @@ class Analyzer:
         # a branch condition is a write-once `PyTruth` in this very block, so a miss is a broken invariant, not
         # a case to tolerate.
         assert terminator.cond in result.binding_facts, f"branch condition {terminator.cond} has no fact"
-        truth = result.binding_facts[terminator.cond]
-        settled = static_truth(truth.value) if isinstance(truth, Known) else None
+        condition = result.binding_facts[terminator.cond]
+        settled = static_truth(condition.value) if isinstance(condition, Known) else None
         if settled is None:
             return
         dead = terminator.else_target if settled else terminator.then_target
@@ -1591,11 +1600,11 @@ class Analyzer:
                 if concat is not None:
                     env.set(Local(dst), concat)
                 elif _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
-                    env.set(Local(dst), self._elementwise_binary(bin_op, lhs_fact, rhs_fact, op.origin))
+                    env.set(Local(dst), elementwise_binary(bin_op, lhs_fact, rhs_fact, op.origin))
                 elif isinstance(lhs_fact, AggregateFact) or isinstance(rhs_fact, AggregateFact):
                     raise AnalysisRejection("arithmetic on an aggregate value", op.origin)
                 elif bin_op in _BITWISE_OPS:
-                    env.set(Local(dst), self._fold_bitwise(bin_op, lhs_fact, rhs_fact, op.origin))
+                    env.set(Local(dst), fold_bitwise(bin_op, lhs_fact, rhs_fact, op.origin))
                 else:
                     # Python's / always yields float. A residual power stays integer only for an integer base with a
                     # compile-time nonnegative integer exponent (a multiply chain); any other exponent may go float
@@ -1609,7 +1618,7 @@ class Analyzer:
                     )
                     env.set(
                         Local(dst),
-                        self._fold_binary(
+                        fold_binary(
                             lambda a, b: static_binop(bin_op, a, b),
                             lhs_fact,
                             rhs_fact,
@@ -1619,20 +1628,17 @@ class Analyzer:
                     )
             case PyUn(dst=dst, op=un_op, operand=operand):
                 operand_fact = env.get(Local(operand))
-                if (isinstance(operand_fact, Known) and isinstance(operand_fact.value, (StaticBool, NpBool))) or (
-                    isinstance(operand_fact, Residual) and operand_fact.type is SemType.BOOL
-                ):
-                    raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", op.origin)
+                arithmetic_operands((_scalar_sem(operand_fact),), op.origin)
                 if isinstance(operand_fact, AggregateFact) and isinstance(operand_fact.layout, ArrayLayout):
-                    env.set(Local(dst), self._elementwise_unary(un_op, operand_fact, op.origin))
+                    env.set(Local(dst), elementwise_unary(un_op, operand_fact, op.origin))
                 elif isinstance(operand_fact, Known):
                     folded = static_unop(un_op, operand_fact.value)
                     env.set(
                         Local(dst),
-                        Known(folded) if folded is not None else self._residual_of(operand_fact, op.origin),
+                        Known(folded) if folded is not None else unary_residual(operand_fact, op.origin),
                     )
                 else:
-                    env.set(Local(dst), self._residual_of(operand_fact, op.origin))
+                    env.set(Local(dst), unary_residual(operand_fact, op.origin))
             case PyCompare(dst=dst, op=rel, lhs=lhs, rhs=rhs):
                 lhs_fact, rhs_fact = env.get(Local(lhs)), env.get(Local(rhs))
                 if _is_array_fact(lhs_fact) or _is_array_fact(rhs_fact):
@@ -1644,7 +1650,7 @@ class Analyzer:
                         op.origin,
                     )
                 else:
-                    compared = self._fold_binary(
+                    compared = fold_binary(
                         lambda a, b: static_compare(rel, a, b),
                         lhs_fact,
                         rhs_fact,
@@ -1663,14 +1669,14 @@ class Analyzer:
                             raise AnalysisRejection("only == and != are defined between boolean values", op.origin)
                     env.set(Local(dst), compared)
             case PyNot(dst=dst, operand=operand):
-                truth = self._truth_fact(env.get(Local(operand)), op.origin)
-                if isinstance(truth, Known):
-                    result = Known(StaticBool(not as_python(truth.value)))
+                verdict = truth_value(env.get(Local(operand)), op.origin)
+                if isinstance(verdict, Known):
+                    result = Known(StaticBool(not as_python(verdict.value)))
                 else:
                     result = Residual(SemType.BOOL)
                 env.set(Local(dst), result)
             case PyTruth(dst=dst, operand=operand):
-                result = self._truth_fact(env.get(Local(operand)), op.origin)
+                result = truth_value(env.get(Local(operand)), op.origin)
                 env.set(Local(dst), result)
             case PySelect(dst=dst, mode=mode, cond=cond, lhs=lhs, rhs=rhs):
                 condition = env.get(Local(cond))
@@ -1793,355 +1799,15 @@ class Analyzer:
                 return self._expand_call(unit, block, index, op, env)
         return False
 
-    def _residual_of(self, fact: Fact, origin: OriginStack) -> Fact:
-        match fact:
-            case Known(value=value):
-                sem = _residual_type(value)
-                if sem is None:
-                    raise AnalysisRejection("a non-numeric value reaches a runtime operation", origin)
-                return Residual(SemType.INT if sem is SemType.BOOL else sem)  # Python: unary on bool yields int
-            case Residual(type=SemType.BOOL):
-                return Residual(SemType.INT)
-            case Residual():
-                return fact  # a unary negation/plus preserves the operand's numeric kind
-            case _:
-                raise AnalysisRejection("a runtime operation reads an aggregate or unbound value", origin)
-
-    def _fold_binary(
-        self,
-        fold: Callable[[StaticValue, StaticValue], StaticValue | None],
-        lhs: Fact,
-        rhs: Fact,
-        origin: OriginStack,
-        default: SemType | None = None,
-        promotes_to_float: bool = False,
-    ) -> Fact:
-        if isinstance(lhs, Known) and isinstance(rhs, Known):
-            folded = fold(lhs.value, rhs.value)
-            if folded is not None:
-                return Known(folded)
-        operand_types = [self._operand_type(fact, origin) for fact in (lhs, rhs)]
-        if default is None and SemType.BOOL in operand_types:
-            raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
-        if default is not None:
-            return Residual(default)
-        if promotes_to_float or SemType.FLOAT in operand_types:
-            return Residual(SemType.FLOAT)
-        return Residual(SemType.INT)
-
-    def _elementwise_binary(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
-        """
-        Elementwise ``+ - * /`` with at least one array operand: the other side is a same-shape array (leaves pair
-        in canonical order) or a numeric scalar (broadcast). Each leaf pair takes the SCALAR fold rule, so a fully
-        static pair folds through ``static_binop`` on the domain's own numpy-kinded leaf values -- element-wise
-        numpy semantics (promotion, wraparound, errstate deferrals) hold per leaf by construction, and general
-        broadcasting stays a located rejection rather than a silent alignment. Divergence guards mirror what numpy
-        applies ARRAY-WIDE before touching any element (an empty array included): an out-of-range Python-int
-        constant is a located rejection where numpy raises OverflowError. A runtime-integer result rejects until
-        the integer sprint: the scalar integer datapath saturates where numpy wraps, so lowering it would diverge
-        leafwise.
-        """
-        if bin_op is BinOp.MATMUL:
-            raise AnalysisRejection("the matrix product is not lowerable yet", origin)
-        if bin_op not in _ELEMENTWISE_OPS:
-            raise AnalysisRejection(f"operator {bin_op.value!r} is not supported on arrays", origin)
-        for side in (lhs, rhs):
-            if isinstance(side, AggregateFact) and not isinstance(side.layout, ArrayLayout):
-                raise AnalysisRejection(
-                    "elementwise arithmetic mixes an array with a non-array container; wrap it in np.array(...)",
-                    origin,
-                )
-        promotes = bin_op is BinOp.DIV
-        lhs_sem = self._elementwise_side_sem(lhs, origin)
-        rhs_sem = self._elementwise_side_sem(rhs, origin)
-        if SemType.BOOL in (lhs_sem, rhs_sem):
-            raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
-        arrays = [side for side in (lhs, rhs) if isinstance(side, AggregateFact)]
-        shapes = [side.layout.shape for side in arrays if isinstance(side.layout, ArrayLayout)]
-        if len(set(shapes)) > 1:
-            raise AnalysisRejection(
-                f"elementwise arithmetic on mismatched shapes {shapes[0]} and {shapes[1]} "
-                "(only a scalar broadcasts)",
-                origin,
-            )
-        result_sem = SemType.FLOAT if promotes or SemType.FLOAT in (lhs_sem, rhs_sem) else SemType.INT
-        for side in (lhs, rhs):
-            if isinstance(side, Known) and isinstance(side.value, MetaInt):
-                constant = side.value.value
-                if result_sem is SemType.INT and not -(2**63) <= constant < 2**63:
-                    raise AnalysisRejection(
-                        "an integer constant beyond the signed 64-bit range does not combine with an integer "
-                        "array (numpy raises OverflowError)",
-                        origin,
-                    )
-                if result_sem is SemType.FLOAT and not _fits_float64(constant):
-                    raise AnalysisRejection(
-                        "an integer constant too large for float64 does not combine with an array "
-                        "(numpy raises OverflowError)",
-                        origin,
-                    )
-        if result_sem is SemType.INT and (
-            any(isinstance(side, Residual) for side in (lhs, rhs))
-            or any(isinstance(leaf, Residual) for array in arrays for leaf in array.leaves)
-        ):
-            # The scalar integer datapath saturates (contained at MIR) where numpy int64 wraps; lowering a
-            # runtime-integer array op leafwise onto it would silently diverge the moment integers lower.
-            raise AnalysisRejection(
-                "runtime integer array arithmetic is not lowerable yet; cast to float first", origin
-            )
-
-        def pair(ordinal: int) -> Fact:
-            left = lhs.leaves[ordinal] if isinstance(lhs, AggregateFact) else lhs
-            right = rhs.leaves[ordinal] if isinstance(rhs, AggregateFact) else rhs
-            return self._fold_binary(
-                lambda a, b: static_binop(bin_op, a, b), left, right, origin, promotes_to_float=promotes
-            )
-
-        dtype = ArrayDType.FLOAT if result_sem is SemType.FLOAT else ArrayDType.INT
-        leaves: list[AtomicFact] = []
-        for ordinal in range(leaf_count(arrays[0].layout)):
-            leaf = pair(ordinal)
-            assert isinstance(leaf, (Known, Residual)), leaf
-            assert (leaf == Residual(result_sem)) or (
-                isinstance(leaf, Known) and _residual_type(leaf.value) is result_sem
-            ), "an elementwise leaf diverged from the result dtype"
-            leaves.append(leaf)
-        return AggregateFact(ArrayLayout(shapes[0], dtype), tuple(leaves))
-
-    def _static_reshape_target(
-        self, shape_args: tuple[BindingId, ...], env: _Env, origin: OriginStack
-    ) -> tuple[int, ...]:
-        """The reshape target as static dimensions: bare integers or one static tuple; -1 inference rejects."""
-        if not shape_args:
-            raise AnalysisRejection("reshape() requires a shape argument", origin)
-        facts = [env.get(Local(arg)) for arg in shape_args]
-        if len(facts) == 1 and isinstance(facts[0], AggregateFact):
-            materialized = materialize_static(facts[0])
-            if materialized is not None:
-                facts = [Known(materialized)]
-        if len(facts) == 1 and isinstance(facts[0], Known) and isinstance(facts[0].value, StaticSeq):
-            items: list[StaticValue] = list(facts[0].value.items)
-        else:
-            checked: list[StaticValue] = []
-            for fact in facts:
-                if not isinstance(fact, Known):
-                    raise AnalysisRejection("reshape() requires a static shape", origin)
-                checked.append(fact.value)
-            items = checked
-        dimensions: list[int] = []
-        for item in items:
-            if not isinstance(item, (MetaInt, NpInt)):
-                raise AnalysisRejection("reshape() requires integer dimensions", origin)
-            dimension = int(item.value)
-            if dimension < 0:
-                raise AnalysisRejection(
-                    "a -1 (inferred) reshape dimension is not supported; spell the shape explicitly", origin
-                )
-            dimensions.append(dimension)
-        if not dimensions:
-            raise AnalysisRejection("a 0-dimensional array is not supported; use the scalar directly", origin)
-        return tuple(dimensions)
-
-    def _elementwise_unary(self, un_op: UnOp, operand: AggregateFact, origin: OriginStack) -> Fact:
-        assert isinstance(operand.layout, ArrayLayout)
-        if operand.layout.dtype is ArrayDType.BOOL:
-            # numpy itself refuses unary +/- on a boolean array (TypeError pointing at ~/logical ops).
-            raise AnalysisRejection("arithmetic on a bool requires an explicit conversion", origin)
-        if operand.layout.dtype is ArrayDType.INT and any(isinstance(leaf, Residual) for leaf in operand.leaves):
-            raise AnalysisRejection(
-                "runtime integer array arithmetic is not lowerable yet; cast to float first", origin
-            )
-        leaves: list[AtomicFact] = []
-        for leaf in operand.leaves:
-            folded = static_unop(un_op, leaf.value) if isinstance(leaf, Known) else None
-            if folded is not None:
-                leaves.append(Known(folded))
-            else:
-                residual = self._residual_of(leaf, origin)
-                assert isinstance(residual, Residual), residual
-                leaves.append(residual)
-        return AggregateFact(operand.layout, tuple(leaves))
-
-    def _array_factory(self, source: AggregateFact, origin: OriginStack, force_float: bool = False) -> AggregateFact:
-        """
-        np.array/asarray/asanyarray over a residual-carrying aggregate: a relayout of the SAME leaves onto the
-        rectangular shape the nesting yields, with dtype discovery restricted to the proven subset -- any float
-        evidence promotes to FLOAT64 (integer leaves coerce: Knowns re-kind to np.float64 exactly as numpy
-        extraction would yield them, residual integers pick up a runtime conversion at emission), an all-boolean
-        argument builds a BOOL array, and empty array children contribute their dtype as evidence. Outside the
-        subset numpy behaves in ways the domain cannot carry, so the forms reject where numpy would surprise: a
-        Python-int leaf beyond signed 64 bits (numpy builds an object array, or silently promotes the uint64
-        range to float64), a bool/numeric mix (numpy widens the bool), and a runtime-integer result (the integer
-        datapath saturates where numpy wraps).
-        """
-        shape = _rectangular_shape(source.layout)
-        if shape is None:
-            raise AnalysisRejection("an array literal must be rectangular (numpy raises on ragged nesting)", origin)
-        sems: set[SemType | None] = set()
-        for leaf in source.leaves:
-            assert not isinstance(leaf, Reference), "a reference leaf survived the admission walk"
-            sems.add(leaf.type if isinstance(leaf, Residual) else _residual_type(leaf.value))
-        sems |= {
-            {ArrayDType.BOOL: SemType.BOOL, ArrayDType.INT: SemType.INT, ArrayDType.FLOAT: SemType.FLOAT}[dtype]
-            for dtype in _layout_dtypes(source.layout)
-        }
-        if None in sems:  # a string or range leaf: numpy would build a string/object array, outside the domain
-            raise AnalysisRejection("an array literal requires numeric or boolean elements", origin)
-        assert sems, "an empty argument cannot carry a residual leaf"
-        if force_float:
-            sems = {SemType.FLOAT}  # the explicit dtype=float casts every leaf; no discovery, no mix question
-        if SemType.BOOL in sems and sems != {SemType.BOOL}:
-            raise AnalysisRejection(
-                "an array literal mixes booleans with numbers (numpy would widen the bool); convert explicitly",
-                origin,
-            )
-        for leaf in source.leaves:
-            if isinstance(leaf, Known) and isinstance(leaf.value, MetaInt):
-                if not -(2**63) <= leaf.value.value < 2**63:
-                    raise AnalysisRejection(
-                        "an integer beyond the signed 64-bit range in an array literal is not supported "
-                        "(numpy would build an object array or promote through uint64)",
-                        origin,
-                    )
-        if sems == {SemType.BOOL}:
-            dtype = ArrayDType.BOOL
-        elif SemType.FLOAT in sems:
-            dtype = ArrayDType.FLOAT
-        else:
-            dtype = ArrayDType.INT
-        if dtype is ArrayDType.INT:
-            # Only residual integers can reach here (a fully static argument took the concrete fold), and the
-            # scalar integer datapath saturates where numpy int64 wraps.
-            raise AnalysisRejection(
-                "runtime integer array construction is not lowerable yet; cast to float first", origin
-            )
-        leaves: list[AtomicFact] = []
-        for leaf in source.leaves:
-            if isinstance(leaf, Known):
-                leaves.append(numpy_kinded(leaf, dtype))
-            else:
-                assert isinstance(leaf, Residual)
-                leaves.append(Residual(SemType.FLOAT) if dtype is ArrayDType.FLOAT else leaf)
-        return AggregateFact(ArrayLayout(shape, dtype), tuple(leaves))
-
-    def _elementwise_side_sem(self, side: Fact, origin: OriginStack) -> SemType:
-        if isinstance(side, AggregateFact):
-            assert isinstance(side.layout, ArrayLayout)
-            match side.layout.dtype:
-                case ArrayDType.BOOL:
-                    return SemType.BOOL
-                case ArrayDType.INT:
-                    return SemType.INT
-                case ArrayDType.FLOAT:
-                    return SemType.FLOAT
-        return self._operand_type(side, origin)
-
-    def _fold_bitwise(self, bin_op: BinOp, lhs: Fact, rhs: Fact, origin: OriginStack) -> Fact:
-        # Bit-true operators. ``&``/``|``/``^`` on two booleans is a boolean (logical) result; every other admitted form
-        # is two integers. A float operand, a boolean shift, and mixed bool/int all refuse -- Python's bool-as-int
-        # promotion is not modelled in the datapath, so an explicit cast is required. A compile-time-known negative
-        # shift count refuses (Python raises); a runtime count is the hardware's documented reverse-shift deviation. A
-        # fully-static form folds Python-exact via ``static_binop``. Operand kinds are validated before any diagnostic.
-        is_shift = bin_op in (BinOp.LSHIFT, BinOp.RSHIFT)
-        ltype, rtype = self._operand_type(lhs, origin), self._operand_type(rhs, origin)
-        if SemType.FLOAT in (ltype, rtype):
-            raise AnalysisRejection(f"bitwise/shift operator {bin_op.value} requires integer operands", origin)
-        if is_shift and isinstance(rhs, Known) and isinstance(rhs.value, (MetaInt, NpInt)) and int(rhs.value.value) < 0:
-            raise AnalysisRejection(
-                f"a negative shift count ({int(rhs.value.value)}) is rejected at compile time", origin
-            )
-        if ltype is SemType.BOOL and rtype is SemType.BOOL and not is_shift:
-            result_type = SemType.BOOL  # & | ^ on two booleans stays in the boolean bank
-        elif ltype is SemType.INT and rtype is SemType.INT:
-            result_type = SemType.INT
-        else:
-            raise AnalysisRejection(
-                f"bitwise/shift operator {bin_op.value} requires two integers (or two booleans for & | ^)", origin
-            )
-        if isinstance(lhs, Known) and isinstance(rhs, Known):
-            folded = static_binop(bin_op, lhs.value, rhs.value)
-            if folded is not None:
-                return Known(folded)
-            if isinstance(lhs.value, (StaticBool, NpBool)) and isinstance(rhs.value, (StaticBool, NpBool)):
-                # static_binop covers only numerics; combine two Known booleans here so ``True & False`` folds to a
-                # Known bool and drives edge selection (a dead branch guarded by it is never analyzed). numpy wins
-                # the result provenance exactly as np.bool_ & bool yields np.bool_.
-                a, b = lhs.value.value, rhs.value.value
-                combined = bool(a and b if bin_op is BinOp.BITAND else a or b if bin_op is BinOp.BITOR else a != b)
-                numpy_side = isinstance(lhs.value, NpBool) or isinstance(rhs.value, NpBool)
-                return Known(NpBool(combined) if numpy_side else StaticBool(combined))
-        return Residual(result_type)
-
-    def _operand_type(self, fact: Fact, origin: OriginStack) -> SemType:
-        match fact:
-            case Known(value=value):
-                sem = _residual_type(value)
-                if sem is None:
-                    raise AnalysisRejection("a non-numeric value reaches a runtime operation", origin)
-                return sem
-            case Residual(type=sem):
-                return sem
-            case Reference(obj=referent) if isinstance(referent, np.ndarray):
-                # An unadmitted ndarray reaches arithmetic as a live reference; name the actual problem
-                # instead of "non-numeric" -- a SUBCLASS (np.matrix redefines * as the matrix product) or a
-                # dtype outside the embeddable boolean/integer/float categories (a timedelta64, a huge uint64).
-                if type(referent) is not np.ndarray:
-                    raise AnalysisRejection(
-                        "an ndarray subclass does not participate in arithmetic; use a plain numpy array", origin
-                    )
-                raise AnalysisRejection(
-                    f"an array of dtype {referent.dtype} is not admitted " "(only boolean/integer/float dtypes embed)",
-                    origin,
-                )
-            case Reference():
-                raise AnalysisRejection("a non-numeric value reaches a runtime operation", origin)
-            case _:
-                raise AnalysisRejection("a runtime operation reads an aggregate or unbound value", origin)
-
-    def _truth_fact(self, fact: Fact, origin: OriginStack) -> Fact:
-        match fact:
-            case Known(value=value):
-                truth = static_truth(value)
-                if truth is None and _residual_type(value) is None:
-                    raise AnalysisRejection("the truth value of this object is not defined here", origin)
-                return Known(StaticBool(truth)) if truth is not None else Residual(SemType.BOOL)
-            case Reference():
-                raise AnalysisRejection("the truth value of this object is not defined here", origin)
-            case AggregateFact() as aggregate:
-                layout = aggregate.layout
-                if isinstance(layout, ArrayLayout) or (
-                    isinstance(layout, StructuralLayout) and ContainerFlavor.ARRAY in layout.flavors
-                ):
-                    raise AnalysisRejection(
-                        "the truth value of an array is ambiguous; use .any() or .all() in plain numpy", origin
-                    )
-                if isinstance(layout, RecordLayout):
-                    # A class-dictionary __bool__/__len__ entry (even ``__bool__ = None``) rejects outright: the
-                    # override would run on a value-faithful but not type-faithful reconstruction (an enum field
-                    # rebuilds as its base value), so folding it can silently diverge from Python.
-                    if _has_truth_override(layout.klass):
-                        raise AnalysisRejection(
-                            "the truth of a record with a custom __bool__/__len__ is not supported", origin
-                        )
-                    return Known(StaticBool(True))  # default object truth, regardless of field count
-                return Known(StaticBool(outer_arity(layout) != 0))
-            case _:
-                return Residual(SemType.BOOL)
-
     def _subscript(self, op: PySubscript, obj: Fact, index: Fact) -> Fact:
         import operator
 
         origin = op.origin
+        subscript_index(index, origin)  # before materialization: a record key cannot arrive by folding one
         if isinstance(index, AggregateFact):
-            if contains_record(index.layout):  # a record anywhere in the key would run __index__ on a rebuild
-                raise AnalysisRejection("a record subscript index is not supported", origin)
             key = materialize_static(index)  # a static tuple key (m[1, 0]); runtime keys reject below
             if key is not None:
                 index = Known(key)
-        if isinstance(index, Known) and isinstance(index.value, StaticRecord):
-            # Rejected for ANY subscriptable (a range or string included): the key would resolve through a user
-            # __index__ running on the reconstruction, whose semantics the compiler cannot vouch for.
-            raise AnalysisRejection("a record subscript index is not supported", origin)
         if isinstance(index, Reference):
             # A referenced key would resolve through the LIVE object's __index__ at compile time (repeatedly:
             # once per fixpoint visit of its block), reading reset-time state the kernel's
@@ -2150,13 +1816,10 @@ class Analyzer:
         if isinstance(obj, AggregateFact) and isinstance(index, Known):
             if isinstance(obj.layout, RecordLayout):
                 raise AnalysisRejection("a record is not subscriptable; access its fields by name", origin)
-            if isinstance(index.value, (StaticBool, NpBool)) and (
-                isinstance(obj.layout, ArrayLayout)
-                or (isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors)
+            if isinstance(obj.layout, ArrayLayout) or (
+                isinstance(obj.layout, StructuralLayout) and ContainerFlavor.ARRAY in obj.layout.flavors
             ):
-                # numpy boolean indexing selects by mask (and prepends an axis for a scalar bool); Python's
-                # bool-as-int semantics apply only to tuples/lists, so guessing here would miscompile.
-                raise AnalysisRejection("a boolean index into an array is not supported; use an integer", origin)
+                array_index_element(index.value, origin)
             if isinstance(index.value, NpBool):
                 # numpy 2 removed np.bool_.__index__, so Python itself refuses it as a sequence index; only the
                 # plain Python bool keeps bool-as-int indexing.
@@ -2166,13 +1829,9 @@ class Analyzer:
             if isinstance(index.value, StaticSlice) and isinstance(obj.layout, (TupleLayout, ListLayout)):
                 # A slice of a positional container is a WINDOW operation over the same children -- runtime
                 # leaves included, exactly like conversion and projection -- so nothing materializes and
-                # nothing crosses. Records still refuse (their consumptions are field access and integer
-                # projection); a structural flavor cannot truthfully pick a result container, so it keeps the
-                # concrete-fallback rejection below.
-                if contains_record(obj.layout):
-                    raise AnalysisRejection(
-                        "slicing or multi-axis indexing of a record-carrying sequence is not supported", origin
-                    )
+                # nothing crosses. A structural flavor cannot truthfully pick a result container, so it keeps
+                # the concrete-fallback rejection below.
+                spanning_subscript_source(obj.layout, origin)
                 window = as_python(index.value)
                 assert isinstance(window, slice)
                 try:
@@ -2197,14 +1856,8 @@ class Analyzer:
                 position = operator.index(as_python(index.value))  # type: ignore[arg-type]  # np ints qualify
             except TypeError:
                 # A non-integer static key (a tuple key ``m[1, 0]``, a slice) applies concretely to an all-Known
-                # aggregate; on a runtime-leaf aggregate it awaits the slicing/multi-axis stages. A record
-                # anywhere in the OBJECT refuses first: the concrete fallback rebuilds real instances (a __del__
-                # would fire at compile time), and records never cross into host evaluation -- integer projection
-                # and field access are their consumptions.
-                if contains_record(obj.layout):
-                    raise AnalysisRejection(
-                        "slicing or multi-axis indexing of a record-carrying sequence is not supported", origin
-                    ) from None
+                # aggregate; on a runtime-leaf aggregate it awaits the slicing/multi-axis stages.
+                spanning_subscript_source(obj.layout, origin)
                 concrete = materialize_static(obj)
                 if concrete is None:
                     raise AnalysisRejection(
@@ -2246,8 +1899,7 @@ class Analyzer:
                 f"too many indices for a {len(shape)}-dimensional array ({len(raw)} were given)", origin
             )
         for item in raw:
-            if isinstance(item, (StaticBool, NpBool)):
-                raise AnalysisRejection("a boolean index into an array is not supported; use an integer", origin)
+            array_index_element(item, origin)
         axes: list[list[int]] = []
         kept: list[int] = []
         for axis, item in enumerate(raw):
@@ -2336,10 +1988,7 @@ class Analyzer:
                 # (.base, .strides, .flags, .data) observe the snapshot, not the user's object, so only the
                 # value-determined navigation set folds.
                 raise AnalysisRejection(f"array attribute '{name}' is not supported", origin)
-            if contains_record(obj.layout):
-                # A bound method of a record-carrying sequence would run Python's protocols over the rebuilt
-                # records; records are consumed by field access only.
-                raise AnalysisRejection(f"attribute '{name}' of a record-carrying sequence is not supported", origin)
+            attribute_receiver(obj.layout, name, origin)
             concrete = materialize_static(obj)
             if concrete is None:
                 raise AnalysisRejection(f"attribute '{name}' of a runtime aggregate is not supported yet", origin)
@@ -2756,7 +2405,7 @@ class Analyzer:
         assert isinstance(source, AggregateFact)
         site.env.set(
             Local(site.call.dst),
-            self._array_factory(source, site.call.origin, force_float=_explicit_float_dtype(site)),
+            array_factory(source, site.call.origin, force_float=_explicit_float_dtype(site)),
         )
         self._call_lowering[id(site.call)] = CallLowering.CONVERSION
 
@@ -2842,7 +2491,7 @@ class Analyzer:
                 assert isinstance(receiver_fact, AggregateFact) and isinstance(receiver_fact.layout, ArrayLayout)
                 cells = leaf_count(receiver_fact.layout)
                 if method.name == "reshape":
-                    reshaped = self._static_reshape_target(call.args[1:], env, call.origin)
+                    reshaped = reshape_dimensions([env.get(Local(arg)) for arg in call.args[1:]], call.origin)
                     if math.prod(reshaped) != cells:
                         raise AnalysisRejection(
                             f"cannot reshape an array of {cells} element(s) into shape "
@@ -2974,12 +2623,8 @@ class Analyzer:
                 )
             except Exception as error:
                 raise AnalysisRejection(f"call fails here: {error}", call.origin) from None
-            admitted = admit(concrete)
+            admitted = crossing_fact(concrete, call.origin)
             if admitted is None:
-                if isinstance(concrete, np.ndarray) and concrete.ndim == 0:
-                    raise AnalysisRejection(
-                        "a 0-dimensional array is not supported; use the scalar directly", call.origin
-                    )
                 env.set(Local(call.dst), Reference(concrete))
             else:
                 env.set(Local(call.dst), normalize_static(admitted))
@@ -3041,11 +2686,7 @@ class Analyzer:
                 sources.append(keyword.pop(param.name))
             elif param.name in default_by_name:
                 default_value = default_by_name[param.name]
-                if isinstance(default_value, np.ndarray) and default_value.ndim == 0:
-                    raise AnalysisRejection(
-                        "a 0-dimensional array is not supported; use the scalar directly", call.origin
-                    )
-                sources.append(_DefaultArgument(default_value, admit(default_value)))
+                sources.append(_DefaultArgument(default_value, crossing_fact(default_value, call.origin)))
             else:
                 raise AnalysisRejection(f"missing argument '{param.name}'", call.origin)
         if keyword:

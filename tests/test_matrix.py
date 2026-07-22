@@ -1135,6 +1135,40 @@ def test_elementwise_rejections_are_located() -> None:
             lower(kernel)
 
 
+_EMPTY_BOOL_CONST = np.array([], dtype=bool)
+
+
+def test_elementwise_arithmetic_refuses_a_boolean_array_with_no_elements() -> None:
+    # The bool refusal is ARRAY-WIDE, exactly like the OverflowError guards above, and this is the only shape
+    # that proves it: with even one element the leafwise scalar fold refuses again, so the array-level guard
+    # can be deleted with every other witness still green. Zero elements means zero leaf folds, and without
+    # the array-level guard the kernel is silently accepted.
+    def scaled(a: float) -> float:
+        v = _EMPTY_BOOL_CONST * 2.0
+        return a + float(len(v))
+
+    with pytest.raises(UnsupportedConstruct, match="arithmetic on a bool requires an explicit conversion"):
+        lower(scaled)
+
+
+def test_the_runtime_integer_array_refusal_names_the_consumption_that_produced_it() -> None:
+    # One doctrine -- the scalar integer datapath saturates where numpy int64 wraps -- reached by two
+    # consumptions whose refusals differ only in the noun. Nothing pinned WHICH noun: every other witness
+    # matches on the shared tail, so the two could be exchanged with the suite and the frozen corpus green.
+    def by_arithmetic(s: float) -> float:
+        v = INT_TAPS * int(s)
+        return float(v[0])
+
+    def by_construction(a: float, b: float) -> float:
+        v = np.array([int(a), int(b)])
+        return float(v[0])
+
+    with pytest.raises(UnsupportedConstruct, match="runtime integer array arithmetic is not lowerable"):
+        lower(by_arithmetic)
+    with pytest.raises(UnsupportedConstruct, match="runtime integer array construction is not lowerable"):
+        lower(by_construction)
+
+
 # ---------------------------------------------------------------- array factories (stage 9a-2a)
 
 

@@ -1837,6 +1837,23 @@ def test_record_carrying_sequences_never_rebuild_through_subscript_fallback() ->
         lower(hook_free)
 
 
+def test_a_multi_axis_key_on_a_record_carrying_sequence_refuses_before_any_rebuild() -> None:
+    # The record guard on the CONCRETE-FALLBACK arm, which every slice witness above misses: a tuple key on a
+    # non-array sequence reaches it only after ``operator.index`` has refused the key, and that arm is what
+    # stands between a record-carrying tuple and a compile-time rebuild of real instances.
+    @dataclasses.dataclass(frozen=True)
+    class Point:
+        x: float
+        y: float
+
+    def multi_axis(a: float) -> float:
+        seq = (Point(1.0, 2.0), Point(3.0, 4.0))
+        return a + seq[0, 1].x  # type: ignore[call-overload]
+
+    with pytest.raises(UnsupportedConstruct, match="record-carrying sequence"):
+        lower(multi_axis)
+
+
 # ------------------------------ M2 step 3a: slices and starred targets ------------------------------
 
 
