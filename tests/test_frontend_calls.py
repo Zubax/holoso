@@ -1153,8 +1153,8 @@ def test_concrete_evaluation_has_one_admission_door() -> None:
     analyze_source = Path(analyze_module.__file__).read_text()
     fold_source = Path(fold_module.__file__).read_text()
     assert analyze_source.count("admit_call(") == 1
-    assert analyze_source.count("concrete = target(") == 1
-    assert analyze_source.index("admit_call(") < analyze_source.index("concrete = target(")
+    assert analyze_source.count("concrete = site.target(") == 1
+    assert analyze_source.index("admit_call(") < analyze_source.index("concrete = site.target(")
     assert "_vetted_concrete_target" not in analyze_source
     assert "_vetted_concrete_target" in fold_source
 
@@ -1372,6 +1372,68 @@ def test_binary_linalg_stubs_take_exact_positional_arguments() -> None:
     for kernel in (matmul_kwargs, trace_offset):
         with pytest.raises(UnsupportedConstruct, match=r"takes exactly \d positional array argument"):
             lower(kernel)
+
+
+def test_the_matrix_product_keeps_its_own_operand_guidance() -> None:
+    # M3, measured: the matmul/dot operand refusal and the shared array-operand one differ only in which comes
+    # FIRST, and swapping them left the whole targeted suite green while every matmul diagnostic changed. Both
+    # halves are pinned separately, because pinning only the matmul side would pass with both rules merged.
+    from jaxtyping import Float64
+
+    def matmul_scalar(m: Float64[np.ndarray, "2 2"], x: float) -> float:
+        return float(np.matmul(m, x)[0][0])
+
+    def dot_sequence(m: Float64[np.ndarray, "2 2"], x: float) -> float:
+        return float(np.dot(m, [x, x])[0])
+
+    for kernel in (matmul_scalar, dot_sequence):
+        with pytest.raises(UnsupportedConstruct, match="the matrix product requires array operands") as excinfo:
+            lower(kernel)
+        assert "does not acquire array semantics" not in str(excinfo.value)
+
+    def outer_scalar(m: Float64[np.ndarray, "2 2"], x: float) -> float:
+        return float(np.outer(m, x)[0][0])
+
+    with pytest.raises(UnsupportedConstruct, match="np.outer requires array operands") as excinfo:
+        lower(outer_scalar)
+    assert "matrix product" not in str(excinfo.value)
+
+
+def test_transpose_relayouts_an_array_operand_only() -> None:
+    # M3, measured: the relayout arm's guard is the whole reason np.transpose(scalar) stays a located rejection.
+    # Widened to any sole operand it reaches the arm and dies on its own assert -- which under -O disappears,
+    # so the guard, not the assert, is what keeps a non-array out of the structural path.
+    def scalar(x: float) -> float:
+        return float(np.transpose(x))
+
+    def sequence(x: float) -> float:
+        return float(np.transpose([x, x])[0])
+
+    for kernel in (scalar, sequence):
+        with pytest.raises(UnsupportedConstruct, match="call to 'transpose' is not supported in a kernel"):
+            lower(kernel)
+
+
+def test_a_call_target_that_defies_hashing_and_equality_misses_every_arm() -> None:
+    # M3, measured: dispatch compares targets by IDENTITY. A shadowed builtin name can be unhashable (a set or
+    # dict lookup would raise) and its __eq__ can yield an array (making `==` ambiguous rather than false), so
+    # either spelling turns a clean refusal into a crash. Swapping `is` for `==` left the targeted suite green.
+    class Defiant:
+        __hash__ = None  # type: ignore[assignment]
+
+        def __eq__(self, other: object) -> object:  # type: ignore[override]
+            return np.array([False, False])
+
+        def __repr__(self) -> str:
+            return "<defiant>"
+
+    defiant = Defiant()
+
+    def kernel(x: float) -> float:
+        return float(defiant(x))  # type: ignore[operator]
+
+    with pytest.raises(UnsupportedConstruct, match="call to '<defiant>' is not supported in a kernel"):
+        lower(kernel)
 
 
 def scale_(v: float) -> float:

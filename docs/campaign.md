@@ -2480,3 +2480,31 @@ criterion unmet. That is a planning defect, not an implementation one, and it is
 M6. Two candidate resolutions: M7 stops being optional and becomes the step that closes the routes, or a
 dedicated reachability-recomputation step is inserted. This needs a ruling before M5, because M5 moves
 refusals into analysis and would be shaped differently depending on which spine they land in.
+
+
+M3 IS LANDED: both dispatch ladders are now ordered frozen row tables matched first-to-last, five tables in all,
+with identity comparison throughout (`eq=False` rows, so no comparison ever touches `==` on a numpy callable) and
+the phase ordering preserved by using three call tables rather than one with a phase field. Verified in the
+maintainer's tree: corpus 151/151 BYTE-IDENTICAL, 546 targeted tests, mypy clean over 208 files, black clean, and
+the M2 witnesses untouched at a zero-line diff.
+
+THE STRONGEST EVIDENCE WAS AN AST DIFF OF EVERY STRING LITERAL, not a test run: 0 diagnostic strings disappeared
+and 11 were added (all docstrings plus one assert description). That checks messages on UNREACHABLE paths too,
+which the rejection corpus cannot, and "messages verbatim" was M3's binding constraint.
+
+THREE MUTATIONS SURVIVED THE COMMITTED SUITE, and that is the finding worth keeping. Matrix-product message
+order, identity-versus-equality, and transpose guard width were all unpinned -- by the suite AND by the corpus --
+in precisely the properties M3 exists to preserve. Three black-box pins were added, each verified to fail under
+its mutation. The implementation's own probe harness had two blind spots as well, closed only after mutation
+testing found them; a harness is no more trustworthy than a test until something has tried to defeat it.
+
+TWO THINGS RECORDED RATHER THAN SMOOTHED OVER. `_reject_unimplemented_library` never fires -- 0 hits across 98
+probes and 423 instrumented tests -- because an earlier fold refuses those targets with the identical message.
+It is PRE-EXISTING (HEAD had the same predicate at the same position) and was NOT deleted, because "I could not
+construct a witness" is not "unreachable". And `_analyze.py` grew 2,974 -> 3,195 lines, further past the ~2,000
+soft limit: turning control flow into data costs the type vocabulary. Splitting a `_dispatch.py` out needs `_Env`
+moved first and would still leave ~2,900 lines, so it is a separate step, flagged rather than silently taken.
+
+A REPORTED GATE WAS WRONG AGAIN, caught by re-running it: M3 reported mypy clean, and mypy failed on an unused
+`type: ignore` the change had made redundant. One line, no consequence -- but it is the fourth handoff this
+session whose self-reported gate did not survive being re-run.

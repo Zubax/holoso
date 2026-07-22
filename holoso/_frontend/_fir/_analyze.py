@@ -17,8 +17,13 @@ point can rebuild from scratch each outer round.
 import logging
 import math
 import types
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import MISSING, dataclass, field, is_dataclass, replace
+from functools import partial
+from typing import NoReturn
+
+import numpy as np
 
 from ..._errors import UnsupportedConstruct, UnsupportedLibraryFunction
 from .._ast_support import UNROLL_THRESHOLD
@@ -286,6 +291,232 @@ class _Env:
                 changed = True
         deferred.raise_if_deferred()
         return changed
+
+
+class _TargetTest(ABC):
+    """
+    The dispatch key of a call row. Matching is by object IDENTITY throughout, never equality and never a
+    hash lookup: a call target may be an unhashable shadow of a builtin name (a bound array, a dict) that has
+    to miss cleanly rather than raise, and equality on a numpy callable is not a predicate to build on.
+    """
+
+    @abstractmethod
+    def admits(self, target: object) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _AnyOf(_TargetTest):
+    targets: tuple[object, ...]
+
+    def admits(self, target: object) -> bool:
+        return any(target is candidate for candidate in self.targets)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _Matching(_TargetTest):
+    """A target no table can name when it is built: a user's record class, a registry membership, anything."""
+
+    predicate: Callable[[object], bool]
+
+    def admits(self, target: object) -> bool:
+        return self.predicate(target)
+
+
+@dataclass(frozen=True, slots=True)
+class _CallSite:
+    """A call as the dispatch rows see it: the resolved target beside its operand facts, positional and keyword."""
+
+    target: object
+    call: PyCall
+    env: _Env
+    args: list[Fact]
+    kwargs: list[tuple[str, Fact]]
+
+    @property
+    def operands(self) -> list[Fact]:
+        return [*self.args, *(fact for _, fact in self.kwargs)]
+
+    @property
+    def sole_argument(self) -> Fact | None:
+        """The single positional operand of a keyword-free call, which most structural arms require."""
+        return self.args[0] if len(self.args) == 1 and not self.kwargs else None
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _CallRow:
+    """
+    One arm of an ordered call-dispatch table. A selected row CONSUMES the call -- it binds the destination or
+    refuses -- so nothing falls through past a matched action and the guard has to carry the whole
+    applicability condition rather than its plausible part.
+    """
+
+    target: _TargetTest
+    guard: Callable[[_CallSite], bool]
+    apply: Callable[["Analyzer", _CallSite], None]
+
+    def selects(self, site: _CallSite) -> bool:
+        return self.target.admits(site.target) and self.guard(site)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ShapeRow:
+    """
+    One arm of the library call-shape table. A selected row always REFUSES; a spelling that matches no row, or
+    whose row finds no violation, passes through to its stub. First match decides which violation is reported,
+    so a spelling's arity rule has to precede its operand rule.
+    """
+
+    target: _TargetTest
+    violated: Callable[[_CallSite], bool]
+    reject: Callable[[_CallSite], NoReturn]
+
+    def selects(self, site: _CallSite) -> bool:
+        return self.target.admits(site.target) and self.violated(site)
+
+
+@dataclass(frozen=True, slots=True)
+class _AttrSite:
+    """An attribute read as the intercept rows see it."""
+
+    op: PyAttr
+    block: Block
+    index: int
+    env: _Env
+    receiver: Fact
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _AttrRow:
+    """
+    One arm of the ordered table of attribute reads resolved structurally, ahead of generic attribute
+    resolution. A selected action reports whether it REWROTE the op, in which case the transfer revisits it.
+    """
+
+    names: tuple[str, ...]
+    receiver: Callable[[Fact], bool]
+    apply: Callable[["Analyzer", _AttrSite], bool]
+
+    def selects(self, site: _AttrSite) -> bool:
+        return site.op.name in self.names and self.receiver(site.receiver)
+
+
+def _anything(target: object) -> bool:
+    return True
+
+
+def _is_record_class(target: object) -> bool:
+    return isinstance(target, type) and is_dataclass(target)
+
+
+def _always(site: _CallSite) -> bool:
+    return True
+
+
+def _sole_operand(site: _CallSite) -> bool:
+    return site.sole_argument is not None
+
+
+def _sole_array_operand(site: _CallSite) -> bool:
+    sole = site.sole_argument
+    return sole is not None and _is_array_fact(sole)
+
+
+def _sole_aggregate_operand(site: _CallSite) -> bool:
+    return isinstance(site.sole_argument, AggregateFact)
+
+
+def _sole_residual_operand(site: _CallSite) -> bool:
+    return isinstance(site.sole_argument, Residual)
+
+
+def _explicit_float_dtype(site: _CallSite) -> bool:
+    """An explicit ``dtype=float`` IS the conversion the implicit-widening rejections demand: every leaf casts."""
+    if len(site.kwargs) != 1:
+        return False
+    keyword, fact = site.kwargs[0]
+    return keyword == "dtype" and isinstance(fact, Reference) and any(fact.obj is kind for kind in (float, np.float64))
+
+
+def _residual_array_source(site: _CallSite) -> bool:
+    if len(site.args) != 1 or (site.kwargs and not _explicit_float_dtype(site)):
+        return False
+    source = site.args[0]
+    return isinstance(source, AggregateFact) and any(isinstance(leaf, Residual) for leaf in source.leaves)
+
+
+def _reduction_axis_given(site: _CallSite) -> bool:
+    sole_keyword_operand = not site.call.args and [keyword for keyword, _ in site.call.kwargs] == ["a"]
+    return not (len(site.call.args) == 1 and not site.call.kwargs) and not sole_keyword_operand
+
+
+def _non_array_operand(site: _CallSite) -> bool:
+    return any(not _is_array_fact(fact) for fact in site.operands)
+
+
+def _integer_operand(site: _CallSite) -> bool:
+    return any(_is_integer_operand(fact) for fact in site.args)
+
+
+def _library_spelling(target: object) -> str:
+    return getattr(target, "__name__", "?")
+
+
+def _callee_name(target: object) -> str:
+    return getattr(target, "__name__", repr(target))
+
+
+def _reject_reduction_axis(site: _CallSite) -> NoReturn:
+    raise AnalysisRejection(
+        f"np.{_library_spelling(site.target)} supports only the default axis: exactly one array "
+        "argument (reduce the other axis explicitly instead of passing an axis)",
+        site.call.origin,
+    )
+
+
+def _reject_matrix_operand(site: _CallSite) -> NoReturn:
+    raise AnalysisRejection(
+        "the matrix product requires array operands on both sides; a scalar, list, or "
+        "tuple does not acquire matrix semantics (wrap it in np.array(...))",
+        site.call.origin,
+    )
+
+
+def _reject_array_operand(site: _CallSite) -> NoReturn:
+    raise AnalysisRejection(
+        f"np.{_library_spelling(site.target)} requires array operands; a scalar, list, or "
+        "tuple does not acquire array semantics (wrap it in np.array(...))",
+        site.call.origin,
+    )
+
+
+def _reject_integer_sign(site: _CallSite) -> NoReturn:
+    # np.sign is int-polymorphic like abs (np.sign of an integer is an integer); its float composite would round
+    # subsequent integer arithmetic, and there is no integer sign yet, so an integer operand refuses.
+    raise AnalysisRejection("an integer operand to np.sign is not yet lowerable; cast to float first", site.call.origin)
+
+
+def _positional_arity_rule(targets: tuple[object, ...], expected: int) -> _ShapeRow:
+    """
+    These spell positional ufunc-style calls: numpy itself refuses matmul keywords, and an offset or axis
+    argument reaches machinery the subset does not model.
+    """
+
+    def violated(site: _CallSite) -> bool:
+        return bool(site.call.kwargs) or len(site.call.args) != expected
+
+    def reject(site: _CallSite) -> NoReturn:
+        raise AnalysisRejection(
+            f"np.{_library_spelling(site.target)} takes exactly {expected} positional array " "argument(s) here",
+            site.call.origin,
+        )
+
+    return _ShapeRow(_AnyOf(targets), violated, reject)
+
+
+def _check_call_shape(site: _CallSite) -> None:
+    for row in _LIBRARY_SHAPE_ROWS:
+        if row.selects(site):
+            row.reject(site)
 
 
 def _is_integer_operand(fact: Fact | None) -> bool:
@@ -729,8 +960,6 @@ class Analyzer:
         never entering the memo: this read is its creation door (scope ruling T3) for state resets, component
         reads, and namespace lookups alike, mirroring the builder's global-load door.
         """
-        import numpy as np
-
         key = (id(owner), name)
         hit = self._component_reads.get(key)
         if hit is not None and hit[0] is owner:
@@ -1352,8 +1581,6 @@ class Analyzer:
                         )
                     # ``@`` IS the library function: rewrite onto the spelled np.matmul call so the operator
                     # and the call cannot drift apart (they inline the same registry stub).
-                    import numpy as np
-
                     matmul_callee = self._fresh_temp()
                     block.ops[index : index + 1] = [
                         LoadRef(matmul_callee, np.matmul, op.origin),
@@ -1505,31 +1732,10 @@ class Analyzer:
                 env.set(Local(dst), result)
             case PyAttr(dst=dst, obj=obj, name=name):
                 receiver_fact = env.get(Local(obj))
-                if (
-                    isinstance(receiver_fact, AggregateFact)
-                    and isinstance(receiver_fact.layout, ArrayLayout)
-                    and name in ("flatten", "ravel", "reshape")
-                ):
-                    method_key = (obj, name)
-                    if method_key not in self._array_methods:
-                        self._array_methods[method_key] = _ArrayMethod(obj, name)
-                    env.set(Local(dst), Reference(self._array_methods[method_key]))
-                    return False
-                if (
-                    isinstance(receiver_fact, AggregateFact)
-                    and isinstance(receiver_fact.layout, ArrayLayout)
-                    and name == "T"
-                ):
-                    # Transpose is a pure structural relayout (a permutation of the same leaves), so ``.T``
-                    # rewrites to the spelled np.transpose call and both spellings share one lowering.
-                    import numpy as np
-
-                    callee = self._fresh_temp()
-                    block.ops[index : index + 1] = [
-                        LoadRef(callee, np.transpose, op.origin),
-                        PyCall(dst, callee, (obj,), (), op.origin),
-                    ]
-                    return True
+                attribute_site = _AttrSite(op, block, index, env, receiver_fact)
+                for attribute_row in _ATTRIBUTE_INTERCEPT_ROWS:
+                    if attribute_row.selects(attribute_site):
+                        return attribute_row.apply(self, attribute_site)
                 attr = self._attribute(env, receiver_fact, name, op.origin)
                 if isinstance(attr, _PropertyRead):
                     # Desugar the property read into a bound zero-argument call and re-run: the generic call-expansion
@@ -1867,8 +2073,6 @@ class Analyzer:
         return Residual(result_type)
 
     def _operand_type(self, fact: Fact, origin: OriginStack) -> SemType:
-        import numpy as np
-
         match fact:
             case Known(value=value):
                 sem = _residual_type(value)
@@ -2453,9 +2657,146 @@ class Analyzer:
         self._temp_serial += 1
         return BindingId(f"%c{self._temp_serial}", self._temp_serial)
 
-    def _expand_call(self, unit: FunctionUnit, block: Block, index: int, call: PyCall, env: _Env) -> bool:
-        import numpy as np
+    # ------------------------------------ dispatch row actions ------------------------------------
 
+    def _dispatch(self, rows: tuple[_CallRow, ...], site: _CallSite) -> bool:
+        for row in rows:
+            if row.selects(site):
+                row.apply(self, site)
+                return True
+        return False
+
+    def _reject_getattr(self, site: _CallSite) -> NoReturn:
+        # Trimmed (scope ruling T1): the static name getattr would require anyway makes it pure spelling
+        # redundancy over the dotted access, and letting it near the concrete path was a demonstrated
+        # miscompile habitat. The row stays as the refusal site so the guidance is specific.
+        raise AnalysisRejection(
+            "getattr is not supported in a kernel; spell the attribute access directly (x.name)",
+            site.call.origin,
+        )
+
+    def _reject_isinstance(self, site: _CallSite) -> NoReturn:
+        # Trimmed (scope ruling T4): values are statically typed here, so an honest query answers itself
+        # at authoring time, while a faithful compile-time verdict demanded real machinery -- member
+        # provenance, complete classinfo resolution, record-layout folds -- with a demonstrated
+        # miscompile history. One refusal at the dispatch covers every spelling.
+        raise AnalysisRejection(
+            "isinstance is not supported in a kernel: values are statically typed", site.call.origin
+        )
+
+    def _route_transpose(self, site: _CallSite) -> None:
+        # A pure structural relayout: the same leaves under the reversed shape, recorded as a route plan
+        # (source ordinal per result cell). Precedes admission: nothing crosses.
+        pivoted = site.sole_argument
+        assert isinstance(pivoted, AggregateFact)
+        pivoted_layout = pivoted.layout
+        assert isinstance(pivoted_layout, ArrayLayout)
+        routes = _transpose_routes(pivoted_layout.shape)
+        site.env.set(
+            Local(site.call.dst),
+            AggregateFact(
+                ArrayLayout(pivoted_layout.shape[::-1], pivoted_layout.dtype),
+                tuple(pivoted.leaves[k] for k in routes),
+            ),
+        )
+        self._call_lowering[id(site.call)] = CallLowering.CONVERSION
+        self._route_evidence[id(site.call)] = SourceSelection(routes)
+
+    def _fold_rank(self, site: _CallSite) -> None:
+        # Deliberately narrow (np.ndim of a LIST would observe structure the fact model erases at atomic
+        # leaves): a numeric scalar is rank 0, an array is its layout rank, everything else rejects. The
+        # linalg stubs probe ranks through this spelling.
+        probed = site.sole_argument
+        assert probed is not None
+        if isinstance(probed, AggregateFact) and isinstance(probed.layout, ArrayLayout):
+            rank = len(probed.layout.shape)
+        elif isinstance(probed, Residual) or (isinstance(probed, Known) and _residual_type(probed.value) is not None):
+            rank = 0
+        else:
+            raise AnalysisRejection("np.ndim of this value is not supported here", site.call.origin)
+        admitted_rank = admit(rank)
+        assert admitted_rank is not None
+        site.env.set(Local(site.call.dst), Known(admitted_rank))
+        self._call_lowering[id(site.call)] = CallLowering.FOLDED
+
+    def _construct_record(self, site: _CallSite) -> None:
+        # Record construction is STRUCTURAL, never an evaluation: the layout is the class's validated field
+        # schema and the children are the argument facts THEMSELVES -- runtime leaves and reference leaves ride
+        # through untouched, and no host code (not even the generated __init__) ever runs. Like the transpose
+        # relayout, this precedes the admission harness: there is nothing to admit because nothing crosses.
+        assert isinstance(site.target, type)
+        self._expand_construction(site.target, site.call, site.env)
+
+    def _reflavor_container(self, site: _CallSite) -> None:
+        # A container conversion over an aggregate is a LAYOUT operation, never an evaluation: the same leaves
+        # (runtime ones included) re-aggregate under the requested flavor. Concrete containers (a range, a
+        # string, an all-Known tuple) miss the row and fall through to the vetted evaluation.
+        source_fact = site.sole_argument
+        assert isinstance(source_fact, AggregateFact)  # a record never reaches here: admission refused it
+        children = tuple(source_fact.child(i) for i in range(outer_arity(source_fact.layout)))
+        site.env.set(Local(site.call.dst), aggregate_of(children, is_list=site.target is list))
+        self._call_lowering[id(site.call)] = CallLowering.CONVERSION
+
+    def _fold_length(self, site: _CallSite) -> None:
+        # Length is layout-determined: it folds on runtime leaves exactly as the unpacking arity check (the
+        # PyLen op) does, records having been refused by the admission walk already.
+        sized = site.sole_argument
+        assert isinstance(sized, AggregateFact)
+        length = admit(outer_arity(sized.layout))
+        assert length is not None
+        site.env.set(Local(site.call.dst), Known(length))
+        self._call_lowering[id(site.call)] = CallLowering.FOLDED
+
+    def _build_array(self, site: _CallSite) -> None:
+        # A residual-carrying array construction is the same LAYOUT operation under numpy's discovery rules,
+        # restricted to the proven subset; a fully static argument misses the row and falls through to the
+        # vetted concrete call, where numpy itself decides every discovery corner (object promotion, the
+        # uint64 range, bool widening) and the result normalizes back exactly.
+        source = site.args[0]
+        assert isinstance(source, AggregateFact)
+        site.env.set(
+            Local(site.call.dst),
+            self._array_factory(source, site.call.origin, force_float=_explicit_float_dtype(site)),
+        )
+        self._call_lowering[id(site.call)] = CallLowering.CONVERSION
+
+    def _cast_scalar(self, site: _CallSite, kind: SemType) -> None:
+        # ``float()``/``int()``/``bool()`` on a runtime scalar: a same-kind cast is the identity (a documented
+        # no-op); a cross-kind cast lowers to a conversion op (int<->float truncation/promotion, truthiness,
+        # bool widening). Explicit casts are how bool crosses into arithmetic and how float truncates to int.
+        site.env.set(Local(site.call.dst), Residual(kind))
+        self._call_lowering[id(site.call)] = CallLowering.CAST
+
+    def _reject_unimplemented_library(self, site: _CallSite) -> NoReturn:
+        # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc): a
+        # distinct public error so the user knows it is a missing library primitive, not a bad call.
+        raise LibraryAnalysisRejection(
+            f"library function {_callee_name(site.target)!r} is not implemented yet", site.call.origin
+        )
+
+    def _reject_runtime_arguments(self, site: _CallSite) -> NoReturn:
+        raise AnalysisRejection(
+            f"call to {_callee_name(site.target)} with runtime arguments is not supported yet", site.call.origin
+        )
+
+    def _bind_array_method(self, site: _AttrSite) -> bool:
+        method_key = (site.op.obj, site.op.name)
+        if method_key not in self._array_methods:
+            self._array_methods[method_key] = _ArrayMethod(site.op.obj, site.op.name)
+        site.env.set(Local(site.op.dst), Reference(self._array_methods[method_key]))
+        return False
+
+    def _rewrite_array_transpose(self, site: _AttrSite) -> bool:
+        # Transpose is a pure structural relayout (a permutation of the same leaves), so ``.T`` rewrites to the
+        # spelled np.transpose call and both spellings share one lowering.
+        callee = self._fresh_temp()
+        site.block.ops[site.index : site.index + 1] = [
+            LoadRef(callee, np.transpose, site.op.origin),
+            PyCall(site.op.dst, callee, (site.op.obj,), (), site.op.origin),
+        ]
+        return True
+
+    def _expand_call(self, unit: FunctionUnit, block: Block, index: int, call: PyCall, env: _Env) -> bool:
         from .._lib import IntrinsicResultRule, Library, resolve
         from .._lib import Intrinsic
 
@@ -2530,62 +2871,24 @@ class Analyzer:
                 )
             block.ops[index : index + 1] = [replace(call, args=(method.receiver, *call.args))]
             return True
-        target = callee_fact.obj
-        match = resolve(target)
+        site = _CallSite(
+            callee_fact.obj,
+            call,
+            env,
+            [env.get(Local(arg)) for arg in call.args],
+            [(keyword, env.get(Local(value))) for keyword, value in call.kwargs],
+        )
+        match = resolve(site.target)
         stub_display: str | None = None
         if isinstance(match, Library):
-            reduction = any(target is fn for fn in (np.max, np.amax, np.mean))
-            sole_keyword_operand = not call.args and [keyword for keyword, _ in call.kwargs] == ["a"]
-            if reduction and not (len(call.args) == 1 and not call.kwargs) and not sole_keyword_operand:
-                raise AnalysisRejection(
-                    f"np.{getattr(target, '__name__', '?')} supports only the default axis: exactly one array "
-                    "argument (reduce the other axis explicitly instead of passing an axis)",
-                    call.origin,
-                )
-            binary_linalg = any(target is fn for fn in (np.matmul, np.dot, np.outer))
-            if binary_linalg or target is np.trace:
-                # These spell positional ufunc-style calls: numpy itself refuses matmul keywords, and an offset
-                # or axis argument reaches machinery the subset does not model.
-                expected = 2 if binary_linalg else 1
-                if call.kwargs or len(call.args) != expected:
-                    raise AnalysisRejection(
-                        f"np.{getattr(target, '__name__', '?')} takes exactly {expected} positional array "
-                        "argument(s) here",
-                        call.origin,
-                    )
-            if reduction or binary_linalg or target is np.trace:
-                # The linalg and reduction stubs are defined over arrays only; a scalar/list/tuple operand
-                # must not acquire array semantics through the spelled call any more than through an operator.
-                for arg in (*call.args, *(value for _, value in call.kwargs)):
-                    operand_fact = env.get(Local(arg))
-                    if not (isinstance(operand_fact, AggregateFact) and isinstance(operand_fact.layout, ArrayLayout)):
-                        if any(target is fn for fn in (np.matmul, np.dot)):
-                            raise AnalysisRejection(
-                                "the matrix product requires array operands on both sides; a scalar, list, or "
-                                "tuple does not acquire matrix semantics (wrap it in np.array(...))",
-                                call.origin,
-                            )
-                        raise AnalysisRejection(
-                            f"np.{getattr(target, '__name__', '?')} requires array operands; a scalar, list, or "
-                            "tuple does not acquire array semantics (wrap it in np.array(...))",
-                            call.origin,
-                        )
-
-            # np.sign is int-polymorphic like abs (np.sign of an integer is an integer); its float composite would
-            # round subsequent integer arithmetic, and there is no integer sign yet, so an integer operand refuses.
-            if target is np.sign and any(_is_integer_operand(env.get(Local(arg))) for arg in call.args):
-                raise AnalysisRejection(
-                    "an integer operand to np.sign is not yet lowerable; cast to float first", call.origin
-                )
+            _check_call_shape(site)
             # A composite library stub inlines exactly like a user function, but its grafted frames display the
             # SPELLED callee the user resolved (np.dot reads "in dot():" even though matmul_ implements it); the
             # stub's own stripped name is the fallback for a callee with no __name__.
-            stub_display = getattr(target, "__name__", None) or match.display_name
-            target = match.stub
+            stub_display = getattr(site.target, "__name__", None) or match.display_name
+            site = replace(site, target=match.stub)
         elif isinstance(match, Intrinsic):
-            argument_facts = [env.get(Local(arg)) for arg in call.args] + [
-                env.get(Local(value)) for _, value in call.kwargs
-            ]
+            argument_facts = site.operands
             if all(_concrete_fact(fact) is not None for fact in argument_facts):
                 pass  # fully static (an all-Known aggregate included): fold concretely below through the callable
             else:
@@ -2609,7 +2912,7 @@ class Analyzer:
                     # must extend this fold rather than silently inherit the isfinite/isinf split.
                     assert isinstance(match.operator, (FloatIsFinite, FloatIsInf, FloatIsPosInf, FloatIsNegInf))
                     verdict = isinstance(match.operator, FloatIsFinite)
-                    numpy_spelling = getattr(target, "__module__", "").startswith("numpy")
+                    numpy_spelling = getattr(site.target, "__module__", "").startswith("numpy")
                     env.set(Local(call.dst), Known(NpBool(verdict) if numpy_spelling else StaticBool(verdict)))
                     self._call_lowering[id(call)] = CallLowering.FOLDED
                     return False
@@ -2627,182 +2930,45 @@ class Analyzer:
                 env.set(Local(call.dst), result)
                 self._call_lowering[id(call)] = CallLowering.INTRINSIC
                 return False
-        if not isinstance(target, (types.FunctionType, types.MethodType)) and not (
-            hasattr(type(target), "__call__")
-            and isinstance(getattr(type(target), "__call__", None), types.FunctionType)
+        if not isinstance(site.target, (types.FunctionType, types.MethodType)) and not (
+            hasattr(type(site.target), "__call__")
+            and isinstance(getattr(type(site.target), "__call__", None), types.FunctionType)
         ):
             # A builtin (range, float, abs...) or a fully-static intrinsic evaluates concretely under the snapshot
             # doctrine; its runtime-operand form was already routed to an HIR operation above.
-            argument_facts = [env.get(Local(arg)) for arg in call.args]
-            keyword_facts = [(keyword, env.get(Local(value))) for keyword, value in call.kwargs]
-            if target is getattr:
-                # Trimmed (scope ruling T1): the static name getattr would require anyway makes it pure spelling
-                # redundancy over the dotted access, and letting it near the concrete path was a demonstrated
-                # miscompile habitat. The arm stays as the refusal site so the guidance is specific. Identity
-                # comparisons throughout: ``target`` may be an unhashable shadow of a builtin name, which must
-                # miss cleanly.
-                raise AnalysisRejection(
-                    "getattr is not supported in a kernel; spell the attribute access directly (x.name)",
-                    call.origin,
-                )
-            if target is isinstance:
-                # Trimmed (scope ruling T4): values are statically typed here, so an honest query answers itself
-                # at authoring time, while a faithful compile-time verdict demanded real machinery -- member
-                # provenance, complete classinfo resolution, record-layout folds -- with a demonstrated
-                # miscompile history. One refusal at the dispatch covers every spelling.
-                raise AnalysisRejection(
-                    "isinstance is not supported in a kernel: values are statically typed", call.origin
-                )
-            if (
-                target is np.transpose
-                and not keyword_facts
-                and len(argument_facts) == 1
-                and isinstance(argument_facts[0], AggregateFact)
-                and isinstance(argument_facts[0].layout, ArrayLayout)
-            ):
-                # A pure structural relayout: the same leaves under the reversed shape, recorded as a route
-                # plan (source ordinal per result cell). Precedes admission: nothing crosses.
-                pivoted = argument_facts[0]
-                pivoted_layout = pivoted.layout
-                assert isinstance(pivoted_layout, ArrayLayout)
-                routes = _transpose_routes(pivoted_layout.shape)
-                env.set(
-                    Local(call.dst),
-                    AggregateFact(
-                        ArrayLayout(pivoted_layout.shape[::-1], pivoted_layout.dtype),
-                        tuple(pivoted.leaves[k] for k in routes),
-                    ),
-                )
-                self._call_lowering[id(call)] = CallLowering.CONVERSION
-                self._route_evidence[id(call)] = SourceSelection(routes)
-                return False
-            if target is np.ndim and not keyword_facts and len(argument_facts) == 1:
-                # Deliberately narrow (np.ndim of a LIST would observe structure the fact model erases at
-                # atomic leaves): a numeric scalar is rank 0, an array is its layout rank, everything else
-                # rejects. The linalg stubs probe ranks through this spelling.
-                probed = argument_facts[0]
-                if isinstance(probed, AggregateFact) and isinstance(probed.layout, ArrayLayout):
-                    rank = len(probed.layout.shape)
-                elif isinstance(probed, Residual) or (
-                    isinstance(probed, Known) and _residual_type(probed.value) is not None
-                ):
-                    rank = 0
-                else:
-                    raise AnalysisRejection("np.ndim of this value is not supported here", call.origin)
-                admitted_rank = admit(rank)
-                assert admitted_rank is not None
-                env.set(Local(call.dst), Known(admitted_rank))
-                self._call_lowering[id(call)] = CallLowering.FOLDED
-                return False
-            if isinstance(target, type) and is_dataclass(target):
-                # Record construction is STRUCTURAL, never an evaluation: the layout is the class's validated
-                # field schema and the children are the argument facts THEMSELVES -- runtime leaves and
-                # reference leaves ride through untouched, and no host code (not even the generated __init__)
-                # ever runs. Like the transpose relayout above, this precedes the admission harness: there is
-                # nothing to admit because nothing crosses.
-                self._expand_construction(target, call, env)
+            if self._dispatch(_PRE_ADMISSION_ROWS, site):
                 return False
             # Concrete evaluation is a CLOSED WHITELIST behind one door: the fold admission harness. The
             # analyzer contributes only what the harness cannot know -- per-Analyzer minted-method identity and
             # library-registry resolution -- and locates the refusal at the call origin.
-            minted = any(target is method for method in self._value_methods.values())
+            minted = any(site.target is method for method in self._value_methods.values())
             try:
                 admit_call(
-                    target,
-                    argument_facts,
-                    [fact for _, fact in keyword_facts],
+                    site.target,
+                    site.args,
+                    [fact for _, fact in site.kwargs],
                     minted=minted,
-                    registry_resolved=resolve(target) is not None,
+                    registry_resolved=resolve(site.target) is not None,
                 )
             except FoldRefusal as refusal:
                 if refusal.library_diagnostic:
                     raise LibraryAnalysisRejection(str(refusal), call.origin) from None
                 raise AnalysisRejection(str(refusal), call.origin) from None
-            if (target is list or target is tuple) and not keyword_facts and len(argument_facts) == 1:
-                # A container conversion over an aggregate is a LAYOUT operation, never an evaluation: the same
-                # leaves (runtime ones included) re-aggregate under the requested flavor. Concrete containers
-                # (a range, a string, an all-Known tuple) fall through to the vetted evaluation below.
-                source_fact = argument_facts[0]
-                if isinstance(source_fact, AggregateFact):
-                    # A record never reaches here: the admission walk already refused it as an argument.
-                    children = tuple(source_fact.child(i) for i in range(outer_arity(source_fact.layout)))
-                    env.set(Local(call.dst), aggregate_of(children, is_list=target is list))
-                    self._call_lowering[id(call)] = CallLowering.CONVERSION
-                    return False
-            if (
-                target is len
-                and not keyword_facts
-                and len(argument_facts) == 1
-                and isinstance(argument_facts[0], AggregateFact)
-            ):
-                # Length is layout-determined: it folds on runtime leaves exactly as the unpacking arity check
-                # (the PyLen op) does, records having been refused by the admission walk already.
-                sized = argument_facts[0]
-                length = admit(outer_arity(sized.layout))
-                assert length is not None
-                env.set(Local(call.dst), Known(length))
-                self._call_lowering[id(call)] = CallLowering.FOLDED
-                return False
-            explicit_float_dtype = (
-                len(keyword_facts) == 1
-                and keyword_facts[0][0] == "dtype"
-                and isinstance(keyword_facts[0][1], Reference)
-                and any(keyword_facts[0][1].obj is kind for kind in (float, np.float64))
-            )
-            if (
-                any(target is factory for factory in (np.array, np.asarray, np.asanyarray))
-                and (not keyword_facts or explicit_float_dtype)
-                and len(argument_facts) == 1
-                and isinstance(argument_facts[0], AggregateFact)
-                and any(isinstance(leaf, Residual) for leaf in argument_facts[0].leaves)
-            ):
-                # A residual-carrying array construction is the same LAYOUT operation under numpy's discovery
-                # rules, restricted to the proven subset; a fully static argument falls through to the vetted
-                # concrete call below, where numpy itself decides every discovery corner (object promotion,
-                # the uint64 range, bool widening) and the result normalizes back exactly. An explicit
-                # dtype=float IS the conversion the implicit-widening rejections demand: every leaf casts.
-                env.set(
-                    Local(call.dst),
-                    self._array_factory(argument_facts[0], call.origin, force_float=explicit_float_dtype),
-                )
-                self._call_lowering[id(call)] = CallLowering.CONVERSION
+            if self._dispatch(_POST_ADMISSION_ROWS, site):
                 return False
             concrete_args: list[StaticValue | Reference | None] = [
-                fact if isinstance(fact, Reference) else _concrete_fact(fact) for fact in argument_facts
+                fact if isinstance(fact, Reference) else _concrete_fact(fact) for fact in site.args
             ]
             concrete_kwargs = [
                 (keyword, fact if isinstance(fact, Reference) else _concrete_fact(fact))
-                for keyword, fact in keyword_facts
+                for keyword, fact in site.kwargs
             ]
             if any(value is None for value in concrete_args) or any(v is None for _, v in concrete_kwargs):
-                name = getattr(target, "__name__", repr(target))
-                # ``float()``/``int()``/``bool()`` on a runtime scalar: a same-kind cast is the identity (a documented
-                # no-op); a cross-kind cast lowers to a conversion op (int<->float truncation/promotion, truthiness,
-                # bool widening). Explicit casts are how bool crosses into arithmetic and how float truncates to int.
-                # Identity comparisons, never a dict/set membership test: ``target`` may be an unhashable shadow of a
-                # builtin name (a bound array, a dict), which must miss cleanly rather than raise on hashing.
-                cast_target = (
-                    SemType.FLOAT
-                    if target is float
-                    else SemType.INT if target is int else SemType.BOOL if target is bool else None
-                )
-                cast_source = argument_facts[0] if argument_facts else None
-                if (
-                    cast_target is not None
-                    and not keyword_facts
-                    and len(argument_facts) == 1
-                    and isinstance(cast_source, Residual)
-                ):
-                    env.set(Local(call.dst), Residual(cast_target))
-                    self._call_lowering[id(call)] = CallLowering.CAST
-                    return False
-                if is_unimplemented_library(target):
-                    # A recognized math/numpy function with no fast-math hardware equivalent (erf, spacing, a ufunc):
-                    # a distinct public error so the user knows it is a missing library primitive, not a bad call.
-                    raise LibraryAnalysisRejection(f"library function {name!r} is not implemented yet", call.origin)
-                raise AnalysisRejection(f"call to {name} with runtime arguments is not supported yet", call.origin)
+                consumed = self._dispatch(_RUNTIME_OPERAND_ROWS, site)
+                assert consumed, "the runtime-operand table is total: its last row refuses unconditionally"
+                return False
             try:
-                concrete = target(  # type: ignore[operator]
+                concrete = site.target(  # type: ignore[operator]
                     *[_crossing_object(value) for value in concrete_args if value is not None],
                     **{keyword: _crossing_object(value) for keyword, value in concrete_kwargs if value is not None},
                 )
@@ -2819,6 +2985,7 @@ class Analyzer:
                 env.set(Local(call.dst), normalize_static(admitted))
             self._call_lowering[id(call)] = CallLowering.FOLDED
             return False
+        target = site.target
         receiver: object | None = None
         if isinstance(target, types.MethodType):
             receiver = target.__self__
@@ -2972,3 +3139,57 @@ class Analyzer:
         # re-derives or clears any residual exactly as a clean revisit of the call would have.
         self._transfer_deferrals.pop(id(call), None)
         return True
+
+
+# ---------------------------------------- dispatch tables ----------------------------------------
+#
+# ORDERED, FIRST MATCH WINS, and the order is SEMANTIC rather than cosmetic. `_PRE_ADMISSION_ROWS` runs ahead of
+# the fold-admission harness because its arms either resolve structurally, with nothing crossing the host
+# boundary, or refuse with guidance the harness cannot phrase; `_POST_ADMISSION_ROWS` runs behind it, so an arm
+# there has already been vetted for crossing; `_RUNTIME_OPERAND_ROWS` is reached only once some operand is known
+# not to be concrete and is TOTAL -- its last row refuses unconditionally, so no call leaves it unconsumed.
+
+_PRE_ADMISSION_ROWS: tuple[_CallRow, ...] = (
+    _CallRow(_AnyOf((getattr,)), _always, Analyzer._reject_getattr),
+    _CallRow(_AnyOf((isinstance,)), _always, Analyzer._reject_isinstance),
+    _CallRow(_AnyOf((np.transpose,)), _sole_array_operand, Analyzer._route_transpose),
+    _CallRow(_AnyOf((np.ndim,)), _sole_operand, Analyzer._fold_rank),
+    _CallRow(_Matching(_is_record_class), _always, Analyzer._construct_record),
+)
+
+_POST_ADMISSION_ROWS: tuple[_CallRow, ...] = (
+    _CallRow(_AnyOf((list, tuple)), _sole_aggregate_operand, Analyzer._reflavor_container),
+    _CallRow(_AnyOf((len,)), _sole_aggregate_operand, Analyzer._fold_length),
+    _CallRow(_AnyOf((np.array, np.asarray, np.asanyarray)), _residual_array_source, Analyzer._build_array),
+)
+
+_RUNTIME_OPERAND_ROWS: tuple[_CallRow, ...] = (
+    _CallRow(_AnyOf((float,)), _sole_residual_operand, partial(Analyzer._cast_scalar, kind=SemType.FLOAT)),
+    _CallRow(_AnyOf((int,)), _sole_residual_operand, partial(Analyzer._cast_scalar, kind=SemType.INT)),
+    _CallRow(_AnyOf((bool,)), _sole_residual_operand, partial(Analyzer._cast_scalar, kind=SemType.BOOL)),
+    _CallRow(_Matching(is_unimplemented_library), _always, Analyzer._reject_unimplemented_library),
+    _CallRow(_Matching(_anything), _always, Analyzer._reject_runtime_arguments),
+)
+
+# The linalg and reduction stubs are defined over arrays only; a scalar/list/tuple operand must not acquire
+# array semantics through the spelled call any more than it does through an operator. A spelling's arity rule
+# precedes its operand rule, and the matrix product's operand refusal precedes the shared one, because first
+# match decides which of a call's several violations is the one reported.
+
+_REDUCTIONS = (np.max, np.amax, np.mean)
+_BINARY_LINALG = (np.matmul, np.dot, np.outer)
+_ARRAY_ONLY_SPELLINGS = (*_REDUCTIONS, *_BINARY_LINALG, np.trace)
+
+_LIBRARY_SHAPE_ROWS: tuple[_ShapeRow, ...] = (
+    _ShapeRow(_AnyOf(_REDUCTIONS), _reduction_axis_given, _reject_reduction_axis),
+    _positional_arity_rule(_BINARY_LINALG, 2),
+    _positional_arity_rule((np.trace,), 1),
+    _ShapeRow(_AnyOf((np.matmul, np.dot)), _non_array_operand, _reject_matrix_operand),
+    _ShapeRow(_AnyOf(_ARRAY_ONLY_SPELLINGS), _non_array_operand, _reject_array_operand),
+    _ShapeRow(_AnyOf((np.sign,)), _integer_operand, _reject_integer_sign),
+)
+
+_ATTRIBUTE_INTERCEPT_ROWS: tuple[_AttrRow, ...] = (
+    _AttrRow(("flatten", "ravel", "reshape"), _is_array_fact, Analyzer._bind_array_method),
+    _AttrRow(("T",), _is_array_fact, Analyzer._rewrite_array_transpose),
+)

@@ -304,6 +304,25 @@ contract: emission still decides cast, intrinsic, power,
 and return-contract policy from the final facts, and classifies operand kinds outside routing -- decisions the
 Stage-4 restructuring moves analyzer-side.
 
+### Call and attribute dispatch rows
+
+Which arm a call takes, and which attribute reads the analyzer resolves structurally ahead of generic attribute
+resolution, are chosen from ORDERED FROZEN TABLES of typed rows matched first-to-last rather than from an
+if/elif ladder. A row carries a target test, a guard over the operand facts and the action that consumes the
+site, so a new construct is a row rather than a branch and the dispatch surface is enumerable. Matching is by
+object IDENTITY, never equality and never a hash lookup: a call target may be an unhashable shadow of a builtin
+name, and equality on a numpy callable can yield an array rather than a verdict.
+
+Order is SEMANTIC, and the table boundaries are load-bearing. The pre-admission table either resolves
+structurally (transpose relayout, rank fold, record construction) or refuses with guidance the fold-admission
+harness cannot phrase, and precedes that harness because nothing crosses the host boundary at those arms; the
+post-admission table (container re-flavoring, length, the array factories) sits behind it, so a record or an
+object reference has already been refused as an argument; and the runtime-operand table, reached once some
+operand is known non-concrete, is TOTAL -- its last row refuses unconditionally, so no call leaves it
+unconsumed. In the library call-shape table first match decides which of a call's several violations is
+reported, so a spelling's arity rule precedes its operand rule and the matrix product's operand refusal
+precedes the shared array-operand one.
+
 ### The route plan
 
 Cell routing is a TOTAL typed plan, in `_plan.py`, keyed by a phase-local `PlanSite` of `(block, op index)` over
