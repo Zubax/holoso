@@ -2689,10 +2689,13 @@ maintainer's tree: corpus 151/151, 567 targeted tests, mypy clean over 210 files
 STILL EXIT 0 WITH `_KNOWN_OPEN` EMPTY, which was the gate that mattered most: M5's closures had to survive a
 step that moves refusals across a phase boundary.
 
-SIXTEEN SITES DID NOT MOVE, AND THAT IS A RESULT RATHER THAN UNFINISHED WORK. They read the carried KIND of a
-node emission has already built, and the carried kind genuinely differs from the fact's -- an integer crossing
-a state boundary is float-carried while its fact still reads integer -- so no resolver over final facts can
-decide them without rebuilding the SSA.
+SIXTEEN SITES DID NOT MOVE, AND MY RECORD OF WHY WAS WRONG -- corrected by the M6 review, which counted
+instead of reading the claim. Only FIVE even call `type_of`, and only THREE have an evident carried-kind-drift
+route (an integer crossing a state boundary is float-carried while its fact still reads integer, the one shape
+a resolver over final facts genuinely cannot decide without rebuilding the SSA). SEVEN could move into a
+use-site settlement over the final graph with NO SSA rebuild, and four more are exhaustive fallbacks or
+duplicate checks analysis already makes. So it is a step in its own right for three, and ordinary unfinished
+work for the rest. The architecture test's comment carried the same overstatement and is corrected too.
 
 FIVE REFUSALS HAD NO KILLER AT ALL, and breaking them at their OLD emission site also failed nothing, so the
 move EXPOSED a pre-existing gap rather than creating one; they are pinned now, each verified to fail under its
@@ -2861,3 +2864,42 @@ LANDED THROUGH A THREE-WAY MERGE against M7, which had landed underneath it. One
 interesting kind: M7 removed an invalid empty origin from a `join_facts` call while this step changed the same
 call from leaf facts to CELL facts. Resolved to keep both -- per-cell semantics with M7's origin -- rather than
 taking either side whole.
+
+
+M6 REVIEW: `_settle` IS GENUINELY TERMINAL, which was the soundness question that mattered. Verified against
+the code: static-for rewriting, grafting, unrolling, restarts, storage checks, deferred refusals, validation
+and `_finalize` ALL precede it, and `fixpoint()` returns immediately afterward, with both verifiers and
+emission only reading the stabilized graph. So a refusal decided there is not decided on facts that can still
+change -- the defect class the move risked. And no previously-refused kernel became accepted, checked across a
+30-kernel paired phase matrix, which was the failure mode I was most worried about.
+
+THE THREE UNREACHED RESET REFUSALS ARE CONFIRMED UNREACHABLE, with a closed-set argument rather than a failed
+search: 22 kernels over strings, ranges, slices, records, unsupported objects, empty and nested aggregates,
+numpy width extremes, huge integers and IntEnums, infinity and NaN, and conditional/helper/unanchored stores.
+Every surviving attribute store calls `_state_reset_fact` first; inadmissible resets are refused by storage
+conformance before settlement; admitted non-datapath resets are refused by reset-schema validation; and
+admitted numeric resets form a closed bool/int/float set where integers take the IntConst branch and floats are
+already binary64. That is what an unreachability claim should look like, against the three earlier ones in this
+campaign that were only "I could not construct a witness".
+
+A THIRD DIAGNOSTIC ATTRIBUTION CHANGE, unreported by M6 and found here: a read-before-store collision now
+blames the later store rather than the earlier aggregate assignment, because settlement claims names in
+`store_order` where emission claimed them positionally. No port-ABI misordering -- a non-colliding variant
+produces identical ordered outputs in both trees -- but it is a public attribution change and it belongs in
+the record with the other two.
+
+A VERIFICATION GAP IN M6'S OWN OUTPUT: the three new authoritative tables have no independent verifier.
+`verify_plan_totality` recomputes RPO rather than checking the emission order it is handed, and NEITHER
+verifier validates the state-slot table or the settled return. The emitter trusts all three directly, so a
+future producer error -- a missing or reordered block, a wrong reset or name, a wrong return row -- bypasses
+the plan verifiers entirely, with the goldens and behavioural tests as the only backstop. That is the same
+shape as the gap M2 was built to close, reintroduced one layer up.
+
+STATE-FIX REVIEW, TWO ITEMS STANDING. A folded cell keeps a DEAD slot (no `StateRead` ops) that is still
+emitted with a binary64 reset rounding in the carrier, so `state_a_0` reports 1.0 while `out_0` reports the
+same cell as greater than 1.0 -- one design, one transaction, two contradictory answers. And the defect class
+is HALF-CLOSED: a genuinely-varying slot with an unrepresentable reset still miscompiles silently in four
+lines with no aggregate (`self.s = 1.0 + 2**-30`; guard on `self.s > 1.0`; then `self.s = x`), python 10.0
+against hardware 20.0, verified here. That one is the charter case -- the register cannot hold the value, and
+a rule refusing it would refuse `self.y = 0.1` -- but "charter" is a reason, not a defence, and the campaign
+should stop describing this defect class as closed when one half of it is documented rather than fixed.
