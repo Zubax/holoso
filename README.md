@@ -34,6 +34,8 @@ Contributions of any kind are emphatically welcome!
 
 ## 🎓 Crash course
 
+> *People who are really serious about software should make their own hardware. \[Alan Kay\]*
+
 ### Install
 
 ```
