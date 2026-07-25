@@ -433,3 +433,43 @@ def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
     float_v = generate(float_lir).verilog
     assert "bregs" not in float_v and "NBREG" not in float_v and "[0:-1]" not in float_v
     _elaborate("madd_only", float_v, tmp_path)
+
+
+class SharedLiveOut:
+    """
+    Two slots ending the transaction holding one value. The read-modify-write pair frees ``a``'s home register
+    mid-transaction and the allocator reuses it, so a boundary-installing slot's register also carries opcode writes --
+    the shape the emitter used to refuse outright.
+    """
+
+    def __init__(self) -> None:
+        self.a = 0.0
+        self.b = 1.0
+
+    def step(self, x: float) -> float:
+        self.a = x + self.a
+        self.a = x + self.a
+        self.b = self.a
+        return self.b
+
+
+@requires_iverilog
+def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(tmp_path: Path) -> None:
+    # The boundary install outranks the opcode arm on the same register, so this shape used to be refused outright.
+    # It is safe because the install executes at present_step and every write event rides a strictly earlier step; the
+    # kernel is cosimulated in test_cosim.py, so here only the premise and the elaboration are checked.
+    from holoso._backend.verilog._microcode import write_events
+
+    lir = build(_run(SharedLiveOut().step, _ops(FloatFormat(6, 18))), "shared_live_out", fetch_stages=3)
+    steps: dict[object, list[int]] = {}
+    for event in write_events(lir):
+        steps.setdefault(event.dst, []).append(event.step)
+    coexisting = [
+        slot
+        for slot in lir.float_state_slots
+        if slot.needs_copy and lir.float_state_install_is_boundary(slot) and slot.reg in steps
+    ]
+    assert coexisting, "the premise needs a boundary-installing slot whose own register also takes opcode writes"
+    for slot in coexisting:
+        assert max(steps[slot.reg]) < lir.present_step, f"{slot.name!r}: {sorted(steps[slot.reg])} vs present_step"
+    _elaborate("shared_live_out", generate(lir).verilog, tmp_path)
