@@ -137,8 +137,8 @@ def run(hir: Hir) -> Hir:
         if is_neg_one(b):
             return make_neg(builder, a)
         divisor = float_of(b)
-        # A zero divisor is excluded for the same reason an infinite one is: there is no reciprocal to multiply by.
-        # Nothing here is about what the datapath would answer -- the quotient simply has no second factor to become.
+        # A zero divisor is excluded because there is no reciprocal to multiply by at all. An infinite one is excluded
+        # only because nothing has needed the fold; ``1/inf`` is ``0.0``, a perfectly good second factor.
         if divisor is not None and divisor != 0.0 and math.isfinite(divisor):
             k = _ilog2_exact(divisor)
             if k is not None:
