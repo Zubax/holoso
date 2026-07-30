@@ -19,6 +19,11 @@ class BoolType(Type):
 
 
 @dataclass(frozen=True, slots=True)
+class IntType(Type):
+    """A semantic signed integer of unbounded range; the hardware width is chosen at selection, not carried here."""
+
+
+@dataclass(frozen=True, slots=True)
 class Signature:
     operand_types: tuple[Type, ...]
     result_type: Type

@@ -755,3 +755,52 @@ def test_cosim_phi_swap_computed_arm(sim: str) -> None:
         {"x": fmt.encode(x), "n": fmt.encode(n)} for x in (1.0, 2.0, -1.5) for n in (1.0, 2.0, 4.0)
     ]
     run_cosim(sim, phi_swap_computed_loop, fmt, "cs_phi_swap_computed", vectors=vectors)
+
+
+class _SharedLiveOut:
+    """Two slots ending the transaction holding one value; the emitter's boundary install shares a register with
+    opcode writes, which it used to refuse rather than emit."""
+
+    def __init__(self) -> None:
+        self.a = 0.0
+        self.b = 1.0
+
+    def __call__(self, x: float) -> float:
+        self.a = x + self.a
+        self.a = x + self.a
+        self.b = self.a
+        return self.b
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_shared_live_out_state_slots(sim: str) -> None:
+    # The install arm outranks the opcode arm in the same statement, so if the two could ever be enabled on one PC the
+    # DUT would diverge from the model here -- across a persistent recurrence, on the very first transaction.
+    run_cosim(sim, _SharedLiveOut().__call__, FloatFormat(6, 18), "shared_live_out")
+
+
+class _SharedBoolLiveOut:
+    """
+    Two boolean slots ending the transaction holding one value, with ``d``'s early read freeing ``a``'s register so the
+    allocator lands an opcode write on it: a boundary-installing bool slot whose own register also takes one.
+    """
+
+    def __init__(self) -> None:
+        self.a = False
+        self.b = True
+        self.d = False
+
+    def __call__(self, x: bool, y: bool) -> tuple[bool, bool, bool]:
+        keep = self.d
+        self.d = x and self.a
+        self.a = y or self.a
+        self.a = x and self.a
+        self.b = self.a
+        return keep, self.b, self.d
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_shared_live_out_bool_state_slots(sim: str) -> None:
+    # The boolean bank leans on the same priority argument as the wide one, and boolean installs are boundary-only, so
+    # a shadowed write here would diverge from the model on the recurrence rather than on a single transaction.
+    run_cosim(sim, _SharedBoolLiveOut().__call__, FloatFormat(6, 18), "shared_bool_live_out")

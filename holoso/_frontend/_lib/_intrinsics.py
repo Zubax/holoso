@@ -59,7 +59,7 @@ def exp2_(x: float) -> float:
 
 @intrinsic(FloatLog2, math.log2, np.log2)
 def log2_(x: float) -> float:
-    return math.log2(x)
+    return float(np.log2(x))  # -inf at the pole and nan off the domain, like the hardware; math.log2 raises instead
 
 
 @intrinsic(FloatSqrt, math.sqrt, np.sqrt)

@@ -1279,7 +1279,7 @@ class _Lowerer:
         attribute (a boolean instance attribute never assigned anywhere in the body, so it keeps its snapshot value),
         or a comparison of two compile-time floats (a literal, an unrolled loop counter, a read-only attribute, or
         arithmetic of these; e.g. ``if i > 0:``) -- or None for a runtime condition. The comparison fold is fast-math
-        (float64, accepted per DESIGN.md), exactly as the constant folder evaluates a relational of constants. A
+        (float64, accepted per DESIGN.md), exactly as HIR folding evaluates a relational of constants. A
         statically-known condition takes one arm and the other is not lowered (no spurious persistent state from a
         write that can never execute). The scan and the lowering share this so their reachability agrees.
         """
@@ -1364,7 +1364,7 @@ class _Lowerer:
         one predicate the lowering fold (``_lower_if`` / ``_lower_ifexp`` / ``_lower_while``) and the attribute and loop
         scans share, so they descend exactly the same arms; a divergence would make a folded-away arm's write a
         persistent-state slot with no value (a crash). A leaf or unrelated comparison defers to ``_static_bool``. This
-        is a sound, deliberately incomplete approximation of the (complete) HIR constant folder -- it folds the forms a
+        is a sound, deliberately incomplete approximation of the (complete) HIR folding -- it folds the forms a
         kernel realistically writes (connectives, casts, equal-arm ternaries, a ``float(<cond>)`` comparison); a
         constant condition buried under some other shape stays runtime, at worst rejecting a ``return`` or leaving an
         unused state register under a contrived tautology (Phase 2's early returns lift the return limit).
@@ -2129,17 +2129,44 @@ class _Lowerer:
             raise UnsupportedConstruct(f"unsupported call to {func.attr!r}", self._loc(node))
         if node.keywords:
             raise UnsupportedConstruct(f"method {func.attr}() takes no keyword arguments", self._loc(node))
-        return self._inline(method, self._lower_args(node), self._loc(node), bound_self=bound_self)
+        return self._inline(method, self._lower_args(node), self._loc(node), bound_self=bound_self, arg_nodes=node.args)
 
     def _inline_call(self, callee: types.FunctionType, node: ast.Call) -> Value:
         if node.keywords:
             raise UnsupportedConstruct(
                 f"inlined call to {callee.__name__}() takes no keyword arguments", self._loc(node)
             )
-        return self._inline(callee, self._lower_args(node), self._loc(node))
+        return self._inline(callee, self._lower_args(node), self._loc(node), arg_nodes=node.args)
+
+    def _static_argument_bindings(self, params: list[str], arg_nodes: list[ast.expr]) -> dict[str, int]:
+        """
+        The parameters an inlined call substitutes a compile-time INTEGER into, resolved from the argument expressions
+        in the CALLER's scope. Inlining substitutes an argument exactly as unrolling substitutes a loop target, so a
+        callee that subscripts its own parameter -- ``taps[index]`` -- must see the integer at the call: HIR has no
+        arrays, so an index unresolved here is an index nothing downstream can resolve. Only integers, and only for
+        indexing and trip counts; a number in the datapath is a value, and values are the graph's business.
+
+        A splatted argument expands to as many values as its aggregate holds, so it is the whole correspondence between
+        expressions and parameters that breaks, not merely the one expression that cannot be read; such a call binds
+        nothing. Reading it positionally anyway would hand a parameter the number belonging to a later one, and a guard
+        over it would then take the arm Python does not.
+        """
+        if any(isinstance(node, ast.Starred) for node in arg_nodes):
+            return {}
+        return {
+            name: index
+            for name, node in zip(params, arg_nodes, strict=False)
+            if (index := self._static_int(node)) is not None
+        }
 
     def _inline(
-        self, callee: types.FunctionType, args: list[Value], loc: SourceLocation, *, bound_self: bool = False
+        self,
+        callee: types.FunctionType,
+        args: list[Value],
+        loc: SourceLocation,
+        *,
+        bound_self: bool = False,
+        arg_nodes: list[ast.expr] | None = None,
     ) -> Value:
         if callee in self._inlining:
             raise UnsupportedConstruct(f"recursive inlining of {callee.__name__}() is not supported", loc)
@@ -2168,8 +2195,11 @@ class _Lowerer:
         outer = self._capture()
         self._inlining.add(callee)
         bindings = {param.arg: arg for param, arg in zip(params, args)}
+        static = self._static_argument_bindings([param.arg for param in params], arg_nodes or [])
         context = outer if bound_self else None
-        self._install(Scope.fresh(callee, bindings, lines, start, filename, context=context, self_name=self_param))
+        self._install(
+            Scope.fresh(callee, bindings, static, lines, start, filename, context=context, self_name=self_param)
+        )
         if (
             callee not in self._local_names
         ):  # a pure function of the callee's source, and matmul inlines its dot n*m times
@@ -2251,7 +2281,7 @@ class _Lowerer:
         Evaluate an expression to a compile-time float, or None if it is not one: a literal, a static integer (an
         unrolled loop counter), a read-only float attribute (a float instance attribute never assigned in the body, so
         it keeps its snapshot value), or ``+``/``-``/``*`` arithmetic of these. The fold is fast-math (float64),
-        matching the constant folder and accepted per DESIGN.md.
+        matching HIR folding and accepted per DESIGN.md.
         """
         cast = self._cast_call(node)
         if cast is not None and cast[0] == "float":

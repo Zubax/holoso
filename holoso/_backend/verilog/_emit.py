@@ -633,16 +633,16 @@ always @(posedge clk) begin
     for reg, slot in sorted(float_slots.items()):
         arms = load_arm(float_loads, reg)
         if slot.needs_copy and lir.float_state_install_is_boundary(slot):
-            # The boundary install is a higher-priority arm than the opcode case, so it must not shadow any opcode
-            # write. It never can: a non-coalesced boundary slot holds its live-in until the read-first boundary read,
-            # so the allocator lands no intermediate write on it -- pinned here so a future scheduler cannot regress it.
-            assert RegRef(reg) not in write_books, "a boundary-install slot must carry no opcode write sources"
+            # This arm outranks the opcode case below it and must not shadow it, here or in the boolean bank below.
+            # It cannot: the install executes at ``present_step``, and ``build_microcode`` -- already run, over every
+            # write event -- asserts each rides a strictly earlier step, so the word presented alongside the install
+            # holds the write NOP. That is what lets a slot register which also carries opcode writes, the shape a
+            # live-out coalesced into another slot's register leaves behind, be emitted rather than refused.
             arms.append(("out_valid && out_ready", _operand_rhs(slot.tap)))
         _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms)
     for reg, bslot in sorted(bool_slots.items()):
         arms = load_arm(bool_loads, reg)
         if bslot.needs_copy:
-            assert BoolRegRef(reg) not in write_books, "a boundary-install bool slot must carry no opcode write sources"
             arms.append(("out_valid && out_ready", _operand_rhs(bslot.live_out)))
         _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms)
     w.pop()

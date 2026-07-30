@@ -3,7 +3,8 @@ Composite math/numpy stubs the frontend inlines like ordinary user functions, ex
 that is, bare-hardware operators. Fast-math transforms are legal here, which may alter semantics.
 
 Math domain violations raise in plain Python but garbage-in-garbage-out in hardware,
-with the error output signals asserted; refer to the operator RTL for details.
+with the error output signals asserted; refer to the operator RTL for details. A violation the compiler happens to
+prove statically is refused at build time instead -- a liberty it takes where a fold reaches, never a guarantee.
 
 Composites compute through the intrinsic stubs (exp2_, atan2_, ...) instead of the library functions directly even
 though the library spellings would lower identically (they are registered intrinsic keys too). The intrinsic stub
@@ -166,7 +167,7 @@ def pow_(b: float, e: float) -> float:
     """
     if e == 0.0 or b == 1.0:  # b==1 avoids IEEE 754 divergence on non-finite e
         r = 1.0
-    elif e == 1.0 or b == 0.0:  # b==0 avoids the pole error signal on log2(0)
+    elif e == 1.0:
         r = b
     elif e == 2.0:
         r = b * b

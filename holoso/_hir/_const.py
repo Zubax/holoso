@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .._errors import UnsupportedConstruct
-from ._types import BoolType, FloatType, Type
+from ._types import BoolType, FloatType, IntType, Type
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,3 +37,17 @@ class BoolConst(Const):
     @property
     def type(self) -> BoolType:
         return BoolType()
+
+
+@dataclass(frozen=True, slots=True)
+class IntConst(Const):
+    """
+    Normally, the lower levels that are hardware-aware should refuse lowering of constants that would saturate the
+    machine's integer type. E.g., 2^63 would refuse on a 32-bit machine.
+    """
+
+    value: int
+
+    @property
+    def type(self) -> IntType:
+        return IntType()

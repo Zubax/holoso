@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "holoso"
 dynamic = ["version"]
-requires-python = ">=3.12"  # Verification targets Python 3.14+; earlier versions supported on a best-effort basis.
+requires-python = ">=3.13"  # math.fma is 3.13+. Verification targets Python 3.14+.
 description = "A simple Python-to-Verilog synthesizer for numeric kernels, control systems, and DSP."
 readme = { file = "README.md", content-type = "text/markdown" }
 license = "Apache-2.0"
@@ -91,6 +91,7 @@ target-version = ["py312"]
 python_version = "3.14"
 strict = true
 files = ["holoso", "tests", "examples", "synth", "tools"]
+exclude = ["examples/build"]
 
 [[tool.mypy.overrides]]
 module = ["scipy.*", "cocotb.*", "cocotb_tools.*"]

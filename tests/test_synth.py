@@ -86,16 +86,20 @@ def test_synthesize_threads_pipeline_stages() -> None:
     assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(3)" in staged.verilog_output.verilog
 
 
-def test_rejects_nan_constants() -> None:
+def test_rejects_nan_constant_data_and_nan_producing_folds_alike() -> None:
+    # A literal NaN is not a number, so it cannot be written as data; an expression of constants that denotes no
+    # number is the same defect reached by arithmetic, and is refused rather than handed to the datapath.
     def nan_global(a: float) -> float:
         return a + _NAN
 
-    def folds_to_nan(a: float) -> float:
-        return a + (1e400 - 1e400)
+    with pytest.raises(holoso.UnsupportedConstruct):
+        holoso.synthesize(nan_global, ops=_ops())
 
-    for fn in (nan_global, folds_to_nan):
-        with pytest.raises(holoso.UnsupportedConstruct):
-            holoso.synthesize(fn, ops=_ops())
+    def folds_to_nan(a: float) -> float:
+        return a + (1e400 - 1e400)  # inf + -inf: an indeterminate form, so it names nothing
+
+    with pytest.raises(holoso.SynthesisError, match="names no number"):
+        holoso.synthesize(folds_to_nan, ops=_ops())
 
 
 def test_infinity_constants_are_allowed() -> None:

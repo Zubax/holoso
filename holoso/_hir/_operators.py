@@ -1,13 +1,16 @@
 """Semantic HIR operators."""
 
 import math
+
+import numpy as np
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
 from .._util import RelationalOp
-from ._const import BoolConst, Const, FloatConst
-from ._types import BoolType, FloatType, Signature
+from ._const import BoolConst, Const, FloatConst, IntConst
+from ._types import BoolType, FloatType, IntType, Signature
 
 
 def _float_signature(arity: int) -> Signature:
@@ -32,6 +35,66 @@ def _bool_const(const: Const) -> BoolConst:
     return const
 
 
+def _int_const(const: Const) -> IntConst:
+    if not isinstance(const, IntConst):
+        raise TypeError(f"expected IntConst, got {const!r}")
+    return const
+
+
+class NoNumber(Exception):
+    """
+    The signal :meth:`Operator.evaluate` raises when the operands prove the expression names no number -- an
+    indeterminate form like ``inf - inf``, or an argument outside a function's domain like ``sqrt(-1)``. It is not an
+    answer, so it is not a return value.
+
+    It is a signal and not a refusal. Every pass that folds speculatively catches it and leaves the operation exactly
+    as it stands, because unrolling and inlining SUBSTITUTE values and so manufacture expressions the kernel never
+    wrote -- ``for w in [1.0, 0.0]: if w > 0.0: x / w`` becomes ``x / 0.0`` -- and convicting one of those is the
+    compiler answering for its own transformation. What refuses is the survivor sweep at the end of optimization
+    (``_refuse_nameless``), over what is left once every deletion has run. See the fastmath charter in DESIGN.md.
+
+    ``what`` names the expression for that diagnostic; the signal carries no message of its own because where it is
+    raised is not where it is reported.
+    """
+
+    def __init__(self, what: str) -> None:
+        super().__init__(what)
+        self.what = what
+
+
+def _scalars(operands: list[Const]) -> str:
+    return ", ".join(str(o.value) for o in operands if isinstance(o, (FloatConst, BoolConst, IntConst)))
+
+
+def _fold_float(operands: list[Const], name: str, evaluate: Callable[..., float]) -> Const:
+    """
+    Host-precision float folding -- never the target format. Whatever the operator's own reference declines to answer,
+    we decline too: a domain fault, a result past the carrier, a NaN. Guessing which infinity an overflow meant is
+    inventing a value the expression never named, and the exception could not tell us anyway. A reference that
+    SATURATES instead of raising therefore hands back the infinity as an ordinary value, which is the answer rather
+    than a guess at one.
+    """
+    try:
+        value = evaluate(*[_float_const(operand).value for operand in operands])
+    except (ValueError, OverflowError, ZeroDivisionError):
+        value = math.nan
+    if math.isnan(value):
+        raise NoNumber(f"{name} of {_scalars(operands)}")
+    return FloatConst(value)
+
+
+def _fold_int(operands: list[Const], name: str, evaluate: Callable[..., int]) -> Const:
+    """
+    Arbitrary-precision integer folding -- no width, no saturation, and no size limit. An expression the user wrote is
+    one the user asked for: ``1 << 10**9`` takes as long as it takes, exactly as it would in the Python the kernel is
+    written in. A host fault means the operands are outside the operation's domain, so no value exists.
+    """
+    try:
+        return IntConst(evaluate(*[_int_const(operand).value for operand in operands]))
+    except (ZeroDivisionError, ValueError, OverflowError):
+        raise NoNumber(f"{name} of {_scalars(operands)}") from None
+
+
 @dataclass(frozen=True, slots=True)
 class Operator(ABC):
     mnemonic: ClassVar[str]
@@ -46,31 +109,32 @@ class Operator(ABC):
     @abstractmethod
     def signature(self) -> Signature: ...
 
-    @property
-    def arity(self) -> int:
-        return self.signature.arity
+    @abstractmethod
+    def evaluate(self, operands: list[Const]) -> Const:
+        """
+        The value of this operation over operands the compiler knows in full, which is a number or no build at all.
+        Evaluation runs in the compiler's own arithmetic -- unbounded integers, host-precision floats -- and never in
+        the target format, so a folded constant may differ from what the datapath would compute; see the fastmath
+        charter in DESIGN.md. Nothing declines a fold: not size, not representability, and never a result the hardware
+        would disagree with. Where no value exists at all it raises :class:`NoNumber`.
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
+        A caller asks only where it sees EVERY operand. One it cannot see leaves the expression unnamed, and then the
+        algebraic identities below speak for it instead -- which is why ``x*0`` is zero for an unknown ``x`` while
+        ``inf*0`` names no number.
         """
-        The folded constant node, or None to leave the operation unfolded (the default; like ``absorbing``/``identity``,
-        a foldable operator opts in by overriding). The HIR folder is format-agnostic (float64), so folding is faithful
-        only where that float64 result is an accepted fast-math approximation of the hardware; a format-critical
-        operator stays unfolded and is evaluated by the hardware operator, where the format is known.
-        """
-        return None
 
     def absorbing(self) -> Const | None:
         """
         The constant operand that forces the result to that constant regardless of the others (the absorbing element):
-        ``True`` for ``or``, ``False`` for ``and``. None if the operator has no absorbing element. The constant folder
-        uses it to fold a partially-constant expression like ``x or True`` to a constant.
+        ``True`` for ``or``, ``False`` for ``and``. None if the operator has none. Strength reduction uses it to reduce
+        a partially-constant expression like ``x or True`` to a constant.
         """
         return None
 
     def identity(self) -> Const | None:
         """
-        The constant operand that leaves the result equal to the other operand (the identity element): ``False`` for
-        ``or``, ``True`` for ``and``. None if the operator has none. The constant folder drops it (``x and True`` -> x).
+        The constant operand that leaves the result unchanged (the identity element): ``False`` for ``or``,
+        ``True`` for ``and``. None if the operator has none. Strength reduction drops it (``x and True`` -> x).
         """
         return None
 
@@ -84,9 +148,12 @@ class FloatAdd(Operator):
     def signature(self) -> Signature:
         return _float_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
-        a, b = [_float_const(operand) for operand in operands]
-        return FloatConst(a.value + b.value)
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the sum", lambda a, b: a + b)
+
+    def identity(self) -> Const | None:
+        # ``x + 0 == x``, declared rather than hand-coded so every rewrite agrees about it
+        return FloatConst(0.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +165,17 @@ class FloatMul(Operator):
     def signature(self) -> Signature:
         return _float_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
-        a, b = [_float_const(operand) for operand in operands]
-        return FloatConst(a.value * b.value)
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the product", lambda a, b: a * b)
+
+    # ``x*0 == 0`` is the charter's identity, declared here rather than hand-coded in one pass so that every rewrite
+    # reasoning about known values sees it. It cannot fire on two constants: an all-known product is evaluated first,
+    # and ``inf*0`` names no number.
+    def absorbing(self) -> Const | None:
+        return FloatConst(0.0)
+
+    def identity(self) -> Const | None:
+        return FloatConst(1.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +186,8 @@ class FloatDiv(Operator):
     def signature(self) -> Signature:
         return _float_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        a, b = [_float_const(operand) for operand in operands]
-        return FloatConst(a.value / b.value) if b.value != 0 else None
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the quotient", lambda a, b: a / b)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +199,7 @@ class FloatNeg(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
         return FloatConst(-a.value)
 
@@ -139,7 +213,7 @@ class FloatAbs(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
         return FloatConst(abs(a.value))
 
@@ -156,9 +230,10 @@ class FloatMulPow2(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
-        (a,) = [_float_const(operand) for operand in operands]
-        return FloatConst(math.ldexp(a.value, self.k))
+    def evaluate(self, operands: list[Const]) -> Const:
+        # ``np.ldexp`` rather than ``math.ldexp`` because this operator stands for a multiplication, which saturates:
+        # the raise is the math module's, not the operation's, and answering it would be inventing a value.
+        return _fold_float(operands, "the scaling", lambda a: float(np.ldexp(a, self.k)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +247,9 @@ class FloatRound(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the rounding", lambda a: float(round(a)))
+
 
 @dataclass(frozen=True, slots=True)
 class FloatFloor(Operator):
@@ -183,6 +261,9 @@ class FloatFloor(Operator):
     @property
     def signature(self) -> Signature:
         return _float_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the floor", lambda a: float(math.floor(a)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +277,9 @@ class FloatCeil(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the ceiling", lambda a: float(math.ceil(a)))
+
 
 @dataclass(frozen=True, slots=True)
 class FloatTrunc(Operator):
@@ -208,6 +292,9 @@ class FloatTrunc(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the truncation", lambda a: float(math.trunc(a)))
+
 
 @dataclass(frozen=True, slots=True)
 class FloatExp2(Operator):
@@ -218,15 +305,10 @@ class FloatExp2(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        (a,) = [_float_const(operand) for operand in operands]
-        if not math.isfinite(a.value):
-            return None
-        try:
-            result = math.exp2(a.value)
-        except OverflowError:
-            return None
-        return FloatConst(result) if math.isfinite(result) else None
+    def evaluate(self, operands: list[Const]) -> Const:
+        # ``np.exp2`` is this operator's reference -- the intrinsic stub is registered against it -- and it saturates.
+        # ``math.exp2`` raises instead, which is the math module's convention and not this operation's answer.
+        return _fold_float(operands, "the exponential", lambda a: float(np.exp2(a)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,12 +319,8 @@ class FloatLog2(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        (a,) = [_float_const(operand) for operand in operands]
-        if not (math.isfinite(a.value) and a.value > 0.0):
-            return None
-        result = math.log2(a.value)
-        return FloatConst(result) if math.isfinite(result) else None
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the base-2 logarithm", math.log2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,9 +332,8 @@ class FloatSin(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        (a,) = [_float_const(operand) for operand in operands]
-        return FloatConst(math.sin(a.value)) if math.isfinite(a.value) else None
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the sine", math.sin)
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,9 +345,8 @@ class FloatCos(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        (a,) = [_float_const(operand) for operand in operands]
-        return FloatConst(math.cos(a.value)) if math.isfinite(a.value) else None
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the cosine", math.cos)
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,9 +357,8 @@ class FloatSqrt(Operator):
     def signature(self) -> Signature:
         return _float_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        (a,) = [_float_const(operand) for operand in operands]
-        return FloatConst(math.sqrt(a.value)) if math.isfinite(a.value) and a.value >= 0.0 else None
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the square root", math.sqrt)
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,11 +370,8 @@ class FloatAtan2(Operator):
     def signature(self) -> Signature:
         return _float_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        y, x = [_float_const(operand) for operand in operands]
-        if not (math.isfinite(y.value) and math.isfinite(x.value)):
-            return None
-        return FloatConst(math.atan2(y.value, x.value))
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the arctangent", math.atan2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,12 +387,8 @@ class FloatHypot2(Operator):
     def signature(self) -> Signature:
         return _float_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
-        a, b = [_float_const(operand) for operand in operands]
-        if not (math.isfinite(a.value) and math.isfinite(b.value)):
-            return None
-        result = math.hypot(a.value, b.value)
-        return FloatConst(result) if math.isfinite(result) else None
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the magnitude", math.hypot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +400,10 @@ class FloatIsFinite(Operator):
     def signature(self) -> Signature:
         return Signature((FloatType(),), BoolType())
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand) for operand in operands]
+        return BoolConst(math.isfinite(a.value))
+
 
 @dataclass(frozen=True, slots=True)
 class FloatIsInf(Operator):
@@ -341,6 +413,10 @@ class FloatIsInf(Operator):
     @property
     def signature(self) -> Signature:
         return Signature((FloatType(),), BoolType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand) for operand in operands]
+        return BoolConst(math.isinf(a.value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +428,10 @@ class FloatIsPosInf(Operator):
     def signature(self) -> Signature:
         return Signature((FloatType(),), BoolType())
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value == math.inf)
+
 
 @dataclass(frozen=True, slots=True)
 class FloatIsNegInf(Operator):
@@ -362,14 +442,14 @@ class FloatIsNegInf(Operator):
     def signature(self) -> Signature:
         return Signature((FloatType(),), BoolType())
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value == -math.inf)
+
 
 @dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
-    """
-    Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds.
-    Never constant-folded -- a fold in the format-agnostic HIR could only use float64, which double-rounds relative
-    to the hardware's single round -- exactly the double-rounding FMA exists to avoid.
-    """
+    """Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds."""
 
     mnemonic: ClassVar[str] = "fma"
     speculatable: ClassVar[bool] = True
@@ -377,6 +457,9 @@ class FloatFma(Operator):
     @property
     def signature(self) -> Signature:
         return _float_signature(3)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the fused multiply-add", math.fma)
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,10 +471,8 @@ class FloatMin(Operator):
     def signature(self) -> Signature:
         return _float_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
+    def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
-        if math.isnan(a.value) or math.isnan(b.value):
-            return None
         return a if a.value < b.value else b
 
 
@@ -404,10 +485,8 @@ class FloatMax(Operator):
     def signature(self) -> Signature:
         return _float_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const | None:
+    def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
-        if math.isnan(a.value) or math.isnan(b.value):
-            return None
         return b if a.value < b.value else a
 
 
@@ -421,7 +500,7 @@ class FloatRelational(Operator):
     def signature(self) -> Signature:
         return Signature((FloatType(), FloatType()), BoolType())
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(self.op.apply(a.value, b.value))
 
@@ -435,15 +514,17 @@ class BoolAnd(Operator):
     def signature(self) -> Signature:
         return _bool_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_bool_const(operand) for operand in operands]
         return BoolConst(a.value and b.value)
 
-    def absorbing(self) -> Const:
-        return BoolConst(False)  # x and False == False
+    def absorbing(self) -> Const | None:
+        # x and False == False
+        return BoolConst(False)
 
-    def identity(self) -> Const:
-        return BoolConst(True)  # x and True == x
+    def identity(self) -> Const | None:
+        # x and True == x
+        return BoolConst(True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,15 +536,17 @@ class BoolOr(Operator):
     def signature(self) -> Signature:
         return _bool_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_bool_const(operand) for operand in operands]
         return BoolConst(a.value or b.value)
 
-    def absorbing(self) -> Const:
-        return BoolConst(True)  # x or True == True
+    def absorbing(self) -> Const | None:
+        # x or True == True
+        return BoolConst(True)
 
-    def identity(self) -> Const:
-        return BoolConst(False)  # x or False == x
+    def identity(self) -> Const | None:
+        # x or False == x
+        return BoolConst(False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,12 +558,13 @@ class BoolXor(Operator):
     def signature(self) -> Signature:
         return _bool_signature(2)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_bool_const(operand) for operand in operands]
         return BoolConst(a.value != b.value)
 
-    def identity(self) -> Const:
-        return BoolConst(False)  # x ^ False == x (there is no absorbing element: x ^ True == ~x, not a constant)
+    def identity(self) -> Const | None:
+        # x ^ False == x (there is no absorbing element: x ^ True == ~x, not a constant)
+        return BoolConst(False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,7 +576,7 @@ class BoolNot(Operator):
     def signature(self) -> Signature:
         return _bool_signature(1)
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_bool_const(operand) for operand in operands]
         return BoolConst(not a.value)
 
@@ -511,14 +595,17 @@ class Select(Operator):
     def signature(self) -> Signature:
         return Signature((BoolType(), FloatType(), FloatType()), FloatType())
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        cond, a, b = operands
+        return _float_const(a) if _bool_const(cond).value else _float_const(b)
+
 
 @dataclass(frozen=True, slots=True)
 class BoolSelect(Operator):
     """
     A boolean mux ``a if cond else b`` over boolean values, the 1-bit dual of :class:`Select`. Produced exclusively by
-    if-conversion of a boolean-phi diamond; like ``Select`` it refuses constant conditions, so a constant-condition
-    bool select never exists and ``fold_constants`` never fires. Its constant arms (the common ``True``/``False`` arms
-    of a state-machine merge) are reduced to ``and``/``or``/``not``/passthrough by strength reduction.
+    if-conversion of a boolean-phi diamond. Its constant arms (the common ``True``/``False`` arms of a state-machine
+    merge) are reduced to ``and``/``or``/``not``/passthrough by strength reduction.
     """
 
     mnemonic: ClassVar[str] = "bool_select"
@@ -528,14 +615,14 @@ class BoolSelect(Operator):
     def signature(self) -> Signature:
         return Signature((BoolType(), BoolType(), BoolType()), BoolType())
 
+    def evaluate(self, operands: list[Const]) -> Const:
+        cond, a, b = operands
+        return _bool_const(a) if _bool_const(cond).value else _bool_const(b)
+
 
 @dataclass(frozen=True, slots=True)
 class FloatToBool(Operator):
-    """
-    A scalar cast ``bool(x)``: a float is truthy iff it is nonzero (the ZKF exponent-nonzero test). Never
-    constant-folded: the test is on the constant *encoded into the configured format*, so a magnitude too small to
-    represent (encoding to zero) is False -- which a format-agnostic float64 ``c != 0.0`` would get wrong.
-    """
+    """A scalar cast ``bool(x)``: a float is truthy iff it is nonzero."""
 
     mnemonic: ClassVar[str] = "float_to_bool"
     speculatable: ClassVar[bool] = True
@@ -543,6 +630,10 @@ class FloatToBool(Operator):
     @property
     def signature(self) -> Signature:
         return Signature((FloatType(),), BoolType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value != 0.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +645,305 @@ class BoolToFloat(Operator):
     def signature(self) -> Signature:
         return Signature((BoolType(),), FloatType())
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_bool_const(operand) for operand in operands]
         return FloatConst(1.0 if a.value else 0.0)
+
+
+# Signed integers before hardware width selection. Folding is exact at arbitrary precision -- no width, no saturation
+# -- so a fully static integer expression disappears before MIR, whose integer refusal therefore only ever sees a
+# runtime one. Add/sub/mul/neg/abs and the bitwise and shift operators are speculatable; floor-division and modulo
+# assert the div-by-zero error flag, so they are not.
+
+
+def _int_signature(arity: int) -> Signature:
+    ty = IntType()
+    return Signature((ty,) * arity, ty)
+
+
+@dataclass(frozen=True, slots=True)
+class IntAdd(Operator):
+    mnemonic: ClassVar[str] = "iadd"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the sum", lambda a, b: a + b)
+
+    def identity(self) -> Const | None:
+        return IntConst(0)
+
+
+@dataclass(frozen=True, slots=True)
+class IntSub(Operator):
+    mnemonic: ClassVar[str] = "isub"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the difference", lambda a, b: a - b)
+
+
+@dataclass(frozen=True, slots=True)
+class IntMul(Operator):
+    mnemonic: ClassVar[str] = "imul"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the product", lambda a, b: a * b)
+
+    def absorbing(self) -> Const | None:
+        return IntConst(0)
+
+    def identity(self) -> Const | None:
+        return IntConst(1)
+
+
+@dataclass(frozen=True, slots=True)
+class IntNeg(Operator):
+    mnemonic: ClassVar[str] = "ineg"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the negation", lambda a: -a)
+
+
+@dataclass(frozen=True, slots=True)
+class IntAbs(Operator):
+    mnemonic: ClassVar[str] = "iabs"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the magnitude", abs)
+
+
+@dataclass(frozen=True, slots=True)
+class IntDivFloor(Operator):
+    mnemonic: ClassVar[str] = "idivfloor"
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the quotient", lambda a, b: a // b)
+
+
+@dataclass(frozen=True, slots=True)
+class IntMod(Operator):
+    mnemonic: ClassVar[str] = "imod"
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the remainder", lambda a, b: a % b)
+
+
+@dataclass(frozen=True, slots=True)
+class IntShiftLeft(Operator):
+    mnemonic: ClassVar[str] = "ishl"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the left shift", lambda a, b: a << b)
+
+
+@dataclass(frozen=True, slots=True)
+class IntShiftRight(Operator):
+    mnemonic: ClassVar[str] = "ishr"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the right shift", lambda a, b: a >> b)
+
+
+@dataclass(frozen=True, slots=True)
+class IntAnd(Operator):
+    mnemonic: ClassVar[str] = "iand"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the conjunction", lambda a, b: a & b)
+
+    def absorbing(self) -> Const | None:
+        return IntConst(0)
+
+    def identity(self) -> Const | None:
+        # all ones at every width
+        return IntConst(-1)
+
+
+@dataclass(frozen=True, slots=True)
+class IntOr(Operator):
+    mnemonic: ClassVar[str] = "ior"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the disjunction", lambda a, b: a | b)
+
+    def absorbing(self) -> Const | None:
+        # all ones at every width
+        return IntConst(-1)
+
+    def identity(self) -> Const | None:
+        return IntConst(0)
+
+
+@dataclass(frozen=True, slots=True)
+class IntXor(Operator):
+    mnemonic: ClassVar[str] = "ixor"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the exclusive disjunction", lambda a, b: a ^ b)
+
+    def identity(self) -> Const | None:
+        return IntConst(0)
+
+
+@dataclass(frozen=True, slots=True)
+class IntNot(Operator):
+    mnemonic: ClassVar[str] = "inot"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the complement", lambda a: ~a)
+
+
+@dataclass(frozen=True, slots=True)
+class IntRelational(Operator):
+    mnemonic: ClassVar[str] = "irelational"
+    speculatable: ClassVar[bool] = True
+    op: RelationalOp
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((IntType(), IntType()), BoolType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_int_const(operand) for operand in operands]
+        return BoolConst(self.op.apply(a.value, b.value))
+
+
+@dataclass(frozen=True, slots=True)
+class IntSelect(Operator):
+    """A data mux ``a if cond else b`` over integer values, the integer dual of :class:`Select`."""
+
+    mnemonic: ClassVar[str] = "int_select"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(), IntType(), IntType()), IntType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        cond, a, b = operands
+        return _int_const(a) if _bool_const(cond).value else _int_const(b)
+
+
+@dataclass(frozen=True, slots=True)
+class IntToFloat(Operator):
+    mnemonic: ClassVar[str] = "int_to_float"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((IntType(),), FloatType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_int_const(operand) for operand in operands]
+        try:
+            return FloatConst(float(a.value))
+        except OverflowError:
+            raise NoNumber(f"the float value of {a.value}") from None
+
+
+@dataclass(frozen=True, slots=True)
+class FloatToInt(Operator):
+    """A truncation-toward-zero cast ``int(x)``; no error sideband, so speculatable."""
+
+    mnemonic: ClassVar[str] = "float_to_int"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), IntType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand) for operand in operands]
+        try:
+            return IntConst(int(a.value))
+        except OverflowError:
+            raise NoNumber(f"the integer part of {_scalars(operands)}") from None
+
+
+@dataclass(frozen=True, slots=True)
+class IntToBool(Operator):
+    mnemonic: ClassVar[str] = "int_to_bool"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((IntType(),), BoolType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_int_const(operand) for operand in operands]
+        return BoolConst(a.value != 0)
+
+
+@dataclass(frozen=True, slots=True)
+class BoolToInt(Operator):
+    mnemonic: ClassVar[str] = "bool_to_int"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(),), IntType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_bool_const(operand) for operand in operands]
+        return IntConst(1 if a.value else 0)

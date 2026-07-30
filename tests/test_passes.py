@@ -1,5 +1,6 @@
 """Unit tests for HIR optimization and MIR selection passes."""
 
+import math
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from typing import ClassVar
 
 import pytest
 
+import holoso
 from holoso import (
     FAddOperator,
     FCmpOperator,
@@ -17,7 +19,8 @@ from holoso import (
     FMulOperator,
     OpConfig,
 )
-from holoso._errors import UnsupportedConstruct
+from holoso._errors import SynthesisError, UnsupportedConstruct
+from holoso._util import ValueId
 from holoso._frontend import lower
 from holoso._hir import (
     BoolAnd,
@@ -27,6 +30,7 @@ from holoso._hir import (
     Const,
     FloatAdd,
     FloatConst,
+    FloatMul,
     FloatType as HirFloatType,
     Hir,
     HirBuilder,
@@ -37,9 +41,50 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, Phi, Select
+from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, RelationalOp, Ret, Select
+from holoso._hir import (
+    FloatAbs,
+    FloatAtan2,
+    FloatCos,
+    FloatExp2,
+    FloatFloor,
+    FloatFma,
+    FloatHypot2,
+    FloatIsFinite,
+    FloatIsInf,
+    FloatIsNegInf,
+    FloatIsPosInf,
+    FloatLog2,
+    FloatRound,
+    FloatSin,
+    FloatSqrt,
+    FloatToBool,
+    FloatTrunc,
+)
+from holoso._hir import (
+    BoolToInt,
+    FloatToInt,
+    IntAbs,
+    IntAdd,
+    IntAnd,
+    IntConst,
+    IntDivFloor,
+    IntMod,
+    IntMul,
+    IntNeg,
+    IntNot,
+    IntOr,
+    IntRelational,
+    IntSelect,
+    IntShiftLeft,
+    IntShiftRight,
+    IntSub,
+    IntToBool,
+    IntToFloat,
+    IntType,
+    IntXor,
+)
 from holoso._hir import _if_convert as if_convert_pass
-from holoso._hir._const_fold import run as fold_constants
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
@@ -70,17 +115,12 @@ class OtherFold(Operator):
 
     @property
     def signature(self) -> Signature:
-        ty = OtherType()
-        return Signature((ty,), ty)
+        return Signature((OtherType(),), OtherType())
 
-    def fold_constants(self, operands: list[Const]) -> Const:
+    def evaluate(self, operands: list[Const]) -> Const:
         (operand,) = operands
         assert isinstance(operand, OtherConst)
         return OtherConst(operand.value + 1)
-
-    def render(self, *operands: str) -> str:
-        (operand,) = operands
-        return f"other_fold({operand})"
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
@@ -164,7 +204,7 @@ def test_hir_constant_folding_preserves_const_subclass() -> None:
     builder.output("out_0", y)
     builder.ret()
 
-    hir = fold_constants(builder.finish())
+    hir = optimize(builder.finish())
     node = hir.nodes[hir.outputs[0].value]
     assert isinstance(node, OtherConst)
     assert node.value == 11
@@ -346,11 +386,10 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
         assert float(model.run(x)[0]) == _deep_cfg_kernel(x)
 
 
-def test_const_fold_handles_absorbing_and_identity_boolean_connectives() -> None:
-    # Regression (user): the constant folder must fold every constant expression, including a partially-constant
-    # connective via its absorbing element (``x or True`` -> True, ``x and False`` -> False), and must drop the
-    # identity element (``x or False`` -> x, ``x and True`` -> x), which is what collapses the residual ``and`` a
-    # chained comparison leaves once a statically-true link folds.
+def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
+    # Regression (user): a partially-constant connective reduces through its absorbing element (``x or True`` -> True,
+    # ``x and False`` -> False), and its identity element drops out (``x or False`` -> x, ``x and True`` -> x), which
+    # is what collapses the residual ``and`` a chained comparison leaves once a statically-true link folds.
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", BoolType())  # a dynamic boolean operand
@@ -360,8 +399,8 @@ def test_const_fold_handles_absorbing_and_identity_boolean_connectives() -> None
     builder.output("or_id", builder.operation(BoolOr(), [x, false_]))
     builder.output("and_id", builder.operation(BoolAnd(), [x, true_]))
     builder.ret()
-    folded = fold_constants(builder.finish())
-    out = {o.name: folded.nodes[o.value] for o in folded.outputs}
+    reduced = optimize(builder.finish())
+    out = {o.name: reduced.nodes[o.value] for o in reduced.outputs}
     assert out["or_abs"] == BoolConst(True)  # x or True  -> True   (absorbing)
     assert out["and_abs"] == BoolConst(False)  # x and False -> False  (absorbing)
     assert isinstance(out["or_id"], InPort) and out["or_id"].name == "x"  # x or False -> x  (identity dropped)
@@ -550,6 +589,40 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
             assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"
 
 
+def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
+    # ``mux(c, X, X) == X`` is the universal mux identity the constant-arm reductions above depend on: they read a
+    # ``True``/``True`` pair as the True/False table entry and answer ``c``, which is only never wrong because
+    # identical arms have already been reduced away. The shape cannot be witnessed before if-conversion -- while a
+    # block boundary separates the arms, their copies of ``x*2.0`` are distinct values and the phi is not trivial --
+    # so it appears only once the splice interns them into one block and each arm's comparison becomes a
+    # self-comparison. Both kernels are constant functions in Python and must be constant in hardware too.
+    def identical_bool_arms(x: float) -> bool:
+        doubled = x * 2.0
+        if x > 0.0:
+            same = (x * 2.0) == doubled
+        else:
+            same = (x * 2.0) == doubled
+        return same
+
+    def identical_float_arms(x: float) -> float:
+        doubled = x * 2.0
+        if x > 0.0:
+            picked = x * 2.0
+        else:
+            picked = doubled
+        return picked
+
+    for kernel, read in ((identical_bool_arms, bool), (identical_float_arms, float)):
+        hir = _hir_of(kernel)
+        assert not any(
+            isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, Select)) for n in hir.nodes.values()
+        ), f"{kernel.__name__}: a mux over identical arms survived"
+        model = build_model(build(lower_to_mir(hir, OPS), kernel.__name__, fetch_stages=3))
+        for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
+            got, want = read(model.run(x)[0]), read(kernel(x))
+            assert got == want, f"{kernel.__name__}({x}): got {got}, want {want}"
+
+
 def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
     def f(x: float, y: float) -> float:
         if x > 0.0:
@@ -626,3 +699,542 @@ def test_operator_layer_does_not_import_hir() -> None:
     """
     offenders = forbidden_imports("holoso._operators", "holoso._hir")
     assert not offenders, f"the operator layer transitively imports HIR: {offenders}"
+
+
+def test_a_reduction_minted_constant_does_not_reach_the_datapath() -> None:
+    # A reduction can mint what another rule would erase: the one-shot latch below reduces to ``first and False``,
+    # which is the constant False written the long way. Every connective a reduction mints therefore passes through
+    # the declared algebra in the same walk, or the latch live-out ships as a live boolean operation.
+    class Primed:
+        def __init__(self) -> None:
+            self.y: float = 0.0
+            self._first: bool = True
+
+        def __call__(self, x: float) -> float:
+            if self._first:
+                self._first = False
+                self.y = x
+            else:
+                self.y = self.y + 0.5 * (x - self.y)
+            return self.y
+
+    hir = _hir_of(Primed().__call__)
+    first = next(slot for slot in hir.state_slots if slot.name == "_first")
+    assert isinstance(hir.nodes[first.live_out], BoolConst)
+
+
+# The integer vocabulary is deliberately unreachable through the frontend, so it is exercised at the builder level:
+# HIR declares the types and operators, and MIR refuses every one of them until the integer backend lands.
+_INT_OPERATORS: list[tuple[Operator, list[Type], Type]] = [
+    (IntAdd(), [IntType(), IntType()], IntType()),
+    (IntSub(), [IntType(), IntType()], IntType()),
+    (IntMul(), [IntType(), IntType()], IntType()),
+    (IntDivFloor(), [IntType(), IntType()], IntType()),
+    (IntMod(), [IntType(), IntType()], IntType()),
+    (IntShiftLeft(), [IntType(), IntType()], IntType()),
+    (IntShiftRight(), [IntType(), IntType()], IntType()),
+    (IntAnd(), [IntType(), IntType()], IntType()),
+    (IntOr(), [IntType(), IntType()], IntType()),
+    (IntXor(), [IntType(), IntType()], IntType()),
+    (IntNeg(), [IntType()], IntType()),
+    (IntAbs(), [IntType()], IntType()),
+    (IntNot(), [IntType()], IntType()),
+    (IntRelational(RelationalOp.LT), [IntType(), IntType()], BoolType()),
+    (IntSelect(), [BoolType(), IntType(), IntType()], IntType()),
+    (IntToFloat(), [IntType()], HirFloatType()),
+    (FloatToInt(), [HirFloatType()], IntType()),
+    (IntToBool(), [IntType()], BoolType()),
+    (BoolToInt(), [BoolType()], IntType()),
+]
+
+
+@pytest.mark.parametrize("operator, operand_types, result_type", _INT_OPERATORS)
+def test_integer_operator_signature(operator: Operator, operand_types: list[Type], result_type: Type) -> None:
+    builder = HirBuilder()
+    builder.block()
+    operands = [
+        {
+            IntType(): builder.int_const(1),
+            BoolType(): builder.bool_const(True),
+            HirFloatType(): builder.float_const(1.0),
+        }[operand_type]
+        for operand_type in operand_types
+    ]
+    vid = builder.operation(operator, operands)
+    assert builder.type_of(vid) == result_type
+    # The signature is enforced, so a wrong-typed operand cannot silently build an ill-typed graph.
+    wrong = builder.float_const(2.0) if operand_types[0] != HirFloatType() else builder.int_const(2)
+    with pytest.raises(ValueError):
+        builder.operation(operator, [wrong, *operands[1:]])
+
+
+def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_value() -> None:
+    # The declared integer identities and absorbing elements simplify against an operand the folder cannot see:
+    # nothing but the input survives the identity chain, and an absorbing operand fixes the result outright.
+    builder = HirBuilder()
+    builder.block()
+    n = builder.input("n", IntType())
+    zero, one, all_ones = builder.int_const(0), builder.int_const(1), builder.int_const(-1)
+    value = builder.operation(IntAdd(), [n, zero])
+    value = builder.operation(IntMul(), [value, one])
+    value = builder.operation(IntOr(), [value, zero])
+    value = builder.operation(IntXor(), [value, zero])
+    value = builder.operation(IntAnd(), [value, all_ones])
+    builder.output("identities", value)
+    builder.output("killed", builder.operation(IntMul(), [n, zero]))
+    builder.output("saturated", builder.operation(IntOr(), [n, all_ones]))
+    builder.output("masked_off", builder.operation(IntAnd(), [n, zero]))
+    builder.ret()
+
+    hir = optimize(builder.finish())
+    outputs = {out.name: hir.nodes[out.value] for out in hir.outputs}
+    assert isinstance(outputs["identities"], InPort), "every identity must drop, leaving the input itself"
+    assert outputs["killed"] == outputs["masked_off"] == IntConst(0)
+    assert outputs["saturated"] == IntConst(-1)
+    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
+
+
+def test_a_constant_integer_expression_folds_away_entirely() -> None:
+    # Folding is exact at arbitrary precision -- no width, no saturation -- so a fully static integer expression
+    # disappears before MIR, which is what keeps MIR's integer refusal from rejecting programs the design accepts.
+    builder = HirBuilder()
+    builder.block()
+    value = builder.operation(IntAdd(), [builder.int_const(2), builder.int_const(3)])
+    value = builder.operation(IntMul(), [value, builder.int_const(2**200)])
+    builder.output("y", builder.operation(IntToFloat(), [value]))
+    builder.ret()
+
+    hir = optimize(builder.finish())
+    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
+    (out,) = hir.outputs
+    assert hir.nodes[out.value] == FloatConst(float(5 * 2**200))
+    lower_to_mir(hir, OPS)  # nothing integer is left, so MIR accepts it
+
+
+def test_integer_folding_is_exact_across_the_vocabulary() -> None:
+    huge = 3**500  # far past any hardware width, and past the binary64 carrier
+    cases: list[tuple[Operator, list[int], int]] = [
+        (IntAdd(), [huge, 1], huge + 1),
+        (IntSub(), [1, huge], 1 - huge),
+        (IntMul(), [huge, -huge], -(huge**2)),
+        (IntDivFloor(), [7, 2], 3),
+        (IntDivFloor(), [-7, 2], -4),
+        (IntDivFloor(), [7, -2], -4),
+        (IntDivFloor(), [-7, -2], 3),
+        (IntMod(), [7, 2], 1),
+        (IntMod(), [-7, 2], 1),
+        (IntMod(), [7, -2], -1),
+        (IntMod(), [-7, -2], -1),
+        (IntShiftLeft(), [huge, 64], huge << 64),
+        (IntShiftRight(), [-huge, 64], -huge >> 64),
+        (IntAnd(), [0b1100, 0b1010], 0b1000),
+        (IntOr(), [0b1100, 0b1010], 0b1110),
+        (IntXor(), [0b1100, 0b1010], 0b0110),
+        (IntNeg(), [huge], -huge),
+        (IntAbs(), [-huge], huge),
+        (IntNot(), [huge], ~huge),
+    ]
+    for operator, operands, expected in cases:
+        builder = HirBuilder()
+        builder.block()
+        builder.output("y", builder.operation(operator, [builder.int_const(operand) for operand in operands]))
+        builder.ret()
+        hir = optimize(builder.finish())
+        assert not [node for node in hir.nodes.values() if isinstance(node, Operation)], operator
+        assert hir.nodes[hir.outputs[0].value] == IntConst(expected), operator
+
+
+def test_integer_folding_has_no_size_limit() -> None:
+    # A big shift is computed, not declined: an expression the user wrote is one the user asked for, and folding it
+    # is exactly what the same program does in Python. Nothing about the compiler's convenience stops a fold, so an
+    # all-constant integer expression always disappears -- which is what keeps it away from MIR's integer refusal.
+    builder = HirBuilder()
+    builder.block()
+    shifted = builder.operation(IntShiftLeft(), [builder.int_const(1), builder.int_const(20_000)])
+    builder.output("y", builder.operation(IntToFloat(), [builder.operation(IntAnd(), [shifted, builder.int_const(0)])]))
+    builder.ret()
+
+    hir = optimize(builder.finish())
+    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
+    lower_to_mir(hir, OPS)  # nothing integer survives, however wide the intermediate was
+
+
+@pytest.mark.parametrize(
+    "operator, operands, expected",
+    [
+        (FloatFma(), (2.0, 3.0, 4.0), 10.0),
+        (FloatExp2(), (math.inf,), math.inf),
+        (FloatExp2(), (-math.inf,), 0.0),
+        (FloatExp2(), (1e10,), math.inf),  # past the carrier, upward only
+        (FloatLog2(), (math.inf,), math.inf),
+        (FloatSqrt(), (math.inf,), math.inf),
+        (FloatHypot2(), (math.inf, 1.0), math.inf),
+        (FloatHypot2(), (1.5e308, 1.5e308), math.inf),  # math.hypot saturates rather than raising, so the fold does
+        (FloatHypot2(), (-math.inf, 1.0), math.inf),  # a magnitude is never negative
+        (FloatAtan2(), (math.inf, math.inf), math.pi / 4.0),
+        (FloatFloor(), (2.7,), 2.0),
+        (FloatTrunc(), (-2.7,), -2.0),
+        (FloatSin(), (0.0,), 0.0),
+    ],
+)
+def test_a_float_fold_takes_the_ideal_result_over_the_extended_domain(
+    operator: Operator, operands: tuple[float, ...], expected: float
+) -> None:
+    # The transcendental and rounding folds take the ideal result over the whole extended domain, infinities included;
+    # nothing here consults a numeric format, and overflow becomes the mathematically right infinity.
+    hir = _optimized_constant_operation(operator, *operands)
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(expected)
+
+
+def _wrapped_infinity_times_zero(wrapper: Operator) -> Hir:
+    builder = HirBuilder()
+    builder.block()
+    wrapped = builder.operation(wrapper, [builder.float_const(math.inf)])
+    builder.output("y", builder.operation(FloatMul(), [wrapped, builder.float_const(0.0)]))
+    builder.ret()
+    return optimize(builder.finish())
+
+
+def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression() -> None:
+    # "Known" has to mean known, not "spelled as a constant node". ``abs(inf)`` IS the infinity, however it is written,
+    # so the product is the same indeterminate form as ``inf * 0.0`` and survives to be refused.
+    with pytest.raises(SynthesisError, match="names no number"):
+        _wrapped_infinity_times_zero(FloatAbs())
+    # The other side of the same rule, and the reason it is not a dodge: ``floor(inf)`` names NO number, so it is an
+    # operand the compiler cannot see, and the absorbing zero claims it exactly as it claims a runtime one. The wrapper
+    # is deleted by that rewrite, so nothing naming no number survives -- a refusal missed under the charter's license,
+    # never a wrong answer, and the alternative would be an identity that consults how its operand was produced.
+    for dodged in (FloatFloor(), FloatTrunc()):
+        hir = _wrapped_infinity_times_zero(dodged)
+        assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
+
+
+def test_a_self_division_erases_an_operand_that_names_no_number() -> None:
+    # ``x/x == 1`` speaks for an operand the compiler cannot see, and ``inf + -inf`` is one: the fold has no value for
+    # it. So the quotient reduces and the sum goes with it, leaving nothing for the survivor sweep to convict.
+    builder = HirBuilder()
+    builder.block()
+    settled = builder.operation(FloatAdd(), [builder.float_const(math.inf), builder.float_const(-math.inf)])
+    builder.output("y", builder.operation(HirFloatDiv(), [settled, settled]))
+    builder.ret()
+    hir = optimize(builder.finish())
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(1.0)
+    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
+
+
+def _merge_of(builder: HirBuilder, arm: Callable[[HirBuilder], ValueId]) -> ValueId:
+    """A phi merging two separately-built arms behind a runtime condition -- the shape a plain ``if/else`` leaves."""
+    entry = builder.current_block
+    then_block, else_block, merge = builder.block(), builder.block(), builder.block()
+    builder.position_at(entry)
+    builder.branch(builder.input("c", BoolType()), then_block, else_block)
+    builder.position_at(then_block)
+    taken = arm(builder)
+    builder.jump(merge)
+    builder.position_at(else_block)
+    other = arm(builder)
+    builder.jump(merge)
+    builder.position_at(merge)
+    return builder.phi(builder.type_of(taken), [(then_block, taken), (else_block, other)])
+
+
+@pytest.mark.parametrize(
+    "operator, other",
+    [(FloatAdd(), -math.inf), (HirFloatDiv(), math.inf)],
+    ids=["inf_minus_inf", "inf_over_inf"],
+)
+def test_an_operand_known_only_through_a_merge_still_blocks_the_identity(operator: Operator, other: float) -> None:
+    # An identity may only claim an operand the compiler cannot see, and a merge of two arms that agree is one it can:
+    # the folder names the merge, and the round after that the identity no longer applies. Which spellings it gets to
+    # in time is a matter of how far the analysis reaches, and the charter promises no particular reach -- an identity
+    # winning a race against the folder costs an unfolded diagnosis, never a wrong answer.
+    builder = HirBuilder()
+    builder.block()
+    merged = _merge_of(builder, lambda b: b.operation(FloatMul(), [b.input("x", HirFloatType()), b.float_const(0.0)]))
+    infinite = builder.operation(FloatAdd(), [merged, builder.float_const(math.inf)])  # 0.0 + inf, known to be inf
+    builder.output("y", builder.operation(operator, [infinite, builder.float_const(other)]))
+    builder.ret()
+    with pytest.raises(SynthesisError, match="names no number"):
+        optimize(builder.finish())
+
+
+@pytest.mark.parametrize(
+    "operator, expected",
+    [
+        (FloatIsFinite(), [True, True, False, False]),
+        (FloatIsInf(), [False, False, True, True]),
+        (FloatIsPosInf(), [False, False, True, False]),
+        (FloatIsNegInf(), [False, False, False, True]),
+    ],
+    ids=["isfinite", "isinf", "isposinf", "isneginf"],
+)
+def test_float_classification_folds_at_host_precision(operator: Operator, expected: list[bool]) -> None:
+    # Left to MIR these fold AFTER conversion into the target format, so 1e100 classified as non-finite in a narrow
+    # build -- a constant whose value depends on the selected hardware, which the charter forbids. Folding in HIR
+    # settles them in the compiler's own arithmetic instead.
+    for operand, want in zip([0.0, 1e100, math.inf, -math.inf], expected, strict=True):
+        hir = _optimized_constant_operation(operator, operand)
+        assert hir.nodes[hir.outputs[0].value] == BoolConst(want), (operator, operand)
+
+
+def test_a_float_to_bool_cast_folds_at_host_precision() -> None:
+    # A magnitude the configured format would flush to zero is nonzero to the compiler, and the compiler's answer is
+    # the one that stands: the cast folds True.
+    hir = _optimized_constant_operation(FloatToBool(), 2.0**-200)
+    assert hir.nodes[hir.outputs[0].value] == BoolConst(True)
+
+
+def test_a_constant_condition_selects_a_mux_arm_in_every_scalar_family() -> None:
+    # A mux whose select line never moves is not a mux. The three families are the same identity, so leaving any one
+    # of them out would be exactly the special-casing the design forbids.
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirFloatType())
+    runtime_int = builder.operation(FloatToInt(), [x])
+    runtime_bool = builder.operation(FloatToBool(), [x])
+    true, false = builder.bool_const(True), builder.bool_const(False)
+    builder.output("float", builder.operation(Select(), [true, builder.float_const(3.0), x]))
+    builder.output("bool", builder.operation(BoolSelect(), [false, runtime_bool, builder.bool_const(True)]))
+    builder.output(
+        "int",
+        builder.operation(IntToFloat(), [builder.operation(IntSelect(), [true, builder.int_const(7), runtime_int])]),
+    )
+    builder.ret()
+
+    hir = optimize(builder.finish())
+    chosen = {out.name: hir.nodes[out.value] for out in hir.outputs}
+    assert chosen["float"] == FloatConst(3.0)
+    assert chosen["bool"] == BoolConst(True)
+    assert chosen["int"] == FloatConst(7.0)
+    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
+
+
+def test_the_integer_float_round_trip_is_not_an_identity() -> None:
+    # ``int(float(n)) == n`` is NOT an axiom here, so the nest stands over an operand the compiler cannot see. The
+    # carrier may be coarser than the integer, and then the round trip ROUNDS -- exactness is promised only where a
+    # float holds the integer, and an identity may claim nothing weaker than every value. The constant case shows the
+    # rounding the axiom would have had to deny.
+    builder = HirBuilder()
+    builder.block()
+    n = builder.input("n", IntType())
+    builder.output("y", builder.operation(FloatToInt(), [builder.operation(IntToFloat(), [n])]))
+    builder.ret()
+    hir = optimize(builder.finish())
+    assert [node.operator for node in hir.nodes.values() if isinstance(node, Operation)] == [IntToFloat(), FloatToInt()]
+
+    def constant_round_trip(value: int) -> Hir:
+        builder = HirBuilder()
+        builder.block()
+        builder.output(
+            "y", builder.operation(FloatToInt(), [builder.operation(IntToFloat(), [builder.int_const(value)])])
+        )
+        builder.ret()
+        return optimize(builder.finish())
+
+    assert constant_round_trip(5).nodes[constant_round_trip(5).outputs[0].value] == IntConst(5)
+    rounded = constant_round_trip(2**53 + 1)
+    assert rounded.nodes[rounded.outputs[0].value] == IntConst(2**53)  # exactly what Python answers
+    assert int(float(2**53 + 1)) == 2**53
+
+
+def test_the_float_integer_round_trip_is_a_truncation() -> None:
+    # float(int(x)) == trunc(x) for every x, and a rounding over an already-integral value is the identity, so the
+    # nest collapses to one truncation and a truncation of a floor collapses to the floor.
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirFloatType())
+    builder.output("round_trip", builder.operation(IntToFloat(), [builder.operation(FloatToInt(), [x])]))
+    builder.output("idempotent", builder.operation(FloatTrunc(), [builder.operation(FloatFloor(), [x])]))
+    builder.ret()
+
+    hir = optimize(builder.finish())
+    operators = sorted((n.operator for n in hir.nodes.values() if isinstance(n, Operation)), key=lambda op: op.mnemonic)
+    assert operators == [FloatFloor(), FloatTrunc()]
+    assert hir.nodes[hir.outputs[0].value] == Operation(FloatTrunc(), (hir.input_ids[0],))
+    assert hir.nodes[hir.outputs[1].value] == Operation(FloatFloor(), (hir.input_ids[0],))
+
+
+def _optimized_constant_operation(operator: Operator, *operands: float | int) -> Hir:
+    """``operator(consts...)`` wired to an output so DCE keeps it, run through the whole HIR pipeline."""
+    builder = HirBuilder()
+    builder.block()
+    values = [
+        builder.int_const(operand) if isinstance(operand, int) else builder.float_const(operand) for operand in operands
+    ]
+    result = builder.operation(operator, values)
+    if builder.type_of(result) == IntType():
+        result = builder.operation(IntToFloat(), [result])
+    builder.output("y", result)
+    builder.ret()
+    return optimize(builder.finish())
+
+
+@pytest.mark.parametrize(
+    "operator, operands",
+    [
+        (FloatLog2(), (0.0,)),
+        (FloatLog2(), (-2.0,)),
+        (FloatSqrt(), (-1.0,)),
+        (FloatSin(), (math.inf,)),
+        (FloatCos(), (-math.inf,)),
+        (FloatAdd(), (math.inf, -math.inf)),
+        (FloatMul(), (0.0, math.inf)),
+        (HirFloatDiv(), (math.inf, math.inf)),
+        (HirFloatDiv(), (0.0, 0.0)),
+        (FloatFma(), (math.inf, 0.0, 1.0)),
+        (FloatFma(), (math.inf, 1.0, -math.inf)),
+        (IntDivFloor(), (7, 0)),
+        (IntMod(), (7, 0)),
+        (IntShiftLeft(), (1, -1)),
+        (IntShiftRight(), (1, -1)),
+        (FloatFloor(), (math.inf,)),
+        (FloatRound(), (-math.inf,)),
+        (FloatFma(), (1e300, 1e300, 0.0)),
+    ],
+    ids=[
+        "log2_zero",
+        "log2_negative",
+        "sqrt_negative",
+        "sin_infinite",
+        "cos_infinite",
+        "inf_minus_inf",
+        "zero_times_inf",
+        "inf_over_inf",
+        "zero_over_zero",
+        "fma_inf_times_zero",
+        "fma_inf_minus_inf",
+        "int_div_zero",
+        "int_mod_zero",
+        "shift_left_negative",
+        "shift_right_negative",
+        "floor_of_infinity",
+        "round_of_infinity",
+        "fma_past_the_carrier",
+    ],
+)
+def test_an_operation_outside_its_mathematical_domain_is_refused(
+    operator: Operator, operands: tuple[object, ...]
+) -> None:
+    # The criterion is first-principles arithmetic: none of these expressions names a number, whatever the datapath
+    # would answer if asked. How the host signals it -- a raised exception for some, a NaN for others -- is an accident
+    # of the host and no part of the rule.
+    with pytest.raises(SynthesisError, match="names no number"):
+        _optimized_constant_operation(operator, *operands)  # type: ignore[arg-type]
+
+
+def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
+    # Nothing rewrites a proven branch into a jump, so a proven-dead arm survives into the survivor sweep, and in a
+    # never-returning loop it is still CFG-reachable -- the shape where post-DCE block liveness and enterability
+    # disagree. The guard proves its own arm dead, so the sweep must not convict what that arm holds.
+    # ``gate`` is opaque to the front end (an operation over a parameter) and constant to HIR (``x*0 == 0``).
+    # The excluded arm holds ``0.0/0.0`` and not ``y/gate``: a fold names a quotient only where it knows BOTH operands,
+    # so an unknown numerator would go unconvicted wherever it sat and would witness nothing about enterability.
+    def never_returns(x: float) -> float:
+        y = x
+        while True:
+            gate = y * 0.0
+            if gate > 0.0:
+                y = 0.0 / 0.0
+            y = y + 1.0
+        return y
+
+    hir = optimize(lower(never_returns))
+    assert any(isinstance(block.terminator, Ret) for block in hir.blocks)
+    quotients = [
+        node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)
+    ]
+    assert quotients, "the excluded arm's quotient must still be present -- otherwise the skip rule is untested"
+    assert all(
+        all(isinstance(hir.nodes[operand], FloatConst) for operand in node.operands) for node in quotients
+    ), "both operands must be constant, or the sweep would decline to convict it wherever it sat"
+
+
+def _int_in_port(builder: HirBuilder) -> None:
+    builder.output("y", builder.operation(IntToFloat(), [builder.input("n", IntType())]))
+
+
+def _int_const(builder: HirBuilder) -> None:
+    # A runtime selector between two integer constants: the constants survive folding and reach MIR as themselves.
+    selected = builder.operation(
+        IntSelect(), [builder.input("c", BoolType()), builder.int_const(3), builder.int_const(4)]
+    )
+    builder.output("y", builder.operation(IntToFloat(), [selected]))
+
+
+def _int_operation(builder: HirBuilder) -> None:
+    # Rooted at FLOAT inputs, so no integer constant, port, or state read precedes the operation in lowering order.
+    a, b = builder.input("a", HirFloatType()), builder.input("b", HirFloatType())
+    total = builder.operation(IntAdd(), [builder.operation(FloatToInt(), [a]), builder.operation(FloatToInt(), [b])])
+    builder.output("y", builder.operation(IntToFloat(), [total]))
+
+
+def _int_state_read(builder: HirBuilder) -> None:
+    value = builder.state_read("s", IntType())
+    builder.state_slot("s", IntConst(0), value)
+    builder.output("y", builder.operation(IntToFloat(), [value]))
+
+
+def _int_phi(builder: HirBuilder) -> None:
+    # A merge of two integer values: the sweep sees it directly, ahead of any lowering-order effect.
+    entry = builder.current_block
+    then_block, else_block, merge = builder.block(), builder.block(), builder.block()
+    builder.branch(builder.input("c", BoolType()), then_block, else_block)
+    builder.position_at(then_block)
+    builder.jump(merge)
+    builder.position_at(else_block)
+    builder.jump(merge)
+    builder.position_at(merge)
+    phi = builder.phi(IntType(), [(then_block, builder.int_const(1)), (else_block, builder.int_const(2))])
+    builder.output("y", builder.operation(IntToFloat(), [phi]))
+    assert entry == 0
+
+
+def _int_state_reset(builder: HirBuilder) -> None:
+    # An integer reset carried by an otherwise float slot: only a sweep over the slots themselves sees this one.
+    x = builder.input("x", HirFloatType())
+    builder.state_slot("s", IntConst(0), x)
+    builder.output("y", x)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [_int_in_port, _int_const, _int_operation, _int_state_read, _int_state_reset, _int_phi],
+    ids=["in_port", "const", "operation", "state_read", "state_reset", "phi"],
+)
+def test_integer_nodes_are_refused_by_mir_lowering(make: Callable[[HirBuilder], None]) -> None:
+    # Integers are contained at the HIR/MIR seam until the integer backend lands. Each node kind takes a different
+    # lowering path, and a conversion operator is integer-OPERANDED while being float- or bool-RESULTED, so the
+    # refusal cannot key on the result type alone.
+    builder = HirBuilder()
+    builder.block()
+    make(builder)
+    builder.ret()
+    with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
+        lower_to_mir(builder.finish(), OPS)
+
+
+def test_a_bool_select_repeating_its_condition_reduces_to_a_gate() -> None:
+    # ``if c: r = a`` over a boolean leaves bool_select(c, a, c) -- Python's eager ``and`` shape written as a branch --
+    # and its dual leaves bool_select(c, c, b). Both are pure gates, so the mux must not reach the hardware.
+    def and_shape(c: bool, a: bool) -> bool:
+        r = c
+        if c:
+            r = a
+        return r
+
+    def or_shape(c: bool, b: bool) -> bool:
+        r = b
+        if c:
+            r = c
+        return r
+
+    for kernel, gate in ((and_shape, BoolAnd), (or_shape, BoolOr)):
+        operators = [node.operator for node in _hir_of(kernel).nodes.values() if isinstance(node, Operation)]
+        assert not any(isinstance(op, BoolSelect) for op in operators), f"{kernel.__name__}: the mux survived"
+        assert any(isinstance(op, gate) for op in operators), f"{kernel.__name__}: expected a {gate.__name__}"
+        # The shape alone cannot tell an `and` rewritten as an `or`; only the truth table can.
+        sim = build_model(build(_run(kernel), kernel.__name__, fetch_stages=3))
+        for c in (False, True):
+            for other in (False, True):
+                assert sim.run(c, other)[0] is kernel(c, other), f"{kernel.__name__}({c}, {other})"

@@ -44,6 +44,9 @@ Python float, and outputs are compared on ``.bits`` so the assertions cannot sil
 import math
 from collections.abc import Callable
 
+import numpy as np
+import pytest
+
 import holoso
 from holoso import (
     FAddOperator,
@@ -54,8 +57,8 @@ from holoso import (
     FMulILog2OperatorFamily,
     FMulOperator,
     OpConfig,
+    SynthesisError,
 )
-
 from ._modelref import default_tolerance, format_edge_bits, within
 
 FMT = FloatFormat(6, 18)
@@ -211,6 +214,64 @@ def test_divide_by_zero_emits_inf_error_path() -> None:
     out = sim.run(FloatValue.from_float(FMT, 1.0), FloatValue.from_float(FMT, 0.0))[0]
     assert isinstance(out, FloatValue)
     assert math.isinf(float(out)) and float(out) > 0.0, f"1.0/0.0 not +inf: {float(out)} (bits 0x{out.bits:x})"
+
+
+_INF = math.inf  # a module-level constant, the supported spelling of a compile-time infinity in a kernel
+
+
+def _inf_minus_inf(x: float) -> float:
+    return _INF + -_INF
+
+
+def _runtime_cancellation(x: float) -> float:
+    return x + -x
+
+
+def test_the_identities_govern_unknown_operands_and_arithmetic_governs_constants() -> None:
+    # The two halves of the charter, side by side on the same shapes. Over an operand the compiler cannot see, the
+    # identity holds whatever the value turns out to be, so the expression folds away and no hardware is emitted.
+    # Over constants nothing is assumed, ordinary arithmetic decides, and an indeterminate form names no number.
+    for kernel, refused in (
+        (_inf_minus_inf, "the sum"),
+        (_inf_div_inf, "the quotient"),
+        (_zero_div_zero, "the quotient"),
+        (_zero_times_inf, "the product"),
+    ):
+        with pytest.raises(SynthesisError, match=refused):
+            holoso.synthesize(kernel, _ops(), name=kernel.__name__.lstrip("_"))
+    # ... while the same three identities over a runtime operand are unaffected, and emit nothing either.
+    result = holoso.synthesize(_runtime_cancellation, _ops(), name="runtime_cancellation")
+    assert "holoso_fadd #" not in result.verilog_output.verilog
+    out = result.numerical_model.elaborate().run(_val(0))[0]
+    assert isinstance(out, FloatValue)
+    assert out.bits == 0
+
+
+def _inf_div_inf(x: float) -> float:
+    return _INF / _INF
+
+
+def _zero_div_zero(x: float) -> float:
+    return 0.0 / 0.0
+
+
+def _zero_times_inf(x: float) -> float:
+    return 0.0 * _INF
+
+
+def _self_division(x: float) -> float:
+    return x / x
+
+
+def test_self_division_folds_to_one_over_an_unknown_operand() -> None:
+    # x/x == 1 holds whatever the unknown x turns out to be, so no divider is emitted and the answer is 1 even where
+    # the datapath would have computed something else -- the divergence the charter accepts. The constant twins of this
+    # shape (0.0/0.0, inf/inf) name no number and are refused instead, which the test above pins.
+    result = holoso.synthesize(_self_division, _ops(), name="self_division")
+    assert "holoso_fdiv #" not in result.verilog_output.verilog
+    out = result.numerical_model.elaborate().run(_val(0))[0]  # x == 0 at run time, and the answer is still 1
+    assert isinstance(out, FloatValue)
+    assert out.bits == FloatValue.from_float(FMT, 1.0).bits
 
 
 def _k_lt(x: float, y: float) -> bool:
@@ -434,12 +495,67 @@ def _div_by_zero_const(x: float) -> float:
     return x / 0.0
 
 
-def test_nonzero_division_by_zero_constant_still_emits_fdiv_and_value_path() -> None:
-    result = holoso.synthesize(_div_by_zero_const, _ops(), name="div_by_zero_const")
-    assert "holoso_fdiv #" in result.verilog_output.verilog
-    out = result.numerical_model.elaborate().run(FloatValue.from_float(FMT, 1.0))[0]
-    assert isinstance(out, FloatValue)
-    assert math.isinf(float(out)) and float(out) > 0.0
+def _dead_div_by_zero(x: float) -> float:
+    unused = x / 0.0  # noqa: F841 -- never read, so DCE removes it before anything can be diagnosed
+    return x + 1.0
+
+
+def _div_by_zero_in_a_live_arm(x: float) -> float:
+    r = x
+    if x > 0.0:
+        r = x / 0.0
+    return r
+
+
+def _div_by_zero_behind_a_folded_guard(x: float) -> float:
+    """
+    The kernel writes ``x / w``, never ``x / 0.0``: unrolling is what substitutes the zero. Whether the guard resolves
+    before the body is lowered or after it reaches HIR decides only which pass deletes the disabled tap, never whether
+    the kernel builds -- refusing what the compiler's own transformation put there is what survivor-based refusal
+    exists to prevent.
+    """
+    total = 0.0
+    for w in [1.0, 0.0, 2.0]:  # a disabled tap, spelled as a zero weight
+        if w > 0.0:  # the guard the user wrote to avoid exactly the division below
+            total = total + x / w
+    return total
+
+
+def _self_division_of_a_failing_expression(x: float) -> float:
+    bad = x / 0.0
+    return bad / bad
+
+
+def _failure_discarded_by_a_frontend_shortcut(x: float) -> float:
+    return x + math.sqrt(-1.0) ** 0
+
+
+def test_a_failure_an_identity_deletes_is_not_refused() -> None:
+    # ``x/x == 1`` answers the first kernel and ``**0`` the second, leaving the division by zero dead for DCE. Refusal
+    # is over the SURVIVORS, so an expression no operation is left reading was never the program's to answer for.
+    # Python has no answer for either -- it evaluates what the optimizer deletes and raises there -- which is the
+    # charter's own divergence: what the optimizer deletes signals no error.
+    three = FloatValue.from_float(FMT, 3.0)
+    assert float(_sim(_self_division_of_a_failing_expression, "self_div_of_failure").run(three)[0]) == 1.0
+    assert float(_sim(_failure_discarded_by_a_frontend_shortcut, "failure_discarded").run(three)[0]) == 4.0
+
+
+def test_a_division_by_a_zero_constant_stays_a_division() -> None:
+    # A fold answers only where it knows EVERY operand, and an unknown numerator over a zero divisor is not that: the
+    # quotient goes to hardware, which asserts div0 on every run. That the compiler could have named the fault and did
+    # not is the charter's license at work -- a missed refusal is never a defect -- and the constant twin (0.0/0.0,
+    # pinned above) is what a fold does name. What must NOT happen is the reciprocal rewrite: there is no 1/0 to
+    # multiply by, so the division has to survive as itself rather than become a multiply or a folded infinity.
+    for kernel in (_div_by_zero_const, _div_by_zero_in_a_live_arm):
+        verilog = holoso.synthesize(kernel, _ops(), name=kernel.__name__.lstrip("_")).verilog_output.verilog
+        assert "holoso_fdiv #" in verilog, kernel
+        assert "holoso_fmul #" not in verilog, kernel
+    # A value nothing reads is deleted before the sweep sees it, and so is an arm a guard excludes -- whether that
+    # guard is resolved by the front end or by HIR. Neither is in the program the sweep is given.
+    # 4.0 rather than ``_dead_div_by_zero(3.0)``: Python evaluates the statement the optimizer deletes and raises.
+    assert float(_sim(_dead_div_by_zero, "dead_div_zero").run(FloatValue.from_float(FMT, 3.0))[0]) == 4.0
+    guarded = _sim(_div_by_zero_behind_a_folded_guard, "div_zero_behind_guard")
+    assert float(guarded.run(FloatValue.from_float(FMT, 3.0))[0]) == 4.5
 
 
 def _k_and(a: bool, b: bool) -> bool:
@@ -627,3 +743,25 @@ def test_bounded_for_loop_polynomial_matches_reference() -> None:
         want = (((1.0 * x + 1.0) * x + 1.0) * x + 1.0) * x + 1.0
         rtol, atol = default_tolerance(FMT, op_count=10, magnitude=max(1.0, abs(want)))
         assert within(got, want, rtol, atol), f"horner x={x}: {got} vs {want}"
+
+
+_TINY = math.ldexp(1.0, -1022)  # module scope: a kernel resolves module-level constants, not enclosing locals
+
+
+def _scale_past_the_carrier(c: bool) -> float:
+    r = True
+    if c:
+        r = c
+    return (4.0 * float(r)) / _TINY
+
+
+def test_a_power_of_two_scale_past_the_carrier_folds_to_an_infinity() -> None:
+    # Strength reduction can mint a power-of-two scale whose host-precision fold overflows; it folds to the operand's
+    # own infinity rather than letting an OverflowError escape as a raw traceback.
+    fmt = FloatFormat(11, 53)
+    ops = OpConfig(
+        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    )
+    sim = holoso.synthesize(_scale_past_the_carrier, ops, name="pow2_carrier_overflow").numerical_model.elaborate()
+    for c in (False, True):
+        assert math.isinf(float(sim.run(c)[0])), f"c={c}"

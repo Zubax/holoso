@@ -16,9 +16,9 @@ without a branch around it).
 
 Both arms are computed, so conversion only pays where arms are cheap: the per-arm operation budget is the
 ``HOLOSO_IFCONV_MAX_OPS`` knob (developer-only, read once; 0 disables the pass entirely). A diamond with any phi that
-is neither float nor boolean (none exist today) is left as a real branch. A boolean mux's constant arms (the common
-``True``/``False`` of a state-machine merge) reduce to ``and``/``or``/``not`` in the strength-reduction pass that
-re-runs after if-conversion.
+is neither float nor boolean -- an integer one, until that backend lands -- is left as a real branch. A boolean mux's
+constant arms (the common ``True``/``False`` of a state-machine merge) reduce to ``and``/``or``/``not`` in the
+strength-reduction pass that re-runs after if-conversion.
 """
 
 import logging
