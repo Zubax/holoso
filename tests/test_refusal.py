@@ -43,13 +43,15 @@ def _deleted_as_a_dead_constant(x: float) -> float:
     return x + 1.0
 
 
-def _deleted_by_a_guard_only_hir_can_prove(x: float) -> float:
+def _excluded_by_a_guard_only_hir_can_prove(x: float) -> float:
     # The front end cannot see that ``gate`` is zero -- it is an operation over a parameter -- while HIR proves it from
-    # ``x*0 == 0`` and resolves the guard. Which pass deletes the arm is not what decides whether the kernel builds.
+    # ``x*0 == 0`` and resolves the guard. Which pass excludes the arm is not what decides whether the kernel builds.
+    # The reciprocal has a CONSTANT numerator on purpose: a fold names a quotient only where it knows both operands, so
+    # an unknown one would go unconvicted wherever it sat and the witness would say nothing about enterability.
     gate = x * 0.0
     acc = x
     if gate > 0.0:
-        acc = x / gate
+        acc = 1.0 / gate
     return acc
 
 
@@ -59,8 +61,8 @@ def test_a_dead_constant_expression_is_not_refused() -> None:
 
 
 def test_an_arm_only_hir_proves_dead_is_not_refused() -> None:
-    assert float(_sim(_deleted_by_a_guard_only_hir_can_prove, "hir_proved_guard").run(3.0)[0]) == (
-        _deleted_by_a_guard_only_hir_can_prove(3.0)
+    assert float(_sim(_excluded_by_a_guard_only_hir_can_prove, "hir_proved_guard").run(3.0)[0]) == (
+        _excluded_by_a_guard_only_hir_can_prove(3.0)
     )
 
 
