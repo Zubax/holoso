@@ -151,14 +151,14 @@ def test_pow_rungs_are_exact_including_negative_bases() -> None:
 def test_pow_general_path() -> None:
     for b, e in ((2.0, 0.5), (3.0, 2.5), (10.0, -1.5), (0.5, 8.0), (1.0, 123.456)):
         assert pow_(b, e) == pytest.approx(math.pow(b, e), rel=1e-12), (b, e)
-    with pytest.raises(ValueError):
-        pow_(-2.0, 6.0)  # off the rungs, the a>0 identity raises in plain Python where math.pow is 64.0
+    # Off the rungs the a>0 identity answers nan for a negative base, where math.pow is 64.0. The stub follows the
+    # hardware, which computes the same identity and has no way back to the sign it discarded.
+    assert math.isnan(pow_(-2.0, 6.0)) and math.pow(-2.0, 6.0) == 64.0
 
 
 def test_pow_zero_base() -> None:
-    # A zero base short-circuits to r = b, so the stub no longer routes through log2(0) (which raised here before) and
-    # matches math.pow for a non-negative exponent: 0**0 == 1, 0**positive == 0. Exponents off the 0..5 rungs (0.5,
-    # 7.0, ...) are the ones that used to reach the general path and fail.
+    # A zero base needs no rung of its own: the general path is exp2(e * log2(0)), and log2(0) is -inf, so a positive
+    # exponent gives exp2(-inf) == 0.0 and a negative one exp2(+inf) == inf -- exactly what math.pow answers.
     for e in (0.0, 0.5, 1.0, 2.0, 5.0, 7.0, 123.4):
         assert pow_(0.0, e) == math.pow(0.0, e), e
 

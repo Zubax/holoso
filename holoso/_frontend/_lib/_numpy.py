@@ -167,10 +167,8 @@ def pow_(b: float, e: float) -> float:
     """
     if e == 0.0 or b == 1.0:  # b==1 avoids IEEE 754 divergence on non-finite e
         r = 1.0
-    elif e == 1.0 or (b == 0.0 and e > 0.0):  # a positive exponent over a zero base avoids the pole error on log2(0)
+    elif e == 1.0:
         r = b
-    elif b == 0.0:  # a zero base with a negative exponent is a pole, not the base: 0**-1 diverges
-        r = 1.0 / b
     elif e == 2.0:
         r = b * b
     elif e == 3.0:
