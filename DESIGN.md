@@ -1,5 +1,7 @@
 # Holoso design
 
+>*Perfection is achieved not when there is nothing more to add, but when there is nothing left to take away.*
+
 Holoso lowers a small subset of Python (numerical control/DSP kernels) into vendor-neutral, synthesizable Verilog.
 See `README.md` for scope and `PRIOR_ART.md` for why existing tools don't fit.
 
@@ -22,11 +24,77 @@ initiation interval like a streaming pipeline: the II is whatever the scheduled 
 path an exact, statically known cycle count from the per-operator latency model, varying across programs and branch
 paths. This is a compiler problem more than a circuit-design one.
 
-We encourage departure from IEEE 754 where it makes sense for numerical control/DSP (e.g., drop NaN/subnormals).
-
 Compilation is deterministic and reproducible for fixed inputs and dependency versions: identical input produces
 byte-identical output (except diagnostics and reports, which may carry timestamps and the like), achieved by sorted
 iteration over name-keyed merge points and a fixed seed for every stochastic optimization pass.
+
+### Fast math philosophy
+
+We encourage departure from IEEE 754 where it makes sense for numerical control/DSP (e.g., drop NaN/subnormals).
+
+The optimizer does not model the hardware. It is the easiest rule here to break, and breaking it looks like diligence.
+Constant folding and constant evaluation run in the compiler's own arithmetic -- integers of unbounded range, floats at
+host precision -- never in the target format and never mindful of saturation, width, WEXP/WMAN, etc. A folded result
+MAY therefore differ from what the hardware datapath computes for the same expression. That is designed, not broken.
+Optimizations are based on first-principles math reasoning irrespective of the hardware behavior.
+Never add a guard that declines a rewrite because the hardware would answer differently, and never consult a numeric
+format to decide whether a rewrite is legal.
+
+Optimization identities are provided for what the compiler cannot see.
+Over an operand of unknown value these hold whatever that value turns out to be;
+the absence of NaN is a significant enabler here:
+- commutativity and associativity;
+- `x/x == 1` (no NaN, holds even for x=0);
+- `x/y == x*(1/y)`;
+- `x*0 == 0` (even for non-finite x);
+- `0/x == 0`;
+- `x+(-x) == 0`;
+- `int(float(i)) ≈ i`;
+- `float(int(f)) == trunc(f)` (limited integer range intentionally not modeled);
+- And so on; the list may be incomplete but general principles are extensible.
+
+Error-bearing operations are elided and reordered freely -- what the optimizer deletes signals no error,
+and what it moves signals its error elsewhere.
+Bit-exactness, agreement with the same program run in host Python, and IEEE 754 conformance are anti-goals.
+A divergence between a folded constant and the datapath's own answer is therefore not a bug report,
+and a test that asserts the datapath's answer for a foldable expression is defective by definition.
+
+Where every operand IS known there is nothing to assume, so no identity applies and ordinary arithmetic decides.
+The two halves diverge, by design: `x/x` is rewritten to `1`, so the emitted hardware answers 1 even when `x`
+is zero at run time, while `0.0/0.0` written out has no value and is REFUSED AT COMPILE TIME.
+Likewise `x*0` is zero for an unknown `x`, while `inf*0` is an indeterminate form and is refused at compile time.
+
+Constant evaluation is the same expression in Python and nothing more.
+Where Python raises, or would answer NaN, there is no value and the build is refused:
+`math.sqrt(-1.0)`, `math.sin(inf)`, `float(10**400)`, `inf - inf`, `1 << -1`, etc.
+Where Python returns a value the fold takes it, infinities included -- `1e300 * 1e300` is `inf` and folds to `inf`.
+Python is not consistent about this (`x*y` overflows to an infinity while `math.exp2(x)` raises) and neither are we:
+chasing a consistency the language itself does not have would mean inventing an answer, which is the one thing a fold
+must not do.
+Nothing else stops a fold: not size (a huge shift costs what it costs, exactly as it would in Python),
+not representability in the target format, and certainly not a result the datapath would disagree with.
+
+The error sidebands report INPUT-DEPENDENT failures. An expression that denotes no number is instead a defect in the
+program, and the build is refused. WHERE the expression sits does not change what it DENOTES, but it does decide
+whether the expression is the kernel's at all, and only the kernel's expressions are refused. Unrolling and inlining
+SUBSTITUTE values, so the compiler manufactures such expressions itself -- `for w in [1.0, 0.0]: if w > 0.0: x / w`
+becomes `x / 0.0` -- and convicting one of those is the compiler answering for its own transformation. So refusal is
+SURVIVOR-BASED: `NoNumber` is an internal signal rather than an error, every speculative fold catches it and leaves the
+operation exactly as written, and a single sweep at the end of HIR optimization refuses whatever is still there. An
+expression no identity erased, no guard excluded, and nothing left dead is the program's, and that is what the sweep
+sees. It follows that an operation naming no number is one the compiler cannot NAME, so every identity treats it as it
+treats any unknown: `x/x` is 1 even when `x` is `inf - inf`.
+
+This is a LICENSE, not a PROMISE. An expression known to fail on every run MAY be refused, and the compiler takes that
+liberty wherever a fold happens to reach; it does not undertake to reach everywhere. Two spellings of one kernel can
+therefore disagree -- one refused, the other built -- when a pass deletes an arm in the same sweep that would have made
+its operands visible. Nothing is lost by that: the arm is dead either way, the emitted hardware is identical, and the
+cost is a diagnostic the user did not get. A MISSED refusal is never a defect; a WRONG answer always is.
+
+Value arithmetic is the graph's business, not the front end's.
+The front end const-evaluates only what nothing downstream could recover because HIR has no loops, arrays, or shapes.
+Everything else is lowered and left to the optimizer, so one expression cannot answer two ways according to which layer
+happened to evaluate it.
 
 ## Pipeline
 
@@ -157,7 +225,9 @@ back-edge loop; an `if` on a static test takes one branch, on a dynamic test emi
 (used for branch/loop reachability and compile-time indices) resolves only the operands that both the reachability
 scan and lowering reconstruct identically: numeric literals, module-level numeric/array constants,
 read-only instance attributes, and loop counters -- including numpy navigation (indexing, slicing, transpose,
-`.flatten()`) of a module-level array constant or read-only array attribute.
+`.flatten()`) of a module-level array constant or read-only array attribute. An inlined call's parameter joins them
+where the argument is a compile-time integer, so a callee that subscripts its own parameter resolves that index at the
+call -- HIR has no arrays, and an index unresolved there is an index nothing downstream can resolve.
 
 Shape queries. An aggregate's shape is a static value, so `len`, `.ndim`, and `.shape[k]` evaluate to compile-time
 integers usable wherever one is expected, there being no runtime integer type to carry one into a value position.
@@ -274,10 +344,14 @@ output ports). The pure operations cover float arithmetic, scalar float classifi
 boolean logic yielding `bool`, float<->bool casts, and `select` (a data mux produced by if-conversion, distinct from
 control flow).
 
+HIR operates at the level of basic math principles irrespective of the hardware implementation details,
+of which it is unaware. Refer to the fastmath philosophy for the background.
+
 `bool` is implemented alongside `float` throughout (constants, input ports, state reads, phis), and a state slot's reset
 is a typed constant, so a boolean state register carries a boolean snapshot. Node names stay explicit (`FloatConst`,
-`FloatAdd`, ...) so int nodes can be added later without overloading float semantics. Negation and absolute value are
-ordinary semantic float operations here, not hardware details until selection.
+`FloatAdd`, ...) rather than overloading one spelling across scalar kinds, which is what lets the typed integer
+vocabulary sit alongside the float one without disturbing it -- it exists but nothing produces it yet, see DEFERRED.
+Negation and absolute value are ordinary semantic float operations here, not hardware details until selection.
 
 Interning is block-scoped for operations and global for entry-dominating pure values (constants, state reads); inputs
 are never interned (each parameter is a distinct ordered port). CSE'ing an operation only within its own block is the
@@ -340,26 +414,42 @@ Newton-Raphson reciprocal iterated to a tolerance illustrates this, on its conve
 
 ### HIR optimization
 
-Holoso is intentionally very liberal when it comes to expression optimization.
-Bit-exactness, numerical determinism, or strict IEEE 754 compliance are anti-goals.
+Holoso is intentionally very liberal when it comes to expression optimization; the fastmath charter in Direction states
+how far, and every pass here is bound by it.
 
-HIR optimization is hardware-agnostic and ordered so each pass sees final costs: const-fold -> strength reduction
-(trivial fast-math identities, powers of two to shifts, `x/c` to `x*(1/c)`) -> diamond if-conversion (after folding, so
-arm costs are final; before DCE, which then sweeps a converted diamond's now-dead condition cone) -> a second
-const-fold/strength-reduction pass for the muxes created by if-conversion -> merge threading -> DCE. Constant folding
-is typed, so bool/int constants need no float-specific rebuilding.
+HIR optimization is hardware-agnostic and ordered so each pass sees final costs: strength reduction -> diamond
+if-conversion (after folding, so arm costs are final; before DCE, which then sweeps a converted diamond's now-dead
+condition cone) -> a second strength reduction for the muxes if-conversion created -> merge threading -> DCE -> the
+survivor refusal sweep.
+
+Integer folding is exact at arbitrary precision and unbounded in size, so a static integer expression always
+folds away, even if it would be incomputable in hardware (e.g., due to integer width limits).
 
 Merge threading eliminates an empty pass-through merge block -- the shape a non-convertible diamond leaves when its
 merge feeds a following control structure -- by retargeting each predecessor's jump onto the merge's successor and
 composing the phi arms. A merge phi reached any other way (e.g. a loop-invariant value the header carries on its
 back-edge arm) keeps its real branch -- deferred (see LIR DEFERRED).
 
-FP math is non-associative, so some of these optimizations may produce non-bit-exact results -- accepted, analogous to
-fast-math in C/C++ compilers. Division identities may also rewrite zero/infinity special cases and drop sidebands when
-they remove an error-bearing op; sign/identity folds may preserve or expose a zero sign through raw sign conditioning.
-NaN constants are rejected because ZKF has no NaN, including float64 constant folds of ZKF-defined infinity cases;
-infinities are ordinary float values. The transcendental folds likewise take the ideal (infinite-precision) result, so
-a folded constant can differ from the datapath's own value.
+A fold that proves the expression denotes no number signals it -- a quotient or modulus by zero, a logarithm of a
+non-positive, a root of a negative, a sine or cosine of an infinity, a shift by a negative count, an indeterminate
+form. The test is uniform, so each case needs a message rather than a rule of its own: every operand known and the fold
+still produced nothing means no number exists.
+A NaN is not a number either, so it can be neither folded to nor written as a literal.
+Nothing here consults an error port, a lowering, or a format.
+
+The signal is not a refusal, and every pass that folds catches it: strength reduction copies the operation verbatim and
+offers it no rewrite, since there is nothing left for an identity to speak for. The refusal is the closing sweep's
+alone. It asks the same fold, so it can prove nothing the passes could not -- which is what
+stops it convicting an expression a further round would have erased -- and it runs on the already-reduced graph, where
+every constant an identity established is a `Const` node, which is what makes it prove enough. Reordering it ahead of a
+reduction would silently lose convictions. Its walk is its own: it starts at the entry, folds forward, and at a branch
+whose condition it can prove takes only the successor that condition selects, so an operation in a block the sequencer
+cannot enter is never asked -- which is how an arm a guard proved dead escapes conviction even though it is still
+CFG-reachable and still in the graph.
+
+The cost is that a proof reached through an inlined library composite names an expression the kernel does not contain
+-- `np.power(0.0, e)` is refused because the composite spells its poles out, as `log2(b)` and `1.0 / b`. That is a
+limitation of those composites, not of the rule.
 
 ### DEFERRED
 
@@ -371,8 +461,8 @@ Early return from a loop body.
 Static folding of a constant that reaches a static position (a branch/loop condition or a compile-time index) only
 through a local alias or an inline-built value, e.g. `g = CONST; if g[0] > 0:` or `if np.asarray([...])[0] > 0:`. Such
 a value still lowers correctly but is treated as dynamic, because folding it would require the reachability scan to
-track arbitrary local bindings it does not build. Only module-level constants, read-only instance attributes, and loop
-counters fold in static positions.
+track arbitrary local bindings it does not build. Only module-level constants, read-only instance attributes, loop
+counters, and an inlined call's integer argument fold in static positions.
 
 The scan/lowering duality itself. The reachability scan runs before the body it describes, so it cannot see the local
 bindings lowering will have, and shape queries on locals therefore fold at lowering but not in the scan. Today the
@@ -384,12 +474,22 @@ binding-time environment over locals (shapes at least, values where cheap) so th
 and neither the trim nor the assertion is needed; short of that, folding could be confined to bindings both phases
 reconstruct. Either is a redesign of the scan, not a patch to it.
 
-Integer operands: typed int operands/constants/operators sharing the wide register bank when their width matches the
-build. Until then every integer enters the float datapath, so one that binary64 cannot represent exactly is rejected
-rather than silently rounded -- otherwise a stored integer reads back as a different number than the source compares
-against. The check is against binary64, not against the build's own float format: the front end does not know that
-format, and a narrow one rounds every constant, integer or not. An integer attribute in a narrow build can therefore
-still lose its exact value, which typed integers, not a wider check here, are what fix.
+Integers. HIR carries the typed vocabulary -- `IntType`/`IntConst` and signed operators (add/sub/mul/neg/abs,
+floor-coupled `//`/`%`, dynamic shifts, bitwise, relational, int-select, and the int<->float/int<->bool conversions) --
+and folds and reduces it at arbitrary precision, but nothing produces it and nothing consumes it. Any integer node
+reaching MIR -- operator, constant, input, state read, or state reset -- is a clean "not yet lowerable" rejection,
+checked by one sweep over the whole graph so it cannot depend on lowering order. Only a runtime integer trips it: a
+static one has already folded away.
+
+Two milestones remain: the front end that emits integers (with C-style promotion to float on any mixed expression),
+and the integer BACKEND, typed MIR views sharing the wide register bank. Integer if-conversion belongs to the latter
+-- `IntSelect` exists, but the diamond matcher declines any merge carrying a non-float, non-boolean phi, so an integer
+diamond simply stays a real branch. Until the front end lands, every integer it sees enters the float datapath, so one
+that binary64 cannot represent exactly is rejected rather than silently rounded -- otherwise a stored integer reads
+back as a different number than the source compares against. The check is against binary64, not against the build's own
+float format: the front end does not know that format, and a narrow one rounds every constant, integer or not. An
+integer attribute in a narrow build can therefore still lose its exact value, which typed integers, not a wider check
+here, are what fix.
 
 ## MIR
 

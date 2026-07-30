@@ -274,7 +274,7 @@ def const_branch_kernel(x: float, y: float) -> float:
     """
     Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition ``1.0 / 5.0 >
     0.0`` is constant-true but formed by DIVISION, which escapes the frontend's AST-level reachability fold (it
-    evaluates only +,-,* of literals), so the HIR const-folder reduces it to a BoolConst that if-conversion refuses --
+    evaluates only +,-,* of literals), so HIR strength reduction folds it to a BoolConst that if-conversion refuses --
     leaving an EMPTY const-branch block (the condition install + a branch, no float content). That const materialization
     is a pc-gated install read AT the terminator and lands at the drained boundary, so the drain must keep that
     boundary for it; shrinking below it made the branch read the condition one PC before it landed.

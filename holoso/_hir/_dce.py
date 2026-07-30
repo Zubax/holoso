@@ -2,7 +2,7 @@
 
 from ._copy import copy_node, rebuild
 from .._util import ValueId
-from ._ir import Hir, HirBuilder, Node, Operation, Phi
+from ._ir import Hir, Operation, Phi
 
 
 def run(hir: Hir) -> Hir:
@@ -24,9 +24,4 @@ def run(hir: Hir) -> Hir:
                 stack.extend(value for _, value in arms)
             case _:
                 pass
-    keep = reachable | set(hir.input_ids)
-
-    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-        return copy_node(builder, node, remap)
-
-    return rebuild(hir, build_value, keep=keep)
+    return rebuild(hir, copy_node, keep=reachable | set(hir.input_ids))

@@ -601,7 +601,7 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_const_branch_install_block_drains_to_its_inline_landing(config: OperatorCase) -> None:
     # Regression (fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
-    # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so the HIR const-folder reduces
+    # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so HIR strength reduction folds
     # it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch block (the condition install + a
     # branch, no float content). The condition is a literal -- an entry-resident source -- so its tail bool write is
     # inline-class: it fires at the combinational step and lands one read-first edge later, at the combinational landing

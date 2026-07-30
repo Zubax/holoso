@@ -45,6 +45,7 @@ from .._hir import (
     FloatType as HirFloatType,
     Hir,
     InPort,
+    IntType as HirIntType,
     Jump,
     Node,
     Operation,
@@ -80,7 +81,6 @@ from .._operators import (
     SelectOperator,
 )
 from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
-from .._value import FloatValue
 from ._ir import Mir, MirBuilder
 
 
@@ -96,6 +96,28 @@ def _select_hardware(semantic: Operator, hardware: HardwareOperator) -> Hardware
         semantic.speculatable and error_ports
     ), f"{semantic.mnemonic} is speculatable but lowers to error-bearing {hardware.mnemonic}"
     return hardware
+
+
+def _reject_integers(hir: Hir) -> None:
+    """
+    HIR carries a complete integer vocabulary, but no hardware selects it yet. The whole graph is swept before any
+    lowering runs, so the refusal does not depend on which node kind the lowering order happens to reach first, and a
+    conversion operator -- integer-operanded but float- or bool-RESULTED -- is refused as the integer operation it is
+    rather than as an unrecognized float one. Sorted, so simultaneous offenders yield one reproducible diagnostic.
+    TODO FIXME REMOVE THIS ONCE INTEGERS ARE SUPPORTED.
+    """
+    for vid in sorted(hir.nodes):
+        node = hir.nodes[vid]
+        if isinstance(node, Operation):
+            signature = node.operator.signature
+            if any(isinstance(ty, HirIntType) for ty in (*signature.operand_types, signature.result_type)):
+                mnemonic = node.operator.mnemonic
+                raise UnsupportedConstruct(f"integer operator {mnemonic!r} is not yet lowerable to hardware")
+        elif isinstance(node.type, HirIntType):
+            raise UnsupportedConstruct("integer values are not yet lowerable to hardware")
+    for slot in hir.state_slots:
+        if isinstance(slot.reset_value.type, HirIntType):
+            raise UnsupportedConstruct(f"integer state slot {slot.name!r} is not yet lowerable to hardware")
 
 
 def _sign_of(node: Operation) -> FloatSignControl | None:
@@ -529,13 +551,8 @@ class _LoweringContext:
     ) -> None:
         operator, output = self.float_lowerer.classification_lowering(semantic)
         base, sign = _collapse_signs(self.hir.nodes, a)
-        folded = self.float_lowerer.constant_classification(operator, output, base, sign)
-        self.remap[old_id] = (
-            folded
-            if folded is not None
-            else self.builder.operation(
-                _select_hardware(semantic, operator), [self.remap[base]], [sign], output_conditioner=output
-            )
+        self.remap[old_id] = self.builder.operation(
+            _select_hardware(semantic, operator), [self.remap[base]], [sign], output_conditioner=output
         )
 
     def _lower_output(self, name: str, value: ValueId) -> None:
@@ -618,24 +635,9 @@ class _FloatLowerer:
             if isinstance(plan.semantic, FloatIsPosInf)
             else FloatIsNegInfOperator(self.context.ops.float_format)
         )
-        folded = self.constant_classification(operator, BoolInversion(), plan.operand, plan.sign)
-        if folded is not None:
-            return folded
         return self.context.builder.operation(
             _select_hardware(plan.semantic, operator), [self.context.remap[plan.operand]], [plan.sign]
         )
-
-    def constant_classification(
-        self, operator: FloatClassificationOperator, output: BoolInversion, operand: ValueId, sign: FloatSignControl
-    ) -> ValueId | None:
-        """Fold a HIR float constant through the selected-format inline classifier."""
-        node = self.context.hir.nodes[operand]
-        if not isinstance(node, FloatConst):
-            return None
-        value = sign.apply_value(FloatValue.from_float(self.context.ops.float_format, node.value))
-        (result,) = operator.evaluate(value)
-        assert isinstance(result, bool)
-        return self.context.builder.bool_const(output.apply(result), ScalarBoolType())
 
     def _lower_operation(self, node: Operation) -> ValueId | None:
         match node:
@@ -947,4 +949,5 @@ def lower(hir: Hir, ops: OpConfig) -> Mir:
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
     ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
+    _reject_integers(hir)
     return _LoweringContext(hir, ops).run()

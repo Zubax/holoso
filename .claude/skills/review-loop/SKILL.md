@@ -61,6 +61,15 @@ whose only findings are adversarial-input constructions as clean and stop.
 When all reviewers return, merge their findings, discard the noise, and fix what is real.
 For every correctness defect, add a regression test verified to fail before the fix and pass after.
 
+## Avoid scope creep
+
+The loop always finds something, so every round can justify the next. That does not make a finding a mandate.
+Each finding MUST be checked against the DESIGN.md's intent, not only the criterion you handed the reviewer:
+an agent told "a wrong answer is always a defect" will faithfully report behaviour the design deliberately sanctions.
+
+After each iteration, re-read the original request and compare it to the diffstat.
+If the work no longer resembles what was asked, stop and say so -- cutting back is the maintainer's call.
+
 ## When to stop
 
 A round is clean when the reviewers surface only trivial feedback or none; the first clean round ends the loop.

@@ -27,6 +27,7 @@ from holoso import (
     FSincosOperator,
     FSortOperator,
     OpConfig,
+    SynthesisError,
     UnsupportedConstruct,
 )
 
@@ -120,7 +121,10 @@ def test_float_classification_intrinsics() -> None:
         assert got == want, f"x={x}: {got} vs {want}"
 
 
-def test_float_classification_constants_use_target_format() -> None:
+def test_float_classification_constants_fold_at_host_precision() -> None:
+    # 1e100 leaves this build's carrier, so classifying it after conversion would call it infinite -- a constant whose
+    # value depends on the selected hardware. The fold runs in the compiler's own arithmetic instead, which is why
+    # every answer below is Python's.
     def kernel(x: float) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
         return (
             math.isfinite(1e100),
@@ -133,16 +137,7 @@ def test_float_classification_constants_use_target_format() -> None:
             bool(np.isneginf(_NEG_INF)),
         )
 
-    assert _sim(kernel, "float_classification_const").run(0.0) == [
-        False,
-        True,
-        True,
-        True,
-        False,
-        True,
-        True,
-        True,
-    ]
+    assert _sim(kernel, "float_classification_const").run(0.0) == list(kernel(0.0))
 
 
 # A battery spanning ties (x.5 at both parities), the sub-one band (|x| < 1), already-integral values, and infinities.
@@ -510,12 +505,19 @@ def test_min_max_infinity_constants_fold() -> None:
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
-def test_min_max_nan_constant_is_rejected() -> None:
-    def max_selects_finite(x: float) -> float:
+def test_a_cancelling_infinity_of_constants_is_refused_not_folded() -> None:
+    # `x + (-x) == 0` is an assumption about an operand the compiler cannot see. Both operands here are constants, so
+    # nothing is assumed and ordinary arithmetic decides: inf - inf names no number, wherever it is nested.
+    def max_over_a_cancellation(x: float) -> float:
         return x + max(2.0, 1e400 - 1e400)
 
-    with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(max_selects_finite, _ops(), name="max_selects_finite")
+    with pytest.raises(SynthesisError, match="names no number"):
+        holoso.synthesize(max_over_a_cancellation, _ops(), name="max_over_cancellation")
+
+    def max_over_a_runtime_cancellation(x: float) -> float:
+        return max(2.0, x + -x)  # the same shape over an unknown operand: the identity applies and it is 0.0
+
+    assert float(_sim(max_over_a_runtime_cancellation, "max_over_runtime").run(1.0)[0]) == 2.0
 
 
 def _ulp32(value: float) -> float:
@@ -867,19 +869,50 @@ def test_trig_of_constants_fold() -> None:
         assert _bits(out[index]) == _v(ref).bits, f"folded output {index}"
 
 
-def test_constant_fold_declines_unsupported_transcendental_results() -> None:
-    # Regression: an inf input to sin/cos's fold crashed with a raw ValueError from math.sin. The fold is declined
-    # instead, leaving the legal infinity operand for the hardware path.
-    def unfoldable(x: float) -> tuple[float, float]:
-        overflow = math.hypot(1.5e308, 1.5e308)  # stays unfolded -> a hardware op, so sin/cos of it lower normally
-        return math.sin(overflow), math.cos(overflow)
+def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None:
+    # The composite steers a zero base away from log2's pole, but only a POSITIVE exponent leaves the base itself:
+    # 0**-1 diverges. Regression: the shortcut returned the base for every exponent, so 0**-1 answered 0.0.
+    def constant_pole(x: float) -> float:
+        return x + math.pow(0.0, -1.0)
 
-    holoso.synthesize(unfoldable, _ops(), name="inf_fold_unfold").numerical_model.elaborate()
+    with pytest.raises(SynthesisError, match="names no number"):
+        holoso.synthesize(constant_pole, _ops(), name="pow_zero_negative")
 
-    def sin_of_inf(x: float) -> float:
+    def runtime_pole(b: float, e: float) -> float:
+        return math.pow(b, e)
+
+    sim = _sim(runtime_pole, "pow_runtime_pole")
+    assert math.isinf(float(sim.run(0.0, -1.0)[0])), "0**-1 diverges rather than returning the base"
+    assert float(sim.run(0.0, 2.0)[0]) == 0.0  # a positive exponent still leaves the zero base alone
+    assert float(sim.run(2.0, 3.0)[0]) == 8.0
+
+
+def test_a_constant_zero_base_is_refused_because_the_composite_writes_out_its_poles() -> None:
+    # ``0.0 ** e`` denotes a number for every e except a negative one, so the refusal below is NOT a property of the
+    # expression the user wrote: it comes from how the composite spells the general path and the pole -- ``log2(b)``
+    # and ``1.0 / b``, both of which name no number once the base folds to zero, whichever the folder reaches first.
+    # Pinned because it is a real limitation with a real cost: a composite that reached neither would let this build.
+    def zero_base(e: float) -> float:
+        return float(np.power(0.0, e))
+
+    with pytest.raises(SynthesisError, match="names no number"):
+        holoso.synthesize(zero_base, _ops(), name="pow_zero_base_runtime_exponent")
+
+
+def test_a_circular_function_of_a_constant_infinity_is_refused() -> None:
+    # sin and cos have no value at infinity, so a constant one is a domain error the build refuses rather than a
+    # ValueError escaping the folder. A runtime operand that merely MIGHT be infinite is ordinary hardware.
+    def sin_of_a_constant_infinity(x: float) -> float:
         return math.sin(1e300 * 1e300) + x
 
-    holoso.synthesize(sin_of_inf, _ops(), name="inf_fold_decline").numerical_model.elaborate()
+    with pytest.raises(SynthesisError, match="names no number"):
+        holoso.synthesize(sin_of_a_constant_infinity, _ops(), name="sin_of_const_inf")
+
+    def circular_of_a_runtime_value(x: float) -> tuple[float, float]:
+        scaled = x * 1e300
+        return math.sin(scaled), math.cos(scaled)
+
+    holoso.synthesize(circular_of_a_runtime_value, _ops(), name="sin_of_runtime").numerical_model.elaborate()
 
 
 def test_atan2_fold_normalizes_signed_zero() -> None:

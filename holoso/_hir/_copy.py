@@ -20,11 +20,12 @@ from ._ir import (
     Ret,
     StateRead,
     Terminator,
+    successors,
 )
 
 # A pass supplies one of these to rebuild each value into the target builder; it returns the new value id and may fold
 # an operation into a constant. The builder is already positioned at the value's block.
-type BuildValue = Callable[[HirBuilder, ValueId, Node, dict[ValueId, ValueId]], ValueId]
+type BuildValue = Callable[[HirBuilder, Node, dict[ValueId, ValueId]], ValueId]
 
 
 def copy_node(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
@@ -73,15 +74,7 @@ def reverse_postorder(hir: Hir) -> list[BlockId]:
     precedes its body), so visiting blocks in this order remaps every operand and forward phi arm before its use --
     numeric id order does not (a nested ``if``'s merge gets a higher id than the outer merge it feeds).
     """
-    successors: dict[BlockId, list[BlockId]] = {}
-    for block in hir.blocks:
-        match block.terminator:
-            case Jump(target=target):
-                successors[block.id] = [target]
-            case Branch(if_true=if_true, if_false=if_false):
-                successors[block.id] = [if_true, if_false]
-            case Ret():
-                successors[block.id] = []
+    succs = {block.id: successors(block) for block in hir.blocks}
     order: list[BlockId] = []
     visited: set[BlockId] = set()
     # Iterative DFS (explicit stack) rather than recursion: a deep CFG -- e.g. nested unrolled loops, which chain
@@ -91,10 +84,10 @@ def reverse_postorder(hir: Hir) -> list[BlockId]:
     visited.add(hir.entry)
     while stack:
         node, index = stack[-1]
-        succs = successors[node]
-        if index < len(succs):
+        outgoing = succs[node]
+        if index < len(outgoing):
             stack[-1] = (node, index + 1)
-            successor = succs[index]
+            successor = outgoing[index]
             if successor not in visited:
                 visited.add(successor)
                 stack.append((successor, 0))
@@ -123,7 +116,7 @@ def rebuild(hir: Hir, build_value: BuildValue, keep: Set[ValueId] | None = None)
     deferred: list[ValueId] = []  # loop-header phis with a forward-referenced latch arm, closed after every block
 
     def emit(vid: ValueId) -> None:
-        remap[vid] = build_value(builder, vid, hir.nodes[vid], remap)
+        remap[vid] = build_value(builder, hir.nodes[vid], remap)
 
     builder.position_at(entry)
     for vid in hir.input_ids:

@@ -42,6 +42,7 @@ class Scope:
         cls,
         fn: types.FunctionType,
         env: dict[str, Value],
+        static_ints: dict[str, int],
         lines: list[str],
         start: int,
         filename: str,
@@ -50,8 +51,9 @@ class Scope:
         self_name: str | None = None,
     ) -> "Scope":
         """
-        A scope for lowering a callee: the given parameter bindings and source, with a fresh return slot and no
-        inherited loop-counter bindings. A pure function gets NO state context (``context`` is None). An instance method
+        A scope for lowering a callee: the given parameter bindings and source, with a fresh return slot and none of
+        the caller's loop-counter bindings -- only whatever of the callee's OWN parameters an integer argument
+        substitutes. A pure function gets NO state context (``context`` is None). An instance method
         passes the caller's scope as ``context`` to inherit its instance/snapshot/state -- so the method's
         ``self.<attr>`` reads resolve against the same module -- with ``self_name`` bound to the method's own receiver.
         The branch depth also restarts: whether the callee's own body guards a statement behind a data-dependent test is
@@ -60,7 +62,7 @@ class Scope:
         return cls(
             fn=fn,
             env=env,
-            static_ints={},
+            static_ints=static_ints,
             return_=None,
             in_branch=0,
             instance=context.instance if context is not None else None,

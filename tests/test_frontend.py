@@ -2294,7 +2294,7 @@ def test_and_false_in_a_condition_folds_to_the_else_arm() -> None:
 
 
 def test_chained_comparison_with_a_static_true_link_collapses_the_dead_and() -> None:
-    # ``0.0 < 1.0 < x`` is ``(0 < 1) and (1 < x)``; the static-true link folds, and the constant folder's identity
+    # ``0.0 < 1.0 < x`` is ``(0 < 1) and (1 < x)``; the static-true link folds, and the declared identity
     # element collapses ``True and (1 < x)`` to just ``1 < x`` -- no residual dead AND.
     def f(x: float) -> float:
         return 1.0 if 0.0 < 1.0 < x else 0.0
@@ -3893,3 +3893,46 @@ def test_a_negative_inexact_integer_literal_is_rejected_not_rounded() -> None:
     assert negative_counter_rounds(float(-(2**53))) == 0.0  # -(2**53+1) != -2.0**53 in Python
     with pytest.raises(UnsupportedConstruct, match="no exact float"):
         lower(negative_counter_rounds)
+
+
+def _tapped(index: int, taps: list[float]) -> float:
+    return taps[index]  # a subscript, so the argument has to be a compile-time INTEGER, not merely a known number
+
+
+def _structural_inlined_argument(x: float) -> float:
+    return _tapped(2, [x, x * 2.0, x * 3.0])
+
+
+def test_an_inlined_integer_argument_still_indexes() -> None:
+    # Inlining substitutes an argument exactly as unrolling substitutes a loop target, so a callee that subscripts its
+    # own parameter has to see the integer at the call: HIR decomposed the aggregate into scalars and has no index
+    # left to resolve. Without the binding this is rejected with "array index/bound must be a compile-time integer".
+    hir = optimize(lower(_structural_inlined_argument))
+    inputs = [vid for vid in hir.nodes if isinstance(hir.nodes[vid], InPort)]
+    assert len(inputs) == 1
+    scale = next(node for node in hir.nodes.values() if isinstance(node, FloatConst))
+    assert scale.value == 3.0  # taps[2] is x*3.0, so the surviving multiply is by three
+
+
+_SPLAT_PAIR = np.array([10.0, 20.0])
+
+
+def _branchy_over_three(a: float, b: float, c: float) -> float:
+    r = a + 100.0
+    if b > 15.0:
+        r = a * 2.0
+    return r + c
+
+
+def _splat_then_a_literal(x: float) -> float:
+    return _branchy_over_three(*_SPLAT_PAIR, 7) + x  # type: ignore[call-arg]  # mypy cannot size the array
+
+
+def test_a_splatted_argument_does_not_misbind_the_parameters_after_it() -> None:
+    # A ``*aggregate`` argument expands to as many values as the aggregate holds, so the argument EXPRESSIONS stop
+    # lining up with the parameters. Binding a compile-time integer by position through such a call gave ``b`` the
+    # literal 7 that belongs to ``c``, folding the guard to the arm Python does not take.
+    sim = holoso.synthesize(
+        _splat_then_a_literal, default_ops(FloatFormat(11, 52)), name="splat_then_literal"
+    ).numerical_model.elaborate()
+    assert float(sim.run(1.0)[0]) == _splat_then_a_literal(1.0) == 28.0

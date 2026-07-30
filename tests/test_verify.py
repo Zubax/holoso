@@ -1487,18 +1487,17 @@ def test_model_cross_domain_cast_chain_is_exact() -> None:
         assert got == ref, f"x={x}: {got} != {ref}"
 
 
-def test_model_bool_cast_of_underflowing_constant_is_false() -> None:
-    # Regression (Codex): bool(c) of a compile-time constant is the ZKF exponent-nonzero test on the constant *encoded
-    # into the format*, not a raw float64 ``c != 0.0``. In FMT(6,18) the tiny magnitude 2**-200 encodes to zero, so the
-    # cast is False -- the HIR const-folder must not fold it to True.
-    assert FMT.encode(2.0**-200) == 0  # the constant underflows to ZKF zero in this format
+def test_model_bool_cast_of_underflowing_constant_folds_at_host_precision() -> None:
+    # bool(c) folds at host precision, where 2**-200 is nonzero, even though FMT(6,18) encodes that magnitude to zero
+    # and the runtime cast would therefore read False. The optimizer does not model the format; the gate is taken.
+    assert FMT.encode(2.0**-200) == 0
 
     def kernel(a: float) -> float:
-        return a if bool(2.0**-200) else -a  # the gate is False -> the model returns -a
+        return a if bool(2.0**-200) else -a
 
     model = build_model(build(_run(kernel), "tiny_bool", fetch_stages=3))
     for a in (1.0, -2.0, 3.5):
-        assert float(model.run(a)[0]) == -a
+        assert float(model.run(a)[0]) == a
 
 
 def test_connective_branch_does_not_create_a_phantom_state_slot() -> None:

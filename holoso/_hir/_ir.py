@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import assert_never
 
 from .._util import BlockId, ValueId
-from ._const import BoolConst, Const, FloatConst
+from ._const import BoolConst, Const, FloatConst, IntConst
 from ._operators import Operator
 from ._types import BoolType, FloatType, Type
 
@@ -73,17 +73,23 @@ class Ret:
 type Terminator = Jump | Branch | Ret
 
 
+def successors(block: "Block") -> list[BlockId]:
+    match block.terminator:
+        case Jump(target=target):
+            return [target]
+        case Branch(if_true=if_true, if_false=if_false):
+            return [if_true, if_false]
+        case Ret():
+            return []
+        case _:
+            assert_never(block.terminator)
+
+
 def predecessors(blocks: list["Block"]) -> dict[BlockId, set[BlockId]]:
     preds: dict[BlockId, set[BlockId]] = {block.id: set() for block in blocks}
     for block in blocks:
-        match block.terminator:
-            case Jump(target=target):
-                preds[target].add(block.id)
-            case Branch(if_true=if_true, if_false=if_false):
-                preds[if_true].add(block.id)
-                preds[if_false].add(block.id)
-            case Ret():
-                pass
+        for target in successors(block):
+            preds[target].add(block.id)
     return preds
 
 
@@ -323,6 +329,9 @@ class HirBuilder:
 
     def bool_const(self, value: bool) -> ValueId:
         return self.const_node(BoolConst(bool(value)))
+
+    def int_const(self, value: int) -> ValueId:
+        return self.const_node(IntConst(int(value)))
 
     def operation(self, operator: Operator, operands: list[ValueId]) -> ValueId:
         signature = operator.signature
