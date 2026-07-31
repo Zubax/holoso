@@ -4,17 +4,18 @@ The partial-evaluation value domain: what an environment name can hold.
 A static scalar carries the typed HIR ``Const``: its dataclass equality is type-discriminating where Python
 equality is not (``True == 1 == 1.0`` would silently unify a bool arm with an int arm at a join), and its
 construction normalizes negative zero and refuses NaN, so the compiler's numeric invariants hold in the
-evaluator's own state for free. An opaque value is a captured environment object that is not an admitted
-scalar; it is judged at its USE site, never at capture (desugar hoists every callee through a temp, so an
-eager judgment would reject ``bool(x)``), and its only legal use here is the callee position. A tuple value is
-the flat scalar row of a return statement; nothing else consumes tuples until aggregates land (M5).
+evaluator's own state for free. An opaque value is a captured object that is not an admitted scalar (NaN
+floats included); it is judged at its USE site, never at capture -- desugar hoists every callee through a
+temp, and binding an unused NaN default is CPython-legal. A tuple value is the flat scalar row of a return;
+tuples and opaques also ride unread across call boundaries. Nothing else consumes tuples until aggregates
+land (M5).
 """
 
 from dataclasses import dataclass
 
-from ..._errors import UnsupportedConstruct
 from .._ir import LocalRef, Origin, ScalarType, TempRef
 from ._ops import Const, scalar_type
+from ._reject import reject
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +96,4 @@ class ExpansionBudget:
         self.spent += units
         self._remaining -= units
         if self._remaining < 0:
-            raise UnsupportedConstruct(
-                f"the graph expansion budget is exhausted while expanding {construct}", origin.location
-            )
+            reject(origin, f"the graph expansion budget is exhausted while expanding {construct}")

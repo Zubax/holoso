@@ -872,11 +872,12 @@ def test_trig_of_constants_fold() -> None:
 def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None:
     # The composite steers a zero base away from log2's pole, but only a POSITIVE exponent leaves the base itself:
     # 0**-1 diverges. Regression: the shortcut returned the base for every exponent, so 0**-1 answered 0.0.
+    # A CONSTANT pole folds to the same +inf the runtime path computes, because log2's evaluate follows the np
+    # reference (-inf at zero, the maintainer's M4 pole ruling) and exp2's saturates.
     def constant_pole(x: float) -> float:
         return x + math.pow(0.0, -1.0)
 
-    with pytest.raises(SynthesisError, match="names no number"):
-        holoso.synthesize(constant_pole, _ops(), name="pow_zero_negative")
+    assert math.isinf(float(_sim(constant_pole, "pow_zero_negative").run(1.0)[0]))
 
     def runtime_pole(b: float, e: float) -> float:
         return math.pow(b, e)
@@ -887,16 +888,19 @@ def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None
     assert float(sim.run(2.0, 3.0)[0]) == 8.0
 
 
-def test_a_constant_zero_base_is_refused_because_the_composite_writes_out_its_poles() -> None:
-    # ``0.0 ** e`` denotes a number for every e except a negative one, so the refusal below is NOT a property of the
-    # expression the user wrote: it comes from how the composite spells the general path and the pole -- ``log2(b)``
-    # and ``1.0 / b``, both of which name no number once the base folds to zero, whichever the folder reaches first.
-    # Pinned because it is a real limitation with a real cost: a composite that reached neither would let this build.
+def test_a_constant_zero_base_computes_its_poles_through_the_composite() -> None:
+    # ``0.0 ** e`` denotes a number for every e except a negative one. The general path is ``exp2(e * log2(b))``,
+    # and log2's evaluate answers the np reference's -inf at the folded zero base (the M4 pole ruling), so the
+    # build no longer refuses: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
+    # e==0 rung, 0.0 for a positive exponent, +inf past the negative pole (np.power semantics; math.pow raises
+    # on the host there).
     def zero_base(e: float) -> float:
         return float(np.power(0.0, e))
 
-    with pytest.raises(SynthesisError, match="names no number"):
-        holoso.synthesize(zero_base, _ops(), name="pow_zero_base_runtime_exponent")
+    sim = _sim(zero_base, "pow_zero_base_runtime_exponent")
+    assert float(sim.run(0.0)[0]) == 1.0
+    assert float(sim.run(2.0)[0]) == 0.0
+    assert math.isinf(float(sim.run(-1.0)[0]))
 
 
 def test_a_circular_function_of_a_constant_infinity_is_refused() -> None:

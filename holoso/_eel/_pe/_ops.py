@@ -20,7 +20,6 @@ from ..._hir import (
     FloatAdd,
     FloatConst,
     FloatDiv,
-    FloatExp2,
     FloatMul,
     FloatNeg,
     FloatRelational,
@@ -76,14 +75,21 @@ def const_value(const: Const) -> bool | int | float:
     return const.value
 
 
-def result_stype(operator: Operator) -> ScalarType:
-    result = operator.signature.result_type
-    if isinstance(result, _BoolType):
+def _stype_of(ty: object) -> ScalarType:
+    if isinstance(ty, _BoolType):
         return ScalarType.BOOL
-    if isinstance(result, IntType):
+    if isinstance(ty, IntType):
         return ScalarType.INT
-    assert isinstance(result, FloatType)
+    assert isinstance(ty, FloatType)
     return ScalarType.FLOAT
+
+
+def result_stype(operator: Operator) -> ScalarType:
+    return _stype_of(operator.signature.result_type)
+
+
+def operand_stypes(operator: Operator) -> list[ScalarType]:
+    return [_stype_of(ty) for ty in operator.signature.operand_types]
 
 
 INT_BINARY: dict[BinaryOp, Operator] = {
@@ -103,7 +109,6 @@ FLOAT_ADD: Operator = FloatAdd()
 FLOAT_MUL: Operator = FloatMul()
 FLOAT_DIV: Operator = FloatDiv()
 FLOAT_NEG: Operator = FloatNeg()
-FLOAT_EXP2: Operator = FloatExp2()
 INT_NEG: Operator = IntNeg()
 INT_NOT: Operator = IntNot()
 BOOL_NOT: Operator = BoolNot()

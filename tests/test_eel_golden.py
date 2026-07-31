@@ -20,6 +20,7 @@ from holoso._eel._print import print_eel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateless  # noqa: E402
+import equal_temperament  # noqa: E402
 import madd  # noqa: E402
 import poly3  # noqa: E402
 import signal_window  # noqa: E402
@@ -40,6 +41,8 @@ _RESIDUAL_GOLDENS: list[tuple[str, Callable[[], object]]] = [
     ("madd", lambda: madd.madd),
     ("poly3", lambda: poly3.poly3),
     ("signal_window", lambda: signal_window.signal_window),
+    # Pins the pow_ stub-inline shape: the exponent ladder survives residually and log2(2.0) folds away.
+    ("equal_temperament", lambda: equal_temperament.equal_temperament),
 ]
 
 _DIRECTORY = Path(__file__).resolve().parent / "eel_goldens"

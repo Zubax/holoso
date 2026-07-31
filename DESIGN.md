@@ -47,12 +47,14 @@ elsewhere. Bit-exactness, agreement with host Python, and IEEE 754 conformance a
 the datapath's answer for a foldable expression is defective by definition.
 
 Where every operand IS known, no identity applies and ordinary arithmetic decides: constant evaluation is the same
-expression in Python and nothing more. Where Python raises, or would answer NaN, there is no value and the build is
-refused (`math.sqrt(-1.0)`, `inf - inf`, `1 << -1`); where Python returns a value the fold takes it, infinities
-included -- Python is not consistent about which is which, and neither are we, since chasing a consistency the
-language does not have would mean inventing an answer. Nothing else stops a fold: not size, not representability in
-the target format. The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware answers 1 even when `x`
-is zero at run time, while `0.0/0.0` written out is refused at compile time.
+expression in Python and nothing more, each operator answering as its own registered reference does -- the numpy
+variant where the math module disagrees, so `log2(0.0)` folds to the `-inf` the hardware computes and a rounding
+passes an infinity through where `math.floor` raises. Where the reference raises, or would answer NaN, there is no
+value and the build is refused (`math.sqrt(-1.0)`, `inf - inf`, `1 << -1`); where it returns a value the fold takes
+it, infinities included -- Python is not consistent about which is which, and neither are we, since chasing a
+consistency the language does not have would mean inventing an answer. Nothing else stops a fold: not size, not
+representability in the target format. The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware
+answers 1 even when `x` is zero at run time, while `0.0/0.0` written out is refused at compile time.
 
 The error sidebands report INPUT-DEPENDENT failures; an expression that denotes no number is a program defect and is
 refused -- but only the kernel's own expressions are. Unrolling and inlining SUBSTITUTE values, so the compiler

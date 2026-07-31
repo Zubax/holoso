@@ -1,0 +1,44 @@
+fn equal_temperament(note: float):
+    output [0]: float
+    output [1]: float
+    %0: float = intrinsic add(note, -69.0)
+    %1: float = intrinsic div(%0, 12.0)
+    %2: bool = intrinsic frelational<eq>(%1, 0.0)
+    %3: bool = intrinsic bor(%2, False)
+    if %3:
+        %16: float = 1.0
+    else:
+        %4: bool = intrinsic frelational<eq>(%1, 1.0)
+        if %4:
+            %15: float = 2.0
+        else:
+            %5: bool = intrinsic frelational<eq>(%1, 2.0)
+            if %5:
+                %14: float = 4.0
+            else:
+                %6: bool = intrinsic frelational<eq>(%1, 3.0)
+                if %6:
+                    %13: float = 8.0
+                else:
+                    %7: bool = intrinsic frelational<eq>(%1, 4.0)
+                    if %7:
+                        %12: float = 16.0
+                    else:
+                        %8: bool = intrinsic frelational<eq>(%1, 5.0)
+                        if %8:
+                            %11: float = 32.0
+                        else:
+                            %9: float = intrinsic mul(%1, 1.0)
+                            %10: float = intrinsic exp2(%9)
+                            %11: float = %10
+                        %12: float = %11
+                    %13: float = %12
+                %14: float = %13
+            %15: float = %14
+        %16: float = %15
+    %17: float = intrinsic mul(440.0, %16)
+    %18: float = intrinsic div(%17, 440.0)
+    %19: float = intrinsic log2(%18)
+    %20: float = intrinsic mul(12.0, %19)
+    %21: float = intrinsic add(69.0, %20)
+    return %17, %21

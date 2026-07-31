@@ -343,14 +343,15 @@ def _pow_int_base_runtime_exponent(n: int) -> float:
     return 2**n  # type: ignore[no-any-return]
 
 
-def test_unsupported_power_forms_are_gaps() -> None:
-    """
-    The residual power surface is a staging gap, not a ruling: M4 lowers residual float-lane powers by
-    inlining the registry pow_ stub, M7 adds the loop-carrying pow_int_ for runtime integer exponents.
-    """
-    _rejects(_pow_residual_exponent, "power form is not supported yet")
-    _rejects(_pow_float_exponent, "power form is not supported yet")
-    _rejects(_pow_int_base_runtime_exponent, "use 2.0 as the base")
+def test_residual_powers_lower_through_the_pow_stub() -> None:
+    """Every non-integer-exponent power C-promotes and inlines the registry pow_ stub, `**` and calls alike."""
+    _oracle(_pow_residual_exponent, [{"a": 3.0, "b": 2.5}, {"a": 2.0, "b": 2.0}, {"a": 0.5, "b": -1.5}])
+    _oracle(_pow_float_exponent, [{"x": 4.0}, {"x": 2.0}, {"x": 0.25}])
+
+
+def test_runtime_integer_power_of_integer_base_is_a_gap() -> None:
+    """M7 lowers this via a loop-carrying pow_int_ stub; float lanes already ride the pow_ inline."""
+    _rejects(_pow_int_base_runtime_exponent, "use a float base")
 
 
 def _pow_budget_kill(x: float) -> float:
@@ -598,16 +599,6 @@ def _comprehension_gap(x: float) -> float:
     return x
 
 
-def _raise_gap(x: float) -> float:
-    if x > 0.0:
-        raise ValueError("positive")
-    return x
-
-
-def _call_gap(x: float) -> float:
-    return math.sin(x)
-
-
 def _attr_gap(x: float) -> float:
     return _BOX.value * x  # type: ignore[no-any-return]
 
@@ -636,8 +627,6 @@ def test_temporary_scope_gaps() -> None:
         (_loop_gap, "loops are not supported yet"),
         (_for_gap, "loops are not supported yet"),
         (_comprehension_gap, "comprehensions are not supported yet"),
-        (_raise_gap, "raise statements are not supported yet"),
-        (_call_gap, "attribute access is not supported yet"),
         (_attr_gap, "attribute access is not supported yet"),
         (_store_gap, "stores through attributes or elements"),
         (_index_gap, "aggregate values are not supported yet"),
@@ -645,10 +634,6 @@ def test_temporary_scope_gaps() -> None:
         (_unpack_gap, "aggregate values are not supported yet"),
     ]:
         _rejects(fn, match)
-
-
-def _direct_call_gap(x: float) -> float:
-    return _sin(x)
 
 
 _sin = math.sin
@@ -680,10 +665,6 @@ def test_unjoinable_branch_values_reject_located_at_the_read() -> None:
     """
     for fn in (_select_callee_ternary, _select_callee_branch, _select_tuple_ternary):
         _rejects(fn, "cannot merge")
-
-
-def test_direct_callable_gap_names_the_callee() -> None:
-    _rejects(_direct_call_gap, "cannot lower the call to '_sin'")
 
 
 class _Stateful:

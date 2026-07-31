@@ -75,7 +75,10 @@ def _fold_float(operands: list[Const], name: str, evaluate: Callable[..., float]
     than a guess at one.
     """
     try:
-        value = evaluate(*[_float_const(operand).value for operand in operands])
+        # The fold must not depend on the user's process-global numpy error policy; faults are judged by the
+        # NaN value below, never by the signal.
+        with np.errstate(all="ignore"):
+            value = evaluate(*[_float_const(operand).value for operand in operands])
     except (ValueError, OverflowError, ZeroDivisionError):
         value = math.nan
     if math.isnan(value):
@@ -248,7 +251,7 @@ class FloatRound(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the rounding", lambda a: float(round(a)))
+        return _fold_float(operands, "the rounding", lambda a: float(np.rint(a)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,7 +266,7 @@ class FloatFloor(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the floor", lambda a: float(math.floor(a)))
+        return _fold_float(operands, "the floor", lambda a: float(np.floor(a)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,7 +281,7 @@ class FloatCeil(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the ceiling", lambda a: float(math.ceil(a)))
+        return _fold_float(operands, "the ceiling", lambda a: float(np.ceil(a)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,7 +296,7 @@ class FloatTrunc(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the truncation", lambda a: float(math.trunc(a)))
+        return _fold_float(operands, "the truncation", lambda a: float(np.trunc(a)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +323,8 @@ class FloatLog2(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the base-2 logarithm", math.log2)
+        # np.log2 answers -inf at the 0.0 pole like the hardware; math.log2 raises there.
+        return _fold_float(operands, "the base-2 logarithm", lambda a: float(np.log2(a)))
 
 
 @dataclass(frozen=True, slots=True)

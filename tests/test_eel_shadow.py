@@ -84,7 +84,7 @@ ROWS: list[ParityRow] = [
     ParityRow("madd", lambda: madd.madd, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("poly3", lambda: poly3.poly3, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("signal_window", lambda: signal_window.signal_window, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
-    ParityRow("equal_temperament", lambda: equal_temperament.equal_temperament, _D, "M4", "ORACLE_OK"),
+    ParityRow("equal_temperament", lambda: equal_temperament.equal_temperament, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("octave_index", lambda: octave_index.octave_index, _D, "M7", "ORACLE_OK"),
     ParityRow("remainder", lambda: remainder.remainder, _D, "M7", "ORACLE_OK"),
     ParityRow("kepler", lambda: kepler.eccentric_anomaly, _D, "M7", "ORACLE_OK"),

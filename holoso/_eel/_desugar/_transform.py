@@ -254,6 +254,8 @@ class _Transformer:
                     match value:
                         case ast.Constant(value=str(text)):
                             parts.append(text)
+                        case ast.FormattedValue(value=ast.Constant(value=str(text)), conversion=-1, format_spec=None):
+                            parts.append(text)  # a literal in a field is still a literal string part
                         case ast.FormattedValue(conversion=-1, format_spec=None):
                             parts.append(self._atom(value.value, sink))
                         case ast.FormattedValue():

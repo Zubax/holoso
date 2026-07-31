@@ -12,6 +12,7 @@ parallel phi snapshots, state carry/reset/commit atomicity, and the runaway boun
 import math
 from collections.abc import Callable, Mapping, Sequence
 
+import numpy as np
 import pytest
 
 from holoso._frontend import lower
@@ -19,11 +20,17 @@ from holoso._hir import (
     BoolAnd,
     BoolOr,
     FloatAdd,
+    FloatCeil,
     FloatConst,
     FloatDiv,
+    FloatExp2,
+    FloatFloor,
+    FloatLog2,
     FloatMul,
     FloatNeg,
     FloatRelational,
+    FloatRound,
+    FloatTrunc,
     FloatType,
     Hir,
     HirBuilder,
@@ -143,6 +150,32 @@ def test_straight_line_arithmetic() -> None:
     evaluator = HirEvaluator(_straight_line())
     assert evaluator.run(2.0, 3.0) == [7.0]
     assert evaluator.run(-1.0, 0.5) == [0.5]
+
+
+def test_operator_reference_poles() -> None:
+    """
+    Maintainer ruling (M4 design consult): each evaluate follows its own registered np reference at the poles,
+    so a static fold answers the same value the RTL and the stub reference produce instead of refusing.
+    """
+    inf = math.inf
+    assert FloatLog2().evaluate([FloatConst(0.0)]) == FloatConst(-inf)
+    with pytest.raises(NoNumber):
+        FloatLog2().evaluate([FloatConst(-1.0)])
+    for operator in (FloatFloor(), FloatCeil(), FloatTrunc(), FloatRound()):
+        assert operator.evaluate([FloatConst(inf)]) == FloatConst(inf)
+        assert operator.evaluate([FloatConst(-inf)]) == FloatConst(-inf)
+    assert FloatRound().evaluate([FloatConst(2.5)]) == FloatConst(2.0)
+    assert FloatRound().evaluate([FloatConst(3.5)]) == FloatConst(4.0)
+
+
+def test_folds_are_immune_to_the_ambient_numpy_error_state() -> None:
+    # The compiler runs in-process with user code, and np.seterr(all="raise") is a common defensive setting
+    # there; a fold must answer the same values regardless and leak neither warnings nor FloatingPointError.
+    with np.errstate(all="raise"):
+        assert FloatLog2().evaluate([FloatConst(0.0)]) == FloatConst(-math.inf)
+        with pytest.raises(NoNumber):
+            FloatLog2().evaluate([FloatConst(-1.0)])
+        assert FloatExp2().evaluate([FloatConst(1e30)]) == FloatConst(math.inf)
 
 
 def test_input_validation() -> None:

@@ -897,17 +897,18 @@ def _wrapped_infinity_times_zero(wrapper: Operator) -> Hir:
 
 
 def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression() -> None:
-    # "Known" has to mean known, not "spelled as a constant node". ``abs(inf)`` IS the infinity, however it is written,
-    # so the product is the same indeterminate form as ``inf * 0.0`` and survives to be refused.
-    with pytest.raises(SynthesisError, match="names no number"):
-        _wrapped_infinity_times_zero(FloatAbs())
-    # The other side of the same rule, and the reason it is not a dodge: ``floor(inf)`` names NO number, so it is an
+    # "Known" has to mean known, not "spelled as a constant node". ``abs(inf)``, ``floor(inf)``, ``trunc(inf)``
+    # each IS the infinity, however written, so the product is the same indeterminate form as ``inf * 0.0`` and
+    # survives to be refused.
+    for spelled in (FloatAbs(), FloatFloor(), FloatTrunc()):
+        with pytest.raises(SynthesisError, match="names no number"):
+            _wrapped_infinity_times_zero(spelled)
+    # The other side of the same rule, and the reason it is not a dodge: ``sin(inf)`` names NO number, so it is an
     # operand the compiler cannot see, and the absorbing zero claims it exactly as it claims a runtime one. The wrapper
     # is deleted by that rewrite, so nothing naming no number survives -- a refusal missed under the charter's license,
     # never a wrong answer, and the alternative would be an identity that consults how its operand was produced.
-    for dodged in (FloatFloor(), FloatTrunc()):
-        hir = _wrapped_infinity_times_zero(dodged)
-        assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
+    hir = _wrapped_infinity_times_zero(FloatSin())
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
 
 
 def test_a_self_division_erases_an_operand_that_names_no_number() -> None:
@@ -1073,7 +1074,6 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
 @pytest.mark.parametrize(
     "operator, operands",
     [
-        (FloatLog2(), (0.0,)),
         (FloatLog2(), (-2.0,)),
         (FloatSqrt(), (-1.0,)),
         (FloatSin(), (math.inf,)),
@@ -1088,12 +1088,9 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
         (IntMod(), (7, 0)),
         (IntShiftLeft(), (1, -1)),
         (IntShiftRight(), (1, -1)),
-        (FloatFloor(), (math.inf,)),
-        (FloatRound(), (-math.inf,)),
         (FloatFma(), (1e300, 1e300, 0.0)),
     ],
     ids=[
-        "log2_zero",
         "log2_negative",
         "sqrt_negative",
         "sin_infinite",
@@ -1108,8 +1105,6 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
         "int_mod_zero",
         "shift_left_negative",
         "shift_right_negative",
-        "floor_of_infinity",
-        "round_of_infinity",
         "fma_past_the_carrier",
     ],
 )
@@ -1121,6 +1116,25 @@ def test_an_operation_outside_its_mathematical_domain_is_refused(
     # of the host and no part of the rule.
     with pytest.raises(SynthesisError, match="names no number"):
         _optimized_constant_operation(operator, *operands)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "operator, operand, expected",
+    [
+        (FloatLog2(), 0.0, -math.inf),
+        (FloatFloor(), math.inf, math.inf),
+        (FloatRound(), -math.inf, -math.inf),
+    ],
+    ids=["log2_zero", "floor_of_infinity", "round_of_infinity"],
+)
+def test_a_pole_the_operator_reference_answers_folds_to_that_value(
+    operator: Operator, operand: float, expected: float
+) -> None:
+    # Each evaluate follows its own registered np reference (maintainer ruling, M4): np.log2 answers the
+    # one-sided -inf limit at the pole like the RTL, and an infinity passes through the rounding family.
+    # These DO name the value the hardware computes, so the fold hands it back instead of refusing.
+    hir = _optimized_constant_operation(operator, operand)
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(expected)
 
 
 def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:

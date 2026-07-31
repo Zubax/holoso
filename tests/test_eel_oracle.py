@@ -12,7 +12,7 @@ from holoso._eel import lower
 from ._eeloracle import assert_hir_matches_reference
 from ._examples import SPECS, ExampleSpec
 
-ORACLE_COVERED = frozenset({"madd", "poly3", "signal_window"})
+ORACLE_COVERED = frozenset({"madd", "poly3", "signal_window", "equal_temperament"})
 
 _SPECS = [spec for spec in SPECS if spec.name in ORACLE_COVERED]
 
