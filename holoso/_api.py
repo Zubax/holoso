@@ -13,6 +13,7 @@ from ._backend.html import generate as generate_html, HtmlOutput
 from ._backend.numerical import generate as generate_model, NumericalModel
 from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
+from ._eel import run_shadow
 from ._frontend import lower as lower_frontend
 from ._hir import optimize
 from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, build
@@ -86,6 +87,7 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
         _logger.info("\t%s: %s", field.name, getattr(ops, field.name))
 
     hir = optimize(lower_frontend(target))
+    run_shadow(target)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
     mir = lower_to_mir(hir, ops)

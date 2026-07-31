@@ -204,6 +204,9 @@ Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and be
 expressions promote to float C-style, true division always yields float as in Python, and floor division, modulo,
 shifts, and bitwise operators are integer-only -- except that the gates over two booleans remain boolean operations
 -- while booleans take no part in arithmetic, a small deliberate deviation from Python bought for clean typing.
+The gates `and`/`or` are eager rather than short-circuiting -- both operands always evaluate, as combinational
+logic does -- a second small deliberate deviation; every other conditionally-evaluated position (conditional
+expressions, comparison-chain suffixes) keeps Python's semantics through real branches.
 One join rule governs every meeting point -- branch merges, loop phis, early returns, state reset against live-out,
 and return validation: Int meeting Float promotes to Float with conversions on the integer arms, Bool joins only with
 Bool, and aggregates join only with identical kind and shape.

@@ -1,0 +1,36 @@
+fn __call__(self, setpoint, measurement, dt, /):
+    error = setpoint - measurement
+    %0 = self.integral
+    %1 = self.ki
+    %2 = %1 * error
+    %3 = %2 * dt
+    candidate = %0 + %3
+    %4 = self._started
+    if %4:
+        %5 = self.kd
+        %6 = self.prev_error
+        %7 = error - %6
+        %8 = %5 * %7
+        derivative = %8 / dt
+    else:
+        derivative = 0.0
+    self.prev_error = error
+    self._started = True
+    %9 = self.kp
+    %10 = %9 * error
+    %11 = %10 + candidate
+    u = %11 + derivative
+    %12 = self.limit
+    %13 = u > %12
+    if %13:
+        u = self.limit
+    else:
+        %14 = self.limit
+        %15 = -%14
+        %16 = u < %15
+        if %16:
+            %17 = self.limit
+            u = -%17
+        else:
+            self.integral = candidate
+    return u
