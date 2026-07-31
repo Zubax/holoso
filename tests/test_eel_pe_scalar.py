@@ -1,0 +1,757 @@
+"""
+The M3 partial-evaluator scalar core, driven black-box through the differential oracle wherever the behavior is
+observable (kernels defined here, lowered through ``holoso._eel`` and compared against CPython), with residual
+text pins only where the behavior is invisible to the oracle (static-control folding, orphan dropping,
+determinism). Rejections pin one located diagnostic per family; temporary gaps pin the catch-all their owner
+milestone will replace.
+"""
+
+import math
+import types
+from collections.abc import Callable, Mapping, Sequence
+
+import numpy as np
+import pytest
+
+from holoso._eel import lower
+from holoso._eel._desugar import desugar
+from holoso._eel._lower import resolve_target
+from holoso._eel._pe import partial_evaluate
+from holoso._eel._print import print_eel
+from holoso._errors import SynthesisError, UnsupportedConstruct
+from holoso._hir import Branch, HirEvaluator, NoNumber
+
+from ._eeloracle import assert_hir_matches_reference
+
+type _Row = Mapping[str, float | bool | int]
+
+_NEVER = False
+_ENABLED = True
+_SCALE = 4
+_GAIN = 2.5
+_BIG_INT = 2**54 + 1
+_HUGE_INT = 10**400
+_NAN_VALUE = float("nan")
+_NP_GAIN = np.float64(1.5)
+_BOX = types.SimpleNamespace(value=0.0)
+_XS = (1.0, 2.0)
+
+
+def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
+    compared = assert_hir_matches_reference(lower(fn), fn, vectors, label=fn.__name__)
+    assert compared == len(vectors)
+
+
+def _rejects(fn: object, match: str) -> None:
+    with pytest.raises(UnsupportedConstruct, match=match):
+        lower(fn)
+
+
+def _residual_text(fn: Callable[..., object]) -> str:
+    assert isinstance(fn, types.FunctionType)
+    return print_eel(partial_evaluate(desugar(fn), fn))
+
+
+# ---------------------------------------------------------------------- arithmetic, promotion, casts
+
+
+def _mixed(a: float, n: int) -> float:
+    return (a - n) * _SCALE + n / 2 - a / n + float(n) * a
+
+
+def test_mixed_arithmetic_and_promotion() -> None:
+    _oracle(_mixed, [{"a": 1.5, "n": 2}, {"a": -0.25, "n": 7}, {"a": 3.0, "n": -3}, {"a": 0.5, "n": 1}])
+
+
+def _int_ops(a: int, b: int) -> tuple[int, int, int, int, int, int]:
+    return a + b * 3, (a - b) // 5, a % (b + 7), a << 2, a >> 1, (a & b) | (a ^ 12)
+
+
+def test_integer_vocabulary() -> None:
+    _oracle(_int_ops, [{"a": 17, "b": 5}, {"a": -9, "b": 3}, {"a": 1024, "b": -2}, {"a": 0, "b": 1}])
+
+
+def _gates(a: bool, b: bool, c: bool) -> tuple[bool, bool, bool, bool, bool]:
+    return (a and b) or c, a ^ b, not (a | c), a == b, b != c
+
+
+def test_boolean_gates_and_equality() -> None:
+    rows = [{"a": x, "b": y, "c": z} for x in (False, True) for y in (False, True) for z in (False, True)]
+    _oracle(_gates, rows)
+
+
+def _casts(x: float, n: int, b: bool) -> tuple[int, float, bool, float, int, bool]:
+    return int(x), float(n), bool(x), float(b), int(b), bool(n)
+
+
+def test_casts() -> None:
+    _oracle(
+        _casts,
+        [
+            {"x": 2.75, "n": 3, "b": True},
+            {"x": -2.75, "n": 0, "b": False},
+            {"x": 0.0, "n": -5, "b": True},
+        ],
+    )
+
+
+def _compare_mix(n: int, x: float) -> tuple[bool, bool, bool]:
+    return n < x, x <= n, n == 2
+
+
+def test_mixed_comparisons_promote() -> None:
+    _oracle(_compare_mix, [{"n": 2, "x": 2.5}, {"n": 3, "x": 3.0}, {"n": -1, "x": -1.5}, {"n": 2, "x": 1.0}])
+
+
+def _unary(x: float, n: int) -> tuple[float, int, float, int]:
+    return -x, -n, +x, ~n
+
+
+def test_unary_operators() -> None:
+    _oracle(_unary, [{"x": 1.5, "n": 3}, {"x": -0.5, "n": -7}, {"x": 0.0, "n": 0}])
+
+
+def _big_promotion(x: float) -> float:
+    return x * _BIG_INT
+
+
+def test_static_int_meets_float_as_its_image() -> None:
+    _oracle(_big_promotion, [{"x": 1.0}, {"x": -0.5}, {"x": 3.25}])
+
+
+def _int_return_promotes(n: int) -> float:
+    return n
+
+
+def test_declared_float_accepts_int_lane() -> None:
+    _oracle(_int_return_promotes, [{"n": 3}, {"n": -17}, {"n": 0}])
+
+
+def _gate_with_static(x: float) -> bool:
+    return _ENABLED and x > 0.0
+
+
+def test_gate_with_static_operand_stays_residual() -> None:
+    _oracle(_gate_with_static, [{"x": 1.0}, {"x": -1.0}, {"x": 0.0}])
+
+
+# ---------------------------------------------------------------------- control, joins, definite assignment
+
+
+def _ternary_promotes(c: bool, x: float) -> float:
+    return 1 if c else x
+
+
+def test_join_promotes_static_int_arm() -> None:
+    _oracle(_ternary_promotes, [{"c": True, "x": 5.0}, {"c": False, "x": 5.0}, {"c": False, "x": -2.5}])
+
+
+def _chain4(a: float, b: float, c: float, d: float) -> bool:
+    return a < b < c < d
+
+
+def test_long_comparison_chain() -> None:
+    _oracle(
+        _chain4,
+        [
+            {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0},
+            {"a": 1.0, "b": 2.0, "c": 2.0, "d": 4.0},
+            {"a": 5.0, "b": 2.0, "c": 3.0, "d": 4.0},
+            {"a": 1.0, "b": 2.0, "c": 3.0, "d": 0.0},
+        ],
+    )
+
+
+def _walrus_reuse(x: float) -> float:
+    y = 1.0 + (t := x * 2.0)
+    return y + t
+
+
+def test_walrus_single_evaluation() -> None:
+    _oracle(_walrus_reuse, [{"x": 1.25}, {"x": -3.0}])
+
+
+def _augmented(x: float, n: int) -> tuple[float, int]:
+    y = x
+    y += 2.5
+    y *= x
+    m = n
+    m //= 2
+    m <<= 1
+    return y, m
+
+
+def test_augmented_assignment_rebinds() -> None:
+    _oracle(_augmented, [{"x": 1.5, "n": 9}, {"x": -0.5, "n": -9}])
+
+
+def _static_taken(x: float) -> float:
+    if _ENABLED:
+        return x * 2.0
+    return x / 0.0
+
+
+def test_static_condition_folds_the_branch_away() -> None:
+    _oracle(_static_taken, [{"x": 1.5}, {"x": -2.0}])
+    hir = lower(_static_taken)
+    assert not any(isinstance(block.terminator, Branch) for block in hir.blocks)
+
+
+def _dead_arm_is_lazy(x: float) -> float:
+    if _NEVER:
+        bad = NEVER_DEFINED + True  # type: ignore[name-defined]  # noqa: F821
+        return bad  # type: ignore[no-any-return]
+    return x + 1.0
+
+
+def test_dead_arm_semantics_are_never_judged() -> None:
+    """
+    The ratified split: the desugar whitelist judges syntax even in dead arms, while the partial evaluator's
+    semantics (name resolution, typing) run only where evaluation reaches -- exactly CPython's laziness.
+    """
+    _oracle(_dead_arm_is_lazy, [{"x": 1.0}, {"x": -1.0}])
+
+
+def _equal_static_arms(c: bool) -> float:
+    return 1 if c else 1.0
+
+
+def test_equal_arms_join_statically_and_drop_the_branch() -> None:
+    _oracle(_equal_static_arms, [{"c": True}, {"c": False}])
+    hir = lower(_equal_static_arms)
+    assert not any(isinstance(block.terminator, Branch) for block in hir.blocks)
+
+
+def _rebind_across_branch(c: bool, x: float) -> float:
+    y = x * 2.0
+    if c:
+        y = y + 1.0
+    return y
+
+
+def test_prior_binding_joins_with_branch_arm() -> None:
+    _oracle(_rebind_across_branch, [{"c": True, "x": 1.0}, {"c": False, "x": 1.0}])
+
+
+def _incompatible_arms(c: bool) -> float:
+    return 1 if c else True
+
+
+def test_incompatible_arm_types_reject() -> None:
+    _rejects(_incompatible_arms, "incompatible types")
+
+
+def _one_sided_read(c: bool) -> float:
+    if c:
+        y = 1.0
+    return y
+
+
+def test_one_sided_binding_read_rejects() -> None:
+    _rejects(_one_sided_read, "not bound on every path")
+
+
+def _read_before_binding(x: float) -> float:
+    r: float = q * x  # type: ignore[has-type, used-before-def]
+    q = 1.0
+    return r + q
+
+
+def test_read_before_binding_rejects() -> None:
+    _rejects(_read_before_binding, "not bound on every path")
+
+
+def _truthy_condition(x: float) -> float:
+    if x:
+        return 1.0
+    return 0.0
+
+
+def _static_truthy_condition(x: float) -> float:
+    if 1:
+        return x
+    return -x
+
+
+def test_conditions_must_be_bool_at_both_binding_times() -> None:
+    _rejects(_truthy_condition, "condition must be a bool")
+    _rejects(_static_truthy_condition, "condition must be a bool")
+
+
+def _early_return(x: float) -> float:
+    if x > 0.0:
+        return x
+    return -x
+
+
+def test_return_inside_runtime_branch_is_a_gap() -> None:
+    _rejects(_early_return, "return inside a runtime branch")
+
+
+# ---------------------------------------------------------------------- powers and the budget
+
+
+def _pow_chains(x: float) -> tuple[float, float, float, float]:
+    return x**3, x**1, x**-2, (-2.0) ** 3 * x
+
+
+def test_power_chains_and_reciprocal() -> None:
+    _oracle(_pow_chains, [{"x": 1.5}, {"x": -2.0}, {"x": 0.25}])
+
+
+def _pow_zero_orphans(a: float, b: float) -> float:
+    return (a * b) ** 0
+
+
+def test_zero_power_orphans_its_base() -> None:
+    _oracle(_pow_zero_orphans, [{"a": 2.0, "b": 3.0}])
+    text = _residual_text(_pow_zero_orphans)
+    assert "mul" not in text
+    assert "return 1.0" in text
+
+
+def _exp2_float(note: float) -> float:
+    return 2 ** ((note - 69.0) / 12.0)
+
+
+def _exp2_int_exponent(n: int) -> float:
+    return 2.0**n
+
+
+def test_exponentials_of_two() -> None:
+    _oracle(_exp2_float, [{"note": 69.0}, {"note": 57.0}, {"note": 81.5}])
+    _oracle(_exp2_int_exponent, [{"n": 0}, {"n": 5}, {"n": -3}])
+
+
+def _static_pow_folds(x: float) -> float:
+    return 7**30 * x + 2**-3
+
+
+def test_fully_static_powers_fold() -> None:
+    _oracle(_static_pow_folds, [{"x": 1.0}, {"x": 1e-20}])
+
+
+def _pow_residual_exponent(a: float, b: float) -> float:
+    return a**b  # type: ignore[no-any-return]
+
+
+def _pow_float_exponent(x: float) -> float:
+    return x**0.5  # type: ignore[no-any-return]
+
+
+def _pow_int_base_runtime_exponent(n: int) -> float:
+    return 2**n  # type: ignore[no-any-return]
+
+
+def test_unsupported_power_forms_are_gaps() -> None:
+    """
+    The residual power surface is a staging gap, not a ruling: M4 lowers residual float-lane powers by
+    inlining the registry pow_ stub, M7 adds the loop-carrying pow_int_ for runtime integer exponents.
+    """
+    _rejects(_pow_residual_exponent, "power form is not supported yet")
+    _rejects(_pow_float_exponent, "power form is not supported yet")
+    _rejects(_pow_int_base_runtime_exponent, "use 2.0 as the base")
+
+
+def _pow_budget_kill(x: float) -> float:
+    return x ** (10**9)
+
+
+def test_huge_exponent_is_a_located_budget_rejection() -> None:
+    """The TODO.md huge-exponent hang class: the chain draws the budget down and rejects instead of spinning."""
+    _rejects(_pow_budget_kill, "expansion budget is exhausted")
+
+
+# ---------------------------------------------------------------------- environment snapshots
+
+
+def _global_scalar(x: float) -> float:
+    return x * _GAIN + _SCALE
+
+
+def _quoted_annotations(x: "float") -> "float":
+    return x * 2.0
+
+
+def test_global_scalars_fold() -> None:
+    _oracle(_global_scalar, [{"x": 1.0}, {"x": -2.0}])
+
+
+def test_quoted_annotations_are_accepted() -> None:
+    _oracle(_quoted_annotations, [{"x": 1.5}])
+
+
+def _make_closure_kernel() -> Callable[[float], float]:
+    gain = 3.5
+
+    def kernel(x: float) -> float:
+        return x * gain
+
+    return kernel
+
+
+def test_closure_cells_snapshot() -> None:
+    _oracle(_make_closure_kernel(), [{"x": 1.0}, {"x": -2.0}])
+
+
+def _make_unbound_cell_kernel() -> Callable[[float], float]:
+    def kernel(x: float) -> float:
+        return x * late
+
+    if _NEVER:
+        late = 1.0
+    return kernel
+
+
+def test_unbound_closure_cell_rejects() -> None:
+    _rejects(_make_unbound_cell_kernel(), "unbound in its enclosing scope")
+
+
+def _missing_global(x: float) -> float:
+    return x * NEVER_DEFINED  # type: ignore[name-defined, no-any-return]  # noqa: F821
+
+
+def _nan_global(x: float) -> float:
+    return x * _NAN_VALUE
+
+
+def _numpy_global(x: float) -> float:
+    return x * _NP_GAIN
+
+
+def test_environment_rejections() -> None:
+    _rejects(_missing_global, "is not defined")
+    _rejects(_nan_global, "is NaN")
+    _rejects(_numpy_global, "is not a bool, int, or float scalar")
+
+
+# ---------------------------------------------------------------------- the module boundary
+
+
+def _returns_nothing(x: float) -> None:
+    y = x * 2.0
+    assert y == y
+
+
+def _returns_bare_none(x: float) -> None:
+    y = x * 2.0
+    assert y == y
+    return None
+
+
+def test_none_kernels_have_no_outputs() -> None:
+    _oracle(_returns_nothing, [{"x": 1.0}])
+    _oracle(_returns_bare_none, [{"x": 1.0}])
+    assert lower(_returns_nothing).outputs == []
+
+
+def _mixed_tuple(n: int, x: float) -> tuple[int, float, bool]:
+    return n * 2, x / 2.0, x > n
+
+
+def test_flat_tuple_return() -> None:
+    _oracle(_mixed_tuple, [{"n": 3, "x": 1.5}, {"n": -1, "x": -0.5}])
+
+
+def _unannotated_param(x) -> float:  # type: ignore[no-untyped-def]
+    return float(x)
+
+
+def _str_param(x: str) -> float:
+    return 1.0
+
+
+def _no_return_annotation(x: float):  # type: ignore[no-untyped-def]
+    return x
+
+
+def _none_returns_value(x: float) -> None:
+    return x  # type: ignore[return-value]
+
+
+def _value_returns_none(x: float) -> float:
+    if x > 0.0:
+        y = x
+    return None  # type: ignore[return-value]
+
+
+def _int_from_float(x: float) -> int:
+    return x  # type: ignore[return-value]
+
+
+def _bool_from_float(x: float) -> bool:
+    return x  # type: ignore[return-value]
+
+
+def _arity_mismatch(x: float) -> tuple[float, float]:
+    return x, x, x  # type: ignore[return-value]
+
+
+def _scalar_where_tuple(x: float) -> tuple[float, float]:
+    return x  # type: ignore[return-value]
+
+
+def _nested_tuple(x: float) -> tuple[tuple[float, float], float]:
+    return (x, x), x
+
+
+def _falls_off_the_end(x: float) -> float:  # type: ignore[return]
+    if _NEVER:
+        return x
+
+
+def test_interface_annotation_rejections() -> None:
+    _rejects(_unannotated_param, "requires a type annotation")
+    _rejects(_str_param, "annotation of parameter 'x' is not supported")
+    _rejects(_no_return_annotation, "return type annotation is required")
+    _rejects(_none_returns_value, "annotation does not match the returned scalar")
+    _rejects(_value_returns_none, "returns no value but its annotation declares one")
+    _rejects(_int_from_float, "type float where the annotation declares int")
+    _rejects(_bool_from_float, "type float where the annotation declares bool")
+    _rejects(_arity_mismatch, "declares 2 returned value")
+    _rejects(_scalar_where_tuple, "does not match the returned scalar")
+    _rejects(_nested_tuple, "only supported as the returned value")
+    _rejects(_falls_off_the_end, "can complete without returning a value")
+
+
+# ---------------------------------------------------------------------- type-model rejections
+
+
+def _bool_arithmetic(b: bool) -> int:
+    return b + 1
+
+
+def _bool_negate(b: bool) -> int:
+    return -b
+
+
+def _bool_invert(b: bool) -> bool:
+    return ~b  # type: ignore[return-value]
+
+
+def _bool_ordering(a: bool, b: bool) -> bool:
+    return a < b
+
+
+def _bool_vs_number(b: bool) -> bool:
+    return b == 0
+
+
+def _float_floordiv(a: float, b: float) -> float:
+    return a // b
+
+
+def _float_mod(a: float, b: float) -> float:
+    return a % b
+
+
+def _float_shift(a: float, n: int) -> float:
+    return a << n  # type: ignore[operator]
+
+
+def _mixed_bitwise(n: int, b: bool) -> int:
+    return n & b
+
+
+def _float_truthiness(a: float, b: float) -> bool:
+    return a and b  # type: ignore[return-value]
+
+
+def _not_on_float(a: float) -> bool:
+    return not a
+
+
+def test_type_model_rejections() -> None:
+    for fn, match in [
+        (_bool_arithmetic, "booleans take no part in arithmetic"),
+        (_bool_negate, "booleans take no part in arithmetic"),
+        (_bool_invert, "integer-only"),
+        (_bool_ordering, "ordering comparisons of booleans"),
+        (_bool_vs_number, "cannot be compared with a number"),
+        (_float_floordiv, "`//` is integer-only"),
+        (_float_mod, "`%` is integer-only"),
+        (_float_shift, "`<<` is integer-only"),
+        (_mixed_bitwise, "requires two ints or two bools"),
+        (_float_truthiness, "truthiness is not supported"),
+        (_not_on_float, "requires a bool operand"),
+    ]:
+        _rejects(fn, match)
+
+
+# ---------------------------------------------------------------------- temporary scope gaps
+
+
+def _loop_gap(x: float) -> float:
+    while x > 0.0:
+        x = x - 1.0
+    return x
+
+
+def _for_gap(x: float) -> float:
+    for _ in _XS:
+        x = x + 1.0
+    return x
+
+
+def _comprehension_gap(x: float) -> float:
+    ys = [v * x for v in _XS]
+    return x
+
+
+def _raise_gap(x: float) -> float:
+    if x > 0.0:
+        raise ValueError("positive")
+    return x
+
+
+def _call_gap(x: float) -> float:
+    return math.sin(x)
+
+
+def _attr_gap(x: float) -> float:
+    return _BOX.value * x  # type: ignore[no-any-return]
+
+
+def _store_gap(x: float) -> float:
+    _BOX.value = x
+    return x
+
+
+def _index_gap(x: float) -> float:
+    return _XS[0] * x
+
+
+def _list_gap(x: float) -> float:
+    ys = [x, x]
+    return x
+
+
+def _unpack_gap(x: float) -> float:
+    a, b = x, x
+    return a + b
+
+
+def test_temporary_scope_gaps() -> None:
+    for fn, match in [
+        (_loop_gap, "loops are not supported yet"),
+        (_for_gap, "loops are not supported yet"),
+        (_comprehension_gap, "comprehensions are not supported yet"),
+        (_raise_gap, "raise statements are not supported yet"),
+        (_call_gap, "attribute access is not supported yet"),
+        (_attr_gap, "attribute access is not supported yet"),
+        (_store_gap, "stores through attributes or elements"),
+        (_index_gap, "aggregate values are not supported yet"),
+        (_list_gap, "aggregate values are not supported yet"),
+        (_unpack_gap, "aggregate values are not supported yet"),
+    ]:
+        _rejects(fn, match)
+
+
+def _direct_call_gap(x: float) -> float:
+    return _sin(x)
+
+
+_sin = math.sin
+_cos = math.cos
+
+
+def _select_callee_ternary(c: bool, x: float) -> float:
+    f = _sin if c else _cos
+    return f(x)
+
+
+def _select_callee_branch(c: bool, x: float) -> float:
+    if c:
+        f = _sin
+    else:
+        f = _cos
+    return f(x)
+
+
+def _select_tuple_ternary(c: bool, x: float) -> tuple[float, float]:
+    y = (x, 1.0) if c else (2.0, x)
+    return y
+
+
+def test_unjoinable_branch_values_reject_located_at_the_read() -> None:
+    """
+    Reading a binding whose branch values cannot merge is a located rejection like any other
+    definite-assignment failure, in every spelling -- never a bare internal assertion.
+    """
+    for fn in (_select_callee_ternary, _select_callee_branch, _select_tuple_ternary):
+        _rejects(fn, "cannot merge")
+
+
+def test_direct_callable_gap_names_the_callee() -> None:
+    _rejects(_direct_call_gap, "cannot lower the call to '_sin'")
+
+
+class _Stateful:
+    def __init__(self) -> None:
+        self.y = 0.0
+
+    def step(self, x: float) -> float:
+        self.y = self.y + x
+        return self.y
+
+
+def test_bound_methods_are_a_gap() -> None:
+    _rejects(_Stateful().step, "bound methods")
+    with pytest.raises(SynthesisError, match="not a plain function"):
+        resolve_target(3)
+
+
+# ---------------------------------------------------------------------- fault residualization and hygiene
+
+
+def _static_fault_reaches_output(x: float) -> float:
+    return x + 1.0 / 0.0
+
+
+def test_static_fault_residualizes_for_survivor_refusal() -> None:
+    """CPython raises ZeroDivisionError; the compiler builds, and the fault surfaces only if it survives."""
+    hir = lower(_static_fault_reaches_output)
+    with pytest.raises(NoNumber):
+        HirEvaluator(hir).run(1.0)
+
+
+def _dead_fault_is_dropped(x: float) -> float:
+    y = 1.0 / 0.0
+    return x * 2.0
+
+
+def test_dead_fault_is_dropped() -> None:
+    """
+    CPython raises on the unused division; dropping it is the charter's elision license, identical to HIR
+    DCE running before the survivor sweep.
+    """
+    assert HirEvaluator(lower(_dead_fault_is_dropped)).run(2.0) == [4.0]
+
+
+def _huge_int_promotion(x: float) -> float:
+    return x * _HUGE_INT
+
+
+def _huge_int_ratio() -> float:
+    return _HUGE_INT / (2 * _HUGE_INT)
+
+
+def test_unrepresentable_promotion_residualizes() -> None:
+    """
+    float(10**400) overflows: CPython raises at the multiply, the compiler refuses survivor-based. The ruling
+    extends to fully static division: `/` promotes BOTH operands to their float images first, per the ratified
+    C-promotion model, even though CPython's int/int true division would answer 0.5 without any float
+    conversion -- folding it Python's way would let the same expression answer differently by binding time.
+    """
+    text = _residual_text(_huge_int_promotion)
+    assert "int_to_float" in text
+    with pytest.raises(NoNumber):
+        HirEvaluator(lower(_huge_int_promotion)).run(1.0)
+    with pytest.raises(NoNumber):
+        HirEvaluator(lower(_huge_int_ratio)).run()
+
+
+def test_residual_is_deterministic() -> None:
+    first = _residual_text(_mixed)
+    second = _residual_text(_mixed)
+    assert first == second

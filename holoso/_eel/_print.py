@@ -3,8 +3,10 @@ The canonical printed Eel text: print-only (never parsed back), deterministic, g
 residual seams. Locations off for goldens, on for logs.
 """
 
+import dataclasses
 import math
 import os
+from enum import Enum
 
 from ._ir import *
 
@@ -148,13 +150,28 @@ def _expr(expr: Expr) -> str:
         case EnvRead(name=name, free=free):
             return f"{'free' if free else 'env'} {name}"
         case IntrinsicCall(operator=operator, args=args):
-            return f"intrinsic {operator!r}({', '.join(_atom(a) for a in args)})"
+            return f"intrinsic {_operator(operator)}({', '.join(_atom(a) for a in args)})"
         case SlotRead(slot=slot):
             return f"slot {_slot(slot)}"
         case Comp():
             raise AssertionError("a comprehension prints only as the value of an assignment")
         case _:
             raise AssertionError(expr)
+
+
+def _operator(operator: object) -> str:
+    """
+    The mnemonic plus any operator parameters (``frelational<lt>``), duck-typed so the printer stays HIR-free;
+    stable across operator-class internals, unlike the dataclass repr.
+    """
+    mnemonic = getattr(operator, "mnemonic", None)
+    if not isinstance(mnemonic, str):
+        return repr(operator)
+    if not dataclasses.is_dataclass(operator) or isinstance(operator, type):
+        return mnemonic
+    parts = [getattr(operator, field.name) for field in dataclasses.fields(operator)]
+    rendered = [part.value if isinstance(part, Enum) else repr(part) for part in parts]
+    return mnemonic + (f"<{','.join(str(r) for r in rendered)}>" if rendered else "")
 
 
 def _item(item: Atom | StarArg) -> str:

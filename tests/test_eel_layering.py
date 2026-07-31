@@ -13,8 +13,11 @@ _EEL_DIR = Path(__file__).resolve().parents[1] / "holoso" / "_eel"
 _FRONTEND_LIB = Path(__file__).resolve().parents[1] / "holoso" / "_frontend" / "_lib"
 
 # Modules allowed to import numpy / HIR within holoso._eel, as repo-relative posix paths under _eel.
+# `_pe/_ops.py` is the partial evaluator's sole HIR-facing module: it selects operators and folds through their
+# own `evaluate` (the one-answer mandate), while the rest of `_pe` stays HIR-free; `_lower.py` composes the
+# stages and returns an `Hir`.
 _NUMPY_HOMES = {"_lib"}  # joined by _pe/_snapshot.py when it lands
-_HIR_HOMES = {"_lib"}  # joined by _emit/ when it lands
+_HIR_HOMES = {"_lib", "_emit", "_pe/_ops.py", "_lower.py"}
 
 
 def test_eel_never_imports_old_frontend() -> None:
@@ -35,7 +38,11 @@ def test_desugar_closure_is_syntax_only() -> None:
 def test_desugar_never_reaches_hir_or_backends() -> None:
     for forbidden in ("holoso._hir", "holoso._mir", "holoso._lir", "holoso._backend"):
         assert forbidden_imports("holoso._eel._desugar", forbidden) == []
-        assert forbidden_imports("holoso._eel._shadow", forbidden) == []
+
+
+def test_eel_never_reaches_below_hir() -> None:
+    for forbidden in ("holoso._mir", "holoso._lir", "holoso._backend"):
+        assert forbidden_imports("holoso._eel", forbidden) == []
 
 
 def _unsanctioned_modules(homes: set[str]) -> list[Path]:

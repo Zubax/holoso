@@ -1,8 +1,10 @@
 """
-The shadow parity table, v1: every example entry target's expected Eel stage, one declarative row each.
+The shadow parity table: every example entry target's expected Eel status, one declarative row each.
 A row is TEMPORARY until its owner milestone advances it to the terminal expectation; the two permanent
 refusals record their terminal refusal class in ``terminal``. The table fails on any unexpected status, so a
-regression or an unplanned advance both surface here. The mechanism is deleted at cutover.
+regression or an unplanned advance both surface here. An ORACLE_OK expectation demands both a full lower from
+the probe and membership in ``test_eel_oracle.ORACLE_COVERED``, so the claim is backed by an actual
+differential verification. The mechanism is deleted at cutover.
 
 Also pins the shadow containment contract: a shadow failure of any kind must not affect the primary output.
 """
@@ -10,12 +12,15 @@ Also pins the shadow containment contract: a shadow failure of any kind must not
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import pytest
 
 import holoso
 from holoso._eel._shadow import ShadowStage, probe
+
+from .test_eel_oracle import ORACLE_COVERED
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful  # noqa: E402
@@ -44,27 +49,41 @@ from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingInte
 from uart import UartRx, UartTx  # noqa: E402
 
 
+class RowExpect(Enum):
+    """
+    The status required TODAY: DESUGARED means the kernel desugars but does not fully lower yet (the partial
+    evaluator's diagnostic is informational); LOWERED means the full pipeline succeeds but the kernel is not
+    oracle-verified; ORACLE_OK additionally requires the differential verification to exist; REJECTED is a
+    desugar-level refusal.
+    """
+
+    DESUGARED = "desugared"
+    LOWERED = "lowered"
+    ORACLE_OK = "oracle-ok"
+    REJECTED = "rejected"
+
+
 @dataclass(frozen=True)
 class ParityRow:
     """
-    ``expect`` is the stage required TODAY; ``owner`` is the milestone expected to advance the row next;
+    ``expect`` is the status required TODAY; ``owner`` is the milestone expected to advance the row next;
     ``terminal`` is the end state the row is driving toward (ORACLE_OK, or the refusal class for the two
     permanent refusals).
     """
 
     name: str
     make: Callable[[], object]
-    expect: ShadowStage
+    expect: RowExpect
     owner: str
     terminal: str
 
 
-_D = ShadowStage.DESUGARED
+_D = RowExpect.DESUGARED
 
 ROWS: list[ParityRow] = [
-    ParityRow("madd", lambda: madd.madd, _D, "M3", "ORACLE_OK"),
-    ParityRow("poly3", lambda: poly3.poly3, _D, "M3", "ORACLE_OK"),
-    ParityRow("signal_window", lambda: signal_window.signal_window, _D, "M3", "ORACLE_OK"),
+    ParityRow("madd", lambda: madd.madd, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("poly3", lambda: poly3.poly3, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("signal_window", lambda: signal_window.signal_window, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("equal_temperament", lambda: equal_temperament.equal_temperament, _D, "M4", "ORACLE_OK"),
     ParityRow("octave_index", lambda: octave_index.octave_index, _D, "M7", "ORACLE_OK"),
     ParityRow("remainder", lambda: remainder.remainder, _D, "M7", "ORACLE_OK"),
@@ -97,14 +116,26 @@ ROWS: list[ParityRow] = [
 ]
 
 
+_EXPECTED_STAGE: dict[RowExpect, ShadowStage] = {
+    RowExpect.DESUGARED: ShadowStage.DESUGARED,
+    RowExpect.LOWERED: ShadowStage.LOWERED,
+    RowExpect.ORACLE_OK: ShadowStage.LOWERED,
+    RowExpect.REJECTED: ShadowStage.REJECTED,
+}
+
+
 @pytest.mark.parametrize("row", ROWS, ids=[row.name for row in ROWS])
 def test_parity(row: ParityRow) -> None:
     report = probe(row.make())
+    expected = _EXPECTED_STAGE[row.expect]
     assert (
-        report.stage is row.expect
+        report.stage is expected
     ), f"{row.name}: expected {row.expect.value}, got {report.stage.value}: {report.error}"
-    if report.stage is ShadowStage.DESUGARED:
+    if row.expect is RowExpect.ORACLE_OK:
+        assert row.name in ORACLE_COVERED, f"{row.name} claims ORACLE_OK without a differential verification"
+    if report.stage is not ShadowStage.REJECTED:
         assert report.text
+    if report.stage is ShadowStage.LOWERED:
         assert report.error is None
 
 

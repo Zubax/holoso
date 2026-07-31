@@ -1,6 +1,7 @@
 """
 The shadow entry point: runs the deepest landed Eel stage next to the primary frontend, with zero effect on the
-primary output. Deleted at cutover.
+primary output. Deleted at cutover. A bound method stops after desugar: persistent state lands at M8, and the
+partial evaluator's parameter typing would otherwise misreport ``self``.
 """
 
 import inspect
@@ -11,18 +12,23 @@ from enum import Enum
 
 from .._errors import SynthesisError
 from ._desugar import desugar
+from ._emit import emit
+from ._pe import partial_evaluate
 from ._print import print_eel
 
 _logger = logging.getLogger(__name__)
 
 
 class ShadowStage(Enum):
+    LOWERED = "lowered"
     DESUGARED = "desugared"
     REJECTED = "rejected"
 
 
 @dataclass(frozen=True, slots=True)
 class ShadowReport:
+    """``text`` is the canonical Eel of the deepest reached seam: residual when LOWERED, desugared otherwise."""
+
     stage: ShadowStage
     error: SynthesisError | None
     text: str | None
@@ -37,17 +43,27 @@ def probe(target: object) -> ShadowReport:
         eel = desugar(fn)
     except SynthesisError as error:
         return ShadowReport(ShadowStage.REJECTED, error, None)
-    return ShadowReport(ShadowStage.DESUGARED, None, print_eel(eel, locations=True))
+    text = print_eel(eel, locations=True)
+    _logger.debug("Eel shadow desugared text:\n%s", text)
+    if inspect.ismethod(target):
+        return ShadowReport(ShadowStage.DESUGARED, None, text)
+    try:
+        residual = partial_evaluate(eel, fn)
+        emit(residual)
+    except SynthesisError as error:
+        return ShadowReport(ShadowStage.DESUGARED, error, text)
+    return ShadowReport(ShadowStage.LOWERED, None, print_eel(residual, locations=True))
 
 
 def run_shadow(target: object) -> None:
     try:
         report = probe(target)
-        if report.error is not None or report.text is None:
+        if report.text is None:
             _logger.info("Eel shadow: %s: %s", report.stage.value, report.error)
         else:
             name = getattr(target, "__name__", target)
-            _logger.info("Eel shadow: %s %r: %d lines", report.stage.value, name, report.text.count("\n"))
+            suffix = "" if report.error is None else f" ({report.error})"
+            _logger.info("Eel shadow: %s %r: %d lines%s", report.stage.value, name, report.text.count("\n"), suffix)
             _logger.debug("Eel shadow text:\n%s", report.text)
     except Exception:  # the single sanctioned broad except: the shadow must never affect the primary result
         _logger.exception("Eel shadow failed outside the SynthesisError contract")

@@ -1,0 +1,42 @@
+fn signal_window(x: float, lo: float, hi: float):
+    output [0]: float
+    output [1]: bool
+    output [2]: bool
+    output [3]: bool
+    output [4]: float
+    %0: bool = intrinsic frelational<gt>(x, hi)
+    if %0:
+        %3: float = hi
+    else:
+        %1: bool = intrinsic frelational<lt>(x, lo)
+        if %1:
+            %2: float = lo
+        else:
+            %2: float = x
+        %3: float = %2
+    %4: bool = intrinsic frelational<lt>(lo, x)
+    if %4:
+        %5: bool = intrinsic frelational<lt>(x, hi)
+        %6: bool = %5
+    else:
+        %6: bool = False
+    %7: bool = intrinsic frelational<le>(x, lo)
+    %8: bool = intrinsic frelational<ge>(x, hi)
+    %9: bool = intrinsic bor(%7, %8)
+    %10: bool = intrinsic float_to_bool(x)
+    %11: bool = intrinsic frelational<lt>(lo, x)
+    if %11:
+        %12: bool = intrinsic frelational<lt>(x, hi)
+        %13: bool = %12
+    else:
+        %13: bool = False
+    %14: bool = intrinsic band(%10, %13)
+    %15: bool = intrinsic frelational<lt>(lo, x)
+    if %15:
+        %16: bool = intrinsic frelational<lt>(x, hi)
+        %17: bool = %16
+    else:
+        %17: bool = False
+    %18: float = intrinsic bool_to_float(%17)
+    %19: float = intrinsic mul(%18, x)
+    return %3, %6, %9, %14, %19
