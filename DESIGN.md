@@ -512,7 +512,11 @@ The cosimulation is structurally blind to one miscompile class: a scheduling, bi
 the LIR is shared by both sides, so a wrong-but-consistent LIR passes. A schedule-independent oracle closes the gap:
 a MIR interpreter evaluates the unscheduled MIR dataflow directly through the operators' own bit-exact `evaluate`,
 deliberately importing nothing from the LIR, so the differential `interpreter == model` isolates exactly the LIR
-layer.
+layer. The front-end is bracketed the same way from above: a differential oracle runs the original kernel under
+CPython against a host-precision evaluator of the unoptimized HIR, before optimization so fastmath rewrites cannot
+muddy the verdict; because the eager gates evaluate operands CPython may skip, a value that names no number is
+carried as poison and convicts only when it reaches an observable sink -- an output, a state live-out, a branch
+condition.
 
 The HTML report must give humans an EXACT representation of the generated core behavior -- the tool for understanding
 and debugging what the compiler did -- not a simplified or approximated view.
