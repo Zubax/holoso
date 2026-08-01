@@ -343,15 +343,72 @@ def _pow_int_base_runtime_exponent(n: int) -> float:
     return 2**n  # type: ignore[no-any-return]
 
 
+def _pow_int_pair(b: int, n: int) -> float:
+    return b**n  # type: ignore[no-any-return]
+
+
+def _pow_negative_base_high_exponent(x: float) -> float:
+    return x**7.0  # type: ignore[no-any-return]
+
+
+def _zero_base_pow(e: float) -> float:
+    return 0.0**e  # type: ignore[no-any-return]
+
+
 def test_residual_powers_lower_through_the_pow_stub() -> None:
-    """Every non-integer-exponent power C-promotes and inlines the registry pow_ stub, `**` and calls alike."""
-    _oracle(_pow_residual_exponent, [{"a": 3.0, "b": 2.5}, {"a": 2.0, "b": 2.0}, {"a": 0.5, "b": -1.5}])
+    """Runtime exponents C-promote and inline the registry pow_ stub, ints and negative bases included."""
+    _oracle(
+        _pow_residual_exponent,
+        [{"a": 3.0, "b": 2.5}, {"a": 2.0, "b": 2.0}, {"a": 0.5, "b": -1.5}, {"a": -1.0, "b": math.inf}],
+    )
     _oracle(_pow_float_exponent, [{"x": 4.0}, {"x": 2.0}, {"x": 0.25}])
+    _oracle(_pow_int_base_runtime_exponent, [{"n": 0}, {"n": 5}, {"n": -3}])
+    _oracle(
+        _pow_int_pair, [{"b": 3, "n": 2}, {"b": 2, "n": 5}, {"b": -2, "n": 3}, {"b": -3, "n": 7}, {"b": 2, "n": -2}]
+    )
+    _oracle(_pow_negative_base_high_exponent, [{"x": -2.0}, {"x": -1.5}, {"x": 3.0}])
+    _oracle(_pow_float_exponent, [{"x": 0.0}])
+    _oracle(_zero_base_pow, [{"e": 2.5}, {"e": 0.5}])
+    assert "log2" not in _residual_text(_zero_base_pow)
 
 
-def test_runtime_integer_power_of_integer_base_is_a_gap() -> None:
-    """M7 lowers this via a loop-carrying pow_int_ stub; float lanes already ride the pow_ inline."""
-    _rejects(_pow_int_base_runtime_exponent, "use a float base")
+def _zero_to_negative_power(x: float) -> float:
+    return x + 0.0**-1
+
+
+def _overflowing_static_power(x: float) -> float:
+    return x + 1e300**3
+
+
+def _zero_to_negative_float_power(x: float) -> float:
+    return x + 0.0**-1.0  # type: ignore[no-any-return]
+
+
+def _overflowing_static_float_power(x: float) -> float:
+    return x + 1e300**3.0  # type: ignore[no-any-return]
+
+
+def test_a_static_fold_that_raises_on_the_host_is_a_diagnostic() -> None:
+    for fn, exc in [
+        (_zero_to_negative_power, "ZeroDivisionError"),
+        (_overflowing_static_power, "OverflowError"),
+        (_zero_to_negative_float_power, "ZeroDivisionError"),
+        (_overflowing_static_float_power, "OverflowError"),
+    ]:
+        _rejects(fn, f"this power always raises on the host: {exc}")
+
+
+def _nonnegative_int_fold_stays_int(x: float) -> float:
+    return float((3**5) // 2) * x
+
+
+def _negative_base_fold_is_float(x: float) -> float:
+    return float(((-3) ** 5) // 2) * x
+
+
+def test_exact_ints_exist_only_for_nonnegative_folds() -> None:
+    _oracle(_nonnegative_int_fold_stays_int, [{"x": 2.0}])
+    _rejects(_negative_base_fold_is_float, "`//` is integer-only")
 
 
 def _pow_budget_kill(x: float) -> float:
@@ -591,24 +648,7 @@ def test_type_model_rejections() -> None:
         _rejects(fn, match)
 
 
-# ---------------------------------------------------------------------- temporary scope gaps
-
-
-def _loop_gap(x: float) -> float:
-    while x > 0.0:
-        x = x - 1.0
-    return x
-
-
-def _for_gap(x: float) -> float:
-    for _ in _XS:
-        x = x + 1.0
-    return x
-
-
-def _comprehension_gap(x: float) -> float:
-    ys = [v * x for v in _XS]
-    return x
+# ---------------------------------------------------------------------- the captured environment
 
 
 def _attr_gap(x: float) -> float:
@@ -632,15 +672,6 @@ def _list_gap(x: float) -> float:
 def _unpack_gap(x: float) -> float:
     a, b = x, x
     return a + b
-
-
-def test_temporary_scope_gaps() -> None:
-    for fn, match in [
-        (_loop_gap, "loops are not supported yet"),
-        (_for_gap, "loops are not supported yet"),
-        (_comprehension_gap, "comprehensions are not supported yet"),
-    ]:
-        _rejects(fn, match)
 
 
 def test_a_captured_object_store_is_observable_outside_and_rejects() -> None:
@@ -701,8 +732,8 @@ class _Stateful:
         return self.y
 
 
-def test_bound_methods_are_a_gap() -> None:
-    _rejects(_Stateful().step, "bound methods")
+def test_a_state_writing_bound_method_is_a_gap() -> None:
+    _rejects(_Stateful().step, "attribute stores are not supported yet")
     with pytest.raises(SynthesisError, match="not a plain function"):
         resolve_target(3)
 

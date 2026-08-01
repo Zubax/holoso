@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateless  # noqa: E402
 import equal_temperament  # noqa: E402
 import madd  # noqa: E402
+import octave_index  # noqa: E402
 import polar  # noqa: E402
 import poly3  # noqa: E402
 import signal_window  # noqa: E402
@@ -47,6 +48,8 @@ _RESIDUAL_GOLDENS: list[tuple[str, Callable[[], object]]] = [
     # Pins the array seams: the decomposed leaf parameters and the fully dissolved aggregate structure.
     ("to_polar", lambda: polar.to_polar),
     ("ekf1_stateless", lambda: ekf1_stateless.update_x_P),
+    # Pins the residual-while shape: the phi rows, the header re-evaluated per test, and the back edge.
+    ("octave_index", lambda: octave_index.octave_index),
 ]
 
 _DIRECTORY = Path(__file__).resolve().parent / "eel_goldens"

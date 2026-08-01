@@ -55,9 +55,14 @@ class AllocationState(Enum):
 
 @dataclass(eq=False, slots=True)
 class Allocation:
-    """One runtime container's identity; the state only ever moves forward (never back toward UNIQUE)."""
+    """
+    One runtime container's identity; the state only ever moves forward (never back toward UNIQUE), while
+    ``borrows`` is the scoped overlay counting the active loops/comprehensions iterating this allocation --
+    a counter rather than a flag because nested loops may iterate the same allocation.
+    """
 
     state: AllocationState = AllocationState.UNIQUE
+    borrows: int = 0
 
 
 @dataclass(frozen=True, slots=True)

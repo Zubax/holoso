@@ -18,8 +18,9 @@ evaluator can reject it with the escaped-root diagnostic instead of a syntax err
 
 Residual-only forms (never produced by the desugarer, introduced by the partial evaluator, consumed by emit):
 IntrinsicCall (a resolved HIR operator riding opaquely — also the spelling of every PE-inserted conversion),
-SlotRead/SlotWrite over flattened state-slot paths, ResidualReturn against the OutputDecl table, and the
-mandatory ScalarType annotations on residual Assign/Param. Residual Eel is fully scalar: no TupleExpr survives
+SlotRead/SlotWrite over flattened state-slot paths, ResidualWhile with its explicit loop-carried phis,
+ResidualReturn against the OutputDecl table, and the mandatory ScalarType annotations on residual Assign/Param.
+Residual Eel is fully scalar: no TupleExpr survives
 partial evaluation; a multi-output kernel returns one typed atom per OutputDecl row. A returned leaf that
 duplicates a public state slot's live-out is elided at OutputDecl construction. A bare scalar return flattens
 to leaf path (0,), matching the existing out_0 port convention.
@@ -394,6 +395,31 @@ class For:
 
 
 @dataclass(frozen=True, slots=True)
+class LoopPhi:
+    """``index`` is the phi's own temp, ``entry`` its value on loop entry, ``back`` its per-iteration value."""
+
+    origin: Origin
+    index: int
+    stype: ScalarType
+    entry: Atom
+    back: Atom
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualWhile:
+    """
+    Residual-only: a genuine back-edge loop. Every test binds the phis and re-runs the header, so the header
+    also runs on the final failing test and its temps stay readable after the loop (it dominates the exit).
+    """
+
+    origin: Origin
+    phis: tuple[LoopPhi, ...]
+    header: tuple["Stmt", ...]
+    cond: Atom
+    body: tuple["Stmt", ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Return:
     origin: Origin
     value: Atom | None
@@ -445,6 +471,7 @@ type Stmt = (
     | If
     | While
     | For
+    | ResidualWhile
     | Return
     | ResidualReturn
     | SlotWrite

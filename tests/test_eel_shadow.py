@@ -85,15 +85,15 @@ ROWS: list[ParityRow] = [
     ParityRow("poly3", lambda: poly3.poly3, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("signal_window", lambda: signal_window.signal_window, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("equal_temperament", lambda: equal_temperament.equal_temperament, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
-    ParityRow("octave_index", lambda: octave_index.octave_index, _D, "M7", "ORACLE_OK"),
-    ParityRow("remainder", lambda: remainder.remainder, _D, "M7", "ORACLE_OK"),
-    ParityRow("kepler", lambda: kepler.eccentric_anomaly, _D, "M7", "ORACLE_OK"),
-    ParityRow("recip_newton", lambda: NewtonReciprocal().__call__, _D, "M7", "ORACLE_OK"),
-    ParityRow("cordic_sincos", lambda: CordicSinCos(iterations=12).__call__, _D, "M7", "ORACLE_OK"),
+    ParityRow("octave_index", lambda: octave_index.octave_index, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("remainder", lambda: remainder.remainder, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("kepler", lambda: kepler.eccentric_anomaly, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("recip_newton", lambda: NewtonReciprocal().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("cordic_sincos", lambda: CordicSinCos(iterations=12).__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("ekf1_stateless", lambda: ekf1_stateless.update_x_P, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("to_polar", lambda: polar.to_polar, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("from_polar", lambda: polar.from_polar, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
-    ParityRow("imu_frame_transform", lambda: imu_frame_transform.transform, _D, "M7", "ORACLE_OK"),
+    ParityRow("imu_frame_transform", lambda: imu_frame_transform.transform, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("iir1_lpf", lambda: IIR1LPF().__call__, _D, "M8", "ORACLE_OK"),
     ParityRow("pid", lambda: PID().__call__, _D, "M8", "ORACLE_OK"),
     ParityRow("schmitt_trigger", lambda: SchmittTrigger().__call__, _D, "M8", "ORACLE_OK"),
@@ -105,8 +105,8 @@ ROWS: list[ParityRow] = [
     ParityRow("uart_tx", lambda: UartTx(parity=False).__call__, _D, "M8", "ORACLE_OK"),
     ParityRow("uart_rx", lambda: UartRx(parity=False).__call__, _D, "M8", "ORACLE_OK"),
     ParityRow("ekf1_stateful", lambda: ekf1_stateful.Ekf1().update, _D, "M8", "ORACLE_OK"),
-    # The probe's bound-method early-stop holds until M8, so these two cannot advance before it even though
-    # the machinery that will refuse them (snapshot conversion, parameter binding) landed with M5.
+    # Bound methods lower fully (the receiver binds as a frozen snapshot root), so these two stop at their
+    # own PE diagnostics; the terminal refusal classes land with M8's state machinery.
     ParityRow("iir1_hpf", lambda: IIR1HPF().step, _D, "M8", "REJECTED: stateful sub-object at snapshot conversion"),
     ParityRow(
         "finite_set_current_controller",

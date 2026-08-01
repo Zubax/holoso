@@ -351,7 +351,7 @@ class _Transformer:
         collisions = targets & reads
         if collisions:
             witness = next(w for w in walruses if isinstance(w.target, ast.Name) and w.target.id in collisions)
-            advice = "restructure as `while True:` with a guarded break" if in_while_test else "split the statement"
+            advice = "update the name inside the loop body" if in_while_test else "split the statement"
             self._reject(witness, f"a name assigned by `:=` may not also be read in the same statement; {advice}")
 
     def _reject_walrus_in(self, nodes: list[ast.expr], where: str) -> None:

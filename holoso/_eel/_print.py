@@ -96,6 +96,16 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
             else:
                 put(f"while {_atom(cond)}:", origin)
             _block(body, depth + 1, lines, locations)
+        case ResidualWhile(origin=origin, phis=phis, header=header, cond=cond, body=body):
+            for phi in phis:
+                put(f"phi %{phi.index}: {phi.stype.value} = {_atom(phi.entry)} -> {_atom(phi.back)}", phi.origin)
+            if header:
+                put("while:", origin)
+                _block(header, depth + 1, lines, locations)
+                lines.append(pad + f"do {_atom(cond)}:")
+            else:
+                put(f"while {_atom(cond)}:", origin)
+            _block(body, depth + 1, lines, locations)
         case For(origin=origin, target=target, iterable=iterable, body=body):
             put(f"for {target.name} in {_atom(iterable)}:", origin)
             _block(body, depth + 1, lines, locations)

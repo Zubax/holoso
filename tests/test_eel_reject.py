@@ -393,7 +393,7 @@ _CASES: list[tuple[object, str]] = [
     (_k_walrus_aug, "may not also be read in the same statement"),
     (_k_walrus_index_store, "may not also be read in the same statement"),
     (_k_walrus_index_aug, "may not also be read in the same statement"),
-    (_k_walrus_while, "guarded break"),
+    (_k_walrus_while, "update the name inside the loop body"),
     (_k_wrapped, "wrapped by a decorator"),
     (_k_assert_yield, "generators are not supported"),
     (_k_generic, "generic type parameters"),

@@ -41,6 +41,8 @@ def _block(builder: HirBuilder, fn: EelFunction, stmts: tuple[Stmt, ...], env: _
                 env[index] = _value(builder, value, env, stype)
             case If(cond=cond, then=then, orelse=orelse):
                 _branch(builder, fn, cond, then, orelse, env)
+            case ResidualWhile():
+                _loop(builder, fn, stmt, env)
             case ResidualReturn(values=values):
                 for decl, atom in zip(fn.outputs, values, strict=True):
                     value_id = _atom(builder, atom, env)
@@ -93,6 +95,40 @@ def _branch(
         merged_type = builder.type_of(a)
         assert merged_type == builder.type_of(b), f"the arms bind {key!r} to differing types"
         env[key] = builder.phi(merged_type, [(then_exit, a), (else_exit, b)])
+
+
+def _loop(builder: HirBuilder, fn: EelFunction, stmt: ResidualWhile, env: _Env) -> None:
+    """
+    The genuine back-edge loop: phis and the latch target live in the loop-entry block; the header (which may
+    itself branch and re-join) runs before every test, so the exit block continues with the environment as of
+    header end -- header-defined values dominate the exit, body-defined ones are never read after the loop.
+    """
+    entry_ids = [_atom(builder, phi.entry, env) for phi in stmt.phis]
+    pre_exit = builder.current_block
+    loop_entry = builder.block()
+    builder.jump(loop_entry)
+    builder.position_at(loop_entry)
+    phi_ids: list[int] = []
+    for phi, entry_id in zip(stmt.phis, entry_ids, strict=True):
+        phi_id = builder.open_phi(_TYPES[phi.stype], (pre_exit, entry_id))
+        env[phi.index] = phi_id
+        phi_ids.append(phi_id)
+    returned = _block(builder, fn, stmt.header, env)
+    assert not returned
+    body_block = builder.block()
+    exit_block = builder.block()
+    builder.branch(_atom(builder, stmt.cond, env), body_block, exit_block)
+
+    builder.position_at(body_block)
+    returned = _block(builder, fn, stmt.body, env)
+    assert not returned
+    back_ids = [_atom(builder, phi.back, env) for phi in stmt.phis]
+    latch_exit = builder.current_block
+    builder.jump(loop_entry)
+    for phi_id, entry_id, back_id in zip(phi_ids, entry_ids, back_ids, strict=True):
+        builder.set_phi_arms(phi_id, [(pre_exit, entry_id), (latch_exit, back_id)])
+
+    builder.position_at(exit_block)
 
 
 def _value(builder: HirBuilder, value: Expr, env: _Env, stype: ScalarType) -> int:

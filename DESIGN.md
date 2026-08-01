@@ -196,16 +196,22 @@ frozen configuration, reachability -- while value arithmetic remains the graph's
 demands, so one expression cannot answer two ways according to which layer evaluated it. Every structure-producing
 expansion (unrolling, comprehensions, inlining, repetition, power chains) draws from a single graph-size budget, so
 an accidental blow-up is a located rejection rather than a hang; the budget deliberately does not cap exact
-arbitrary-precision constant arithmetic. A read the evaluator cannot prove bound on every residual path is a located
+arbitrary-precision constant arithmetic. When a fold executed with host arithmetic raises, the failure is certain
+wherever the expression is evaluated -- evaluation judged under the subset's own semantics, eager gates included --
+so the compiler surfaces a compile-time diagnostic instead of masking the error into a runtime value, escalating it
+early and staying simple; folds through HIR operators keep the survivor-based refusal policy. A read the evaluator
+cannot prove bound on every residual path is a located
 rejection -- never a fall-through to a same-named global, where CPython would raise only at run time. The residual
 program is scalar and typed, its static control decided and only genuinely dynamic branches and loops remaining; HIR
 emission from it is mechanical, and structured loop exits (break, continue, early return) are just extra control
 edges there, with exits from unrolled loops handled by predication inside the partial evaluator instead.
 
 Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below, never here. Mixed int/float
-expressions promote to float C-style, true division always yields float as in Python, and floor division, modulo,
-shifts, and bitwise operators are integer-only -- except that the gates over two booleans remain boolean operations
--- while booleans take no part in arithmetic, a small deliberate deviation from Python bought for clean typing.
+expressions promote to float C-style, true division always yields float as in Python, a power yields float unless it
+is fully folded with a nonnegative integer base (the one place exact integer powers survive), and floor division,
+modulo, shifts, and bitwise operators are integer-only -- except that the gates over two booleans remain boolean
+operations -- while booleans take no part in arithmetic, a small deliberate deviation from Python bought for clean
+typing.
 The gates `and`/`or` are eager rather than short-circuiting -- both operands always evaluate, as combinational
 logic does -- a second small deliberate deviation; every other conditionally-evaluated position (conditional
 expressions, comparison-chain suffixes) keeps Python's semantics through real branches.

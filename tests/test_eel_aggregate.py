@@ -311,10 +311,17 @@ def _matmul_list(x: float) -> float:
     return (_GRID @ _GRID)[0][0] * x  # type: ignore[operator, no-any-return]
 
 
-def test_linalg_waits_for_loops_with_chain_attribution() -> None:
-    # The 2-D linalg stub bodies carry loops/comprehensions (M7); resolution and re-attribution land now.
-    _rejects(_matmul, r"in np.matmul\(\): ")
-    _rejects(_transpose_2d, r"in np.transpose\(\): ")
+def _trace_and_outer(x: float) -> float:
+    outer = np.outer(np.array([x, 1.0]), np.array([2.0, 3.0]))
+    return float(np.trace(_ARRAY) + np.dot(np.array([x, 1.0]), np.array([2.0, 3.0])) + outer[1][0])
+
+
+def test_linalg_stubs_lower_and_match_the_host() -> None:
+    for fn in (_matmul, _transpose_2d, _trace_and_outer):
+        _oracle(fn, [{"x": 2.0}, {"x": -0.5}])
+
+
+def test_linalg_shape_refusals_re_attribute_through_the_chain() -> None:
     _rejects(_matmul_scalar, r"in np.matmul\(\): ValueError: ")
     _rejects(_matmul_list, "`@` on a Python list/tuple is not supported; build a numpy array")
 

@@ -4,7 +4,7 @@ import inspect
 import logging
 import types
 
-from .._errors import SynthesisError, UnsupportedConstruct
+from .._errors import SynthesisError
 from .._hir import Hir
 from ._desugar import desugar
 from ._emit import emit
@@ -14,19 +14,23 @@ from ._print import print_eel
 _logger = logging.getLogger(__name__)
 
 
-def resolve_target(target: object) -> types.FunctionType:
+def resolve_target(target: object) -> tuple[types.FunctionType, object | None]:
+    """A bound method contributes its receiver, bound as a frozen snapshot root by the partial evaluator."""
     if inspect.ismethod(target):
-        raise UnsupportedConstruct("bound methods (persistent state) are not supported yet")
+        fn = target.__func__
+        if not isinstance(fn, types.FunctionType):
+            raise SynthesisError(f"the target {target!r} is not a plain function or a bound method")
+        return fn, target.__self__
     if not isinstance(target, types.FunctionType):
         raise SynthesisError(f"the target {target!r} is not a plain function")
-    return target
+    return target, None
 
 
 def lower(target: object) -> Hir:
-    fn = resolve_target(target)
+    fn, instance = resolve_target(target)
     eel = desugar(fn)
     _logger.debug("%s: desugared Eel:\n%s", fn.__qualname__, print_eel(eel, locations=True))
-    residual = partial_evaluate(eel, fn)
+    residual = partial_evaluate(eel, fn, instance)
     _logger.debug("%s: residual Eel:\n%s", fn.__qualname__, print_eel(residual, locations=True))
     hir = emit(residual)
     _logger.info(

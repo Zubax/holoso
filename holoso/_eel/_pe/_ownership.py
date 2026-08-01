@@ -21,7 +21,12 @@ All events that create a second handle move the state forward:
   and the kernel's own array parameters) enter ESCAPED -- CPython would make a mutation observable outside
   the kernel, which hardware cannot honor;
 - borrow: the iterable of an active loop/comprehension is borrowed for the loop's duration (a scoped
-  overlay, not a monotone state; it lands with loops).
+  overlay on the iterated allocation, not a monotone state: the borrow lifts when the loop ends, and items
+  extracted during iteration remain shared via the aggregate-valued-read event, which carries the safety).
+
+A while header evaluated speculatively (to see whether the test folds) rolls back its environment effects
+when the loop residualizes, but the ownership events it fired persist -- allocation states are global
+monotone facts, so speculation is at worst stricter, never wrong.
 
 Store admission is PATH-QUANTIFIED (amended A1): a mutation is admitted iff EVERY allocation along the
 store path -- from the root handle through the allocation holding the written scalar leaf -- is unique and
@@ -51,11 +56,28 @@ def escape(value: Value) -> None:
         allocation.state = AllocationState.ESCAPED
 
 
+def borrow(value: Value) -> Allocation | None:
+    match value:
+        case SequenceValue(allocation=allocation) | TensorValue(allocation=allocation):
+            allocation.borrows += 1
+            return allocation
+        case _:
+            return None
+
+
+def release(allocation: Allocation | None) -> None:
+    if allocation is not None:
+        assert allocation.borrows > 0
+        allocation.borrows -= 1
+
+
 def mutable(allocation: Allocation) -> bool:
-    return allocation.state is AllocationState.UNIQUE
+    return allocation.state is AllocationState.UNIQUE and allocation.borrows == 0
 
 
 def blame(allocation: Allocation) -> str:
+    if allocation.borrows > 0:
+        return "it is being iterated by an enclosing loop"
     match allocation.state:
         case AllocationState.SHARED:
             return "it is shared (reachable through another name or container); rebind a fresh value instead"

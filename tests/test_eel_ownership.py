@@ -1,6 +1,6 @@
 """
-The mutation/ownership model, one test per reachable event; the borrow overlay and comprehension embedding
-become executable with loops (M7), which owns the exhaustive DoD.
+The mutation/ownership model, one test per event: every second-handle route, the escaped roots, the
+structural store rules, the borrow overlay of active loops/comprehensions, and comprehension embedding.
 
 Recorded conservatism (a ruling, not a defect): a chained element read of a 2-D array (``m[0][1]``) derives
 the row on the way, so the array is shared from then on and later stores through it reject -- the spellings
@@ -466,3 +466,95 @@ def _sequence_store_index(x: float) -> float:
 
 def test_a_sequence_store_index_rejects() -> None:
     _rejects(_sequence_store_index, "a sequence index on an array is not supported")
+
+
+# ---------------------------------------------------------------------- the borrow overlay
+
+
+def _store_into_the_iterated_array(x: float) -> float:
+    v = np.array([x, 2.0])
+    for a in v:
+        v[0] = a
+    return v[0]  # type: ignore[no-any-return]
+
+
+def _aug_of_the_iterated_array(x: float) -> float:
+    v = np.array([x, 2.0])
+    total = 0.0
+    for a in v:
+        v += 1.0
+        total = total + a
+    return total
+
+
+def _borrow_survives_the_inner_loop(x: float) -> float:
+    v = np.array([x, 1.0])
+    acc = 0.0
+    for a in v:
+        for b in v:
+            acc = acc + a * b
+        v[0] = acc
+    return acc
+
+
+def test_the_iterated_allocation_is_unborrowable() -> None:
+    for fn in (_store_into_the_iterated_array, _aug_of_the_iterated_array, _borrow_survives_the_inner_loop):
+        _rejects(fn, "it is being iterated by an enclosing loop")
+
+
+def _borrow_lifts_at_loop_end(x: float) -> float:
+    v = np.array([x, 2.0])
+    acc = 0.0
+    for a in v:
+        acc = acc + a
+    v[0] = acc
+    return v[0] + v[1]  # type: ignore[no-any-return]
+
+
+def _loop_indexed_accumulate(x: float) -> float:
+    acc = np.zeros(2)
+    for i in range(2):
+        acc[i] += x * float(i + 1)
+    return acc[0] + acc[1]  # type: ignore[no-any-return]
+
+
+def test_the_borrow_is_scoped_to_the_loop() -> None:
+    for fn in (_borrow_lifts_at_loop_end, _loop_indexed_accumulate):
+        _oracle(fn, [{"x": 2.0}, {"x": -0.5}])
+
+
+def _row_iteration_extraction_outlives_the_loop(x: float) -> float:
+    m = np.array([[x, 1.0], [2.0, 3.0]])
+    acc = 0.0
+    for row in m:
+        acc = acc + row[0]
+    m[0, 0] = acc
+    return m[0, 0]  # type: ignore[no-any-return]
+
+
+def test_extracted_rows_keep_the_parent_shared_after_the_loop() -> None:
+    _rejects(_row_iteration_extraction_outlives_the_loop, "it is shared")
+
+
+# ---------------------------------------------------------------------- comprehension embedding
+
+
+def _comp_embedding_of_a_named_array(x: float) -> float:
+    u = np.array([x, 1.0])
+    pair = [u for _ in (0, 1)]
+    u[0] = 5.0
+    return pair[0][0]  # type: ignore[no-any-return]
+
+
+def test_a_named_aggregate_element_shares_into_the_result() -> None:
+    _rejects(_comp_embedding_of_a_named_array, "it is shared")
+
+
+def _comp_elements_stay_fresh(x: float) -> float:
+    rows = [np.array((x, 1.0)) for _ in (0, 1)]
+    rows[0][0] = x + 2.0
+    return rows[0][0] + rows[1][0]  # type: ignore[no-any-return]
+
+
+def test_fresh_per_iteration_elements_stay_writable() -> None:
+    _oracle(_comp_elements_stay_fresh, [{"x": 2.0}, {"x": -0.5}])

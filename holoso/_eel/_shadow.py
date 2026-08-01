@@ -1,7 +1,7 @@
 """
 The shadow entry point: runs the deepest landed Eel stage next to the primary frontend, with zero effect on the
-primary output. Deleted at cutover. A bound method stops after desugar: persistent state lands at M8, and the
-partial evaluator's parameter typing would otherwise misreport ``self``.
+primary output. Deleted at cutover. A bound method's receiver binds as a frozen snapshot root, so a stateless
+method lowers fully while a state-writing one stops at its first attribute store until M8.
 """
 
 import inspect
@@ -45,10 +45,8 @@ def probe(target: object) -> ShadowReport:
         return ShadowReport(ShadowStage.REJECTED, error, None)
     text = print_eel(eel, locations=True)
     _logger.debug("Eel shadow desugared text:\n%s", text)
-    if inspect.ismethod(target):
-        return ShadowReport(ShadowStage.DESUGARED, None, text)
     try:
-        residual = partial_evaluate(eel, fn)
+        residual = partial_evaluate(eel, fn, target.__self__ if inspect.ismethod(target) else None)
         emit(residual)
     except SynthesisError as error:
         return ShadowReport(ShadowStage.DESUGARED, error, text)

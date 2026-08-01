@@ -179,10 +179,9 @@ def _int_pair_np_power(a: int, b: int) -> float:
     return np.power(a, b)  # type: ignore[no-any-return]
 
 
-def test_spelled_pow_cannot_dodge_the_int_pair_gap() -> None:
-    """The staged int/int rejection binds the spelled family too, not just the ** operator."""
-    _rejects(_int_pair_pow, "use a float base")
-    _rejects(_int_pair_np_power, "use a float base")
+def test_spelled_int_pairs_ride_the_same_float_lane_as_the_operator() -> None:
+    _oracle(_int_pair_pow, [{"a": 3, "b": 2}, {"a": 2, "b": 5}, {"a": 2, "b": -1}])
+    _oracle(_int_pair_np_power, [{"a": 3, "b": 2}, {"a": 2, "b": 5}])
 
 
 def _static_pow_conforms(x: float) -> float:
@@ -207,17 +206,25 @@ def _dead_static_pow_fault(x: float) -> float:
     return x
 
 
-def test_static_negative_base_powers_follow_the_stub_identity() -> None:
-    """
-    Off the small-integer rungs the pow_ stub's a>0 identity names no number for a negative base, so the
-    fault residualizes and the survivor sweep refuses -- the binding-time-consistent answer, unlike CPython's
-    64.0. The integer-exponent spelling stays exact through the multiply chain, and a dead fault vanishes.
-    """
-    with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_neg_base_float_exponent))
+def _neg_base_odd_exponent(x: float) -> float:
+    return (-2.0) ** 7.0 + x  # type: ignore[no-any-return]
+
+
+def _neg_base_fractional_exponent(x: float) -> float:
+    return (-8.0) ** 0.5 + x  # type: ignore[no-any-return]
+
+
+def test_static_negative_base_powers_fold_through_the_stub_parity_lane() -> None:
+    """The stub honors integer exponents of negative bases (sign by parity); the fractional case is complex."""
+    _oracle(_neg_base_float_exponent, [{"x": 0.0}, {"x": 1.0}])
+    assert "64.0" in _residual_text(_neg_base_float_exponent)
     _oracle(_neg_base_int_exponent, [{"x": 0.0}, {"x": 1.0}])
     assert "64.0" in _residual_text(_neg_base_int_exponent)
+    _oracle(_neg_base_odd_exponent, [{"x": 0.0}, {"x": 1.0}])
+    assert "-128.0" in _residual_text(_neg_base_odd_exponent)
     _oracle(_dead_static_pow_fault, [{"x": 3.5}])
+    with pytest.raises(SynthesisError, match="names no number"):
+        optimize(lower(_neg_base_fractional_exponent))
 
 
 # ---------------------------------------------------------------------- user-function inlining
@@ -571,7 +578,7 @@ def test_a_callee_desugar_failure_reports_the_user_call_site_with_the_chain() ->
 
 def _deep_reject(v: float) -> float:
     while v > 0.0:
-        v = v - 1.0
+        break
     return v
 
 
@@ -585,7 +592,7 @@ def _calls_deep(x: float) -> float:
 
 def test_nested_rejections_report_the_outermost_call_site_with_the_full_chain() -> None:
     with pytest.raises(
-        UnsupportedConstruct, match=r"in _middle\(\): in _deep_reject\(\): loops are not supported"
+        UnsupportedConstruct, match=r"in _middle\(\): in _deep_reject\(\): `break` is not supported"
     ) as info:
         lower(_calls_deep)
     location = info.value.location

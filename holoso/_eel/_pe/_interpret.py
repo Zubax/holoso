@@ -10,10 +10,13 @@ names and desugars no callees; captures are judged at use, never at capture.
 A name bound on only one side of a residual branch drops (CPython would raise UnboundLocalError); divergent
 unmergeable values stay bound to a marker so the read, in any spelling, rejects truthfully. ``raise`` is
 judged within its own function: unconditional there is a compile-time diagnostic even under a caller's
-residual arm. Library stubs bind positionally only. All pow spellings share the ``**`` lowering; a fully
-static non-integer power folds THROUGH the pow_ stub so the answer cannot depend on binding time. Recorded
-edge, do not "fix": a power chain over a static base saturates to infinity where CPython raises
-OverflowError, identical to HIR folding the same chain, covered by the fastmath charter.
+residual arm. Library stubs bind positionally only. All pow spellings share the ``**`` lowering: a fully
+static integer-exponent power folds exactly with host arithmetic, a fully static non-integer power folds
+THROUGH the pow_ stub so the answer cannot depend on binding time, a static int exponent over a residual
+base expands a float multiply chain, and everything else promotes to float through the pow_ stub. Exact
+int results exist only for a nonnegative-int-base fold -- every non-folded power is float. A static power
+that raises on the host surfaces as a compile-time diagnostic, never masked into a runtime value; the
+raise is certain wherever the expression is evaluated, under the subset's own eager-gate semantics.
 
 Ownership events ride value flow: a desugared temp is a linear conduit, so the first read of an aggregate
 temp MOVES it and any re-read is the second handle, judged at the read itself regardless of where the value
@@ -38,7 +41,7 @@ from .._ir import *
 from .._lib import Conversion, Factory, Intrinsic, Library, matmul_, resolve, transpose_
 from .._names import indexed_names
 from . import _aggregate, _ops
-from ._ownership import blame, escape, mutable, share
+from ._ownership import blame, borrow, escape, mutable, release, share
 from ._reject import reattribute, reject
 from ._snapshot import Snapshotter, describe_opaque as _describe_opaque, nan_payload, tensor_of
 from ._values import (
@@ -115,8 +118,8 @@ _SCALAR_ANNOTATIONS: list[tuple[type, ScalarType]] = [
 ]
 
 
-def partial_evaluate(eel: EelFunction, fn: types.FunctionType) -> EelFunction:
-    return _Interpreter(fn).run(eel)
+def partial_evaluate(eel: EelFunction, fn: types.FunctionType, instance: object | None = None) -> EelFunction:
+    return _Interpreter(fn, instance).run(eel)
 
 
 def _annotation_stype(annotation: object) -> ScalarType | None:
@@ -146,8 +149,9 @@ def _rechained(node: object, frames: tuple[CallFrame, ...]) -> object:
 
 
 class _Interpreter:
-    def __init__(self, fn: types.FunctionType) -> None:
+    def __init__(self, fn: types.FunctionType, instance: object | None = None) -> None:
         self._fn = fn
+        self._instance = instance
         self._budget = ExpansionBudget()
         self._next_temp = 0
         self._outputs: tuple[OutputDecl, ...] = ()
@@ -165,8 +169,16 @@ class _Interpreter:
 
     def run(self, eel: EelFunction) -> EelFunction:
         frame = _Frame(fn=self._fn, annotations=self._annotations_of(eel.origin, self._fn), env={}, root=True)
+        remaining = eel.params
+        if self._instance is not None:
+            # The bound receiver is a frozen snapshot root, not a port: reads fold, and a store through it
+            # draws the attribute-store rejection until persistent state lands.
+            assert remaining, "a bound method always has a receiver parameter"
+            receiver = remaining[0]
+            frame.env[receiver.name] = self._snapshot.admit(receiver.name, self._instance)
+            remaining = remaining[1:]
         params: list[Param] = []
-        for param in eel.params:
+        for param in remaining:
             params.extend(self._param(param, frame))
         names = [param.name for param in params]
         if len(set(names)) != len(names):
@@ -275,10 +287,16 @@ class _Interpreter:
                     return True
                 case Raise():
                     self._raise(stmt, frame, sink, in_branch)
-                case While(origin=origin) | For(origin=origin):
-                    reject(origin, "loops are not supported yet")
-                case Break(origin=origin) | Continue(origin=origin):
-                    reject(origin, "loops are not supported yet")
+                case While():
+                    if self._while(stmt, frame, sink, in_branch):
+                        return True
+                case For():
+                    if self._for(stmt, frame, sink, in_branch):
+                        return True
+                case Break(origin=origin):
+                    reject(origin, "`break` is not supported yet")
+                case Continue(origin=origin):
+                    reject(origin, "`continue` is not supported yet")
                 case Store() | AugStore():
                     self._store(stmt, frame, sink)
                 case _:
@@ -293,12 +311,7 @@ class _Interpreter:
                 return index
 
     def _if(self, stmt: If, frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
-        cond_value = self._expr(stmt.cond, frame, sink)
-        if isinstance(cond_value, _AGGREGATE):
-            reject(stmt.origin, "the truthiness of an aggregate is not supported")
-        cond = self._scalar(cond_value, stmt.origin)
-        if cond.stype is not ScalarType.BOOL:
-            reject(stmt.origin, "the branch condition must be a bool; Python truthiness is not supported")
+        cond = self._condition(stmt.origin, self._expr(stmt.cond, frame, sink))
         if isinstance(cond, StaticScalar):
             decided = _ops.const_value(cond.const)
             assert isinstance(decided, bool)
@@ -446,6 +459,177 @@ class _Interpreter:
                 reject(stmt.origin, "the raise message interpolates a value that is not a compile-time constant")
         text = "".join(pieces)
         reject(stmt.origin, f"{stmt.exc_type}: {text}" if text else stmt.exc_type)
+
+    # ------------------------------------------------------------------ loops
+
+    def _for(self, stmt: For, frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
+        iterable = self._expr(stmt.iterable, frame, sink)
+        if not isinstance(iterable, _AGGREGATE):
+            reject(stmt.origin, f"{_aggregate.a_kind(iterable)} is not iterable")
+        items = _aggregate.splice_items(stmt.origin, iterable)
+        held = borrow(iterable)
+        try:
+            for item in items:
+                self._budget.spend(1, stmt.origin, "the unrolled loop")
+                frame.env[stmt.target.name] = item
+                if self._block(stmt.body, frame, sink, in_branch):
+                    return True
+        finally:
+            release(held)
+        return False
+
+    def _while(self, stmt: While, frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
+        """
+        Static tests execute trip by trip, splicing each header evaluation (CPython runs the failing test's
+        header too); the first residual test rolls the env back to before its header and residualizes the
+        remaining loop. Ownership events fired by the discarded header evaluation persist -- the recorded
+        speculative-evaluation conservatism.
+        """
+        while True:
+            saved = dict(frame.env)
+            header_sink: list[Stmt] = []
+            returned = self._block(stmt.header, frame, header_sink, in_branch)
+            assert not returned, "a test expression cannot return"
+            cond = self._condition(stmt.origin, self._expr(stmt.cond, frame, header_sink))
+            if isinstance(cond, ResidualScalar):
+                frame.env.clear()
+                frame.env.update(saved)
+                self._residual_while(stmt, frame, sink)
+                return False
+            sink.extend(header_sink)
+            decided = _ops.const_value(cond.const)
+            assert isinstance(decided, bool)
+            if not decided:
+                return False
+            self._budget.spend(1, stmt.origin, "the unrolled loop")
+            if self._block(stmt.body, frame, sink, in_branch):
+                return True
+
+    def _condition(self, origin: Origin, value: Value) -> Scalar:
+        if isinstance(value, _AGGREGATE):
+            reject(origin, "the truthiness of an aggregate is not supported")
+        cond = self._scalar(value, origin)
+        if cond.stype is not ScalarType.BOOL:
+            reject(origin, "the branch condition must be a bool; Python truthiness is not supported")
+        return cond
+
+    def _residual_while(self, stmt: While, frame: _Frame, sink: list[Stmt]) -> None:
+        """
+        The carried set is the syntactic assigned-name set of header+body, restricted to names bound at entry
+        -- each becomes a scalar phi. One symbolic header+body pass computes the back-edge values; the stype
+        assumptions join per the one rule (a FLOAT phi converts an INT back value in place; an INT assumption
+        meeting a FLOAT back value promotes and re-runs, monotone and bounded by the carried count). The
+        post-loop env is the env after the final pass's HEADER: the header runs on the failing test too, so
+        its bindings survive the loop (emit-side the header dominates the exit), while body-only names drop
+        (a zero-trip loop never binds them).
+        """
+        origin = stmt.origin
+        carried: list[tuple[str, int]] = []
+        stypes: dict[str, ScalarType] = {}
+        rebound, stored = _assigned_names((*stmt.header, *stmt.body))
+        for name in sorted(rebound | stored):
+            bound = frame.env.get(name)
+            if bound is None:
+                continue
+            assert not isinstance(bound, _Moved), "only temps ride the conduit"
+            value = self._readable(bound, origin)
+            if isinstance(value, (StaticScalar, ResidualScalar)):
+                if name in rebound:
+                    carried.append((name, self._fresh()))
+                    stypes[name] = value.stype
+                continue
+            if name in rebound or isinstance(value, _AGGREGATE):
+                reject(
+                    origin,
+                    f"{name!r} is {_aggregate.a_kind(value)}; only bool, int, and float values can be "
+                    "carried across the iterations of a data-dependent loop",
+                )
+            # A store through a non-aggregate root can never be admitted; the body pass draws the precise
+            # rejection at the store itself (an attribute store on a snapshot, an item store on a scalar).
+        while True:
+            loop_frame = _Frame(frame.fn, frame.annotations, dict(frame.env), frame.root)
+            for name, index in carried:
+                loop_frame.env[name] = ResidualScalar(stypes[name], TempRef(origin, index))
+            header_sink: list[Stmt] = []
+            returned = self._block(stmt.header, loop_frame, header_sink, in_branch=True)
+            assert not returned, "a test expression cannot return"
+            cond = self._condition(origin, self._expr(stmt.cond, loop_frame, header_sink))
+            assert isinstance(cond, ResidualScalar), "a residual test cannot re-fold under residual carries"
+            post_header_env = dict(loop_frame.env)
+            body_sink: list[Stmt] = []
+            returned = self._block(stmt.body, loop_frame, body_sink, in_branch=True)
+            assert not returned, "in_branch rejects returns before they unwind"
+            promoted = False
+            backs: dict[str, Scalar] = {}
+            for name, _ in carried:
+                back_bound = loop_frame.env.get(name)
+                assert back_bound is not None, "an entry-bound name cannot vanish"
+                back = self._readable(back_bound, origin)
+                if not isinstance(back, (StaticScalar, ResidualScalar)):
+                    reject(
+                        origin,
+                        f"{name!r} is rebound to {_aggregate.a_kind(back)} inside a data-dependent loop; "
+                        "only bool, int, and float values can be carried across its iterations",
+                    )
+                assumed = stypes[name]
+                if back.stype is assumed:
+                    backs[name] = back
+                elif assumed is ScalarType.FLOAT and back.stype is ScalarType.INT:
+                    backs[name] = self._as_float(back, origin, body_sink)
+                elif assumed is ScalarType.INT and back.stype is ScalarType.FLOAT:
+                    stypes[name] = ScalarType.FLOAT
+                    promoted = True
+                else:
+                    reject(
+                        origin,
+                        f"the loop rebinds {name!r} from {assumed.value} to {back.stype.value} "
+                        "across iterations; only int-with-float joins promote",
+                    )
+            if not promoted:
+                break
+        phis: list[LoopPhi] = []
+        for name, index in carried:
+            entry_bound = frame.env[name]
+            assert isinstance(entry_bound, (StaticScalar, ResidualScalar))
+            entry: Scalar = entry_bound
+            if stypes[name] is ScalarType.FLOAT and entry.stype is ScalarType.INT:
+                entry = self._as_float(entry, origin, sink)
+            assert entry.stype is stypes[name]
+            back_atom = self._materialize(backs[name], origin)
+            phis.append(LoopPhi(origin, index, stypes[name], self._materialize(entry, origin), back_atom))
+        _logger.debug(
+            "%s: the loop at %s residualizes with %d carried phi(s): %s",
+            frame.fn.__qualname__,
+            origin.location,
+            len(carried),
+            ", ".join(f"{name}:{stypes[name].value}" for name, _ in carried),
+        )
+        sink.append(
+            ResidualWhile(origin, tuple(phis), tuple(header_sink), self._materialize(cond, origin), tuple(body_sink))
+        )
+        frame.env.clear()
+        frame.env.update(post_header_env)
+
+    def _comp(self, node: Comp, frame: _Frame, sink: list[Stmt]) -> SequenceValue:
+        iterable = self._expr(node.iterable, frame, sink)
+        if not isinstance(iterable, _AGGREGATE):
+            reject(node.origin, f"{_aggregate.a_kind(iterable)} is not iterable")
+        items = _aggregate.splice_items(node.origin, iterable)
+        held = borrow(iterable)
+        collected: list[Value] = []
+        try:
+            for item in items:
+                self._budget.spend(1, node.origin, "the comprehension")
+                frame.env[node.target] = item
+                returned = self._block(node.body, frame, sink, in_branch=True)
+                assert not returned, "a comprehension body holds no return"
+                value = self._expr(node.element, frame, sink)
+                if isinstance(value, _AGGREGATE) and isinstance(node.element, LocalRef):
+                    share(value)
+                collected.append(value)
+        finally:
+            release(held)
+        return SequenceValue(tuple(collected), Allocation())
 
     # ------------------------------------------------------------------ the module boundary
 
@@ -602,8 +786,8 @@ class _Interpreter:
                     else:
                         resolved.append(self._expr(axis, frame, sink))
                 return _aggregate.multi_index_read(origin, base_value, tuple(resolved))
-            case Comp(origin=origin):
-                reject(origin, "comprehensions are not supported yet")
+            case Comp():
+                return self._comp(expr, frame, sink)
             case _:
                 raise AssertionError(expr)
 
@@ -948,8 +1132,7 @@ class _Interpreter:
             case Library(stub=stub):
                 values = self._positional_arguments(node, callee.name, frame, sink)
                 if stub is self._pow_stub:
-                    # All pow spellings share the ** lowering, so the staged int/int rejection cannot be
-                    # dodged by spelling.
+                    # All pow spellings share the ** lowering.
                     if len(values) != 2:
                         reject(node.origin, f"{callee.name}() takes 2 argument(s), got {len(values)}")
                     base = self._scalar(values[0], node.origin)
@@ -971,6 +1154,8 @@ class _Interpreter:
             return self._cast(node, target, frame, sink)
         if raw is len:
             return self._len(node, frame, sink)
+        if raw is range:
+            return self._range(node, frame, sink)
         if raw is list or raw is tuple:
             return self._rebuild_sequence(node, callee.name, frame, sink)
         if isinstance(raw, types.FunctionType):
@@ -1065,6 +1250,21 @@ class _Interpreter:
                 return StaticScalar(_ops.make_const(shape[0]))
             case _:
                 reject(node.origin, f"len() requires an aggregate, not {_aggregate.a_kind(values[0])}")
+
+    def _range(self, node: Call, frame: _Frame, sink: list[Stmt]) -> SequenceValue:
+        values = self._operand_arguments(node, "range", frame, sink)
+        if not 1 <= len(values) <= 3:
+            reject(node.origin, f"range() takes 1 to 3 arguments, got {len(values)}")
+        bounds = [_aggregate.static_index(node.origin, value, "a range argument") for value in values]
+        try:
+            span = range(*bounds)
+        except ValueError as error:
+            reject(node.origin, f"range() rejects its arguments: {error}")
+        # The length in exact arithmetic: len() of a huge range overflows Py_ssize_t, and the charge must
+        # land as the located budget rejection before any materialization.
+        length = max(0, (span.stop - span.start + span.step - (1 if span.step > 0 else -1)) // span.step)
+        self._budget.spend(max(length, 1), node.origin, "the range materialization")
+        return SequenceValue(tuple(StaticScalar(_ops.make_const(i)) for i in span), Allocation())
 
     def _rebuild_sequence(self, node: Call, display: str, frame: _Frame, sink: list[Stmt]) -> Value:
         values = self._operand_arguments(node, display, frame, sink)
@@ -1394,53 +1594,94 @@ class _Interpreter:
             n = _ops.const_value(exponent.const)
             assert isinstance(n, int)
             if isinstance(base, StaticScalar):
-                if (folded := self._fold_pow(base, n)) is not None:
-                    return folded
-            return self._pow_chain(origin, base, n, sink)
-        if base.stype is ScalarType.INT and exponent.stype is ScalarType.INT:
-            reject(
-                origin,
-                "a runtime integer exponent of an integer base is not supported yet; "
-                "use a float base or a compile-time exponent",
-            )
+                return self._fold_pow(origin, base, n)
+            return self._pow_chain(origin, self._as_float(base, origin, sink), n, sink)
+        if isinstance(base, StaticScalar) and isinstance(exponent, StaticScalar):
+            # The host as the raise oracle only: the folded VALUE still comes from the stub body, so the
+            # answer cannot depend on binding time. A complex host result is no raise; the stub's log2
+            # domain owns that refusal.
+            b = _ops.const_value(base.const)
+            e = _ops.const_value(exponent.const)
+            assert isinstance(b, (int, float)) and isinstance(e, (int, float))
+            try:
+                b**e
+            except (OverflowError, ZeroDivisionError) as error:
+                reject(origin, f"this power always raises on the host: {type(error).__name__}: {error}")
         promoted: list[Value] = [self._as_float(base, origin, sink), self._as_float(exponent, origin, sink)]
         value = self._inline(origin, "pow", self._pow_stub, promoted, {}, sink, positional_only=True)
         return self._scalar(value, origin)
 
-    def _fold_pow(self, base: StaticScalar, n: int) -> StaticScalar | None:
+    def _fold_pow(self, origin: Origin, base: StaticScalar, n: int) -> StaticScalar:
         """
-        The whole-power host fold for a fully static power with an integer exponent; an int power is exact at
-        arbitrary precision (the budget carve-out demands better than a linear chain of huge folds). A refused
-        value (overflow, zero to a negative power) falls back to the chain so the graph re-derives the fault
-        survivor-based.
+        Exact host arithmetic; the result stays an int only for a nonnegative int base — every power the
+        compiler cannot fold is float, so a negative base folds to its float image.
         """
         value = _ops.const_value(base.const)
         assert isinstance(value, (int, float))
         try:
             folded = value**n
-        except (OverflowError, ZeroDivisionError, ValueError):
-            return None
+        except (OverflowError, ZeroDivisionError) as error:
+            reject(origin, f"this power always raises on the host: {type(error).__name__}: {error}")
         assert type(folded) in (int, float), "an integer exponent cannot yield a complex power"
+        if isinstance(folded, int) and value < 0:
+            try:
+                folded = float(folded)
+            except OverflowError:
+                reject(origin, "the folded power of a negative base does not fit a binary64 float")
         return StaticScalar(_ops.make_const(folded))
 
     def _pow_chain(self, origin: Origin, base: Scalar, n: int, sink: list[Stmt]) -> Scalar:
+        assert base.stype is ScalarType.FLOAT
         if n < 0:
-            base = self._as_float(base, origin, sink)
             chain = self._chain(origin, base, -n, sink)
             one = StaticScalar(_ops.make_const(1.0))
             return self._apply(_ops.FLOAT_DIV, [one, chain], origin, sink)
         if n == 0:
-            return StaticScalar(_ops.make_const(1 if base.stype is ScalarType.INT else 1.0))
+            return StaticScalar(_ops.make_const(1.0))
         return self._chain(origin, base, n, sink)
 
     def _chain(self, origin: Origin, base: Scalar, n: int, sink: list[Stmt]) -> Scalar:
         assert n >= 1
-        multiply = _ops.INT_BINARY[BinaryOp.MUL] if base.stype is ScalarType.INT else _ops.FLOAT_MUL
         result = base
         for _ in range(n - 1):
             self._budget.spend(1, origin, "the power chain")
-            result = self._apply(multiply, [result, base], origin, sink)
+            result = self._apply(_ops.FLOAT_MUL, [result, base], origin, sink)
         return result
+
+
+def _assigned_names(stmts: tuple[Stmt, ...]) -> tuple[set[str], set[str]]:
+    """
+    The syntactic (rebound, store-rooted) name sets: the loop-carry over-approximation for residualization.
+    They are kept apart because a store mutates its root in place rather than rebinding it, so a
+    non-aggregate store root is no carry at all — the store step itself owns the precise rejection.
+    Comprehension bodies bind only temps and their renamed targets never collide with user locals, so the
+    uniform walk stays exact for names.
+    """
+    rebound: set[str] = set()
+    stored: set[str] = set()
+    for stmt in stmts:
+        parts: tuple[tuple[Stmt, ...], ...] = ()
+        match stmt:
+            case Assign(target=LocalBind(name=name)) | AugAssign(target=LocalBind(name=name)):
+                rebound.add(name)
+            case Unpack(targets=targets):
+                rebound |= {target.name for target in targets if isinstance(target, LocalBind)}
+            case Store(root=LocalRef(name=name)) | AugStore(root=LocalRef(name=name)):
+                stored.add(name)
+            case If(then=then, orelse=orelse):
+                parts = (then, orelse)
+            case While(header=header, body=body):
+                parts = (header, body)
+            case For(target=target, body=body):
+                rebound.add(target.name)
+                parts = (body,)
+            case _:
+                pass
+        for part in parts:
+            inner_rebound, inner_stored = _assigned_names(part)
+            rebound |= inner_rebound
+            stored |= inner_stored
+    return rebound, stored
 
 
 def _allocations_match(a: Value, b: Value) -> bool:
@@ -1486,6 +1727,13 @@ def _prune(stmts: list[Stmt] | tuple[Stmt, ...], live_after: set[int] | None = N
                     continue
                 live = then_live | else_live | _reads(cond)
                 kept_reversed.append(If(origin, cond, tuple(then_kept), tuple(else_kept)))
+            case ResidualWhile():
+                # A residual loop is never dead (termination is observable); its interior is kept whole and
+                # HIR's own sweeps clean any dead interior operations.
+                defined, read = _loop_temps((stmt,))
+                live -= defined
+                live |= read - defined
+                kept_reversed.append(stmt)
             case ResidualReturn(values=values):
                 for atom in values:
                     live |= _reads(atom)
@@ -1493,6 +1741,35 @@ def _prune(stmts: list[Stmt] | tuple[Stmt, ...], live_after: set[int] | None = N
             case _:
                 raise AssertionError(stmt)
     return list(reversed(kept_reversed)), live
+
+
+def _loop_temps(stmts: tuple[Stmt, ...]) -> tuple[set[int], set[int]]:
+    """The (defined, read) temp-index sets over a residual subtree, uncut by liveness."""
+    defined: set[int] = set()
+    read: set[int] = set()
+    for stmt in stmts:
+        match stmt:
+            case Assign(target=TempBind(index=index), value=value):
+                defined.add(index)
+                read |= _reads(value)
+            case If(cond=cond, then=then, orelse=orelse):
+                read |= _reads(cond)
+                for arm in (then, orelse):
+                    inner_defined, inner_read = _loop_temps(arm)
+                    defined |= inner_defined
+                    read |= inner_read
+            case ResidualWhile(phis=phis, header=header, cond=cond, body=body):
+                defined |= {phi.index for phi in phis}
+                for phi in phis:
+                    read |= _reads(phi.entry) | _reads(phi.back)
+                read |= _reads(cond)
+                for part in (header, body):
+                    inner_defined, inner_read = _loop_temps(part)
+                    defined |= inner_defined
+                    read |= inner_read
+            case _:
+                raise AssertionError(stmt)
+    return defined, read
 
 
 def _reads(expr: Expr) -> set[int]:
