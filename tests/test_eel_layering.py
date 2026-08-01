@@ -1,7 +1,7 @@
 """
 Architectural guards for the Eel package: the two frontends never import each other, the desugarer's closure is
-syntax-only, numpy and HIR stay confined to their sanctioned homes, and the temporary `_lib` duplicate remains
-byte-identical to the original until cutover deletes the original.
+syntax-only, and numpy and HIR stay confined to their sanctioned homes. The two `_lib` trees diverge freely
+(maintainer ruling): the Eel copy is the living one, the old frontend's dies at cutover.
 """
 
 import ast
@@ -10,13 +10,12 @@ from pathlib import Path
 from ._importguard import forbidden_imports, transitive_holoso_imports
 
 _EEL_DIR = Path(__file__).resolve().parents[1] / "holoso" / "_eel"
-_FRONTEND_LIB = Path(__file__).resolve().parents[1] / "holoso" / "_frontend" / "_lib"
 
 # Modules allowed to import numpy / HIR within holoso._eel, as repo-relative posix paths under _eel.
 # `_pe/_ops.py` is the partial evaluator's sole HIR-facing module: it selects operators and folds through their
 # own `evaluate` (the one-answer mandate), while the rest of `_pe` stays HIR-free; `_lower.py` composes the
 # stages and returns an `Hir`.
-_NUMPY_HOMES = {"_lib"}  # joined by _pe/_snapshot.py when it lands
+_NUMPY_HOMES = {"_lib", "_pe/_snapshot.py"}
 _HIR_HOMES = {"_lib", "_emit", "_pe/_ops.py", "_lower.py"}
 
 
@@ -79,11 +78,3 @@ def test_hir_only_in_sanctioned_homes() -> None:
     for path in _unsanctioned_modules(_HIR_HOMES):
         for name in _imported_names(path):
             assert "_hir" not in name.split("."), f"HIR import in {path.name}"
-
-
-def test_lib_duplicate_is_byte_identical() -> None:
-    original = {p.name: p for p in _FRONTEND_LIB.glob("*.py")}
-    duplicate = {p.name: p for p in (_EEL_DIR / "_lib").glob("*.py")}
-    assert original.keys() == duplicate.keys()
-    for name, path in original.items():
-        assert path.read_bytes() == duplicate[name].read_bytes(), f"_lib drift in {name}"

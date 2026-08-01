@@ -420,10 +420,19 @@ def _numpy_global(x: float) -> float:
     return x * _NP_GAIN
 
 
+def _object_global(x: float) -> float:
+    return x * _BOX  # type: ignore[operator]
+
+
 def test_environment_rejections() -> None:
     _rejects(_missing_global, "is not defined")
     _rejects(_nan_global, "is NaN")
-    _rejects(_numpy_global, "is not a bool, int, or float scalar")
+    _rejects(_object_global, "is not a bool, int, or float scalar")
+
+
+def test_numpy_scalars_snapshot_as_their_exact_values() -> None:
+    _oracle(_numpy_global, [{"x": 2.0}, {"x": -0.5}])
+    assert "env" not in _residual_text(_numpy_global)
 
 
 # ---------------------------------------------------------------------- the module boundary
@@ -493,7 +502,7 @@ def _scalar_where_tuple(x: float) -> tuple[float, float]:
 
 
 def _nested_tuple(x: float) -> tuple[tuple[float, float], float]:
-    return (x, x), x
+    return (x, 2.0 * x), x + 1.0
 
 
 def _falls_off_the_end(x: float) -> float:  # type: ignore[return]
@@ -509,10 +518,13 @@ def test_interface_annotation_rejections() -> None:
     _rejects(_value_returns_none, "returns no value but its annotation declares one")
     _rejects(_int_from_float, "type float where the annotation declares int")
     _rejects(_bool_from_float, "type float where the annotation declares bool")
-    _rejects(_arity_mismatch, "declares 2 returned value")
-    _rejects(_scalar_where_tuple, "does not match the returned scalar")
-    _rejects(_nested_tuple, "only supported as the returned value")
+    _rejects(_arity_mismatch, r"has 3 element\(s\) where the annotation declares 2")
+    _rejects(_scalar_where_tuple, "is not a sequence")
     _rejects(_falls_off_the_end, "can complete without returning a value")
+
+
+def test_nested_tuple_returns_flatten_row_major() -> None:
+    _oracle(_nested_tuple, [{"x": 1.5}, {"x": -2.0}])
 
 
 # ---------------------------------------------------------------------- type-model rejections
@@ -627,13 +639,17 @@ def test_temporary_scope_gaps() -> None:
         (_loop_gap, "loops are not supported yet"),
         (_for_gap, "loops are not supported yet"),
         (_comprehension_gap, "comprehensions are not supported yet"),
-        (_attr_gap, "attribute access is not supported yet"),
-        (_store_gap, "stores through attributes or elements"),
-        (_index_gap, "aggregate values are not supported yet"),
-        (_list_gap, "aggregate values are not supported yet"),
-        (_unpack_gap, "aggregate values are not supported yet"),
     ]:
         _rejects(fn, match)
+
+
+def test_a_captured_object_store_is_observable_outside_and_rejects() -> None:
+    _rejects(_store_gap, "cannot mutate '_BOX': it was captured from outside the kernel")
+
+
+def test_captured_aggregates_and_instance_attributes_fold() -> None:
+    for fn in (_attr_gap, _index_gap, _list_gap, _unpack_gap):
+        _oracle(fn, [{"x": 2.0}, {"x": -1.5}])
 
 
 _sin = math.sin
@@ -658,13 +674,22 @@ def _select_tuple_ternary(c: bool, x: float) -> tuple[float, float]:
     return y
 
 
+def _select_shape_mismatch(c: bool, x: float) -> float:
+    y = (x, 1.0) if c else (x, 1.0, 2.0)
+    return y[0]
+
+
 def test_unjoinable_branch_values_reject_located_at_the_read() -> None:
     """
     Reading a binding whose branch values cannot merge is a located rejection like any other
     definite-assignment failure, in every spelling -- never a bare internal assertion.
     """
-    for fn in (_select_callee_ternary, _select_callee_branch, _select_tuple_ternary):
+    for fn in (_select_callee_ternary, _select_callee_branch, _select_shape_mismatch):
         _rejects(fn, "cannot merge")
+
+
+def test_same_shape_aggregates_join_leafwise() -> None:
+    _oracle(_select_tuple_ternary, [{"c": True, "x": 3.0}, {"c": False, "x": 3.0}])
 
 
 class _Stateful:

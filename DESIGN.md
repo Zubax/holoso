@@ -213,24 +213,25 @@ One join rule governs every meeting point -- branch merges, loop phis, early ret
 and return validation: Int meeting Float promotes to Float with conversions on the integer arms, Bool joins only with
 Bool, and aggregates join only with identical kind and shape.
 
-Aggregates are one structural container with a semantic kind -- tuple, list, or tensor, later record -- carried per
-node and derived from provenance, never inferred from shape: a rectangular homogeneous list is still a list, because
-`+` concatenates a list and elementwise-adds an array, and following Python means never silently reinterpreting one
-as the other. The kind gates operator admission under one kind-governed rule; everything else about aggregates --
-decomposition to scalar leaves, indexing, iteration, ports -- is uniform. Arrays never exist as hardware aggregates:
-matrices and
-vectors are compile-time bookkeeping over scalar wires, no aggregate survives partial evaluation, and only scalar
-leaves reach HIR.
+Aggregates are one structural container of two kinds derived from provenance, never inferred from shape: a
+sequence (spelled as a tuple or a list) is immutable structure -- construction, indexing, slicing, unpacking, and
+returns, with no arithmetic and no element stores -- while an array is the numerical kind, carrying a float or
+integer element family, elementwise arithmetic, and all mutation. A rectangular homogeneous list is still a
+sequence, never silently an array. Everything else about aggregates -- decomposition to scalar leaves, indexing,
+iteration, ports -- is uniform, and element dtype widths are not modeled: array leaves live in the same width-less
+int / binary64 float value model as scalars. Arrays never exist as hardware aggregates: matrices and vectors are
+compile-time bookkeeping over scalar wires, no aggregate survives partial evaluation, and only scalar leaves reach
+HIR.
 
 Mutation follows one principle: it is admitted only where reference semantics and value semantics cannot be told
 apart, and rejected with advice everywhere else -- a license, not a promise, so some value-safe spellings are
-rejected too. A store or in-place update is legal only when every allocation along the store path, root through the
-written leaf's holder, is still unique and unborrowed at the store step itself, judged after the stored value and
-indices are evaluated: reached by no other handle -- freshly built, never aliased, extracted, embedded, passed,
-returned, or installed, nor under live iteration -- so the compiler needs no heap model, no copy-versus-view
-knowledge, and no escape analysis; aggregates arriving from outside the kernel's own construction (globals,
-closures, defaults, parameters) are never mutable, since CPython would let the outside observe the change and
-hardware cannot. Persistent state is the one mutable resident: an element store through an unaliased state path is a
+rejected too. Mutation is array-only. A store or in-place update is legal only when every allocation along the
+store path, root through the written array, is still unique and unborrowed at the store step itself, judged after
+the stored value and indices are evaluated: reached by no other handle -- freshly built, never aliased, extracted,
+embedded, passed, returned, or installed, nor under live iteration -- so the compiler needs no heap model, no
+copy-versus-view knowledge, and no escape analysis; aggregates arriving from outside the kernel's own construction
+(globals, closures, defaults, parameters) are never mutable, since CPython would let the outside observe the change
+and hardware cannot. Persistent state is the one mutable resident: an element store through an unaliased state path is a
 state update, observably identical in both worlds. State trees must stay disjoint from each other, from everything
 captured, and internally -- otherwise a mutation in a later transaction would write through an alias that the flat
 state slots cannot represent -- and the invariant is established by the construction snapshot itself and preserved

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateless  # noqa: E402
 import equal_temperament  # noqa: E402
 import madd  # noqa: E402
+import polar  # noqa: E402
 import poly3  # noqa: E402
 import signal_window  # noqa: E402
 from pid import PID  # noqa: E402
@@ -43,6 +44,9 @@ _RESIDUAL_GOLDENS: list[tuple[str, Callable[[], object]]] = [
     ("signal_window", lambda: signal_window.signal_window),
     # Pins the pow_ stub-inline shape: the exponent ladder survives residually and log2(2.0) folds away.
     ("equal_temperament", lambda: equal_temperament.equal_temperament),
+    # Pins the array seams: the decomposed leaf parameters and the fully dissolved aggregate structure.
+    ("to_polar", lambda: polar.to_polar),
+    ("ekf1_stateless", lambda: ekf1_stateless.update_x_P),
 ]
 
 _DIRECTORY = Path(__file__).resolve().parent / "eel_goldens"

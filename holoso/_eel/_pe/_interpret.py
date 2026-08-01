@@ -10,18 +10,24 @@ names and desugars no callees; captures are judged at use, never at capture.
 A name bound on only one side of a residual branch drops (CPython would raise UnboundLocalError); divergent
 unmergeable values stay bound to a marker so the read, in any spelling, rejects truthfully. ``raise`` is
 judged within its own function: unconditional there is a compile-time diagnostic even under a caller's
-residual arm. Library stubs bind positionally only -- deliberately stricter than a host spelling like
-``pow(base=..)``. All pow spellings share the ``**`` lowering; a fully static non-integer power folds
-THROUGH the pow_ stub so the answer cannot depend on binding time -- hence a static ``(-2.0) ** 6.0``
-refuses exactly like its runtime counterpart misbehaves, while ``(-2.0) ** 6`` chains exact. Recorded edge,
-do not "fix": a power chain over a static base saturates to infinity where CPython raises OverflowError,
-identical to HIR folding the same chain, covered by the fastmath charter.
+residual arm. Library stubs bind positionally only. All pow spellings share the ``**`` lowering; a fully
+static non-integer power folds THROUGH the pow_ stub so the answer cannot depend on binding time. Recorded
+edge, do not "fix": a power chain over a static base saturates to infinity where CPython raises
+OverflowError, identical to HIR folding the same chain, covered by the fastmath charter.
+
+Ownership events ride value flow: a desugared temp is a linear conduit, so the first read of an aggregate
+temp MOVES it and any re-read is the second handle, judged at the read itself regardless of where the value
+lands; local-name reads stay innocent, their events firing where the value gains a persistent place.
+Sequence-to-tensor conversions and sequence slices copy scalar leaves (exact); tensor-to-tensor derivations
+conservatively share -- except np.array of an array, an independent copy on the host and the A5 explicit-copy
+spelling, which stays unique. A scalar answers rank zero so library stubs can interrogate rank. Annotation
+promotion rebinds leaves along the SAME allocations: a fresh tree would sever the handle relationship and
+admit a mutation CPython observes through the original name.
 """
 
 import dataclasses
 import inspect
 import logging
-import math
 import types
 import typing
 from dataclasses import dataclass
@@ -29,29 +35,64 @@ from dataclasses import dataclass
 from ..._errors import SourceLocation, SynthesisError
 from .._desugar import desugar
 from .._ir import *
-from .._lib import Intrinsic, Library, resolve
-from . import _ops
+from .._lib import Conversion, Factory, Intrinsic, Library, matmul_, resolve, transpose_
+from .._names import indexed_names
+from . import _aggregate, _ops
+from ._ownership import blame, escape, mutable, share
 from ._reject import reattribute, reject
-from ._values import ExpansionBudget, Opaque, ResidualScalar, Scalar, StaticScalar, TupleValue, Value, same
+from ._snapshot import Snapshotter, describe_opaque as _describe_opaque, nan_payload, tensor_of
+from ._values import (
+    Allocation,
+    AllocationState,
+    ExpansionBudget,
+    Opaque,
+    ResidualScalar,
+    Scalar,
+    SequenceValue,
+    StaticScalar,
+    TensorMethod,
+    TensorValue,
+    Value,
+    same,
+)
 
 _logger = logging.getLogger(__name__)
 
 type _EnvKey = str | int
 
+_AGGREGATE = (SequenceValue, TensorValue)
+
 
 @dataclass(frozen=True, slots=True)
 class _Unjoinable:
     """
-    A binding whose two branch values cannot merge (captured objects with different identities, divergent
-    tuples). The binding itself stays in the environment so that a later read draws a truthful located
-    rejection at the read site -- CPython would have carried either value happily, so the honest report is
-    "the compiler cannot merge these", never "unbound".
+    A binding whose two branch values cannot merge (captured objects with different identities, aggregates
+    of divergent shape). The binding itself stays in the environment so that a later read draws a truthful
+    located rejection at the read site -- CPython would have carried either value happily, so the honest
+    report is "the compiler cannot merge these", never "unbound".
     """
 
     description: str
 
 
-type _Env = dict[_EnvKey, Value | _Unjoinable]
+@dataclass(frozen=True, slots=True)
+class _Moved:
+    """A spent temp conduit: the value went on to a persistent place, so a re-read is a second handle."""
+
+    value: SequenceValue | TensorValue
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreSite:
+    spelled: str
+    chain: list[Allocation]
+    spine: list[tuple[SequenceValue, int]]
+    holder: TensorValue
+    slot: int
+    slot_value: Value
+
+
+type _Env = dict[_EnvKey, Value | _Unjoinable | _Moved]
 
 
 @dataclass(slots=True)
@@ -86,13 +127,6 @@ def _key_order(key: _EnvKey) -> tuple[bool, str]:
     return isinstance(key, str), str(key)
 
 
-def _describe_opaque(value: Opaque) -> str:
-    # An Opaque never carries an admissible float, so a float payload here is necessarily a NaN.
-    if type(value.value) is float:
-        return f"the captured value of {value.name!r} is NaN, which the compiler cannot represent"
-    return f"the captured value of {value.name!r} is not a bool, int, or float scalar"
-
-
 def _rechained(node: object, frames: tuple[CallFrame, ...]) -> object:
     """
     An inlined callee's tree with every origin carrying the frame chain, so residual nodes and rejections
@@ -121,13 +155,23 @@ class _Interpreter:
         self._eels: dict[types.FunctionType, EelFunction] = {}
         self._meta: dict[types.FunctionType, dict[str, object]] = {}
         self._inlining: set[types.FunctionType] = {fn}
+        self._snapshot = Snapshotter()
         anchor = resolve(pow)
         assert isinstance(anchor, Library), "the builtin pow key anchors the ** lowering"
         self._pow_stub = anchor.stub
+        assert isinstance(matmul_, types.FunctionType) and isinstance(transpose_, types.FunctionType)
+        self._matmul_stub: types.FunctionType = matmul_
+        self._transpose_stub: types.FunctionType = transpose_
 
     def run(self, eel: EelFunction) -> EelFunction:
         frame = _Frame(fn=self._fn, annotations=self._annotations_of(eel.origin, self._fn), env={}, root=True)
-        params = tuple(self._param(param, frame) for param in eel.params)
+        params: list[Param] = []
+        for param in eel.params:
+            params.extend(self._param(param, frame))
+        names = [param.name for param in params]
+        if len(set(names)) != len(names):
+            collision = next(name for name in names if names.count(name) > 1)
+            reject(eel.origin, f"the decomposed parameter names collide on {collision!r}; rename the parameters")
         sink: list[Stmt] = []
         returned = self._block(eel.body, frame, sink, in_branch=False)
         if not returned:
@@ -135,7 +179,7 @@ class _Interpreter:
         sink.append(ResidualReturn(eel.origin, self._return_values))
         body, live = _prune(sink)
         assert not live, "a residual temp is read before any assignment"
-        residual = EelFunction(eel.origin, eel.name, params, tuple(body), slots=(), outputs=self._outputs)
+        residual = EelFunction(eel.origin, eel.name, tuple(params), tuple(body), slots=(), outputs=self._outputs)
         _logger.info(
             "%s: partial evaluation: %d residual statement(s), %d output(s), %d budget unit(s) spent",
             eel.name,
@@ -164,15 +208,22 @@ class _Interpreter:
             self._meta[fn] = found
         return found
 
-    def _param(self, param: Param, frame: _Frame) -> Param:
+    def _param(self, param: Param, frame: _Frame) -> list[Param]:
         annotation = frame.annotations.get(param.name, _MISSING)
         if annotation is _MISSING:
             reject(param.origin, f"the parameter {param.name!r} requires a type annotation")
         stype = _annotation_stype(annotation)
-        if stype is None:
+        if stype is not None:
+            frame.env[param.name] = ResidualScalar(stype, LocalRef(param.origin, param.name))
+            return [Param(param.origin, param.name, param.kind, stype)]
+        annotated = _aggregate.array_annotation_shape(annotation, param.origin, f"parameter {param.name!r}")
+        if annotated is None:
             reject(param.origin, f"the annotation of parameter {param.name!r} is not supported yet")
-        frame.env[param.name] = ResidualScalar(stype, LocalRef(param.origin, param.name))
-        return Param(param.origin, param.name, param.kind, stype)
+        shape, family = annotated
+        leaf_names = indexed_names(param.name, shape)
+        leaves = tuple(ResidualScalar(family, LocalRef(param.origin, leaf)) for leaf in leaf_names)
+        frame.env[param.name] = TensorValue(shape, family, leaves, Allocation(AllocationState.ESCAPED))
+        return [Param(param.origin, leaf, param.kind, family) for leaf in leaf_names]
 
     def _fresh(self) -> int:
         index = self._next_temp
@@ -185,13 +236,27 @@ class _Interpreter:
         for stmt in stmts:
             match stmt:
                 case Assign(target=target, value=value):
-                    frame.env[self._binding_key(target)] = self._expr(value, frame, sink)
+                    result = self._expr(value, frame, sink)
+                    key = self._binding_key(target)
+                    if isinstance(result, _AGGREGATE) and isinstance(value, LocalRef) and value.name != key:
+                        share(result)
+                    frame.env[key] = result
                 case AugAssign(origin=origin, target=target, op=op, value=value):
                     current = frame.env.get(target.name)
                     if current is None:
                         reject(origin, f"the local name {target.name!r} is not bound on every path reaching this read")
+                    current_value = self._readable(current, origin)
                     rhs = self._expr(value, frame, sink)
-                    frame.env[target.name] = self._binary(origin, op, self._readable(current, origin), rhs, sink)
+                    if isinstance(current_value, _AGGREGATE):
+                        updated = self._aug_aggregate(origin, target.name, current_value, op, rhs, sink)
+                    else:
+                        updated = self._binary(origin, op, current_value, rhs, sink)
+                    frame.env[target.name] = updated
+                case Unpack(origin=origin, targets=targets, value=value):
+                    source = self._expr(value, frame, sink)
+                    items = _aggregate.unpack_items(origin, source, len(targets))
+                    for target, item in zip(targets, items, strict=True):
+                        frame.env[self._binding_key(target)] = item
                 case If():
                     if self._if(stmt, frame, sink, in_branch):
                         return True
@@ -202,10 +267,10 @@ class _Interpreter:
                         self._conclude(stmt, frame, sink)
                     elif stmt.value is not None:
                         result = self._expr(stmt.value, frame, sink)
-                        declared = _annotation_stype(frame.annotations.get("return"))
-                        if declared is not None:
+                        annotation = frame.annotations.get("return", _MISSING)
+                        if annotation is not _MISSING:
                             # At the return itself, so a mismatch points into the callee.
-                            result = self._conform(result, declared, origin, sink, "the returned value")
+                            result = self._conform_value(result, annotation, origin, sink, "the returned value")
                         frame.result = result
                     return True
                 case Raise():
@@ -214,10 +279,8 @@ class _Interpreter:
                     reject(origin, "loops are not supported yet")
                 case Break(origin=origin) | Continue(origin=origin):
                     reject(origin, "loops are not supported yet")
-                case Unpack(origin=origin):
-                    reject(origin, "aggregate values are not supported yet")
-                case Store(origin=origin) | AugStore(origin=origin):
-                    reject(origin, "stores through attributes or elements are not supported yet")
+                case Store() | AugStore():
+                    self._store(stmt, frame, sink)
                 case _:
                     raise AssertionError(stmt)
         return False
@@ -230,7 +293,10 @@ class _Interpreter:
                 return index
 
     def _if(self, stmt: If, frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
-        cond = self._scalar(self._expr(stmt.cond, frame, sink), stmt.origin)
+        cond_value = self._expr(stmt.cond, frame, sink)
+        if isinstance(cond_value, _AGGREGATE):
+            reject(stmt.origin, "the truthiness of an aggregate is not supported")
+        cond = self._scalar(cond_value, stmt.origin)
         if cond.stype is not ScalarType.BOOL:
             reject(stmt.origin, "the branch condition must be a bool; Python truthiness is not supported")
         if isinstance(cond, StaticScalar):
@@ -257,42 +323,110 @@ class _Interpreter:
     ) -> _Env:
         joined: _Env = {}
         for key in sorted(set(then_env) & set(else_env), key=_key_order):
-            a, b = then_env[key], else_env[key]
-            if not isinstance(a, _Unjoinable) and not isinstance(b, _Unjoinable) and same(a, b):
-                joined[key] = a
-                continue
-            if not (isinstance(a, (StaticScalar, ResidualScalar)) and isinstance(b, (StaticScalar, ResidualScalar))):
+            a_bound, b_bound = then_env[key], else_env[key]
+            moved = isinstance(a_bound, _Moved) or isinstance(b_bound, _Moved)
+            a = a_bound.value if isinstance(a_bound, _Moved) else a_bound
+            b = b_bound.value if isinstance(b_bound, _Moved) else b_bound
+            if isinstance(a, _Unjoinable) or isinstance(b, _Unjoinable):
                 joined[key] = _Unjoinable(self._describe_key(key))
                 continue
-            if {a.stype, b.stype} == {ScalarType.INT, ScalarType.FLOAT}:
-                a = self._as_float(a, origin, then_sink)
-                b = self._as_float(b, origin, else_sink)
-            elif a.stype is not b.stype:
-                reject(
-                    origin,
-                    f"the branches bind {self._describe_key(key)} to incompatible types "
-                    f"({a.stype.value} vs {b.stype.value})",
-                )
             if same(a, b):
-                joined[key] = a
+                joined[key] = _Moved(a) if moved and isinstance(a, _AGGREGATE) else a
                 continue
-            stype = a.stype
-            index = self._fresh()
-            then_sink.append(Assign(origin, TempBind(origin, index), self._materialize(a, origin), stype))
-            else_sink.append(Assign(origin, TempBind(origin, index), self._materialize(b, origin), stype))
-            joined[key] = ResidualScalar(stype, TempRef(origin, index))
+            if isinstance(a, _AGGREGATE) and isinstance(b, _AGGREGATE):
+                merged = self._join_aggregates(origin, key, a, b, then_sink, else_sink)
+                joined[key] = _Moved(merged) if moved and isinstance(merged, _AGGREGATE) else merged
+                continue
+            if isinstance(a, (StaticScalar, ResidualScalar)) and isinstance(b, (StaticScalar, ResidualScalar)):
+                joined[key] = self._join_scalars(origin, self._describe_key(key), a, b, then_sink, else_sink)
+                continue
+            joined[key] = _Unjoinable(self._describe_key(key))
         return joined
+
+    def _join_scalars(
+        self, origin: Origin, described: str, a: Scalar, b: Scalar, then_sink: list[Stmt], else_sink: list[Stmt]
+    ) -> Scalar:
+        if {a.stype, b.stype} == {ScalarType.INT, ScalarType.FLOAT}:
+            a = self._as_float(a, origin, then_sink)
+            b = self._as_float(b, origin, else_sink)
+        elif a.stype is not b.stype:
+            reject(origin, f"the branches bind {described} to incompatible types ({a.stype.value} vs {b.stype.value})")
+        if same(a, b):
+            return a
+        stype = a.stype
+        index = self._fresh()
+        then_sink.append(Assign(origin, TempBind(origin, index), self._materialize(a, origin), stype))
+        else_sink.append(Assign(origin, TempBind(origin, index), self._materialize(b, origin), stype))
+        return ResidualScalar(stype, TempRef(origin, index))
+
+    def _join_aggregates(
+        self, origin: Origin, key: _EnvKey, a: Value, b: Value, then_sink: list[Stmt], else_sink: list[Stmt]
+    ) -> Value | _Unjoinable:
+        keep = _allocations_match(a, b)
+        merged = self._merge(origin, key, a, b, then_sink, else_sink, keep)
+        if merged is None:
+            return _Unjoinable(self._describe_key(key))
+        if not keep:
+            # CPython would carry ONE of the two objects; a mutation through the merged name must therefore
+            # reject, and so must a mutation through either source, hence all three trees share.
+            share(a)
+            share(b)
+            share(merged)
+        return merged
+
+    def _merge(
+        self,
+        origin: Origin,
+        key: _EnvKey,
+        a: Value,
+        b: Value,
+        then_sink: list[Stmt],
+        else_sink: list[Stmt],
+        keep: bool,
+    ) -> Value | None:
+        match a, b:
+            case SequenceValue(), SequenceValue():
+                if len(a.items) != len(b.items):
+                    return None
+                items: list[Value] = []
+                for x, y in zip(a.items, b.items, strict=True):
+                    item = self._merge(origin, key, x, y, then_sink, else_sink, keep)
+                    if item is None:
+                        return None
+                    items.append(item)
+                return SequenceValue(tuple(items), a.allocation if keep else Allocation())
+            case TensorValue(), TensorValue():
+                if a.shape != b.shape:
+                    return None
+                leaves: list[Scalar | Opaque] = []
+                for x, y in zip(a.leaves, b.leaves, strict=True):
+                    leaf = self._merge(origin, key, x, y, then_sink, else_sink, keep)
+                    if leaf is None:
+                        return None
+                    assert isinstance(leaf, (StaticScalar, ResidualScalar, Opaque))
+                    leaves.append(leaf)
+                family = next((leaf.stype for leaf in leaves if not isinstance(leaf, Opaque)), a.family)
+                return TensorValue(a.shape, family, tuple(leaves), a.allocation if keep else Allocation())
+            case (StaticScalar() | ResidualScalar()), (StaticScalar() | ResidualScalar()):
+                return self._join_scalars(origin, self._describe_key(key), a, b, then_sink, else_sink)
+            case Opaque(), Opaque():
+                return a if same(a, b) else None
+            case _:
+                return None
 
     def _describe_key(self, key: _EnvKey) -> str:
         return f"the local {key!r}" if isinstance(key, str) else "the conditional result"
 
-    def _readable(self, binding: Value | _Unjoinable, origin: Origin) -> Value:
+    def _readable(self, binding: Value | _Unjoinable | _Moved, origin: Origin) -> Value:
         if isinstance(binding, _Unjoinable):
             reject(
                 origin,
                 f"{binding.description} holds branch values the compiler cannot merge; "
                 "only bool, int, and float values join branches",
             )
+        if isinstance(binding, _Moved):
+            share(binding.value)
+            return binding.value
         return binding
 
     def _raise(self, stmt: Raise, frame: _Frame, sink: list[Stmt], in_branch: bool) -> None:
@@ -324,38 +458,20 @@ class _Interpreter:
                 reject(stmt.origin, "the kernel returns no value but its annotation declares one")
             return
         value = self._expr(stmt.value, frame, sink)
-        match value:
-            case TupleValue(items=items):
-                self._conclude_tuple(stmt.origin, annotation, items, sink)
+        if isinstance(value, Opaque):
+            reject(stmt.origin, f"the captured object {value.name!r} cannot be returned")
+        conformed = self._conform_value(value, annotation, stmt.origin, sink, "the returned value", root=True)
+        match conformed:
             case StaticScalar() | ResidualScalar():
-                declared = _annotation_stype(annotation)
-                if declared is None:
-                    reject(stmt.origin, "the return annotation does not match the returned scalar value")
-                leaf = self._conform(value, declared, stmt.origin, sink, "the returned value")
-                self._outputs = (OutputDecl((0,), leaf.stype),)
-                self._return_values = (self._materialize(leaf, stmt.origin),)
-            case Opaque(name=name):
-                reject(stmt.origin, f"the captured object {name!r} cannot be returned")
-
-    def _conclude_tuple(self, origin: Origin, annotation: object, items: tuple[Scalar, ...], sink: list[Stmt]) -> None:
-        if typing.get_origin(annotation) is not tuple:
-            reject(origin, "the return annotation does not match the returned tuple")
-        args = typing.get_args(annotation)
-        if any(arg is Ellipsis for arg in args):
-            reject(origin, "variadic tuple return annotations are not supported yet")
-        declared = [_annotation_stype(arg) for arg in args]
-        if any(stype is None for stype in declared):
-            reject(origin, "the return annotation is not supported yet; only flat scalar tuples lower for now")
-        if len(declared) != len(items):
-            reject(
-                origin, f"the annotation declares {len(declared)} returned value(s), the kernel returns {len(items)}"
-            )
-        leaves: list[Scalar] = []
-        for item, stype in zip(items, declared, strict=True):
-            assert stype is not None
-            leaves.append(self._conform(item, stype, origin, sink, "the returned value"))
-        self._outputs = tuple(OutputDecl((i,), leaf.stype) for i, leaf in enumerate(leaves))
-        self._return_values = tuple(self._materialize(leaf, origin) for leaf in leaves)
+                self._outputs = (OutputDecl((0,), conformed.stype),)
+                self._return_values = (self._materialize(conformed, stmt.origin),)
+            case SequenceValue() | TensorValue():
+                escape(conformed)
+                leaves = _aggregate.flatten(stmt.origin, conformed)
+                self._outputs = tuple(OutputDecl(path, leaf.stype) for path, leaf in leaves)
+                self._return_values = tuple(self._materialize(leaf, stmt.origin) for _, leaf in leaves)
+            case _:
+                raise AssertionError(conformed)
 
     def _conclude_bare(self, origin: Origin, frame: _Frame) -> None:
         annotation = frame.annotations.get("return", _MISSING)
@@ -363,6 +479,59 @@ class _Interpreter:
             reject(origin, "the return type annotation is required")
         if annotation is not None:
             reject(origin, "the kernel can complete without returning a value but its annotation declares one")
+
+    def _conform_value(
+        self, value: Value, annotation: object, origin: Origin, sink: list[Stmt], what: str, *, root: bool = False
+    ) -> Value:
+        """
+        The one annotation-conformance rule for both module boundaries: the root interface demands a
+        recognized annotation, while an inlined frame skips unrecognized ones (library stubs annotate with
+        shapeless types the subset cannot check).
+        """
+        stype = _annotation_stype(annotation)
+        if stype is not None:
+            return self._conform(value, stype, origin, sink, what)
+        shaped = typing.get_origin(annotation)
+        if shaped is tuple:
+            args = typing.get_args(annotation)
+            if not isinstance(value, SequenceValue):
+                reject(origin, f"{what} is not a sequence")
+            if len(args) == 2 and args[1] is Ellipsis:
+                items = tuple(self._conform_value(item, args[0], origin, sink, what, root=root) for item in value.items)
+                return dataclasses.replace(value, items=items)
+            if len(args) != len(value.items):
+                reject(origin, f"{what} has {len(value.items)} element(s) where the annotation declares {len(args)}")
+            items = tuple(
+                self._conform_value(item, arg, origin, sink, what, root=root)
+                for item, arg in zip(value.items, args, strict=True)
+            )
+            return dataclasses.replace(value, items=items)
+        if shaped is list:
+            reject(origin, "list annotations are not supported; annotate a tuple")
+        annotated = _aggregate.array_annotation_shape(annotation, origin, what)
+        if annotated is not None:
+            shape, family = annotated
+            if not isinstance(value, TensorValue):
+                reject(origin, f"{what} is not an array")
+            if value.shape != shape:
+                reject(origin, f"{what} has shape {value.shape} where the annotation declares {shape}")
+            if value.family is ScalarType.INT and family is ScalarType.FLOAT:
+                promoted = tuple(
+                    leaf if isinstance(leaf, Opaque) else self._as_float(leaf, origin, sink) for leaf in value.leaves
+                )
+                return dataclasses.replace(value, family=ScalarType.FLOAT, leaves=promoted)
+            if value.family is not family:
+                reject(origin, f"{what} is a {value.family.value} array where the annotation declares {family.value}")
+            return value
+        if not root:
+            return value
+        if isinstance(value, (StaticScalar, ResidualScalar)):
+            reject(origin, "the return annotation does not match the returned scalar")
+        reject(
+            origin,
+            "the return annotation is not supported yet; "
+            "annotate with scalars, tuple[...], or a fixed-shape jaxtyping array",
+        )
 
     def _conform(self, value: Value, declared: ScalarType, origin: Origin, sink: list[Stmt], what: str) -> Scalar:
         if isinstance(value, Opaque):
@@ -384,7 +553,10 @@ class _Interpreter:
             case TempRef(origin=origin, index=index):
                 bound = frame.env.get(index)
                 assert bound is not None, "desugar binds every temp before its first read"
-                return self._readable(bound, origin)
+                read = self._readable(bound, origin)
+                if isinstance(read, _AGGREGATE) and not isinstance(bound, _Moved):
+                    frame.env[index] = _Moved(read)
+                return read
             case LocalRef(origin=origin, name=name):
                 found = frame.env.get(name)
                 if found is None:
@@ -405,31 +577,56 @@ class _Interpreter:
             case Call():
                 return self._call(expr, frame, sink)
             case TupleExpr(origin=origin, items=items):
-                scalars: list[Scalar] = []
-                for item in items:
-                    if isinstance(item, StarArg):
-                        reject(origin, "aggregate values are not supported yet")
-                    scalars.append(self._scalar(self._expr(item, frame, sink), origin))
-                return TupleValue(tuple(scalars))
+                return self._display(origin, items, frame, sink)
+            case ListExpr(origin=origin, items=items):
+                return self._display(origin, items, frame, sink)
             case AttrRead(origin=origin, base=base, attr=attr):
+                return self._attr_read(origin, self._expr(base, frame, sink), attr, sink)
+            case IndexRead(origin=origin, base=base, index=index):
                 base_value = self._expr(base, frame, sink)
-                if isinstance(base_value, Opaque) and isinstance(base_value.value, (types.ModuleType, type)):
-                    # A module/class attribute is a metadata read (class access unwraps staticmethod and
-                    # plain functions); an instance would run live descriptors, so it waits for snapshots.
-                    try:
-                        raw = getattr(base_value.value, attr)
-                    except AttributeError:
-                        reject(origin, f"{base_value.name!r} has no attribute {attr!r}")
-                    return self._admit(origin, f"{base_value.name}.{attr}", raw)
-                reject(origin, "attribute access is not supported yet")
-            case IndexRead(origin=origin) | SliceRead(origin=origin) | MultiIndexRead(origin=origin):
-                reject(origin, "aggregate values are not supported yet")
-            case ListExpr(origin=origin):
-                reject(origin, "aggregate values are not supported yet")
+                index_value = self._expr(index, frame, sink)
+                return _aggregate.index_read(origin, base_value, index_value)
+            case SliceRead(origin=origin, base=base, lo=lo, hi=hi):
+                base_value = self._expr(base, frame, sink)
+                lo_bound = self._slice_bound(lo, frame, sink)
+                hi_bound = self._slice_bound(hi, frame, sink)
+                return _aggregate.slice_read(origin, base_value, lo_bound, hi_bound)
+            case MultiIndexRead(origin=origin, base=base, axes=axes):
+                base_value = self._expr(base, frame, sink)
+                resolved: list[_aggregate.ResolvedAxis] = []
+                for axis in axes:
+                    if isinstance(axis, SliceSel):
+                        resolved.append(
+                            (self._slice_bound(axis.lo, frame, sink), self._slice_bound(axis.hi, frame, sink))
+                        )
+                    else:
+                        resolved.append(self._expr(axis, frame, sink))
+                return _aggregate.multi_index_read(origin, base_value, tuple(resolved))
             case Comp(origin=origin):
                 reject(origin, "comprehensions are not supported yet")
             case _:
                 raise AssertionError(expr)
+
+    def _slice_bound(self, atom: Atom | None, frame: _Frame, sink: list[Stmt]) -> int | None:
+        if atom is None:
+            return None
+        return _aggregate.static_index(atom.origin, self._expr(atom, frame, sink), "a slice bound")
+
+    def _display(
+        self, origin: Origin, items: tuple[Atom | StarArg, ...], frame: _Frame, sink: list[Stmt]
+    ) -> SequenceValue:
+        collected: list[Value] = []
+        for item in items:
+            if isinstance(item, StarArg):
+                source = self._expr(item.value, frame, sink)
+                collected.extend(_aggregate.splice_items(origin, source))
+            else:
+                value = self._expr(item, frame, sink)
+                if isinstance(value, _AGGREGATE) and isinstance(item, LocalRef):
+                    share(value)
+                collected.append(value)
+        self._budget.spend(max(len(collected), 1), origin, "the sequence display")
+        return SequenceValue(tuple(collected), Allocation())
 
     def _env_read(self, node: EnvRead, frame: _Frame) -> Value:
         if node.free:
@@ -453,15 +650,83 @@ class _Interpreter:
                 if node.name not in builtins_ns:
                     reject(node.origin, f"the name {node.name!r} is not defined")
                 raw = builtins_ns[node.name]
-        return self._admit(node.origin, node.name, raw)
+        return self._snapshot.admit(node.name, raw)
 
-    def _admit(self, origin: Origin, name: str, raw: object) -> Value:
-        if type(raw) is bool or type(raw) is int:
-            return StaticScalar(_ops.make_const(raw))
-        if type(raw) is float and not math.isnan(raw):
-            return StaticScalar(_ops.make_const(raw))
-        # A NaN rides as an opaque capture: binding one is CPython-legal; only a scalar use rejects.
-        return Opaque(name, raw)
+    # ------------------------------------------------------------------ attribute reads
+
+    def _attr_read(self, origin: Origin, base_value: Value, attr: str, sink: list[Stmt]) -> Value:
+        match base_value:
+            case TensorValue():
+                return self._tensor_attr(origin, base_value, attr, sink)
+            case SequenceValue():
+                if attr in ("shape", "ndim", "T", "flatten"):
+                    reject(
+                        origin,
+                        f"`.{attr}` on a Python sequence is not supported; " "build a numpy array with np.array([...])",
+                    )
+                reject(origin, f"a sequence has no supported attribute {attr!r}")
+            case StaticScalar() | ResidualScalar():
+                if attr == "ndim":
+                    return StaticScalar(_ops.make_const(0))
+                if attr == "shape":
+                    return SequenceValue((), Allocation())
+                reject(origin, f"a scalar has no supported attribute {attr!r}")
+            case TensorMethod():
+                reject(origin, "a bound array method can only be called")
+            case Opaque(name=name, value=value) if isinstance(value, (types.ModuleType, type)):
+                # A module/class attribute is a metadata read (class access unwraps staticmethod and
+                # plain functions); an instance never runs live descriptors, below.
+                try:
+                    raw = getattr(value, attr)
+                except AttributeError:
+                    reject(origin, f"{name!r} has no attribute {attr!r}")
+                return self._snapshot.admit(f"{name}.{attr}", raw)
+            case Opaque():
+                return self._instance_attr(origin, base_value, attr, sink)
+            case _:
+                raise AssertionError(base_value)
+
+    def _tensor_attr(self, origin: Origin, tensor: TensorValue, attr: str, sink: list[Stmt]) -> Value:
+        if attr == "ndim":
+            return StaticScalar(_ops.make_const(len(tensor.shape)))
+        if attr == "shape":
+            dims = tuple(StaticScalar(_ops.make_const(dim)) for dim in tensor.shape)
+            return SequenceValue(dims, Allocation())
+        if attr == "T":
+            share(tensor)
+            return self._inline(origin, "np.transpose", self._transpose_stub, [tensor], {}, sink, positional_only=True)
+        if attr == "flatten":
+            share(tensor)
+            return TensorMethod(tensor, "flatten")
+        reject(origin, f"an array has no supported attribute {attr!r}")
+
+    def _instance_attr(self, origin: Origin, base: Opaque, attr: str, sink: list[Stmt]) -> Value:
+        """
+        CPython's attribute precedence over class metadata, never calling into the object: a data descriptor
+        wins (only a plain property is readable -- its getter is inlined as ordinary code), then the instance
+        dict, then non-data class attributes.
+        """
+        found: object = next(
+            (klass.__dict__[attr] for klass in type(base.value).__mro__ if attr in klass.__dict__), _MISSING
+        )
+        if isinstance(found, property) and isinstance(found.fget, types.FunctionType):
+            return self._inline(origin, f"{base.name}.{attr}", found.fget, [base], {}, sink, positional_only=False)
+        if found is not _MISSING and inspect.isdatadescriptor(found):
+            reject(origin, f"the attribute {attr!r} is a descriptor the compiler cannot read")
+        instance_dict = getattr(base.value, "__dict__", None)
+        if isinstance(instance_dict, dict) and attr in instance_dict:
+            return self._snapshot.admit(f"{base.name}.{attr}", instance_dict[attr])
+        if found is _MISSING:
+            reject(origin, f"{base.name!r} has no attribute {attr!r}")
+        if isinstance(found, staticmethod):
+            return self._snapshot.admit(f"{base.name}.{attr}", found.__func__)
+        if isinstance(found, types.FunctionType):
+            return self._snapshot.admit(f"{base.name}.{attr}", types.MethodType(found, base.value))
+        if isinstance(found, classmethod):
+            return self._snapshot.admit(f"{base.name}.{attr}", types.MethodType(found.__func__, type(base.value)))
+        return self._snapshot.admit(f"{base.name}.{attr}", found)
+
+    # ------------------------------------------------------------------ scalars and operators
 
     def _scalar(self, value: Value, origin: Origin) -> Scalar:
         match value:
@@ -469,8 +734,10 @@ class _Interpreter:
                 return value
             case Opaque():
                 reject(origin, _describe_opaque(value))
-            case TupleValue():
-                reject(origin, "a tuple is only supported as the returned value for now")
+            case SequenceValue() | TensorValue():
+                reject(origin, f"{_aggregate.a_kind(value)} cannot be used as a scalar here")
+            case TensorMethod():
+                reject(origin, "a bound array method can only be called")
 
     def _materialize(self, scalar: Scalar, origin: Origin) -> Atom:
         match scalar:
@@ -498,7 +765,15 @@ class _Interpreter:
         assert scalar.stype is ScalarType.INT
         return self._apply(_ops.CONVERT[(ScalarType.INT, ScalarType.FLOAT)], [scalar], origin, sink)
 
-    def _unary(self, origin: Origin, op: UnaryOp, value: Value, sink: list[Stmt]) -> Scalar:
+    def _unary(self, origin: Origin, op: UnaryOp, value: Value, sink: list[Stmt]) -> Value:
+        if isinstance(value, TensorValue) and op in (UnaryOp.NEG, UnaryOp.POS):
+            leaves = tuple(self._unary_leaf(origin, op, leaf, sink) for leaf in value.leaves)
+            self._budget.spend(len(leaves), origin, "the elementwise operation")
+            return TensorValue(value.shape, value.family, leaves, Allocation())
+        if isinstance(value, _AGGREGATE):
+            if op is UnaryOp.NOT:
+                reject(origin, "the truthiness of an aggregate is not supported")
+            reject(origin, f"`{op.value}` is not supported on {_aggregate.a_kind(value)}")
         operand = self._scalar(value, origin)
         match op:
             case UnaryOp.NEG | UnaryOp.POS:
@@ -517,7 +792,84 @@ class _Interpreter:
                     reject(origin, "`~` is integer-only")
                 return self._apply(_ops.INT_NOT, [operand], origin, sink)
 
-    def _binary(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, sink: list[Stmt]) -> Scalar:
+    def _unary_leaf(self, origin: Origin, op: UnaryOp, leaf: Scalar | Opaque, sink: list[Stmt]) -> Scalar | Opaque:
+        if op is UnaryOp.POS:
+            return leaf
+        result = self._unary(origin, op, self._scalar_leaf(origin, leaf), sink)
+        assert isinstance(result, (StaticScalar, ResidualScalar))
+        return result
+
+    def _operand_arguments(self, node: Call, display: str, frame: _Frame, sink: list[Stmt]) -> list[Value]:
+        """Arguments for a callee that retains no handle: no aliasing event, unlike parameter binding."""
+        values: list[Value] = []
+        for arg in node.args:
+            match arg:
+                case PosArg(value=value):
+                    values.append(self._expr(value, frame, sink))
+                case StarArg(value=value):
+                    values.extend(_aggregate.splice_items(node.origin, self._expr(value, frame, sink)))
+                case KwArg():
+                    reject(node.origin, f"{display}() takes no keyword arguments")
+        return values
+
+    def _scalar_leaf(self, origin: Origin, leaf: Scalar | Opaque) -> Scalar:
+        if isinstance(leaf, Opaque):
+            reject(origin, _describe_opaque(leaf))
+        return leaf
+
+    def _binary(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, sink: list[Stmt]) -> Value:
+        if op is BinaryOp.MATMUL:
+            if isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue):
+                reject(origin, "`@` on a Python list/tuple is not supported; build a numpy array with np.array([...])")
+            for operand in (lv, rv):
+                if isinstance(operand, _AGGREGATE):
+                    share(operand)
+            return self._inline(origin, "np.matmul", self._matmul_stub, [lv, rv], {}, sink, positional_only=True)
+        tensors = isinstance(lv, TensorValue) or isinstance(rv, TensorValue)
+        sequences = isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue)
+        if (tensors or sequences) and op in (BinaryOp.AND, BinaryOp.OR):
+            reject(origin, "the truthiness of an aggregate is not supported")
+        if tensors and sequences:
+            reject(origin, "cannot mix an array with a Python list/tuple; convert with np.array([...])")
+        if tensors:
+            return self._elementwise(origin, op, lv, rv, sink)
+        if sequences:
+            return self._sequence_binary(origin, op)
+        return self._binary_scalars(origin, op, lv, rv, sink)
+
+    def _elementwise(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, sink: list[Stmt]) -> TensorValue:
+        if op not in (BinaryOp.ADD, BinaryOp.SUB, BinaryOp.MUL, BinaryOp.DIV):
+            reject(origin, f"the operator `{op.value}` is not supported on arrays yet")
+        pairs: list[tuple[Scalar, Scalar]]
+        shape: tuple[int, ...]
+        if isinstance(lv, TensorValue) and isinstance(rv, TensorValue):
+            if lv.shape != rv.shape:
+                reject(origin, f"array shapes {lv.shape} and {rv.shape} do not match; broadcasting is not supported")
+            shape = lv.shape
+            pairs = [
+                (self._scalar_leaf(origin, a), self._scalar_leaf(origin, b))
+                for a, b in zip(lv.leaves, rv.leaves, strict=True)
+            ]
+        elif isinstance(lv, TensorValue):
+            scalar = self._scalar(rv, origin)
+            shape = lv.shape
+            pairs = [(self._scalar_leaf(origin, a), scalar) for a in lv.leaves]
+        else:
+            assert isinstance(rv, TensorValue)
+            scalar = self._scalar(lv, origin)
+            shape = rv.shape
+            pairs = [(scalar, self._scalar_leaf(origin, b)) for b in rv.leaves]
+        leaves: list[Scalar | Opaque] = []
+        for a, b in pairs:
+            leaves.append(self._binary_scalars(origin, op, a, b, sink))
+        self._budget.spend(len(leaves), origin, "the elementwise operation")
+        family = next(leaf.stype for leaf in leaves if not isinstance(leaf, Opaque))
+        return TensorValue(shape, family, tuple(leaves), Allocation())
+
+    def _sequence_binary(self, origin: Origin, op: BinaryOp) -> Value:
+        reject(origin, f"the operator `{op.value}` is not supported on a sequence; build a numpy array instead")
+
+    def _binary_scalars(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, sink: list[Stmt]) -> Scalar:
         left = self._scalar(lv, origin)
         right = self._scalar(rv, origin)
         both_bool = left.stype is ScalarType.BOOL and right.stype is ScalarType.BOOL
@@ -535,8 +887,6 @@ class _Interpreter:
                 reject(origin, f"the bitwise operator `{op.value}` requires two ints or two bools")
             case BinaryOp.POW:
                 return self._pow(origin, left, right, sink)
-            case BinaryOp.MATMUL:
-                reject(origin, "aggregate values are not supported yet")
             case _:
                 pass
         if ScalarType.BOOL in (left.stype, right.stype):
@@ -564,6 +914,8 @@ class _Interpreter:
                 raise AssertionError(op)
 
     def _compare(self, origin: Origin, op: CompareOp, lv: Value, rv: Value, sink: list[Stmt]) -> Scalar:
+        if isinstance(lv, _AGGREGATE) or isinstance(rv, _AGGREGATE):
+            reject(origin, "aggregate comparison is not supported")
         left = self._scalar(lv, origin)
         right = self._scalar(rv, origin)
         if left.stype is ScalarType.BOOL and right.stype is ScalarType.BOOL:
@@ -585,6 +937,8 @@ class _Interpreter:
 
     def _call(self, node: Call, frame: _Frame, sink: list[Stmt]) -> Value:
         callee = self._expr(node.callee, frame, sink)
+        if isinstance(callee, TensorMethod):
+            return self._tensor_method(node, callee, frame, sink)
         if not isinstance(callee, Opaque):
             reject(node.origin, "the callee is not a callable object")
         raw = callee.value
@@ -602,12 +956,23 @@ class _Interpreter:
                     exponent = self._scalar(values[1], node.origin)
                     return self._pow(node.origin, base, exponent, sink)
                 return self._inline(node.origin, callee.name, stub, values, {}, sink, positional_only=True)
+            case Factory() as match:
+                return self._factory(node, callee.name, match, frame, sink)
+            case Conversion(copies=copies):
+                values = self._operand_arguments(node, callee.name, frame, sink)
+                if len(values) != 1:
+                    reject(node.origin, f"{callee.name}() takes a single array-like argument")
+                return self._to_tensor(node.origin, callee.name, values[0], sink, copies=copies)
             case None:
                 pass
         if raw is float or raw is int or raw is bool:
             target = raw
             assert isinstance(target, type)
             return self._cast(node, target, frame, sink)
+        if raw is len:
+            return self._len(node, frame, sink)
+        if raw is list or raw is tuple:
+            return self._rebuild_sequence(node, callee.name, frame, sink)
         if isinstance(raw, types.FunctionType):
             # Ingested like user code wherever it lives: substitution is the registry's decision alone
             # (maintainer ruling), and the interpreter knows no library names.
@@ -619,14 +984,20 @@ class _Interpreter:
             reject(node.origin, f"calls to {callee.name!r} are not supported yet")
         reject(node.origin, f"the captured object {callee.name!r} is not callable")
 
+    def _argument(self, atom: Atom, frame: _Frame, sink: list[Stmt]) -> Value:
+        value = self._expr(atom, frame, sink)
+        if isinstance(value, _AGGREGATE) and isinstance(atom, LocalRef):
+            share(value)
+        return value
+
     def _positional_arguments(self, node: Call, display: str, frame: _Frame, sink: list[Stmt]) -> list[Value]:
         values: list[Value] = []
         for arg in node.args:
             match arg:
                 case PosArg(value=value):
-                    values.append(self._expr(value, frame, sink))
-                case StarArg():
-                    reject(node.origin, "aggregate values are not supported yet")
+                    values.append(self._argument(value, frame, sink))
+                case StarArg(value=value):
+                    values.extend(_aggregate.splice_items(node.origin, self._expr(value, frame, sink)))
                 case KwArg():
                     reject(node.origin, f"{display}() takes no keyword arguments")
         return values
@@ -637,15 +1008,15 @@ class _Interpreter:
         for arg in node.args:
             match arg:
                 case PosArg(value=value):
-                    positional.append(self._expr(value, frame, sink))
-                case StarArg():
-                    reject(node.origin, "aggregate values are not supported yet")
+                    positional.append(self._argument(value, frame, sink))
+                case StarArg(value=value):
+                    positional.extend(_aggregate.splice_items(node.origin, self._expr(value, frame, sink)))
                 case KwArg(name=name, value=value):
-                    keywords[name] = self._expr(value, frame, sink)
+                    keywords[name] = self._argument(value, frame, sink)
         return positional, keywords
 
     def _intrinsic(self, node: Call, display: str, operator: _ops.Operator, frame: _Frame, sink: list[Stmt]) -> Value:
-        values = self._positional_arguments(node, display, frame, sink)
+        values = self._operand_arguments(node, display, frame, sink)
         stypes = _ops.operand_stypes(operator)
         if len(values) != len(stypes):
             reject(node.origin, f"{display}() takes {len(stypes)} argument(s), got {len(values)}")
@@ -654,6 +1025,286 @@ class _Interpreter:
             for i, (value, stype) in enumerate(zip(values, stypes, strict=True))
         ]
         return self._apply(operator, operands, node.origin, sink)
+
+    def _tensor_method(self, node: Call, method: TensorMethod, frame: _Frame, sink: list[Stmt]) -> Value:
+        assert method.name == "flatten"
+        if node.args:
+            reject(node.origin, ".flatten() takes no arguments")
+        return _aggregate.flattened(method.receiver)
+
+    def _factory(self, node: Call, display: str, match: Factory, frame: _Frame, sink: list[Stmt]) -> Value:
+        values = self._operand_arguments(node, display, frame, sink)
+        host = [self._static_argument(node.origin, display, value) for value in values]
+        try:
+            built = match.build(*host)
+        except Exception as error:  # a registered library builder, not user code; its refusal is a diagnostic
+            reject(node.origin, f"{display}() rejects its arguments: {error}")
+        tensor = tensor_of(built, display)
+        if tensor is None:
+            reject(node.origin, f"{display}() must build a non-empty 1-D or 2-D numeric array")
+        self._budget.spend(len(tensor.leaves), node.origin, "the array factory")
+        return tensor
+
+    def _static_argument(self, origin: Origin, display: str, value: Value) -> object:
+        match value:
+            case StaticScalar(const=const):
+                return _ops.const_value(const)
+            case SequenceValue(items=items):
+                return tuple(self._static_argument(origin, display, item) for item in items)
+            case _:
+                reject(origin, f"the arguments of {display}() must be compile-time constants")
+
+    def _len(self, node: Call, frame: _Frame, sink: list[Stmt]) -> Value:
+        values = self._operand_arguments(node, "len", frame, sink)
+        if len(values) != 1:
+            reject(node.origin, f"len() takes exactly one argument, got {len(values)}")
+        match values[0]:
+            case SequenceValue(items=items):
+                return StaticScalar(_ops.make_const(len(items)))
+            case TensorValue(shape=shape):
+                return StaticScalar(_ops.make_const(shape[0]))
+            case _:
+                reject(node.origin, f"len() requires an aggregate, not {_aggregate.a_kind(values[0])}")
+
+    def _rebuild_sequence(self, node: Call, display: str, frame: _Frame, sink: list[Stmt]) -> Value:
+        values = self._operand_arguments(node, display, frame, sink)
+        if len(values) != 1:
+            reject(node.origin, f"{display}() takes exactly one aggregate argument here")
+        source = values[0]
+        if not isinstance(source, _AGGREGATE):
+            reject(node.origin, f"{display}() requires an aggregate argument")
+        children = _aggregate.splice_items(node.origin, source)
+        self._budget.spend(max(len(children), 1), node.origin, "the sequence conversion")
+        return SequenceValue(tuple(children), Allocation())
+
+    def _store(self, stmt: Store | AugStore, frame: _Frame, sink: list[Stmt]) -> None:
+        """
+        The one mutation gate: resolve the target path with the store-prefix exemption (walked over the value
+        tree, never through expression reads), judge admission at the store step after the RHS and index
+        temps, and rebind new frozen values along the unchanged allocation spine.
+        """
+        origin = stmt.origin
+        rhs = self._expr(stmt.value, frame, sink)
+        match stmt.root:
+            case EnvRead(name=name):
+                reject(
+                    origin,
+                    f"cannot mutate {name!r}: it was captured from outside the kernel, "
+                    "so the change would be observable there",
+                )
+            case LocalRef(name=name):
+                bound = frame.env.get(name)
+                if bound is None:
+                    reject(origin, f"the local name {name!r} is not bound on every path reaching this read")
+                root_value = self._readable(bound, origin)
+        if not isinstance(root_value, _AGGREGATE):
+            if isinstance(stmt.path[0], AttrSel):
+                reject(origin, "attribute stores are not supported yet")
+            reject(origin, f"{_aggregate.a_kind(root_value)} does not support item assignment")
+        site = self._store_site(origin, name, root_value, stmt.path, frame, sink)
+        for allocation in site.chain:
+            if not mutable(allocation):
+                reject(origin, f"cannot store into {site.spelled}: {blame(allocation)}")
+        old = site.slot_value
+        if isinstance(stmt, AugStore):
+            if isinstance(old, Opaque):
+                reject(origin, _describe_opaque(old))
+            value = self._binary(origin, stmt.op, old, rhs, sink)
+        else:
+            value = rhs
+        if isinstance(value, (SequenceValue, TensorValue, TensorMethod)):
+            reject(
+                origin, "storing an aggregate into a container is not supported; rebind or build with a comprehension"
+            )
+        assert isinstance(value, (StaticScalar, ResidualScalar, Opaque))
+        leaf = self._tensor_leaf(origin, site.holder.family, value, sink)
+        new_leaves = tuple(leaf if position == site.slot else kept for position, kept in enumerate(site.holder.leaves))
+        rebuilt: SequenceValue | TensorValue = dataclasses.replace(site.holder, leaves=new_leaves)
+        for container, position in reversed(site.spine):
+            rebuilt = dataclasses.replace(
+                container,
+                items=tuple(rebuilt if index == position else kept for index, kept in enumerate(container.items)),
+            )
+        frame.env[name] = rebuilt
+
+    def _store_site(
+        self,
+        origin: Origin,
+        root_name: str,
+        root_value: SequenceValue | TensorValue,
+        path: tuple[Selector, ...],
+        frame: _Frame,
+        sink: list[Stmt],
+    ) -> "_StoreSite":
+        spelled = root_name
+        chain: list[Allocation] = []
+        spine: list[tuple[SequenceValue, int]] = []
+        current: Value = root_value
+        tensor: TensorValue | None = None
+        axes: list[int] = []
+        assert path, "desugar never emits an empty store path"
+        for step, selector in enumerate(path):
+            terminal = step == len(path) - 1
+            match selector:
+                case AttrSel():
+                    reject(origin, "attribute stores are not supported yet")
+                case IndexSel(index=atom):
+                    index_value = self._expr(atom, frame, sink)
+            if tensor is not None:
+                added = self._store_axes(origin, tensor, len(axes), index_value)
+                axes.extend(added)
+                spelled += self._spell_axes(added)
+                continue
+            match current:
+                case SequenceValue(items=items):
+                    chain.append(current.allocation)
+                    position = _aggregate.static_index(origin, index_value, "a subscript index")
+                    resolved = position + len(items) if position < 0 else position
+                    if not 0 <= resolved < len(items):
+                        reject(
+                            origin,
+                            f"index {position} is out of bounds for a "
+                            f"{_aggregate.kind_label(current)} of length {len(items)}",
+                        )
+                    spelled += f"[{position}]"
+                    if terminal:
+                        reject(
+                            origin,
+                            f"cannot store into {spelled}: sequences are immutable; build a numpy array instead",
+                        )
+                    spine.append((current, resolved))
+                    current = items[resolved]
+                case TensorValue():
+                    chain.append(current.allocation)
+                    tensor = current
+                    added = self._store_axes(origin, tensor, 0, index_value)
+                    axes.extend(added)
+                    spelled += self._spell_axes(added)
+                case _:
+                    reject(origin, f"{_aggregate.a_kind(current)} is not subscriptable")
+        if tensor is None:
+            raise AssertionError("the loop returns at the terminal sequence slot")
+        rank = len(tensor.shape)
+        if len(axes) < rank:
+            reject(origin, "a store into an array must write one scalar element; rebind the whole array instead")
+        flat = axes[0] * tensor.shape[1] + axes[1] if rank == 2 else axes[0]
+        return _StoreSite(spelled, chain, spine, tensor, flat, tensor.leaves[flat])
+
+    def _store_axes(self, origin: Origin, tensor: TensorValue, taken: int, index_value: Value) -> list[int]:
+        if isinstance(index_value, SequenceValue):
+            reject(origin, "a sequence index on an array is not supported; spell the axes directly (m[i, j])")
+        rank = len(tensor.shape)
+        if taken >= rank:
+            plural = "index" if rank == 1 else "indices"
+            reject(origin, f"a {rank}-D array store takes at most {rank} {plural}")
+        dim = tensor.shape[taken]
+        position = _aggregate.static_index(origin, index_value, "a subscript index")
+        wrapped = position + dim if position < 0 else position
+        if not 0 <= wrapped < dim:
+            reject(origin, f"index {position} is out of bounds for an axis of length {dim}")
+        return [wrapped]
+
+    def _spell_axes(self, axes: list[int]) -> str:
+        return "".join(f"[{axis}]" for axis in axes)
+
+    def _aug_aggregate(
+        self,
+        origin: Origin,
+        name: str,
+        current: SequenceValue | TensorValue,
+        op: BinaryOp,
+        rhs: Value,
+        sink: list[Stmt],
+    ) -> Value:
+        match current:
+            case SequenceValue():
+                reject(
+                    origin, f"the operator `{op.value}=` is not supported on a sequence; build a numpy array instead"
+                )
+            case TensorValue():
+                if op not in (BinaryOp.ADD, BinaryOp.SUB, BinaryOp.MUL, BinaryOp.DIV):
+                    reject(origin, f"the operator `{op.value}=` is not supported on arrays yet")
+                if isinstance(rhs, SequenceValue):
+                    reject(origin, "cannot mix an array with a Python list/tuple; convert with np.array([...])")
+                if not mutable(current.allocation):
+                    reject(origin, f"cannot update {name!r} in place: {blame(current.allocation)}")
+                computed = self._elementwise(origin, op, current, rhs, sink)
+                if computed.family is not current.family:
+                    reject(
+                        origin,
+                        f"an in-place operation cannot change the array's element family from "
+                        f"{current.family.value} to {computed.family.value}; rebind with `{name} = {name} "
+                        f"{op.value} ...` instead",
+                    )
+                return TensorValue(current.shape, current.family, computed.leaves, current.allocation)
+            case _:
+                raise AssertionError(current)
+
+    def _to_tensor(self, origin: Origin, display: str, value: Value, sink: list[Stmt], *, copies: bool) -> TensorValue:
+        match value:
+            case TensorValue():
+                result = TensorValue(value.shape, value.family, value.leaves, Allocation())
+                if not copies:
+                    share(value)
+                    share(result)
+                return result
+            case SequenceValue(items=items):
+                if not items:
+                    reject(origin, f"{display}() of an empty sequence is not supported")
+                shape, leaves = self._tensor_rows(origin, display, items)
+                for leaf in leaves:
+                    if not isinstance(leaf, Opaque) and leaf.stype is ScalarType.BOOL:
+                        reject(origin, "an array must hold numbers, not booleans")
+                if any(isinstance(leaf, Opaque) or leaf.stype is ScalarType.FLOAT for leaf in leaves):
+                    family = ScalarType.FLOAT
+                else:
+                    family = ScalarType.INT
+                conformed = [self._tensor_leaf(origin, family, leaf, sink) for leaf in leaves]
+                self._budget.spend(len(conformed), origin, "the array conversion")
+                return TensorValue(shape, family, tuple(conformed), Allocation())
+            case _:
+                reject(origin, f"{display}() requires a sequence or array argument, not {_aggregate.a_kind(value)}")
+
+    def _tensor_rows(
+        self, origin: Origin, display: str, items: tuple[Value, ...]
+    ) -> tuple[tuple[int, ...], list[Scalar | Opaque]]:
+        """The scalar leaves are copied, so the source keeps sole ownership of itself."""
+        if all(isinstance(item, (StaticScalar, ResidualScalar, Opaque)) for item in items):
+            flat = [item for item in items if isinstance(item, (StaticScalar, ResidualScalar, Opaque))]
+            return (len(items),), flat
+        rows: list[list[Scalar | Opaque]] = []
+        for item in items:
+            match item:
+                case SequenceValue(items=row_items):
+                    row: list[Scalar | Opaque] = []
+                    for element in row_items:
+                        if not isinstance(element, (StaticScalar, ResidualScalar, Opaque)):
+                            reject(origin, f"{display}() supports only 1-D and 2-D rectangular constructions")
+                        row.append(element)
+                    rows.append(row)
+                case TensorValue(shape=shape, leaves=leaves) if len(shape) == 1:
+                    rows.append(list(leaves))
+                case _:
+                    reject(origin, f"{display}() supports only 1-D and 2-D rectangular constructions")
+        widths = {len(row) for row in rows}
+        if len(widths) != 1 or 0 in widths:
+            reject(origin, f"{display}() requires rectangular rows of equal nonzero length")
+        return (len(rows), widths.pop()), [leaf for row in rows for leaf in row]
+
+    def _tensor_leaf(
+        self, origin: Origin, family: ScalarType, leaf: Scalar | Opaque, sink: list[Stmt]
+    ) -> Scalar | Opaque:
+        if isinstance(leaf, Opaque):
+            if family is not ScalarType.FLOAT or not nan_payload(leaf.value):
+                reject(origin, _describe_opaque(leaf))
+            return leaf
+        if leaf.stype is ScalarType.BOOL:
+            reject(origin, "an array must hold numbers, not booleans")
+        if family is ScalarType.FLOAT:
+            return self._as_float(leaf, origin, sink)
+        if leaf.stype is ScalarType.FLOAT:
+            reject(origin, "storing a float into an integer array truncates on the host; rebind a float array instead")
+        return leaf
 
     def _inline(
         self,
@@ -687,9 +1338,9 @@ class _Interpreter:
         env: _Env = {}
         for param in callee.params:
             value = bindings[param.name]
-            declared = _annotation_stype(annotations.get(param.name))
-            if declared is not None:
-                value = self._conform(value, declared, site, sink, f"the argument {param.name!r}")
+            declared = annotations.get(param.name, _MISSING)
+            if declared is not _MISSING:
+                value = self._conform_value(value, declared, site, sink, f"the argument {param.name!r}")
             env[param.name] = value
         inner = _Frame(fn=fn, annotations=annotations, env=env, root=False)
         self._inlining.add(fn)
@@ -718,10 +1369,10 @@ class _Interpreter:
         bound.apply_defaults()
         bindings: dict[str, Value] = {}
         for name, value in bound.arguments.items():
-            if isinstance(value, (StaticScalar, ResidualScalar, Opaque, TupleValue)):
+            if isinstance(value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, TensorMethod)):
                 bindings[name] = value
             else:
-                bindings[name] = self._admit(site, name, value)  # an injected default: a plain Python object
+                bindings[name] = self._snapshot.admit(name, value)  # an injected default: a plain Python object
         return bindings
 
     def _cast(self, node: Call, target: type, frame: _Frame, sink: list[Stmt]) -> Value:
@@ -790,6 +1441,22 @@ class _Interpreter:
             self._budget.spend(1, origin, "the power chain")
             result = self._apply(multiply, [result, base], origin, sink)
         return result
+
+
+def _allocations_match(a: Value, b: Value) -> bool:
+    match a, b:
+        case SequenceValue(), SequenceValue():
+            return (
+                a.allocation is b.allocation
+                and len(a.items) == len(b.items)
+                and all(_allocations_match(x, y) for x, y in zip(a.items, b.items))
+            )
+        case TensorValue(), TensorValue():
+            return a.allocation is b.allocation
+        case (SequenceValue() | TensorValue(), _) | (_, SequenceValue() | TensorValue()):
+            return False
+        case _:
+            return True
 
 
 # ---------------------------------------------------------------------- residual pruning

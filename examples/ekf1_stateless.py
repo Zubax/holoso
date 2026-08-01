@@ -27,7 +27,7 @@ def update_x_P(
     x_i: float,
     z_ct: float,
     z_shunt: float,
-) -> list[list[float]]:
+) -> tuple[tuple[float], ...]:
     """
     All inputs are floating point scalars. The float format to use in the generated RTL code is specified at synthesis.
     The return values are flattened in the row-major order, and each element thereof becomes a separate RTL output port.
@@ -73,11 +73,11 @@ def update_x_P(
     x38 = x10 * x5
     x39 = x35 * x5
     x40 = x1 * x30
-    return [
-        [x22 * (x21 * x6 + x23 * (x2 * x24 - x25 * x26) - x27 * (x2 * x28 - x24 * x26))],
-        [x22 * (-R_ct * x23 * x24 + x21 * x_g - x27 * (x13 * x28 - x24**2))],
-        [x22 * (x21 * x_R + x23 * (P12 * x24 - x25 * x29) - x27 * (P12 * x28 - x24 * x29))],
-        [
+    return (
+        (x22 * (x21 * x6 + x23 * (x2 * x24 - x25 * x26) - x27 * (x2 * x28 - x24 * x26)),),
+        (x22 * (-R_ct * x23 * x24 + x21 * x_g - x27 * (x13 * x28 - x24**2)),),
+        (x22 * (x21 * x_R + x23 * (P12 * x24 - x25 * x29) - x27 * (P12 * x28 - x24 * x29)),),
+        (
             x22
             * (
                 2 * P12 * x2 * x7 * x9
@@ -90,10 +90,10 @@ def update_x_P(
                 - x13 * x31
                 - x16 * x3
                 - x17 * x8
-            )
-        ],
-        [x36 * (-P12 * x35 + x10 * x34 + x2 * x8 + x32 - x33 * x7)],
-        [
+            ),
+        ),
+        (x36 * (-P12 * x35 + x10 * x34 + x2 * x8 + x32 - x33 * x7),),
+        (
             x22
             * (
                 -P12 * x32
@@ -106,11 +106,11 @@ def update_x_P(
                 + x15 * x35
                 + x17 * x38
                 - x19 * x33
-            )
-        ],
-        [x20 * x36],
-        [x36 * (P12 * R_shunt + P12 * x4 - x1 * x34 + x10 * x33 - x2 * x38)],
-        [
+            ),
+        ),
+        (x20 * x36,),
+        (x36 * (P12 * R_shunt + P12 * x4 - x1 * x34 + x10 * x33 - x2 * x38),),
+        (
             x22
             * (
                 2 * P12 * x1 * x2 * x9
@@ -123,9 +123,9 @@ def update_x_P(
                 - x13 * x40
                 - x15 * x4
                 - x18 * x5
-            )
-        ],
-    ]
+            ),
+        ),
+    )
 
 
 def main() -> None:

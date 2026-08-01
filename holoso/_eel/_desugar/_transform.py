@@ -311,6 +311,8 @@ class _Transformer:
                 ):
                     self._reject(index, "slice assignment is not supported; rebind the whole value instead")
                 root, path = self._store_path(base, sink)
+                if isinstance(index, ast.Tuple):
+                    return root, (*path, *(IndexSel(self._atom(e, sink)) for e in index.elts))
                 return root, (*path, IndexSel(self._atom(index, sink)))
             case _:
                 self._reject(target, "a store target must be a plain name followed by attributes and indexes")

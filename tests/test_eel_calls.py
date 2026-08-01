@@ -119,16 +119,9 @@ def _tan(x: float) -> float:
     return math.tan(x)
 
 
-def test_a_stub_needing_tuple_unpacking_waits_for_m5_and_reattributes() -> None:
-    """
-    tan_ opens with ``s, c = sin_(x), cos_(x)``, an M5 construct; until then the stub is an honest staging
-    gap whose rejection must still surface at the user's call site with the stub frame in the chain.
-    """
-    with pytest.raises(UnsupportedConstruct, match=r"in math.tan\(\): aggregate values .* \(at _numpy.py:") as info:
-        lower(_tan)
-    location = info.value.location
-    assert location is not None
-    assert location.lineno == _line_of(_tan, "math.tan(x)")
+def test_a_stub_opening_with_tuple_unpacking_inlines() -> None:
+    # tan_ opens with ``s, c = sin_(x), cos_(x)`` -- the unpack construct that gated it through M4.
+    _oracle(_tan, [{"x": 0.5}, {"x": -1.0}, {"x": 2.0}, {"x": 0.0}])
 
 
 def _cbrt(x: float) -> float:
@@ -474,7 +467,7 @@ def _unimplemented_library(x: float) -> float:
 
 
 def _unimplemented_python_library(x: float) -> float:
-    y = np.eye(2)  # noqa: F841
+    y = np.identity(2)  # noqa: F841
     return x
 
 
@@ -485,11 +478,11 @@ def test_unregistered_callables_are_uniform_no_library_is_special() -> None:
     unsupported construct chain-attributed to the user's call site; a source-less callable rejects generically.
     """
     _rejects(_unimplemented_library, "calls to 'math.erf' are not supported yet")
-    with pytest.raises(UnsupportedConstruct, match=r"in np.eye\(\): ") as info:
+    with pytest.raises(UnsupportedConstruct, match=r"in np.identity\(\): ") as info:
         lower(_unimplemented_python_library)
     location = info.value.location
     assert location is not None
-    assert location.lineno == _line_of(_unimplemented_python_library, "np.eye(2)")
+    assert location.lineno == _line_of(_unimplemented_python_library, "np.identity(2)")
 
 
 # ---------------------------------------------------------------------- raise semantics

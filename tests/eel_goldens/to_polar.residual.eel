@@ -1,0 +1,6 @@
+fn to_polar(v_0: float, v_1: float):
+    output [0]: float
+    output [1]: float
+    %0: float = intrinsic hypot2(v_1, v_0)
+    %1: float = intrinsic atan2(v_1, v_0)
+    return %0, %1

@@ -90,9 +90,9 @@ ROWS: list[ParityRow] = [
     ParityRow("kepler", lambda: kepler.eccentric_anomaly, _D, "M7", "ORACLE_OK"),
     ParityRow("recip_newton", lambda: NewtonReciprocal().__call__, _D, "M7", "ORACLE_OK"),
     ParityRow("cordic_sincos", lambda: CordicSinCos(iterations=12).__call__, _D, "M7", "ORACLE_OK"),
-    ParityRow("ekf1_stateless", lambda: ekf1_stateless.update_x_P, _D, "M5", "ORACLE_OK"),
-    ParityRow("to_polar", lambda: polar.to_polar, _D, "M5", "ORACLE_OK"),
-    ParityRow("from_polar", lambda: polar.from_polar, _D, "M5", "ORACLE_OK"),
+    ParityRow("ekf1_stateless", lambda: ekf1_stateless.update_x_P, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("to_polar", lambda: polar.to_polar, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("from_polar", lambda: polar.from_polar, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("imu_frame_transform", lambda: imu_frame_transform.transform, _D, "M7", "ORACLE_OK"),
     ParityRow("iir1_lpf", lambda: IIR1LPF().__call__, _D, "M8", "ORACLE_OK"),
     ParityRow("pid", lambda: PID().__call__, _D, "M8", "ORACLE_OK"),
@@ -105,12 +105,14 @@ ROWS: list[ParityRow] = [
     ParityRow("uart_tx", lambda: UartTx(parity=False).__call__, _D, "M8", "ORACLE_OK"),
     ParityRow("uart_rx", lambda: UartRx(parity=False).__call__, _D, "M8", "ORACLE_OK"),
     ParityRow("ekf1_stateful", lambda: ekf1_stateful.Ekf1().update, _D, "M8", "ORACLE_OK"),
-    ParityRow("iir1_hpf", lambda: IIR1HPF().step, _D, "M5", "REJECTED: stateful sub-object at snapshot conversion"),
+    # The probe's bound-method early-stop holds until M8, so these two cannot advance before it even though
+    # the machinery that will refuse them (snapshot conversion, parameter binding) landed with M5.
+    ParityRow("iir1_hpf", lambda: IIR1HPF().step, _D, "M8", "REJECTED: stateful sub-object at snapshot conversion"),
     ParityRow(
         "finite_set_current_controller",
         lambda: FiniteSetCurrentController().__call__,
         _D,
-        "M5",
+        "M8",
         "REJECTED: unsupported (dataclass/shapeless) parameters at parameter binding",
     ),
 ]

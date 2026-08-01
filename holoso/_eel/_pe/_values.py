@@ -6,12 +6,17 @@ equality is not (``True == 1 == 1.0`` would silently unify a bool arm with an in
 construction normalizes negative zero and refuses NaN, so the compiler's numeric invariants hold in the
 evaluator's own state for free. An opaque value is a captured object that is not an admitted scalar (NaN
 floats included); it is judged at its USE site, never at capture -- desugar hoists every callee through a
-temp, and binding an unused NaN default is CPython-legal. A tuple value is the flat scalar row of a return;
-tuples and opaques also ride unread across call boundaries. Nothing else consumes tuples until aggregates
-land (M5).
+temp, and binding an unused NaN default is CPython-legal.
+
+Aggregate dtype widths are not modeled: leaves live in the subset's width-less int / binary64 float value
+model, the same ratified deviation scalars carry. The ``Allocation`` is the identity the ownership model
+tracks: values are frozen and rebound while allocations persist and carry the monotone sharing state, so a
+store under a residual branch is a new value over the same allocation and joins leafwise.
 """
 
+import math
 from dataclasses import dataclass
+from enum import Enum
 
 from .._ir import LocalRef, Origin, ScalarType, TempRef
 from ._ops import Const, scalar_type
@@ -42,19 +47,60 @@ class Opaque:
     value: object
 
 
+class AllocationState(Enum):
+    UNIQUE = "unique"
+    SHARED = "shared"
+    ESCAPED = "escaped"
+
+
+@dataclass(eq=False, slots=True)
+class Allocation:
+    """One runtime container's identity; the state only ever moves forward (never back toward UNIQUE)."""
+
+    state: AllocationState = AllocationState.UNIQUE
+
+
 @dataclass(frozen=True, slots=True)
-class TupleValue:
-    items: tuple[Scalar, ...]
+class SequenceValue:
+    items: tuple["Value", ...]
+    allocation: Allocation
 
 
-type Value = StaticScalar | ResidualScalar | Opaque | TupleValue
+@dataclass(frozen=True, slots=True)
+class TensorValue:
+    shape: tuple[int, ...]
+    family: ScalarType
+    leaves: tuple[Scalar | Opaque, ...]
+    allocation: Allocation
+
+    def __post_init__(self) -> None:
+        assert self.family in (ScalarType.FLOAT, ScalarType.INT)
+        assert 1 <= len(self.shape) <= 2 and all(dim >= 1 for dim in self.shape)
+        assert len(self.leaves) == math.prod(self.shape)
+        assert all(isinstance(leaf, Opaque) or leaf.stype is self.family for leaf in self.leaves)
+        assert self.family is ScalarType.FLOAT or not any(isinstance(leaf, Opaque) for leaf in self.leaves)
+
+
+@dataclass(frozen=True, slots=True)
+class TensorMethod:
+    """A read of a tensor's bound method (``.flatten``); only a call consumes it."""
+
+    receiver: TensorValue
+    name: str
+
+
+type Value = StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | TensorMethod
 
 
 def same(a: Value, b: Value) -> bool:
     """
     Semantic identity for join folding: typed constant equality for statics, binding identity for residuals
-    (atom origins differ between reads of one binding and must not matter), object identity for opaques.
+    (atom origins differ between reads of one binding and must not matter), object identity for opaques, and
+    allocation identity plus leafwise sameness for aggregates (equal-looking distinct allocations are NOT the
+    same value: mutating one would not touch the other).
     """
+    if a is b:
+        return True
     match a, b:
         case StaticScalar(), StaticScalar():
             return a.const == b.const
@@ -62,8 +108,21 @@ def same(a: Value, b: Value) -> bool:
             return a.stype is b.stype and same_atom(a.atom, b.atom)
         case Opaque(), Opaque():
             return a.value is b.value
-        case TupleValue(), TupleValue():
-            return len(a.items) == len(b.items) and all(same(x, y) for x, y in zip(a.items, b.items))
+        case SequenceValue(), SequenceValue():
+            return (
+                a.allocation is b.allocation
+                and len(a.items) == len(b.items)
+                and all(same(x, y) for x, y in zip(a.items, b.items))
+            )
+        case TensorValue(), TensorValue():
+            return (
+                a.allocation is b.allocation
+                and a.shape == b.shape
+                and a.family is b.family
+                and all(same(x, y) for x, y in zip(a.leaves, b.leaves))
+            )
+        case TensorMethod(), TensorMethod():
+            return a.name == b.name and same(a.receiver, b.receiver)
         case _:
             return False
 
@@ -80,10 +139,9 @@ def same_atom(a: TempRef | LocalRef, b: TempRef | LocalRef) -> bool:
 
 class ExpansionBudget:
     """
-    The one graph-expansion bound of the whole lowering: every structure-producing expansion (power chains now;
-    inlining, unrolling, comprehensions, repetition in later milestones) spends units here, at the expansion
-    site, regardless of whether the produced structure later folds away -- so a blow-up is a located rejection,
-    never a hang. Exact constant arithmetic never spends: folding is not expansion.
+    The one graph-expansion bound of the whole lowering: every structure-producing expansion spends units at
+    its expansion site, regardless of whether the produced structure later folds away, so a blow-up is a
+    located rejection, never a hang. Exact constant arithmetic never spends: folding is not expansion.
     """
 
     def __init__(self, limit: int = 100_000) -> None:

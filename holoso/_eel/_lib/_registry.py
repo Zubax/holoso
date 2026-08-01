@@ -24,7 +24,28 @@ class Library:
     stub: types.FunctionType
 
 
-type Match = Intrinsic | Library
+@dataclass(frozen=True, slots=True)
+class Factory:
+    """
+    A call the partial evaluator folds by invoking the registered builder stub on static arguments and
+    snapshotting the resulting array as a fresh allocation.
+    """
+
+    build: types.FunctionType
+
+
+@dataclass(frozen=True, slots=True)
+class Conversion:
+    """
+    A call the partial evaluator lowers as a structural to-array conversion of its single argument.
+    ``copies`` distinguishes np.array (an independent copy -- the A5 escape hatch) from np.asarray (which
+    returns the argument itself for an array input, so source and result share).
+    """
+
+    copies: bool
+
+
+type Match = Intrinsic | Library | Factory | Conversion
 
 _REGISTRY: dict[object, Match] = {}
 
@@ -58,6 +79,21 @@ def lib[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
         return fn
 
     return register
+
+
+def factory[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
+    assert substituted
+
+    def register(fn: F) -> F:
+        assert isinstance(fn, types.FunctionType)
+        _register(Factory(fn), substituted)
+        return fn
+
+    return register
+
+
+def conversion(*keys: object, copies: bool) -> None:
+    _register(Conversion(copies), keys)
 
 
 def resolve(callee: object) -> Match | None:

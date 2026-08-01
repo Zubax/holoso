@@ -30,8 +30,10 @@ Protocol, per transaction of the ordered vector sequence:
 
 Comparable-domain edges, accepted: the evaluator has no negative zero, so a kernel observing the sign of zero
 (``atan2(-0.0, x)``) diverges; a NaN the reference computes and consumes WITHOUT surfacing it in any leaf (say, a
-comparison against ``inf - inf``) is undetectable host-side and fails loudly for eye triage. Aggregate (array)
-kernel parameters are not driven yet; the vector format stays scalar name -> value until M5 needs more.
+comparison against ``inf - inf``) is undetectable host-side and fails loudly for eye triage. An array kernel
+parameter is driven through its decomposed scalar leaves: the vector row stays name -> value with the leaf names
+(``v_0``, ``v_1``), the expected port set derives from the reference's own jaxtyping annotation (read
+structurally, exactly as the frontend reads it), and the binder reassembles the ndarray argument for CPython.
 """
 
 import inspect
@@ -40,6 +42,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from holoso._eel._names import indexed_names
 from holoso._hir import Hir, HirEvaluator, NoNumber
 
 from ._modelref import flatten_value, port_name
@@ -99,15 +102,46 @@ def instance_leaves(instance: object) -> dict[str, object]:
     return leaves
 
 
-def _binder(reference: Callable[..., object]) -> Callable[[InputRow], tuple[list[Scalar], dict[str, Scalar]]]:
+def _annotation_shape(annotation: object) -> tuple[int, ...] | None:
+    """A jaxtyping-style fixed shape, read structurally like the frontend reads it; None for scalars."""
+    dims = getattr(annotation, "dims", None) if isinstance(annotation, type) else None
+    if not isinstance(dims, tuple):
+        return None
+    sizes = [getattr(dim, "size", None) for dim in dims]
+    assert all(isinstance(size, int) for size in sizes), f"non-static array annotation {annotation!r}"
+    return tuple(size for size in sizes if isinstance(size, int))
+
+
+def _parameter_shapes(reference: Callable[..., object]) -> dict[str, tuple[int, ...] | None]:
+    annotations = inspect.get_annotations(reference)
+    return {name: _annotation_shape(annotations.get(name)) for name in inspect.signature(reference).parameters}
+
+
+def expected_input_names(reference: Callable[..., object]) -> list[str]:
+    shapes = _parameter_shapes(reference)
+    names: list[str] = []
+    for name, shape in shapes.items():
+        names.extend([name] if shape is None else indexed_names(name, shape))
+    assert len(set(names)) == len(names), f"duplicate decomposed input names in {names}"
+    return names
+
+
+def _binder(reference: Callable[..., object]) -> Callable[[InputRow], tuple[list[object], dict[str, object]]]:
     """Row lookups happen outside the discard-guarded call, so a typo'd vector key crashes instead of discarding."""
     parameters = list(inspect.signature(reference).parameters.values())
     kinds = {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
     assert all(parameter.kind in kinds for parameter in parameters), f"unsupported signature {parameters}"
+    shapes = _parameter_shapes(reference)
 
-    def bind(row: InputRow) -> tuple[list[Scalar], dict[str, Scalar]]:
-        args = [row[p.name] for p in parameters if p.kind is not inspect.Parameter.KEYWORD_ONLY]
-        kwargs = {p.name: row[p.name] for p in parameters if p.kind is inspect.Parameter.KEYWORD_ONLY}
+    def value_of(name: str, row: InputRow) -> object:
+        shape = shapes[name]
+        if shape is None:
+            return row[name]
+        return np.array([row[leaf] for leaf in indexed_names(name, shape)]).reshape(shape)
+
+    def bind(row: InputRow) -> tuple[list[object], dict[str, object]]:
+        args = [value_of(p.name, row) for p in parameters if p.kind is not inspect.Parameter.KEYWORD_ONLY]
+        kwargs = {p.name: value_of(p.name, row) for p in parameters if p.kind is inspect.Parameter.KEYWORD_ONLY}
         return args, kwargs
 
     return bind
@@ -153,7 +187,7 @@ def assert_hir_matches_reference(
     """Drive the ordered ``vectors`` through both sides; returns the number of compared transactions."""
     evaluator = HirEvaluator(hir)
     input_names = hir.input_names()
-    parameter_names = [parameter.name for parameter in inspect.signature(reference).parameters.values()]
+    parameter_names = expected_input_names(reference)
     assert input_names == parameter_names, f"{label}: input ports {input_names} != parameters {parameter_names}"
     out_ports = [out.name for out in hir.outputs]
     assert len(set(out_ports)) == len(out_ports), f"{label}: duplicate output port names in {out_ports}"
