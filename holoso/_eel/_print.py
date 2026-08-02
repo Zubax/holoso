@@ -115,10 +115,19 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
             put("return" if not values else f"return {', '.join(_atom(v) for v in values)}", origin)
         case SlotWrite(origin=origin, slot=slot, value=value):
             put(f"slot {_slot(slot)} = {_atom(value)}", origin)
-        case Break(origin=origin):
+        case Break(origin=origin) | ResidualBreak(origin=origin):
             put("break", origin)
-        case Continue(origin=origin):
+        case Continue(origin=origin) | ResidualContinue(origin=origin):
             put("continue", origin)
+        case ResidualFrame(origin=origin, rows=rows, body=body):
+            for row in rows:
+                put(f"result %{row.index}: {row.stype.value}", row.origin)
+            put("frame:", origin)
+            _block(body, depth + 1, lines, locations)
+        case ResidualFrameReturn(origin=origin, values=values):
+            # Spelled apart from a kernel return: this one converges at the frame exit and commits no
+            # outputs or slots, and a golden must not read the same for both.
+            put("exit" if not values else f"exit {', '.join(_atom(v) for v in values)}", origin)
         case Raise(origin=origin, exc_type=exc_type, parts=parts):
             rendered = " ".join(repr(p) if isinstance(p, str) else _atom(p) for p in parts)
             put(f"raise {exc_type}" + (f" {rendered}" if rendered else ""), origin)

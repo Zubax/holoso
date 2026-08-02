@@ -38,10 +38,12 @@ allocation for what is one of two runtime objects, erasing the provenance the di
 Every other exit is a PENDING LANE, not a terminator: a break, continue, or callee return holds its branch
 open while the surviving lane's continuation nests into the other arm, and the exit's one consumer -- the
 enclosing loop driver for break/continue, the frame boundary for a callee return -- joins the lanes under
-the one join rule and seals the region flat. Root returns discharge inside residual loop bodies too (the
-site's edge leaves before the latch); a body returning on EVERY path cannot iterate and rejects. Staged by
-ruling: break/continue crossing a residual loop's own back edge, and a callee return crossing the callee's
-own residual loop.
+the one join rule and seals the region flat. A residual loop consumes its own break and continue lanes into
+bare terminators over join temps; a callee return crossing the callee's own residual loop cannot rejoin its
+siblings as arms, so the whole callee region wraps into a frame whose sites converge at the frame exit, and
+until then that one loop stays open for the boundary fold to write into. Root returns discharge inside
+residual loop bodies too (the site's edge leaves before the latch); a body whose every path leaves the loop
+has no back edge, cannot iterate, and rejects.
 """
 
 import dataclasses
@@ -104,8 +106,8 @@ _RETURN_KEY = "<return>"
 class Ctx:
     """
     Where interpretation stands: a residual branch arm rejects raise; a residual loop also rejects aggregate
-    state installs and returns of the frame interpreted inside it -- ``inline`` starts a fresh context, so
-    this gates a return crossing the callee's OWN residual loop, never a callee merely called from one.
+    state installs. ``inline`` starts a fresh context, so the flags describe the frame's own position, never
+    the caller's.
     """
 
     branch: bool = False
@@ -115,7 +117,7 @@ class Ctx:
         return Ctx(branch=True, loop=self.loop)
 
 
-type Sink = list[Stmt | _OpenIf]
+type Sink = list[Stmt | _OpenIf | _OpenWhile]
 
 
 @dataclass(slots=True)
@@ -131,11 +133,31 @@ class _OpenIf:
     orelse: Sink
 
 
+@dataclass(slots=True)
+class _OpenWhile:
+    """
+    A residual loop published with a return lane still pending inside its body; the frame boundary folds
+    the lane, terminates its arms, and freezes the loop with the rest of the callee region.
+    """
+
+    origin: Origin
+    phis: tuple[LoopPhi, ...]
+    header: Sink
+    cond: Atom
+    body: Sink
+
+
 def _frozen(sink: Sink) -> tuple[Stmt, ...]:
-    return tuple(
-        If(item.origin, item.cond, _frozen(item.then), _frozen(item.orelse)) if isinstance(item, _OpenIf) else item
-        for item in sink
-    )
+    out: list[Stmt] = []
+    for item in sink:
+        match item:
+            case _OpenIf():
+                out.append(If(item.origin, item.cond, _frozen(item.then), _frozen(item.orelse)))
+            case _OpenWhile():
+                out.append(ResidualWhile(item.origin, item.phis, _frozen(item.header), item.cond, _frozen(item.body)))
+            case _:
+                out.append(item)
+    return tuple(out)
 
 
 class _ExitKind(enum.Enum):
@@ -149,7 +171,9 @@ class _Exit:
     """
     A pending exit lane, joined at the one consumer its kind names. ``env`` is a SNAPSHOT: a statement-level
     exit ends a lane whose frame dict a sibling lane's fold may later revive and keep mutating in place, so
-    capturing by reference would hand the consumer the survivor's values.
+    capturing by reference would hand the consumer the survivor's values. ``crossed`` marks a return lane
+    that left a residual loop: its arms lie inside the published loop and never reconverge with any seal
+    region, so folds keep it on the union of sinks until the frame boundary wraps the region.
     """
 
     kind: _ExitKind
@@ -157,6 +181,7 @@ class _Exit:
     env: _Env
     sinks: list[Sink]
     result: Value | None = None
+    crossed: bool = False
 
 
 @dataclass(slots=True)
@@ -442,11 +467,6 @@ class Interpreter:
                     current = flow.fall
                     continue
                 case Return(origin=origin):
-                    if ctx.loop and not frame.root:
-                        reject(
-                            origin,
-                            "a return inside a data-dependent loop of an inlined function is not supported yet",
-                        )
                     if frame.root:
                         self._return_site(stmt, frame, piece)
                         self._spread(current, piece)
@@ -582,14 +602,28 @@ class Interpreter:
         """
         Intermediate merges stay on the UNION of the constituent sinks -- sealing early would place a later
         materialization flat where an unfolded lane's path could read it undefined; only the final lane,
-        which covers every path of the region, continues at ``seal``.
+        which covers every path of the region, continues at ``seal``. A crossed lane never seals: its arms
+        do not reconverge with the seal region, so it stays on the union for the frame boundary to wrap.
         """
+        folded = self._fold_union(origin, lanes)
+        if folded.crossed:
+            return folded
+        return _Exit(folded.kind, folded.origin, folded.env, seal, folded.result)
+
+    def _fold_union(self, origin: Origin, lanes: list[_Exit]) -> _Exit:
         assert lanes and all(lane.kind is _ExitKind.RETURN for lane in lanes)
         folded = lanes[0]
         for lane in lanes[1:]:
             merged = self._join_results(origin, folded.result, lane.result, folded.sinks, lane.sinks)
-            folded = _Exit(_ExitKind.RETURN, origin, folded.env, folded.sinks + lane.sinks, merged)
-        return _Exit(folded.kind, folded.origin, folded.env, seal, folded.result)
+            folded = _Exit(
+                _ExitKind.RETURN,
+                origin,
+                folded.env,
+                folded.sinks + lane.sinks,
+                merged,
+                crossed=folded.crossed or lane.crossed,
+            )
+        return folded
 
     def _join_results(
         self, origin: Origin, a: Value | None, b: Value | None, then_sinks: list[Sink], else_sinks: list[Sink]
@@ -815,14 +849,23 @@ class Interpreter:
         parts = [(lane.env, lane.sinks) for lane in lanes]
         if fall is not None:
             parts.append((frame.env, fall))
-        env, sinks = parts[0]
-        for next_env, next_sinks in parts[1:]:
-            env = self._join(origin, env, sinks, next_env, next_sinks)
-            sinks = sinks + next_sinks
+        env, sinks = self._meet_envs(origin, parts)
         if frame.env is not env:
             frame.env.clear()
             frame.env.update(env)
         return seal if seal is not None else sinks
+
+    def _meet_envs(self, origin: Origin, parts: list[tuple[_Env, list[Sink]]]) -> tuple[_Env, list[Sink]]:
+        """
+        Folded pairwise against the GROWING sink union, so each join's materializations reach every lane
+        already folded in -- a join written only into the newest pair's sinks would leave the earlier lanes
+        reading it undefined.
+        """
+        env, sinks = parts[0]
+        for next_env, next_sinks in parts[1:]:
+            env = self._join(origin, env, sinks, next_env, next_sinks)
+            sinks = sinks + next_sinks
+        return env, sinks
 
     def _while(self, stmt: While, frame: Frame, sinks: list[Sink], ctx: Ctx) -> _Flow:
         """
@@ -844,7 +887,7 @@ class Interpreter:
                 frame.env.clear()
                 frame.env.update(saved)
                 piece = self._piece(current)
-                self._residual_while(stmt, frame, piece)
+                escaped.extend(self._residual_while(stmt, frame, piece))
                 self._spread(current, piece)
                 break
             self._spread(current, header_piece)
@@ -865,15 +908,20 @@ class Interpreter:
             reject(origin, "the branch condition must be a bool; Python truthiness is not supported")
         return cond
 
-    def _residual_while(self, stmt: While, frame: Frame, sink: Sink) -> None:
+    def _residual_while(self, stmt: While, frame: Frame, sink: Sink) -> list[_Exit]:
         """
         The carried set is the syntactic assigned-name set of header+body, restricted to names bound at entry
         -- each becomes a scalar phi. One symbolic header+body pass computes the back-edge values; the stype
         assumptions join per the one rule (a FLOAT phi converts an INT back value in place; an INT assumption
-        meeting a FLOAT back value promotes and re-runs, monotone and bounded by the carried count). The
-        post-loop env is the env after the final pass's HEADER: the header runs on the failing test too, so
-        its bindings survive the loop (emit-side the header dominates the exit), while body-only names drop
-        (a zero-trip loop never binds them).
+        meeting a FLOAT back value promotes and re-runs, monotone and bounded by the carried count).
+
+        The loop consumes its own break and continue lanes. Continue lanes meet the fall lane at the latch,
+        so ``phi.back`` is the joined value and back-edge conversions broadcast to every back sink (a direct
+        continue never reaches the flat body tail). Break lanes meet the normal exit after promotion settles;
+        the normal lane's join temps land at HEADER END, the only region that runs on the normal exit path
+        and on no break path (assignments on non-final tests are dead). The post-loop env is that meet -- or,
+        with no breaks, the env after the final pass's header: the header runs on the failing test too, so
+        its bindings survive the loop, while body-only names drop (a zero-trip loop never binds them).
         """
         origin = stmt.origin
         carried: list[tuple[_EnvKey, list[int]]] = []
@@ -935,15 +983,19 @@ class Interpreter:
             post_header_env = dict(loop_frame.env)
             body_sink: Sink = []
             body_flow = self._block(stmt.body, loop_frame, [body_sink], loop_ctx)
-            for exit in body_flow.exits:
-                assert exit.kind is not _ExitKind.RETURN, "callee returns reject before their lane is born"
-                reject(exit.origin, f"a `{exit.kind.value}` inside a data-dependent loop is not supported yet")
-            if body_flow.fall is None:
+            returns = [exit for exit in body_flow.exits if exit.kind is _ExitKind.RETURN]
+            assert not (frame.root and returns), "a root return discharges at its site"
+            continues = [exit for exit in body_flow.exits if exit.kind is _ExitKind.CONTINUE]
+            breaks = [exit for exit in body_flow.exits if exit.kind is _ExitKind.BREAK]
+            if body_flow.fall is None and not continues:
+                how = "leaves the loop" if breaks else "returns"
                 reject(
                     origin,
-                    "the body of this data-dependent loop returns on every path, so the loop cannot iterate; "
+                    f"the body of this data-dependent loop {how} on every path, so the loop cannot iterate; "
                     "write `if` instead",
                 )
+            latch_sinks = self._meet_lanes(origin, loop_frame, continues, body_flow.fall, None)
+            assert latch_sinks is not None, "a body with no back edge was rejected above"
             promoted = False
             backs: dict[tuple[_EnvKey, int], Scalar] = {}
             for key, indices in carried:
@@ -957,7 +1009,7 @@ class Interpreter:
                     if back.stype is assumed:
                         backs[(key, position)] = back
                     elif assumed is ScalarType.FLOAT and back.stype is ScalarType.INT:
-                        backs[(key, position)] = self.as_float(back, origin, body_sink)
+                        backs[(key, position)] = self._float_in(back, origin, latch_sinks)
                     elif assumed is ScalarType.INT and back.stype is ScalarType.FLOAT:
                         if isinstance(key, tuple):
                             assert len(indices) == 1 and isinstance(
@@ -993,19 +1045,34 @@ class Interpreter:
                     LoopPhi(origin, index, stypes[(key, position)], _express.materialize(entry, origin), back_atom)
                 )
         _logger.debug(
-            "%s: the loop at %s residualizes with %d carried phi(s): %s",
+            "%s: the loop at %s residualizes with %d carried phi(s), %d break(s), %d continue(s): %s",
             frame.fn.__qualname__,
             origin.location,
             len(phis),
+            len(breaks),
+            len(continues),
             ", ".join(str(key) for key, _ in carried),
         )
-        sink.append(
-            ResidualWhile(
-                origin, tuple(phis), _frozen(header_sink), _express.materialize(cond, origin), _frozen(body_sink)
-            )
-        )
+        exit_env = post_header_env
+        if breaks:
+            parts = [(lane.env, lane.sinks) for lane in breaks] + [(post_header_env, [header_sink])]
+            exit_env, _ = self._meet_envs(origin, parts)
+        for lane in breaks:
+            for arm in lane.sinks:
+                arm.append(ResidualBreak(lane.origin))
+        for lane in continues:
+            for arm in lane.sinks:
+                arm.append(ResidualContinue(lane.origin))
+        cond_atom = _express.materialize(cond, origin)
+        if returns:
+            for lane in returns:
+                lane.crossed = True
+            sink.append(_OpenWhile(origin, tuple(phis), header_sink, cond_atom, body_sink))
+        else:
+            sink.append(ResidualWhile(origin, tuple(phis), _frozen(header_sink), cond_atom, _frozen(body_sink)))
         frame.env.clear()
-        frame.env.update(post_header_env)
+        frame.env.update(exit_env)
+        return returns
 
     def _back_leaves(self, key: _EnvKey, back_value: Value, entry_env: _Env, origin: Origin) -> list[Scalar]:
         """The per-leaf back-edge values of one carried key; a slot tree must keep its structure and identity."""
@@ -1393,6 +1460,7 @@ class Interpreter:
                 value = self._conform_value(value, declared, site, sink, f"the argument {param.name!r}")
             env[param.name] = value
         inner = Frame(fn=fn, annotations=annotations, env=env, root=False, slots=frame.slots)
+        start = len(sink)
         self._inlining.add(fn)
         try:
             flow = self._block(callee.body, inner, [sink], Ctx())
@@ -1403,7 +1471,37 @@ class Interpreter:
             reject(site, "the call can complete without returning a value, so it cannot be used in an expression")
         if flow.fall is not None or not flow.exits:
             reject(site, "the call returns no value, so it cannot be used in an expression")
-        result = self._fold_returns(site, flow.exits, [sink]).result
-        if result is None:
+        folded = self._fold_returns(site, flow.exits, [sink])
+        if folded.result is None:
             reject(site, "the call returns no value, so it cannot be used in an expression")
-        return result
+        if folded.crossed:
+            return self._wrap_frame(site, folded, sink, start)
+        return folded.result
+
+    def _wrap_frame(self, site: Origin, folded: _Exit, sink: Sink, start: int) -> Value:
+        """
+        A return that crossed the callee's own residual loop cannot rejoin its siblings as arms, so the
+        callee region converges at a frame exit instead: every lane's arm ends with one terminator carrying
+        the residual result leaves, and the caller reads them back through the frame rows. Statically
+        uniform leaves never leave the value model, and the rebuilt tree keeps the fold's allocations.
+        """
+        assert folded.result is not None
+        assert len({id(arm) for arm in folded.sinks}) == len(folded.sinks), "the union holds each lane region once"
+        rows: list[FrameRow] = []
+        atoms: list[Atom] = []
+        leaves: list[Scalar | Opaque] = []
+        for leaf in tree_leaves(folded.result):
+            if isinstance(leaf, (StaticScalar, Opaque)):
+                leaves.append(leaf)
+                continue
+            index = self.fresh()
+            rows.append(FrameRow(site, index, leaf.stype))
+            atoms.append(_express.materialize(leaf, site))
+            leaves.append(ResidualScalar(leaf.stype, TempRef(site, index)))
+        terminator = ResidualFrameReturn(site, tuple(atoms))
+        for arm in folded.sinks:
+            arm.append(terminator)
+        body = _frozen(sink[start:])
+        del sink[start:]
+        sink.append(ResidualFrame(site, tuple(rows), body))
+        return tree_rebuild(folded.result, iter(leaves))

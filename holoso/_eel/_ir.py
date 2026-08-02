@@ -18,8 +18,10 @@ evaluator can reject it with the escaped-root diagnostic instead of a syntax err
 
 Residual-only forms (never produced by the desugarer, introduced by the partial evaluator, consumed by emit):
 IntrinsicCall (a resolved HIR operator riding opaquely — also the spelling of every PE-inserted conversion),
-SlotRead/SlotWrite over flattened state-slot paths, ResidualWhile with its explicit loop-carried phis,
-ResidualReturn against the OutputDecl table, and the mandatory ScalarType annotations on residual Assign/Param.
+SlotRead/SlotWrite over flattened state-slot paths, ResidualWhile with its explicit loop-carried phis and the
+ResidualBreak/ResidualContinue terminators of its body, ResidualFrame with its result rows and the
+ResidualFrameReturn terminators of its sites, ResidualReturn against the OutputDecl table, and the mandatory
+ScalarType annotations on residual Assign/Param.
 Residual Eel is fully scalar: no TupleExpr survives
 partial evaluation; a multi-output kernel returns one typed atom per OutputDecl row. A ResidualReturn is a
 TERMINATOR — one per return path, each preceded by the per-leaf SlotWrite commits of that path — and emission
@@ -453,6 +455,55 @@ class Continue:
 
 
 @dataclass(frozen=True, slots=True)
+class ResidualBreak:
+    """
+    Residual-only terminator: the edge from a ``ResidualWhile`` body to the loop exit. Values leaving on this
+    edge ride ordinary join temps the partial evaluator assigns in the break arm and at header end, so the
+    emitter's loop-exit join stays mechanical.
+    """
+
+    origin: Origin
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualContinue:
+    """Residual-only terminator: the edge from a ``ResidualWhile`` body to the back edge (the next test)."""
+
+    origin: Origin
+
+
+@dataclass(frozen=True, slots=True)
+class FrameRow:
+    """One residual result column of a ``ResidualFrame``; ``index`` is the temp the caller reads."""
+
+    origin: Origin
+    index: int
+    stype: ScalarType
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualFrame:
+    """
+    Residual-only: an inlined callee whose return sites include one inside the callee's own residual loop,
+    so the sites cannot rejoin as sibling arms and instead converge at the frame exit. Each
+    ``ResidualFrameReturn`` carries one atom per row, in row order; statically uniform result leaves never
+    enter the rows -- they stay in the caller's value model.
+    """
+
+    origin: Origin
+    rows: tuple[FrameRow, ...]
+    body: "Block"
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualFrameReturn:
+    """Residual-only terminator: one return site of a ``ResidualFrame``, one atom per frame row."""
+
+    origin: Origin
+    values: tuple[Atom, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Raise:
     """
     A raise with a static message: literal string parts interleaved with hoisted value atoms, formatted by the
@@ -479,6 +530,10 @@ type Stmt = (
     | SlotWrite
     | Break
     | Continue
+    | ResidualBreak
+    | ResidualContinue
+    | ResidualFrame
+    | ResidualFrameReturn
     | Raise
 )
 

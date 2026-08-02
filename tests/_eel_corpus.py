@@ -229,6 +229,33 @@ class Fir4:
         return acc
 
 
+def _into_band(x: float) -> float:
+    while x > 1.0:
+        if x < 2.0:
+            return x
+        x = x * 0.5
+    return x
+
+
+def band_scan(x: float, floor: float) -> float:
+    """A helper returning from inside its own data-dependent scan; its sites converge at the frame exit."""
+    return _into_band(x) + floor
+
+
+def convergence_steps(x: float, tol: float) -> float:
+    """Early-exit iteration: halve toward the tolerance, skim the coarse steps, stop after six tallies."""
+    err = x
+    steps = 0.0
+    while err > tol:
+        err = err * 0.5
+        if err > 16.0:
+            continue
+        steps = steps + 1.0
+        if steps > 6.0:
+            break
+    return err + steps * 0.001
+
+
 class Biquad:
     """A direct-form-II-transposed biquad; the two delay registers are the state."""
 

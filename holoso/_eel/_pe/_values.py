@@ -207,7 +207,7 @@ def tensor_occurrences(value: Value) -> list[Allocation]:
             return []
 
 
-def tree_rebuild(value: Value, leaves: Iterator[Scalar]) -> Value:
+def tree_rebuild(value: Value, leaves: Iterator[Scalar | Opaque]) -> Value:
     """The same structure over the SAME allocations with the scalar leaves replaced in declaration order."""
     match value:
         case SequenceValue(items=items, allocation=allocation):

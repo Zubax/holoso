@@ -1,0 +1,26 @@
+fn convergence_steps(x: float, tol: float):
+    output [0]: float
+    phi %1: float = x -> %4
+    phi %2: float = 0.0 -> %8
+    while:
+        %3: bool = intrinsic frelational<gt>(%1, tol)
+        %9: float = %1
+        %10: float = %2
+    do %3:
+        %4: float = intrinsic mul(%1, 0.5)
+        %5: bool = intrinsic frelational<gt>(%4, 16.0)
+        if %5:
+            %8: float = %2
+            continue
+        else:
+            %6: float = intrinsic add(%2, 1.0)
+            %7: bool = intrinsic frelational<gt>(%6, 6.0)
+            if %7:
+                %9: float = %4
+                %10: float = %6
+                break
+            else:
+                %8: float = %6
+    %11: float = intrinsic mul(%10, 0.001)
+    %12: float = intrinsic add(%9, %11)
+    return %12

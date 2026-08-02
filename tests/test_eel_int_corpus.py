@@ -15,6 +15,7 @@ from holoso._errors import UnsupportedConstruct
 from holoso._mir import lower as lower_to_mir
 
 from ._eel_corpus import Biquad, Crc8, Debouncer, Fir4, IntUartRx, IntUartTx, Lfsr16, NcoPhase, PriorityEncoder, Pwm
+from ._eel_corpus import band_scan, convergence_steps
 from ._eeloracle import InputRow, assert_hir_matches_reference
 
 
@@ -63,6 +64,16 @@ _INT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]
 _FLOAT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]] = [
     ("fir4", lambda: Fir4((0.25, 0.5, 0.25, 0.125)).step, _rows("x", [1.0, 2.0, -1.0, 0.5, 3.0, -2.5, 0.0])),
     ("biquad", lambda: Biquad((0.2, 0.4, 0.2), (-0.5, 0.25)).step, _rows("x", [1.0, 0.0, 0.0, 2.0, -1.0, 0.5, 0.0])),
+    (
+        "convergence_steps",
+        lambda: convergence_steps,
+        [{"x": 100.0, "tol": 1.0}, {"x": 3.0, "tol": 8.0}, {"x": 500.0, "tol": 0.0}, {"x": -1.0, "tol": 0.5}],
+    ),
+    (
+        "band_scan",
+        lambda: band_scan,
+        [{"x": 20.0, "floor": 0.5}, {"x": 1.5, "floor": 0.0}, {"x": 0.25, "floor": 1.0}, {"x": 2.0, "floor": -1.0}],
+    ),
 ]
 
 _CASES = _INT_CASES + _FLOAT_CASES

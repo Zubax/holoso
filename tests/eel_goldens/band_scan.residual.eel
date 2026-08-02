@@ -1,0 +1,16 @@
+fn band_scan(x: float, floor: float):
+    output [0]: float
+    result %5: float
+    frame:
+        phi %1: float = x -> %4
+        while:
+            %2: bool = intrinsic frelational<gt>(%1, 1.0)
+        do %2:
+            %3: bool = intrinsic frelational<lt>(%1, 2.0)
+            if %3:
+                exit %1
+            else:
+                %4: float = intrinsic mul(%1, 0.5)
+        exit %1
+    %6: float = intrinsic add(%5, floor)
+    return %6

@@ -215,10 +215,14 @@ exit block -- extra control edges, never predication -- and a return site may si
 where its edge simply leaves for the exit block before the latch. Every other exit is a pending lane rather than a
 terminator: a break, continue, or inlined-callee return holds its branch open while the surviving path's
 continuation nests into the other arm, and the exit's one consumer -- the enclosing loop for break and continue,
-the frame boundary for a callee return -- joins the lanes under the one join rule and seals the region. Nothing
-about this reaches the residual program: consumed exits print as ordinary nested branches. Two exit forms remain
-staged gaps by ruling: break/continue crossing a dynamic loop's own back edge, and a callee return crossing the
-callee's own dynamic loop.
+the frame boundary for a callee return -- joins the lanes under the one join rule and seals the region. In an
+unrolled loop the consumed exits print as ordinary nested branches; a dynamic loop instead consumes its break and
+continue lanes into bare residual terminators, the values leaving on those edges riding ordinary join temps so
+emission's loop-exit and back-edge joins stay mechanical. A callee return crossing the callee's own dynamic loop
+cannot rejoin its siblings as branch arms, so the inlined callee region becomes a residual frame: each return site
+ends in a terminator carrying the residual result leaves, all sites converge at the frame's exit, and a result
+leaf statically identical across every site never leaves the value model. A loop body whose every path leaves the
+loop has no back edge and is rejected -- such a loop cannot iterate and is an `if` in disguise.
 
 Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below, never here. Mixed int/float
 expressions promote to float C-style, true division always yields float as in Python, a power yields float unless it

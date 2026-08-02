@@ -130,9 +130,9 @@ def prune(stmts: list[Stmt] | tuple[Stmt, ...], live_after: set[int] | None = No
                     continue
                 live = then_live | else_live | reads(cond)
                 kept_reversed.append(If(origin, cond, tuple(then_kept), tuple(else_kept)))
-            case ResidualWhile():
-                # A residual loop is never dead (termination is observable); its interior is kept whole and
-                # HIR's own sweeps clean any dead interior operations.
+            case ResidualWhile() | ResidualFrame():
+                # A residual loop is never dead (termination is observable), and a frame always contains
+                # one; the interior is kept whole and HIR's own sweeps clean any dead interior operations.
                 defined, read = _loop_temps((stmt,))
                 live -= defined
                 live |= read - defined
@@ -175,9 +175,16 @@ def _loop_temps(stmts: tuple[Stmt, ...]) -> tuple[set[int], set[int]]:
                     read |= inner_read
             case SlotWrite(value=value):
                 read |= reads(value)
-            case ResidualReturn(values=values):
+            case ResidualReturn(values=values) | ResidualFrameReturn(values=values):
                 for atom in values:
                     read |= reads(atom)
+            case ResidualBreak() | ResidualContinue():
+                pass
+            case ResidualFrame(rows=rows, body=body):
+                defined |= {row.index for row in rows}
+                inner_defined, inner_read = _loop_temps(body)
+                defined |= inner_defined
+                read |= inner_read
             case _:
                 raise AssertionError(stmt)
     return defined, read

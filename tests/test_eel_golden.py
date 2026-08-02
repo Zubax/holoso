@@ -31,7 +31,7 @@ from recip_newton import NewtonReciprocal  # noqa: E402
 from schmitt_trigger import SchmittTrigger  # noqa: E402
 from uart import UartRx  # noqa: E402
 
-from ._eel_corpus import PriorityEncoder
+from ._eel_corpus import PriorityEncoder, band_scan, convergence_steps
 
 _GOLDENS: list[tuple[str, Callable[[], object]]] = [
     ("madd", lambda: madd.madd),
@@ -60,6 +60,11 @@ _RESIDUAL_GOLDENS: list[tuple[str, Callable[[], object]]] = [
     # Pins the loop-exit shape: break lanes hold their branches open, the trips nest into the surviving
     # arms, and the loop-end join seals the exit value through pairwise join chains.
     ("priority_encoder", lambda: PriorityEncoder().step),
+    # Pins the residual-loop exit shape: bare break/continue terminators, the normal lane's exit join
+    # temps at header end, and the continue lane feeding the back edge.
+    ("convergence_steps", lambda: convergence_steps),
+    # Pins the frame shape: the result row, the in-loop and post-loop sites carrying the folded atom.
+    ("band_scan", lambda: band_scan),
 ]
 
 _DIRECTORY = Path(__file__).resolve().parent / "eel_goldens"

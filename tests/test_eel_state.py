@@ -854,12 +854,187 @@ def _calls_loop_return_helper(x: float) -> float:
     return _loop_return_helper(x) + 1.0
 
 
+def _halve_into_band(x: float) -> float:
+    while x > 1.0:
+        if x < 2.0:
+            return x
+        x = x * 0.5
+    return x
+
+
+def _crossing_inside_enclosing_loop(a: float) -> float:
+    acc = a
+    while acc > 3.0:
+        acc = acc - _halve_into_band(acc)
+    return acc
+
+
+def _header_band(x: float) -> float:
+    while x > 4.0:
+        if x < 8.0:
+            return x
+        x = x * 0.5
+    return x
+
+
+def _crossing_in_header(x: float) -> float:
+    acc = x
+    while _header_band(acc) > 0.5:
+        acc = acc * 0.25
+    return acc
+
+
+def _static_pick(c: bool, x: float) -> int:
+    while c:
+        if x > 0.0:
+            return 3
+        c = False
+    return 3
+
+
+def _uses_static_pick(x: float, c: bool) -> float:
+    # Both sites return the same constant, so the result must STAY static: a sequence subscript demands it.
+    v = (x, x * 2.0, x * 3.0, x * 4.0)
+    return v[_static_pick(c, x)]
+
+
+def _mixed_sibling_and_crossing(x: float) -> float:
+    if x < 0.0:
+        return -1.0
+    while x > 2.0:
+        if x < 4.0:
+            return x * 10.0
+        x = x * 0.5
+    return x
+
+
+def _calls_mixed_sibling_and_crossing(x: float) -> float:
+    return _mixed_sibling_and_crossing(x) + 0.125
+
+
+def _int_float_sites(x: float) -> float:
+    while x > 2.0:
+        if x < 4.0:
+            return 7
+        x = x * 0.5
+    return x
+
+
+def _calls_int_float_sites(x: float) -> float:
+    return _int_float_sites(x) * 2.0
+
+
+def _pair_helper(x: float) -> tuple[float, float]:
+    n = 0.0
+    while x > 2.0:
+        if x < 4.0:
+            return x, n
+        x = x * 0.5
+        n = n + 1.0
+    return x, n
+
+
+def _calls_pair_helper(x: float) -> float:
+    lo, count = _pair_helper(x)
+    return lo + count * 100.0
+
+
+def _exits_and_return_helper(x: float, cap: float) -> float:
+    hits = 0.0
+    while x > 0.0:
+        x = x - 1.0
+        if hits > cap:
+            return hits * 1000.0
+        if x > 6.0:
+            hits = hits + 2.0
+            continue
+        if x < 1.0:
+            break
+        hits = hits + 1.0
+    return hits + x
+
+
+def _calls_exits_and_return(x: float, cap: float) -> float:
+    return _exits_and_return_helper(x, cap) - 0.5
+
+
+def _nested_loops_helper(x: float, n: float) -> float:
+    while n > 0.0:
+        n = n - 1.0
+        y = x + n
+        while y > 1.0:
+            if y < 2.0:
+                return y + n * 10.0
+            y = y * 0.5
+    return -n
+
+
+def _calls_nested_loops(x: float, n: float) -> float:
+    return _nested_loops_helper(x, n) + 0.25
+
+
+def _outer_band(x: float) -> float:
+    while x > 4.0:
+        if x < 8.0:
+            return _halve_into_band(x) + 1.0
+        x = x * 0.5
+    return _halve_into_band(x)
+
+
+def _calls_nested_frames(x: float) -> float:
+    return _outer_band(x) * 2.0
+
+
+def _broadcast_host(x: float, y: float) -> float:
+    for _ in range(1):
+        if x > 0.0:
+            return x
+        if y > 1.0:
+            break
+    return _halve_into_band(y) + 0.5
+
+
+def _calls_broadcast_host(x: float, y: float) -> float:
+    return _broadcast_host(x, y)
+
+
+def _all_return_loop_helper(c: bool) -> int:
+    while c:
+        return 3
+    return 3
+
+
+def _calls_all_return_loop_helper(c: bool) -> int:
+    return _all_return_loop_helper(c)
+
+
 def test_a_callee_that_can_fall_through_cannot_return_a_value() -> None:
     _rejects(_calls_falling_helper, "the call can complete without returning a value")
 
 
-def test_a_return_inside_a_callee_residual_loop_is_a_staged_gap() -> None:
-    _rejects(_calls_loop_return_helper, "a return inside a data-dependent loop of an inlined function")
+def test_returns_inside_callee_residual_loops_match_cpython() -> None:
+    _oracle(_calls_loop_return_helper, [{"x": 15.0}, {"x": 5.0}, {"x": 0.0}, {"x": -3.0}, {"x": 10.5}])
+    _oracle(_crossing_inside_enclosing_loop, [{"a": 20.0}, {"a": 3.0}, {"a": 3.5}, {"a": 100.0}])
+    _oracle(_crossing_in_header, [{"x": 40.0}, {"x": 0.4}, {"x": 4.0}, {"x": 1000.0}])
+    _oracle(_uses_static_pick, [{"x": 2.0, "c": True}, {"x": -1.0, "c": True}, {"x": 2.0, "c": False}])
+    # The pre-loop sibling lane must keep its arm in the union: a fold that sealed it flat would leave the
+    # in-loop lane's continuation unreachable.
+    _oracle(_calls_mixed_sibling_and_crossing, [{"x": -5.0}, {"x": 1.0}, {"x": 3.0}, {"x": 50.0}])
+    _oracle(_calls_int_float_sites, [{"x": 3.0}, {"x": 1.0}, {"x": 64.0}])
+    _oracle(_calls_pair_helper, [{"x": 3.0}, {"x": 1.5}, {"x": 80.0}, {"x": -2.0}])
+    _oracle(
+        _calls_exits_and_return,
+        [{"x": 10.0, "cap": 3.0}, {"x": 10.0, "cap": 100.0}, {"x": 4.0, "cap": 0.0}, {"x": 0.0, "cap": 1.0}],
+    )
+    _oracle(_calls_nested_loops, [{"x": 1.5, "n": 3.0}, {"x": 0.5, "n": 2.0}, {"x": 8.0, "n": 1.0}])
+    # A frame nested inside another frame's own crossing lane, and a frame built while an unrelated
+    # pending lane keeps two sinks open, so the wrap runs on a broadcast piece.
+    _oracle(_calls_nested_frames, [{"x": 20.0}, {"x": 5.0}, {"x": 0.5}, {"x": 100.0}])
+    _oracle(_calls_broadcast_host, [{"x": 1.0, "y": 8.0}, {"x": -1.0, "y": 8.0}, {"x": -1.0, "y": 0.5}])
+
+
+def test_a_callee_loop_body_returning_on_every_path_cannot_iterate() -> None:
+    _rejects(_calls_all_return_loop_helper, "returns on every path, so the loop cannot iterate")
 
 
 def _return_shape_mismatch(c: bool, x: float, /) -> tuple[float, ...]:

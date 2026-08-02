@@ -1,7 +1,8 @@
 """
 Loops and comprehensions: static unrolling (trip-by-trip, budget-bounded), the residual while with its
-loop-carried scalar phis, and the staged gaps (break/continue, dynamic trip counts, aggregate carries).
-Positive shapes are oracle-verified against CPython; every staged gap is pinned as a located rejection.
+loop-carried scalar phis and break/continue exit lanes, and the permanent bans (dynamic trip counts,
+aggregate carries, degenerate exit-on-every-path bodies). Positive shapes are oracle-verified against
+CPython; every ban is pinned as a located rejection.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -12,6 +13,7 @@ import pytest
 from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
 
+from ._eel_corpus import convergence_steps
 from ._eeloracle import assert_hir_matches_reference
 
 type _Row = Mapping[str, float | bool | int]
@@ -369,7 +371,7 @@ def test_residual_while_gaps_and_bans() -> None:
         _rejects(fn, match)
 
 
-# ---------------------------------------------------------------------- staged exits and dynamic trips
+# ---------------------------------------------------------------------- dynamic trips and degenerate exits
 
 
 def _break_in_residual_while(x: float) -> float:
@@ -405,14 +407,17 @@ def _scalar_iteration(x: float) -> float:
     return x
 
 
-def test_staged_exits_and_dynamic_trips_reject_located() -> None:
+def test_dynamic_trips_reject_located() -> None:
     for fn, match in [
-        (_break_in_residual_while, "a `break` inside a data-dependent loop is not supported yet"),
-        (_continue_in_residual_while, "a `continue` inside a data-dependent loop is not supported yet"),
         (_dynamic_trip_count, "a range argument must be a compile-time constant int"),
         (_scalar_iteration, "a scalar is not iterable"),
     ]:
         _rejects(fn, match)
+
+
+def test_a_body_leaving_the_loop_on_every_path_cannot_iterate() -> None:
+    # The ruled degenerate family: no path reaches the back edge, so the loop is an `if` in disguise.
+    _rejects(_break_in_residual_while, "leaves the loop on every path, so the loop cannot iterate")
 
 
 # ---------------------------------------------------------------------- loop-internal break and continue
@@ -537,6 +542,169 @@ def _post_break_binding_dropped(t: float) -> float:
     return y
 
 
+def _early_convergence(x: float, tol: float) -> float:
+    err = x
+    steps = 0.0
+    while err > tol:
+        err = err * 0.5
+        steps = steps + 1.0
+        if steps > 6.0:
+            break
+    return err + steps * 0.001
+
+
+def _int_rebind_on_continue(c: bool, x: float) -> float:
+    y = 0.0
+    while x > 0.0:
+        x = x - 1.0
+        if c:
+            y = 1
+            continue
+        y = 2
+    return y
+
+
+def _continue_only_body(x: float) -> float:
+    while x > 0.0:
+        x = x - 1.5
+        continue
+    return x
+
+
+def _skim_then_break(x: float, n: float) -> float:
+    hits = 0.0
+    while n > 0.0:
+        n = n - 1.0
+        if x > n:
+            hits = hits + 1.0
+            continue
+        break
+    return hits + n * 0.5
+
+
+def _mixed_exits(x: float, lim: float) -> float:
+    acc = 0.0
+    while x > 0.0:
+        x = x - 1.0
+        if acc > lim:
+            return acc * 2.0
+        if x > 3.0:
+            acc = acc + 2.0
+            continue
+        if x < 0.5:
+            break
+        acc = acc + 1.0
+    return acc + x
+
+
+def _flag_on_break(x: float) -> float:
+    found = False
+    while x > 0.0:
+        x = x - 1.0
+        if x < 1.0:
+            found = True
+            break
+    return x + (2.0 if found else 0.5)
+
+
+def _two_breaks(x: float, a: float) -> float:
+    tag = 0.0
+    while x > 0.0:
+        x = x - 1.0
+        if x > a:
+            tag = 1.0
+            break
+        if x < 0.5:
+            tag = 2.0
+            break
+    return x + tag * 10.0
+
+
+def _int_carry_with_break(n: int, lim: int) -> int:
+    k = 0
+    while k < n:
+        k = k + 2
+        if k > lim:
+            break
+    return k
+
+
+class _AccumulateUntil:
+    def __init__(self) -> None:
+        self.total = 0.0
+
+    def step(self, x: float, cap: float) -> float:
+        while x > 0.0:
+            x = x - 1.0
+            self.total = self.total + x
+            if self.total > cap:
+                break
+        return self.total * 0.5
+
+
+def _promoted_carry_with_break(n: float) -> float:
+    k = 0
+    while n > 0.0:
+        n = n - 1.0
+        if n < 2.0:
+            break
+        # The int-to-float rebind IS the promotion trigger, so the loop re-runs with a float phi.
+        k = k + 0.5  # type: ignore[assignment]
+    return float(k) + n
+
+
+def _promoted_carry_with_continue(n: float, c: bool) -> float:
+    k = 0
+    while n > 0.0:
+        n = n - 1.0
+        if c:
+            k = k + 0.5  # type: ignore[assignment]
+            continue
+        k = k + 1
+    return float(k)
+
+
+def _broadcast_exit_helper(x: float, y: float) -> float:
+    for _ in range(1):
+        if x > 0.0:
+            return x  # the pending lane leaves two sinks open, so the exits below are born broadcast
+        if y > 1.0:
+            break
+    for i in range(3):
+        if y > float(i):
+            break
+        y = y + 1.0
+    return y
+
+
+def _exits_on_a_broadcast_piece(x: float, y: float) -> float:
+    return _broadcast_exit_helper(x, y)
+
+
+class _ElideWithLoopExits:
+    def __init__(self) -> None:
+        self.level = 0.0
+
+    def step(self, x: float, cap: float) -> float:
+        while x > 0.0:
+            x = x - 1.0
+            self.level = self.level + x
+            if self.level > cap:
+                return self.level  # an in-loop site whose row matches the public slot's live-out
+            if x < 1.0:
+                break
+        return self.level
+
+
+def _post_break_binding_dropped_residual(x: float) -> float:
+    while x > 0.0:
+        x = x - 1.0
+        if x > 2.0:
+            break
+        y = x + 0.25
+    return y
+
+
 def test_loop_exits_match_cpython() -> None:
     _oracle(_break_static, _X_ROWS)
     _oracle(_continue_static, _X_ROWS)
@@ -562,8 +730,39 @@ def test_loop_exits_match_cpython() -> None:
     )
 
 
+def test_residual_loop_exits_match_cpython() -> None:
+    _oracle(_continue_in_residual_while, [{"x": 9.5}, {"x": 4.0}, {"x": 0.0}, {"x": -2.0}, {"x": 17.25}])
+    _oracle(_early_convergence, [{"x": 8.0, "tol": 1.0}, {"x": 1.0, "tol": 2.0}, {"x": 100.0, "tol": 0.0}])
+    # The back-edge int-to-float conversion must reach every back sink: a direct continue bypasses the
+    # flat body tail, so a conversion placed only there leaves the continue arm without the converted atom.
+    _oracle(_int_rebind_on_continue, [{"c": True, "x": 2.0}, {"c": False, "x": 3.0}, {"c": True, "x": 0.0}])
+    _oracle(_continue_only_body, [{"x": 4.0}, {"x": 0.5}, {"x": 0.0}, {"x": -1.0}])
+    # The fall path never survives here, yet the continues keep a real back edge: this must stay accepted.
+    _oracle(_skim_then_break, [{"x": 5.0, "n": 3.0}, {"x": 0.0, "n": 2.0}, {"x": 1.5, "n": 4.0}])
+    _oracle(_mixed_exits, [{"x": 6.0, "lim": 2.0}, {"x": 3.0, "lim": 100.0}, {"x": 0.0, "lim": 1.0}])
+    _oracle(_flag_on_break, [{"x": 3.5}, {"x": 0.5}, {"x": 0.0}, {"x": -2.0}])
+    _oracle(_two_breaks, [{"x": 5.0, "a": 2.0}, {"x": 1.0, "a": 100.0}, {"x": 0.0, "a": 1.0}, {"x": 3.0, "a": 0.6}])
+    _oracle(convergence_steps, [{"x": 100.0, "tol": 1.0}, {"x": 3.0, "tol": 8.0}, {"x": 500.0, "tol": 0.0}])
+    _oracle(_int_carry_with_break, [{"n": 7, "lim": 4}, {"n": 3, "lim": 100}, {"n": 0, "lim": 1}])
+    # The promote-and-rerun cycle discards a pass that already built exit lanes and terminators.
+    _oracle(_promoted_carry_with_break, [{"n": 6.0}, {"n": 1.0}, {"n": 0.0}, {"n": 3.0}])
+    _oracle(_promoted_carry_with_continue, [{"n": 4.0, "c": True}, {"n": 4.0, "c": False}, {"n": 0.0, "c": True}])
+    # An exit lane born while several sinks are still open, and output-row elision at an in-loop return
+    # site that shares the loop with a break.
+    _oracle(_exits_on_a_broadcast_piece, [{"x": 1.0, "y": 0.0}, {"x": -1.0, "y": 5.0}, {"x": -1.0, "y": 0.5}])
+    _oracle(
+        _ElideWithLoopExits().step,
+        [{"x": 4.0, "cap": 3.0}, {"x": 2.0, "cap": 100.0}, {"x": 0.0, "cap": 1.0}, {"x": 5.0, "cap": 0.0}],
+    )
+    _oracle(
+        _AccumulateUntil().step,
+        [{"x": 3.5, "cap": 10.0}, {"x": 5.0, "cap": 4.0}, {"x": 0.0, "cap": 1.0}, {"x": 2.0, "cap": 0.5}],
+    )
+
+
 def test_a_name_bound_only_before_the_break_drops_at_the_loop_exit() -> None:
     _rejects(_post_break_binding_dropped, "the local name 'y' is not bound on every path reaching this read")
+    _rejects(_post_break_binding_dropped_residual, "the local name 'y' is not bound on every path reaching this read")
 
 
 def test_a_while_true_with_a_guarded_break_stays_a_budget_rejection() -> None:
