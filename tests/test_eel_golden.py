@@ -44,7 +44,7 @@ _RESIDUAL_GOLDENS: list[tuple[str, Callable[[], object]]] = [
     ("madd", lambda: madd.madd),
     ("poly3", lambda: poly3.poly3),
     ("signal_window", lambda: signal_window.signal_window),
-    # Pins the pow_ stub-inline shape: the exponent ladder survives residually and log2(2.0) folds away.
+    # Pins the pow_ stub-inline shape: its runtime guard survives residually and log2(2.0) folds away.
     ("equal_temperament", lambda: equal_temperament.equal_temperament),
     # Pins the array seams: the decomposed leaf parameters and the fully dissolved aggregate structure.
     ("to_polar", lambda: polar.to_polar),

@@ -165,8 +165,7 @@ def pow_(b: float, e: float) -> float:
     Optimized for exactly one exp2 and one log2 as they dominate the hardware cost.
     The parity test is exact over the whole float range: every float >= 2**53 is even.
     """
-    # Schedule the speculable general-case ops early such that they could evaluate in parallel with the
-    # ladder, reducing the worst-case execution time without sacrificing the happy path (empirically verified).
+    # Schedule the speculable general-case ops early so they overlap with the guards.
     integral = round_(e) == e
     half = e * 0.5  # from e, not round_(e): the two rounds then schedule in parallel; equal when it matters
     odd = round_(half) != half
@@ -174,14 +173,6 @@ def pow_(b: float, e: float) -> float:
         r = 1.0
     elif b == 0.0:  # keeps the log2 pole (and its error sideband) away from the degenerate base
         r = 0.0 if e > 0.0 else _INF if e < 0.0 else e  # e == 0 is unreachable here, so the last arm is NaN
-    elif e == 1.0:
-        r = b
-    elif e == 2.0:
-        r = b * b
-    elif e == 3.0:
-        r = b * b * b
-    elif e == 4.0:
-        r = (b * b) * (b * b)  # tree fold
     else:
         t = exp2_(e * log2_(abs(b) if integral else b))
         r = -t if b < 0.0 and integral and odd else t

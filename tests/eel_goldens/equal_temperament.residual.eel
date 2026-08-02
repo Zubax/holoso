@@ -14,41 +14,21 @@ fn equal_temperament(note: float):
     %10: bool = intrinsic band(False, %9)
     %11: bool = intrinsic bor(%8, %10)
     if %11:
-        %26: float = 1.0
+        %18: float = 1.0
     else:
-        %12: bool = intrinsic frelational<eq>(%1, 1.0)
-        if %12:
-            %25: float = 2.0
+        %12: float = intrinsic mul(%1, 1.0)
+        %13: float = intrinsic exp2(%12)
+        %14: bool = intrinsic band(False, %3)
+        %15: bool = intrinsic band(%14, %6)
+        if %15:
+            %16: float = intrinsic neg(%13)
+            %17: float = %16
         else:
-            %13: bool = intrinsic frelational<eq>(%1, 2.0)
-            if %13:
-                %24: float = 4.0
-            else:
-                %14: bool = intrinsic frelational<eq>(%1, 3.0)
-                if %14:
-                    %23: float = 8.0
-                else:
-                    %15: bool = intrinsic frelational<eq>(%1, 4.0)
-                    if %15:
-                        %22: float = 16.0
-                    else:
-                        %16: float = intrinsic mul(%1, 1.0)
-                        %17: float = intrinsic exp2(%16)
-                        %18: bool = intrinsic band(False, %3)
-                        %19: bool = intrinsic band(%18, %6)
-                        if %19:
-                            %20: float = intrinsic neg(%17)
-                            %21: float = %20
-                        else:
-                            %21: float = %17
-                        %22: float = %21
-                    %23: float = %22
-                %24: float = %23
-            %25: float = %24
-        %26: float = %25
-    %27: float = intrinsic mul(440.0, %26)
-    %28: float = intrinsic div(%27, 440.0)
-    %29: float = intrinsic log2(%28)
-    %30: float = intrinsic mul(12.0, %29)
-    %31: float = intrinsic add(69.0, %30)
-    return %27, %31
+            %17: float = %13
+        %18: float = %17
+    %19: float = intrinsic mul(440.0, %18)
+    %20: float = intrinsic div(%19, 440.0)
+    %21: float = intrinsic log2(%20)
+    %22: float = intrinsic mul(12.0, %21)
+    %23: float = intrinsic add(69.0, %22)
+    return %19, %23
