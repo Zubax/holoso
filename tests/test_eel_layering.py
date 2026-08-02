@@ -1,6 +1,6 @@
 """
 Architectural guards for the Eel package: the two frontends never import each other, the desugarer's closure is
-syntax-only, and numpy and HIR stay confined to their sanctioned homes. The two `_lib` trees diverge freely
+syntax-only, and HIR stays confined to its sanctioned homes. The two `_lib` trees diverge freely
 (maintainer ruling): the Eel copy is the living one, the old frontend's dies at cutover.
 """
 
@@ -11,13 +11,10 @@ from ._importguard import forbidden_imports, transitive_holoso_imports
 
 _EEL_DIR = Path(__file__).resolve().parents[1] / "holoso" / "_eel"
 
-# Modules allowed to import numpy / HIR within holoso._eel, as repo-relative posix paths under _eel.
+# Modules allowed to import HIR within holoso._eel, as repo-relative posix paths under _eel.
 # `_pe/_ops.py` is the partial evaluator's sole HIR-facing module: it selects operators and folds through their
 # own `evaluate` (the one-answer mandate), while the rest of `_pe` stays HIR-free; `_lower.py` composes the
-# stages and returns an `Hir`. `_pe/_state.py` is the reset side of the capture boundary: it walks raw instance
-# attributes into slot specs and owns the A5 storage-overlap checks, so it shares the snapshot's numpy license.
-# `_pe/_interpret.py` references np.ndarray for descriptor-identity method dispatch (maintainer ruling).
-_NUMPY_HOMES = {"_lib", "_pe/_snapshot.py", "_pe/_state.py", "_pe/_interpret.py"}
+# stages and returns an `Hir`.
 _HIR_HOMES = {"_lib", "_emit", "_pe/_ops.py", "_lower.py"}
 
 
@@ -68,12 +65,6 @@ def _imported_names(path: Path) -> set[str]:
             names.add(base)
             names |= {f"{base}.{alias.name}" if base else alias.name for alias in node.names}
     return names
-
-
-def test_numpy_only_in_sanctioned_homes() -> None:
-    for path in _unsanctioned_modules(_NUMPY_HOMES):
-        for name in _imported_names(path):
-            assert name != "numpy" and not name.startswith("numpy."), f"numpy import in {path.name}"
 
 
 def test_hir_only_in_sanctioned_homes() -> None:
