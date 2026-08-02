@@ -592,7 +592,7 @@ def _calls_deep(x: float) -> float:
 
 def test_nested_rejections_report_the_outermost_call_site_with_the_full_chain() -> None:
     with pytest.raises(
-        UnsupportedConstruct, match=r"in _middle\(\): in _deep_reject\(\): `break` is not supported"
+        UnsupportedConstruct, match=r"in _middle\(\): in _deep_reject\(\): a `break` inside a data-dependent loop"
     ) as info:
         lower(_calls_deep)
     location = info.value.location

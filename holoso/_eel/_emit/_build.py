@@ -197,10 +197,11 @@ def _loop(builder: HirBuilder, fn: EelFunction, stmt: ResidualWhile, env: _Env, 
     body_block = builder.block()
     exit_block = builder.block()
     builder.branch(_atom(builder, stmt.cond, env), body_block, exit_block)
+    post_header = dict(env)
 
     builder.position_at(body_block)
     terminated = _block(builder, fn, stmt.body, env, sites)
-    assert not terminated, "a residual loop interior holds no return site"
+    assert not terminated, "the loop body keeps a surviving latch path"
     back_ids = [_atom(builder, phi.back, env) for phi in stmt.phis]
     latch_exit = builder.current_block
     builder.jump(loop_entry)
@@ -208,6 +209,10 @@ def _loop(builder: HirBuilder, fn: EelFunction, stmt: ResidualWhile, env: _Env, 
         builder.set_phi_arms(phi_id, [(pre_exit, entry_id), (latch_exit, back_id)])
 
     builder.position_at(exit_block)
+    # Only header-end bindings dominate the exit; a body binding leaking past it would be phi-ed by a later
+    # arm join against a twin copy of this loop, referencing a value a zero-trip path never computes.
+    env.clear()
+    env.update(post_header)
 
 
 def _value(builder: HirBuilder, value: Expr, env: _Env, stype: ScalarType) -> int:

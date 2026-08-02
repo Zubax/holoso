@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 import pytest
 
+from holoso._eel import lower
 from holoso._eel._desugar import desugar
 from holoso._errors import UnsupportedConstruct
 
@@ -19,6 +20,13 @@ def _reject(target: object, fragment: str) -> None:
     assert isinstance(fn, types.FunctionType)
     with pytest.raises(UnsupportedConstruct, match=fragment) as info:
         desugar(fn)
+    assert info.value.location is not None
+    assert info.value.location.lineno > 0
+
+
+def _reject_lowering(target: object, fragment: str) -> None:
+    with pytest.raises(UnsupportedConstruct, match=fragment) as info:
+        lower(target)
     assert info.value.location is not None
     assert info.value.location.lineno > 0
 
@@ -403,6 +411,67 @@ _CASES: list[tuple[object, str]] = [
     (_MangledRaise().kernel, "name mangling"),
     (_k_stub_body, "stub body"),
 ]
+
+
+# ------------------------------------------------------------------ partial-evaluation-level families
+
+
+def _k_zip(a: float, b: float) -> float:
+    acc = 0.0
+    for p in zip((a, b), (b, a)):
+        acc = acc + p[0]
+    return acc
+
+
+def _k_enumerate(a: float, b: float) -> float:
+    acc = 0.0
+    for p in enumerate((a, b)):
+        acc = acc + p[1]
+    return acc
+
+
+def _k_dynamic_index_read(i: int, x: float) -> float:
+    t = (x, x + 1.0)
+    return t[i]
+
+
+def _k_dynamic_index_store(i: int, x: float) -> float:
+    t = [0.0, 0.0]
+    t[i] = x
+    return t[0]
+
+
+def _k_aggregate_truthiness(a: float, b: float) -> float:
+    t = (a, b)
+    if t:
+        return 1.0
+    return 0.0
+
+
+def _k_aggregate_equality(a: float, b: float) -> bool:
+    t = (a, b)
+    u = (b, a)
+    return t == u
+
+
+def _k_bool_arithmetic(a: bool, x: float) -> float:
+    return a * x
+
+
+_PE_CASES: list[tuple[object, str]] = [
+    (_k_zip, "calls to 'zip' are not supported yet"),
+    (_k_enumerate, "calls to 'enumerate' are not supported yet"),
+    (_k_dynamic_index_read, "a subscript index must be a compile-time constant int"),
+    (_k_dynamic_index_store, "a subscript index must be a compile-time constant int"),
+    (_k_aggregate_truthiness, "the truthiness of an aggregate is not supported"),
+    (_k_aggregate_equality, "aggregate comparison is not supported"),
+    (_k_bool_arithmetic, "booleans take no part in arithmetic"),
+]
+
+
+@pytest.mark.parametrize("fn,fragment", _PE_CASES, ids=[getattr(fn, "__name__", "?") for fn, _ in _PE_CASES])
+def test_pe_rejection(fn: object, fragment: str) -> None:
+    _reject_lowering(fn, fragment)
 
 
 def test_lambda_rejection_points_at_the_lambda_token() -> None:

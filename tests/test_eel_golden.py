@@ -31,6 +31,8 @@ from recip_newton import NewtonReciprocal  # noqa: E402
 from schmitt_trigger import SchmittTrigger  # noqa: E402
 from uart import UartRx  # noqa: E402
 
+from ._eel_corpus import PriorityEncoder
+
 _GOLDENS: list[tuple[str, Callable[[], object]]] = [
     ("madd", lambda: madd.madd),
     ("poly3", lambda: poly3.poly3),
@@ -55,6 +57,9 @@ _RESIDUAL_GOLDENS: list[tuple[str, Callable[[], object]]] = [
     # SlotWrite commits before the return, and the elision of a returned public slot.
     ("pid", lambda: PID().__call__),
     ("schmitt_trigger", lambda: SchmittTrigger().__call__),
+    # Pins the loop-exit shape: break lanes hold their branches open, the trips nest into the surviving
+    # arms, and the loop-end join seals the exit value through pairwise join chains.
+    ("priority_encoder", lambda: PriorityEncoder().step),
 ]
 
 _DIRECTORY = Path(__file__).resolve().parent / "eel_goldens"

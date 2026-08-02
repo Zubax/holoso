@@ -211,9 +211,14 @@ rejection -- never a fall-through to a same-named global, where CPython would ra
 program is scalar and typed, its static control decided and only genuinely dynamic branches and loops remaining; HIR
 emission from it is mechanical. An early return is a residual terminator: each return site commits its own outputs
 and state live-outs, conformed against the one annotation-fixed table, and emission joins the sites in a single
-exit block -- extra control edges, never predication, so exits from unrolled loops fall out of the interpreter
-simply continuing down the surviving path. Loop-internal exits (break, continue, return crossing a dynamic loop)
-remain to be designed on the same principle.
+exit block -- extra control edges, never predication -- and a return site may sit inside a dynamic loop's body,
+where its edge simply leaves for the exit block before the latch. Every other exit is a pending lane rather than a
+terminator: a break, continue, or inlined-callee return holds its branch open while the surviving path's
+continuation nests into the other arm, and the exit's one consumer -- the enclosing loop for break and continue,
+the frame boundary for a callee return -- joins the lanes under the one join rule and seals the region. Nothing
+about this reaches the residual program: consumed exits print as ordinary nested branches. Two exit forms remain
+staged gaps by ruling: break/continue crossing a dynamic loop's own back edge, and a callee return crossing the
+callee's own dynamic loop.
 
 Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below, never here. Mixed int/float
 expressions promote to float C-style, true division always yields float as in Python, a power yields float unless it

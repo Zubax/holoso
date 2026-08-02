@@ -26,7 +26,7 @@ from ._values import (
 )
 
 if TYPE_CHECKING:
-    from ._interpret import Frame, Interpreter
+    from ._interpret import Frame, Interpreter, Sink
 
 _AGGREGATE = (SequenceValue, TensorValue)
 
@@ -54,9 +54,7 @@ _MATMUL = _library_anchor(np.matmul)
 # ------------------------------------------------------------------ attribute reads
 
 
-def attr_read(
-    interp: Interpreter, origin: Origin, base_value: Value, attr: str, frame: Frame, sink: list[Stmt]
-) -> Value:
+def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str, frame: Frame, sink: Sink) -> Value:
     match base_value:
         case TensorValue():
             return _tensor_attr(interp, origin, base_value, attr, frame, sink)
@@ -90,7 +88,7 @@ def attr_read(
 
 
 def _tensor_attr(
-    interp: Interpreter, origin: Origin, tensor: TensorValue, attr: str, frame: Frame, sink: list[Stmt]
+    interp: Interpreter, origin: Origin, tensor: TensorValue, attr: str, frame: Frame, sink: Sink
 ) -> Value:
     if attr == "ndim":
         return StaticScalar(_ops.make_const(len(tensor.shape)))
@@ -130,9 +128,7 @@ def materialize(scalar: Scalar, origin: Origin) -> Atom:
             return atom
 
 
-def apply(
-    interp: Interpreter, operator: _ops.Operator, operands: list[Scalar], origin: Origin, sink: list[Stmt]
-) -> Scalar:
+def apply(interp: Interpreter, operator: _ops.Operator, operands: list[Scalar], origin: Origin, sink: Sink) -> Scalar:
     if all(isinstance(operand, StaticScalar) for operand in operands):
         consts = [operand.const for operand in operands if isinstance(operand, StaticScalar)]
         try:
@@ -146,7 +142,7 @@ def apply(
     return ResidualScalar(stype, TempRef(origin, index))
 
 
-def unary(interp: Interpreter, origin: Origin, op: UnaryOp, value: Value, sink: list[Stmt]) -> Value:
+def unary(interp: Interpreter, origin: Origin, op: UnaryOp, value: Value, sink: Sink) -> Value:
     if isinstance(value, TensorValue) and op in (UnaryOp.NEG, UnaryOp.POS):
         leaves = tuple(_unary_leaf(interp, origin, op, leaf, sink) for leaf in value.leaves)
         interp.budget.spend(len(leaves), origin, "the elementwise operation")
@@ -174,9 +170,7 @@ def unary(interp: Interpreter, origin: Origin, op: UnaryOp, value: Value, sink: 
             return apply(interp, _ops.INT_NOT, [operand], origin, sink)
 
 
-def _unary_leaf(
-    interp: Interpreter, origin: Origin, op: UnaryOp, leaf: Scalar | Opaque, sink: list[Stmt]
-) -> Scalar | Opaque:
+def _unary_leaf(interp: Interpreter, origin: Origin, op: UnaryOp, leaf: Scalar | Opaque, sink: Sink) -> Scalar | Opaque:
     if op is UnaryOp.POS:
         return leaf
     result = unary(interp, origin, op, _scalar_leaf(origin, leaf), sink)
@@ -190,9 +184,7 @@ def _scalar_leaf(origin: Origin, leaf: Scalar | Opaque) -> Scalar:
     return leaf
 
 
-def binary(
-    interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: list[Stmt]
-) -> Value:
+def binary(interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink) -> Value:
     if op is BinaryOp.MATMUL:
         if isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue):
             reject(origin, "`@` on a Python list/tuple is not supported; build a numpy array with np.array([...])")
@@ -214,7 +206,7 @@ def binary(
 
 
 def elementwise(
-    interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: list[Stmt]
+    interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink
 ) -> TensorValue:
     if op not in (BinaryOp.ADD, BinaryOp.SUB, BinaryOp.MUL, BinaryOp.DIV):
         reject(origin, f"the operator `{op.value}` is not supported on arrays yet")
@@ -247,7 +239,7 @@ def _sequence_binary(origin: Origin, op: BinaryOp) -> Value:
 
 
 def _binary_scalars(
-    interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: list[Stmt]
+    interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink
 ) -> Scalar:
     left = scalar(lv, origin)
     right = scalar(rv, origin)
@@ -293,7 +285,7 @@ def _binary_scalars(
             raise AssertionError(op)
 
 
-def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: Value, sink: list[Stmt]) -> Scalar:
+def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: Value, sink: Sink) -> Scalar:
     if isinstance(lv, _AGGREGATE) or isinstance(rv, _AGGREGATE):
         reject(origin, "aggregate comparison is not supported")
     left = scalar(lv, origin)
@@ -317,7 +309,7 @@ def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: V
 # ------------------------------------------------------------------ calls
 
 
-def call(interp: Interpreter, node: Call, frame: Frame, sink: list[Stmt]) -> Value:
+def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     callee = interp.expr(node.callee, frame, sink)
     if isinstance(callee, TensorMethod):
         return _tensor_method(interp, node, callee, frame, sink)
@@ -391,14 +383,14 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: list[Stmt]) -> Val
     reject(node.origin, f"the captured object {callee.name!r} is not callable")
 
 
-def _argument(interp: Interpreter, atom: Atom, frame: Frame, sink: list[Stmt]) -> Value:
+def _argument(interp: Interpreter, atom: Atom, frame: Frame, sink: Sink) -> Value:
     value = interp.expr(atom, frame, sink)
     if isinstance(value, _AGGREGATE) and (isinstance(atom, LocalRef) or interp.alias_conduit(frame, atom)):
         share(value)
     return value
 
 
-def _operand_arguments(interp: Interpreter, node: Call, display: str, frame: Frame, sink: list[Stmt]) -> list[Value]:
+def _operand_arguments(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> list[Value]:
     """Arguments for a callee that retains no handle: no aliasing event, unlike parameter binding."""
     values: list[Value] = []
     for arg in node.args:
@@ -412,7 +404,7 @@ def _operand_arguments(interp: Interpreter, node: Call, display: str, frame: Fra
     return values
 
 
-def _positional_arguments(interp: Interpreter, node: Call, display: str, frame: Frame, sink: list[Stmt]) -> list[Value]:
+def _positional_arguments(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> list[Value]:
     values: list[Value] = []
     for arg in node.args:
         match arg:
@@ -426,7 +418,7 @@ def _positional_arguments(interp: Interpreter, node: Call, display: str, frame: 
 
 
 def _signature_arguments(
-    interp: Interpreter, node: Call, frame: Frame, sink: list[Stmt]
+    interp: Interpreter, node: Call, frame: Frame, sink: Sink
 ) -> tuple[list[Value], dict[str, Value]]:
     positional: list[Value] = []
     keywords: dict[str, Value] = {}
@@ -442,7 +434,7 @@ def _signature_arguments(
 
 
 def _intrinsic(
-    interp: Interpreter, node: Call, display: str, operator: _ops.Operator, frame: Frame, sink: list[Stmt]
+    interp: Interpreter, node: Call, display: str, operator: _ops.Operator, frame: Frame, sink: Sink
 ) -> Value:
     values = _operand_arguments(interp, node, display, frame, sink)
     stypes = _ops.operand_stypes(operator)
@@ -462,7 +454,7 @@ def _library_call(
     match: Library,
     values: list[Value],
     frame: Frame,
-    sink: list[Stmt],
+    sink: Sink,
 ) -> Value:
     result = interp.inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
     if match.derives and isinstance(values[0], TensorValue) and isinstance(result, TensorValue):
@@ -471,7 +463,7 @@ def _library_call(
     return result
 
 
-def _tensor_method(interp: Interpreter, node: Call, method: TensorMethod, frame: Frame, sink: list[Stmt]) -> Value:
+def _tensor_method(interp: Interpreter, node: Call, method: TensorMethod, frame: Frame, sink: Sink) -> Value:
     found = resolve(getattr(np.ndarray, method.name))
     assert isinstance(found, Library), "a minted method stays resolvable"
     display = f".{method.name}"
@@ -482,7 +474,7 @@ def _tensor_method(interp: Interpreter, node: Call, method: TensorMethod, frame:
     return _library_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
 
 
-def _factory(interp: Interpreter, node: Call, display: str, match: Factory, frame: Frame, sink: list[Stmt]) -> Value:
+def _factory(interp: Interpreter, node: Call, display: str, match: Factory, frame: Frame, sink: Sink) -> Value:
     values = _operand_arguments(interp, node, display, frame, sink)
     host = [_static_argument(node.origin, display, value) for value in values]
     try:
@@ -506,7 +498,7 @@ def _static_argument(origin: Origin, display: str, value: Value) -> object:
             reject(origin, f"the arguments of {display}() must be compile-time constants")
 
 
-def _len(interp: Interpreter, node: Call, frame: Frame, sink: list[Stmt]) -> Value:
+def _len(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     values = _operand_arguments(interp, node, "len", frame, sink)
     if len(values) != 1:
         reject(node.origin, f"len() takes exactly one argument, got {len(values)}")
@@ -519,7 +511,7 @@ def _len(interp: Interpreter, node: Call, frame: Frame, sink: list[Stmt]) -> Val
             reject(node.origin, f"len() requires an aggregate, not {_aggregate.a_kind(values[0])}")
 
 
-def _range(interp: Interpreter, node: Call, frame: Frame, sink: list[Stmt]) -> SequenceValue:
+def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> SequenceValue:
     values = _operand_arguments(interp, node, "range", frame, sink)
     if not 1 <= len(values) <= 3:
         reject(node.origin, f"range() takes 1 to 3 arguments, got {len(values)}")
@@ -535,7 +527,7 @@ def _range(interp: Interpreter, node: Call, frame: Frame, sink: list[Stmt]) -> S
     return SequenceValue(tuple(StaticScalar(_ops.make_const(i)) for i in span), Allocation())
 
 
-def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Frame, sink: list[Stmt]) -> Value:
+def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> Value:
     values = _operand_arguments(interp, node, display, frame, sink)
     if len(values) != 1:
         reject(node.origin, f"{display}() takes exactly one aggregate argument here")
@@ -548,7 +540,7 @@ def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Fram
 
 
 def _to_tensor(
-    interp: Interpreter, origin: Origin, display: str, value: Value, sink: list[Stmt], *, copies: bool
+    interp: Interpreter, origin: Origin, display: str, value: Value, sink: Sink, *, copies: bool
 ) -> TensorValue:
     match value:
         case TensorValue():
@@ -604,7 +596,7 @@ def _tensor_rows(
 
 
 def tensor_leaf(
-    interp: Interpreter, origin: Origin, family: ScalarType, leaf: Scalar | Opaque, sink: list[Stmt]
+    interp: Interpreter, origin: Origin, family: ScalarType, leaf: Scalar | Opaque, sink: Sink
 ) -> Scalar | Opaque:
     if isinstance(leaf, Opaque):
         if family is not ScalarType.FLOAT or not nan_payload(leaf.value):
@@ -643,7 +635,7 @@ def bind_signature(
     return bindings
 
 
-def _cast(interp: Interpreter, node: Call, target: type, frame: Frame, sink: list[Stmt]) -> Value:
+def _cast(interp: Interpreter, node: Call, target: type, frame: Frame, sink: Sink) -> Value:
     if len(node.args) != 1 or not isinstance(node.args[0], PosArg):
         reject(node.origin, f"{target.__name__}() takes exactly one positional argument here")
     operand = scalar(interp.expr(node.args[0].value, frame, sink), node.origin)
@@ -657,7 +649,7 @@ def _cast(interp: Interpreter, node: Call, target: type, frame: Frame, sink: lis
 # ------------------------------------------------------------------ powers
 
 
-def _pow(interp: Interpreter, origin: Origin, base: Scalar, exponent: Scalar, frame: Frame, sink: list[Stmt]) -> Scalar:
+def _pow(interp: Interpreter, origin: Origin, base: Scalar, exponent: Scalar, frame: Frame, sink: Sink) -> Scalar:
     if ScalarType.BOOL in (base.stype, exponent.stype):
         reject(origin, "booleans take no part in arithmetic; cast explicitly with int(...) or float(...)")
     if isinstance(exponent, StaticScalar) and exponent.stype is ScalarType.INT:
@@ -702,7 +694,7 @@ def _fold_pow(origin: Origin, base: StaticScalar, n: int) -> StaticScalar:
     return StaticScalar(_ops.make_const(folded))
 
 
-def _pow_chain(interp: Interpreter, origin: Origin, base: Scalar, n: int, sink: list[Stmt]) -> Scalar:
+def _pow_chain(interp: Interpreter, origin: Origin, base: Scalar, n: int, sink: Sink) -> Scalar:
     assert base.stype is ScalarType.FLOAT
     if n < 0:
         chain = _chain(interp, origin, base, -n, sink)
@@ -713,7 +705,7 @@ def _pow_chain(interp: Interpreter, origin: Origin, base: Scalar, n: int, sink: 
     return _chain(interp, origin, base, n, sink)
 
 
-def _chain(interp: Interpreter, origin: Origin, base: Scalar, n: int, sink: list[Stmt]) -> Scalar:
+def _chain(interp: Interpreter, origin: Origin, base: Scalar, n: int, sink: Sink) -> Scalar:
     assert n >= 1
     result = base
     for _ in range(n - 1):

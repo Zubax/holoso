@@ -789,8 +789,77 @@ def test_early_return_joins() -> None:
     _oracle(_calls_clamp, [{"x": -2.0}, {"x": 0.5}, {"x": 2.0}])
 
 
-def test_a_mixed_return_in_an_inlined_callee_is_a_staged_gap() -> None:
-    _rejects(_calls_mixed_helper, "a return on only one branch path of an inlined function is not supported yet")
+def _mixed_chain_helper(x: float) -> float:
+    if x > 2.0:
+        return x
+    y = x + 1.0
+    if y > 2.0:
+        return y * 2.0
+    return -y
+
+
+def _calls_mixed_chain(x: float) -> float:
+    return _mixed_chain_helper(x) * 2.0
+
+
+def _helper_with_loop_return(x: float) -> float:
+    for i in range(4):
+        if x > float(i):
+            return x + float(i)
+        x = x + 0.5
+    return x
+
+
+def _calls_helper_with_loop_return(x: float) -> float:
+    return _helper_with_loop_return(x) - 1.0
+
+
+class _MixedHelperInResidualLoop:
+    def __init__(self) -> None:
+        self.acc = 0.0
+
+    def step(self, x: float) -> float:
+        while x > 0.0:
+            x = x - _mixed_in_helper(x - 2.0) - 1.0
+        self.acc = self.acc + x
+        return self.acc
+
+
+def test_mixed_returns_in_inlined_callees_match_cpython() -> None:
+    _oracle(_calls_mixed_helper, [{"x": 2.0}, {"x": -3.0}, {"x": 0.0}])
+    _oracle(_calls_mixed_chain, [{"x": 3.0}, {"x": 1.5}, {"x": 0.0}, {"x": -4.0}])
+    _oracle(_calls_helper_with_loop_return, [{"x": 2.5}, {"x": 0.5}, {"x": -2.0}, {"x": -0.25}])
+    _oracle(_MixedHelperInResidualLoop().step, [{"x": 3.5}, {"x": 0.5}, {"x": 6.0}, {"x": -1.0}])
+    _oracle(_ContinueThenBreakSlot().step, [{"x": -1.0}, {"x": 0.5}, {"x": 1.5}, {"x": 5.0}])
+
+
+def _falls_through_helper(x: float) -> float:  # type: ignore[return]
+    if x > 0.0:
+        return x
+
+
+def _calls_falling_helper(x: float) -> float:
+    return _falls_through_helper(x) * 2.0
+
+
+def _loop_return_helper(x: float) -> float:
+    while x > 0.0:
+        if x > 10.0:
+            return x
+        x = x - 1.0
+    return x
+
+
+def _calls_loop_return_helper(x: float) -> float:
+    return _loop_return_helper(x) + 1.0
+
+
+def test_a_callee_that_can_fall_through_cannot_return_a_value() -> None:
+    _rejects(_calls_falling_helper, "the call can complete without returning a value")
+
+
+def test_a_return_inside_a_callee_residual_loop_is_a_staged_gap() -> None:
+    _rejects(_calls_loop_return_helper, "a return inside a data-dependent loop of an inlined function")
 
 
 def _return_shape_mismatch(c: bool, x: float, /) -> tuple[float, ...]:
@@ -815,8 +884,76 @@ class _ReturnInResidualLoop:
         return x
 
 
-def test_a_return_inside_a_residual_loop_stays_a_staged_gap() -> None:
-    _rejects(_ReturnInResidualLoop().step, "a return inside a data-dependent loop is not supported yet")
+class _SlotCommitAtLoopReturn:
+    def __init__(self) -> None:
+        self.hits = 0.0
+
+    def step(self, x: float) -> float:
+        while x > 0.0:
+            if x > 10.0:
+                self.hits = self.hits + 1.0
+                return x
+            x = x - 1.0
+        return x
+
+
+class _PromotedCarryWithLoopReturn:
+    """
+    The INT carry assumption meets a FLOAT back value (``k + 0.5``), so the body pass is discarded and
+    re-run; the return site committed by the discarded pass must not poison the output table or the
+    elision bookkeeping. Both sites return the public slot itself, so both must stay ELIDED.
+    """
+
+    def __init__(self) -> None:
+        self.y = 0.0
+
+    def step(self, x: float) -> float:
+        k = 0
+        while x > 0.0:
+            if x > 10.0:
+                self.y = x
+                return self.y
+            k = k + 0.5  # type: ignore[assignment]  # the int-to-float rebind IS the promotion trigger
+            x = x - 1.0
+        self.y = k
+        return self.y
+
+
+class _ContinueThenBreakSlot:
+    def __init__(self) -> None:
+        self.found = 0.0
+
+    def step(self, x: float) -> float:
+        for i in range(3):
+            if x > float(i):
+                continue
+            self.found = float(i) * 10.0 + 1.0
+            break
+        return self.found
+
+
+def _all_paths_return_in_residual_loop(x: float) -> float:
+    while x > 0.0:
+        return x
+    return x
+
+
+def test_returns_inside_residual_loops_match_cpython() -> None:
+    _oracle(_ReturnInResidualLoop().step, [{"x": 12.0}, {"x": 3.5}, {"x": 0.0}, {"x": 20.0}, {"x": -1.0}])
+    _oracle(_SlotCommitAtLoopReturn().step, [{"x": 12.0}, {"x": 3.5}, {"x": 15.0}, {"x": 0.0}])
+    _oracle(_PromotedCarryWithLoopReturn().step, [{"x": 12.0}, {"x": 5.5}, {"x": 0.0}, {"x": 11.0}])
+    # Both sites must stay elided (bare returns) through the promotion re-run's discarded commit. The
+    # restore is invariant-protective: annotation conformance makes the discarded and kept passes commit
+    # identical tables today, so no kernel can yet distinguish its absence -- this pins the machinery
+    # running, not a divergence.
+    assert "return %" not in _residual_text(_PromotedCarryWithLoopReturn().step)
+
+
+def test_a_loop_body_returning_on_every_path_cannot_iterate() -> None:
+    _rejects(
+        _all_paths_return_in_residual_loop,
+        "the body of this data-dependent loop returns on every path, so the loop cannot iterate",
+    )
 
 
 # ---------------------------------------------------------------------- slots as residual-loop carries

@@ -407,13 +407,169 @@ def _scalar_iteration(x: float) -> float:
 
 def test_staged_exits_and_dynamic_trips_reject_located() -> None:
     for fn, match in [
-        (_break_in_residual_while, "`break` is not supported yet"),
-        (_break_under_residual_condition, "`break` is not supported yet"),
-        (_continue_in_static_loop, "`continue` is not supported yet"),
+        (_break_in_residual_while, "a `break` inside a data-dependent loop is not supported yet"),
+        (_continue_in_residual_while, "a `continue` inside a data-dependent loop is not supported yet"),
         (_dynamic_trip_count, "a range argument must be a compile-time constant int"),
         (_scalar_iteration, "a scalar is not iterable"),
     ]:
         _rejects(fn, match)
+
+
+# ---------------------------------------------------------------------- loop-internal break and continue
+
+
+def _continue_in_residual_while(x: float) -> float:
+    while x > 0.0:
+        if x > 4.0:
+            x = x - 4.0
+            continue
+        x = x - 1.0
+    return x
+
+
+def _while_true_guarded_break(x: float) -> float:
+    while True:
+        if x > 100.0:
+            break
+        x = x + 1.0
+    return x
+
+
+def _break_static(x: float) -> float:
+    acc = x
+    for i in range(5):
+        if i == 3:
+            break
+        acc = acc + float(i)
+    return acc
+
+
+def _continue_static(x: float) -> float:
+    acc = x
+    for i in range(5):
+        if i == 2:
+            continue
+        acc = acc + float(i)
+    return acc
+
+
+def _break_at_threshold(t: float) -> float:
+    acc = 0.0
+    for i in range(4):
+        if float(i) >= t:
+            break
+        acc = acc * 2.0 + float(i) + 1.0
+    return acc
+
+
+def _continue_under_residual_condition(x: float) -> float:
+    acc = 0.0
+    for i in range(4):
+        if x > float(i):
+            continue
+        acc = acc + x + float(i)
+    return acc
+
+
+def _break_then_continue(x: float) -> float:
+    acc = 0.0
+    for i in range(4):
+        if acc > x:
+            break
+        if float(i) == 2.0:
+            continue
+        acc = acc + float(i) + 1.0
+    return acc
+
+
+def _unrolled_break_inside_residual_while(x: float, n: float) -> float:
+    while n > 0.0:
+        for i in range(4):
+            if x > float(i):
+                break
+            x = x + 0.5
+        n = n - 1.0
+    return x
+
+
+def _continue_then_break(x: float) -> float:
+    marker = -1.0
+    for i in range(3):
+        if x > float(i):
+            continue
+        marker = float(i) * 10.0 + 1.0
+        break
+    return marker
+
+
+def _continue_then_break_while(x: float) -> float:
+    marker = -1.0
+    k = 0
+    while k < 3:
+        k = k + 1
+        if x > float(k):
+            continue
+        marker = float(k) * 10.0 + 1.0
+        break
+    return marker
+
+
+def _broadcast_helper(x: float, y: float) -> float:
+    for _ in range(1):
+        if x > 0.0:
+            return x
+        if y > 1.0:
+            break
+    while y > 0.0:
+        y = y - 1.0
+    return y
+
+
+def _residual_while_on_broadcast_lane(x: float, y: float) -> float:
+    return _broadcast_helper(x, y)
+
+
+def _post_break_binding_dropped(t: float) -> float:
+    for i in range(3):
+        if float(i) >= t:
+            break
+        y = t + float(i)
+    return y
+
+
+def test_loop_exits_match_cpython() -> None:
+    _oracle(_break_static, _X_ROWS)
+    _oracle(_continue_static, _X_ROWS)
+    _oracle(_continue_in_static_loop, _X_ROWS)
+    _oracle(_break_under_residual_condition, [{"x": 5.0}, {"x": -0.5}, {"x": 0.0}, {"x": -3.0}])
+    _oracle(_break_at_threshold, [{"t": 0.0}, {"t": 1.0}, {"t": 2.0}, {"t": 3.0}, {"t": 4.5}])
+    _oracle(_continue_under_residual_condition, [{"x": -1.0}, {"x": 1.5}, {"x": 2.5}, {"x": 5.0}])
+    _oracle(_break_then_continue, [{"x": 0.5}, {"x": 2.0}, {"x": 4.0}, {"x": 100.0}])
+    # The break lane's env must be a snapshot: the continue-lane fold revives the frame dict in place,
+    # which would corrupt a pending lane captured by reference.
+    _oracle(_continue_then_break, [{"x": -1.0}, {"x": 0.5}, {"x": 1.5}, {"x": 2.5}, {"x": 5.0}])
+    _oracle(_continue_then_break_while, [{"x": -1.0}, {"x": 1.5}, {"x": 2.5}, {"x": 3.5}, {"x": 5.0}])
+    _oracle(
+        _unrolled_break_inside_residual_while,
+        [{"x": 0.2, "n": 2.0}, {"x": -1.0, "n": 3.0}, {"x": 5.0, "n": 1.0}, {"x": 0.0, "n": 0.0}],
+    )
+    # A pending callee return keeps the loop's lanes from sealing, so the following residual while is
+    # broadcast into both open sinks; the emitter must scrub body-only bindings at each loop's exit, or
+    # the arm join phis values that do not dominate it.
+    _oracle(
+        _residual_while_on_broadcast_lane,
+        [{"x": -1.0, "y": -1.0}, {"x": 1.0, "y": 5.0}, {"x": -2.0, "y": 3.0}, {"x": -1.0, "y": 2.0}],
+    )
+
+
+def test_a_name_bound_only_before_the_break_drops_at_the_loop_exit() -> None:
+    _rejects(_post_break_binding_dropped, "the local name 'y' is not bound on every path reaching this read")
+
+
+def test_a_while_true_with_a_guarded_break_stays_a_budget_rejection() -> None:
+    # Ruled: the statically-true condition selects unrolling, the pending break lane never ends it, and the
+    # budget draws the located rejection; no rotation into a residual while, no special detector.
+    _rejects(_while_true_guarded_break, "the graph expansion budget is exhausted while expanding the unrolled loop")
 
 
 # ---------------------------------------------------------------------- comprehensions

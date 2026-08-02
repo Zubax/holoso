@@ -25,7 +25,7 @@ from ._values import (
 )
 
 if TYPE_CHECKING:
-    from ._interpret import Ctx, Frame, Interpreter
+    from ._interpret import Ctx, Frame, Interpreter, Sink
 
 _AGGREGATE = (SequenceValue, TensorValue)
 
@@ -40,7 +40,7 @@ class _StoreSite:
     slot_value: Value
 
 
-def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: list[Stmt], ctx: Ctx) -> None:
+def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: Sink, ctx: Ctx) -> None:
     """
     The one mutation gate: resolve the target path with the store-prefix exemption (walked over the value
     tree, never through expression reads), judge admission at the store step after the RHS and index
@@ -72,7 +72,7 @@ def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: list[
 
 
 def _receiver_store(
-    interp: Interpreter, stmt: Store | AugStore, name: str, rhs: Value, frame: Frame, sink: list[Stmt], ctx: Ctx
+    interp: Interpreter, stmt: Store | AugStore, name: str, rhs: Value, frame: Frame, sink: Sink, ctx: Ctx
 ) -> None:
     origin = stmt.origin
     if not frame.root:
@@ -199,7 +199,7 @@ def _element_store(
     path: tuple[Selector, ...],
     rhs: Value,
     frame: Frame,
-    sink: list[Stmt],
+    sink: Sink,
 ) -> SequenceValue | TensorValue:
     origin = stmt.origin
     site = _store_site(interp, origin, spelled_root, root_value, path, frame, sink)
@@ -247,7 +247,7 @@ def _store_site(
     root_value: SequenceValue | TensorValue,
     path: tuple[Selector, ...],
     frame: Frame,
-    sink: list[Stmt],
+    sink: Sink,
 ) -> _StoreSite:
     spelled = root_name
     chain: list[Allocation] = []
@@ -331,7 +331,7 @@ def aug_aggregate(
     op: BinaryOp,
     rhs: Value,
     frame: Frame,
-    sink: list[Stmt],
+    sink: Sink,
 ) -> Value:
     match current:
         case SequenceValue():

@@ -81,6 +81,12 @@ def drop_return_rows(stmts: list[Stmt] | tuple[Stmt, ...], keep: list[bool]) -> 
                 rebuilt.append(
                     If(origin, cond, tuple(drop_return_rows(then, keep)), tuple(drop_return_rows(orelse, keep)))
                 )
+            case ResidualWhile(header=header, body=body):
+                rebuilt.append(
+                    dataclasses.replace(
+                        stmt, header=tuple(drop_return_rows(header, keep)), body=tuple(drop_return_rows(body, keep))
+                    )
+                )
             case _:
                 rebuilt.append(stmt)
     return rebuilt
@@ -167,6 +173,11 @@ def _loop_temps(stmts: tuple[Stmt, ...]) -> tuple[set[int], set[int]]:
                     inner_defined, inner_read = _loop_temps(part)
                     defined |= inner_defined
                     read |= inner_read
+            case SlotWrite(value=value):
+                read |= reads(value)
+            case ResidualReturn(values=values):
+                for atom in values:
+                    read |= reads(atom)
             case _:
                 raise AssertionError(stmt)
     return defined, read
