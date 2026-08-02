@@ -28,6 +28,7 @@ import poly3  # noqa: E402
 import signal_window  # noqa: E402
 from pid import PID  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
+from schmitt_trigger import SchmittTrigger  # noqa: E402
 from uart import UartRx  # noqa: E402
 
 _GOLDENS: list[tuple[str, Callable[[], object]]] = [
@@ -50,16 +51,23 @@ _RESIDUAL_GOLDENS: list[tuple[str, Callable[[], object]]] = [
     ("ekf1_stateless", lambda: ekf1_stateless.update_x_P),
     # Pins the residual-while shape: the phi rows, the header re-evaluated per test, and the back edge.
     ("octave_index", lambda: octave_index.octave_index),
+    # Pins the persistent-state shape: slot declarations with resets, the eager entry reads, the per-leaf
+    # SlotWrite commits before the return, and the elision of a returned public slot.
+    ("pid", lambda: PID().__call__),
+    ("schmitt_trigger", lambda: SchmittTrigger().__call__),
 ]
 
 _DIRECTORY = Path(__file__).resolve().parent / "eel_goldens"
 
 
-def _function(make: Callable[[], object]) -> types.FunctionType:
+def _target(make: Callable[[], object]) -> tuple[types.FunctionType, object | None]:
     target = make()
-    fn = target.__func__ if isinstance(target, types.MethodType) else target
-    assert isinstance(fn, types.FunctionType)
-    return fn
+    if isinstance(target, types.MethodType):
+        fn = target.__func__
+        assert isinstance(fn, types.FunctionType)
+        return fn, target.__self__
+    assert isinstance(target, types.FunctionType)
+    return target, None
 
 
 def _check(path: Path, text: str) -> None:
@@ -72,11 +80,11 @@ def _check(path: Path, text: str) -> None:
 
 @pytest.mark.parametrize("name,make", _GOLDENS, ids=[name for name, _ in _GOLDENS])
 def test_desugar_golden(name: str, make: Callable[[], object]) -> None:
-    fn = _function(make)
+    fn, _ = _target(make)
     _check(_DIRECTORY / f"{name}.desugar.eel", print_eel(desugar(fn)))
 
 
 @pytest.mark.parametrize("name,make", _RESIDUAL_GOLDENS, ids=[name for name, _ in _RESIDUAL_GOLDENS])
 def test_residual_golden(name: str, make: Callable[[], object]) -> None:
-    fn = _function(make)
-    _check(_DIRECTORY / f"{name}.residual.eel", print_eel(partial_evaluate(desugar(fn), fn)))
+    fn, instance = _target(make)
+    _check(_DIRECTORY / f"{name}.residual.eel", print_eel(partial_evaluate(desugar(fn), fn, instance)))

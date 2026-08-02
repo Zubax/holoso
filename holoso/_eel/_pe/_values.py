@@ -15,6 +15,7 @@ store under a residual branch is a new value over the same allocation and joins 
 """
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 
@@ -58,11 +59,15 @@ class Allocation:
     """
     One runtime container's identity; the state only ever moves forward (never back toward UNIQUE), while
     ``borrows`` is the scoped overlay counting the active loops/comprehensions iterating this allocation --
-    a counter rather than a flag because nested loops may iterate the same allocation.
+    a counter rather than a flag because nested loops may iterate the same allocation. ``joined`` marks an
+    allocation minted by a branch join of differing arm allocations: the value is ONE of the two runtime
+    objects, so the fresh identity erases provenance -- installing such a tree into a state attribute is
+    rejected, since the disjointness checks would judge the wrong object.
     """
 
     state: AllocationState = AllocationState.UNIQUE
     borrows: int = 0
+    joined: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,3 +165,73 @@ class ExpansionBudget:
         self._remaining -= units
         if self._remaining < 0:
             reject(origin, f"the graph expansion budget is exhausted while expanding {construct}")
+
+
+def allocations_match(a: Value, b: Value) -> bool:
+    match a, b:
+        case SequenceValue(), SequenceValue():
+            return (
+                a.allocation is b.allocation
+                and len(a.items) == len(b.items)
+                and all(allocations_match(x, y) for x, y in zip(a.items, b.items))
+            )
+        case TensorValue(), TensorValue():
+            return a.allocation is b.allocation
+        case (SequenceValue() | TensorValue(), _) | (_, SequenceValue() | TensorValue()):
+            return False
+        case _:
+            return True
+
+
+def tree_leaves(value: Value) -> list[Scalar | Opaque]:
+    """The scalar leaves of a slot tree in declaration order (depth-first, row-major)."""
+    match value:
+        case SequenceValue(items=items):
+            return [leaf for item in items for leaf in tree_leaves(item)]
+        case TensorValue(leaves=leaves):
+            return list(leaves)
+        case StaticScalar() | ResidualScalar() | Opaque():
+            return [value]
+        case _:
+            raise AssertionError(value)
+
+
+def tensor_occurrences(value: Value) -> list[Allocation]:
+    """Every OCCURRENCE of a tensor allocation, walking through repeated sequence nodes each time."""
+    match value:
+        case SequenceValue(items=items):
+            return [allocation for item in items for allocation in tensor_occurrences(item)]
+        case TensorValue(allocation=allocation):
+            return [allocation]
+        case _:
+            return []
+
+
+def tree_rebuild(value: Value, leaves: Iterator[Scalar]) -> Value:
+    """The same structure over the SAME allocations with the scalar leaves replaced in declaration order."""
+    match value:
+        case SequenceValue(items=items, allocation=allocation):
+            return SequenceValue(tuple(tree_rebuild(item, leaves) for item in items), allocation)
+        case TensorValue(shape=shape, family=family, allocation=allocation):
+            replaced = tuple(next(leaves) for _ in value.leaves)
+            return TensorValue(shape, family, replaced, allocation)
+        case StaticScalar() | ResidualScalar() | Opaque():
+            return next(leaves)
+        case _:
+            raise AssertionError(value)
+
+
+def same_structure(a: Value, b: Value) -> bool:
+    match a, b:
+        case SequenceValue(), SequenceValue():
+            return (
+                a.allocation is b.allocation
+                and len(a.items) == len(b.items)
+                and all(same_structure(x, y) for x, y in zip(a.items, b.items, strict=True))
+            )
+        case TensorValue(), TensorValue():
+            return a.allocation is b.allocation and a.shape == b.shape and a.family is b.family
+        case (StaticScalar() | ResidualScalar() | Opaque()), (StaticScalar() | ResidualScalar() | Opaque()):
+            return True
+        case _:
+            return False

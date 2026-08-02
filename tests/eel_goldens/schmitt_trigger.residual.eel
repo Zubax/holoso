@@ -1,0 +1,15 @@
+fn __call__(x: float, /):
+    state y: bool reset False
+    %0: bool = slot y
+    %1: bool = intrinsic frelational<gt>(x, 1.0)
+    if %1:
+        %4: bool = True
+    else:
+        %2: bool = intrinsic frelational<lt>(x, -1.0)
+        if %2:
+            %3: bool = False
+        else:
+            %3: bool = %0
+        %4: bool = %3
+    slot y = %4
+    return

@@ -199,12 +199,21 @@ an accidental blow-up is a located rejection rather than a hang; the budget deli
 arbitrary-precision constant arithmetic. When a fold executed with host arithmetic raises, the failure is certain
 wherever the expression is evaluated -- evaluation judged under the subset's own semantics, eager gates included --
 so the compiler surfaces a compile-time diagnostic instead of masking the error into a runtime value, escalating it
-early and staying simple; folds through HIR operators keep the survivor-based refusal policy. A read the evaluator
+early and staying simple; folds through HIR operators keep the survivor-based refusal policy. That license extends
+no further: the compiler never PREDICTS host failures it is not itself forced to evaluate. Whether a kernel would
+raise at run time on the host -- a read-only buffer, an exhausted resource, any state of the host environment
+beyond the captured values -- is the user's responsibility, part of the standing contract that inputs are trusted
+and the kernel program is well-defined; the compiler synthesizes the datapath the code asks for, and if the
+program is not runnable as Python, all bets are off. Guards against such conditions are hostile-input hardening
+and are rejected as a matter of policy. A read the evaluator
 cannot prove bound on every residual path is a located
 rejection -- never a fall-through to a same-named global, where CPython would raise only at run time. The residual
 program is scalar and typed, its static control decided and only genuinely dynamic branches and loops remaining; HIR
-emission from it is mechanical, and structured loop exits (break, continue, early return) are just extra control
-edges there, with exits from unrolled loops handled by predication inside the partial evaluator instead.
+emission from it is mechanical. An early return is a residual terminator: each return site commits its own outputs
+and state live-outs, conformed against the one annotation-fixed table, and emission joins the sites in a single
+exit block -- extra control edges, never predication, so exits from unrolled loops fall out of the interpreter
+simply continuing down the surviving path. Loop-internal exits (break, continue, return crossing a dynamic loop)
+remain to be designed on the same principle.
 
 Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below, never here. Mixed int/float
 expressions promote to float C-style, true division always yields float as in Python, a power yields float unless it

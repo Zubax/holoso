@@ -553,11 +553,14 @@ def _missing_attribute(x: float) -> float:
     return _NAMESPACE.absent * x  # type: ignore[no-any-return]
 
 
+def test_instance_and_class_methods_inline_like_helpers() -> None:
+    _oracle(_calls_instance_method, [{"x": 2.5}])
+    _oracle(_calls_classmethod, [{"x": 1.0}])
+
+
 def test_instance_read_rejections() -> None:
     for fn, match in [
         (_reads_slot_descriptor, "the attribute 'slotted' is a descriptor the compiler cannot read"),
-        (_calls_instance_method, "bound methods are not supported yet"),
-        (_calls_classmethod, "bound methods are not supported yet"),
         (_missing_attribute, "'_NAMESPACE' has no attribute 'absent'"),
     ]:
         _rejects(fn, match)

@@ -4,17 +4,19 @@ Everything environment-rooted (globals, closure cells, injected defaults, attrib
 enters ESCAPED per the ownership model, and conversion is MEMOIZED BY OBJECT IDENTITY,
 so two captures sharing a sub-object map to the same allocation and every read of one object yields one identity.
 Anything inadmissible stays a lazily-judged Opaque -- binding it is CPython-legal; only a use rejects.
-The A5 clause (2)/(3) identity-overlap rejections concern state paths and are enforced where state lands
-(M8); the identity memo built here is what makes them expressible.
+The optional ``guard`` is the A5 clause (2) overlap check against the state trees, called on every captured
+aggregate with the capturing read's origin; the state trees are built before any capture, so this one
+direction establishes the disjointness invariant.
 """
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 
 from ._ops import make_const
 from ._ownership import escape
-from .._ir import ScalarType
+from .._ir import Origin, ScalarType
 from ._values import Allocation, Opaque, Scalar, SequenceValue, StaticScalar, TensorValue, Value
 
 
@@ -69,11 +71,12 @@ def ndarray_annotation(annotation: object) -> bool:
 class Snapshotter:
     """One capture boundary per interpretation; the memo pins object identity for the interpreter's lifetime."""
 
-    def __init__(self) -> None:
+    def __init__(self, guard: Callable[[str, object, Origin], None] | None = None) -> None:
         self._memo: dict[int, tuple[object, Value]] = {}
         self._converting: set[int] = set()
+        self._guard = guard
 
-    def admit(self, name: str, raw: object) -> Value:
+    def admit(self, name: str, raw: object, origin: Origin) -> Value:
         scalar = scalar_of(raw, name)
         if scalar is not None:
             return scalar
@@ -81,10 +84,12 @@ class Snapshotter:
             found = self._memo.get(id(raw))
             if found is not None:
                 return found[1]
+            if self._guard is not None:
+                self._guard(name, raw, origin)
             assert id(raw) not in self._converting, "a captured value cannot contain a reference cycle"
             self._converting.add(id(raw))
             try:
-                value = self._aggregate(name, raw)
+                value = self._aggregate(name, raw, origin)
             finally:
                 self._converting.discard(id(raw))
             escape(value)
@@ -92,9 +97,9 @@ class Snapshotter:
             return value
         return Opaque(name, raw)
 
-    def _aggregate(self, name: str, raw: list[object] | tuple[object, ...] | np.ndarray) -> Value:
+    def _aggregate(self, name: str, raw: list[object] | tuple[object, ...] | np.ndarray, origin: Origin) -> Value:
         if isinstance(raw, np.ndarray):
             tensor = tensor_of(raw, name)
             return Opaque(name, raw) if tensor is None else tensor
-        items = tuple(self.admit(f"{name}[{position}]", item) for position, item in enumerate(raw))
+        items = tuple(self.admit(f"{name}[{position}]", item, origin) for position, item in enumerate(raw))
         return SequenceValue(items, Allocation())

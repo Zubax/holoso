@@ -422,7 +422,7 @@ def test_structural_store_rules() -> None:
         (_sequence_concat, r"the operator `\+` is not supported on a sequence"),
         (_sequence_repeat, r"the operator `\*` is not supported on a sequence"),
         (_sequence_aug, r"the operator `\+=` is not supported on a sequence"),
-        (_attribute_store, "attribute stores are not supported yet"),
+        (_attribute_store, "an attribute cannot be stored on a sequence or array"),
     ]:
         _rejects(fn, match)
 

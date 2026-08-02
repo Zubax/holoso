@@ -465,8 +465,8 @@ def _calls_bound_method(x: float) -> float:
     return _BOUND(x)
 
 
-def test_bound_method_callees_reject() -> None:
-    _rejects(_calls_bound_method, "bound methods are not supported yet")
+def test_a_state_writing_bound_callee_rejects_at_the_helper_write() -> None:
+    _rejects(_calls_bound_method, r"in _BOUND\(\): an attribute store is only supported on the entry method's receiver")
 
 
 def _unimplemented_library(x: float) -> float:

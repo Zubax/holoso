@@ -94,25 +94,33 @@ ROWS: list[ParityRow] = [
     ParityRow("to_polar", lambda: polar.to_polar, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("from_polar", lambda: polar.from_polar, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
     ParityRow("imu_frame_transform", lambda: imu_frame_transform.transform, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
-    ParityRow("iir1_lpf", lambda: IIR1LPF().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("pid", lambda: PID().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("schmitt_trigger", lambda: SchmittTrigger().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("quadrature_encoder", lambda: QuadratureEncoder().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("phase_frequency_detector", lambda: PhaseFrequencyDetector().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("latching_fault_register", lambda: LatchingFaultRegister().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("majority_voter", lambda: MajorityVoter().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("integrator", lambda: TrapezoidalLeakyStreamingIntegrator().__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("uart_tx", lambda: UartTx(parity=False).__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("uart_rx", lambda: UartRx(parity=False).__call__, _D, "M8", "ORACLE_OK"),
-    ParityRow("ekf1_stateful", lambda: ekf1_stateful.Ekf1().update, _D, "M8", "ORACLE_OK"),
-    # Bound methods lower fully (the receiver binds as a frozen snapshot root), so these two stop at their
-    # own PE diagnostics; the terminal refusal classes land with M8's state machinery.
-    ParityRow("iir1_hpf", lambda: IIR1HPF().step, _D, "M8", "REJECTED: stateful sub-object at snapshot conversion"),
+    ParityRow("iir1_lpf", lambda: IIR1LPF().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("pid", lambda: PID().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("schmitt_trigger", lambda: SchmittTrigger().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("quadrature_encoder", lambda: QuadratureEncoder().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow(
+        "phase_frequency_detector", lambda: PhaseFrequencyDetector().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"
+    ),
+    ParityRow(
+        "latching_fault_register", lambda: LatchingFaultRegister().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"
+    ),
+    ParityRow("majority_voter", lambda: MajorityVoter().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow(
+        "integrator", lambda: TrapezoidalLeakyStreamingIntegrator().__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"
+    ),
+    ParityRow("uart_tx", lambda: UartTx(parity=False).__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("uart_rx", lambda: UartRx(parity=False).__call__, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    ParityRow("ekf1_stateful", lambda: ekf1_stateful.Ekf1().update, RowExpect.ORACLE_OK, "-", "ORACLE_OK"),
+    # The two permanent refusals, at their terminal PE-level diagnostics (stage DESUGARED: the desugarer is
+    # happy, the partial evaluator refuses); the ruled messages are pinned in test_eel_state.py.
+    ParityRow(
+        "iir1_hpf", lambda: IIR1HPF().step, _D, "-", "REJECTED: hierarchical component call at partial evaluation"
+    ),
     ParityRow(
         "finite_set_current_controller",
         lambda: FiniteSetCurrentController().__call__,
         _D,
-        "M8",
+        "-",
         "REJECTED: unsupported (dataclass/shapeless) parameters at parameter binding",
     ),
 ]

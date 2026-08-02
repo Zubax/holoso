@@ -227,9 +227,10 @@ def _derive_row(origin: Origin, base: TensorValue, position: int) -> TensorValue
 
 
 def _derived(base: TensorValue, shape: tuple[int, ...], leaves: tuple[Scalar | Opaque, ...]) -> TensorValue:
-    result = TensorValue(shape, base.family, leaves, Allocation())
+    # The derivation reuses the source allocation as a storage-equivalence token: store blocking is identical
+    # (one shared allocation either way), and the state-install disjointness checks see views for free.
+    result = TensorValue(shape, base.family, leaves, base.allocation)
     share(base)
-    share(result)
     return result
 
 

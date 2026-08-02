@@ -284,8 +284,8 @@ def _early_return(x: float) -> float:
     return -x
 
 
-def test_return_inside_runtime_branch_is_a_gap() -> None:
-    _rejects(_early_return, "return inside a runtime branch")
+def test_an_early_return_joins_at_the_exit() -> None:
+    _oracle(_early_return, [{"x": 3.0}, {"x": -2.0}, {"x": 0.0}])
 
 
 # ---------------------------------------------------------------------- powers and the budget
@@ -732,8 +732,8 @@ class _Stateful:
         return self.y
 
 
-def test_a_state_writing_bound_method_is_a_gap() -> None:
-    _rejects(_Stateful().step, "attribute stores are not supported yet")
+def test_a_state_writing_bound_method_accumulates_across_transactions() -> None:
+    _oracle(_Stateful().step, [{"x": 1.5}, {"x": -0.25}, {"x": 4.0}])
     with pytest.raises(SynthesisError, match="not a plain function"):
         resolve_target(3)
 

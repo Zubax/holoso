@@ -21,8 +21,10 @@ IntrinsicCall (a resolved HIR operator riding opaquely — also the spelling of 
 SlotRead/SlotWrite over flattened state-slot paths, ResidualWhile with its explicit loop-carried phis,
 ResidualReturn against the OutputDecl table, and the mandatory ScalarType annotations on residual Assign/Param.
 Residual Eel is fully scalar: no TupleExpr survives
-partial evaluation; a multi-output kernel returns one typed atom per OutputDecl row. A returned leaf that
-duplicates a public state slot's live-out is elided at OutputDecl construction. A bare scalar return flattens
+partial evaluation; a multi-output kernel returns one typed atom per OutputDecl row. A ResidualReturn is a
+TERMINATOR — one per return path, each preceded by the per-leaf SlotWrite commits of that path — and emission
+joins all sites in a single exit block, so HIR's sole Ret invariant holds. A returned leaf whose value matches
+the same public state slot's live-out at every site is elided from the table. A bare scalar return flattens
 to leaf path (0,), matching the existing out_0 port convention.
 """
 

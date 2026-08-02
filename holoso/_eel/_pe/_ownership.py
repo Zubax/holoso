@@ -46,13 +46,13 @@ from ._values import Allocation, AllocationState, SequenceValue, TensorValue, Va
 
 
 def share(value: Value) -> None:
-    for allocation in _allocations(value):
+    for allocation in allocations(value):
         if allocation.state is AllocationState.UNIQUE:
             allocation.state = AllocationState.SHARED
 
 
 def escape(value: Value) -> None:
-    for allocation in _allocations(value):
+    for allocation in allocations(value):
         allocation.state = AllocationState.ESCAPED
 
 
@@ -83,19 +83,19 @@ def blame(allocation: Allocation) -> str:
             return "it is shared (reachable through another name or container); rebind a fresh value instead"
         case AllocationState.ESCAPED:
             return (
-                "it arrived from outside the kernel (a global, a closure, a default, or a parameter), "
-                "so the change would be observable outside"
+                "it arrived from outside the kernel (a global, a closure, a default, or a parameter) or has "
+                "escaped through a return or a state install, so the change would be observable elsewhere"
             )
         case AllocationState.UNIQUE:
             raise AssertionError("a unique allocation draws no blame")
 
 
-def _allocations(value: Value) -> list[Allocation]:
+def allocations(value: Value) -> list[Allocation]:
     match value:
         case SequenceValue(items=items, allocation=allocation):
             found = [allocation]
             for item in items:
-                found.extend(_allocations(item))
+                found.extend(allocations(item))
             return found
         case TensorValue(allocation=allocation):
             return [allocation]

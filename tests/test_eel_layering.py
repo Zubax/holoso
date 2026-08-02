@@ -14,8 +14,9 @@ _EEL_DIR = Path(__file__).resolve().parents[1] / "holoso" / "_eel"
 # Modules allowed to import numpy / HIR within holoso._eel, as repo-relative posix paths under _eel.
 # `_pe/_ops.py` is the partial evaluator's sole HIR-facing module: it selects operators and folds through their
 # own `evaluate` (the one-answer mandate), while the rest of `_pe` stays HIR-free; `_lower.py` composes the
-# stages and returns an `Hir`.
-_NUMPY_HOMES = {"_lib", "_pe/_snapshot.py"}
+# stages and returns an `Hir`. `_pe/_state.py` is the reset side of the capture boundary: it walks raw instance
+# attributes into slot specs and owns the A5 storage-overlap checks, so it shares the snapshot's numpy license.
+_NUMPY_HOMES = {"_lib", "_pe/_snapshot.py", "_pe/_state.py"}
 _HIR_HOMES = {"_lib", "_emit", "_pe/_ops.py", "_lower.py"}
 
 

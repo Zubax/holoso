@@ -39,6 +39,17 @@ ORACLE_COVERED = frozenset(
         "recip_newton",
         "cordic_sincos",
         "imu_frame_transform",
+        "iir1_lpf",
+        "pid",
+        "schmitt_trigger",
+        "quadrature_encoder",
+        "phase_frequency_detector",
+        "latching_fault_register",
+        "majority_voter",
+        "integrator",
+        "uart_tx",
+        "uart_rx",
+        "ekf1_stateful",
     }
 )
 

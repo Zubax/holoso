@@ -1,7 +1,6 @@
 """
 The shadow entry point: runs the deepest landed Eel stage next to the primary frontend, with zero effect on the
-primary output. Deleted at cutover. A bound method's receiver binds as a frozen snapshot root, so a stateless
-method lowers fully while a state-writing one stops at its first attribute store until M8.
+primary output. Deleted at cutover.
 """
 
 import inspect

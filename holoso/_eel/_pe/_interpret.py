@@ -22,10 +22,18 @@ Ownership events ride value flow: a desugared temp is a linear conduit, so the f
 temp MOVES it and any re-read is the second handle, judged at the read itself regardless of where the value
 lands; local-name reads stay innocent, their events firing where the value gains a persistent place.
 Sequence-to-tensor conversions and sequence slices copy scalar leaves (exact); tensor-to-tensor derivations
-conservatively share -- except np.array of an array, an independent copy on the host and the A5 explicit-copy
-spelling, which stays unique. A scalar answers rank zero so library stubs can interrogate rank. Annotation
-promotion rebinds leaves along the SAME allocations: a fresh tree would sever the handle relationship and
-admit a mutation CPython observes through the original name.
+conservatively share over the SOURCE allocation (a storage-equivalence token) -- except np.array of an
+array, an independent copy on the host and the A5 explicit-copy spelling, which stays unique. A scalar
+answers rank zero so library stubs can interrogate rank. An annotation never converts an array family: the
+runtime object would keep its dtype, so a mismatch rejects rather than modeling a fiction.
+
+Persistent state: slots are environment bindings keyed by the attribute path, initialized eagerly from
+SlotRead temps so a write under one residual arm joins the entry value from the other. An aggregate state
+read aliases only where its value gains a persistent place, and only when the value IS the current slot
+tree -- state-slot provenance, never syntax. A root return terminates its path: the annotation fixes the
+output table and each site commits its own outputs and slot live-outs, so a partially-returning branch
+simply continues in the surviving arm. Installing a branch-JOINED aggregate rejects: the join mints a fresh
+allocation for what is one of two runtime objects, erasing the provenance the disjointness checks need.
 """
 
 import dataclasses
@@ -35,15 +43,26 @@ import types
 import typing
 from dataclasses import dataclass
 
-from ..._errors import SourceLocation, SynthesisError
+from ..._errors import SynthesisError
 from .._desugar import desugar
 from .._ir import *
 from .._lib import Conversion, Factory, Intrinsic, Library, matmul_, resolve, transpose_
-from .._names import indexed_names
+from .._names import indexed_names, public_slot, state_port_name
 from . import _aggregate, _ops
-from ._ownership import blame, borrow, escape, mutable, release, share
+from ._ownership import allocations, blame, borrow, escape, mutable, release, share
 from ._reject import reattribute, reject
+from ._residual import assigned_names, drop_return_rows, prune, rechained
 from ._snapshot import Snapshotter, describe_opaque as _describe_opaque, nan_payload, tensor_of
+from ._state import (
+    ScalarSpec,
+    SequenceSpec,
+    Spec,
+    StateModel,
+    TensorSpec,
+    descriptor_guard,
+    environment_aggregates,
+    spec_leaves,
+)
 from ._values import (
     Allocation,
     AllocationState,
@@ -56,14 +75,42 @@ from ._values import (
     TensorMethod,
     TensorValue,
     Value,
+    allocations_match,
     same,
+    same_structure,
+    tensor_occurrences,
+    tree_leaves,
+    tree_rebuild,
 )
 
 _logger = logging.getLogger(__name__)
 
-type _EnvKey = str | int
+type _SlotKey = tuple[str, ...]
+
+type _EnvKey = str | int | _SlotKey
 
 _AGGREGATE = (SequenceValue, TensorValue)
+
+_RETURN_KEY = "<return>"
+
+
+@dataclass(frozen=True, slots=True)
+class _Ctx:
+    """Where interpretation stands: a residual branch arm rejects raise; a residual loop also rejects return."""
+
+    branch: bool = False
+    loop: bool = False
+
+    def arm(self) -> "_Ctx":
+        return _Ctx(branch=True, loop=self.loop)
+
+
+class _PromoteRun(Exception):
+    """Internal driver signal: an INT slot leaf met a FLOAT live-out; re-run with that leaf promoted."""
+
+    def __init__(self, path: SlotPath) -> None:
+        super().__init__(path)
+        self.path = path
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +133,16 @@ class _Moved:
 
 
 @dataclass(frozen=True, slots=True)
+class _SlotAlias:
+    """
+    A temp holding an aggregate state read: the tree's persistent home is the slot environment, so unlike an
+    ordinary linear conduit the landing site must fire the aliasing share; reads are innocent like a local's.
+    """
+
+    value: SequenceValue | TensorValue
+
+
+@dataclass(frozen=True, slots=True)
 class _StoreSite:
     spelled: str
     chain: list[Allocation]
@@ -95,17 +152,22 @@ class _StoreSite:
     slot_value: Value
 
 
-type _Env = dict[_EnvKey, Value | _Unjoinable | _Moved]
+type _Env = dict[_EnvKey, Value | _Unjoinable | _Moved | _SlotAlias]
 
 
 @dataclass(slots=True)
 class _Frame:
-    """One function under interpretation; ``result`` is where a non-root ``return`` deposits the call's value."""
+    """
+    One function under interpretation; ``result`` is where a non-root ``return`` deposits the call's value.
+    ``slots`` is the environment holding the slot keys: the frame's own env for the root and its branch-arm
+    forks, the caller's transitively for inlined helpers, so a helper reads the current post-write state.
+    """
 
     fn: types.FunctionType
     annotations: dict[str, object]
     env: _Env
     root: bool
+    slots: _Env
     result: Value | None = None
 
 
@@ -119,47 +181,67 @@ _SCALAR_ANNOTATIONS: list[tuple[type, ScalarType]] = [
 
 
 def partial_evaluate(eel: EelFunction, fn: types.FunctionType, instance: object | None = None) -> EelFunction:
-    return _Interpreter(fn, instance).run(eel)
+    """
+    The A2 trim driver: run with the seeded assumed-state set, shrink to the attributes whose write was
+    actually reached, promote an INT slot that met a FLOAT live-out, and re-run until stable -- each run a
+    fresh interpreter over the same immutable tree. A rejection under the conservative assumption is final,
+    annotated with the pinning writes.
+    """
+    if instance is None:
+        return _Interpreter(fn, None, None).run(eel)
+    assert eel.params, "a bound method always has a receiver parameter"
+    seed = assigned_names(eel.body, eel.params[0].name)[2]
+    if not seed:
+        return _Interpreter(fn, instance, None).run(eel)
+    descriptor_guard(instance, seed)
+    model = StateModel(instance, seed, environment_aggregates(fn))
+    while True:  # terminates: each pass either finishes, strictly shrinks S, or promotes a fresh leaf
+        interpreter = _Interpreter(fn, instance, model)
+        try:
+            residual = interpreter.run(eel)
+        except _PromoteRun as promotion:
+            model.promote(promotion.path)
+            _logger.info("%s: the state leaf %s promotes to float; re-running", eel.name, promotion.path)
+            continue
+        except SynthesisError as error:
+            raise type(error)(error.message + model.note(), error.location) from None
+        if model.trim(interpreter.written_attrs):
+            _logger.info(
+                "%s: the assumed-state set shrinks to {%s}; re-running", eel.name, ", ".join(sorted(model.assumed))
+            )
+            if not model.assumed:
+                return _Interpreter(fn, instance, None).run(eel)
+            continue
+        return residual
 
 
 def _annotation_stype(annotation: object) -> ScalarType | None:
     return next((stype for ty, stype in _SCALAR_ANNOTATIONS if annotation is ty), None)
 
 
-def _key_order(key: _EnvKey) -> tuple[bool, str]:
-    return isinstance(key, str), str(key)
-
-
-def _rechained(node: object, frames: tuple[CallFrame, ...]) -> object:
-    """
-    An inlined callee's tree with every origin carrying the frame chain, so residual nodes and rejections
-    alike re-attribute; shape-generic over the frozen node dataclasses so IR growth needs no maintenance here.
-    """
-    if isinstance(node, Origin):
-        return Origin(node.location, frames)
-    if isinstance(node, SourceLocation):
-        return node
-    if isinstance(node, tuple):
-        return tuple(_rechained(item, frames) for item in node)
-    if dataclasses.is_dataclass(node) and not isinstance(node, type):
-        return dataclasses.replace(
-            node, **{field.name: _rechained(getattr(node, field.name), frames) for field in dataclasses.fields(node)}
-        )
-    return node
+def _key_order(key: _EnvKey) -> tuple[int, str]:
+    return (0 if isinstance(key, int) else 1 if isinstance(key, str) else 2), str(key)
 
 
 class _Interpreter:
-    def __init__(self, fn: types.FunctionType, instance: object | None = None) -> None:
+    def __init__(self, fn: types.FunctionType, instance: object | None, state: StateModel | None) -> None:
         self._fn = fn
         self._instance = instance
+        self._state = state
         self._budget = ExpansionBudget()
         self._next_temp = 0
-        self._outputs: tuple[OutputDecl, ...] = ()
-        self._return_values: tuple[Atom, ...] = ()
+        self._outputs: tuple[OutputDecl, ...] | None = None
+        self._elide: list[SlotPath | None] = []
+        self._specs: dict[str, Spec] = {}
+        self._decls: tuple[SlotDecl, ...] = ()
+        self._slot_keys: list[_SlotKey] = []
+        self._receiver_name: str | None = None
+        self._state_owners: dict[Allocation, str] = {}
+        self.written_attrs: set[str] = set()
         self._eels: dict[types.FunctionType, EelFunction] = {}
         self._meta: dict[types.FunctionType, dict[str, object]] = {}
         self._inlining: set[types.FunctionType] = {fn}
-        self._snapshot = Snapshotter()
+        self._snapshot = Snapshotter(state.check_capture if state is not None else None)
         anchor = resolve(pow)
         assert isinstance(anchor, Library), "the builtin pow key anchors the ** lowering"
         self._pow_stub = anchor.stub
@@ -168,14 +250,18 @@ class _Interpreter:
         self._transpose_stub: types.FunctionType = transpose_
 
     def run(self, eel: EelFunction) -> EelFunction:
-        frame = _Frame(fn=self._fn, annotations=self._annotations_of(eel.origin, self._fn), env={}, root=True)
+        env: _Env = {}
+        frame = _Frame(
+            fn=self._fn, annotations=self._annotations_of(eel.origin, self._fn), env=env, root=True, slots=env
+        )
         remaining = eel.params
         if self._instance is not None:
-            # The bound receiver is a frozen snapshot root, not a port: reads fold, and a store through it
-            # draws the attribute-store rejection until persistent state lands.
+            # The bound receiver is a snapshot root: frozen-attribute reads fold, state attributes read and
+            # write their slot bindings, and calling its methods inlines them over the same receiver.
             assert remaining, "a bound method always has a receiver parameter"
             receiver = remaining[0]
-            frame.env[receiver.name] = self._snapshot.admit(receiver.name, self._instance)
+            self._receiver_name = receiver.name
+            frame.env[receiver.name] = self._snapshot.admit(receiver.name, self._instance, eel.origin)
             remaining = remaining[1:]
         params: list[Param] = []
         for param in remaining:
@@ -185,21 +271,58 @@ class _Interpreter:
             collision = next(name for name in names if names.count(name) > 1)
             reject(eel.origin, f"the decomposed parameter names collide on {collision!r}; rename the parameters")
         sink: list[Stmt] = []
-        returned = self._block(eel.body, frame, sink, in_branch=False)
-        if not returned:
-            self._conclude_bare(eel.origin, frame)
-        sink.append(ResidualReturn(eel.origin, self._return_values))
-        body, live = _prune(sink)
+        if self._state is not None:
+            self._specs = self._state.prepare()
+            self._decls = self._state.decls()
+            self._slot_keys = [(attr,) for attr in sorted(self._specs)]
+            for attr in sorted(self._specs):
+                frame.env[(attr,)] = self._init_slot(attr, self._specs[attr], eel.origin, sink)
+            ports = names + [
+                state_port_name(decl.slot) for decl in self._decls if not str(decl.slot[0]).startswith("_")
+            ]
+            if len(set(ports)) != len(ports):
+                collision = next(name for name in ports if ports.count(name) > 1)
+                reject(eel.origin, f"a state port collides with a parameter on {collision!r}; rename one of them")
+        if not self._block(eel.body, frame, sink, _Ctx()):
+            self._bare_site(eel.origin, frame, sink)
+        assert self._outputs is not None, "every path commits a return site"
+        keep = [candidate is None for candidate in self._elide]
+        outputs = tuple(row for row, kept in zip(self._outputs, keep, strict=True) if kept)
+        statements = sink if all(keep) else drop_return_rows(sink, keep)
+        body, live = prune(statements)
         assert not live, "a residual temp is read before any assignment"
-        residual = EelFunction(eel.origin, eel.name, tuple(params), tuple(body), slots=(), outputs=self._outputs)
+        residual = EelFunction(eel.origin, eel.name, tuple(params), tuple(body), slots=self._decls, outputs=outputs)
         _logger.info(
-            "%s: partial evaluation: %d residual statement(s), %d output(s), %d budget unit(s) spent",
+            "%s: partial evaluation: %d residual statement(s), %d output(s), %d slot(s), %d budget unit(s) spent",
             eel.name,
             len(body),
-            len(self._outputs),
+            len(outputs),
+            len(self._decls),
             self._budget.spent,
         )
         return residual
+
+    def _init_slot(self, attr: str, spec: Spec, origin: Origin, sink: list[Stmt]) -> Value:
+        match spec:
+            case ScalarSpec(path=path, stype=stype):
+                index = self._fresh()
+                sink.append(Assign(origin, TempBind(origin, index), SlotRead(origin, path), stype))
+                return ResidualScalar(stype, TempRef(origin, index))
+            case SequenceSpec(items=items):
+                sequence = SequenceValue(
+                    tuple(self._init_slot(attr, item, origin, sink) for item in items), Allocation()
+                )
+                self._state_owners[sequence.allocation] = attr
+                return sequence
+            case TensorSpec(shape=shape, family=family, leaves=leaves):
+                scalars: list[Scalar | Opaque] = []
+                for leaf in leaves:
+                    index = self._fresh()
+                    sink.append(Assign(origin, TempBind(origin, index), SlotRead(origin, leaf.path), leaf.stype))
+                    scalars.append(ResidualScalar(leaf.stype, TempRef(origin, index)))
+                tensor = TensorValue(shape, family, tuple(scalars), Allocation())
+                self._state_owners[tensor.allocation] = attr
+                return tensor
 
     def _desugared(self, fn: types.FunctionType) -> EelFunction:
         found = self._eels.get(fn)
@@ -244,15 +367,11 @@ class _Interpreter:
 
     # ------------------------------------------------------------------ statements
 
-    def _block(self, stmts: tuple[Stmt, ...], frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
+    def _block(self, stmts: tuple[Stmt, ...], frame: _Frame, sink: list[Stmt], ctx: _Ctx) -> bool:
         for stmt in stmts:
             match stmt:
                 case Assign(target=target, value=value):
-                    result = self._expr(value, frame, sink)
-                    key = self._binding_key(target)
-                    if isinstance(result, _AGGREGATE) and isinstance(value, LocalRef) and value.name != key:
-                        share(result)
-                    frame.env[key] = result
+                    self._assign(target, value, frame, sink)
                 case AugAssign(origin=origin, target=target, op=op, value=value):
                     current = frame.env.get(target.name)
                     if current is None:
@@ -260,9 +379,9 @@ class _Interpreter:
                     current_value = self._readable(current, origin)
                     rhs = self._expr(value, frame, sink)
                     if isinstance(current_value, _AGGREGATE):
-                        updated = self._aug_aggregate(origin, target.name, current_value, op, rhs, sink)
+                        updated = self._aug_aggregate(origin, target.name, current_value, op, rhs, frame, sink)
                     else:
-                        updated = self._binary(origin, op, current_value, rhs, sink)
+                        updated = self._binary(origin, op, current_value, rhs, frame, sink)
                     frame.env[target.name] = updated
                 case Unpack(origin=origin, targets=targets, value=value):
                     source = self._expr(value, frame, sink)
@@ -270,38 +389,60 @@ class _Interpreter:
                     for target, item in zip(targets, items, strict=True):
                         frame.env[self._binding_key(target)] = item
                 case If():
-                    if self._if(stmt, frame, sink, in_branch):
+                    if self._if(stmt, frame, sink, ctx):
                         return True
                 case Return(origin=origin):
-                    if in_branch:
-                        reject(origin, "a return inside a runtime branch is not supported yet")
+                    if ctx.loop:
+                        reject(origin, "a return inside a data-dependent loop is not supported yet")
                     if frame.root:
-                        self._conclude(stmt, frame, sink)
-                    elif stmt.value is not None:
+                        self._return_site(stmt, frame, sink)
+                        return True
+                    if stmt.value is not None:
                         result = self._expr(stmt.value, frame, sink)
                         annotation = frame.annotations.get("return", _MISSING)
                         if annotation is not _MISSING:
                             # At the return itself, so a mismatch points into the callee.
                             result = self._conform_value(result, annotation, origin, sink, "the returned value")
+                        if isinstance(result, _AGGREGATE) and self._alias_conduit(frame, stmt.value):
+                            share(result)
                         frame.result = result
                     return True
                 case Raise():
-                    self._raise(stmt, frame, sink, in_branch)
+                    self._raise(stmt, frame, sink, ctx)
                 case While():
-                    if self._while(stmt, frame, sink, in_branch):
+                    if self._while(stmt, frame, sink, ctx):
                         return True
                 case For():
-                    if self._for(stmt, frame, sink, in_branch):
+                    if self._for(stmt, frame, sink, ctx):
                         return True
                 case Break(origin=origin):
                     reject(origin, "`break` is not supported yet")
                 case Continue(origin=origin):
                     reject(origin, "`continue` is not supported yet")
                 case Store() | AugStore():
-                    self._store(stmt, frame, sink)
+                    self._store(stmt, frame, sink, ctx)
                 case _:
                     raise AssertionError(stmt)
         return False
+
+    def _assign(self, target: Binding, value: Expr, frame: _Frame, sink: list[Stmt]) -> None:
+        result = self._expr(value, frame, sink)
+        key = self._binding_key(target)
+        if isinstance(result, _AGGREGATE):
+            if isinstance(value, LocalRef) and value.name != key:
+                share(result)
+            elif (isinstance(value, AttrRead) and self._slot_tree(frame, result)) or self._alias_conduit(frame, value):
+                if isinstance(target, TempBind):
+                    frame.env[key] = _SlotAlias(result)
+                    return
+                share(result)
+        frame.env[key] = result
+
+    def _slot_tree(self, frame: _Frame, value: Value) -> bool:
+        return any(frame.slots.get(key) is value for key in self._slot_keys)
+
+    def _alias_conduit(self, frame: _Frame, atom: Expr) -> bool:
+        return isinstance(atom, TempRef) and isinstance(frame.env.get(atom.index), _SlotAlias)
 
     def _binding_key(self, binding: Binding) -> _EnvKey:
         match binding:
@@ -310,26 +451,55 @@ class _Interpreter:
             case TempBind(index=index):
                 return index
 
-    def _if(self, stmt: If, frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
+    def _if(self, stmt: If, frame: _Frame, sink: list[Stmt], ctx: _Ctx) -> bool:
+        """The branch structure itself is the return join; an inlined frame value-joins all-arms returns only."""
         cond = self._condition(stmt.origin, self._expr(stmt.cond, frame, sink))
         if isinstance(cond, StaticScalar):
             decided = _ops.const_value(cond.const)
             assert isinstance(decided, bool)
             taken = stmt.then if decided else stmt.orelse
-            return self._block(taken, frame, sink, in_branch)
-        then_frame = _Frame(frame.fn, frame.annotations, dict(frame.env), frame.root)
-        else_frame = _Frame(frame.fn, frame.annotations, dict(frame.env), frame.root)
+            return self._block(taken, frame, sink, ctx)
+        then_env: _Env = dict(frame.env)
+        else_env: _Env = dict(frame.env)
+        then_frame = _Frame(
+            frame.fn, frame.annotations, then_env, frame.root, slots=then_env if frame.root else frame.slots
+        )
+        else_frame = _Frame(
+            frame.fn, frame.annotations, else_env, frame.root, slots=else_env if frame.root else frame.slots
+        )
         then_sink: list[Stmt] = []
         else_sink: list[Stmt] = []
-        returned = self._block(stmt.then, then_frame, then_sink, in_branch=True)
-        assert not returned
-        returned = self._block(stmt.orelse, else_frame, else_sink, in_branch=True)
-        assert not returned
-        joined = self._join(stmt.origin, then_frame.env, then_sink, else_frame.env, else_sink)
+        then_done = self._block(stmt.then, then_frame, then_sink, ctx.arm())
+        else_done = self._block(stmt.orelse, else_frame, else_sink, ctx.arm())
+        if not frame.root and (then_done or else_done):
+            if not (then_done and else_done):
+                reject(stmt.origin, "a return on only one branch path of an inlined function is not supported yet")
+            frame.result = self._join_results(stmt.origin, then_frame.result, else_frame.result, then_sink, else_sink)
+        joined: _Env | None = None
+        if not then_done and not else_done:
+            joined = self._join(stmt.origin, then_frame.env, then_sink, else_frame.env, else_sink)
         sink.append(If(stmt.origin, self._materialize(cond, stmt.origin), tuple(then_sink), tuple(else_sink)))
+        if then_done and else_done:
+            return True
         frame.env.clear()
-        frame.env.update(joined)
+        frame.env.update(joined if joined is not None else else_frame.env if then_done else then_frame.env)
         return False
+
+    def _join_results(
+        self, origin: Origin, a: Value | None, b: Value | None, then_sink: list[Stmt], else_sink: list[Stmt]
+    ) -> Value | None:
+        if a is None or b is None:
+            if a is not b:
+                reject(origin, "one branch returns a value and the other does not")
+            return None
+        merged = self._merge(origin, _RETURN_KEY, a, b, then_sink, else_sink, allocations_match(a, b))
+        if merged is None:
+            reject(origin, "the branches return values the compiler cannot merge")
+        if not allocations_match(a, b) and isinstance(merged, _AGGREGATE):
+            share(a)
+            share(b)
+            share(merged)
+        return merged
 
     def _join(
         self, origin: Origin, then_env: _Env, then_sink: list[Stmt], else_env: _Env, else_sink: list[Stmt]
@@ -338,13 +508,17 @@ class _Interpreter:
         for key in sorted(set(then_env) & set(else_env), key=_key_order):
             a_bound, b_bound = then_env[key], else_env[key]
             moved = isinstance(a_bound, _Moved) or isinstance(b_bound, _Moved)
-            a = a_bound.value if isinstance(a_bound, _Moved) else a_bound
-            b = b_bound.value if isinstance(b_bound, _Moved) else b_bound
+            aliased = isinstance(a_bound, _SlotAlias) and isinstance(b_bound, _SlotAlias)
+            a = a_bound.value if isinstance(a_bound, (_Moved, _SlotAlias)) else a_bound
+            b = b_bound.value if isinstance(b_bound, (_Moved, _SlotAlias)) else b_bound
             if isinstance(a, _Unjoinable) or isinstance(b, _Unjoinable):
                 joined[key] = _Unjoinable(self._describe_key(key))
                 continue
             if same(a, b):
-                joined[key] = _Moved(a) if moved and isinstance(a, _AGGREGATE) else a
+                if isinstance(a, _AGGREGATE) and (moved or aliased):
+                    joined[key] = _Moved(a) if moved else _SlotAlias(a)
+                else:
+                    joined[key] = a
                 continue
             if isinstance(a, _AGGREGATE) and isinstance(b, _AGGREGATE):
                 merged = self._join_aggregates(origin, key, a, b, then_sink, else_sink)
@@ -375,7 +549,7 @@ class _Interpreter:
     def _join_aggregates(
         self, origin: Origin, key: _EnvKey, a: Value, b: Value, then_sink: list[Stmt], else_sink: list[Stmt]
     ) -> Value | _Unjoinable:
-        keep = _allocations_match(a, b)
+        keep = allocations_match(a, b)
         merged = self._merge(origin, key, a, b, then_sink, else_sink, keep)
         if merged is None:
             return _Unjoinable(self._describe_key(key))
@@ -407,7 +581,7 @@ class _Interpreter:
                     if item is None:
                         return None
                     items.append(item)
-                return SequenceValue(tuple(items), a.allocation if keep else Allocation())
+                return SequenceValue(tuple(items), a.allocation if keep else self._minted(a, b))
             case TensorValue(), TensorValue():
                 if a.shape != b.shape:
                     return None
@@ -419,7 +593,7 @@ class _Interpreter:
                     assert isinstance(leaf, (StaticScalar, ResidualScalar, Opaque))
                     leaves.append(leaf)
                 family = next((leaf.stype for leaf in leaves if not isinstance(leaf, Opaque)), a.family)
-                return TensorValue(a.shape, family, tuple(leaves), a.allocation if keep else Allocation())
+                return TensorValue(a.shape, family, tuple(leaves), a.allocation if keep else self._minted(a, b))
             case (StaticScalar() | ResidualScalar()), (StaticScalar() | ResidualScalar()):
                 return self._join_scalars(origin, self._describe_key(key), a, b, then_sink, else_sink)
             case Opaque(), Opaque():
@@ -427,23 +601,38 @@ class _Interpreter:
             case _:
                 return None
 
+    def _minted(self, a: Value, b: Value) -> Allocation:
+        """A keep=False merge product is ONE of the two runtime objects; state-ness rides along with it."""
+        assert isinstance(a, _AGGREGATE) and isinstance(b, _AGGREGATE)
+        minted = Allocation(joined=True)
+        owner = self._state_owners.get(a.allocation) or self._state_owners.get(b.allocation)
+        if owner is not None:
+            self._state_owners[minted] = owner
+        return minted
+
     def _describe_key(self, key: _EnvKey) -> str:
+        if key == _RETURN_KEY:
+            return "the returned value"
+        if isinstance(key, tuple):
+            return f"the state attribute self.{key[0]}"
         return f"the local {key!r}" if isinstance(key, str) else "the conditional result"
 
-    def _readable(self, binding: Value | _Unjoinable | _Moved, origin: Origin) -> Value:
+    def _readable(self, binding: Value | _Unjoinable | _Moved | _SlotAlias, origin: Origin) -> Value:
         if isinstance(binding, _Unjoinable):
             reject(
                 origin,
                 f"{binding.description} holds branch values the compiler cannot merge; "
                 "only bool, int, and float values join branches",
             )
+        if isinstance(binding, _SlotAlias):
+            return binding.value
         if isinstance(binding, _Moved):
             share(binding.value)
             return binding.value
         return binding
 
-    def _raise(self, stmt: Raise, frame: _Frame, sink: list[Stmt], in_branch: bool) -> None:
-        if in_branch:
+    def _raise(self, stmt: Raise, frame: _Frame, sink: list[Stmt], ctx: _Ctx) -> None:
+        if ctx.branch or ctx.loop or (frame.root and self._outputs is not None):
             reject(stmt.origin, "a raise on a data-dependent path (a runtime branch arm) cannot be lowered")
         pieces: list[str] = []
         for part in stmt.parts:
@@ -462,7 +651,7 @@ class _Interpreter:
 
     # ------------------------------------------------------------------ loops
 
-    def _for(self, stmt: For, frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
+    def _for(self, stmt: For, frame: _Frame, sink: list[Stmt], ctx: _Ctx) -> bool:
         iterable = self._expr(stmt.iterable, frame, sink)
         if not isinstance(iterable, _AGGREGATE):
             reject(stmt.origin, f"{_aggregate.a_kind(iterable)} is not iterable")
@@ -472,13 +661,13 @@ class _Interpreter:
             for item in items:
                 self._budget.spend(1, stmt.origin, "the unrolled loop")
                 frame.env[stmt.target.name] = item
-                if self._block(stmt.body, frame, sink, in_branch):
+                if self._block(stmt.body, frame, sink, ctx):
                     return True
         finally:
             release(held)
         return False
 
-    def _while(self, stmt: While, frame: _Frame, sink: list[Stmt], in_branch: bool) -> bool:
+    def _while(self, stmt: While, frame: _Frame, sink: list[Stmt], ctx: _Ctx) -> bool:
         """
         Static tests execute trip by trip, splicing each header evaluation (CPython runs the failing test's
         header too); the first residual test rolls the env back to before its header and residualizes the
@@ -488,7 +677,7 @@ class _Interpreter:
         while True:
             saved = dict(frame.env)
             header_sink: list[Stmt] = []
-            returned = self._block(stmt.header, frame, header_sink, in_branch)
+            returned = self._block(stmt.header, frame, header_sink, ctx)
             assert not returned, "a test expression cannot return"
             cond = self._condition(stmt.origin, self._expr(stmt.cond, frame, header_sink))
             if isinstance(cond, ResidualScalar):
@@ -502,7 +691,7 @@ class _Interpreter:
             if not decided:
                 return False
             self._budget.spend(1, stmt.origin, "the unrolled loop")
-            if self._block(stmt.body, frame, sink, in_branch):
+            if self._block(stmt.body, frame, sink, ctx):
                 return True
 
     def _condition(self, origin: Origin, value: Value) -> Scalar:
@@ -524,19 +713,19 @@ class _Interpreter:
         (a zero-trip loop never binds them).
         """
         origin = stmt.origin
-        carried: list[tuple[str, int]] = []
-        stypes: dict[str, ScalarType] = {}
-        rebound, stored = _assigned_names((*stmt.header, *stmt.body))
+        carried: list[tuple[_EnvKey, list[int]]] = []
+        stypes: dict[tuple[_EnvKey, int], ScalarType] = {}
+        rebound, stored, loop_attrs = assigned_names((*stmt.header, *stmt.body), self._receiver_name)
         for name in sorted(rebound | stored):
             bound = frame.env.get(name)
             if bound is None:
                 continue
-            assert not isinstance(bound, _Moved), "only temps ride the conduit"
+            assert not isinstance(bound, (_Moved, _SlotAlias)), "only temps ride the conduits"
             value = self._readable(bound, origin)
             if isinstance(value, (StaticScalar, ResidualScalar)):
                 if name in rebound:
-                    carried.append((name, self._fresh()))
-                    stypes[name] = value.stype
+                    carried.append((name, [self._fresh()]))
+                    stypes[(name, 0)] = value.stype
                 continue
             if name in rebound or isinstance(value, _AGGREGATE):
                 reject(
@@ -546,69 +735,124 @@ class _Interpreter:
                 )
             # A store through a non-aggregate root can never be admitted; the body pass draws the precise
             # rejection at the store itself (an attribute store on a snapshot, an item store on a scalar).
+        if frame.root:
+            for attr in sorted(set(loop_attrs) & set(self._specs)):
+                slot_key: _SlotKey = (attr,)
+                entry_tree = self._readable(frame.env[slot_key], origin)
+                leaves = tree_leaves(entry_tree)
+                for position, leaf in enumerate(leaves):
+                    if isinstance(leaf, Opaque):
+                        reject(origin, _describe_opaque(leaf))
+                    stypes[(slot_key, position)] = leaf.stype
+                carried.append((slot_key, [self._fresh() for _ in leaves]))
         while True:
-            loop_frame = _Frame(frame.fn, frame.annotations, dict(frame.env), frame.root)
-            for name, index in carried:
-                loop_frame.env[name] = ResidualScalar(stypes[name], TempRef(origin, index))
+            loop_env: _Env = dict(frame.env)
+            loop_frame = _Frame(
+                frame.fn, frame.annotations, loop_env, frame.root, slots=loop_env if frame.root else frame.slots
+            )
+            for key, indices in carried:
+                phi_leaves: list[Scalar] = [
+                    ResidualScalar(stypes[(key, position)], TempRef(origin, index))
+                    for position, index in enumerate(indices)
+                ]
+                if isinstance(key, tuple):
+                    entry_tree = self._readable(frame.env[key], origin)
+                    loop_frame.env[key] = tree_rebuild(entry_tree, iter(phi_leaves))
+                else:
+                    (only,) = phi_leaves
+                    loop_frame.env[key] = only
             header_sink: list[Stmt] = []
-            returned = self._block(stmt.header, loop_frame, header_sink, in_branch=True)
+            loop_ctx = _Ctx(branch=True, loop=True)
+            returned = self._block(stmt.header, loop_frame, header_sink, loop_ctx)
             assert not returned, "a test expression cannot return"
             cond = self._condition(origin, self._expr(stmt.cond, loop_frame, header_sink))
             assert isinstance(cond, ResidualScalar), "a residual test cannot re-fold under residual carries"
             post_header_env = dict(loop_frame.env)
             body_sink: list[Stmt] = []
-            returned = self._block(stmt.body, loop_frame, body_sink, in_branch=True)
-            assert not returned, "in_branch rejects returns before they unwind"
+            returned = self._block(stmt.body, loop_frame, body_sink, loop_ctx)
+            assert not returned, "the loop context rejects returns before they unwind"
             promoted = False
-            backs: dict[str, Scalar] = {}
-            for name, _ in carried:
-                back_bound = loop_frame.env.get(name)
-                assert back_bound is not None, "an entry-bound name cannot vanish"
-                back = self._readable(back_bound, origin)
-                if not isinstance(back, (StaticScalar, ResidualScalar)):
-                    reject(
-                        origin,
-                        f"{name!r} is rebound to {_aggregate.a_kind(back)} inside a data-dependent loop; "
-                        "only bool, int, and float values can be carried across its iterations",
-                    )
-                assumed = stypes[name]
-                if back.stype is assumed:
-                    backs[name] = back
-                elif assumed is ScalarType.FLOAT and back.stype is ScalarType.INT:
-                    backs[name] = self._as_float(back, origin, body_sink)
-                elif assumed is ScalarType.INT and back.stype is ScalarType.FLOAT:
-                    stypes[name] = ScalarType.FLOAT
-                    promoted = True
-                else:
-                    reject(
-                        origin,
-                        f"the loop rebinds {name!r} from {assumed.value} to {back.stype.value} "
-                        "across iterations; only int-with-float joins promote",
-                    )
+            backs: dict[tuple[_EnvKey, int], Scalar] = {}
+            for key, indices in carried:
+                back_bound = loop_frame.env.get(key)
+                assert back_bound is not None, "an entry-bound key cannot vanish"
+                back_value = self._readable(back_bound, origin)
+                back_leaves = self._back_leaves(key, back_value, frame.env, origin)
+                assert len(back_leaves) == len(indices)
+                for position, back in enumerate(back_leaves):
+                    assumed = stypes[(key, position)]
+                    if back.stype is assumed:
+                        backs[(key, position)] = back
+                    elif assumed is ScalarType.FLOAT and back.stype is ScalarType.INT:
+                        backs[(key, position)] = self._as_float(back, origin, body_sink)
+                    elif assumed is ScalarType.INT and back.stype is ScalarType.FLOAT:
+                        if isinstance(key, tuple):
+                            assert len(indices) == 1 and isinstance(
+                                self._specs[key[0]], ScalarSpec
+                            ), "aggregate slot leaves cannot change type inside the loop"
+                        stypes[(key, position)] = ScalarType.FLOAT
+                        promoted = True
+                    else:
+                        reject(
+                            origin,
+                            f"the loop rebinds {self._describe_key(key)} from {assumed.value} to "
+                            f"{back.stype.value} across iterations; only int-with-float joins promote",
+                        )
             if not promoted:
                 break
         phis: list[LoopPhi] = []
-        for name, index in carried:
-            entry_bound = frame.env[name]
-            assert isinstance(entry_bound, (StaticScalar, ResidualScalar))
-            entry: Scalar = entry_bound
-            if stypes[name] is ScalarType.FLOAT and entry.stype is ScalarType.INT:
-                entry = self._as_float(entry, origin, sink)
-            assert entry.stype is stypes[name]
-            back_atom = self._materialize(backs[name], origin)
-            phis.append(LoopPhi(origin, index, stypes[name], self._materialize(entry, origin), back_atom))
+        for key, indices in carried:
+            entry_value = self._readable(frame.env[key], origin)
+            entry_leaves = tree_leaves(entry_value)
+            assert len(entry_leaves) == len(indices)
+            assert not any(isinstance(leaf, Opaque) for leaf in entry_leaves), "the carry setup rejected opaques"
+            for position, index in enumerate(indices):
+                entry_leaf = entry_leaves[position]
+                assert isinstance(entry_leaf, (StaticScalar, ResidualScalar))
+                entry: Scalar = entry_leaf
+                if stypes[(key, position)] is ScalarType.FLOAT and entry.stype is ScalarType.INT:
+                    entry = self._as_float(entry, origin, sink)
+                assert entry.stype is stypes[(key, position)]
+                back_atom = self._materialize(backs[(key, position)], origin)
+                phis.append(
+                    LoopPhi(origin, index, stypes[(key, position)], self._materialize(entry, origin), back_atom)
+                )
         _logger.debug(
             "%s: the loop at %s residualizes with %d carried phi(s): %s",
             frame.fn.__qualname__,
             origin.location,
-            len(carried),
-            ", ".join(f"{name}:{stypes[name].value}" for name, _ in carried),
+            len(phis),
+            ", ".join(str(key) for key, _ in carried),
         )
         sink.append(
             ResidualWhile(origin, tuple(phis), tuple(header_sink), self._materialize(cond, origin), tuple(body_sink))
         )
         frame.env.clear()
         frame.env.update(post_header_env)
+
+    def _back_leaves(self, key: _EnvKey, back_value: Value, entry_env: _Env, origin: Origin) -> list[Scalar]:
+        """The per-leaf back-edge values of one carried key; a slot tree must keep its structure and identity."""
+        if isinstance(key, str):
+            if not isinstance(back_value, (StaticScalar, ResidualScalar)):
+                reject(
+                    origin,
+                    f"{key!r} is rebound to {_aggregate.a_kind(back_value)} inside a data-dependent loop; "
+                    "only bool, int, and float values can be carried across its iterations",
+                )
+            return [back_value]
+        entry_tree = self._readable(entry_env[key], origin)
+        if not same_structure(entry_tree, back_value):
+            reject(
+                origin,
+                f"installing a new aggregate into {self._describe_key(key)} inside a data-dependent loop "
+                "is not supported yet; store its elements instead",
+            )
+        leaves: list[Scalar] = []
+        for leaf in tree_leaves(back_value):
+            if isinstance(leaf, Opaque):
+                reject(origin, _describe_opaque(leaf))
+            leaves.append(leaf)
+        return leaves
 
     def _comp(self, node: Comp, frame: _Frame, sink: list[Stmt]) -> SequenceValue:
         iterable = self._expr(node.iterable, frame, sink)
@@ -621,10 +865,12 @@ class _Interpreter:
             for item in items:
                 self._budget.spend(1, node.origin, "the comprehension")
                 frame.env[node.target] = item
-                returned = self._block(node.body, frame, sink, in_branch=True)
+                returned = self._block(node.body, frame, sink, _Ctx(branch=True))
                 assert not returned, "a comprehension body holds no return"
                 value = self._expr(node.element, frame, sink)
-                if isinstance(value, _AGGREGATE) and isinstance(node.element, LocalRef):
+                if isinstance(value, _AGGREGATE) and (
+                    isinstance(node.element, LocalRef) or self._alias_conduit(frame, node.element)
+                ):
                     share(value)
                 collected.append(value)
         finally:
@@ -633,13 +879,14 @@ class _Interpreter:
 
     # ------------------------------------------------------------------ the module boundary
 
-    def _conclude(self, stmt: Return, frame: _Frame, sink: list[Stmt]) -> None:
+    def _return_site(self, stmt: Return, frame: _Frame, sink: list[Stmt]) -> None:
         annotation = frame.annotations.get("return", _MISSING)
         if annotation is _MISSING:
             reject(stmt.origin, "the return type annotation is required")
         if stmt.value is None:
             if annotation is not None:
                 reject(stmt.origin, "the kernel returns no value but its annotation declares one")
+            self._commit_site(stmt.origin, frame, sink, [])
             return
         value = self._expr(stmt.value, frame, sink)
         if isinstance(value, Opaque):
@@ -647,22 +894,73 @@ class _Interpreter:
         conformed = self._conform_value(value, annotation, stmt.origin, sink, "the returned value", root=True)
         match conformed:
             case StaticScalar() | ResidualScalar():
-                self._outputs = (OutputDecl((0,), conformed.stype),)
-                self._return_values = (self._materialize(conformed, stmt.origin),)
+                self._commit_site(stmt.origin, frame, sink, [((0,), conformed)])
             case SequenceValue() | TensorValue():
+                for allocation in allocations(conformed):
+                    owner = self._state_owners.get(allocation)
+                    if owner is not None:
+                        reject(
+                            stmt.origin,
+                            f"returning the state attribute self.{owner} would hand out a live alias of its "
+                            "storage in Python, which hardware cannot honor; return an explicit copy "
+                            "(np.array(...) or a fresh sequence) instead",
+                        )
                 escape(conformed)
-                leaves = _aggregate.flatten(stmt.origin, conformed)
-                self._outputs = tuple(OutputDecl(path, leaf.stype) for path, leaf in leaves)
-                self._return_values = tuple(self._materialize(leaf, stmt.origin) for _, leaf in leaves)
+                self._commit_site(stmt.origin, frame, sink, _aggregate.flatten(stmt.origin, conformed))
             case _:
                 raise AssertionError(conformed)
 
-    def _conclude_bare(self, origin: Origin, frame: _Frame) -> None:
+    def _bare_site(self, origin: Origin, frame: _Frame, sink: list[Stmt]) -> None:
         annotation = frame.annotations.get("return", _MISSING)
         if annotation is _MISSING:
             reject(origin, "the return type annotation is required")
         if annotation is not None:
             reject(origin, "the kernel can complete without returning a value but its annotation declares one")
+        self._commit_site(origin, frame, sink, [])
+
+    def _commit_site(
+        self, origin: Origin, frame: _Frame, sink: list[Stmt], rows: list[tuple[_aggregate.LeafPath, Scalar]]
+    ) -> None:
+        """A leaf matching the same public, unpromoted slot's live-out at EVERY site is elided after the run."""
+        decls = tuple(OutputDecl(path, leaf.stype) for path, leaf in rows)
+        first = self._outputs is None
+        if first:
+            self._outputs = decls
+        elif decls != self._outputs:
+            reject(origin, "this return does not match the kernel's other return sites in shape or type")
+        slot_values: dict[SlotPath, Scalar] = {}
+        for attr in sorted(self._specs):
+            tree = self._readable(frame.slots[(attr,)], origin)
+            for spec_leaf, leaf in zip(spec_leaves(self._specs[attr]), tree_leaves(tree), strict=True):
+                if isinstance(leaf, Opaque):
+                    reject(origin, _describe_opaque(leaf))
+                committed = self._slot_conform(attr, spec_leaf, leaf, origin, sink)
+                slot_values[spec_leaf.path] = committed
+                sink.append(SlotWrite(origin, spec_leaf.path, self._materialize(committed, origin)))
+        promoted = self._state.promoted_paths() if self._state is not None else frozenset()
+        public = {path: scalar for path, scalar in slot_values.items() if public_slot(path) and path not in promoted}
+        ordered = sorted(public)
+        if first:
+            self._elide = [next((path for path in ordered if same(leaf, public[path])), None) for _, leaf in rows]
+        else:
+            for position, (_, leaf) in enumerate(rows):
+                candidate = self._elide[position]
+                if candidate is not None and not same(leaf, public[candidate]):
+                    self._elide[position] = None
+        sink.append(ResidualReturn(origin, tuple(self._materialize(leaf, origin) for _, leaf in rows)))
+
+    def _slot_conform(self, attr: str, spec: ScalarSpec, leaf: Scalar, origin: Origin, sink: list[Stmt]) -> Scalar:
+        if leaf.stype is spec.stype:
+            return leaf
+        if spec.stype is ScalarType.FLOAT and leaf.stype is ScalarType.INT:
+            return self._as_float(leaf, origin, sink)
+        if spec.stype is ScalarType.INT and leaf.stype is ScalarType.FLOAT:
+            raise _PromoteRun(spec.path)
+        reject(
+            origin,
+            f"the state attribute self.{attr} would change type from {spec.stype.value} to {leaf.stype.value}; "
+            "bool state joins only with bool",
+        )
 
     def _conform_value(
         self, value: Value, annotation: object, origin: Origin, sink: list[Stmt], what: str, *, root: bool = False
@@ -699,13 +997,12 @@ class _Interpreter:
                 reject(origin, f"{what} is not an array")
             if value.shape != shape:
                 reject(origin, f"{what} has shape {value.shape} where the annotation declares {shape}")
-            if value.family is ScalarType.INT and family is ScalarType.FLOAT:
-                promoted = tuple(
-                    leaf if isinstance(leaf, Opaque) else self._as_float(leaf, origin, sink) for leaf in value.leaves
-                )
-                return dataclasses.replace(value, family=ScalarType.FLOAT, leaves=promoted)
             if value.family is not family:
-                reject(origin, f"{what} is a {value.family.value} array where the annotation declares {family.value}")
+                reject(
+                    origin,
+                    f"{what} is a {value.family.value} array where the annotation declares {family.value}; "
+                    "an annotation does not convert an array -- build it from matching elements",
+                )
             return value
         if not root:
             return value
@@ -738,7 +1035,7 @@ class _Interpreter:
                 bound = frame.env.get(index)
                 assert bound is not None, "desugar binds every temp before its first read"
                 read = self._readable(bound, origin)
-                if isinstance(read, _AGGREGATE) and not isinstance(bound, _Moved):
+                if isinstance(read, _AGGREGATE) and not isinstance(bound, (_Moved, _SlotAlias)):
                     frame.env[index] = _Moved(read)
                 return read
             case LocalRef(origin=origin, name=name):
@@ -753,7 +1050,7 @@ class _Interpreter:
             case Binary(origin=origin, op=op, left=left, right=right):
                 lv = self._expr(left, frame, sink)
                 rv = self._expr(right, frame, sink)
-                return self._binary(origin, op, lv, rv, sink)
+                return self._binary(origin, op, lv, rv, frame, sink)
             case Compare(origin=origin, op=op, left=left, right=right):
                 lv = self._expr(left, frame, sink)
                 rv = self._expr(right, frame, sink)
@@ -765,7 +1062,7 @@ class _Interpreter:
             case ListExpr(origin=origin, items=items):
                 return self._display(origin, items, frame, sink)
             case AttrRead(origin=origin, base=base, attr=attr):
-                return self._attr_read(origin, self._expr(base, frame, sink), attr, sink)
+                return self._attr_read(origin, self._expr(base, frame, sink), attr, frame, sink)
             case IndexRead(origin=origin, base=base, index=index):
                 base_value = self._expr(base, frame, sink)
                 index_value = self._expr(index, frame, sink)
@@ -806,7 +1103,7 @@ class _Interpreter:
                 collected.extend(_aggregate.splice_items(origin, source))
             else:
                 value = self._expr(item, frame, sink)
-                if isinstance(value, _AGGREGATE) and isinstance(item, LocalRef):
+                if isinstance(value, _AGGREGATE) and (isinstance(item, LocalRef) or self._alias_conduit(frame, item)):
                     share(value)
                 collected.append(value)
         self._budget.spend(max(len(collected), 1), origin, "the sequence display")
@@ -834,14 +1131,14 @@ class _Interpreter:
                 if node.name not in builtins_ns:
                     reject(node.origin, f"the name {node.name!r} is not defined")
                 raw = builtins_ns[node.name]
-        return self._snapshot.admit(node.name, raw)
+        return self._snapshot.admit(node.name, raw, node.origin)
 
     # ------------------------------------------------------------------ attribute reads
 
-    def _attr_read(self, origin: Origin, base_value: Value, attr: str, sink: list[Stmt]) -> Value:
+    def _attr_read(self, origin: Origin, base_value: Value, attr: str, frame: _Frame, sink: list[Stmt]) -> Value:
         match base_value:
             case TensorValue():
-                return self._tensor_attr(origin, base_value, attr, sink)
+                return self._tensor_attr(origin, base_value, attr, frame, sink)
             case SequenceValue():
                 if attr in ("shape", "ndim", "T", "flatten"):
                     reject(
@@ -864,13 +1161,13 @@ class _Interpreter:
                     raw = getattr(value, attr)
                 except AttributeError:
                     reject(origin, f"{name!r} has no attribute {attr!r}")
-                return self._snapshot.admit(f"{name}.{attr}", raw)
+                return self._snapshot.admit(f"{name}.{attr}", raw, origin)
             case Opaque():
-                return self._instance_attr(origin, base_value, attr, sink)
+                return self._instance_attr(origin, base_value, attr, frame, sink)
             case _:
                 raise AssertionError(base_value)
 
-    def _tensor_attr(self, origin: Origin, tensor: TensorValue, attr: str, sink: list[Stmt]) -> Value:
+    def _tensor_attr(self, origin: Origin, tensor: TensorValue, attr: str, frame: _Frame, sink: list[Stmt]) -> Value:
         if attr == "ndim":
             return StaticScalar(_ops.make_const(len(tensor.shape)))
         if attr == "shape":
@@ -878,37 +1175,46 @@ class _Interpreter:
             return SequenceValue(dims, Allocation())
         if attr == "T":
             share(tensor)
-            return self._inline(origin, "np.transpose", self._transpose_stub, [tensor], {}, sink, positional_only=True)
+            return self._transposed(origin, tensor, frame, sink)
         if attr == "flatten":
             share(tensor)
             return TensorMethod(tensor, "flatten")
         reject(origin, f"an array has no supported attribute {attr!r}")
 
-    def _instance_attr(self, origin: Origin, base: Opaque, attr: str, sink: list[Stmt]) -> Value:
+    def _instance_attr(self, origin: Origin, base: Opaque, attr: str, frame: _Frame, sink: list[Stmt]) -> Value:
         """
-        CPython's attribute precedence over class metadata, never calling into the object: a data descriptor
-        wins (only a plain property is readable -- its getter is inlined as ordinary code), then the instance
-        dict, then non-data class attributes.
+        CPython's attribute precedence over class metadata, never calling into the object: a state attribute
+        of the entry receiver reads its current slot binding, then a data descriptor wins (only a plain
+        property is readable -- its getter is inlined as ordinary code), then the instance dict, then
+        non-data class attributes.
         """
+        if base.value is self._instance and (attr,) in frame.slots:
+            bound = frame.slots[(attr,)]
+            assert not isinstance(bound, (_Moved, _SlotAlias)), "slot bindings never ride the conduits"
+            return self._readable(bound, origin)
         found: object = next(
             (klass.__dict__[attr] for klass in type(base.value).__mro__ if attr in klass.__dict__), _MISSING
         )
         if isinstance(found, property) and isinstance(found.fget, types.FunctionType):
-            return self._inline(origin, f"{base.name}.{attr}", found.fget, [base], {}, sink, positional_only=False)
+            return self._inline(
+                origin, f"{base.name}.{attr}", found.fget, [base], {}, frame, sink, positional_only=False
+            )
         if found is not _MISSING and inspect.isdatadescriptor(found):
             reject(origin, f"the attribute {attr!r} is a descriptor the compiler cannot read")
         instance_dict = getattr(base.value, "__dict__", None)
         if isinstance(instance_dict, dict) and attr in instance_dict:
-            return self._snapshot.admit(f"{base.name}.{attr}", instance_dict[attr])
+            return self._snapshot.admit(f"{base.name}.{attr}", instance_dict[attr], origin)
         if found is _MISSING:
             reject(origin, f"{base.name!r} has no attribute {attr!r}")
         if isinstance(found, staticmethod):
-            return self._snapshot.admit(f"{base.name}.{attr}", found.__func__)
+            return self._snapshot.admit(f"{base.name}.{attr}", found.__func__, origin)
         if isinstance(found, types.FunctionType):
-            return self._snapshot.admit(f"{base.name}.{attr}", types.MethodType(found, base.value))
+            return self._snapshot.admit(f"{base.name}.{attr}", types.MethodType(found, base.value), origin)
         if isinstance(found, classmethod):
-            return self._snapshot.admit(f"{base.name}.{attr}", types.MethodType(found.__func__, type(base.value)))
-        return self._snapshot.admit(f"{base.name}.{attr}", found)
+            return self._snapshot.admit(
+                f"{base.name}.{attr}", types.MethodType(found.__func__, type(base.value)), origin
+            )
+        return self._snapshot.admit(f"{base.name}.{attr}", found, origin)
 
     # ------------------------------------------------------------------ scalars and operators
 
@@ -1001,14 +1307,14 @@ class _Interpreter:
             reject(origin, _describe_opaque(leaf))
         return leaf
 
-    def _binary(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, sink: list[Stmt]) -> Value:
+    def _binary(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: _Frame, sink: list[Stmt]) -> Value:
         if op is BinaryOp.MATMUL:
             if isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue):
                 reject(origin, "`@` on a Python list/tuple is not supported; build a numpy array with np.array([...])")
             for operand in (lv, rv):
                 if isinstance(operand, _AGGREGATE):
                     share(operand)
-            return self._inline(origin, "np.matmul", self._matmul_stub, [lv, rv], {}, sink, positional_only=True)
+            return self._inline(origin, "np.matmul", self._matmul_stub, [lv, rv], {}, frame, sink, positional_only=True)
         tensors = isinstance(lv, TensorValue) or isinstance(rv, TensorValue)
         sequences = isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue)
         if (tensors or sequences) and op in (BinaryOp.AND, BinaryOp.OR):
@@ -1016,12 +1322,14 @@ class _Interpreter:
         if tensors and sequences:
             reject(origin, "cannot mix an array with a Python list/tuple; convert with np.array([...])")
         if tensors:
-            return self._elementwise(origin, op, lv, rv, sink)
+            return self._elementwise(origin, op, lv, rv, frame, sink)
         if sequences:
             return self._sequence_binary(origin, op)
-        return self._binary_scalars(origin, op, lv, rv, sink)
+        return self._binary_scalars(origin, op, lv, rv, frame, sink)
 
-    def _elementwise(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, sink: list[Stmt]) -> TensorValue:
+    def _elementwise(
+        self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: _Frame, sink: list[Stmt]
+    ) -> TensorValue:
         if op not in (BinaryOp.ADD, BinaryOp.SUB, BinaryOp.MUL, BinaryOp.DIV):
             reject(origin, f"the operator `{op.value}` is not supported on arrays yet")
         pairs: list[tuple[Scalar, Scalar]]
@@ -1045,7 +1353,7 @@ class _Interpreter:
             pairs = [(scalar, self._scalar_leaf(origin, b)) for b in rv.leaves]
         leaves: list[Scalar | Opaque] = []
         for a, b in pairs:
-            leaves.append(self._binary_scalars(origin, op, a, b, sink))
+            leaves.append(self._binary_scalars(origin, op, a, b, frame, sink))
         self._budget.spend(len(leaves), origin, "the elementwise operation")
         family = next(leaf.stype for leaf in leaves if not isinstance(leaf, Opaque))
         return TensorValue(shape, family, tuple(leaves), Allocation())
@@ -1053,7 +1361,9 @@ class _Interpreter:
     def _sequence_binary(self, origin: Origin, op: BinaryOp) -> Value:
         reject(origin, f"the operator `{op.value}` is not supported on a sequence; build a numpy array instead")
 
-    def _binary_scalars(self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, sink: list[Stmt]) -> Scalar:
+    def _binary_scalars(
+        self, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: _Frame, sink: list[Stmt]
+    ) -> Scalar:
         left = self._scalar(lv, origin)
         right = self._scalar(rv, origin)
         both_bool = left.stype is ScalarType.BOOL and right.stype is ScalarType.BOOL
@@ -1070,7 +1380,7 @@ class _Interpreter:
                     return self._apply(_ops.INT_BINARY[op], [left, right], origin, sink)
                 reject(origin, f"the bitwise operator `{op.value}` requires two ints or two bools")
             case BinaryOp.POW:
-                return self._pow(origin, left, right, sink)
+                return self._pow(origin, left, right, frame, sink)
             case _:
                 pass
         if ScalarType.BOOL in (left.stype, right.stype):
@@ -1122,7 +1432,7 @@ class _Interpreter:
     def _call(self, node: Call, frame: _Frame, sink: list[Stmt]) -> Value:
         callee = self._expr(node.callee, frame, sink)
         if isinstance(callee, TensorMethod):
-            return self._tensor_method(node, callee, frame, sink)
+            return self._tensor_method(node, callee)
         if not isinstance(callee, Opaque):
             reject(node.origin, "the callee is not a callable object")
         raw = callee.value
@@ -1131,14 +1441,20 @@ class _Interpreter:
                 return self._intrinsic(node, callee.name, operator, frame, sink)
             case Library(stub=stub):
                 values = self._positional_arguments(node, callee.name, frame, sink)
+                if stub is self._transpose_stub:
+                    if len(values) != 1 or not isinstance(values[0], TensorValue):
+                        return self._inline(
+                            node.origin, callee.name, stub, values, {}, frame, sink, positional_only=True
+                        )
+                    return self._transposed(node.origin, values[0], frame, sink)
                 if stub is self._pow_stub:
                     # All pow spellings share the ** lowering.
                     if len(values) != 2:
                         reject(node.origin, f"{callee.name}() takes 2 argument(s), got {len(values)}")
                     base = self._scalar(values[0], node.origin)
                     exponent = self._scalar(values[1], node.origin)
-                    return self._pow(node.origin, base, exponent, sink)
-                return self._inline(node.origin, callee.name, stub, values, {}, sink, positional_only=True)
+                    return self._pow(node.origin, base, exponent, frame, sink)
+                return self._inline(node.origin, callee.name, stub, values, {}, frame, sink, positional_only=True)
             case Factory() as match:
                 return self._factory(node, callee.name, match, frame, sink)
             case Conversion(copies=copies):
@@ -1162,16 +1478,39 @@ class _Interpreter:
             # Ingested like user code wherever it lives: substitution is the registry's decision alone
             # (maintainer ruling), and the interpreter knows no library names.
             positional, keywords = self._signature_arguments(node, frame, sink)
-            return self._inline(node.origin, callee.name, raw, positional, keywords, sink, positional_only=False)
+            return self._inline(node.origin, callee.name, raw, positional, keywords, frame, sink, positional_only=False)
         if inspect.ismethod(raw):
-            reject(node.origin, "bound methods are not supported yet")
+            # A helper method of any snapshotted object: the receiver rides as the first argument, sharing
+            # the memoized identity, so its frozen attributes fold and its state reads see the current slots;
+            # a receiver write inside the helper draws the helper-write rejection.
+            inner = raw.__func__
+            if not isinstance(inner, types.FunctionType):
+                reject(node.origin, f"calls to {callee.name!r} are not supported yet")
+            receiver = self._snapshot.admit(callee.name, raw.__self__, node.origin)
+            positional, keywords = self._signature_arguments(node, frame, sink)
+            return self._inline(
+                node.origin,
+                callee.name,
+                inner,
+                [receiver, *positional],
+                keywords,
+                frame,
+                sink,
+                positional_only=False,
+            )
         if callable(raw):
+            if not isinstance(raw, type) and isinstance(getattr(raw, "__dict__", None), dict):
+                reject(
+                    node.origin,
+                    f"cannot call {callee.name!r}: it is a separate component instance "
+                    f"({type(raw).__name__}); hierarchical state is not supported yet",
+                )
             reject(node.origin, f"calls to {callee.name!r} are not supported yet")
         reject(node.origin, f"the captured object {callee.name!r} is not callable")
 
     def _argument(self, atom: Atom, frame: _Frame, sink: list[Stmt]) -> Value:
         value = self._expr(atom, frame, sink)
-        if isinstance(value, _AGGREGATE) and isinstance(atom, LocalRef):
+        if isinstance(value, _AGGREGATE) and (isinstance(atom, LocalRef) or self._alias_conduit(frame, atom)):
             share(value)
         return value
 
@@ -1211,7 +1550,15 @@ class _Interpreter:
         ]
         return self._apply(operator, operands, node.origin, sink)
 
-    def _tensor_method(self, node: Call, method: TensorMethod, frame: _Frame, sink: list[Stmt]) -> Value:
+    def _transposed(self, origin: Origin, tensor: TensorValue, frame: _Frame, sink: list[Stmt]) -> Value:
+        result = self._inline(
+            origin, "np.transpose", self._transpose_stub, [tensor], {}, frame, sink, positional_only=True
+        )
+        if isinstance(result, TensorValue):
+            result = dataclasses.replace(result, allocation=tensor.allocation)
+        return result
+
+    def _tensor_method(self, node: Call, method: TensorMethod) -> Value:
         assert method.name == "flatten"
         if node.args:
             reject(node.origin, ".flatten() takes no arguments")
@@ -1277,11 +1624,12 @@ class _Interpreter:
         self._budget.spend(max(len(children), 1), node.origin, "the sequence conversion")
         return SequenceValue(tuple(children), Allocation())
 
-    def _store(self, stmt: Store | AugStore, frame: _Frame, sink: list[Stmt]) -> None:
+    def _store(self, stmt: Store | AugStore, frame: _Frame, sink: list[Stmt], ctx: _Ctx) -> None:
         """
         The one mutation gate: resolve the target path with the store-prefix exemption (walked over the value
         tree, never through expression reads), judge admission at the store step after the RHS and index
-        temps, and rebind new frozen values along the unchanged allocation spine.
+        temps, and rebind new frozen values along the unchanged allocation spine. A store rooted at the
+        entry method's receiver is a state write.
         """
         origin = stmt.origin
         rhs = self._expr(stmt.value, frame, sink)
@@ -1297,19 +1645,165 @@ class _Interpreter:
                 if bound is None:
                     reject(origin, f"the local name {name!r} is not bound on every path reaching this read")
                 root_value = self._readable(bound, origin)
+        if isinstance(root_value, Opaque) and self._instance is not None and root_value.value is self._instance:
+            self._receiver_store(stmt, name, rhs, frame, sink, ctx)
+            return
         if not isinstance(root_value, _AGGREGATE):
             if isinstance(stmt.path[0], AttrSel):
-                reject(origin, "attribute stores are not supported yet")
+                reject(origin, "an attribute store is only supported on the entry method's receiver")
             reject(origin, f"{_aggregate.a_kind(root_value)} does not support item assignment")
-        site = self._store_site(origin, name, root_value, stmt.path, frame, sink)
+        frame.env[name] = self._element_store(stmt, name, root_value, stmt.path, rhs, frame, sink)
+
+    def _receiver_store(
+        self, stmt: Store | AugStore, name: str, rhs: Value, frame: _Frame, sink: list[Stmt], ctx: _Ctx
+    ) -> None:
+        origin = stmt.origin
+        if not frame.root:
+            reject(origin, "a helper method cannot write attributes of the receiver; only the entry method may")
+        assert self._receiver_name is not None
+        if name != self._receiver_name:
+            reject(origin, f"the receiver may only be written through its parameter name {self._receiver_name!r}")
+        first = stmt.path[0]
+        if not isinstance(first, AttrSel):
+            reject(origin, "the receiver itself does not support item assignment; store into an attribute")
+        attr = first.name
+        assert self._state is not None and attr in self._specs, "the syntactic seed covers every receiver store"
+        self.written_attrs.add(attr)
+        assert frame.env is frame.slots, "root and arm frames resolve slots in their own environment"
+        key: _SlotKey = (attr,)
+        slot_value = self._readable(frame.slots[key], origin)
+        rest = stmt.path[1:]
+        if rest:
+            if isinstance(rest[0], AttrSel):
+                reject(origin, "an attribute store through a nested object is not supported")
+            if not isinstance(slot_value, _AGGREGATE):
+                reject(origin, f"self.{attr} is a scalar state attribute; it has no elements")
+            frame.env[key] = self._element_store(stmt, f"self.{attr}", slot_value, rest, rhs, frame, sink)
+            return
+        spec = self._specs[attr]
+        if isinstance(stmt, AugStore):
+            if isinstance(slot_value, Opaque):
+                reject(origin, _describe_opaque(slot_value))
+            if isinstance(slot_value, _AGGREGATE):
+                frame.env[key] = self._aug_aggregate(origin, f"self.{attr}", slot_value, stmt.op, rhs, frame, sink)
+                return
+            value = self._binary(origin, stmt.op, slot_value, rhs, frame, sink)
+        else:
+            value = rhs
+        match value:
+            case TensorMethod():
+                reject(origin, "a bound array method cannot be stored")
+            case SequenceValue() | TensorValue():
+                if same(value, slot_value):
+                    return  # rebinding the attribute to its own current tree is Python's no-op
+                if ctx.loop:
+                    reject(
+                        origin,
+                        f"installing a new aggregate into the state attribute self.{attr} inside a "
+                        "data-dependent loop is not supported yet; store its elements instead",
+                    )
+                self._install(origin, attr, spec, value)
+                frame.env[key] = value
+            case StaticScalar() | ResidualScalar():
+                if not isinstance(spec, ScalarSpec):
+                    reject(
+                        origin,
+                        f"self.{attr} is an aggregate state attribute; a scalar cannot replace it -- "
+                        "store its elements instead",
+                    )
+                frame.env[key] = value
+            case Opaque():
+                if not isinstance(spec, ScalarSpec):
+                    reject(origin, _describe_opaque(value))
+                frame.env[key] = value  # judged at use or at the commit, like any captured scalar
+
+    def _install(self, origin: Origin, attr: str, spec: Spec, value: SequenceValue | TensorValue) -> None:
+        """A5 clause (1), plus clause (3) over the value model (tensor-only: in-model sequences are immutable)."""
+        for allocation in allocations(value):
+            if allocation.joined:
+                reject(
+                    origin,
+                    f"cannot install this aggregate into self.{attr}: it was merged across runtime branches, "
+                    "so its identity is branch-dependent; install it in each branch arm instead",
+                )
+            owner = self._state_owners.get(allocation)
+            if owner is not None:
+                reject(
+                    origin,
+                    f"cannot install this aggregate into self.{attr}: it backs (or backed) the state attribute "
+                    f"self.{owner}; state trees must be disjoint -- store an explicit copy "
+                    "(list(...) or np.array(...)) instead",
+                )
+            if allocation.state is AllocationState.ESCAPED:
+                reject(origin, f"cannot install this aggregate into self.{attr}: {blame(allocation)}")
+        occurrences = [id(allocation) for allocation in tensor_occurrences(value)]
+        if len(occurrences) != len(set(occurrences)):
+            reject(
+                origin,
+                f"cannot install this aggregate into self.{attr}: the same array is reachable through more "
+                "than one path within it; build independent elements (e.g. with a comprehension)",
+            )
+        self._install_conform(origin, attr, spec, value)
+        escape(value)
+        for allocation in allocations(value):
+            self._state_owners.setdefault(allocation, attr)
+
+    def _install_conform(self, origin: Origin, attr: str, spec: Spec, value: Value) -> None:
+        """Structure and array family; scalar leaf types are judged at the commit, like any slot value."""
+        match spec, value:
+            case ScalarSpec(), (StaticScalar() | ResidualScalar() | Opaque()):
+                pass
+            case SequenceSpec(items=items), SequenceValue(items=value_items) if len(items) == len(value_items):
+                for item_spec, item in zip(items, value_items, strict=True):
+                    self._install_conform(origin, attr, item_spec, item)
+            case TensorSpec(shape=shape, family=family), TensorValue() if shape == value.shape:
+                if value.family is not family:
+                    reject(
+                        origin,
+                        f"cannot install this array into self.{attr}: its element family ({value.family.value}) "
+                        f"differs from the reset value's ({family.value}), and the dtype is part of the state "
+                        "attribute's identity; build the array from matching elements",
+                    )
+            case _:
+                reject(
+                    origin,
+                    f"cannot install this value into self.{attr}: its structure does not match the reset "
+                    "value's (the kind, length, and shape of every node must agree)",
+                )
+
+    def _element_store(
+        self,
+        stmt: Store | AugStore,
+        spelled_root: str,
+        root_value: SequenceValue | TensorValue,
+        path: tuple[Selector, ...],
+        rhs: Value,
+        frame: _Frame,
+        sink: list[Stmt],
+    ) -> SequenceValue | TensorValue:
+        origin = stmt.origin
+        site = self._store_site(origin, spelled_root, root_value, path, frame, sink)
         for allocation in site.chain:
             if not mutable(allocation):
-                reject(origin, f"cannot store into {site.spelled}: {blame(allocation)}")
+                owner = self._state_owners.get(allocation)
+                if owner is not None and allocation.state is AllocationState.ESCAPED:
+                    reject(
+                        origin,
+                        f"cannot store into {site.spelled}: it was installed into the state attribute "
+                        f"self.{owner} this transaction; construct the aggregate fully, then install it once",
+                    )
+                advice = (
+                    "; if the sharing comes from an extracting read, the augmented (+=) and multi-index "
+                    "(m[i, j]) spellings avoid it"
+                    if spelled_root.startswith("self.") and allocation.state is AllocationState.SHARED
+                    else ""
+                )
+                reject(origin, f"cannot store into {site.spelled}: {blame(allocation)}{advice}")
         old = site.slot_value
         if isinstance(stmt, AugStore):
             if isinstance(old, Opaque):
                 reject(origin, _describe_opaque(old))
-            value = self._binary(origin, stmt.op, old, rhs, sink)
+            value = self._binary(origin, stmt.op, old, rhs, frame, sink)
         else:
             value = rhs
         if isinstance(value, (SequenceValue, TensorValue, TensorMethod)):
@@ -1325,7 +1819,7 @@ class _Interpreter:
                 container,
                 items=tuple(rebuilt if index == position else kept for index, kept in enumerate(container.items)),
             )
-        frame.env[name] = rebuilt
+        return rebuilt
 
     def _store_site(
         self,
@@ -1347,7 +1841,7 @@ class _Interpreter:
             terminal = step == len(path) - 1
             match selector:
                 case AttrSel():
-                    reject(origin, "attribute stores are not supported yet")
+                    reject(origin, "an attribute cannot be stored on a sequence or array")
                 case IndexSel(index=atom):
                     index_value = self._expr(atom, frame, sink)
             if tensor is not None:
@@ -1414,6 +1908,7 @@ class _Interpreter:
         current: SequenceValue | TensorValue,
         op: BinaryOp,
         rhs: Value,
+        frame: _Frame,
         sink: list[Stmt],
     ) -> Value:
         match current:
@@ -1428,7 +1923,7 @@ class _Interpreter:
                     reject(origin, "cannot mix an array with a Python list/tuple; convert with np.array([...])")
                 if not mutable(current.allocation):
                     reject(origin, f"cannot update {name!r} in place: {blame(current.allocation)}")
-                computed = self._elementwise(origin, op, current, rhs, sink)
+                computed = self._elementwise(origin, op, current, rhs, frame, sink)
                 if computed.family is not current.family:
                     reject(
                         origin,
@@ -1443,11 +1938,12 @@ class _Interpreter:
     def _to_tensor(self, origin: Origin, display: str, value: Value, sink: list[Stmt], *, copies: bool) -> TensorValue:
         match value:
             case TensorValue():
-                result = TensorValue(value.shape, value.family, value.leaves, Allocation())
-                if not copies:
-                    share(value)
-                    share(result)
-                return result
+                if copies:
+                    return TensorValue(value.shape, value.family, value.leaves, Allocation())
+                # The non-copying conversion reuses the source allocation as a storage-equivalence token,
+                # so the state-install disjointness checks see the derivation for free.
+                share(value)
+                return TensorValue(value.shape, value.family, value.leaves, value.allocation)
             case SequenceValue(items=items):
                 if not items:
                     reject(origin, f"{display}() of an empty sequence is not supported")
@@ -1513,6 +2009,7 @@ class _Interpreter:
         fn: types.FunctionType,
         positional: list[Value],
         keywords: dict[str, Value],
+        frame: _Frame,
         sink: list[Stmt],
         *,
         positional_only: bool,
@@ -1526,7 +2023,7 @@ class _Interpreter:
             reattribute(site, error)
         annotations = self._annotations_of(site, fn)
         self._budget.spend(1, site, "the inlined call")
-        callee = _rechained(eel, site.frames)
+        callee = rechained(eel, site.frames)
         assert isinstance(callee, EelFunction)
         if positional_only:
             assert not keywords
@@ -1542,10 +2039,10 @@ class _Interpreter:
             if declared is not _MISSING:
                 value = self._conform_value(value, declared, site, sink, f"the argument {param.name!r}")
             env[param.name] = value
-        inner = _Frame(fn=fn, annotations=annotations, env=env, root=False)
+        inner = _Frame(fn=fn, annotations=annotations, env=env, root=False, slots=frame.slots)
         self._inlining.add(fn)
         try:
-            returned = self._block(callee.body, inner, sink, in_branch=False)
+            returned = self._block(callee.body, inner, sink, _Ctx())
         finally:
             self._inlining.discard(fn)
         if not returned or inner.result is None:
@@ -1572,7 +2069,7 @@ class _Interpreter:
             if isinstance(value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, TensorMethod)):
                 bindings[name] = value
             else:
-                bindings[name] = self._snapshot.admit(name, value)  # an injected default: a plain Python object
+                bindings[name] = self._snapshot.admit(name, value, site)  # an injected default: a plain Python object
         return bindings
 
     def _cast(self, node: Call, target: type, frame: _Frame, sink: list[Stmt]) -> Value:
@@ -1587,7 +2084,7 @@ class _Interpreter:
 
     # ------------------------------------------------------------------ powers
 
-    def _pow(self, origin: Origin, base: Scalar, exponent: Scalar, sink: list[Stmt]) -> Scalar:
+    def _pow(self, origin: Origin, base: Scalar, exponent: Scalar, frame: _Frame, sink: list[Stmt]) -> Scalar:
         if ScalarType.BOOL in (base.stype, exponent.stype):
             reject(origin, "booleans take no part in arithmetic; cast explicitly with int(...) or float(...)")
         if isinstance(exponent, StaticScalar) and exponent.stype is ScalarType.INT:
@@ -1608,7 +2105,7 @@ class _Interpreter:
             except (OverflowError, ZeroDivisionError) as error:
                 reject(origin, f"this power always raises on the host: {type(error).__name__}: {error}")
         promoted: list[Value] = [self._as_float(base, origin, sink), self._as_float(exponent, origin, sink)]
-        value = self._inline(origin, "pow", self._pow_stub, promoted, {}, sink, positional_only=True)
+        value = self._inline(origin, "pow", self._pow_stub, promoted, {}, frame, sink, positional_only=True)
         return self._scalar(value, origin)
 
     def _fold_pow(self, origin: Origin, base: StaticScalar, n: int) -> StaticScalar:
@@ -1647,142 +2144,3 @@ class _Interpreter:
             self._budget.spend(1, origin, "the power chain")
             result = self._apply(_ops.FLOAT_MUL, [result, base], origin, sink)
         return result
-
-
-def _assigned_names(stmts: tuple[Stmt, ...]) -> tuple[set[str], set[str]]:
-    """
-    The syntactic (rebound, store-rooted) name sets: the loop-carry over-approximation for residualization.
-    They are kept apart because a store mutates its root in place rather than rebinding it, so a
-    non-aggregate store root is no carry at all — the store step itself owns the precise rejection.
-    Comprehension bodies bind only temps and their renamed targets never collide with user locals, so the
-    uniform walk stays exact for names.
-    """
-    rebound: set[str] = set()
-    stored: set[str] = set()
-    for stmt in stmts:
-        parts: tuple[tuple[Stmt, ...], ...] = ()
-        match stmt:
-            case Assign(target=LocalBind(name=name)) | AugAssign(target=LocalBind(name=name)):
-                rebound.add(name)
-            case Unpack(targets=targets):
-                rebound |= {target.name for target in targets if isinstance(target, LocalBind)}
-            case Store(root=LocalRef(name=name)) | AugStore(root=LocalRef(name=name)):
-                stored.add(name)
-            case If(then=then, orelse=orelse):
-                parts = (then, orelse)
-            case While(header=header, body=body):
-                parts = (header, body)
-            case For(target=target, body=body):
-                rebound.add(target.name)
-                parts = (body,)
-            case _:
-                pass
-        for part in parts:
-            inner_rebound, inner_stored = _assigned_names(part)
-            rebound |= inner_rebound
-            stored |= inner_stored
-    return rebound, stored
-
-
-def _allocations_match(a: Value, b: Value) -> bool:
-    match a, b:
-        case SequenceValue(), SequenceValue():
-            return (
-                a.allocation is b.allocation
-                and len(a.items) == len(b.items)
-                and all(_allocations_match(x, y) for x, y in zip(a.items, b.items))
-            )
-        case TensorValue(), TensorValue():
-            return a.allocation is b.allocation
-        case (SequenceValue() | TensorValue(), _) | (_, SequenceValue() | TensorValue()):
-            return False
-        case _:
-            return True
-
-
-# ---------------------------------------------------------------------- residual pruning
-
-
-def _prune(stmts: list[Stmt] | tuple[Stmt, ...], live_after: set[int] | None = None) -> tuple[list[Stmt], set[int]]:
-    """
-    One reverse-liveness sweep; returns the surviving statements and the temp reads they need live-in.
-    A branch whose arms both empty is dropped whole, de-rooting its condition so the condition's producer can
-    disappear too. An arm is swept against the post-branch live set, so a join temp it assigns stays exactly
-    when something after the branch reads it.
-    """
-    kept_reversed: list[Stmt] = []
-    live = set(live_after) if live_after is not None else set()
-    for stmt in reversed(stmts):
-        match stmt:
-            case Assign(target=TempBind(index=index), value=value):
-                if index not in live:
-                    continue
-                live.discard(index)
-                live |= _reads(value)
-                kept_reversed.append(stmt)
-            case If(origin=origin, cond=cond, then=then, orelse=orelse):
-                then_kept, then_live = _prune(then, live)
-                else_kept, else_live = _prune(orelse, live)
-                if not then_kept and not else_kept:
-                    continue
-                live = then_live | else_live | _reads(cond)
-                kept_reversed.append(If(origin, cond, tuple(then_kept), tuple(else_kept)))
-            case ResidualWhile():
-                # A residual loop is never dead (termination is observable); its interior is kept whole and
-                # HIR's own sweeps clean any dead interior operations.
-                defined, read = _loop_temps((stmt,))
-                live -= defined
-                live |= read - defined
-                kept_reversed.append(stmt)
-            case ResidualReturn(values=values):
-                for atom in values:
-                    live |= _reads(atom)
-                kept_reversed.append(stmt)
-            case _:
-                raise AssertionError(stmt)
-    return list(reversed(kept_reversed)), live
-
-
-def _loop_temps(stmts: tuple[Stmt, ...]) -> tuple[set[int], set[int]]:
-    """The (defined, read) temp-index sets over a residual subtree, uncut by liveness."""
-    defined: set[int] = set()
-    read: set[int] = set()
-    for stmt in stmts:
-        match stmt:
-            case Assign(target=TempBind(index=index), value=value):
-                defined.add(index)
-                read |= _reads(value)
-            case If(cond=cond, then=then, orelse=orelse):
-                read |= _reads(cond)
-                for arm in (then, orelse):
-                    inner_defined, inner_read = _loop_temps(arm)
-                    defined |= inner_defined
-                    read |= inner_read
-            case ResidualWhile(phis=phis, header=header, cond=cond, body=body):
-                defined |= {phi.index for phi in phis}
-                for phi in phis:
-                    read |= _reads(phi.entry) | _reads(phi.back)
-                read |= _reads(cond)
-                for part in (header, body):
-                    inner_defined, inner_read = _loop_temps(part)
-                    defined |= inner_defined
-                    read |= inner_read
-            case _:
-                raise AssertionError(stmt)
-    return defined, read
-
-
-def _reads(expr: Expr) -> set[int]:
-    match expr:
-        case TempRef(index=index):
-            return {index}
-        case IntrinsicCall(args=args):
-            reads: set[int] = set()
-            for arg in args:
-                if isinstance(arg, TempRef):
-                    reads.add(arg.index)
-            return reads
-        case LocalRef() | Const():
-            return set()
-        case _:
-            raise AssertionError(expr)

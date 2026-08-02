@@ -352,14 +352,14 @@ class _Accumulating:
         return self.acc
 
 
-def test_an_attribute_store_inside_a_residual_loop_names_the_store() -> None:
-    _rejects(_Accumulating().step, "attribute stores are not supported yet")
+def test_a_state_write_inside_a_residual_loop_carries_the_slot() -> None:
+    _oracle(_Accumulating().step, [{"x": 3.5}, {"x": 0.0}, {"x": 2.0}])
 
 
 def test_residual_while_gaps_and_bans() -> None:
     for fn, match in [
         (_body_only_name, "the local name 't' is not bound on every path"),
-        (_bool_to_int_carry, "the loop rebinds 'b' from bool to int across iterations"),
+        (_bool_to_int_carry, "the loop rebinds the local 'b' from bool to int across iterations"),
         (_array_carry, "'v' is an array; only bool, int, and float values can be carried"),
         (_array_store_inside_residual, "'v' is an array; only bool, int, and float values can be carried"),
         (_sequence_carry, "'pair' is a sequence; only bool, int, and float values can be carried"),
