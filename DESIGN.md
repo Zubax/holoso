@@ -267,7 +267,11 @@ Inlining everything is the current lowering policy, not a representational fact,
 later change the policy and the emitter, never the desugarer. The math library keeps its one boundary: an intrinsic
 maps to a single semantic HIR operator, while a composite (linear algebra included) is ordinary Python in the
 supported subset, inlined like user code, so each composite is its own numerical reference; kernels compose by the
-same inlining, and a diagnostic arising inside a stub is re-attributed to the user's call site.
+same inlining, and a diagnostic arising inside a stub is re-attributed to the user's call site. The registry also
+binds array methods and attributes declaratively through the same identity keys — a numpy descriptor names its own
+owner and attribute, so ``m.T`` or ``m.flatten()`` resolves to the registered stub with no per-name compiler
+surface, and a registration may declare itself a non-copying derivation whose result keeps the source's storage
+identity.
 
 The guiding principle for the language subset is unchanged: follow Python semantics where the hardware can express
 them, otherwise reject rather than silently reinterpret. The supported source remains ordinary executable

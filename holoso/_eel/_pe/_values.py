@@ -93,7 +93,7 @@ class TensorValue:
 
 @dataclass(frozen=True, slots=True)
 class TensorMethod:
-    """A read of a tensor's bound method (``.flatten``); only a call consumes it."""
+    """A read of a registered array method; only a call consumes it."""
 
     receiver: TensorValue
     name: str

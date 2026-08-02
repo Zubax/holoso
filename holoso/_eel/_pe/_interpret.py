@@ -43,10 +43,12 @@ import types
 import typing
 from dataclasses import dataclass
 
+import numpy as np
+
 from ..._errors import SynthesisError
 from .._desugar import desugar
 from .._ir import *
-from .._lib import Conversion, Factory, Intrinsic, Library, matmul_, resolve, transpose_
+from .._lib import Conversion, Factory, Intrinsic, Library, resolve
 from .._names import indexed_names, public_slot, state_port_name
 from . import _aggregate, _ops
 from ._ownership import allocations, blame, borrow, escape, mutable, release, share
@@ -173,6 +175,17 @@ class _Frame:
 
 _MISSING = object()
 
+
+def _library_anchor(key: object) -> Library:
+    """The registry is fully populated at import, so the operator-lowering anchors resolve once."""
+    found = resolve(key)
+    assert isinstance(found, Library), key
+    return found
+
+
+_POW = _library_anchor(pow)
+_MATMUL = _library_anchor(np.matmul)
+
 _SCALAR_ANNOTATIONS: list[tuple[type, ScalarType]] = [
     (bool, ScalarType.BOOL),
     (int, ScalarType.INT),
@@ -242,12 +255,6 @@ class _Interpreter:
         self._meta: dict[types.FunctionType, dict[str, object]] = {}
         self._inlining: set[types.FunctionType] = {fn}
         self._snapshot = Snapshotter(state.check_capture if state is not None else None)
-        anchor = resolve(pow)
-        assert isinstance(anchor, Library), "the builtin pow key anchors the ** lowering"
-        self._pow_stub = anchor.stub
-        assert isinstance(matmul_, types.FunctionType) and isinstance(transpose_, types.FunctionType)
-        self._matmul_stub: types.FunctionType = matmul_
-        self._transpose_stub: types.FunctionType = transpose_
 
     def run(self, eel: EelFunction) -> EelFunction:
         env: _Env = {}
@@ -1140,7 +1147,7 @@ class _Interpreter:
             case TensorValue():
                 return self._tensor_attr(origin, base_value, attr, frame, sink)
             case SequenceValue():
-                if attr in ("shape", "ndim", "T", "flatten"):
+                if attr in ("shape", "ndim") or resolve(getattr(np.ndarray, attr, None)) is not None:
                     reject(
                         origin,
                         f"`.{attr}` on a Python sequence is not supported; " "build a numpy array with np.array([...])",
@@ -1173,12 +1180,13 @@ class _Interpreter:
         if attr == "shape":
             dims = tuple(StaticScalar(_ops.make_const(dim)) for dim in tensor.shape)
             return SequenceValue(dims, Allocation())
-        if attr == "T":
+        descriptor = getattr(np.ndarray, attr, None)
+        found = resolve(descriptor)
+        if isinstance(found, Library):
+            if inspect.isdatadescriptor(descriptor):
+                return self._library_call(origin, f".{attr}", found, [tensor], frame, sink)
             share(tensor)
-            return self._transposed(origin, tensor, frame, sink)
-        if attr == "flatten":
-            share(tensor)
-            return TensorMethod(tensor, "flatten")
+            return TensorMethod(tensor, attr)
         reject(origin, f"an array has no supported attribute {attr!r}")
 
     def _instance_attr(self, origin: Origin, base: Opaque, attr: str, frame: _Frame, sink: list[Stmt]) -> Value:
@@ -1314,7 +1322,7 @@ class _Interpreter:
             for operand in (lv, rv):
                 if isinstance(operand, _AGGREGATE):
                     share(operand)
-            return self._inline(origin, "np.matmul", self._matmul_stub, [lv, rv], {}, frame, sink, positional_only=True)
+            return self._library_call(origin, "np.matmul", _MATMUL, [lv, rv], frame, sink)
         tensors = isinstance(lv, TensorValue) or isinstance(rv, TensorValue)
         sequences = isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue)
         if (tensors or sequences) and op in (BinaryOp.AND, BinaryOp.OR):
@@ -1432,29 +1440,23 @@ class _Interpreter:
     def _call(self, node: Call, frame: _Frame, sink: list[Stmt]) -> Value:
         callee = self._expr(node.callee, frame, sink)
         if isinstance(callee, TensorMethod):
-            return self._tensor_method(node, callee)
+            return self._tensor_method(node, callee, frame, sink)
         if not isinstance(callee, Opaque):
             reject(node.origin, "the callee is not a callable object")
         raw = callee.value
-        match resolve(raw):
+        match resolve(raw) if callable(raw) else None:
             case Intrinsic(operator=operator):
                 return self._intrinsic(node, callee.name, operator, frame, sink)
-            case Library(stub=stub):
+            case Library(stub=stub) as library:
                 values = self._positional_arguments(node, callee.name, frame, sink)
-                if stub is self._transpose_stub:
-                    if len(values) != 1 or not isinstance(values[0], TensorValue):
-                        return self._inline(
-                            node.origin, callee.name, stub, values, {}, frame, sink, positional_only=True
-                        )
-                    return self._transposed(node.origin, values[0], frame, sink)
-                if stub is self._pow_stub:
+                if stub is _POW.stub:
                     # All pow spellings share the ** lowering.
                     if len(values) != 2:
                         reject(node.origin, f"{callee.name}() takes 2 argument(s), got {len(values)}")
                     base = self._scalar(values[0], node.origin)
                     exponent = self._scalar(values[1], node.origin)
                     return self._pow(node.origin, base, exponent, frame, sink)
-                return self._inline(node.origin, callee.name, stub, values, {}, frame, sink, positional_only=True)
+                return self._library_call(node.origin, callee.name, library, values, frame, sink)
             case Factory() as match:
                 return self._factory(node, callee.name, match, frame, sink)
             case Conversion(copies=copies):
@@ -1550,19 +1552,24 @@ class _Interpreter:
         ]
         return self._apply(operator, operands, node.origin, sink)
 
-    def _transposed(self, origin: Origin, tensor: TensorValue, frame: _Frame, sink: list[Stmt]) -> Value:
-        result = self._inline(
-            origin, "np.transpose", self._transpose_stub, [tensor], {}, frame, sink, positional_only=True
-        )
-        if isinstance(result, TensorValue):
-            result = dataclasses.replace(result, allocation=tensor.allocation)
+    def _library_call(
+        self, origin: Origin, display: str, match: Library, values: list[Value], frame: _Frame, sink: list[Stmt]
+    ) -> Value:
+        result = self._inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
+        if match.derives and isinstance(values[0], TensorValue) and isinstance(result, TensorValue):
+            share(values[0])
+            result = dataclasses.replace(result, allocation=values[0].allocation)
         return result
 
-    def _tensor_method(self, node: Call, method: TensorMethod) -> Value:
-        assert method.name == "flatten"
-        if node.args:
-            reject(node.origin, ".flatten() takes no arguments")
-        return _aggregate.flattened(method.receiver)
+    def _tensor_method(self, node: Call, method: TensorMethod, frame: _Frame, sink: list[Stmt]) -> Value:
+        found = resolve(getattr(np.ndarray, method.name))
+        assert isinstance(found, Library), "a minted method stays resolvable"
+        display = f".{method.name}"
+        values = self._positional_arguments(node, display, frame, sink)
+        arity = found.stub.__code__.co_argcount - 1
+        if len(values) != arity:
+            reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
+        return self._library_call(node.origin, display, found, [method.receiver, *values], frame, sink)
 
     def _factory(self, node: Call, display: str, match: Factory, frame: _Frame, sink: list[Stmt]) -> Value:
         values = self._operand_arguments(node, display, frame, sink)
@@ -2105,7 +2112,7 @@ class _Interpreter:
             except (OverflowError, ZeroDivisionError) as error:
                 reject(origin, f"this power always raises on the host: {type(error).__name__}: {error}")
         promoted: list[Value] = [self._as_float(base, origin, sink), self._as_float(exponent, origin, sink)]
-        value = self._inline(origin, "pow", self._pow_stub, promoted, {}, frame, sink, positional_only=True)
+        value = self._inline(origin, "pow", _POW.stub, promoted, {}, frame, sink, positional_only=True)
         return self._scalar(value, origin)
 
     def _fold_pow(self, origin: Origin, base: StaticScalar, n: int) -> StaticScalar:

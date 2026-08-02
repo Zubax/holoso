@@ -1,8 +1,13 @@
 """
-The library registry: a single `resolve(callee)` dispatch boundary that maps a callee object to the Match that
-says how to lower a call to it, or None when it is unregistered.
+The library registry: a single `resolve(callee)` dispatch boundary over object identity. A class-member
+descriptor is a key like any other (``np.ndarray.T`` IS an object): the caller resolves a method read by
+looking up the descriptor on the owning class, and ``inspect.isdatadescriptor`` on that same object decides
+whether the read already is the call. Only pure readers and derivations may bind members: a stub cannot
+express receiver mutation, so a mutating method (``.fill``, ``.sort``) must stay unregistered and draw the
+no-supported-attribute rejection.
 """
 
+import inspect
 import types
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -19,9 +24,13 @@ class Intrinsic:
 
 @dataclass(frozen=True, slots=True)
 class Library:
-    """A call that inlines a composite stub function."""
+    """
+    A call that inlines a composite stub function. ``derives`` marks a non-copying derivation on the host
+    (``.T``, ``flatten``): the result must carry the source's Allocation as its storage-equivalence token.
+    """
 
     stub: types.FunctionType
+    derives: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +61,10 @@ _REGISTRY: dict[object, Match] = {}
 
 def _register(match: Match, keys: Iterable[object]) -> None:
     for key in keys:
-        assert callable(key), key
+        if inspect.isdatadescriptor(key):
+            assert isinstance(match, Library), "only Library entries may bind class members"
+        else:
+            assert callable(key), key
         # A key holds exactly one Match; an alias to an equal Match (e.g. np.atan2 is np.arctan2) is tolerated.
         assert _REGISTRY.get(key, match) == match, key
         _REGISTRY[key] = match
@@ -70,12 +82,13 @@ def intrinsic[F: Callable[..., object]](operator: Callable[[], Operator], *subst
     return register
 
 
-def lib[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
+def lib[F: Callable[..., object]](*substituted: object, derives: bool = False) -> Callable[[F], F]:
     assert substituted
 
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
-        _register(Library(fn), substituted)
+        assert not derives or fn.__code__.co_argcount == 1, "a derivation's result tracks its sole argument"
+        _register(Library(fn, derives), (fn, *substituted))
         return fn
 
     return register

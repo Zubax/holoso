@@ -25,7 +25,7 @@ def _dot(u: np.ndarray, v: np.ndarray) -> Any:
     return acc
 
 
-@lib(np.transpose)
+@lib(np.transpose, np.ndarray.T, np.ndarray.transpose, derives=True)
 def transpose_(a: np.ndarray) -> Any:
     if a.ndim == 0:
         raise ValueError("cannot transpose a scalar value")
@@ -36,7 +36,19 @@ def transpose_(a: np.ndarray) -> Any:
     return np.array([[a[i][j] for i in range(len(a))] for j in range(len(a[0]))])
 
 
-@lib(np.matmul, np.dot)
+@lib(np.ravel, np.ndarray.flatten, np.ndarray.ravel, derives=True)
+def flatten_(a: np.ndarray) -> Any:
+    if a.ndim == 0:
+        raise ValueError("cannot flatten a scalar value")
+    if a.ndim > 2:
+        raise ValueError(f"flatten of a {a.ndim}-D value is not supported")
+    if a.ndim == 1:
+        return a
+    width = len(a[0])
+    return np.asarray([a[k // width, k % width] for k in range(len(a) * width)])
+
+
+@lib(np.matmul, np.dot, np.ndarray.dot)
 def matmul_(a: np.ndarray, b: np.ndarray) -> Any:
     """
     numpy's shape rules for 1-D and 2-D operands: inner dimensions must agree, a 1-D left operand is promoted to a row
@@ -60,15 +72,15 @@ def matmul_(a: np.ndarray, b: np.ndarray) -> Any:
     return np.array([[_dot(a[i], bt[j]) for j in range(len(bt))] for i in range(len(a))])
 
 
-@lib(np.trace)
+@lib(np.trace, np.ndarray.trace)
 def trace_(a: np.ndarray) -> Any:
     """FIXME Support non-square matrices by running the shorter diagonal."""
     if a.ndim != 2:
         raise ValueError(f"trace requires a matrix, got a {a.ndim}-D value")
     if len(a) != len(a[0]):
         raise ValueError(f"trace requires a square matrix, got {len(a)}×{len(a[0])}")
-    acc = 0.0
-    for i in range(len(a)):
+    acc = a[0][0]
+    for i in range(1, len(a)):
         acc = acc + a[i][i]
     return acc
 

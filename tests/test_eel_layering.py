@@ -16,7 +16,8 @@ _EEL_DIR = Path(__file__).resolve().parents[1] / "holoso" / "_eel"
 # own `evaluate` (the one-answer mandate), while the rest of `_pe` stays HIR-free; `_lower.py` composes the
 # stages and returns an `Hir`. `_pe/_state.py` is the reset side of the capture boundary: it walks raw instance
 # attributes into slot specs and owns the A5 storage-overlap checks, so it shares the snapshot's numpy license.
-_NUMPY_HOMES = {"_lib", "_pe/_snapshot.py", "_pe/_state.py"}
+# `_pe/_interpret.py` references np.ndarray for descriptor-identity method dispatch (maintainer ruling).
+_NUMPY_HOMES = {"_lib", "_pe/_snapshot.py", "_pe/_state.py", "_pe/_interpret.py"}
 _HIR_HOMES = {"_lib", "_emit", "_pe/_ops.py", "_lower.py"}
 
 

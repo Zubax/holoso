@@ -8,7 +8,6 @@ from . import _factories as _factories
 from . import _intrinsics as _intrinsics
 from . import _linalg as _linalg
 from . import _numpy as _numpy
-from ._linalg import matmul_ as matmul_, transpose_ as transpose_
 from ._registry import (
     Conversion as Conversion,
     Factory as Factory,

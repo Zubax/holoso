@@ -598,3 +598,77 @@ def test_nested_rejections_report_the_outermost_call_site_with_the_full_chain() 
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_calls_deep, "_middle(x)")
+
+
+# ---------------------------------------------------------------------- registry-bound array methods
+
+
+def _method_transpose(x: float) -> float:
+    m = np.asarray(((x, 1.0), (2.0, 3.0), (4.0, 5.0)))
+    t = m.transpose()
+    return float(t[0][1] + t[1][2] + t.shape[0] - t.shape[1])
+
+
+def _method_ravel(x: float) -> float:
+    m = np.asarray(((x, 1.0), (2.0, 3.0)))
+    return float(m.ravel()[1] + np.ravel(m)[2] + m.flatten()[3])
+
+
+def _method_dot(x: float) -> float:
+    v = np.asarray((x, 2.0))
+    return float(v.dot(np.asarray((3.0, 4.0))))
+
+
+def _method_trace(x: float) -> float:
+    m = np.asarray(((x, 1.0), (2.0, 3.0)))
+    return float(m.trace())
+
+
+def _explicit_descriptor_spelling(x: float) -> float:
+    v = np.asarray((x, 2.0, 3.0))
+    return float(np.ndarray.flatten(v)[2])
+
+
+def test_registry_bound_array_methods() -> None:
+    _oracle(_method_transpose, [{"x": 7.0}, {"x": -1.5}])
+    _oracle(_method_ravel, [{"x": 7.0}, {"x": 0.5}])
+    _oracle(_method_dot, [{"x": 2.0}, {"x": -3.0}])
+    _oracle(_method_trace, [{"x": 1.0}, {"x": 4.5}])
+    _oracle(_explicit_descriptor_spelling, [{"x": 9.0}])
+
+
+def _ravel_read_then_store(x: float) -> float:
+    v = np.asarray((x, 2.0))
+    f = v.ravel
+    v[0] = x + 1.0
+    return float(f()[0])
+
+
+def _ravel_result_derives_storage(x: float) -> float:
+    v = np.asarray((x, 2.0))
+    r = v.ravel()
+    v[0] = x + 1.0
+    return float(r[0])
+
+
+def test_a_method_read_and_a_derived_result_both_share_the_receiver() -> None:
+    _rejects(_ravel_read_then_store, "cannot store into v.0.: it is shared")
+    _rejects(_ravel_result_derives_storage, "cannot store into v.0.: it is shared")
+
+
+def _method_arity_excess(x: float) -> float:
+    m = np.asarray(((x, 1.0), (2.0, 3.0)))
+    return float(m.flatten(1.0)[0])  # type: ignore[arg-type]
+
+
+def _int_trace_stays_exact() -> bool:
+    m = np.asarray(((9007199254740993, 0), (0, 0)))
+    return bool(m.trace() == 9007199254740992)
+
+
+def test_method_arity_messages_exclude_the_receiver() -> None:
+    _rejects(_method_arity_excess, r"\.flatten\(\) takes 0 argument\(s\), got 1")
+
+
+def test_an_integer_trace_keeps_exact_integers() -> None:
+    _oracle(_int_trace_stays_exact, [{}])

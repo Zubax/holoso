@@ -140,10 +140,6 @@ def multi_index_read(origin: Origin, base: Value, axes: tuple[ResolvedAxis, ...]
     return _derived(base, kept, picked)
 
 
-def flattened(tensor: TensorValue) -> TensorValue:
-    return _derived(tensor, (len(tensor.leaves),), tensor.leaves)
-
-
 def unpack_items(origin: Origin, value: Value, count: int) -> list[Value]:
     items = _iterated(origin, value)
     if len(items) > count:
