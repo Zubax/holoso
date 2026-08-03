@@ -684,7 +684,7 @@ class Lir:
     inputs: list[FloatInputLoad | BoolInputLoad]  # ordered as the function parameters
     ops: list[PooledScheduledOp]  # the pipelined pooled firings, flattened across blocks with ABSOLUTE issue cycles
     outputs: list[FloatOutputWire | BoolOutputWire]
-    float_state_slots: list[FloatStateSlot]  # persistent registers, ordered as the instance attributes
+    float_state_slots: list[FloatStateSlot]  # persistent registers, ordered by attribute path
     # Control-flow overlay. A straight-line kernel has a single block ending in Ret; ``blocks[0]`` is the entry,
     # ``block_base[i]`` is block i's absolute start PC, and ``last_pc`` is the out_valid boundary (the single Ret).
     blocks: list[LirBlock]
@@ -693,7 +693,7 @@ class Lir:
     last_pc: int  # LASTPC: the fetch PC at which out_valid asserts (the single Ret block's boundary)
     min_initiation_interval: int  # shortest executable path latency; exact for branch-free kernels, else a lower bound
     bool_regfile: BoolRegFileLayout
-    bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered as the instance attributes
+    bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered by attribute path
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
 
     def __post_init__(self) -> None:

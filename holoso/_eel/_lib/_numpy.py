@@ -19,7 +19,7 @@ import math
 
 import numpy as np
 
-from ._intrinsics import atan2_, cos_, exp2_, isinf_, log2_, sin_, sqrt_
+from ._intrinsics import atan2_, cos_, exp2_, isinf_, log2_, round_, sin_, sqrt_
 from ._registry import lib
 
 _LOG2E = math.log2(math.e)
@@ -162,21 +162,18 @@ def radians_(x: float) -> float:
 @lib(pow, math.pow, np.power, np.pow, np.float_power)
 def pow_(b: float, e: float) -> float:
     """
-    General path is the a>0 identity exp2(e*log2(b)); a negative base is only honored on small-integer e.
-    TODO generalize.
+    Optimized for exactly one exp2 and one log2 as they dominate the hardware cost.
+    The parity test is exact over the whole float range: every float >= 2**53 is even.
     """
-    if e == 0.0 or b == 1.0:  # b==1 avoids IEEE 754 divergence on non-finite e
+    # Schedule the speculable general-case ops early so they overlap with the guards.
+    integral = round_(e) == e
+    half = e * 0.5  # from e, not round_(e): the two rounds then schedule in parallel; equal when it matters
+    odd = round_(half) != half
+    if e == 0.0 or b == 1.0 or (b == -1.0 and isinf_(e)):  # |b|==1 with non-finite e: exp2(inf*0), IEEE says 1
         r = 1.0
-    elif e == 1.0:
-        r = b
-    elif e == 2.0:
-        r = b * b
-    elif e == 3.0:
-        r = b * b * b
-    elif e == 4.0:
-        r = (b * b) * (b * b)
-    elif e == 5.0:
-        r = (b * b) * (b * b * b)
+    elif b == 0.0:  # keeps the log2 pole (and its error sideband) away from the degenerate base
+        r = 0.0 if e > 0.0 else _INF if e < 0.0 else e  # e == 0 is unreachable here, so the last arm is NaN
     else:
-        r = exp2_(e * log2_(b))
+        t = exp2_(e * log2_(abs(b) if integral else b))
+        r = -t if b < 0.0 and integral and odd else t
     return r

@@ -57,8 +57,6 @@ Work will not be accepted unless architected cleanly.
 When editing code, do not ever leave any compatibility shims behind. Always do a clean break with bridges burned.
 API compatibility is not a concern.
 
-The Python version to target is 3.14 and newer. No need to ensure compatibility with older versions.
-
 Do not use `from __future__ import annotations`.
 Prefer `list` over `tuple[X, ...]` for homogeneous sequences (unless immutability is required).
 Do not use `Protocol`, prefer `ABC`/`@abstractmethod` instead for interfaces and abstract base classes.

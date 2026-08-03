@@ -120,11 +120,31 @@ def test_infinity_constants_are_allowed() -> None:
 def test_write_artifacts(tmp_path: Path) -> None:
     result = holoso.synthesize(_kernel, ops=_ops())
     paths = result.write(tmp_path)
-    assert set(paths) == {"_kernel.v", "holoso_support.v", "test__kernel.py", "_kernel.html"}
-    assert (tmp_path / "_kernel.v").exists()
-    assert (tmp_path / "test__kernel.py").exists()
-    assert (tmp_path / "_kernel.html").exists()
-    assert (tmp_path / "holoso_support.v").exists()
+    assert set(paths) == {
+        "_kernel.v",
+        "holoso_support.v",
+        "test__kernel.py",
+        "_kernel.html",
+        "_kernel.pass0.fir",
+        "_kernel.pass1.fir",
+    }
+    for name in paths:
+        assert (tmp_path / name).read_text(encoding="utf-8")
+
+
+def test_frontend_ir_records_the_passes(tmp_path: Path) -> None:
+    """The written documents are the front end's own passes in order, not two prints of one program."""
+    result = holoso.synthesize(_kernel, ops=_ops())
+    desugared, refined = result.frontend_ir
+    # The desugarer knows no types and keeps the source spelling; partial evaluation types the boundary and
+    # resolves the operators, so the subtraction has become a negate-and-add pair by the second document.
+    assert "fn _kernel(a, b):" in desugared and "a - b" in desugared
+    assert "fn _kernel(a: float, b: float):" in refined and "intrinsic neg(b)" in refined
+    # Locations are on, which is the whole point of shipping these next to the RTL.
+    assert all(f"# {Path(__file__).name}:" in doc for doc in result.frontend_ir)
+    result.write(tmp_path)
+    assert (tmp_path / "_kernel.pass0.fir").read_text(encoding="utf-8") == desugared
+    assert (tmp_path / "_kernel.pass1.fir").read_text(encoding="utf-8") == refined
 
 
 def test_rejects_invalid_and_reserved_module_names() -> None:
@@ -153,6 +173,8 @@ def test_accepts_valid_module_name(tmp_path: Path) -> None:
         "holoso_support.v",
         "test_good_name.py",
         "good_name.html",
+        "good_name.pass0.fir",
+        "good_name.pass1.fir",
     }
 
 
@@ -172,5 +194,5 @@ def test_class_target_is_unsupported() -> None:
         def __call__(self, x: float) -> float:
             return x
 
-    with pytest.raises(holoso.UnsupportedConstruct):
+    with pytest.raises(holoso.UnsupportedConstruct, match="is not a plain function"):
         holoso.synthesize(Stateful, ops=_ops(FloatFormat(6, 18)))

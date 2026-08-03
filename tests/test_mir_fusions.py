@@ -13,7 +13,7 @@ from holoso import (
     FMulOperator,
     OpConfig,
 )
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import build
 from holoso._mir import Mir, MirOperation
@@ -26,7 +26,7 @@ OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target)), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops)
 
 
 def _mir_operation_counts(mir: Mir) -> Counter[str]:
@@ -34,13 +34,13 @@ def _mir_operation_counts(mir: Mir) -> Counter[str]:
 
 
 def test_directional_inf_composites_lower_to_one_classifier() -> None:
-    def kernel(a: float, b: float, c: float, d: float) -> list[bool]:
-        return [
+    def kernel(a: float, b: float, c: float, d: float) -> tuple[bool, ...]:
+        return (
             math.isinf(a) and a > 0.0,
             b < 0.0 and math.isinf(b),
             math.isinf(-c) and -c > 0.0,
             0.0 > d and math.isinf(d),
-        ]
+        )
 
     mir = _run(kernel)
     counts = _mir_operation_counts(mir)
@@ -60,10 +60,10 @@ def test_directional_inf_composites_lower_to_one_classifier() -> None:
 
 
 def test_directional_inf_fusion_preserves_reused_predicates() -> None:
-    def kernel(x: float) -> list[bool]:
+    def kernel(x: float) -> tuple[bool, ...]:
         inf = math.isinf(x)
         pos = x > 0.0
-        return [inf and pos, inf, pos]
+        return inf and pos, inf, pos
 
     mir = _run(kernel)
     counts = _mir_operation_counts(mir)
@@ -80,9 +80,9 @@ def test_directional_inf_fusion_preserves_reused_predicates() -> None:
 
 
 def test_directional_inf_fusion_suppresses_predicate_shared_only_by_fused_ands() -> None:
-    def kernel(x: float) -> list[bool]:
+    def kernel(x: float) -> tuple[bool, ...]:
         inf = math.isinf(x)
-        return [inf and x > 0.0, inf and x < 0.0]
+        return inf and x > 0.0, inf and x < 0.0
 
     mir = _run(kernel)
     counts = _mir_operation_counts(mir)

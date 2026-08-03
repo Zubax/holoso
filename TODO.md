@@ -2,68 +2,62 @@
 
 ## Integer support adjacent
 
-Front-end `_apply_binop` (`_lower.py`) dispatches arithmetic by AST syntax, not operand type; make it
-type-dispatched like `_lower_compare`, and route int literals to a typed `IntConst`.
+The front end carries integers end to end -- Eel has a width-less int type with C promotion, HIR has the int
+vocabulary -- and everything below HIR refuses them at `_reject_integers` (`_mir/_lower.py:101`). Lifting that gate is
+what this section is about.
 
-Scalar-family policy: `PortConditioner` is a closed `FloatSignControl | BoolInversion` union enforced on every
-MIR port (`_operators.py:86`); add an int conditioner (likely identity/no-op) + a scalar-family table owning
-conditioner/bank/coercion/reset/lowering hooks.
+The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.py`); they need a
+`FloatValue | IntValue` union, a typed `lir.wide_consts` pool (constants are float-encoded across
+microcode/emit/html/model today), and one shared scalar port codec (cocotb and the model duplicate it).
 
-The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.py`); introduce a
-`FloatValue | IntValue` wide-value union, a typed `lir.wide_consts` pool (constants are float-encoded across
-microcode/emit/html/model today), and one shared scalar port codec (cocotb + model duplicate it).
+Strength reduction is float-keyed (`cval: dict[ValueId, float]`) and needs an int sibling with a typed-constant cache.
 
-Strength reduction is float-keyed (`cval: dict[ValueId, float]`); add a sibling int reduction + a typed-constant
-cache when int lands.
+`abs`, `min`, `max` and `np.sign` of a runtime integer answer a float: registry dispatch is by callee identity alone,
+so each entry names one operator with the operand type playing no part. Nothing is silent -- the conversion consumes
+an integer-typed value the gate refuses, and the float result is loud one step later (`abs(a) % 3` reports that `%` is
+integer-only). The fix is an entry carrying the integer form alongside the float one, chosen by operand type as the
+arithmetic operators already are: `IntAbs` exists and would serve `abs`, `np.sign` follows from the int comparisons.
+`min`/`max` will be implemented as library functions because there is no dedicated integer sort hardware operator.
 
-When the integer front end lands, adopt the C-style promotion rule throughout.
-For example, in `if c: n = 2.0 else: n = 2`, `n` is promoted to float.
+The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the
+acceptance set: each is oracle-verified against CPython through HIR and records its MIR refusal, so lifting the gate
+turns those refusals into end-to-end coverage. `examples/uart.py` carries its counters as floats until then.
 
-## Frontend subset limitations
+## Frontend limitations
 
-A few valid kernels are conservatively rejected rather than compiled. None is a wrong answer; each is a located
-rejection, and each is unusual enough that the precision has not been worth its cost yet.
+Valid kernels that are conservatively rejected. None is a wrong answer; each is a located refusal with a rewrite.
 
-Arithmetic on an empty aggregate (`-v[:0]`, `v[:0] + v[:0]`) is rejected. An empty aggregate carries no leaves, so the
-leaf-type and shape checks cannot run -- which is exactly what must reject `-boolflags[:0]` (a boolean negation) and
-`a[:0,:] + b[:0,:]` (a width mismatch), both of which CPython rejects. Distinguishing the valid empty-float case would
-need an empty-but-typed aggregate in the value model. This is acceptable, no fix required at the moment.
+An empty array slice (`v[:0]`) is refused where it is taken rather than where it is used, so even `len(v[:0])` fails;
+an empty sequence slice is fine. An empty array carries no leaves, so the leaf-type and shape checks cannot run --
+which is what must reject `-boolflags[:0]` and `a[:0,:] + b[:0,:]`, both of which CPython rejects too. Accepting the
+valid empty-float case needs an empty-but-typed array in the value model.
 
-An empty aggregate loop inside a `while` (`for i in range(2): pass` then `while c: for i in []: pass`) demotes the
-outer counter `i`, so a later `v[i]` is rejected as a non-static index though `i` is still 1 at runtime. This is the
-safe side of the scan/lowering demotion that keeps the state-write invariant sound; making it exact would require the
-demotion to see that an empty aggregate rebinds nothing. This is acceptable, no fix required at the moment.
+A data-dependent loop carries the syntactic set of names its body assigns, fixed before the body is interpreted
+because the header phis must exist first. A leaked `for` counter assigned only on a statically-dead path
+(`if False: i = ...`), or by a loop that rebinds nothing (`for i in []`), is carried anyway and stops being a
+compile-time integer, so a later `v[i]` is refused as a non-static index. Only the compile-time index is lost; the
+loop computes correctly. Exactness needs a fold-aware carried set, which the loop setup cannot have without
+interpreting the body first.
 
-A comprehension target named `self` (`[self for self in [x]]`) is rejected as rebinding the instance parameter, though
-a comprehension has its own scope and the name is a fresh local there. The self-rebinding guard should not apply to a
-comprehension target. This is acceptable, no fix required at the moment.
+Re-installing a tensor derivation into the state attribute it came from (`self.P = self.P.T`) is refused by the
+state-disjointness rule even though the slot is fully overwritten, because the derivation shares its source's storage.
+The diagnostic names the fix (`np.array(self.P.T)`); lifting it needs the install check to see that the source and the
+destination are the same slot.
 
-## Known defects needing resolution
+A tuple swap of two state attributes (`self.a, self.b = self.b, self.a + x`) is refused because an unpack target must
+be a plain name. It is the one refusal here with no one-line rewrite -- the swap needs a temporary.
 
-Closure free variables are not consulted, so a captured name resolves to a same-named module global (or to the
-builtin). A kernel reading a closure variable folds in a module-level global sharing its name (`x * gain` takes a
-module `gain`, not the freevar), and a captured rebinding of `range`/`len` is treated as the builtin (a freevar
-`range` returning a one-element list still unrolls as `builtin range(2)`, giving two trips where Python runs one).
-Both are silent. `_resolve_name` (`_lower.py:2635`) consults closure cells but is only reached when resolving a
-callee; the value-position paths (`_lower_expr`, `_static_int`, `_static_float`, `_static_ndarray_value`) call
-`_module_global` (`_lower.py:2611`) directly, and `_is_builtin_name` (`_lower.py:946`) checks `__globals__` only --
-all skip `__closure__`. Absent a shadowing global the name is correctly rejected as unknown, which is why it has
-hidden. Fix: route every name lookup, builtin detection included, through one resolver that checks `__closure__`
-before `__globals__`, mirroring Python's LEGB order; it touches several static evaluators and wants its own tests.
+Also refused, each naming the construct and each with a plain rewrite: a walrus that reads the name it binds
+(`b = (a := a + x)`); a `list[...]` return annotation, in favour of `tuple[...]`, though a returned list literal stays
+legal; a value that is an array in one arm and a sequence in the other, since aggregates join a branch only when every
+arm agrees in kind; a comprehension `if` filter or a comprehension with more than one `for` clause; and a starred
+unpack target (`first, *rest = v`).
 
-`del` of a module global is not recognized as making the name local. `_collect_local_names` (`_lower.py:2580`) does
-not handle `ast.Delete`, so a function that does `del GLOBAL` anywhere binds the name as local throughout in CPython
-(a later read is `UnboundLocalError`), but Holoso still resolves it to the module global and folds its value in. The
-collector also omits names bound by a nested `def`/`class`. Fix: add `ast.Delete` (and nested-definition targets) to
-the local-name walk. A contrived case, but a silent divergence from Python's scoping.
+`while True:` with a data-dependent `break` exhausts the graph expansion budget rather than residualizing: a literal
+`True` header is decidable on every trip, so the loop unrolls until the budget stops it, while a runtime `break` opens
+an exit lane without ever closing the fall path. The exit condition belongs in the header. This is deliberate --
+every cheap detector for the shape misfires on the legitimate counter-spelled loop.
 
-Bare `AssertionError` when two public state slots share a live-out. `assert RegRef(reg) not in write_books, "a
-boundary-install slot must carry no opcode write sources"` (`_emit.py:639`) fires when two public state slots end a
-transaction on the same live-out register -- e.g. two writes to `self.a` followed by `self.b = self.a` (a single copy
-is fine). The front-end, HIR, MIR, and LIR all accept it; only Verilog emission trips. It fails loudly with no output,
-but the message is addressed to a compiler developer, not the user, who deserves a located `SynthesisError`.
-
-A huge integer exponent hangs the compiler. `_lower_pow` (`_lower.py:2194`) expands `x ** n` into an `n - 1` multiply
-chain without bounding `n`, so a large literal exponent spins `lower()` indefinitely. Check the exponent against
-`UNROLL_THRESHOLD` before expanding and raise a located `UnsupportedConstruct`, as the `for`/comprehension unroll paths
-already do.
+A state attribute's shape and type come from the reset snapshot, so a field annotation contradicting it
+(`P: Float64[np.ndarray, "2 2"]` on an instance holding a 3x3) is documentation rather than a checked declaration.
+Parameter and return annotations are checked, so the module boundary is judged while the state boundary is not.

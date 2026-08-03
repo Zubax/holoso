@@ -1,5 +1,5 @@
 """
-Public-API, black-box behavioral tests for the cross-block-overlap / cycle-model surface landed by M1-M8.
+Public-API, black-box behavioral tests for the cross-block-overlap / cycle-model surface.
 
 Every test here drives the compiler ONLY through the public API: ``holoso.synthesize(fn, ops) -> SynthesisResult``,
 then ``result.numerical_model.elaborate() -> NumericalSimulator``, then exercises the simulator
@@ -11,7 +11,7 @@ deep refactor of the schedule, register allocation, or block layout. The white-b
 trigger live in test_schedule.py / test_cosim.py; this is the complementary black-box layer.
 
 The genuine gaps these fill (the white-box twins and the stateless overlap kernels are covered elsewhere):
-  - cross-block software pipelining (M7) carrying PERSISTENT STATE across many transactions, including back-pressure;
+  - cross-block software pipelining carrying PERSISTENT STATE across many transactions, including back-pressure;
   - the model-level handshake under sustained back-pressure (the cosim has it; nothing exercised it via ``tick`` alone);
   - a two-deep shift register (non-coalesced copy slots) over many transactions plus ``reset`` (model path; cosim-only
     before);
@@ -53,7 +53,7 @@ def _close(got: float, want: float, op_count: int = 12) -> bool:
     return within(got, want, rtol, atol)
 
 
-# M7 cross-block software pipelining: the existing overlap kernels are all STATELESS, so the net-new surface is a
+# Cross-block software pipelining: the existing overlap kernels are all STATELESS, so the net-new surface is a
 # stateful kernel that both spills a wide chain into its arms and feeds a persistent attribute across transactions.
 
 

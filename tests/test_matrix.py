@@ -18,7 +18,7 @@ from jaxtyping import Bool, Float, Float64, Int, Shaped
 
 import holoso
 from holoso import FFmaOperator, FloatFormat, UnsupportedConstruct
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import FloatAdd, FloatMul, optimize
 from holoso._mir import lower as lower_to_mir
 
@@ -97,7 +97,7 @@ def test_matmul_shapes_and_port_layout() -> None:
     def mat_vec(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
 
-    hir = lower(mat_vec)
+    hir = lower(mat_vec).hir
     assert hir.input_names() == ["a_0_0", "a_0_1", "a_0_2", "a_1_0", "a_1_1", "a_1_2", "x_0", "x_1", "x_2"]
     assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
     assert _arith_count(hir, FloatMul) == 6 and _arith_count(hir, FloatAdd) == 4
@@ -107,21 +107,21 @@ def test_matmul_shapes_and_port_layout() -> None:
     def vec_mat(x: Float64[np.ndarray, "2"], a: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3"]:
         return x @ a  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(vec_mat).outputs] == ["out_0", "out_1", "out_2"]
+    assert [o.name for o in lower(vec_mat).hir.outputs] == ["out_0", "out_1", "out_2"]
     _assert_python_matches_holoso(vec_mat, np.array([1.0, -2.0]), np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
     _assert_python_matches_holoso(vec_mat, np.array([0.5, 2.0]), np.array([[-1.0, 0.25, 3.0], [2.0, -2.0, 1.0]]))
 
     def dot(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(dot).outputs] == ["out_0"]
+    assert [o.name for o in lower(dot).hir.outputs] == ["out_0"]
     _assert_python_matches_holoso(dot, np.array([1.0, 2.0, 3.0]), np.array([4.0, -5.0, 6.0]))
     _assert_python_matches_holoso(dot, np.array([0.5, -1.0, 2.0]), np.array([2.0, 3.0, -1.0]))
 
     def mat_mat(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "3 2"]) -> Float64[np.ndarray, "2 2"]:
         return a @ b  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(mat_mat).outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1"]
+    assert [o.name for o in lower(mat_mat).hir.outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1"]
     _assert_python_matches_holoso(
         mat_mat, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     )
@@ -154,13 +154,13 @@ def test_matmul_rejections() -> None:
     def three_dee(a: float) -> float:
         return np.array([[[a]]]) @ np.array([a])  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="1-D or 2-D"):
+    with pytest.raises(UnsupportedConstruct, match="1-D and 2-D"):
         lower(three_dee)
 
     def boolean(v: Float64[np.ndarray, "2"], flag: bool) -> float:
         return v @ np.array([flag, flag])  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+    with pytest.raises(UnsupportedConstruct, match="must hold numbers, not booleans"):
         lower(boolean)
 
 
@@ -175,7 +175,7 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
         ops = default_ops(_FMT)
         if with_fma:
             ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT))
-        mir = lower_to_mir(optimize(lower(dot)), ops)
+        mir = lower_to_mir(optimize(lower(dot).hir), ops)
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
             operator = getattr(node, "operator", None)
@@ -197,14 +197,14 @@ def test_np_matmul_call_is_the_operator() -> None:
     def with_call(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return np.matmul(a, x)  # type: ignore[no-any-return]
 
-    ops = (_arith_count(lower(with_operator), FloatMul), _arith_count(lower(with_operator), FloatAdd))
-    assert ops == (_arith_count(lower(with_call), FloatMul), _arith_count(lower(with_call), FloatAdd))
+    ops = (_arith_count(lower(with_operator).hir, FloatMul), _arith_count(lower(with_operator).hir, FloatAdd))
+    assert ops == (_arith_count(lower(with_call).hir, FloatMul), _arith_count(lower(with_call).hir, FloatAdd))
     for kernel in (with_operator, with_call):
         _assert_python_matches_holoso(kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
         _assert_python_matches_holoso(kernel, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
 
     def keywords(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        return np.matmul(a, x, casting="no")  # type: ignore[no-any-return]
+        return np.matmul(a, x, subok=True)  # type: ignore[no-any-return]
 
     with pytest.raises(UnsupportedConstruct, match="keyword"):
         lower(keywords)
@@ -214,7 +214,7 @@ def test_np_matmul_bare_name_import_resolves() -> None:
     def with_bare_name(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return _matmul(a, x)  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(with_bare_name).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(with_bare_name).hir.outputs] == ["out_0", "out_1"]
     _assert_python_matches_holoso(with_bare_name, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
     _assert_python_matches_holoso(with_bare_name, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
 
@@ -226,7 +226,7 @@ def test_augmented_assignment_to_array_is_rejected() -> None:
         v += s
         return v
 
-    with pytest.raises(UnsupportedConstruct, match="augmented assignment to a list or array"):
+    with pytest.raises(UnsupportedConstruct, match="cannot update 'v' in place"):
         lower(name_target)
 
     @dataclasses.dataclass
@@ -236,14 +236,14 @@ def test_augmented_assignment_to_array_is_rejected() -> None:
         def step(self, f: Float64[np.ndarray, "2 2"]) -> None:
             self.P @= f
 
-    with pytest.raises(UnsupportedConstruct, match="augmented assignment to a list or array"):
+    with pytest.raises(UnsupportedConstruct, match="`@=` is not supported on arrays"):
         lower(State(np.eye(2)).step)
 
     def scalar_ok(a: float, s: float) -> float:
         a += s
         return a
 
-    assert [o.name for o in lower(scalar_ok).outputs] == ["out_0"]
+    assert [o.name for o in lower(scalar_ok).hir.outputs] == ["out_0"]
 
 
 def test_unary_minus_on_boolean_aggregate_is_rejected_with_location() -> None:
@@ -259,18 +259,18 @@ def test_elementwise_arithmetic_and_broadcast() -> None:
     def combos(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "2"], s: float) -> Float64[np.ndarray, "2"]:
         return (v + w) * s - w / 2.0 + (s - v) * w  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(combos).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(combos).hir.outputs] == ["out_0", "out_1"]
 
     def length_mismatch(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return v + w  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="mismatched shapes"):
+    with pytest.raises(UnsupportedConstruct, match="broadcasting is not supported"):
         lower(length_mismatch)
 
     def structure_mismatch(v: Float64[np.ndarray, "2"], m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2"]:
         return v + m  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="mismatched shapes"):
+    with pytest.raises(UnsupportedConstruct, match="broadcasting is not supported"):
         lower(structure_mismatch)
 
 
@@ -288,7 +288,7 @@ def test_python_list_arithmetic_is_rejected() -> None:
         return ([a, b] * s)[0]  # type: ignore[operator]
 
     for kernel in (list_add, list_sub, list_scale):
-        with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+        with pytest.raises(UnsupportedConstruct, match="not supported on a sequence"):
             lower(kernel)
 
 
@@ -307,13 +307,13 @@ def test_numpy_only_methods_on_a_list_are_rejected() -> None:
     def transpose(a: float, b: float) -> float:
         return ([a, b].T)[0]  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="transpose"):
+    with pytest.raises(UnsupportedConstruct, match="`.T` on a Python sequence"):
         lower(transpose)
 
     def flatten(a: float, b: float) -> float:
         return ([[a, b]].flatten())[0]  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="flattening"):
+    with pytest.raises(UnsupportedConstruct, match="`.flatten` on a Python sequence"):
         lower(flatten)
 
     def multi_axis(a: float, b: float) -> float:
@@ -330,7 +330,7 @@ def test_list_of_array_demotes_to_sequence_for_arithmetic() -> None:
     def via_list(v: Float64[np.ndarray, "2"], s: float) -> float:
         return (list(v) * s)[0]  # type: ignore[operator, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="not supported on a sequence"):
         lower(via_list)
 
 
@@ -341,13 +341,13 @@ def test_star_unpack_remainder_is_a_python_list() -> None:
         first, *rest = v
         return (rest + rest)[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="starred assignment targets"):
         lower(spread)
 
 
 def test_mismatched_branch_flavor_merge_rejects_array_ops() -> None:
-    # Regression: a value that is an array in one arm and a list in the other must not silently gain array semantics
-    # (that made acceptance depend on arm order). A numpy op on the merged value is rejected; structural use stays fine.
+    # Only bool, int, and float values join branches, so a value that is an array in one arm and a sequence in the
+    # other cannot merge at all -- neither for arithmetic nor for structural use, and regardless of arm order.
     def arithmetic(c: bool, a: float, b: float) -> Float64[np.ndarray, "2"]:
         if c:
             v = np.array([a, b])
@@ -355,7 +355,7 @@ def test_mismatched_branch_flavor_merge_rejects_array_ops() -> None:
             v = [a, b]  # type: ignore[assignment]
         return v * 2.0
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="aggregates join only when every arm agrees"):
         lower(arithmetic)
 
     def structural(c: bool, a: float, b: float) -> float:
@@ -365,7 +365,8 @@ def test_mismatched_branch_flavor_merge_rejects_array_ops() -> None:
             v = [a, b]  # type: ignore[assignment]
         return v[0]  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(structural).outputs] == ["out_0"]
+    with pytest.raises(UnsupportedConstruct, match="aggregates join only when every arm agrees"):
+        lower(structural)
 
 
 def test_state_assignment_flavor_must_match_reset() -> None:
@@ -379,25 +380,17 @@ def test_state_assignment_flavor_must_match_reset() -> None:
             w = self.v * s
             self.v = [w[0], w[1]]  # type: ignore[assignment]
 
-    with pytest.raises(UnsupportedConstruct, match="numpy array"):
+    with pytest.raises(UnsupportedConstruct, match="structure does not match"):
         lower(ListIntoArray(np.array([1.0, 2.0])).step)
 
 
 def test_unsupported_operator_diagnostic_names_the_operator() -> None:
-    # An unsupported operator must be named even when its operands are boolean (its own diagnostic wins over the
-    # float-operand check), rather than being misreported as a boolean-operand error.
-    def bitor(a: bool, b: bool) -> bool:
-        return a | b
-
-    with pytest.raises(UnsupportedConstruct, match="unsupported binary operator BitOr"):
-        lower(bitor)
-
-    # Also on the aggregate path: an unsupported operator must be named even when the operands' shapes mismatch, rather
-    # than being masked by the shape-mismatch diagnostic.
+    # On the aggregate path an unsupported operator must be named even when the operands' shapes mismatch, rather than
+    # being masked by the shape-mismatch diagnostic.
     def modulo(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return v % w  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="unsupported binary operator Mod"):
+    with pytest.raises(UnsupportedConstruct, match="`%` is not supported on arrays"):
         lower(modulo)
 
 
@@ -405,7 +398,7 @@ def test_transpose_structure() -> None:
     def t(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3 2"]:
         return m.T
 
-    hir = lower(t)
+    hir = lower(t).hir
     assert [o.name for o in hir.outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1", "out_2_0", "out_2_1"]
     assert _arith_count(hir, FloatMul) == 0  # a pure reindexing, no hardware
     _assert_python_matches_holoso(t, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
@@ -414,14 +407,14 @@ def test_transpose_structure() -> None:
     def vector_identity(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v.T
 
-    assert [o.name for o in lower(vector_identity).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(vector_identity).hir.outputs] == ["out_0", "out_1"]
     _assert_python_matches_holoso(vector_identity, np.array([1.0, -2.0]))
     _assert_python_matches_holoso(vector_identity, np.array([0.5, 3.0]))
 
     def scalar_t(a: float) -> float:
         return a.T  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="transpose"):
+    with pytest.raises(UnsupportedConstruct, match="a scalar has no supported attribute"):
         lower(scalar_t)
 
 
@@ -434,7 +427,7 @@ def test_state_attribute_named_t_shadows_transpose() -> None:
             self.T = self.T + a
             return self.T
 
-    hir = lower(Holder(0.0).step)
+    hir = lower(Holder(0.0).step).hir
     assert [s.name for s in hir.state_slots] == ["T"]
 
 
@@ -453,15 +446,15 @@ def test_state_attributes_named_shape_and_ndim_shadow_the_shape_queries() -> Non
             self.T = self.T - a
             return self.shape + self.ndim + self.T
 
-    hir = lower(Holder(0.0, 1.0, 2.0).step)
-    assert [s.name for s in hir.state_slots] == ["shape", "ndim", "T"]
+    hir = lower(Holder(0.0, 1.0, 2.0).step).hir
+    assert [s.name for s in hir.state_slots] == ["T", "ndim", "shape"]
 
     # The reset snapshot is read at synthesis time, so the reference instance must stay untouched until then.
     sim = _sim(Holder(0.5, 1.0, 2.0).step)
     reference = Holder(0.5, 1.0, 2.0)
     for a in (0.25, -1.5, 3.0):
         want = reference.step(a)
-        returned, state_shape, state_ndim, state_t = _run(sim, a)
+        returned, state_t, state_ndim, state_shape = _run(sim, a)
         assert returned == pytest.approx(want)
         assert (state_shape, state_ndim, state_t) == pytest.approx((reference.shape, reference.ndim, reference.T))
 
@@ -471,14 +464,14 @@ def test_numpy_subscripts() -> None:
         column = m[:, 2]
         return m[0, 1], m[1][2], column[0], m[1:, 0][0]
 
-    assert [o.name for o in lower(picks).outputs] == ["out_0", "out_1", "out_2", "out_3"]
+    assert [o.name for o in lower(picks).hir.outputs] == ["out_0", "out_1", "out_2", "out_3"]
     _assert_python_matches_holoso(picks, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
     _assert_python_matches_holoso(picks, np.array([[-1.0, 0.5, 2.0], [3.0, -2.0, 0.25]]))
 
     def too_many(m: Float64[np.ndarray, "2 2"]) -> float:
         return m[0, 1, 0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="too many indices"):
+    with pytest.raises(UnsupportedConstruct, match="must name every axis"):
         lower(too_many)
 
 
@@ -490,14 +483,14 @@ def test_multi_axis_index_on_list_is_rejected() -> None:
         m = [[a, b], [a]]
         return m[0, 1]  # type: ignore[call-overload,no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
+    with pytest.raises(UnsupportedConstruct, match="works only on an array, not a sequence"):
         lower(list_multi_axis)
 
     def ragged_chained(a: float, b: float) -> float:
         m = [[a, b], [a]]
         return m[0][1]
 
-    assert [o.name for o in lower(ragged_chained).outputs] == ["out_0"]
+    assert [o.name for o in lower(ragged_chained).hir.outputs] == ["out_0"]
 
 
 def test_shaped_parameter_annotation_rejections() -> None:
@@ -522,25 +515,24 @@ def test_shaped_parameter_annotation_rejections() -> None:
     def boolean(v: Bool[np.ndarray, "2"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+    with pytest.raises(UnsupportedConstruct, match="float or integer family"):
         lower(boolean)
 
     def integer(v: Int[np.ndarray, "2"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
-        lower(integer)
+    assert lower(integer).hir.input_names() == ["v_0", "v_1"]  # the integer family is supported alongside the float one
 
     def shape_only(v: Shaped[np.ndarray, "2"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+    with pytest.raises(UnsupportedConstruct, match="float or integer family"):
         lower(shape_only)
 
     def shapeless(v: np.ndarray) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="jaxtyping"):
+    with pytest.raises(UnsupportedConstruct, match="annotation of parameter 'v' is not supported"):
         lower(shapeless)
 
     class _FakeArray:  # structurally array-like (has ``dims``) but its dims is not a real jaxtyping tuple
@@ -549,7 +541,7 @@ def test_shaped_parameter_annotation_rejections() -> None:
     def fake(v: _FakeArray) -> float:
         return 1.0
 
-    with pytest.raises(UnsupportedConstruct, match="not a valid fixed-shape array annotation"):
+    with pytest.raises(UnsupportedConstruct, match="only numpy array containers are supported"):
         lower(fake)
 
 
@@ -557,7 +549,7 @@ def test_wide_float_dtype_annotation_is_accepted() -> None:
     def f(v: Float[np.ndarray, "2"]) -> float:
         return v[0] + v[1]  # type: ignore[no-any-return]
 
-    assert lower(f).input_names() == ["v_0", "v_1"]
+    assert lower(f).hir.input_names() == ["v_0", "v_1"]
 
 
 def test_decomposed_parameter_port_collision_is_rejected() -> None:
@@ -572,43 +564,34 @@ def test_array_return_annotation_is_validated() -> None:
     def good(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v * 2.0
 
-    assert [o.name for o in lower(good).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(good).hir.outputs] == ["out_0", "out_1"]
 
     def nested(v: Float64[np.ndarray, "2"], flag: bool) -> tuple[Float64[np.ndarray, "2"], bool]:
         return v * 2.0, flag
 
-    assert [o.name for o in lower(nested).outputs] == ["out_0_0", "out_0_1", "out_1"]
+    assert [o.name for o in lower(nested).hir.outputs] == ["out_0_0", "out_0_1", "out_1"]
 
     def wrong_shape(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "3"]:
         return v * 2.0
 
-    with pytest.raises(UnsupportedConstruct, match="shape mismatch"):
+    with pytest.raises(UnsupportedConstruct, match="the annotation declares"):
         lower(wrong_shape)
 
     def scalar_returned(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="shape mismatch"):
+    with pytest.raises(UnsupportedConstruct, match="the returned value is not an array"):
         lower(scalar_returned)
 
     def boolean_leaves(flag: bool) -> Float64[np.ndarray, "1"]:
         return [flag]  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+    with pytest.raises(UnsupportedConstruct, match="the returned value is not an array"):
         lower(boolean_leaves)
 
 
 def test_matrix_state_annotation_and_assignment_validation() -> None:
-    @dataclasses.dataclass
-    class Declared:
-        P: Float64[np.ndarray, "2 2"]
-
-        def step(self, a: float) -> None:
-            self.P = self.P * a
-
-    with pytest.raises(UnsupportedConstruct, match="declared array type"):
-        lower(Declared(np.zeros((3, 3))).step)
-
+    # A state array's shape comes from the reset snapshot, not from the field annotation, so only installs are judged.
     @dataclasses.dataclass
     class Reshaped:
         P: Float64[np.ndarray, "2 2"]
@@ -616,7 +599,7 @@ def test_matrix_state_annotation_and_assignment_validation() -> None:
         def step(self, a: float) -> None:
             self.P = self.P[0] * a
 
-    with pytest.raises(UnsupportedConstruct, match="incompatible shape"):
+    with pytest.raises(UnsupportedConstruct, match="structure does not match"):
         lower(Reshaped(np.zeros((2, 2))).step)
 
     @dataclasses.dataclass
@@ -641,7 +624,7 @@ def test_state_assignment_element_type_mismatch_is_rejected() -> None:
             # A bool-valued array (flavor matches the ndarray slot) so the check reached is the leaf-type one.
             self.P = np.array([[flag, flag], [flag, flag]])
 
-    with pytest.raises(UnsupportedConstruct, match="incompatible type"):
+    with pytest.raises(UnsupportedConstruct, match="must hold numbers, not booleans"):
         lower(FloatMatrix(np.zeros((2, 2))).step)
 
     @dataclasses.dataclass
@@ -651,7 +634,7 @@ def test_state_assignment_element_type_mismatch_is_rejected() -> None:
         def step(self, flag: bool) -> None:
             self.y = flag
 
-    with pytest.raises(UnsupportedConstruct, match="incompatible type"):
+    with pytest.raises(UnsupportedConstruct, match="would change type from float to bool"):
         lower(FloatScalar(0.0).step)
 
 
@@ -679,7 +662,7 @@ def test_matrix_carried_across_while_loop_is_rejected() -> None:
             x = x - 1.0
         return m
 
-    with pytest.raises(UnsupportedConstruct, match="aggregate"):
+    with pytest.raises(UnsupportedConstruct, match="can be carried across the iterations"):
         lower(f)
 
 
@@ -698,7 +681,7 @@ def test_ndarray_constant_element_folds_in_static_position() -> None:
     def indexed(v: Float64[np.ndarray, "3"]) -> float:
         return v[_INDEX_CONST[0]]  # type: ignore[no-any-return]  # constant int-array element as a static index
 
-    assert [o.name for o in lower(indexed).outputs] == ["out_0"]
+    assert [o.name for o in lower(indexed).hir.outputs] == ["out_0"]
 
     def chained(a: float) -> float:
         if _GATE_CONST2[0][1] > 0.0:  # chained indexing of a 2-D constant, statically true
@@ -722,7 +705,7 @@ def test_readonly_ndarray_attribute_element_folds_a_branch() -> None:
                 out = a * 2.0  # statically dead
             return out
 
-    hir = lower(Filter(np.array([[0.0, 1.0]])).step)
+    hir = lower(Filter(np.array([[0.0, 1.0]])).step).hir
     assert [s.name for s in hir.state_slots] == []  # no spurious state from the statically-dead write
     assert [o.name for o in hir.outputs] == ["out_0"]
 
@@ -740,7 +723,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_slice = lower(WithSlice(0.0).step)
+    hir_slice = lower(WithSlice(0.0).step).hir
     assert [s.name for s in hir_slice.state_slots] == []
     assert [o.name for o in hir_slice.outputs] == ["out_0"]
 
@@ -753,7 +736,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
                 self.y = a  # statically dead
             return a
 
-    hir_t = lower(WithTranspose(0.0).step)
+    hir_t = lower(WithTranspose(0.0).step).hir
     assert [s.name for s in hir_t.state_slots] == []
     assert [o.name for o in hir_t.outputs] == ["out_0"]
 
@@ -767,7 +750,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_f = lower(WithFlatten(0.0).step)
+    hir_f = lower(WithFlatten(0.0).step).hir
     assert [s.name for s in hir_f.state_slots] == []
     assert [o.name for o in hir_f.outputs] == ["out_0"]
 
@@ -814,20 +797,20 @@ def test_unary_plus_rejects_boolean_but_is_identity_on_floats() -> None:
     def floats(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return +v
 
-    assert [o.name for o in lower(floats).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(floats).hir.outputs] == ["out_0", "out_1"]
 
 
 def test_ndarray_module_constant_rejections() -> None:
     def boolean(a: float) -> float:
         return _BOOL_CONST[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="real numbers"):
+    with pytest.raises(UnsupportedConstruct, match="not a supported aggregate"):
         lower(boolean)
 
     def three_dee(a: float) -> float:
         return _CUBE_CONST[0, 0, 0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="1-D or 2-D"):
+    with pytest.raises(UnsupportedConstruct, match="works only on an array"):
         lower(three_dee)
 
 
@@ -837,7 +820,7 @@ def test_ndarray_subclass_constant_and_state_are_rejected() -> None:
     def constant(a: float) -> float:
         return _MATRIX_CONST[0, 1] + a  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="plain numpy array"):
+    with pytest.raises(UnsupportedConstruct, match="not a captured object"):
         lower(constant)
 
     @dataclasses.dataclass
@@ -847,7 +830,7 @@ def test_ndarray_subclass_constant_and_state_are_rejected() -> None:
         def step(self, a: float) -> None:
             self.P = self.P * a
 
-    with pytest.raises(UnsupportedConstruct, match="plain numpy array"):
+    with pytest.raises(UnsupportedConstruct, match="numpy subclass"):
         lower(Stateful(_np_matrix()).step)
 
 
@@ -883,7 +866,7 @@ def test_boolean_operand_to_float_builtin_or_intrinsic_is_rejected_with_location
         return np.floor(flag)  # type: ignore[no-any-return]
 
     for kernel in (with_abs, with_min, with_round, with_floor):
-        with pytest.raises(UnsupportedConstruct, match="boolean"):
+        with pytest.raises(UnsupportedConstruct, match="has type bool where the annotation declares float"):
             lower(kernel)
 
 
@@ -1047,7 +1030,7 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
     # broadcast, an annotated local, a static row loop, a shaped return, and the runtime-divisor Kalman gain.
     sim = holoso.synthesize(TrackingFilter().update, default_ops(_FMT), name="tracker").numerical_model.elaborate()
     assert [p.name for p in sim.outputs] == [
-        "out_0", "out_1", "state_x_0", "state_x_1", "state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1",
+        "out_0", "out_1", "state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1", "state_x_0", "state_x_1",
     ]  # fmt: skip
     reference = TrackingFilter()
     rng = np.random.default_rng(0xF117E5)
@@ -1056,7 +1039,7 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
         z = np.array([float(rng.uniform(-1.0, 1.0)), float(rng.uniform(-1.0, 1.0))])
         got = _run(sim, F, z)
         prediction = reference.update(F, z)
-        want = np.array([float(v) for v in (*prediction, *reference.x, *reference.P.flatten())])
+        want = np.array([float(v) for v in (*prediction, *reference.P.flatten(), *reference.x)])
         assert np.all(np.isfinite(want))
         assert np.allclose(got, want, rtol=1e-9, atol=1e-12), step
 
@@ -1108,7 +1091,8 @@ def test_operators_are_the_library_functions() -> None:
         return np.matmul(a, np.transpose(b))  # type: ignore[no-any-return]
 
     counts = [
-        (_arith_count(lower(k), FloatMul), _arith_count(lower(k), FloatAdd)) for k in (with_operators, with_calls)
+        (_arith_count(lower(k).hir, FloatMul), _arith_count(lower(k).hir, FloatAdd))
+        for k in (with_operators, with_calls)
     ]
     assert counts[0] == counts[1] == (12, 8)
     for kernel in (with_operators, with_calls):
@@ -1121,7 +1105,7 @@ def test_np_dot_is_the_matrix_product() -> None:
     def dot_kernel(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return np.dot(a, x)  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(dot_kernel).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(dot_kernel).hir.outputs] == ["out_0", "out_1"]
     _assert_python_matches_holoso(dot_kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
 
     def scalar_dot(a: float, x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
@@ -1136,14 +1120,14 @@ def test_np_trace_and_np_outer() -> None:
     def tr(m: Float64[np.ndarray, "3 3"]) -> float:
         return np.trace(m)  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(tr).outputs] == ["out_0"]
-    assert _arith_count(lower(tr), FloatMul) == 0  # a fold of the diagonal, no multiplies
+    assert [o.name for o in lower(tr).hir.outputs] == ["out_0"]
+    assert _arith_count(lower(tr).hir, FloatMul) == 0  # a fold of the diagonal, no multiplies
     _assert_python_matches_holoso(tr, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]))
 
     def outer(u: Float64[np.ndarray, "2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2 3"]:
         return np.outer(u, v)
 
-    assert _arith_count(lower(outer), FloatMul) == 6 and _arith_count(lower(outer), FloatAdd) == 0
+    assert _arith_count(lower(outer).hir, FloatMul) == 6 and _arith_count(lower(outer).hir, FloatAdd) == 0
     _assert_python_matches_holoso(outer, np.array([1.0, -2.0]), np.array([0.5, 3.0, -1.0]))
 
     def rect_trace(m: Float64[np.ndarray, "2 3"]) -> float:
@@ -1166,7 +1150,7 @@ def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
     def bool_trace(flag: bool) -> bool:
         return np.trace(np.array([[flag]]))  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="floating-point"):
+    with pytest.raises(UnsupportedConstruct, match="must hold numbers, not booleans"):
         lower(bool_trace)
 
 
@@ -1176,15 +1160,15 @@ def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
     def bad(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match=r"in matmul\(\).*mismatch") as excinfo:
+    with pytest.raises(UnsupportedConstruct, match=r"in np\.matmul\(\).*mismatch") as excinfo:
         lower(bad)
     assert excinfo.value.location is not None
     assert excinfo.value.location.line is not None and "a @ x" in excinfo.value.location.line
 
     def bad_t(a: float) -> float:
-        return a.T  # type: ignore[attr-defined, no-any-return]
+        return np.transpose(a)  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match=r"in transpose\(\).*transpose a scalar"):
+    with pytest.raises(UnsupportedConstruct, match=r"in np\.transpose\(\).*transpose a scalar"):
         lower(bad_t)
 
 
@@ -1198,7 +1182,9 @@ def test_matrix_state_transposed_under_a_shape_guard_across_transactions() -> No
             self.s = 0.0
 
         def step(self, x: float) -> float:
-            self.P = self.P.T
+            self.P = np.array(
+                self.P.T
+            )  # an explicit copy: the bare view shares the storage of the slot it installs into
             if self.P.ndim == 2:
                 self.s = self.s + self.P[0][1] * x
             return self.s

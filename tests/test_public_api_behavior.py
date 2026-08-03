@@ -1,5 +1,5 @@
 """
-Public-API, black-box behavioral tests for the components landed by the recent plan that lacked black-box coverage.
+Public-API, black-box behavioral tests for the components that lacked black-box coverage.
 
 Every test here drives the compiler ONLY through the public API: ``holoso.synthesize(fn, ops) -> SynthesisResult``,
 then ``result.numerical_model.elaborate() -> NumericalSimulator``, and exercises the simulator
@@ -10,19 +10,19 @@ hand-computed exact value for bools and exactly-representable arithmetic), persi
 transactions including a ``reset`` partway, and the typed-port metadata. No internal LIR / schedule / register /
 cycle-count structure is inspected, so these survive a deep refactor of any mid/back-end pass.
 
-These complement test_overlap_behavior.py (the M7 cross-block-overlap surface). The genuine gaps filled here:
-  - M2 if-conversion + select: sign-fold-into-select on both orientations, a comparison->select->float-op chain that
+These complement test_overlap_behavior.py (the cross-block-overlap surface). The genuine gaps filled here:
+  - if-conversion + select: sign-fold-into-select on both orientations, a comparison->select->float-op chain that
     stays straight-line, a select whose two arms are different arithmetic, a nested ternary, and a division-bearing
     diamond that STAYS a real branch -- with an if-convertible / real-branch PAIR of the SAME math asserted to agree.
-  - M3 NOT-folding: ``not`` in every consumer position (branch condition, boolean-logic operand, boolean output,
+  - NOT-folding: ``not`` in every consumer position (branch condition, boolean-logic operand, boolean output,
     boolean state slot, boolean phi arm), double negation, and one comparison consumed in BOTH polarities -- bools
     asserted exact over the full truth table.
-  - M5 phi-arm coalescing: a PURE loop-carried recurrence and the soundness corner (a diamond whose arms reuse an
+  - phi-arm coalescing: a PURE loop-carried recurrence and the soundness corner (a diamond whose arms reuse an
     input that is also a phi result), value-checked over many vectors (coalescing is output-neutral, so a correct
     output across these proves the coalescing path).
-  - M6b typed ports + multi-output: bool input, bool output, mixed float+bool tuple AND list returns, an UNUSED bool
+  - typed ports + multi-output: bool input, bool output, mixed float+bool tuple AND list returns, an UNUSED bool
     input proven neutral by output invariance, with the scalar-type metadata read from the elaborated simulator.
-  - M6 persistent state: a chained-slot kernel and a boolean state slot, each over a long stream with a ``reset``
+  - persistent state: a chained-slot kernel and a boolean state slot, each over a long stream with a ``reset``
     partway, asserted against a Python reference running the same class.
   - Commutative orientation + constant folding: ``a < b`` vs ``b > a`` agree (bool-exact), a constant-only
     subexpression folds, and a comparison of two compile-time constants folds an arm away (still correct).
@@ -173,7 +173,7 @@ def test_ifconvertible_and_real_branch_forms_agree() -> None:
         assert a == b, f"forms disagree x={x} y={y} c={c}: ifc={a} branch={b}"
 
 
-# M3: ``not`` never materializes hardware -- it folds into the consumer's sideband on the CONSUMER side.
+# ``not`` never materializes hardware -- it folds into the consumer's sideband on the CONSUMER side.
 
 
 def _not_in_branch_condition(c: bool, x: float, y: float) -> float:
@@ -217,7 +217,7 @@ def test_not_as_boolean_output() -> None:
 
 
 class _BoolNotState:
-    """A boolean state slot driven by ``not``: ``self.flag = not self.flag`` (the M3 phi/state-slot inversion)."""
+    """A boolean state slot driven by ``not``: ``self.flag = not self.flag`` (the phi/state-slot inversion)."""
 
     def __init__(self) -> None:
         self.flag = False
@@ -304,7 +304,7 @@ def _soundness_corner(x: float, n: float) -> float:
     # The coalescing soundness corner: a REAL diamond INSIDE a loop whose arms reuse an input (``x``) that is ALSO the
     # seed of the phi result (``acc`` is seeded from x and is the loop-carried header phi), branching ON that phi
     # result (``acc > 0.0``). The else arm divides (structurally-nonzero, non-power-of-two divisor) so the diamond
-    # CANNOT if-convert and stays a genuine branch with phi arms and install copies -- the M5 corner where a wrong
+    # CANNOT if-convert and stays a genuine branch with phi arms and install copies -- the corner where a wrong
     # coalesce would clobber a value (the carry / input ``x``) still live in a sibling arm. Output must follow the
     # source semantics, not whatever the allocator chose. Unlike the overlap file's in-loop diamond (whose condition
     # is the loop-invariant ``x > 1.0``), the condition here is the loop-carried phi itself.
@@ -364,10 +364,10 @@ def test_logical_port_is_the_single_public_port_type() -> None:
     assert all(isinstance(port, holoso.LogicalPort) for port in (*sim.inputs, *sim.outputs))
 
 
-def _mixed_list_io(flag: bool, x: float) -> list[float]:
+def _mixed_list_io(flag: bool, x: float) -> tuple[float, ...]:
     # A LIST-literal return (vs the tuple above): the same aggregate-flattening path through a list, with a bool cast
     # into a float lane.
-    return [x + 1.0, float(flag)]
+    return [x + 1.0, float(flag)]  # type: ignore[return-value]  # a list literal is the point; sequences are one kind
 
 
 def test_mixed_list_io_metadata_and_values() -> None:

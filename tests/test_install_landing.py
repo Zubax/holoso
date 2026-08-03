@@ -13,7 +13,7 @@ import pytest
 
 import holoso
 from holoso import FloatFormat, FloatValue
-from holoso._frontend import lower as lower_frontend
+from holoso._eel import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import BoolWrite, FloatCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, build
@@ -25,7 +25,7 @@ from ._modelref import Vector, assert_model_equals_interpreter, build_model_and_
 
 def _build(spec: ExampleSpec) -> Lir:
     return build(
-        lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])),
+        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0])),
         spec.name,
         fetch_stages=3,
     )
@@ -137,7 +137,9 @@ def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
     ops = default_ops(FloatFormat(6, 18))
     lir = build(
-        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__)), ops), "hold_or_update_bool", fetch_stages=3
+        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir), ops),
+        "hold_or_update_bool",
+        fetch_stages=3,
     )
     resident_non_const = [x for b in lir.blocks for x in b.bool_writes if x.resident_source and not x.is_const]
     assert resident_non_const, "the state-read phi arm did not install as a resident-source bool write"
@@ -181,7 +183,7 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     ops = default_ops(FloatFormat(8, 36))
     kernel = _LiveThroughArm().__call__
     lir = build(
-        lower_to_mir(optimize(lower_frontend(kernel)), ops), "live_through_arm", fetch_stages=3
+        lower_to_mir(optimize(lower_frontend(kernel).hir), ops), "live_through_arm", fetch_stages=3
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.copies if not c.resident_source]
     assert cross, "the kernel no longer exercises a non-coalesced cross-block-source install; the shape changed"
@@ -229,7 +231,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     """
     ops = default_ops(FloatFormat(8, 36))
     kernel = _LastWorkArmSource().__call__
-    lir = build(lower_to_mir(optimize(lower_frontend(kernel)), ops), "last_work_arm", fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower_frontend(kernel).hir), ops), "last_work_arm", fetch_stages=3)
     pushed = [
         blk
         for blk in lir.blocks

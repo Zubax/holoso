@@ -13,7 +13,7 @@ from ._backend.html import generate as generate_html, HtmlOutput
 from ._backend.numerical import generate as generate_model, NumericalModel
 from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
-from ._frontend import lower as lower_frontend
+from ._eel import lower as lower_frontend
 from ._hir import optimize
 from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, build
 from ._mir import lower as lower_to_mir
@@ -22,8 +22,9 @@ from ._operators import OpConfig
 type Target = Callable[..., Any]
 """
 Currently supported targets are:
-- A plain stateless function or lambda.
-- A bound method of a class instance -- stateful. Public attributes become additional output ports.
+- A plain stateless function. It must be importable, so a lambda is refused: its source cannot be recovered.
+- A bound method of a class instance -- stateful. An attribute the method WRITES becomes a state register, and a
+  public one additionally gets a ``state_<attr>`` output port; an attribute it only reads folds to its value.
 - Later on we may potentially add support for multiple methods per class, where the generated module will provide
   a selector port to choose which method to execute, all sharing the same state. In this case we would accept
   a tuple containing the class type and a list of its unbound methods. This remains to be seen.
@@ -49,6 +50,11 @@ class SynthesisResult:
     cocotb_output: CocotbOutput
     html_output: HtmlOutput
 
+    frontend_ir: list[str]
+    """
+    The front-end intermediate representation after each pass, earliest first (raw), final last (most refined).
+    """
+
     def write(self, out_dir: Path | str) -> dict[str, Path]:
         """
         Write every artifact to ``out_dir`` and return the written paths keyed by filename.
@@ -61,6 +67,7 @@ class SynthesisResult:
             **self.verilog_output.support_files,
             f"test_{self.module_name}.py": self.cocotb_output.testbench,
             f"{self.module_name}.html": self.html_output.html,
+            **{f"{self.module_name}.pass{i}.fir": text for i, text in enumerate(self.frontend_ir)},
         }
         written: dict[str, Path] = {}
         for filename, content in files.items():
@@ -85,7 +92,8 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
     for field in fields(ops):
         _logger.info("\t%s: %s", field.name, getattr(ops, field.name))
 
-    hir = optimize(lower_frontend(target))
+    frontend = lower_frontend(target)
+    hir = optimize(frontend.hir)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
     mir = lower_to_mir(hir, ops)
@@ -112,6 +120,7 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
         numerical_model=model,
         cocotb_output=cocotb_output,
         html_output=html_output,
+        frontend_ir=frontend.passes,
     )
 
 

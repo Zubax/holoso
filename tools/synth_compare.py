@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 import holoso  # noqa: E402
-from holoso._frontend import lower  # noqa: E402
+from holoso._eel import lower  # noqa: E402
 from holoso._hir import optimize  # noqa: E402
 from holoso._lir import build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
@@ -61,7 +61,7 @@ def capture(out_path: str) -> None:
             "ops": repr(target.ops),
         }
         try:
-            lir = build(lower_to_mir(optimize(lower(target.kernel())), target.ops), target.name, fetch_stages=3)
+            lir = build(lower_to_mir(optimize(lower(target.kernel()).hir), target.ops), target.name, fetch_stages=3)
             row["min_ii"] = lir.min_initiation_interval
             row["last_pc"] = lir.last_pc
             flow = make_flow(target.flow, target.target_frequency_MHz)

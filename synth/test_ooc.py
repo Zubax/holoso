@@ -20,9 +20,9 @@ def kern(a: float, b: float) -> float:
     return (a - b) * 0.25 + a * b
 
 
-def wide(a: float, b: float, c: float, d: float, e: float, f: float) -> list[float]:
+def wide(a: float, b: float, c: float, d: float, e: float, f: float) -> tuple[float, ...]:
     # Six inputs and three outputs, so both selectors are multi-bit (exercises the mux decode).
-    return [a * b + c, d - e * f, a + d]
+    return a * b + c, d - e * f, a + d
 
 
 def bool_gate(a: bool, b: bool) -> bool:

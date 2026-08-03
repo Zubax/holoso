@@ -21,7 +21,7 @@ from holoso import (
 )
 from holoso._errors import SynthesisError, UnsupportedConstruct
 from holoso._util import ValueId
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import (
     BoolAnd,
     BoolConst,
@@ -41,7 +41,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, RelationalOp, Ret, Select
+from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, Ret, Select
 from holoso._hir import (
     FloatAbs,
     FloatAtan2,
@@ -66,15 +66,21 @@ from holoso._hir import (
     FloatToInt,
     IntAbs,
     IntAdd,
-    IntAnd,
+    IntBwAnd,
+    IntBwNot,
+    IntBwOr,
+    IntBwXor,
     IntConst,
     IntDivFloor,
+    IntEqual,
+    IntGreater,
+    IntGreaterOrEqual,
+    IntLess,
+    IntLessOrEqual,
     IntMod,
     IntMul,
     IntNeg,
-    IntNot,
-    IntOr,
-    IntRelational,
+    IntNotEqual,
     IntSelect,
     IntShiftLeft,
     IntShiftRight,
@@ -82,7 +88,6 @@ from holoso._hir import (
     IntToBool,
     IntToFloat,
     IntType,
-    IntXor,
 )
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._lir import build
@@ -124,7 +129,7 @@ class OtherFold(Operator):
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target)), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops)
 
 
 def _op_count(mir: Mir, cls: type) -> int:
@@ -190,7 +195,7 @@ def test_hir_constant_folding_returns_float_const() -> None:
     def f() -> float:
         return 1.25 + 2.0
 
-    hir = optimize(lower(f))
+    hir = optimize(lower(f).hir)
     node = hir.nodes[hir.outputs[0].value]
     assert isinstance(node, FloatConst)
     assert node.value == 3.25
@@ -379,7 +384,7 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
     # in _copy.reverse_postorder (and the symmetric _lir._mir_facts.mir_rpo). With recursion in place, optimize()
     # raises; the iterative DFS compiles cleanly. Exercise the whole front-to-back pipeline (optimize, MIR lowering,
     # LIR build) since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
-    hir = lower(_deep_cfg_kernel)
+    hir = lower(_deep_cfg_kernel).hir
     assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
     model = build_model(build(_run(_deep_cfg_kernel), "deep", fetch_stages=3))
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
@@ -408,7 +413,7 @@ def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
 
 
 def _hir_of(target: object) -> Hir:
-    return optimize(lower(target))
+    return optimize(lower(target).hir)
 
 
 def test_if_conversion_collapses_a_pure_diamond() -> None:
@@ -694,7 +699,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
 def test_operator_layer_does_not_import_hir() -> None:
     """
     The hardware operator models are a base vocabulary layer below the IR pipeline; they must never reach back into the
-    semantic HIR -- the smell W12 removed (importing ``RelationalOp`` from ``_hir``). Locks the severed edge
+    semantic HIR -- the smell W12 removed (importing a relation enum from ``_hir``). Locks the severed edge
     transitively.
     """
     offenders = forbidden_imports("holoso._operators", "holoso._hir")
@@ -733,13 +738,18 @@ _INT_OPERATORS: list[tuple[Operator, list[Type], Type]] = [
     (IntMod(), [IntType(), IntType()], IntType()),
     (IntShiftLeft(), [IntType(), IntType()], IntType()),
     (IntShiftRight(), [IntType(), IntType()], IntType()),
-    (IntAnd(), [IntType(), IntType()], IntType()),
-    (IntOr(), [IntType(), IntType()], IntType()),
-    (IntXor(), [IntType(), IntType()], IntType()),
+    (IntBwAnd(), [IntType(), IntType()], IntType()),
+    (IntBwOr(), [IntType(), IntType()], IntType()),
+    (IntBwXor(), [IntType(), IntType()], IntType()),
     (IntNeg(), [IntType()], IntType()),
     (IntAbs(), [IntType()], IntType()),
-    (IntNot(), [IntType()], IntType()),
-    (IntRelational(RelationalOp.LT), [IntType(), IntType()], BoolType()),
+    (IntBwNot(), [IntType()], IntType()),
+    (IntLess(), [IntType(), IntType()], BoolType()),
+    (IntLessOrEqual(), [IntType(), IntType()], BoolType()),
+    (IntEqual(), [IntType(), IntType()], BoolType()),
+    (IntNotEqual(), [IntType(), IntType()], BoolType()),
+    (IntGreaterOrEqual(), [IntType(), IntType()], BoolType()),
+    (IntGreater(), [IntType(), IntType()], BoolType()),
     (IntSelect(), [BoolType(), IntType(), IntType()], IntType()),
     (IntToFloat(), [IntType()], HirFloatType()),
     (FloatToInt(), [HirFloatType()], IntType()),
@@ -777,13 +787,13 @@ def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_valu
     zero, one, all_ones = builder.int_const(0), builder.int_const(1), builder.int_const(-1)
     value = builder.operation(IntAdd(), [n, zero])
     value = builder.operation(IntMul(), [value, one])
-    value = builder.operation(IntOr(), [value, zero])
-    value = builder.operation(IntXor(), [value, zero])
-    value = builder.operation(IntAnd(), [value, all_ones])
+    value = builder.operation(IntBwOr(), [value, zero])
+    value = builder.operation(IntBwXor(), [value, zero])
+    value = builder.operation(IntBwAnd(), [value, all_ones])
     builder.output("identities", value)
     builder.output("killed", builder.operation(IntMul(), [n, zero]))
-    builder.output("saturated", builder.operation(IntOr(), [n, all_ones]))
-    builder.output("masked_off", builder.operation(IntAnd(), [n, zero]))
+    builder.output("saturated", builder.operation(IntBwOr(), [n, all_ones]))
+    builder.output("masked_off", builder.operation(IntBwAnd(), [n, zero]))
     builder.ret()
 
     hir = optimize(builder.finish())
@@ -827,12 +837,12 @@ def test_integer_folding_is_exact_across_the_vocabulary() -> None:
         (IntMod(), [-7, -2], -1),
         (IntShiftLeft(), [huge, 64], huge << 64),
         (IntShiftRight(), [-huge, 64], -huge >> 64),
-        (IntAnd(), [0b1100, 0b1010], 0b1000),
-        (IntOr(), [0b1100, 0b1010], 0b1110),
-        (IntXor(), [0b1100, 0b1010], 0b0110),
+        (IntBwAnd(), [0b1100, 0b1010], 0b1000),
+        (IntBwOr(), [0b1100, 0b1010], 0b1110),
+        (IntBwXor(), [0b1100, 0b1010], 0b0110),
         (IntNeg(), [huge], -huge),
         (IntAbs(), [-huge], huge),
-        (IntNot(), [huge], ~huge),
+        (IntBwNot(), [huge], ~huge),
     ]
     for operator, operands, expected in cases:
         builder = HirBuilder()
@@ -851,7 +861,9 @@ def test_integer_folding_has_no_size_limit() -> None:
     builder = HirBuilder()
     builder.block()
     shifted = builder.operation(IntShiftLeft(), [builder.int_const(1), builder.int_const(20_000)])
-    builder.output("y", builder.operation(IntToFloat(), [builder.operation(IntAnd(), [shifted, builder.int_const(0)])]))
+    builder.output(
+        "y", builder.operation(IntToFloat(), [builder.operation(IntBwAnd(), [shifted, builder.int_const(0)])])
+    )
     builder.ret()
 
     hir = optimize(builder.finish())
@@ -897,17 +909,18 @@ def _wrapped_infinity_times_zero(wrapper: Operator) -> Hir:
 
 
 def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression() -> None:
-    # "Known" has to mean known, not "spelled as a constant node". ``abs(inf)`` IS the infinity, however it is written,
-    # so the product is the same indeterminate form as ``inf * 0.0`` and survives to be refused.
-    with pytest.raises(SynthesisError, match="names no number"):
-        _wrapped_infinity_times_zero(FloatAbs())
-    # The other side of the same rule, and the reason it is not a dodge: ``floor(inf)`` names NO number, so it is an
+    # "Known" has to mean known, not "spelled as a constant node". ``abs(inf)``, ``floor(inf)``, ``trunc(inf)``
+    # each IS the infinity, however written, so the product is the same indeterminate form as ``inf * 0.0`` and
+    # survives to be refused.
+    for spelled in (FloatAbs(), FloatFloor(), FloatTrunc()):
+        with pytest.raises(SynthesisError, match="names no number"):
+            _wrapped_infinity_times_zero(spelled)
+    # The other side of the same rule, and the reason it is not a dodge: ``sin(inf)`` names NO number, so it is an
     # operand the compiler cannot see, and the absorbing zero claims it exactly as it claims a runtime one. The wrapper
     # is deleted by that rewrite, so nothing naming no number survives -- a refusal missed under the charter's license,
     # never a wrong answer, and the alternative would be an identity that consults how its operand was produced.
-    for dodged in (FloatFloor(), FloatTrunc()):
-        hir = _wrapped_infinity_times_zero(dodged)
-        assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
+    hir = _wrapped_infinity_times_zero(FloatSin())
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
 
 
 def test_a_self_division_erases_an_operand_that_names_no_number() -> None:
@@ -1073,7 +1086,6 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
 @pytest.mark.parametrize(
     "operator, operands",
     [
-        (FloatLog2(), (0.0,)),
         (FloatLog2(), (-2.0,)),
         (FloatSqrt(), (-1.0,)),
         (FloatSin(), (math.inf,)),
@@ -1088,12 +1100,9 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
         (IntMod(), (7, 0)),
         (IntShiftLeft(), (1, -1)),
         (IntShiftRight(), (1, -1)),
-        (FloatFloor(), (math.inf,)),
-        (FloatRound(), (-math.inf,)),
         (FloatFma(), (1e300, 1e300, 0.0)),
     ],
     ids=[
-        "log2_zero",
         "log2_negative",
         "sqrt_negative",
         "sin_infinite",
@@ -1108,8 +1117,6 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
         "int_mod_zero",
         "shift_left_negative",
         "shift_right_negative",
-        "floor_of_infinity",
-        "round_of_infinity",
         "fma_past_the_carrier",
     ],
 )
@@ -1123,23 +1130,43 @@ def test_an_operation_outside_its_mathematical_domain_is_refused(
         _optimized_constant_operation(operator, *operands)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "operator, operand, expected",
+    [
+        (FloatLog2(), 0.0, -math.inf),
+        (FloatFloor(), math.inf, math.inf),
+        (FloatRound(), -math.inf, -math.inf),
+    ],
+    ids=["log2_zero", "floor_of_infinity", "round_of_infinity"],
+)
+def test_a_pole_the_operator_reference_answers_folds_to_that_value(
+    operator: Operator, operand: float, expected: float
+) -> None:
+    # Each evaluate follows its own registered np reference: np.log2 answers the
+    # one-sided -inf limit at the pole like the RTL, and an infinity passes through the rounding family.
+    # These DO name the value the hardware computes, so the fold hands it back instead of refusing.
+    hir = _optimized_constant_operation(operator, operand)
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(expected)
+
+
 def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
     # Nothing rewrites a proven branch into a jump, so a proven-dead arm survives into the survivor sweep, and in a
     # never-returning loop it is still CFG-reachable -- the shape where post-DCE block liveness and enterability
     # disagree. The guard proves its own arm dead, so the sweep must not convict what that arm holds.
-    # ``gate`` is opaque to the front end (an operation over a parameter) and constant to HIR (``x*0 == 0``).
-    # The excluded arm holds ``0.0/0.0`` and not ``y/gate``: a fold names a quotient only where it knows BOTH operands,
-    # so an unknown numerator would go unconvicted wherever it sat and would witness nothing about enterability.
+    # Every constant here is opaque to the front end (an operation over a parameter) and constant to HIR (``x*0 == 0``):
+    # the loop condition, so the loop residualizes rather than unrolling and only HIR sees that it never exits; the
+    # guard, so its arm is proven dead; and both operands of the quotient, because a fold names a quotient only where
+    # it knows BOTH of them, so an unknown numerator would go unconvicted wherever it sat and would witness nothing.
     def never_returns(x: float) -> float:
         y = x
-        while True:
+        while (x * 0.0) <= 0.0:
             gate = y * 0.0
             if gate > 0.0:
-                y = 0.0 / 0.0
+                y = (y * 0.0) / (y * 0.0)
             y = y + 1.0
         return y
 
-    hir = optimize(lower(never_returns))
+    hir = optimize(lower(never_returns).hir)
     assert any(isinstance(block.terminator, Ret) for block in hir.blocks)
     quotients = [
         node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)

@@ -22,7 +22,7 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._backend.verilog import generate
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import BoolRegRef, RegRef, build, pooled_write_word
 from holoso._mir import Mir, lower as lower_to_mir
@@ -39,7 +39,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig) -> Mir:
-    return lower_to_mir(optimize(lower(target)), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
@@ -239,8 +239,8 @@ def test_kernel_without_outputs_is_rejected() -> None:
         return ()
 
     fmt = FloatFormat(6, 18)
-    with pytest.raises(UnsupportedConstruct, match="at least one output"):
-        build(_run(empty, _ops(fmt)), "empty", fetch_stages=3)
+    with pytest.raises(UnsupportedConstruct, match="an empty aggregate cannot be returned"):
+        _run(empty, _ops(fmt))
 
 
 @requires_iverilog

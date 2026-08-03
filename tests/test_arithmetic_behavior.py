@@ -415,8 +415,8 @@ def test_power_of_two_overflow_and_underflow_edges() -> None:
     assert under.bits == 0, f"smallest_normal*0.125 not +0: bits=0x{under.bits:x} ({float(under)})"
 
 
-def _trivial_float_folds(x: float, y: float) -> list[float]:
-    return [
+def _trivial_float_folds(x: float, y: float) -> tuple[float, ...]:
+    return (
         x * 1.0,
         1.0 * x,
         x / 1.0,
@@ -432,7 +432,7 @@ def _trivial_float_folds(x: float, y: float) -> list[float]:
         x / -1.0,
         x / x,
         x - x,
-    ]
+    )
 
 
 def test_trivial_fast_math_float_folds_are_operator_free_and_bit_exact() -> None:

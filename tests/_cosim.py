@@ -6,7 +6,7 @@ from holoso import FloatFormat, OpConfig
 from holoso._backend.cocotb import generate as generate_testbench
 from holoso._backend.numerical import generate
 from holoso._backend.verilog import generate as generate_verilog
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
@@ -29,7 +29,7 @@ def run_cosim(
     sequence (each maps an input-port name to its ZKF bits); when omitted the bench draws its own fixed-seed sweep.
     """
     ops = default_ops(fmt) if ops is None else ops
-    lir = build(lower_to_mir(optimize(lower(fn)), ops), name, fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(fn).hir), ops), name, fetch_stages=3)
     model = generate(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"

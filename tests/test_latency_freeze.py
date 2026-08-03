@@ -23,7 +23,7 @@ import pytest
 
 import holoso
 from holoso import FloatFormat
-from holoso._frontend import lower as lower_frontend
+from holoso._eel import lower as lower_frontend
 from holoso._hir import optimize
 from holoso._lir import FloatStateSlot, build
 from holoso._lir._ir import BoolStateSlot
@@ -45,8 +45,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "majority_voter": (14, 19),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
-    "recip_newton": (15, 32),
-    "remainder": (36, 53),
+    # The convergence test is statically true on entry (delta is seeded above the tolerance), so the first trip is
+    # peeled at compile time and only trips 2..N remain residual: one body's worth of extra microcode, and a realized
+    # transaction that is shorter, not longer (test_cycle_model).
+    "recip_newton": (29, 46),
+    "remainder": (37, 54),
     "cordic_sincos": (104, 104),
     "ekf1_stateless": (125, 125),
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
@@ -57,6 +60,10 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
     "uart_tx": (7, 103),
     "octave_index": (14, 38),
+    # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
+    # control flow at all), so their whole schedule is one block and min II equals last PC.
+    "fir": (20, 20),
+    "biquad": (21, 21),
 }
 
 _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
@@ -66,7 +73,9 @@ _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
 def test_schedule_length_is_frozen(name: str) -> None:
     spec = _SPEC_BY_NAME[name]
     lir = build(
-        lower_to_mir(optimize(lower_frontend(spec.make_kernel())), default_ops(spec.formats[0])), name, fetch_stages=3
+        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0])),
+        name,
+        fetch_stages=3,
     )
     got = (lir.min_initiation_interval, lir.last_pc)
     assert got == _FROZEN_SCHEDULE[name], (
@@ -116,7 +125,9 @@ _CHAINED_COPY: list[tuple[str, type[_Delay3] | type[_BoolShift3], tuple[int, int
 def test_chained_copy_schedule_is_frozen(
     name: str, kernel_cls: type[_Delay3] | type[_BoolShift3], frozen: tuple[int, int]
 ) -> None:
-    lir = build(lower_to_mir(optimize(lower_frontend(kernel_cls().__call__)), default_ops(_FMT)), name, fetch_stages=3)
+    lir = build(
+        lower_to_mir(optimize(lower_frontend(kernel_cls().__call__).hir), default_ops(_FMT)), name, fetch_stages=3
+    )
     slots: list[FloatStateSlot | BoolStateSlot] = [*lir.float_state_slots, *lir.bool_state_slots]
     assert all(
         slot.needs_copy for slot in slots

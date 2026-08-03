@@ -33,8 +33,10 @@ import madd  # noqa: E402
 import polar as polar  # noqa: E402  # scalar-driven below; vector I/O pinned in test_verify
 import poly3  # noqa: E402
 from polar import from_polar, to_polar  # noqa: E402  # bare names so the frontend inlines them into the wrappers
+from biquad import Biquad  # noqa: E402
 from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
+from fir import Fir4  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
@@ -49,7 +51,7 @@ from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
-# The wide scalar datapath; the plan permits synthesizing only this configuration for the example matrix.
+# The wide scalar datapath: the one configuration the example matrix is synthesized in.
 _FMT = FloatFormat(8, 36)
 # Frozen random vectors per example (over and above the manual and edge vectors); scale via the env knob to trade
 # coverage for cosimulation wall-clock.
@@ -631,6 +633,34 @@ SPECS = [
         draw_random=_draw_ekf_stateless,
         edge_values=_EKF_EDGES,
         edge_overrides={"R_ct": _POSITIVE_DIVISOR_EDGES, "R_shunt": _POSITIVE_DIVISOR_EDGES},
+    ),
+    ExampleSpec(
+        name="fir",
+        inputs=("x",),
+        make_kernel=lambda: Fir4().__call__,
+        reference=ReferenceComparison.APPROXIMATE,
+        nominal={"x": 1.0},
+        manual=[  # an impulse walking the whole line, then a step, then a sign flip
+            *({"x": v} for v in (1.0, 0.0, 0.0, 0.0, 0.0)),
+            *({"x": v} for v in (2.0, 2.0, 2.0, 2.0)),
+            *({"x": v} for v in (-1.0, 0.5, -3.0, 0.0)),
+        ],
+        draw_random=_draw_scalars(("x",), -4.0, 4.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="biquad",
+        inputs=("x",),
+        make_kernel=lambda: Biquad().__call__,
+        reference=ReferenceComparison.APPROXIMATE,
+        nominal={"x": 1.0},
+        manual=[  # an impulse response, then a step the two accumulators settle through
+            *({"x": v} for v in (1.0, 0.0, 0.0, 0.0, 0.0)),
+            *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
+            *({"x": v} for v in (-2.0, 0.25, 3.0, 0.0)),
+        ],
+        draw_random=_draw_scalars(("x",), -4.0, 4.0),
+        edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
         name="ekf1_stateful",

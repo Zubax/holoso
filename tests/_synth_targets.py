@@ -208,13 +208,22 @@ TARGETS: list[SynthTarget] = [
     for_example("majority_voter", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("majority_voter", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("recip_newton", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    # Diamond's critical path here is the fmul post-product cone (DSP product register through pack/normalize into
+    # the register file), 18 logic levels at 58% route. One pack stage splits it; the other two flows close lean.
+    for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_pack=1))),
     for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("integrator", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("integrator", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
     for_example(
         "integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))
     ),
+    # Straight-line multiply-accumulate chains; both close lean on all three flows.
+    for_example("fir", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
+    for_example("fir", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    for_example("fir", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    for_example("biquad", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
+    for_example("biquad", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    for_example("biquad", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("uart_tx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_tx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_tx", FlowId.VIVADO_ARTIX7, 150, op_config(F_e4m8)),

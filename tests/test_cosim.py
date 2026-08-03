@@ -20,7 +20,7 @@ from holoso import (
     OpConfig,
 )
 from holoso._backend.verilog import generate as generate_verilog
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import Lir, build, pooled_write_word
 from holoso._mir import lower as lower_to_mir
@@ -134,7 +134,7 @@ def test_cosim_comparison_at_branch_boundary(sim: str, config: OperatorCase) -> 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_overlap_spill(sim: str, config: OperatorCase) -> None:
-    # Cross-block software pipelining (M7): the entry block shrinks its terminator to a wide chain's write word, and
+    # Cross-block software pipelining: the entry block shrinks its terminator to a wide chain's write word, and
     # that result spills past the terminator into BOTH single-predecessor arms, which read it. If the arm read did not
     # wait for the in-flight landing in the successor frame -- or the spill mis-aligned by even one frame -- the RTL
     # would diverge from the cycle-accurate model here. The white-box twin
@@ -194,8 +194,8 @@ def test_cosim_min_max(sim: str) -> None:
     # Binary min/max lower to holoso_fsort. Taking BOTH min and max of one pair fuses to a SINGLE firing that writes
     # two wide registers at once -- the first operator to do so -- so this proves the generated RTL lands both results
     # bit-exactly against the model. The |a|,|b| sort in a second firing exercises the operand sign conditioners.
-    def kernel(a: float, b: float) -> list[float]:
-        return [min(a, b), max(a, b), min(abs(a), abs(b))]
+    def kernel(a: float, b: float) -> tuple[float, ...]:
+        return min(a, b), max(a, b), min(abs(a), abs(b))
 
     fmt = FloatFormat(8, 24)
     ops = OpConfig(
@@ -388,7 +388,7 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"kdiv_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(kdiv)), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(kdiv).hir), config.make_ops(fmt)), name, fetch_stages=3)
     bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -451,7 +451,7 @@ def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"klog2_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(klog2)), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(klog2).hir), config.make_ops(fmt)), name, fetch_stages=3)
     bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -510,14 +510,14 @@ async def overlap_div0_errpc(dut):
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
-    # M7 regression (review round 3, Codex P1): an error-bearing division whose result spills past a SHRUNK
+    # Overlap regression: an error-bearing division whose result spills past a SHRUNK
     # terminator must still latch err_pc to its OWN step, not the redirected non-fall-through successor frame. The data
     # is correct regardless (model == RTL), so only this step-exact err_pc cosim catches the regression. White-box
     # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See
     # _modelref.overlap_div_err_kernel.
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel).hir), config.make_ops(fmt)), name, fetch_stages=3)
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)
@@ -535,10 +535,10 @@ def test_cosim_mirrored_comparisons_swap_orientation(sim: str, config: OperatorC
     # RTL twin of test_schedule.test_commutative_comparator_swap_permutes_output_taps: mirrored comparisons over one
     # operand pair make the port assignment orient one comparator firing swapped (its lt tap moving to gt), so the
     # emitted module must still produce both relations bit-exactly through the permuted lane.
-    def kernel(a: float, b: float) -> list[float]:
+    def kernel(a: float, b: float) -> tuple[float, ...]:
         below = a < b
         above = b < a
-        return [float(below), float(above)]
+        return float(below), float(above)
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, kernel, fmt, f"mirrored_cmp_{config.label}", ops=config.make_ops(fmt))
@@ -601,14 +601,14 @@ def test_cosim_not_folding_sinks(sim: str, config: OperatorCase) -> None:
 def test_cosim_inverted_bool_phi_arm(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_inverted_bool_phi_arm_installs_with_opposite_polarities: the conditional flag
     # negation rides the phi-arm install's inversion.
-    def kernel(a: float, b: float, c: float) -> list[float]:
+    def kernel(a: float, b: float, c: float) -> tuple[float, ...]:
         flag = a > b
         if c > 0.0:
             flag = not flag
             d = a / (c * c + 1.0)
         else:
             d = b
-        return [float(flag), d]
+        return float(flag), d
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, kernel, fmt, f"inverted_arm_{config.label}", ops=config.make_ops(fmt))
@@ -622,7 +622,7 @@ def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: Operat
     # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces ``a``. This
     # proves the de-coalesced residual install is bit-exact in RTL, not only against the Python cycle model. The
     # division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
-    def kernel(x: float, b: float, cc: float) -> list[float]:
+    def kernel(x: float, b: float, cc: float) -> tuple[float, ...]:
         if b < cc:
             a = x
             z = 1.0
@@ -631,7 +631,7 @@ def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: Operat
             a = -(x + 1.0)
             z = x
             d = x / b
-        return [a, z, d]
+        return a, z, d
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, kernel, fmt, f"coal_conflict_{config.label}", ops=config.make_ops(fmt))

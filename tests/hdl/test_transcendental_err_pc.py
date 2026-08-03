@@ -23,7 +23,7 @@ from holoso import (
     OpConfig,
 )
 from holoso._backend.verilog import generate
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir
@@ -129,7 +129,7 @@ async def err_pc_safe_transcendentals(dut: Any) -> None:
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_safe_transcendental_err_pc(sim: str, case: _Case) -> None:
-    lir = build(lower_to_mir(optimize(lower(case.fn)), _ops()), f"err_{case.name}", fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(case.fn).hir), _ops()), f"err_{case.name}", fetch_stages=3)
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"err_{case.name}_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / f"err_{case.name}.v"

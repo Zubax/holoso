@@ -47,12 +47,14 @@ elsewhere. Bit-exactness, agreement with host Python, and IEEE 754 conformance a
 the datapath's answer for a foldable expression is defective by definition.
 
 Where every operand IS known, no identity applies and ordinary arithmetic decides: constant evaluation is the same
-expression in Python and nothing more. Where Python raises, or would answer NaN, there is no value and the build is
-refused (`math.sqrt(-1.0)`, `inf - inf`, `1 << -1`); where Python returns a value the fold takes it, infinities
-included -- Python is not consistent about which is which, and neither are we, since chasing a consistency the
-language does not have would mean inventing an answer. Nothing else stops a fold: not size, not representability in
-the target format. The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware answers 1 even when `x`
-is zero at run time, while `0.0/0.0` written out is refused at compile time.
+expression in Python and nothing more, each operator answering as its own registered reference does -- the numpy
+variant where the math module disagrees, so `log2(0.0)` folds to the `-inf` the hardware computes and a rounding
+passes an infinity through where `math.floor` raises. Where the reference raises, or would answer NaN, there is no
+value and the build is refused (`math.sqrt(-1.0)`, `inf - inf`, `1 << -1`); where it returns a value the fold takes
+it, infinities included -- Python is not consistent about which is which, and neither are we, since chasing a
+consistency the language does not have would mean inventing an answer. Nothing else stops a fold: not size, not
+representability in the target format. The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware
+answers 1 even when `x` is zero at run time, while `0.0/0.0` written out is refused at compile time.
 
 The error sidebands report INPUT-DEPENDENT failures; an expression that denotes no number is a program defect and is
 refused -- but only the kernel's own expressions are. Unrolling and inlining SUBSTITUTE values, so the compiler
@@ -130,6 +132,11 @@ runtime environment the binding-time front-end needs -- `__globals__`, closure c
 compile root; the boundary ("what to ignore") falls out of reachability + binding-time analysis, not manual
 enumeration.
 
+Beside the generated RTL, testbench, numerical model, and report, the result carries the front-end's own
+intermediate representation after each of its passes, written as indexed `.fir` documents. Neither Eel program
+survives into HIR, so keeping their canonical text is what makes a front-end decision reviewable after the fact --
+the compiler explaining itself, next to what it produced.
+
 A plain function synthesizes to a stateless module. A stateful module is requested by passing a bound method of a
 constructed instance, e.g. `synthesize(filt.update, ops)`: the instance's attribute snapshot seeds the reset state,
 and its method is the analyzed body; the constructor runs in plain Python, its arguments frozen into the build. The
@@ -143,9 +150,11 @@ Runtime values are only:
 - `float` -- one ZKF format, `WEXP`/`WMAN` fixed per build. FPGA-friendly formats usually set WMAN to a multiple of the
   native DSP tile width (commonly 18); e.g. WEXP=8 WMAN=36 for precision, WEXP=6 WMAN=18 for simpler targets.
 - `bool` -- 1 bit.
-- A separate fixed-width `int` type may appear eventually; the LIR wide data register file is already neutral storage.
+- `int` -- a semantic integer, width-less through the front-end and HIR; its hardware width binds at MIR and below
+  (the LIR wide data register file is already neutral storage). Mixed int/float expressions promote to float, C-style.
 
-Compile-time ints/shapes/structure are resolved in the front-end and never reach HIR.
+Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
+reach HIR, and remain unlowerable past MIR until the integer backend lands (see DEFERRED).
 
 ## Operators
 
@@ -163,45 +172,75 @@ per-instance initiation interval (most are II=1, fully pipelined).
 
 ## Front-end
 
-Abstract interpretation over the Python AST/CFG with a binding-time lattice. Static values are evaluated concretely --
-real Python/NumPy runs at synthesis time -- and dynamic values become SSA handles that accumulate HIR. Shapes,
-indices, and aggregate structure are compile-time facts and must resolve statically, with unrolling bounded by the
-unroll threshold; scalar control flow may stay dynamic and lowers to real branches and back-edge loops. Static
-evaluation resolves only what the compiler can reconstruct with certainty -- anything else is treated as dynamic or
-rejected, never guessed at.
+The front-end is three stages over one representation, the Eel: desugaring, partial evaluation, and HIR emission.
+Their charters are disjoint so that special-casing cannot accrete: Python's syntactic breadth is absorbed at one
+seam, every semantic decision has exactly one owner, and a construct that does not desugar into the Eel vocabulary
+amends that vocabulary rather than patching downstream. The Eel has a canonical printed form, so what each stage did
+is inspectable.
 
-The guiding principle for the language subset is to follow Python semantics where sensible and otherwise reject the
-construct rather than silently reinterpret it. The supported source remains ordinary executable Python/numpy, so the
-same kernel runs unmodified on the host as its own (non-bit-exact) reference. A construct whose faithful meaning the
-hardware cannot express -- a data-dependent exception, for instance -- is rejected; an exception raised
-unconditionally (judged within the function that writes it, not at its call sites) folds into a compile-time
-diagnostic instead, which is how library stubs self-validate with plain `raise` statements.
+Desugaring owns syntax alone -- lexical binding, evaluation order, normalization to one spelling per construct --
+knowing no types and evaluating nothing. Rejection is the default, acceptance an enumerated whitelist over the
+original source shapes; dead code enjoys no exemption, an unsupported construct rejecting even in a statically
+untaken arm, the body of an `assert` being the one thing accepted and ignored wholesale, as under `-O`. Name
+resolution reproduces CPython's static classification of every name, because the kernel must mean what it means
+when the host runs it.
 
-Arrays never exist as hardware aggregates: matrices/vectors are compile-time bookkeeping over scalar wires, and only
-scalar leaves reach HIR. Calls dispatch on the object identity the callee resolves to rather than its spelled name,
-and the math library splits on one boundary: an intrinsic maps to a single semantic HIR operator, while a composite
-(linear algebra included) is ordinary Python in the supported subset, inlined like user code, so each composite is
-its own numerical reference; kernels compose by the same inlining, and a diagnostic arising inside a stub is
-re-attributed to the user's call site.
+Partial evaluation is the sole semantic owner -- binding time, types, shapes, reachability, unrolling, inlining, and
+state. A specializing interpreter producing residual Eel, it is a pure function over an immutable tree re-run from
+its inputs rather than patched in place: accumulated marks and mutable side tables are how fixpoint analyses go
+quietly wrong. Static structure folds here while value arithmetic stays the graph's business per the fastmath
+charter, so one expression cannot answer two ways -- excepting two folds taken in host arithmetic, the
+static-exponent power chain and the call whose every argument is a static integer, which answer as Python does so
+an integer stays an integer. The residual program is scalar and typed; early returns and loop exits lower to real
+control edges rather than predication, leaving emission mechanical.
 
-Persistent state falls out of the instance snapshot: attributes the synthesized method writes become persistent
-registers (the loop-carried back-edge of the initiation loop), attributes it only reads freeze into constants, and
-public state is observable through output ports. Only the entry method owns the state analysis -- an inlined method
-may read `self` but not write it. The analyses that decide such structure may over-approximate,
-costing a stray register, a port, or a conservative rejection, but must never produce a wrong value; conservatism is
-only ever permitted in that direction.
+Three policies bound that evaluation. The compiler never predicts host failures it is not itself forced to evaluate:
+what a kernel does at run time on the host is the user's responsibility, inputs are trusted, and guards against
+such conditions are hostile-input hardening, rejected as policy. Conservatism may cost a diagnostic, never a wrong
+value. Every structure-producing expansion draws on one graph-size budget, so an accidental blow-up is a located
+rejection rather than a hang.
 
-The module boundary is explicitly typed: parameters and the return value require annotations, decomposed row-major to
-scalar ports and validated against the inferred result; any divergence rejects the kernel. Annotations are detected
-structurally, so their libraries remain dependencies of the user's code only.
+Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below. Four deviations from Python are
+deliberate: mixed int/float expressions promote to float C-style, a power yields float unless it is fully folded over
+a nonnegative integer base, booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both
+operands as combinational logic does, while other conditional positions still branch. One join rule governs every
+meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only with identical
+kind and shape.
+
+Aggregates are one container of two kinds fixed by provenance, not shape: a sequence is immutable structure, an
+array the numerical kind carrying elementwise arithmetic and all mutation, so a rectangular homogeneous list is still
+a sequence, never silently an array. Arrays never exist as hardware aggregates: matrices and vectors are compile-time
+bookkeeping over scalar wires, and only scalar leaves reach HIR.
+
+Mutation is admitted only where reference and value semantics cannot be told apart, and rejected with advice
+everywhere else, sparing the compiler a heap model and escape analysis. Persistent state is the one mutable
+resident; its trees stay disjoint from each other and from everything captured, or a later transaction would write
+through an alias the flat state slots cannot represent. Whether an attribute is state is decided by running, not
+scanning: the evaluator assumes every written attribute is state and re-runs with that assumption shrunk when a write
+turns out dead. Only the entry method owns that analysis -- an inlined method may read `self` but not write it.
+
+Calls dispatch on the object identity the callee resolves to, not its spelled name, and inlining everything is a
+lowering policy, not a representational fact. The math library keeps its one boundary: an intrinsic maps to a single
+semantic HIR operator, while a composite (linear algebra included) is ordinary Python in the supported subset,
+inlined like user code, so each is its own numerical reference.
+
+The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
+reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
+(non-bit-exact) reference on the host. A construct whose faithful meaning the hardware cannot express -- a
+data-dependent exception, for instance -- is rejected; one raised unconditionally within the function that writes it,
+whatever its call sites, folds into a compile-time diagnostic instead, which is how library stubs self-validate with
+plain `raise`. The module boundary is explicitly typed: parameters and the return value require annotations,
+decomposed to scalar ports and checked against the inferred result, with the annotations detected structurally so
+their libraries stay dependencies of the user's code alone.
 
 ## HIR
 
-HIR is a real CFG of basic blocks carrying an SSA value DAG: pure semantic operations over floats and booleans, phis
-at merges, and jump/branch/ret terminators. It is target-independent and hardware-unaware, operating at the level of
-basic math principles under the fastmath charter. The node vocabulary is explicitly typed per scalar kind rather than
-overloading one spelling, which is what lets a new scalar kind (integers, see DEFERRED) sit alongside the existing
-ones without disturbing them. Value sharing respects control flow: an expression is interned only where one value can
+HIR is a real CFG of basic blocks carrying an SSA value DAG: pure semantic operations over floats, booleans, and
+integers, phis at merges, and jump/branch/ret terminators. It is target-independent and hardware-unaware, operating
+at the level of basic math principles under the fastmath charter. The node vocabulary is explicitly typed per scalar
+kind rather than overloading one spelling, which is what let the integer kind arrive alongside the float and boolean
+ones without disturbing them (only its backend is still deferred, see DEFERRED); the same discipline extends to the
+next kind. Value sharing respects control flow: an expression is interned only where one value can
 legally serve every consumer, so identical expressions in mutually exclusive arms stay distinct.
 
 Operators split structurally into POOLED -- physical streaming modules the scheduler contends for -- and INLINE --
@@ -220,7 +259,11 @@ the goal -- the regression guard is realized latency, not the static bound.
 
 Loops with a static trip count unroll fully, below the unroll threshold; a `while` becomes a genuine back-edge loop
 that fully drains before iterating, so no overlap ever crosses a back-edge. Its static II deliberately counts the
-back-edge as not-taken -- a true lower bound; the numerical model is the authority on realized cycle counts.
+back-edge as not-taken -- a true lower bound; the numerical model is the authority on realized cycle counts. A
+`while` whose first test is decidable at compile time -- the sentinel spelling of a `do`-`while`, which Python has no
+syntax for -- has that trip peeled by the front end and only the remaining trips residualized. The peel costs
+microcode and no datapath, and removes a runtime test from every transaction along with an entry path no input could
+ever take.
 
 ### HIR optimization
 
@@ -235,20 +278,13 @@ expression the kernel never spelled; an accepted limitation of the composites, n
 ### DEFERRED
 
 A `for` that cannot unroll -- a dynamic trip count, or a static one above the unroll threshold -- is rejected rather
-than lowered to a counted back-edge loop, which needs a runtime integer counter. Early return from a loop body.
+than lowered to a counted back-edge loop, which needs a runtime integer counter; once runtime integers lower past
+MIR, the counted back-edge loop becomes the natural follow-on.
 
-Static folding of constants that reach static positions only through local aliases or inline-built values. The
-underlying scan/lowering duality: the reachability scan runs before lowering and cannot see the bindings lowering
-will have, contained today by the one-sided contract at the cost of an occasional stray register, port, or
-conservative rejection -- and every new static-evaluation source must be checked against it by hand. The way out is
-a shared binding-time environment so both phases fold identically -- a redesign of the scan, not a patch to it.
-
-Integers. HIR carries a complete typed integer vocabulary and folds it exactly, but nothing produces or consumes it
-yet; any integer node reaching MIR is rejected as not-yet-lowerable. The remaining milestones are the integer-emitting
-front end (with C-style promotion to float in mixed expressions) and the integer backend sharing the wide register
-bank. Until then integers ride the float datapath: one that binary64 cannot represent exactly is rejected rather than
-silently rounded, though a build narrower than binary64 can still round a stored integer -- typed integers, not a
-wider check, are what fix that.
+Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
+integer node reaching MIR is rejected as not-yet-lowerable; the integer backend, sharing the wide register bank,
+is future work. A kernel whose integers stay compile-time is unaffected by the gap: a static integer has
+already folded away before MIR ever sees it.
 
 ## MIR
 
@@ -356,10 +392,11 @@ per-instance busy residue and each spilled value's landing cycle. A multi-predec
 `Ret`) never receives a spill, so the carry converges in one reverse-postorder pass and no overlap crosses a
 back-edge.
 
-Compile-time-known branch conditions fold to a single arm so the other is never lowered. This shared reachability
-predicate is deliberately narrower than the complete HIR constant folder -- a constant condition buried under a shape
-it does not inspect stays a runtime branch: at worst an unused state register, never a miscompile. Unifying the two
-is tracked future work.
+Compile-time-known branch conditions fold to a single arm so the other is never lowered. The front end decides a
+condition by evaluating it, never by algebra over a residual operand, so a condition that is constant only under a
+value identity the graph owns (`x*0 == 0`) survives partial evaluation and reaches the graph as a branch on a
+constant. If-conversion refuses such a branch rather than pinning the untaken arm live through a select, so it
+survives as a block that installs a constant and branches on it: at worst unreachable microcode, never a miscompile.
 
 ### DEFERRED
 
@@ -452,7 +489,11 @@ The cosimulation is structurally blind to one miscompile class: a scheduling, bi
 the LIR is shared by both sides, so a wrong-but-consistent LIR passes. A schedule-independent oracle closes the gap:
 a MIR interpreter evaluates the unscheduled MIR dataflow directly through the operators' own bit-exact `evaluate`,
 deliberately importing nothing from the LIR, so the differential `interpreter == model` isolates exactly the LIR
-layer.
+layer. The front-end is bracketed the same way from above: a differential oracle runs the original kernel under
+CPython against a host-precision evaluator of the unoptimized HIR, before optimization so fastmath rewrites cannot
+muddy the verdict; because the eager gates evaluate operands CPython may skip, a value that names no number is
+carried as poison and convicts only when it reaches an observable sink -- an output, a state live-out, a branch
+condition.
 
 The HTML report must give humans an EXACT representation of the generated core behavior -- the tool for understanding
 and debugging what the compiler did -- not a simplified or approximated view.

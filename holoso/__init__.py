@@ -24,7 +24,6 @@ from ._errors import (
     SourceUnavailable as SourceUnavailable,
     SynthesisError as SynthesisError,
     UnsupportedConstruct as UnsupportedConstruct,
-    UnsupportedLibraryFunction as UnsupportedLibraryFunction,
 )
 
 from ._backend.cocotb import CocotbOutput as CocotbOutput
@@ -51,5 +50,5 @@ from ._operators import (
     OpConfig as OpConfig,
 )
 
-__version__ = "0.1.13"
+__version__ = "0.2.0"
 __url__ = "https://holoso.digital"

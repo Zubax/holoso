@@ -9,22 +9,22 @@ from ..._hir import *
 from ._registry import intrinsic
 
 
-@intrinsic(FloatFloor, math.floor, np.floor)
+@intrinsic(FloatFloor, math.floor, np.floor, integral=True)
 def floor_(x: float) -> float:
     return float(np.floor(x))
 
 
-@intrinsic(FloatCeil, math.ceil, np.ceil)
+@intrinsic(FloatCeil, math.ceil, np.ceil, integral=True)
 def ceil_(x: float) -> float:
     return float(np.ceil(x))
 
 
-@intrinsic(FloatTrunc, math.trunc, np.trunc, np.fix)
+@intrinsic(FloatTrunc, math.trunc, np.trunc, np.fix, integral=True)
 def trunc_(x: float) -> float:
     return float(np.trunc(x))
 
 
-@intrinsic(FloatRound, round, np.round, np.rint, np.around)
+@intrinsic(FloatRound, round, np.round, np.rint, np.around, integral=True)
 def round_(x: float) -> float:
     return float(np.round(x))
 

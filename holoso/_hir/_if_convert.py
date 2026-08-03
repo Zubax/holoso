@@ -58,9 +58,9 @@ def _find_diamond(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, 
         if block.terminator.if_true == block.terminator.if_false:
             continue
         if isinstance(hir.nodes[block.terminator.cond], BoolConst):
-            # The frontend's static-condition detection is deliberately incomplete, so a constant condition CAN
-            # reach this pass; converting it would pin the untaken arm live through the select forever. Refusing it
-            # keeps "a constant-condition select never exists" true by construction.
+            # The frontend folds a condition by EVALUATING it, so one constant only under a value identity this
+            # pass's own strength reduction applies (``x*0 == 0``) still arrives here constant. Converting it would
+            # pin the untaken arm live through the select forever.
             continue
         arm_t, arm_f = blocks_by_id[block.terminator.if_true], blocks_by_id[block.terminator.if_false]
         if not (_arm_convertible(hir, preds, arm_t, block.id) and _arm_convertible(hir, preds, arm_f, block.id)):

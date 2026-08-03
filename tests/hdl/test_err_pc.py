@@ -27,7 +27,7 @@ from holoso import (
     OpConfig,
 )
 from holoso._backend.verilog import generate
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import build, pooled_write_word
 from holoso._mir import lower as lower_to_mir
@@ -88,7 +88,7 @@ async def err_pc_latches_div0(dut: Any) -> None:
 @pytest.mark.parametrize("stage_output", [0, 1])
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_pc(sim: str, stage_output: int) -> None:
-    lir = build(lower_to_mir(optimize(lower(_divide)), _ops(stage_output)), "divide", fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(_divide).hir), _ops(stage_output)), "divide", fetch_stages=3)
     # The fdiv asserts div0 at its commit; err_pc latches the write word -- the
     # commit step itself (pooled_write_word). An fdiv output stage pushes the commit later, and the err flag and the
     # result still latch/land together: err_step is recomputed from this build's actual fdiv commit.

@@ -65,8 +65,8 @@ class UartTx(_UartFrame):
     def __init__(self, parity: bool | None) -> None:
         super().__init__(parity)
         self._busy = False
-        self._phase = 0  # sub-bit countdown LAST_PHASE..0 within the current frame bit
-        self._index = 0  # which frame bit is on the wire: 0 start, 1..8 data, then parity/stop
+        self._phase = 0.0  # sub-bit countdown LAST_PHASE..0 within the current frame bit
+        self._index = 0.0  # which frame bit is on the wire: 0 start, 1..8 data, then parity/stop
         self._shift = 0.0  # the byte being shifted out, current bit in the MSB
         self._parity = False  # the polarized parity bit, computed once at latch
 
@@ -82,7 +82,7 @@ class UartTx(_UartFrame):
         for _ in range(8):
             bit = rest >= MSB
             rest = (rest - MSB if bit else rest) * 2
-            rev = rev / 2 + (MSB if bit else 0)
+            rev = rev / 2 + (MSB if bit else 0.0)
         return rev
 
     def __call__(self, start: bool, char: float, /) -> tuple[bool, bool]:
@@ -91,7 +91,7 @@ class UartTx(_UartFrame):
             if start:
                 self._busy = True  # the frame begins (start bit) on the next tick
                 self._phase = LAST_PHASE
-                self._index = 0
+                self._index = 0.0
                 self._shift = self._reverse_byte(char)  # reversed so the MSB-first shift-out emits the byte LSB first
                 self._parity = self._parity_bit(char)
         else:
@@ -129,8 +129,8 @@ class UartRx(_UartFrame):
     def __init__(self, parity: bool | None) -> None:
         super().__init__(parity)
         self._busy = False
-        self._count = 0  # ticks remaining until the next mid-bit sample
-        self._index = 0  # which bit is being sampled: 0 start, 1..8 data, then parity/stop
+        self._count = 0.0  # ticks remaining until the next mid-bit sample
+        self._index = 0.0  # which bit is being sampled: 0 start, 1..8 data, then parity/stop
         self._char = 0.0  # the byte, accumulated bit by bit; only meaningful on the tick ``valid`` is high
         self._parity_rx = False  # the parity bit as sampled off the wire (E/O only)
 
@@ -142,8 +142,8 @@ class UartRx(_UartFrame):
             if not rx:  # falling edge into the start bit
                 self._busy = True
                 self._count = HALF_BIT  # the first sample lands at the middle of the start bit
-                self._index = 0
-                self._char = 0  # begin a fresh byte
+                self._index = 0.0
+                self._char = 0.0  # begin a fresh byte
         elif self._count <= 0:
             # Mid-bit sample of frame bit ``index``.
             if self._index <= 0:
@@ -151,7 +151,7 @@ class UartRx(_UartFrame):
                     self._busy = False  # the line is high at the middle of the start bit: a false start, abort
                 else:
                     self._count = LAST_PHASE
-                    self._index = 1
+                    self._index = 1.0
             elif self._index <= 8:
                 self._char = self._char / 2 + float(rx) * MSB  # shift the data bit into the top: rebuilds LSB first
                 self._count = LAST_PHASE
