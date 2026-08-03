@@ -168,7 +168,7 @@ def unary(interp: Interpreter, origin: Origin, op: UnaryOp, value: Value, sink: 
         case UnaryOp.INVERT:
             if operand.stype is not ScalarType.INT:
                 reject(origin, "`~` is integer-only")
-            return apply(interp, _ops.INT_NOT, [operand], origin, sink)
+            return apply(interp, _ops.INT_BW_NOT, [operand], origin, sink)
 
 
 def _unary_leaf(interp: Interpreter, origin: Origin, op: UnaryOp, leaf: Scalar | Opaque, sink: Sink) -> Scalar | Opaque:
@@ -301,10 +301,10 @@ def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: V
     if ScalarType.BOOL in (left.stype, right.stype):
         reject(origin, "a boolean cannot be compared with a number; cast explicitly")
     if left.stype is ScalarType.INT and right.stype is ScalarType.INT:
-        return apply(interp, _ops.int_relational(op), [left, right], origin, sink)
+        return apply(interp, _ops.INT_COMPARE[op], [left, right], origin, sink)
     left = interp.as_float(left, origin, sink)
     right = interp.as_float(right, origin, sink)
-    return apply(interp, _ops.float_relational(op), [left, right], origin, sink)
+    return apply(interp, _ops.FLOAT_COMPARE[op], [left, right], origin, sink)
 
 
 # ------------------------------------------------------------------ calls

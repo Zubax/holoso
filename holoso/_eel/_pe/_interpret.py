@@ -54,7 +54,7 @@ import types
 import typing
 from dataclasses import dataclass
 
-from ..._errors import SynthesisError
+from ..._errors import HolosoError, SynthesisError
 from .._desugar import desugar
 from .._ir import *
 from .._names import indexed_names, public_slot, state_port_name
@@ -197,7 +197,7 @@ class _Flow:
     fall: list[Sink] | None
 
 
-class _PromoteRun(Exception):
+class _PromoteRun(HolosoError):
     """Internal driver signal: an INT slot leaf met a FLOAT live-out; re-run with that leaf promoted."""
 
     def __init__(self, path: SlotPath) -> None:

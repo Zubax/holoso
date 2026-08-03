@@ -41,7 +41,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, RelationalOp, Ret, Select
+from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, Ret, Select
 from holoso._hir import (
     FloatAbs,
     FloatAtan2,
@@ -66,15 +66,21 @@ from holoso._hir import (
     FloatToInt,
     IntAbs,
     IntAdd,
-    IntAnd,
+    IntBwAnd,
+    IntBwNot,
+    IntBwOr,
+    IntBwXor,
     IntConst,
     IntDivFloor,
+    IntEqual,
+    IntGreater,
+    IntGreaterOrEqual,
+    IntLess,
+    IntLessOrEqual,
     IntMod,
     IntMul,
     IntNeg,
-    IntNot,
-    IntOr,
-    IntRelational,
+    IntNotEqual,
     IntSelect,
     IntShiftLeft,
     IntShiftRight,
@@ -82,7 +88,6 @@ from holoso._hir import (
     IntToBool,
     IntToFloat,
     IntType,
-    IntXor,
 )
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._lir import build
@@ -694,7 +699,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
 def test_operator_layer_does_not_import_hir() -> None:
     """
     The hardware operator models are a base vocabulary layer below the IR pipeline; they must never reach back into the
-    semantic HIR -- the smell W12 removed (importing ``RelationalOp`` from ``_hir``). Locks the severed edge
+    semantic HIR -- the smell W12 removed (importing a relation enum from ``_hir``). Locks the severed edge
     transitively.
     """
     offenders = forbidden_imports("holoso._operators", "holoso._hir")
@@ -733,13 +738,18 @@ _INT_OPERATORS: list[tuple[Operator, list[Type], Type]] = [
     (IntMod(), [IntType(), IntType()], IntType()),
     (IntShiftLeft(), [IntType(), IntType()], IntType()),
     (IntShiftRight(), [IntType(), IntType()], IntType()),
-    (IntAnd(), [IntType(), IntType()], IntType()),
-    (IntOr(), [IntType(), IntType()], IntType()),
-    (IntXor(), [IntType(), IntType()], IntType()),
+    (IntBwAnd(), [IntType(), IntType()], IntType()),
+    (IntBwOr(), [IntType(), IntType()], IntType()),
+    (IntBwXor(), [IntType(), IntType()], IntType()),
     (IntNeg(), [IntType()], IntType()),
     (IntAbs(), [IntType()], IntType()),
-    (IntNot(), [IntType()], IntType()),
-    (IntRelational(RelationalOp.LT), [IntType(), IntType()], BoolType()),
+    (IntBwNot(), [IntType()], IntType()),
+    (IntLess(), [IntType(), IntType()], BoolType()),
+    (IntLessOrEqual(), [IntType(), IntType()], BoolType()),
+    (IntEqual(), [IntType(), IntType()], BoolType()),
+    (IntNotEqual(), [IntType(), IntType()], BoolType()),
+    (IntGreaterOrEqual(), [IntType(), IntType()], BoolType()),
+    (IntGreater(), [IntType(), IntType()], BoolType()),
     (IntSelect(), [BoolType(), IntType(), IntType()], IntType()),
     (IntToFloat(), [IntType()], HirFloatType()),
     (FloatToInt(), [HirFloatType()], IntType()),
@@ -777,13 +787,13 @@ def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_valu
     zero, one, all_ones = builder.int_const(0), builder.int_const(1), builder.int_const(-1)
     value = builder.operation(IntAdd(), [n, zero])
     value = builder.operation(IntMul(), [value, one])
-    value = builder.operation(IntOr(), [value, zero])
-    value = builder.operation(IntXor(), [value, zero])
-    value = builder.operation(IntAnd(), [value, all_ones])
+    value = builder.operation(IntBwOr(), [value, zero])
+    value = builder.operation(IntBwXor(), [value, zero])
+    value = builder.operation(IntBwAnd(), [value, all_ones])
     builder.output("identities", value)
     builder.output("killed", builder.operation(IntMul(), [n, zero]))
-    builder.output("saturated", builder.operation(IntOr(), [n, all_ones]))
-    builder.output("masked_off", builder.operation(IntAnd(), [n, zero]))
+    builder.output("saturated", builder.operation(IntBwOr(), [n, all_ones]))
+    builder.output("masked_off", builder.operation(IntBwAnd(), [n, zero]))
     builder.ret()
 
     hir = optimize(builder.finish())
@@ -827,12 +837,12 @@ def test_integer_folding_is_exact_across_the_vocabulary() -> None:
         (IntMod(), [-7, -2], -1),
         (IntShiftLeft(), [huge, 64], huge << 64),
         (IntShiftRight(), [-huge, 64], -huge >> 64),
-        (IntAnd(), [0b1100, 0b1010], 0b1000),
-        (IntOr(), [0b1100, 0b1010], 0b1110),
-        (IntXor(), [0b1100, 0b1010], 0b0110),
+        (IntBwAnd(), [0b1100, 0b1010], 0b1000),
+        (IntBwOr(), [0b1100, 0b1010], 0b1110),
+        (IntBwXor(), [0b1100, 0b1010], 0b0110),
         (IntNeg(), [huge], -huge),
         (IntAbs(), [-huge], huge),
-        (IntNot(), [huge], ~huge),
+        (IntBwNot(), [huge], ~huge),
     ]
     for operator, operands, expected in cases:
         builder = HirBuilder()
@@ -851,7 +861,9 @@ def test_integer_folding_has_no_size_limit() -> None:
     builder = HirBuilder()
     builder.block()
     shifted = builder.operation(IntShiftLeft(), [builder.int_const(1), builder.int_const(20_000)])
-    builder.output("y", builder.operation(IntToFloat(), [builder.operation(IntAnd(), [shifted, builder.int_const(0)])]))
+    builder.output(
+        "y", builder.operation(IntToFloat(), [builder.operation(IntBwAnd(), [shifted, builder.int_const(0)])])
+    )
     builder.ret()
 
     hir = optimize(builder.finish())

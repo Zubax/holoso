@@ -28,7 +28,7 @@ from holoso._hir import (
     FloatLog2,
     FloatMul,
     FloatNeg,
-    FloatRelational,
+    FloatGreater,
     FloatRound,
     FloatTrunc,
     FloatType,
@@ -42,7 +42,6 @@ from holoso._hir import (
     IntToFloat,
     IntType,
     NoNumber,
-    RelationalOp,
 )
 
 from ._eeloracle import assert_hir_matches_reference
@@ -203,7 +202,7 @@ def test_swap_loop_phis_resolve_in_parallel() -> None:
     i = builder.open_phi(FloatType(), (entry, n))
     a = builder.open_phi(FloatType(), (entry, first))
     b = builder.open_phi(FloatType(), (entry, second))
-    builder.branch(builder.operation(FloatRelational(RelationalOp.GT), [i, builder.float_const(0.0)]), body, exit_)
+    builder.branch(builder.operation(FloatGreater(), [i, builder.float_const(0.0)]), body, exit_)
     builder.position_at(body)
     dec = builder.operation(FloatAdd(), [i, builder.float_const(-1.0)])
     builder.jump(header)
@@ -281,7 +280,7 @@ def _gated_poison(gate_value: bool) -> Hir:
     builder.block()
     x = builder.input("x", FloatType())
     quotient = builder.operation(FloatDiv(), [builder.float_const(1.0), x])
-    positive = builder.operation(FloatRelational(RelationalOp.GT), [quotient, builder.float_const(0.0)])
+    positive = builder.operation(FloatGreater(), [quotient, builder.float_const(0.0)])
     builder.output("out_0", builder.operation(BoolAnd(), [builder.bool_const(gate_value), positive]))
     builder.ret()
     return builder.finish()
@@ -293,7 +292,7 @@ def test_poison_absorbed_by_declared_absorbing_elements() -> None:
     builder.block()
     x = builder.input("x", FloatType())
     quotient = builder.operation(FloatDiv(), [builder.float_const(1.0), x])
-    positive = builder.operation(FloatRelational(RelationalOp.GT), [quotient, builder.float_const(0.0)])
+    positive = builder.operation(FloatGreater(), [quotient, builder.float_const(0.0)])
     builder.output("out_0", builder.operation(BoolOr(), [builder.bool_const(True), positive]))
     builder.output("out_1", builder.operation(FloatMul(), [builder.float_const(0.0), quotient]))
     builder.ret()
@@ -327,7 +326,7 @@ def test_poison_at_branch_condition() -> None:
     merge = builder.block()
     x = builder.input("x", FloatType())
     quotient = builder.operation(FloatDiv(), [builder.float_const(1.0), x])
-    positive = builder.operation(FloatRelational(RelationalOp.GT), [quotient, builder.float_const(0.0)])
+    positive = builder.operation(FloatGreater(), [quotient, builder.float_const(0.0)])
     builder.position_at(entry)
     builder.branch(positive, then, other)
     builder.position_at(then)

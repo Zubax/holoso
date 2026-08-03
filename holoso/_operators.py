@@ -4,7 +4,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from enum import IntEnum
+from enum import Enum, IntEnum
 from hashlib import blake2s
 from typing import ClassVar
 
@@ -12,7 +12,6 @@ import zkf
 
 from ._value import FloatValue
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
-from ._util import RelationalOp
 
 
 def _instance_stem_text(text: str) -> str:
@@ -80,6 +79,21 @@ class BoolInversion:
 
 
 type PortConditioner = FloatSignControl | BoolInversion
+
+
+class Relation(Enum):
+    """
+    The relations a comparator serves, shared by every comparator family. Naming them here rather than in the
+    semantic IR keeps this layer below the HIR, whose operators carry the relation in their own identity; MIR maps
+    the two. The value is the symbol used when rendering a tapped flag back as the relation it implements.
+    """
+
+    LT = "<"
+    LE = "≤"
+    GT = ">"
+    GE = "≥"
+    EQ = "="
+    NE = "≠"
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,27 +440,19 @@ class FCmpOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fcmp"
     output_hdl_ports: ClassVar[list[str]] = ["a_gt_b", "a_eq_b", "a_lt_b"]
 
-    # RelationalOp -> (output port 0..2 = gt/eq/lt, inversion): the single place the relation/flag mapping is defined.
+    # Relation -> (output port 0..2 = gt/eq/lt, inversion): the single place the relation/flag mapping is defined.
     # A relation maps onto exactly one port with an optional inversion (consumers go through `tap_of`):
     # gt, eq, lt directly; le = ~gt, ne = ~eq, ge = ~lt.
-    _TAP_OF_RELATION: ClassVar[dict[RelationalOp, tuple[int, BoolInversion]]] = {
-        RelationalOp.GT: (0, BoolInversion()),
-        RelationalOp.EQ: (1, BoolInversion()),
-        RelationalOp.LT: (2, BoolInversion()),
-        RelationalOp.LE: (0, BoolInversion(invert=True)),
-        RelationalOp.NE: (1, BoolInversion(invert=True)),
-        RelationalOp.GE: (2, BoolInversion(invert=True)),
+    _TAP_OF_RELATION: ClassVar[dict[Relation, tuple[int, BoolInversion]]] = {
+        Relation.GT: (0, BoolInversion()),
+        Relation.EQ: (1, BoolInversion()),
+        Relation.LT: (2, BoolInversion()),
+        Relation.LE: (0, BoolInversion(invert=True)),
+        Relation.NE: (1, BoolInversion(invert=True)),
+        Relation.GE: (2, BoolInversion(invert=True)),
     }
-    _RELATION_OF_TAP: ClassVar[dict[tuple[int, BoolInversion], RelationalOp]] = {
+    _RELATION_OF_TAP: ClassVar[dict[tuple[int, BoolInversion], Relation]] = {
         tap: rel for rel, tap in _TAP_OF_RELATION.items()
-    }
-    _RELATION_SYMBOL: ClassVar[dict[RelationalOp, str]] = {
-        RelationalOp.LT: "<",
-        RelationalOp.LE: "≤",
-        RelationalOp.GT: ">",
-        RelationalOp.GE: "≥",
-        RelationalOp.EQ: "=",
-        RelationalOp.NE: "≠",
     }
     # The ZKF ordering is total and compare is antisymmetric, so cmp(b,a) is cmp(a,b) with gt and lt transposed
     # (eq fixed) -- the comparator is commutative under that flag exchange, which lets port assignment orient its
@@ -468,17 +474,17 @@ class FCmpOperator(FloatHardwareOperator):
         return f"cmp({a},{b})"
 
     @classmethod
-    def tap_of(cls, relation: RelationalOp) -> tuple[int, "BoolInversion"]:
+    def tap_of(cls, relation: Relation) -> tuple[int, BoolInversion]:
         """The (output port, inversion) pair implementing a relation; every relation is one flag or its complement."""
         return cls._TAP_OF_RELATION[relation]
 
     def render_output(
-        self, port: int, conditioner: "PortConditioner", *operands: str, immediates: tuple[int, ...] = ()
+        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
     ) -> str:
         """Human-friendly form of one tapped flag, recovered as the relation it implements (e.g. ``a≥b``)."""
         assert isinstance(conditioner, BoolInversion)
         a, b = operands
-        return f"{a}{self._RELATION_SYMBOL[self._RELATION_OF_TAP[(port, conditioner)]]}{b}"
+        return f"{a}{self._RELATION_OF_TAP[(port, conditioner)].value}{b}"
 
     def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands, 2)

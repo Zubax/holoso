@@ -180,7 +180,7 @@ def _expr(expr: Expr) -> str:
 
 def _operator(operator: object) -> str:
     """
-    The mnemonic plus any operator parameters (``frelational<lt>``), duck-typed so the printer stays HIR-free;
+    The mnemonic plus any operator parameters (``mul_pow2<3>``), duck-typed so the printer stays HIR-free;
     stable across operator-class internals, unlike the dataclass repr.
     """
     mnemonic = getattr(operator, "mnemonic", None)

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
-from .._util import RelationalOp
+from .._errors import HolosoError
 from ._const import BoolConst, Const, FloatConst, IntConst
 from ._types import BoolType, FloatType, IntType, Signature
 
@@ -41,7 +41,7 @@ def _int_const(const: Const) -> IntConst:
     return const
 
 
-class NoNumber(Exception):
+class NoNumber(HolosoError):
     """
     The signal :meth:`Operator.evaluate` raises when the operands prove the expression names no number -- an
     indeterminate form like ``inf - inf``, or an argument outside a function's domain like ``sqrt(-1)``. It is not an
@@ -495,18 +495,68 @@ class FloatMax(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatRelational(Operator):
-    mnemonic: ClassVar[str] = "frelational"
+class FloatComparison(Operator, ABC):
+    """One relation over two floats; the six spellings are distinct operators sharing everything but their truth."""
+
     speculatable: ClassVar[bool] = True
-    op: RelationalOp
 
     @property
     def signature(self) -> Signature:
         return Signature((FloatType(), FloatType()), BoolType())
 
+
+@dataclass(frozen=True, slots=True)
+class FloatLess(FloatComparison):
+    mnemonic: ClassVar[str] = "flt"
+
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(self.op.apply(a.value, b.value))
+        return BoolConst(a.value < b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatLessOrEqual(FloatComparison):
+    mnemonic: ClassVar[str] = "fle"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value <= b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatEqual(FloatComparison):
+    mnemonic: ClassVar[str] = "feq"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value == b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatNotEqual(FloatComparison):
+    mnemonic: ClassVar[str] = "fne"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value != b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatGreaterOrEqual(FloatComparison):
+    mnemonic: ClassVar[str] = "fge"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value >= b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatGreater(FloatComparison):
+    mnemonic: ClassVar[str] = "fgt"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_float_const(operand) for operand in operands]
+        return BoolConst(a.value > b.value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -790,7 +840,7 @@ class IntShiftRight(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntAnd(Operator):
+class IntBwAnd(Operator):
     mnemonic: ClassVar[str] = "iand"
     speculatable: ClassVar[bool] = True
 
@@ -810,7 +860,7 @@ class IntAnd(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntOr(Operator):
+class IntBwOr(Operator):
     mnemonic: ClassVar[str] = "ior"
     speculatable: ClassVar[bool] = True
 
@@ -830,7 +880,7 @@ class IntOr(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntXor(Operator):
+class IntBwXor(Operator):
     mnemonic: ClassVar[str] = "ixor"
     speculatable: ClassVar[bool] = True
 
@@ -846,7 +896,7 @@ class IntXor(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntNot(Operator):
+class IntBwNot(Operator):
     mnemonic: ClassVar[str] = "inot"
     speculatable: ClassVar[bool] = True
 
@@ -859,18 +909,68 @@ class IntNot(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntRelational(Operator):
-    mnemonic: ClassVar[str] = "irelational"
+class IntComparison(Operator, ABC):
+    """The integer dual of :class:`FloatComparison`: one relation per operator, exact at any magnitude."""
+
     speculatable: ClassVar[bool] = True
-    op: RelationalOp
 
     @property
     def signature(self) -> Signature:
         return Signature((IntType(), IntType()), BoolType())
 
+
+@dataclass(frozen=True, slots=True)
+class IntLess(IntComparison):
+    mnemonic: ClassVar[str] = "ilt"
+
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
-        return BoolConst(self.op.apply(a.value, b.value))
+        return BoolConst(a.value < b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class IntLessOrEqual(IntComparison):
+    mnemonic: ClassVar[str] = "ile"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_int_const(operand) for operand in operands]
+        return BoolConst(a.value <= b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class IntEqual(IntComparison):
+    mnemonic: ClassVar[str] = "ieq"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_int_const(operand) for operand in operands]
+        return BoolConst(a.value == b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class IntNotEqual(IntComparison):
+    mnemonic: ClassVar[str] = "ine"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_int_const(operand) for operand in operands]
+        return BoolConst(a.value != b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class IntGreaterOrEqual(IntComparison):
+    mnemonic: ClassVar[str] = "ige"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_int_const(operand) for operand in operands]
+        return BoolConst(a.value >= b.value)
+
+
+@dataclass(frozen=True, slots=True)
+class IntGreater(IntComparison):
+    mnemonic: ClassVar[str] = "igt"
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, b = [_int_const(operand) for operand in operands]
+        return BoolConst(a.value > b.value)
 
 
 @dataclass(frozen=True, slots=True)

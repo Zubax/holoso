@@ -22,12 +22,12 @@ fn __call__(setpoint: float, measurement: float, dt: float, /):
     %13: float = intrinsic mul(0.5, %4)
     %14: float = intrinsic add(%13, %7)
     %15: float = intrinsic add(%14, %12)
-    %16: bool = intrinsic frelational<gt>(%15, 4.0)
+    %16: bool = intrinsic fgt(%15, 4.0)
     if %16:
         %20: float = 4.0
         %21: float = %1
     else:
-        %17: bool = intrinsic frelational<lt>(%15, -4.0)
+        %17: bool = intrinsic flt(%15, -4.0)
         if %17:
             %18: float = -4.0
             %19: float = %1

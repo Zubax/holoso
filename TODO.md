@@ -16,7 +16,7 @@ Strength reduction is float-keyed (`cval: dict[ValueId, float]`) and needs an in
 so each entry names one operator with the operand type playing no part. Nothing is silent -- the conversion consumes
 an integer-typed value the gate refuses, and the float result is loud one step later (`abs(a) % 3` reports that `%` is
 integer-only). The fix is an entry carrying the integer form alongside the float one, chosen by operand type as the
-arithmetic operators already are: `IntAbs` exists and would serve `abs`, `np.sign` follows from `IntRelational`.
+arithmetic operators already are: `IntAbs` exists and would serve `abs`, `np.sign` follows from the int comparisons.
 `min`/`max` will be implemented as library functions because there is no dedicated integer sort hardware operator.
 
 The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the

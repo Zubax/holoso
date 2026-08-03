@@ -13,38 +13,47 @@ from ..._hir import (
     BoolOr,
     BoolToFloat,
     BoolToInt,
-    BoolXor,
     BoolType as _BoolType,
+    BoolXor,
     Const as Const,
     FloatAdd,
     FloatConst,
     FloatDiv,
+    FloatEqual,
+    FloatGreater,
+    FloatGreaterOrEqual,
+    FloatLess,
+    FloatLessOrEqual,
     FloatMul,
     FloatNeg,
-    FloatRelational,
+    FloatNotEqual,
     FloatToBool,
     FloatToInt,
     FloatType,
     IntAdd,
-    IntAnd,
+    IntBwAnd,
+    IntBwNot,
+    IntBwOr,
+    IntBwXor,
     IntConst,
     IntDivFloor,
+    IntEqual,
+    IntGreater,
+    IntGreaterOrEqual,
+    IntLess,
+    IntLessOrEqual,
     IntMod,
     IntMul,
     IntNeg,
-    IntNot,
-    IntOr,
-    IntRelational,
+    IntNotEqual,
     IntShiftLeft,
     IntShiftRight,
     IntSub,
     IntToBool,
     IntToFloat,
     IntType,
-    IntXor,
     NoNumber as NoNumber,
     Operator as Operator,
-    RelationalOp,
 )
 from .._ir import BinaryOp, CompareOp, ScalarType
 
@@ -99,9 +108,9 @@ INT_BINARY: dict[BinaryOp, Operator] = {
     BinaryOp.MOD: IntMod(),
     BinaryOp.LSHIFT: IntShiftLeft(),
     BinaryOp.RSHIFT: IntShiftRight(),
-    BinaryOp.BITAND: IntAnd(),
-    BinaryOp.BITOR: IntOr(),
-    BinaryOp.BITXOR: IntXor(),
+    BinaryOp.BITAND: IntBwAnd(),
+    BinaryOp.BITOR: IntBwOr(),
+    BinaryOp.BITXOR: IntBwXor(),
 }
 
 FLOAT_ADD: Operator = FloatAdd()
@@ -109,7 +118,7 @@ FLOAT_MUL: Operator = FloatMul()
 FLOAT_DIV: Operator = FloatDiv()
 FLOAT_NEG: Operator = FloatNeg()
 INT_NEG: Operator = IntNeg()
-INT_NOT: Operator = IntNot()
+INT_BW_NOT: Operator = IntBwNot()
 BOOL_NOT: Operator = BoolNot()
 BOOL_XOR: Operator = BoolXor()
 
@@ -130,19 +139,20 @@ CONVERT: dict[tuple[ScalarType, ScalarType], Operator] = {
     (ScalarType.INT, ScalarType.BOOL): IntToBool(),
 }
 
-_RELATION: dict[CompareOp, RelationalOp] = {
-    CompareOp.LT: RelationalOp.LT,
-    CompareOp.LE: RelationalOp.LE,
-    CompareOp.GT: RelationalOp.GT,
-    CompareOp.GE: RelationalOp.GE,
-    CompareOp.EQ: RelationalOp.EQ,
-    CompareOp.NE: RelationalOp.NE,
+INT_COMPARE: dict[CompareOp, Operator] = {
+    CompareOp.LT: IntLess(),
+    CompareOp.LE: IntLessOrEqual(),
+    CompareOp.GT: IntGreater(),
+    CompareOp.GE: IntGreaterOrEqual(),
+    CompareOp.EQ: IntEqual(),
+    CompareOp.NE: IntNotEqual(),
 }
 
-
-def int_relational(op: CompareOp) -> Operator:
-    return IntRelational(_RELATION[op])
-
-
-def float_relational(op: CompareOp) -> Operator:
-    return FloatRelational(_RELATION[op])
+FLOAT_COMPARE: dict[CompareOp, Operator] = {
+    CompareOp.LT: FloatLess(),
+    CompareOp.LE: FloatLessOrEqual(),
+    CompareOp.GT: FloatGreater(),
+    CompareOp.GE: FloatGreaterOrEqual(),
+    CompareOp.EQ: FloatEqual(),
+    CompareOp.NE: FloatNotEqual(),
+}

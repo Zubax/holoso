@@ -21,6 +21,7 @@ from holoso import (
     OpConfig,
 )
 from holoso._errors import UnsupportedConstruct
+from holoso._operators import Relation
 from holoso._eel import lower
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
@@ -71,7 +72,6 @@ from holoso._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from holoso._hir import RelationalOp
 from ._modelref import build_model
 from holoso._lir import build
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
@@ -2307,7 +2307,7 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
     assert len(firings) == 2
     sources = [tuple(operand.source for operand in op.operands) for op in firings]
     assert sources[0] == sources[1], "the MILP must orient both firings to read the same registers per port"
-    gt_port, lt_port = (FCmpOperator.tap_of(rel)[0] for rel in (RelationalOp.GT, RelationalOp.LT))
+    gt_port, lt_port = (FCmpOperator.tap_of(rel)[0] for rel in (Relation.GT, Relation.LT))
     ports = sorted(write.port for op in firings for write in op.writes)
     assert ports == sorted((gt_port, lt_port)), "exactly one firing's lt tap must move to gt under the swap"
     model = build_model(lir)

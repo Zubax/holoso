@@ -4,9 +4,9 @@ fn band_scan(x: float, floor: float):
     frame:
         phi %1: float = x -> %4
         while:
-            %2: bool = intrinsic frelational<gt>(%1, 1.0)
+            %2: bool = intrinsic fgt(%1, 1.0)
         do %2:
-            %3: bool = intrinsic frelational<lt>(%1, 2.0)
+            %3: bool = intrinsic flt(%1, 2.0)
             if %3:
                 exit %1
             else:

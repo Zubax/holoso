@@ -19,24 +19,30 @@ from .._hir import (
     FloatAdd,
     FloatAtan2,
     FloatCeil,
+    FloatComparison,
     FloatConst,
     FloatCos,
     FloatDiv,
+    FloatEqual,
     FloatExp2,
     FloatFloor,
     FloatFma,
+    FloatGreater,
+    FloatGreaterOrEqual,
     FloatHypot2,
     FloatIsFinite,
     FloatIsInf,
     FloatIsNegInf,
     FloatIsPosInf,
+    FloatLess,
+    FloatLessOrEqual,
     FloatLog2,
     FloatMax,
     FloatMin,
     FloatMul,
     FloatMulPow2,
     FloatNeg,
-    FloatRelational,
+    FloatNotEqual,
     FloatRound,
     FloatSin,
     FloatSqrt,
@@ -58,7 +64,7 @@ from .._hir import (
     Terminator,
     reverse_postorder,
 )
-from .._util import RelationalOp, ValueId
+from .._util import ValueId
 from .._operators import (
     BoolAndOperator,
     BoolInversion,
@@ -78,10 +84,21 @@ from .._operators import (
     OpConfig,
     PortConditioner,
     PooledHardwareOperator,
+    Relation,
     SelectOperator,
 )
 from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
 from ._ir import Mir, MirBuilder
+
+# The seam between the semantic relation and the comparator flag it taps; the two vocabularies meet only here.
+_FCMP_RELATION: dict[type[FloatComparison], Relation] = {
+    FloatLess: Relation.LT,
+    FloatLessOrEqual: Relation.LE,
+    FloatEqual: Relation.EQ,
+    FloatNotEqual: Relation.NE,
+    FloatGreaterOrEqual: Relation.GE,
+    FloatGreater: Relation.GT,
+}
 
 
 def _select_hardware(semantic: Operator, hardware: HardwareOperator) -> HardwareOperator:
@@ -231,25 +248,21 @@ def _match_zero_sign_relation(
 ) -> tuple[ValueId, FloatSignControl, FloatIsPosInf | FloatIsNegInf] | None:
     """Recognize zero-sided sign tests that distinguish positive from negative infinity."""
     match hir.nodes[vid]:
-        case Operation(operator=FloatRelational(op=relation), operands=(left, right)):
-            pass
-        case _:
+        case Operation(operator=FloatGreater() | FloatGreaterOrEqual(), operands=(left, right)):
+            greater = True
+        case Operation(operator=FloatLess() | FloatLessOrEqual(), operands=(left, right)):
+            greater = False
+        case _:  # equality tests say nothing about the side
             return None
     left_zero = _is_zero_float(hir, left)
     right_zero = _is_zero_float(hir, right)
     if left_zero == right_zero:
         return None
-    if right_zero:
-        operand, sign = _collapse_signs(hir.nodes, left)
-        positive = relation in {RelationalOp.GT, RelationalOp.GE}
-        negative = relation in {RelationalOp.LT, RelationalOp.LE}
-    else:
-        operand, sign = _collapse_signs(hir.nodes, right)
-        positive = relation in {RelationalOp.LT, RelationalOp.LE}
-        negative = relation in {RelationalOp.GT, RelationalOp.GE}
-    if sign.absolute or not (positive or negative):
+    operand, sign = _collapse_signs(hir.nodes, left if right_zero else right)
+    if sign.absolute:
         return None
-    return operand, sign, FloatIsPosInf() if positive else FloatIsNegInf()
+    # ``x > 0`` and ``0 < x`` both test the positive side; either mirroring alone flips it.
+    return operand, sign, FloatIsPosInf() if greater == right_zero else FloatIsNegInf()
 
 
 def _directional_inf_plan(hir: Hir, isinf_id: ValueId, relation_id: ValueId) -> _DirectionalInfPlan | None:
@@ -488,13 +501,13 @@ class _LoweringContext:
             case BoolConst(value=value):
                 self.remap[old_id] = self.builder.bool_const(value, ScalarBoolType())
                 return True
-            case Operation(operator=FloatRelational(op=relation) as semantic, operands=(a, b)):
+            case Operation(operator=FloatComparison() as semantic, operands=(a, b)):
                 # A relation is one comparator output port with an optional inversion (the ZKF ordering is total and
                 # the flags one-hot), so every relation -- and every comparison over the same operand pair -- selects
                 # into the same pooled fcmp operator and can fuse into one firing.
                 base_a, sign_a = _collapse_signs(self.hir.nodes, a)
                 base_b, sign_b = _collapse_signs(self.hir.nodes, b)
-                port, inversion = self.ops.fcmp.tap_of(relation)
+                port, inversion = self.ops.fcmp.tap_of(_FCMP_RELATION[type(semantic)])
                 self.remap[old_id] = self.builder.operation(
                     _select_hardware(semantic, self.ops.fcmp),
                     [self.remap[base_a], self.remap[base_b]],
@@ -868,9 +881,9 @@ class _FloatLowerer:
                 return FloatIsNegInfOperator(fmt), BoolInversion()
 
     def _float_eq_zero(self, operand: ValueId, conditioner: FloatSignControl) -> ValueId:
-        port, inversion = self.context.ops.fcmp.tap_of(RelationalOp.EQ)
+        port, inversion = self.context.ops.fcmp.tap_of(_FCMP_RELATION[FloatEqual])
         return self.context.builder.operation(
-            _select_hardware(FloatRelational(RelationalOp.EQ), self.context.ops.fcmp),
+            _select_hardware(FloatEqual(), self.context.ops.fcmp),
             [operand, self._lower_float_const(0.0)],
             [conditioner, FloatSignControl()],
             output_port=port,

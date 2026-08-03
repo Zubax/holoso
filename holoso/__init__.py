@@ -50,5 +50,5 @@ from ._operators import (
     OpConfig as OpConfig,
 )
 
-__version__ = "0.1.13"
+__version__ = "0.2.0"
 __url__ = "https://holoso.digital"
