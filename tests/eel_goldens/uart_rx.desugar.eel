@@ -10,8 +10,8 @@ fn __call__(self, rx, /):
             self._busy = True
             %3 = env HALF_BIT
             self._count = %3
-            self._index = 0
-            self._char = 0
+            self._index = 0.0
+            self._char = 0.0
     else:
         %4 = self._count
         %5 = %4 <= 0
@@ -24,7 +24,7 @@ fn __call__(self, rx, /):
                 else:
                     %8 = env LAST_PHASE
                     self._count = %8
-                    self._index = 1
+                    self._index = 1.0
             else:
                 %9 = self._index
                 %10 = %9 <= 8

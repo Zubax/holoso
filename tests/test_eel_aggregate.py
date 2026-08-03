@@ -560,7 +560,7 @@ def test_instance_and_class_methods_inline_like_helpers() -> None:
 
 def test_instance_read_rejections() -> None:
     for fn, match in [
-        (_reads_slot_descriptor, "the attribute 'slotted' is a descriptor the compiler cannot read"),
+        (_reads_slot_descriptor, "_Config defines __slots__, so 'slotted' has no instance __dict__ entry to read"),
         (_missing_attribute, "'_NAMESPACE' has no attribute 'absent'"),
     ]:
         _rejects(fn, match)

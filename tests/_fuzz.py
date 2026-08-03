@@ -40,7 +40,7 @@ from typing import Any, cast
 import numpy as np
 
 from holoso._backend.numerical import NumericalSimulator, generate
-from holoso._frontend import lower as lower_frontend
+from holoso._eel import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import Branch, Lir, RegRef, ScheduledOp, build, landing_cycle
@@ -535,9 +535,10 @@ def _emit_dead_arm_spill(em: _Emitter) -> _Fragment:
 
 def _emit_const_branch(em: _Emitter) -> _Fragment:
     """
-    A const-branch-via-division shape: an outer runtime diamond whose then arm contains an inner constant-true
-    division condition, leaving an empty const-branch block. The inner false arm is over-budget so the
-    :data:`Shape.CONST_BRANCH` and :data:`Shape.NESTED_IF` tags denote a surviving inner branch.
+    A const-branch shape: an outer runtime diamond whose then arm holds an inner condition that is constant only
+    under the graph's ``x*0 == 0`` identity -- so it survives partial evaluation and reaches HIR as a constant branch,
+    leaving an empty const-branch block. The inner false arm is over-budget so the :data:`Shape.CONST_BRANCH` and
+    :data:`Shape.NESTED_IF` tags denote a surviving inner branch.
     """
     cond = _emit_condition(em, balanced=True)
     r = em.fresh("r")
@@ -546,7 +547,7 @@ def _emit_const_branch(em: _Emitter) -> _Fragment:
     inner_then = _fragment(f"{base} + 1.0", Mode.CONTINUOUS)
     inner_else_body, inner_else_fragment = _overbudget_arm(em, r)
     inner = _if_else_body(
-        "(1.0 / 5.0) > 0.0",
+        f"({base} * 0.0) > -1.0",
         _assign_body(r, inner_then),
         inner_else_body,
     )

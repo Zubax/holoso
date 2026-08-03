@@ -3,6 +3,7 @@
 import dataclasses
 import inspect
 import types
+import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -317,8 +318,8 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         reject(node.origin, "the callee is not a callable object")
     raw = callee.value
     match resolve(raw) if callable(raw) else None:
-        case Intrinsic(operator=operator):
-            return _intrinsic(interp, node, callee.name, operator, frame, sink)
+        case Intrinsic() as match:
+            return _intrinsic(interp, node, callee.name, raw, match, frame, sink)
         case Library(stub=stub) as library:
             values = _positional_arguments(interp, node, callee.name, frame, sink)
             if stub is _POW.stub:
@@ -328,6 +329,9 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
                 base = scalar(values[0], node.origin)
                 exponent = scalar(values[1], node.origin)
                 return _pow(interp, node.origin, base, exponent, frame, sink)
+            integer = _integer_lane(node.origin, raw, values)
+            if integer is not None:
+                return integer
             return _library_call(interp, node.origin, callee.name, library, values, frame, sink)
         case Factory() as match:
             return _factory(interp, node, callee.name, match, frame, sink)
@@ -373,7 +377,9 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
             positional_only=False,
         )
     if callable(raw):
-        if not isinstance(raw, type) and isinstance(getattr(raw, "__dict__", None), dict):
+        # A component instance defines __call__ as a plain Python function; a C-level one (a numpy dispatcher or
+        # ufunc, a partial) is simply a callee the registry does not carry.
+        if isinstance(getattr(type(raw), "__call__", None), types.FunctionType):
             reject(
                 node.origin,
                 f"cannot call {callee.name!r}: it is a separate component instance "
@@ -433,13 +439,53 @@ def _signature_arguments(
     return positional, keywords
 
 
+def _integral(raw: object) -> int | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    return int(raw) if isinstance(raw, np.integer) else None
+
+
+def _integer_lane(origin: Origin, raw: object, values: list[Value]) -> Value | None:
+    """
+    Registry dispatch is by callee identity alone, so every entry names float hardware -- yet abs, min, max, the
+    roundings and sign keep an integer integral in Python. Conforming a static integer into the float lane rounds it
+    before the fold, and the fold then erases the integer before the runtime-integer gate below HIR can refuse it, so
+    the wrong constant reaches the hardware. Where every argument is a static integer the fold is the call itself.
+
+    Opportunistic: anything the host declines to compute -- a float result, an exception, a warning-turned-error --
+    falls through to the float lane, where the operator's own registered reference decides. Convicting here would
+    answer for a host call the compiler was never forced to make, and would refuse ``math.log2(0)`` where
+    ``math.log2(0.0)`` folds. Signals are silenced so the answer cannot depend on the process-global numpy policy.
+    """
+    if not values or not all(isinstance(v, StaticScalar) and v.stype is ScalarType.INT for v in values):
+        return None
+    assert callable(raw)
+    try:
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            answer = raw(*(_ops.const_value(v.const) for v in values if isinstance(v, StaticScalar)))
+    except Exception:
+        return None
+    integral = _integral(answer)
+    return None if integral is None else StaticScalar(_ops.make_const(integral))
+
+
 def _intrinsic(
-    interp: Interpreter, node: Call, display: str, operator: _ops.Operator, frame: Frame, sink: Sink
+    interp: Interpreter, node: Call, display: str, raw: object, match: Intrinsic, frame: Frame, sink: Sink
 ) -> Value:
+    operator = match.operator
     values = _operand_arguments(interp, node, display, frame, sink)
     stypes = _ops.operand_stypes(operator)
     if len(values) != len(stypes):
         reject(node.origin, f"{display}() takes {len(stypes)} argument(s), got {len(values)}")
+    first = values[0]
+    if match.integral and isinstance(first, (StaticScalar, ResidualScalar)) and first.stype is ScalarType.INT:
+        return first  # rounding an integer is the identity, at either binding time
+    integer = _integer_lane(node.origin, raw, values)
+    if integer is not None:
+        return integer
     operands = [
         interp.conform(value, stype, node.origin, sink, f"argument {i + 1} of {display}()")
         for i, (value, stype) in enumerate(zip(values, stypes, strict=True))

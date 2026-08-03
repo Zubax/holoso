@@ -6,7 +6,10 @@ reference, or a constant); every non-atomic subexpression is hoisted by the desu
 evaluation order. Temps are anonymous locals, not SSA values: a guarded construct (a desugared conditional
 expression or comparison chain) assigns its result temp in both arms.
 
-The tree is pure syntax: no numpy, no HIR, no function objects. The partial evaluator keeps the pairing between
+The tree is pure syntax: no numpy, no function objects, and no HIR beyond one opacity -- a residual
+``IntrinsicCall`` carries the operator the partial evaluator selected, typed ``object`` here and downcast only by
+emit, so the boundary is an IMPORT boundary rather than a representational one. The partial
+evaluator keeps the pairing between
 an EelFunction and its FunctionType on the side. Every node carries an Origin — a source location plus the
 inline frame chain, which is empty at desugar and grows as the partial evaluator inlines calls — so any
 rejection raised inside library-stub code is re-attributed to the user's call site.

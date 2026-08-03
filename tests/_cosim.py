@@ -6,7 +6,7 @@ from holoso import FloatFormat, OpConfig
 from holoso._backend.cocotb import generate as generate_testbench
 from holoso._backend.numerical import generate
 from holoso._backend.verilog import generate as generate_verilog
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import build
 from holoso._mir import lower as lower_to_mir

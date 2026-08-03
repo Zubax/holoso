@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 import holoso  # noqa: E402
-from holoso._frontend import lower  # noqa: E402
+from holoso._eel import lower  # noqa: E402
 from holoso._hir import optimize  # noqa: E402
 from holoso._lir import build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402

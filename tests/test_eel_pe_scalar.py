@@ -1,5 +1,5 @@
 """
-The M3 partial-evaluator scalar core, driven black-box through the differential oracle wherever the behavior is
+The partial-evaluator scalar core, driven black-box through the differential oracle wherever the behavior is
 observable (kernels defined here, lowered through ``holoso._eel`` and compared against CPython), with residual
 text pins only where the behavior is invisible to the oracle (static-control folding, orphan dropping,
 determinism). Rejections pin one located diagnostic per family; temporary gaps pin the catch-all their owner
@@ -792,3 +792,88 @@ def test_residual_is_deterministic() -> None:
     first = _residual_text(_mixed)
     second = _residual_text(_mixed)
     assert first == second
+
+
+# 2**53 + 1 is the first integer a binary64 cannot hold, so any lane that routes it through a float is visible.
+_UNHOLDABLE = 9007199254740993
+
+
+def _abs_of_an_unholdable_int() -> bool:
+    return abs(-_UNHOLDABLE) == 9007199254740992
+
+
+def _round_of_an_unholdable_int() -> bool:
+    return round(_UNHOLDABLE) == 9007199254740992
+
+
+def _floor_of_an_unholdable_int() -> bool:
+    return math.floor(_UNHOLDABLE) == 9007199254740992
+
+
+def _min_of_unholdable_ints() -> int:
+    return min(_UNHOLDABLE, 9007199254740992)
+
+
+def _abs_stays_integer(n: int) -> int:
+    return abs(-3) + n
+
+
+def test_an_intrinsic_over_static_integers_stays_in_the_integer_lane() -> None:
+    """
+    Regression: these are registered against float operators, so a static integer argument was rounded before the
+    fold -- ``abs(-(2**53+1))`` compared equal to 2**53 -- and the integer was gone before the runtime-integer gate
+    below HIR could refuse it.
+    """
+    for kernel in (
+        _abs_of_an_unholdable_int,
+        _round_of_an_unholdable_int,
+        _floor_of_an_unholdable_int,
+        _min_of_unholdable_ints,
+    ):
+        assert HirEvaluator(lower(kernel)).run() == [kernel()], kernel.__name__
+    # The result keeps the integer TYPE too, so it composes with the integer operators rather than poisoning them.
+    _oracle(_abs_stays_integer, [{"n": 4}, {"n": -1}])
+
+
+def _log2_of_an_integer_zero(x: float) -> float:
+    return x + math.log2(0)
+
+
+def _exp2_of_an_integer_overflow(x: float) -> float:
+    return x + math.exp2(2000)
+
+
+def _floor_of_a_runtime_integer(a: int) -> int:
+    return math.floor(a)
+
+
+def _rounding_chain_of_a_runtime_integer(a: int) -> int:
+    return (round(a) % 3) + math.trunc(a) + math.ceil(a)
+
+
+def test_rounding_an_integer_is_the_identity_at_either_binding_time() -> None:
+    # floor/ceil/trunc/round round a float to an integral value, so on an integer they lower to nothing at all --
+    # which keeps the integer lane open through them instead of widening the operand to a float.
+    assert _residual_text(_floor_of_a_runtime_integer).splitlines()[-1].strip() == "return a"
+    _oracle(_floor_of_a_runtime_integer, [{"a": -7}, {"a": 0}, {"a": 5}])
+    _oracle(_rounding_chain_of_a_runtime_integer, [{"a": 7}, {"a": -4}])
+
+
+def _sign_of_a_static_integer(x: float) -> float:
+    return x + float(np.sign(-7) % 3)
+
+
+def test_the_integer_lane_covers_composite_dispatch_too() -> None:
+    # ``np.sign`` is registered as a composite stub rather than as one operator, but Python still keeps its integer
+    # argument integral, so the lane must reach both dispatch kinds -- otherwise the `%` below has a float operand.
+    _oracle(_sign_of_a_static_integer, [{"x": 1.5}, {"x": -0.25}])
+
+
+def test_the_integer_lane_defers_to_the_registered_reference_where_the_host_declines() -> None:
+    """
+    Regression: the integer lane folds through the callee the user named, and a raise there is not an answer --
+    ``math.log2(0)`` raises where the operator's reference computes -inf. Convicting would refuse a legal build and
+    make the expression answer differently for ``0`` and ``0.0``.
+    """
+    for kernel, want in ((_log2_of_an_integer_zero, -math.inf), (_exp2_of_an_integer_overflow, math.inf)):
+        assert HirEvaluator(lower(kernel)).run(0.0) == [want], kernel.__name__

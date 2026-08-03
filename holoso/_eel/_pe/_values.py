@@ -166,6 +166,15 @@ class ExpansionBudget:
         if self._remaining < 0:
             reject(origin, f"the graph expansion budget is exhausted while expanding {construct}")
 
+    def mark(self) -> int:
+        return self.spent
+
+    def rewind(self, mark: int) -> None:
+        """The budget bounds the graph that gets BUILT, so a pass whose result is discarded gives its spend back."""
+        assert 0 <= mark <= self.spent
+        self._remaining += self.spent - mark
+        self.spent = mark
+
 
 def allocations_match(a: Value, b: Value) -> bool:
     match a, b:

@@ -1,8 +1,7 @@
 """
 The Eel frontend differential oracle over example kernels: CPython executing the original kernel against the
 evaluator running the unoptimized HIR lowered by ``holoso._eel``. ``ORACLE_COVERED`` is the set of example
-names verified here; the parity table asserts membership before a row may claim ORACLE_OK, so the claim cannot
-be made without the verification actually existing. Array-parameter kernels are driven directly through their
+names verified here. Array-parameter kernels are driven directly through their
 decomposed leaf ports (``v_0``, ``v_1``) with local vector tables; scalar kernels ride the shared SPECS rows.
 """
 

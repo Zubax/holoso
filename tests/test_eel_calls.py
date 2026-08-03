@@ -1,5 +1,5 @@
 """
-The M4 call machinery, driven black-box through the differential oracle wherever the behavior is observable:
+The call machinery, driven black-box through the differential oracle wherever the behavior is observable:
 registry identity dispatch (intrinsics and Library stubs under every spelling), user-function inlining with
 CPython signature binding, boundary conformance, the pow one-behavior rule, raise semantics, and the
 re-attribution of every rejection arising inside an inlined callee to the user's call site.
@@ -120,7 +120,7 @@ def _tan(x: float) -> float:
 
 
 def test_a_stub_opening_with_tuple_unpacking_inlines() -> None:
-    # tan_ opens with ``s, c = sin_(x), cos_(x)`` -- the unpack construct that gated it through M4.
+    # tan_ opens with ``s, c = sin_(x), cos_(x)``, so it exercises tuple unpacking inside an inlined stub.
     _oracle(_tan, [{"x": 0.5}, {"x": -1.0}, {"x": 2.0}, {"x": 0.0}])
 
 

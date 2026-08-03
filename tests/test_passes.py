@@ -21,7 +21,7 @@ from holoso import (
 )
 from holoso._errors import SynthesisError, UnsupportedConstruct
 from holoso._util import ValueId
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import (
     BoolAnd,
     BoolConst,
@@ -1141,15 +1141,16 @@ def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
     # Nothing rewrites a proven branch into a jump, so a proven-dead arm survives into the survivor sweep, and in a
     # never-returning loop it is still CFG-reachable -- the shape where post-DCE block liveness and enterability
     # disagree. The guard proves its own arm dead, so the sweep must not convict what that arm holds.
-    # ``gate`` is opaque to the front end (an operation over a parameter) and constant to HIR (``x*0 == 0``).
-    # The excluded arm holds ``0.0/0.0`` and not ``y/gate``: a fold names a quotient only where it knows BOTH operands,
-    # so an unknown numerator would go unconvicted wherever it sat and would witness nothing about enterability.
+    # Every constant here is opaque to the front end (an operation over a parameter) and constant to HIR (``x*0 == 0``):
+    # the loop condition, so the loop residualizes rather than unrolling and only HIR sees that it never exits; the
+    # guard, so its arm is proven dead; and both operands of the quotient, because a fold names a quotient only where
+    # it knows BOTH of them, so an unknown numerator would go unconvicted wherever it sat and would witness nothing.
     def never_returns(x: float) -> float:
         y = x
-        while True:
+        while (x * 0.0) <= 0.0:
             gate = y * 0.0
             if gate > 0.0:
-                y = 0.0 / 0.0
+                y = (y * 0.0) / (y * 0.0)
             y = y + 1.0
         return y
 

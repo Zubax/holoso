@@ -4,7 +4,7 @@ import inspect
 import logging
 import types
 
-from .._errors import SynthesisError
+from .._errors import UnsupportedConstruct
 from .._hir import Hir
 from ._desugar import desugar
 from ._emit import emit
@@ -19,10 +19,10 @@ def resolve_target(target: object) -> tuple[types.FunctionType, object | None]:
     if inspect.ismethod(target):
         fn = target.__func__
         if not isinstance(fn, types.FunctionType):
-            raise SynthesisError(f"the target {target!r} is not a plain function or a bound method")
+            raise UnsupportedConstruct(f"the target {target!r} is not a plain function or a bound method")
         return fn, target.__self__
     if not isinstance(target, types.FunctionType):
-        raise SynthesisError(f"the target {target!r} is not a plain function")
+        raise UnsupportedConstruct(f"the target {target!r} is not a plain function")
     return target, None
 
 

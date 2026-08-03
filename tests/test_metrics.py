@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from holoso import FloatFormat
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import Lir, build
 from holoso._mir import lower as lower_to_mir
@@ -55,6 +55,8 @@ from remainder import remainder  # noqa: E402
 from schmitt_trigger import SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
+from biquad import Biquad  # noqa: E402
+from fir import Fir4  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
 
@@ -75,6 +77,8 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "cordic_sincos": lambda: CordicSinCos().__call__,
     "integrator": lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
     "imu_frame_transform": lambda: imu_frame_transform.transform,
+    "fir": lambda: Fir4().__call__,
+    "biquad": lambda: Biquad().__call__,
     "ekf1_stateless": lambda: update_x_P,
     "ekf1_stateful": lambda: Ekf1().update,
 }
@@ -188,41 +192,49 @@ def _measure(name: str) -> Metrics:
 #   guards keep the kernel multi-block with one residual copy. The larger PID row is therefore a property of the example
 #   itself, not a scheduler regression to chase.
 BASELINE: dict[str, Metrics] = {
-    "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=15, last_pc=15, max_block_span=15),
-    "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=24, last_pc=24, max_block_span=24),
-    "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=10, last_pc=10, max_block_span=10),
-    "iir1_lpf": Metrics(False, nreg=3, bnreg=2, steering=2, copies=0, min_ii=16, last_pc=16, max_block_span=16),
-    "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=38, last_pc=71, max_block_span=32),
-    "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=7, last_pc=7, max_block_span=7),
-    "quadrature_encoder": Metrics(False, nreg=1, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
+    "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=14, last_pc=14, max_block_span=14),
+    "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=23, last_pc=23, max_block_span=23),
+    "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=9, last_pc=9, max_block_span=9),
+    "iir1_lpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=15, last_pc=15, max_block_span=15),
+    "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=36, last_pc=68, max_block_span=31),
+    "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6),
+    "quadrature_encoder": Metrics(False, nreg=0, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(
         False, nreg=0, bnreg=5, steering=5, copies=0, min_ii=6, last_pc=6, max_block_span=6
     ),
     "latching_fault_register": Metrics(
-        False, nreg=1, bnreg=6, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6
+        False, nreg=0, bnreg=6, steering=2, copies=0, min_ii=5, last_pc=5, max_block_span=5
     ),
-    "majority_voter": Metrics(False, nreg=1, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
-    "recip_newton": Metrics(False, nreg=4, bnreg=1, steering=4, copies=2, min_ii=15, last_pc=32, max_block_span=16),
-    "remainder": Metrics(False, nreg=8, bnreg=4, steering=12, copies=2, min_ii=39, last_pc=58, max_block_span=17),
-    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=16, last_pc=51, max_block_span=25),
+    "majority_voter": Metrics(False, nreg=0, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
+    # The only two rows the cutover moved UPWARD. recip_newton's loop opens with a statically-true convergence test, so
+    # the partial evaluator peels the first trip: one more live value across the loop entry (nreg, steering) and one
+    # body's worth of extra microcode, in exchange for a shorter realized transaction (test_cycle_model).
+    "recip_newton": Metrics(False, nreg=5, bnreg=1, steering=7, copies=1, min_ii=29, last_pc=46, max_block_span=23),
+    # remainder's HIR is structurally identical to the old frontend's (same blocks, ops, and nodes); only the value
+    # numbering order differs, which costs one register and buys four stages of schedule.
+    "remainder": Metrics(False, nreg=9, bnreg=4, steering=11, copies=2, min_ii=37, last_pc=54, max_block_span=17),
+    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=14, last_pc=47, max_block_span=24),
     "cordic_sincos": Metrics(
-        False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=105, last_pc=105, max_block_span=105
+        False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=104, last_pc=104, max_block_span=104
     ),
-    "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=17, last_pc=17, max_block_span=17),
+    "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=16, last_pc=16, max_block_span=16),
     # The only example whose datapath is built entirely from the matrix product and transpose, so it is the gate that
     # would catch a linear-algebra library stub expanding into more hardware than the operators it replaced.
     "imu_frame_transform": Metrics(
         True, nreg=20, bnreg=0, steering=35, copies=0, min_ii=42, last_pc=42, max_block_span=42
     ),
+    # The two graduated filter examples: both straight-line, so every figure is one block's.
+    "fir": Metrics(True, nreg=8, bnreg=0, steering=5, copies=0, min_ii=20, last_pc=20, max_block_span=20),
+    "biquad": Metrics(True, nreg=6, bnreg=0, steering=5, copies=0, min_ii=21, last_pc=21, max_block_span=21),
     # The two largest kernels carry slightly higher register pressure as a deliberate latency-for-area point: the
     # uniform landing keeps min_ii/last_pc tight, so a result resides a cycle longer, raising register
     # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (``<=``) pinned
     # tight to the converged build, so a later improvement may sit below its bound until the next re-freeze.
     "ekf1_stateless": Metrics(
-        True, nreg=41, bnreg=0, steering=100, copies=0, min_ii=126, last_pc=126, max_block_span=126
+        True, nreg=41, bnreg=0, steering=100, copies=0, min_ii=125, last_pc=125, max_block_span=125
     ),
     "ekf1_stateful": Metrics(
-        True, nreg=40, bnreg=0, steering=89, copies=0, min_ii=128, last_pc=128, max_block_span=128
+        True, nreg=40, bnreg=0, steering=89, copies=0, min_ii=127, last_pc=127, max_block_span=127
     ),
 }
 

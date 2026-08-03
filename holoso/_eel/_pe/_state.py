@@ -333,6 +333,17 @@ def environment_aggregates(fn: object) -> list[tuple[str, object]]:
     return found
 
 
+READ_PROTOCOLS = ("__getattribute__", "__getattr__")
+"""Overriding one of these hides the value from the structural resolution, so a read through it cannot be lowered."""
+
+_WRITE_PROTOCOLS = ("__setattr__", "__delattr__")
+
+
+def overridden_protocol(instance: object, protocols: tuple[str, ...]) -> str | None:
+    """The first of ``protocols`` the instance's class overrides, or None when it inherits all of them."""
+    return next((p for p in protocols if getattr(type(instance), p, None) is not getattr(object, p, None)), None)
+
+
 def descriptor_guard(instance: object, seed: dict[str, Origin]) -> None:
     """
     State reads and writes lower to plain slot operations, so anything that would make CPython run code on
@@ -340,7 +351,7 @@ def descriptor_guard(instance: object, seed: dict[str, Origin]) -> None:
     is a located rejection at the pinning write.
     """
     anchor = seed[min(seed)]
-    for protocol in ("__setattr__", "__getattribute__", "__getattr__", "__delattr__"):
+    for protocol in _WRITE_PROTOCOLS + READ_PROTOCOLS:
         if getattr(type(instance), protocol, None) is not getattr(object, protocol, None):
             reject(
                 anchor,

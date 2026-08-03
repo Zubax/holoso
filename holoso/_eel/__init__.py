@@ -1,8 +1,3 @@
-"""
-The Eel front end: Python -> Eel -> residual Eel -> HIR, in three stages with one representation.
-Runs in shadow next to the primary frontend until cutover; ``run_shadow`` is the only integration point,
-and ``lower`` is the full pipeline that replaces the primary at cutover.
-"""
+"""The Eel front end: Python -> Eel -> residual Eel -> HIR, in three stages with one representation."""
 
 from ._lower import lower as lower
-from ._shadow import run_shadow as run_shadow

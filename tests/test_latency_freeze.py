@@ -23,7 +23,7 @@ import pytest
 
 import holoso
 from holoso import FloatFormat
-from holoso._frontend import lower as lower_frontend
+from holoso._eel import lower as lower_frontend
 from holoso._hir import optimize
 from holoso._lir import FloatStateSlot, build
 from holoso._lir._ir import BoolStateSlot
@@ -45,8 +45,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "majority_voter": (14, 19),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
-    "recip_newton": (15, 32),
-    "remainder": (36, 53),
+    # The convergence test is statically true on entry (delta is seeded above the tolerance), so the first trip is
+    # peeled at compile time and only trips 2..N remain residual: one body's worth of extra microcode, and a realized
+    # transaction that is shorter, not longer (test_cycle_model).
+    "recip_newton": (29, 46),
+    "remainder": (37, 54),
     "cordic_sincos": (104, 104),
     "ekf1_stateless": (125, 125),
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
@@ -57,6 +60,10 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
     "uart_tx": (7, 103),
     "octave_index": (14, 38),
+    # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
+    # control flow at all), so their whole schedule is one block and min II equals last PC.
+    "fir": (20, 20),
+    "biquad": (21, 21),
 }
 
 _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}

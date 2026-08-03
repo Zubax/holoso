@@ -24,7 +24,6 @@ from ._errors import (
     SourceUnavailable as SourceUnavailable,
     SynthesisError as SynthesisError,
     UnsupportedConstruct as UnsupportedConstruct,
-    UnsupportedLibraryFunction as UnsupportedLibraryFunction,
 )
 
 from ._backend.cocotb import CocotbOutput as CocotbOutput

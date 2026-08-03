@@ -33,9 +33,5 @@ class UnsupportedConstruct(SynthesisError):
     """The input uses a Python construct that Holoso cannot (yet) synthesize."""
 
 
-class UnsupportedLibraryFunction(SynthesisError):
-    """The input calls a recognized math/numpy library function that Holoso does not implement yet."""
-
-
 class SourceUnavailable(SynthesisError):
     """The target's source code could not be retrieved for analysis."""

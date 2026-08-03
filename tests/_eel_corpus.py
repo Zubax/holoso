@@ -1,11 +1,9 @@
 """
-The M9 corpus: the integer kernels the float examples stand in for (``examples/uart.py``'s TODO(integers)
-notes), plus float FIR and biquad on the ratified delay-line idiom. The integer kernels lower through the
-Eel frontend and verify against CPython exactly, while MIR still refuses them until the integer hardware
-sprint; FIR and biquad graduate to ``examples/`` in M11.
+The integer corpus: the kernels the float examples stand in for (``examples/uart.py``'s TODO(integers) notes),
+plus the residual-loop exit kernels. These lower through the Eel frontend and verify against CPython exactly,
+while MIR still refuses the integer ones until the integer hardware sprint. The float FIR and biquad that once
+lived here graduated to ``examples/fir.py`` and ``examples/biquad.py``.
 """
-
-import numpy as np
 
 OVERSAMPLE = 16
 LAST_PHASE = OVERSAMPLE - 1
@@ -214,21 +212,6 @@ class PriorityEncoder:
         return position
 
 
-class Fir4:
-    """A 4-tap FIR on the ratified delay-line idiom."""
-
-    def __init__(self, taps: tuple[float, float, float, float]) -> None:
-        self._taps = np.array(taps)
-        self.line = np.zeros(4)
-
-    def step(self, x: float) -> float:
-        self.line = np.array((*self.line[1:], x))
-        acc = 0.0
-        for i in range(4):
-            acc = acc + self._taps[i] * self.line[i]
-        return acc
-
-
 def _into_band(x: float) -> float:
     while x > 1.0:
         if x < 2.0:
@@ -254,19 +237,3 @@ def convergence_steps(x: float, tol: float) -> float:
         if steps > 6.0:
             break
     return err + steps * 0.001
-
-
-class Biquad:
-    """A direct-form-II-transposed biquad; the two delay registers are the state."""
-
-    def __init__(self, b: tuple[float, float, float], a: tuple[float, float]) -> None:
-        self._b0, self._b1, self._b2 = b
-        self._a1, self._a2 = a
-        self.s1 = 0.0
-        self.s2 = 0.0
-
-    def step(self, x: float) -> float:
-        y = self._b0 * x + self.s1
-        self.s1 = self._b1 * x - self._a1 * y + self.s2
-        self.s2 = self._b2 * x - self._a2 * y
-        return y

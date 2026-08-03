@@ -5,7 +5,7 @@ half of the front-end differential oracle, whose other half is CPython executing
 Where the MIR interpreter (``holoso._mir._interpret``) is bit-exact in the target format to isolate the LIR layer,
 this evaluator runs in the compiler's own arithmetic -- host floats, unbounded ints, each ``Operator.evaluate``
 itself -- upstream of HIR optimization, so a divergence from CPython indicts the front-end alone. It deliberately
-imports nothing from ``_mir``/``_lir``/``_eel``/``_frontend``; a guard test enforces the independence.
+imports nothing from ``_mir``/``_lir``/``_eel``; a guard test enforces the independence.
 
 ``NoNumber`` is carried as a poison value rather than an abort: the front-end's ``and``/``or`` gates are eager, so
 the graph computes operands CPython may short-circuit past, and convicting one of those would fail kernels CPython

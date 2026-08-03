@@ -21,7 +21,7 @@ from holoso import (
     OpConfig,
 )
 from holoso._errors import UnsupportedConstruct
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import (
@@ -600,10 +600,11 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_const_branch_install_block_drains_to_its_inline_landing(config: OperatorCase) -> None:
-    # Regression (fuzz-found B1 miscompile): a constant branch condition formed by DIVISION escapes the
-    # frontend's AST-level reachability fold (which evaluates only +,-,* of literals), so HIR strength reduction folds
-    # it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch block (the condition install + a
-    # branch, no float content). The condition is a literal -- an entry-resident source -- so its tail bool write is
+    # Regression (fuzz-found B1 miscompile): a branch condition that is constant only under the graph's ``x*0 == 0``
+    # VALUE identity survives partial evaluation (which folds by evaluating, never by algebra over a residual operand),
+    # so HIR strength reduction folds it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch
+    # block (the condition install + a branch, no float content). The condition is a literal -- an entry-resident
+    # source -- so its tail bool write is
     # inline-class: it fires at the combinational step and lands one read-first edge later, at the combinational landing
     # within the work makespan -- and the block must drain to exactly that landing, where the terminator then reads the
     # condition the following step. The drain must neither shrink below it (terminator reads a stale condition -- the
@@ -2155,10 +2156,10 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
     # Two DIFFERENT relations over the same operand pair tap two distinct output ports of one comparator activation,
     # so they fuse into a single firing: one instance issue, one operand read, two boolean writes -- the multi-output
     # machinery exercised end to end on the boolean side. The model must still produce both values correctly.
-    def f(a: float, b: float) -> list[float]:
+    def f(a: float, b: float) -> tuple[float, ...]:
         below = a < b
         same = a == b
-        return [float(below), float(same)]
+        return float(below), float(same)
 
     lir = build(_run(f), "fused_relations", fetch_stages=3)
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
@@ -2176,10 +2177,10 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
 def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
     # ``a < b`` taps the lt flag plainly and ``a >= b`` taps the SAME flag inverted: one output-port lane writes once
     # per firing, so these must stay two firings, spaced by instance contention. Both values must still be correct.
-    def f(a: float, b: float) -> list[float]:
+    def f(a: float, b: float) -> tuple[float, ...]:
         below = a < b
         not_below = a >= b
-        return [float(below), float(not_below)]
+        return float(below), float(not_below)
 
     lir = build(_run(f), "split_inversions", fetch_stages=3)
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
@@ -2296,10 +2297,10 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
     # otherwise read (a,b) and (b,a) -- two registers per read port; the port assignment orients one of them swapped,
     # shrinking each port's read-set to a single register, and the swapped firing's lt tap moves to gt. Bit-exact
     # because the ZKF ordering is total and compare is antisymmetric.
-    def f(a: float, b: float) -> list[float]:
+    def f(a: float, b: float) -> tuple[float, ...]:
         below = a < b
         above = b < a
-        return [float(below), float(above)]
+        return float(below), float(above)
 
     lir = build(_run(f, config.make_ops(FMT)), f"mirrored_{config.label}", fetch_stages=3)
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
@@ -2384,10 +2385,10 @@ def test_not_folds_into_every_sink_position() -> None:
     # A semantic NOT never materializes hardware: it becomes a free inversion conditioner at each consumer. The
     # kernel routes one comparison's negation into a logic operand, a bool output, and a bool->float cast; the LIR
     # must contain NO inline op beyond the band and the cast, and the inversions must ride the operand sidebands.
-    def f(a: float, b: float, c: float) -> list[float]:
+    def f(a: float, b: float, c: float) -> tuple[float, ...]:
         flag = not (a > b)
         out_logic = flag and (c > 0.0)
-        return [float(flag), float(out_logic)]
+        return float(flag), float(out_logic)
 
     lir = build(_run(f), "not_sinks", fetch_stages=3)
     inline_mnemonics = sorted(op.operator.mnemonic for block in lir.blocks for op in block.inline_ops)
@@ -2437,9 +2438,9 @@ def test_double_negation_cancels() -> None:
 
 def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
     # ``x`` and ``not x`` share one comparator tap and one boolean register: the polarity lives on each consumer.
-    def f(a: float, b: float) -> list[float]:
+    def f(a: float, b: float) -> tuple[float, ...]:
         flag = a > b
-        return [float(flag), float(not flag)]
+        return float(flag), float(not flag)
 
     lir = build(_run(f), "both_polarities", fetch_stages=3)
     comparisons = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
@@ -2477,14 +2478,14 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: Operato
     # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry
     # opposite-polarity sources, and the model must take the correct value on both paths. The division keeps the
     # diamond a real branch (bool-phi diamonds are refused by if-conversion anyway; the div makes it doubly so).
-    def f(a: float, b: float, c: float) -> list[float]:
+    def f(a: float, b: float, c: float) -> tuple[float, ...]:
         flag = a > b
         if c > 0.0:
             flag = not flag
             d = a / (c * c + 1.0)
         else:
             d = b
-        return [float(flag), d]
+        return float(flag), d
 
     lir = build(_run(f, config.make_ops(FMT)), f"inverted_arm_{config.label}", fetch_stages=3)
     sources = [(write.source.source, write.source.inversion) for block in lir.blocks for write in block.bool_writes]

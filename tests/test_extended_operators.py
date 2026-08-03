@@ -577,16 +577,21 @@ def test_pow_two_lowers_to_exp2() -> None:
             assert _bits(sim.run(x)[0]) == _v(x).exp2().bits, f"{kernel.__name__} x={x}"
 
 
-def test_pow_nonconstant_or_nontwo_base_is_rejected() -> None:
+def test_pow_of_a_runtime_or_non_two_base_rides_the_general_lane() -> None:
+    # Neither operand has to be a power of two: a runtime base and a non-two constant base both lower through the
+    # exp2/log2 identity of the pow_ stub rather than being refused.
     def k_runtime_base(x: float, y: float) -> float:
         return x**y  # type: ignore[no-any-return]
 
     def k_ten_base(x: float) -> float:
         return 10**x
 
-    for fn in (k_runtime_base, k_ten_base):
-        with pytest.raises(UnsupportedConstruct):
-            holoso.synthesize(fn, _ops(), name=fn.__name__)
+    sim = _sim(k_runtime_base, "pow_runtime_base")
+    for x, y in ((2.0, 3.0), (3.0, 2.5), (0.5, -2.0)):
+        assert float(sim.run(x, y)[0]) == pytest.approx(math.pow(x, y), rel=1e-5), (x, y)
+    sim = _sim(k_ten_base, "pow_ten_base")
+    for x in (0.0, 1.0, 2.0, -1.0):
+        assert float(sim.run(x)[0]) == pytest.approx(10.0**x, rel=1e-5), x
 
 
 def test_exp2_log2_dispatch_numpy_and_bare_name() -> None:
@@ -872,12 +877,13 @@ def test_trig_of_constants_fold() -> None:
 def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None:
     # The composite steers a zero base away from log2's pole, but only a POSITIVE exponent leaves the base itself:
     # 0**-1 diverges. Regression: the shortcut returned the base for every exponent, so 0**-1 answered 0.0.
-    # A CONSTANT pole folds to the same +inf the runtime path computes, because log2's evaluate follows the np
-    # reference (-inf at zero, the maintainer's M4 pole ruling) and exp2's saturates.
+    # A fully CONSTANT pole is a located diagnostic rather than a fold, because ``math.pow(0.0, -1.0)`` raises on the
+    # host and the compiler never invents an answer the host itself refuses to give (the host-raise license).
     def constant_pole(x: float) -> float:
         return x + math.pow(0.0, -1.0)
 
-    assert math.isinf(float(_sim(constant_pole, "pow_zero_negative").run(1.0)[0]))
+    with pytest.raises(UnsupportedConstruct, match="this power always raises on the host"):
+        _sim(constant_pole, "pow_zero_negative")
 
     def runtime_pole(b: float, e: float) -> float:
         return math.pow(b, e)
@@ -1047,17 +1053,29 @@ def test_pow_needs_transcendentals_even_for_a_constant_exponent() -> None:
         holoso.synthesize(kernel, _ops(with_log2=False), name="lib_pow_needs_log2")
 
 
-def test_pow_static_exponent_matches_star_star_bit_exactly() -> None:
+def test_a_static_integer_exponent_chain_expands_in_every_spelling() -> None:
+    # A static INTEGER exponent expands into a multiplication chain -- exact, and identical whichever way the power is
+    # spelled. A FLOAT exponent of the same magnitude is a different lane by design (the exp2/log2 identity of the
+    # pow_ stub), so it is compared against the host rather than against the chain.
     def with_pow(x: float) -> float:
-        return pow(x, 3.0)  # type: ignore[no-any-return]
+        return pow(x, 3)
+
+    def with_math(x: float) -> float:
+        return math.pow(x, 3)
 
     def with_star(x: float) -> float:
         return x**3
 
-    sim_pow, sim_star = _sim(with_pow, "lib_pow_static"), _sim(with_star, "lib_pow_star")
+    def with_float_exponent(x: float) -> float:
+        return x**3.0  # type: ignore[no-any-return]
+
+    sims = [_sim(fn, f"lib_pow_{fn.__name__}") for fn in (with_pow, with_math, with_star)]
+    general = _sim(with_float_exponent, "lib_pow_float_exponent")
     for x in (2.0, -2.0, 0.5, -1.5, 100.0):
-        assert _bits(sim_pow.run(x)[0]) == _bits(sim_star.run(x)[0]), f"pow(x,3) vs x**3 x={x}"
-    assert float(sim_pow.run(-2.0)[0]) == -8.0
+        bits = {_bits(sim.run(x)[0]) for sim in sims}
+        assert len(bits) == 1, f"the static-integer spellings disagree at x={x}"
+        assert float(general.run(x)[0]) == pytest.approx(x**3.0, rel=1e-5), x
+    assert float(sims[0].run(-2.0)[0]) == -8.0
 
 
 def test_pow_runtime_exponent_rungs_and_general_path() -> None:

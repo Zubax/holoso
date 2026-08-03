@@ -17,9 +17,13 @@ from ..._hir import Operator
 
 @dataclass(frozen=True, slots=True)
 class Intrinsic:
-    """A call that lowers to a single HIR float operator."""
+    """
+    A call that lowers to a single HIR float operator. ``integral`` marks one that rounds a float to an integral
+    value, so on an integer argument it is the identity and lowers to nothing at all.
+    """
 
     operator: Operator
+    integral: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,13 +74,16 @@ def _register(match: Match, keys: Iterable[object]) -> None:
         _REGISTRY[key] = match
 
 
-def intrinsic[F: Callable[..., object]](operator: Callable[[], Operator], *substituted: object) -> Callable[[F], F]:
+def intrinsic[F: Callable[..., object]](
+    operator: Callable[[], Operator], *substituted: object, integral: bool = False
+) -> Callable[[F], F]:
     op = operator()  # instantiated once here, so the registry stores an operator instance rather than a live factory
 
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
         assert fn.__code__.co_argcount == op.signature.arity
-        _register(Intrinsic(op), (fn, *substituted))
+        assert not integral or op.signature.arity == 1
+        _register(Intrinsic(op, integral), (fn, *substituted))
         return fn
 
     return register

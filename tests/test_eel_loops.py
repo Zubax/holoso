@@ -836,3 +836,35 @@ def test_comprehensions_match_cpython() -> None:
 
 def test_a_generator_argument_is_still_a_ban() -> None:
     _rejects(_comp_returned, "generator expressions are not supported")
+
+
+# Just over half the expansion budget, so one body fits and two do not.
+_HALF_BUDGET_EXPONENT = 55001
+
+
+def _float_carry_fits(n: int, x: float) -> float:
+    acc = 0.0
+    i = 0
+    while i < n:
+        acc = acc + x**_HALF_BUDGET_EXPONENT
+        i = i + 1
+    return acc
+
+
+def _int_carry_promotes_then_fits(n: int, x: float) -> float:
+    acc = 0  # the int seed makes the first pass assume an INT carry, so the whole body is built twice
+    i = 0
+    while i < n:
+        acc = acc + x**_HALF_BUDGET_EXPONENT  # type: ignore[assignment]  # the rebind to float IS the promotion
+        i = i + 1
+    return acc
+
+
+def test_a_discarded_promote_pass_does_not_charge_the_budget() -> None:
+    """
+    Regression: the promote fixpoint discards what the previous pass built but kept charging its budget spend, so a
+    body over half the budget was refused for the sole reason that its accumulator was seeded ``0`` and not ``0.0``.
+    """
+    fits = lower(_float_carry_fits)
+    promotes = lower(_int_carry_promotes_then_fits)
+    assert len(promotes.nodes) == len(fits.nodes)

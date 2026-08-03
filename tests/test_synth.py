@@ -172,5 +172,5 @@ def test_class_target_is_unsupported() -> None:
         def __call__(self, x: float) -> float:
             return x
 
-    with pytest.raises(holoso.UnsupportedConstruct):
+    with pytest.raises(holoso.UnsupportedConstruct, match="is not a plain function"):
         holoso.synthesize(Stateful, ops=_ops(FloatFormat(6, 18)))

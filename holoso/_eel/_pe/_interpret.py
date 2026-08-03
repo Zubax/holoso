@@ -64,6 +64,7 @@ from ._reject import reattribute, reject
 from ._residual import assigned_names, drop_return_rows, prune, rechained
 from ._snapshot import Snapshotter, describe_opaque as _describe_opaque
 from ._state import (
+    READ_PROTOCOLS,
     ScalarSpec,
     SequenceSpec,
     Spec,
@@ -71,6 +72,7 @@ from ._state import (
     TensorSpec,
     descriptor_guard,
     environment_aggregates,
+    overridden_protocol,
     spec_leaves,
 )
 from ._values import (
@@ -404,7 +406,7 @@ class Interpreter:
         if found is None:
             try:
                 # eval_str accepts quoted annotations; lazy PEP 649 annotations execute user expressions
-                # here, so any exception is the user's -- the broad catch is sanctioned alongside the shadow's.
+                # here, so any exception is the user's, and containing it is the only way to locate it.
                 found = inspect.get_annotations(fn, eval_str=True)
             except Exception as error:
                 reject(origin, f"the type annotations cannot be evaluated: {error}")
@@ -763,8 +765,8 @@ class Interpreter:
         if isinstance(binding, _Unjoinable):
             reject(
                 origin,
-                f"{binding.description} holds branch values the compiler cannot merge; "
-                "only bool, int, and float values join branches",
+                f"{binding.description} holds branch values the compiler cannot merge: scalars join freely, and "
+                "aggregates join only when every arm agrees in kind, length, and shape",
             )
         if isinstance(binding, _SlotAlias):
             return binding.value
@@ -959,6 +961,7 @@ class Interpreter:
         while True:
             outputs_before = self._outputs
             elide_before = list(self._elide)
+            budget_before = self.budget.mark()
             loop_env: _Env = dict(frame.env)
             loop_frame = Frame(
                 frame.fn, frame.annotations, loop_env, frame.root, slots=loop_env if frame.root else frame.slots
@@ -1025,8 +1028,10 @@ class Interpreter:
                         )
             if not promoted:
                 break
+            # Charging the discarded pass would let the mere presence of a promotion reject a body that fits.
             self._outputs = outputs_before
             self._elide = elide_before
+            self.budget.rewind(budget_before)
         phis: list[LoopPhi] = []
         for key, indices in carried:
             entry_value = self.readable(frame.env[key], origin)
@@ -1380,8 +1385,16 @@ class Interpreter:
         CPython's attribute precedence over class metadata, never calling into the object: a state attribute
         of the entry receiver reads its current slot binding, then a data descriptor wins (only a plain
         property is readable -- its getter is inlined as ordinary code), then the instance dict, then
-        non-data class attributes.
+        non-data class attributes. Structural resolution is faithful only while the attribute protocol is
+        CPython's, so an overridden one is a rejection rather than a value read past it.
         """
+        protocol = overridden_protocol(base.value, READ_PROTOCOLS)
+        if protocol is not None:
+            reject(
+                origin,
+                f"the class {type(base.value).__name__} overrides {protocol}, so reading {attr!r} runs host "
+                "code; the compiler resolves attributes structurally and would answer past it",
+            )
         if base.value is self.instance and (attr,) in frame.slots:
             bound = frame.slots[(attr,)]
             assert not isinstance(bound, (_Moved, _SlotAlias)), "slot bindings never ride the conduits"
@@ -1392,6 +1405,14 @@ class Interpreter:
         if isinstance(found, property) and isinstance(found.fget, types.FunctionType):
             return self.inline(
                 origin, f"{base.name}.{attr}", found.fget, [base], {}, frame, sink, positional_only=False
+            )
+        if isinstance(found, types.MemberDescriptorType):
+            # Named apart from the general descriptor refusal: __slots__ made an ordinary attribute a descriptor
+            # behind the user's back, so the generic message would name nothing they wrote.
+            reject(
+                origin,
+                f"the class {type(base.value).__name__} defines __slots__, so {attr!r} has no instance "
+                "__dict__ entry to read; __slots__ is not supported yet",
             )
         if found is not _MISSING and inspect.isdatadescriptor(found):
             reject(origin, f"the attribute {attr!r} is a descriptor the compiler cannot read")

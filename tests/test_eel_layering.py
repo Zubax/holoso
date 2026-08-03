@@ -1,7 +1,6 @@
 """
-Architectural guards for the Eel package: the two frontends never import each other, the desugarer's closure is
-syntax-only, and HIR stays confined to its sanctioned homes. The two `_lib` trees diverge freely
-(maintainer ruling): the Eel copy is the living one, the old frontend's dies at cutover.
+Architectural guards for the Eel package: the replaced frontend leaves no trace, the desugarer's closure is
+syntax-only, and HIR stays confined to its sanctioned homes.
 """
 
 import ast
@@ -9,7 +8,13 @@ from pathlib import Path
 
 from ._importguard import forbidden_imports, transitive_holoso_imports
 
-_EEL_DIR = Path(__file__).resolve().parents[1] / "holoso" / "_eel"
+_REPO = Path(__file__).resolve().parents[1]
+_EEL_DIR = _REPO / "holoso" / "_eel"
+
+# ``build`` is skipped: a synthesis result writes a generated cocotb testbench next to its RTL, so scanning it
+# would read the developer's build state rather than the sources.
+_SOURCE_TREES = ("holoso", "tests", "tools", "synth", "examples", "docs", ".github")
+_SOURCE_SUFFIXES = (".py", ".md", ".toml", ".cfg", ".yml", ".yaml")
 
 # Modules allowed to import HIR within holoso._eel, as repo-relative posix paths under _eel.
 # `_pe/_ops.py` is the partial evaluator's sole HIR-facing module: it selects operators and folds through their
@@ -18,12 +23,22 @@ _EEL_DIR = Path(__file__).resolve().parents[1] / "holoso" / "_eel"
 _HIR_HOMES = {"_lib", "_emit", "_pe/_ops.py", "_lower.py"}
 
 
-def test_eel_never_imports_old_frontend() -> None:
-    assert forbidden_imports("holoso._eel", "holoso._frontend") == []
-
-
-def test_old_frontend_never_imports_eel() -> None:
-    assert forbidden_imports("holoso._frontend", "holoso._eel") == []
+def test_the_replaced_frontend_leaves_no_trace() -> None:
+    """A surviving reference is either a dangling import or prose describing a design that no longer exists."""
+    self = Path(__file__).resolve()  # the needle itself lives here
+    scanned = [
+        path
+        for tree in _SOURCE_TREES
+        for path in sorted((_REPO / tree).rglob("*"))
+        if "build" not in path.relative_to(_REPO).parts
+    ]
+    scanned += sorted(_REPO.glob("*"))
+    stray = [
+        path.relative_to(_REPO).as_posix()
+        for path in scanned
+        if path.suffix in _SOURCE_SUFFIXES and path != self and "holoso._frontend" in path.read_text(encoding="utf-8")
+    ]
+    assert not stray, stray
 
 
 def test_desugar_closure_is_syntax_only() -> None:

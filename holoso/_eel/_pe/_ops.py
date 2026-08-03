@@ -1,10 +1,9 @@
 """
-The single HIR-facing module of the partial evaluator: operator selection tables and constant folding.
-
-Folding calls the selected operator's own ``evaluate``, so a value the partial evaluator computes statically and
-a value HIR folding computes for the same residual expression cannot differ -- one expression, one answer, per
-the fastmath charter. Every other ``_pe`` module stays free of direct HIR imports; the confinement is enforced
-by ``tests/test_eel_layering.py``.
+The single HIR-importing module of the partial evaluator: the operator selection tables, and the const type
+the operators fold over. The fold itself is applied one level up, in ``_express``, and it calls the selected
+operator's own ``evaluate``, so a value the partial evaluator computes statically and a value HIR folding computes
+for the same residual expression cannot differ -- one expression, one answer, per the fastmath charter. Every other
+``_pe`` module stays free of direct HIR imports; the confinement is enforced by ``tests/test_eel_layering.py``.
 """
 
 from ..._hir import (

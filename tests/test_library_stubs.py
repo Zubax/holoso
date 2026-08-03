@@ -10,9 +10,9 @@ import math
 import numpy as np
 import pytest
 
-from holoso._frontend._lib import Intrinsic, Library, resolve
-from holoso._frontend._lib._linalg import matmul_, outer_, trace_, transpose_
-from holoso._frontend._lib._intrinsics import (
+from holoso._eel._lib import Intrinsic, Library, resolve
+from holoso._eel._lib._linalg import matmul_, outer_, trace_, transpose_
+from holoso._eel._lib._intrinsics import (
     abs_,
     atan2_,
     ceil_,
@@ -33,7 +33,7 @@ from holoso._frontend._lib._intrinsics import (
     sqrt_,
     trunc_,
 )
-from holoso._frontend._lib._numpy import (
+from holoso._eel._lib._numpy import (
     acos_,
     acosh_,
     asin_,
@@ -72,7 +72,8 @@ def test_registry_resolves_the_expected_externals() -> None:
     for external in library_externals:
         assert isinstance(resolve(external), Library), external
     # ``@`` and ``.T`` are lowered by resolving these two, so the frontend holds no matrix expansion of its own.
-    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) == Library(transpose_)  # type: ignore[arg-type]
+    # A transpose is a non-copying derivation on the host, so its match carries the storage-equivalence flag.
+    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) == Library(transpose_, derives=True)  # type: ignore[arg-type]
     assert resolve(np.dot) == resolve(np.matmul)  # identical on the supported 1-D/2-D non-scalar domain
     # An unregistered callable resolves to nothing; an unhashable shadow does not crash the lookup.
     assert resolve(math.erf) is None and resolve(np.zeros(3)) is None
@@ -140,20 +141,23 @@ def test_exp_log() -> None:
         assert log10_(x) == pytest.approx(math.log10(x), rel=1e-12, abs=1e-15), x
 
 
-def test_pow_rungs_are_exact_including_negative_bases() -> None:
-    for b in (2.0, -2.0, 0.5, -1.5, 3.0):
+def test_pow_recovers_the_sign_of_a_negative_base() -> None:
+    # The magnitude rides the exp2/log2 identity over ``abs(b)``, so an integer exponent gets its sign back from the
+    # exponent's parity rather than from a per-exponent ladder: exact wherever the identity itself is exact.
+    for b in (2.0, -2.0, 0.5, -0.5):
         for e in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0):
             assert pow_(b, e) == math.pow(b, e), (b, e)
     assert pow_(0.0, 0.0) == 1.0
     assert pow_(-2.0, 3.0) == -8.0
+    # A non-integer exponent of a negative base has no real value; the identity's log2 of a negative operand answers it.
+    assert math.isnan(pow_(-2.0, 2.5))
 
 
 def test_pow_general_path() -> None:
-    for b, e in ((2.0, 0.5), (3.0, 2.5), (10.0, -1.5), (0.5, 8.0), (1.0, 123.456)):
+    for b, e in ((2.0, 0.5), (3.0, 2.5), (10.0, -1.5), (0.5, 8.0), (1.0, 123.456), (-1.5, 3.0), (-2.0, 6.0)):
         assert pow_(b, e) == pytest.approx(math.pow(b, e), rel=1e-12), (b, e)
-    # Off the rungs the a>0 identity answers nan for a negative base, where math.pow is 64.0. The stub follows the
-    # hardware, which computes the same identity and has no way back to the sign it discarded.
-    assert math.isnan(pow_(-2.0, 6.0)) and math.pow(-2.0, 6.0) == 64.0
+    # ``|b| == 1`` with a non-finite exponent is the IEEE special case the guard chain answers ahead of exp2(inf*0).
+    assert pow_(-1.0, _INF) == 1.0 and pow_(-1.0, -_INF) == 1.0 and pow_(1.0, _INF) == 1.0
 
 
 def test_pow_zero_base() -> None:

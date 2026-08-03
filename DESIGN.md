@@ -193,7 +193,10 @@ side tables are how fixpoint analyses go quietly wrong. It owns
 binding time, scalar types, shapes, aggregate semantics, reachability, unrolling, inlining, argument binding,
 mutation legality, and persistent-state determination. Static structure folds here -- shapes, indices, trip counts,
 frozen configuration, reachability -- while value arithmetic remains the graph's business as the fastmath charter
-demands, so one expression cannot answer two ways according to which layer evaluated it. Every structure-producing
+demands, so one expression cannot answer two ways according to which layer evaluated it. Two folds run in host
+arithmetic instead: the static-exponent power chain the pow rule below grants, and a call whose every argument is a
+static integer, which answers as the Python call does so an integer stays an integer. The latter only ever ANSWERS --
+where the host declines, the operator's own reference decides, so it cannot turn a legal build into a refusal. Every structure-producing
 expansion (unrolling, comprehensions, inlining, repetition, power chains) draws from a single graph-size budget, so
 an accidental blow-up is a located rejection rather than a hang; the budget deliberately does not cap exact
 arbitrary-precision constant arithmetic. When a fold executed with host arithmetic raises, the failure is certain
@@ -318,7 +321,11 @@ the goal -- the regression guard is realized latency, not the static bound.
 
 Loops with a static trip count unroll fully, below the unroll threshold; a `while` becomes a genuine back-edge loop
 that fully drains before iterating, so no overlap ever crosses a back-edge. Its static II deliberately counts the
-back-edge as not-taken -- a true lower bound; the numerical model is the authority on realized cycle counts.
+back-edge as not-taken -- a true lower bound; the numerical model is the authority on realized cycle counts. A
+`while` whose first test is decidable at compile time -- the sentinel spelling of a `do`-`while`, which Python has no
+syntax for -- has that trip peeled by the front end and only the remaining trips residualized. The peel costs
+microcode and no datapath, and removes a runtime test from every transaction along with an entry path no input could
+ever take.
 
 ### HIR optimization
 
@@ -447,10 +454,11 @@ per-instance busy residue and each spilled value's landing cycle. A multi-predec
 `Ret`) never receives a spill, so the carry converges in one reverse-postorder pass and no overlap crosses a
 back-edge.
 
-Compile-time-known branch conditions fold to a single arm so the other is never lowered. This shared reachability
-predicate is deliberately narrower than the complete HIR constant folder -- a constant condition buried under a shape
-it does not inspect stays a runtime branch: at worst an unused state register, never a miscompile. Unifying the two
-is tracked future work.
+Compile-time-known branch conditions fold to a single arm so the other is never lowered. The front end decides a
+condition by evaluating it, never by algebra over a residual operand, so a condition that is constant only under a
+value identity the graph owns (`x*0 == 0`) survives partial evaluation and reaches the graph as a branch on a
+constant. If-conversion refuses such a branch rather than pinning the untaken arm live through a select, so it
+survives as a block that installs a constant and branches on it: at worst unreachable microcode, never a miscompile.
 
 ### DEFERRED
 

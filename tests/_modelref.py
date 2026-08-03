@@ -21,13 +21,16 @@ from holoso import (
     OpConfig,
 )
 from holoso._backend.numerical import NumericalSimulator, generate as generate
-from holoso._frontend import lower as lower_frontend
+from holoso._eel import lower as lower_frontend
 from holoso._hir import Hir, Operation, Operator, optimize
 from holoso._lir import Lir, build
 from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat
 from holoso._value import FloatValue
-from holoso._frontend._ast_support import Path as Path, port_name as port_name
+from holoso._eel._names import port_name as port_name
+
+type Path = tuple[int | str, ...]
+"""A leaf path into a returned value: indices for sequence elements, names for dataclass fields."""
 
 type Vector = list[FloatValue | bool]
 
@@ -88,10 +91,10 @@ def flatten_value(root: object) -> list[tuple[Path, Any]]:
             node = node.tolist()
         if isinstance(node, (list, tuple)) and not isinstance(node, str):
             for index, item in enumerate(node):
-                walk(item, [*path, index])
+                walk(item, (*path, index))
         elif dataclasses.is_dataclass(node) and not isinstance(node, type):
             for field in dataclasses.fields(node):
-                walk(getattr(node, field.name), [*path, field.name])
+                walk(getattr(node, field.name), (*path, field.name))
         else:
             leaves.append((path, node))
 
@@ -100,9 +103,9 @@ def flatten_value(root: object) -> list[tuple[Path, Any]]:
     if (isinstance(root, (list, tuple)) and not isinstance(root, str)) or (
         dataclasses.is_dataclass(root) and not isinstance(root, type)
     ):
-        walk(root, [])
+        walk(root, ())
     else:
-        leaves.append(([0], root))
+        leaves.append(((0,), root))
     return leaves
 
 
@@ -272,16 +275,17 @@ def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
 
 def const_branch_kernel(x: float, y: float) -> float:
     """
-    Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition ``1.0 / 5.0 >
-    0.0`` is constant-true but formed by DIVISION, which escapes the frontend's AST-level reachability fold (it
-    evaluates only +,-,* of literals), so HIR strength reduction folds it to a BoolConst that if-conversion refuses --
-    leaving an EMPTY const-branch block (the condition install + a branch, no float content). That const materialization
-    is a pc-gated install read AT the terminator and lands at the drained boundary, so the drain must keep that
-    boundary for it; shrinking below it made the branch read the condition one PC before it landed.
+    Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition
+    ``(x * 0.0) > -1.0`` is constant-true, but only under the VALUE identity ``x*0 == 0`` that the graph owns and the
+    partial evaluator deliberately does not apply to a residual operand -- so it survives partial evaluation, and HIR
+    strength reduction then folds it to a BoolConst that if-conversion refuses, leaving an EMPTY const-branch block
+    (the condition install + a branch, no float content). That const materialization is a pc-gated install read AT the
+    terminator and lands at the drained boundary, so the drain must keep that boundary for it; shrinking below it made
+    the branch read the condition one PC before it landed.
     """
     r = x
     if x > y:
-        if (1.0 / 5.0) > 0.0:  # constant-true via division: an empty const-branch block, no float content
+        if (x * 0.0) > -1.0:  # constant-true under the graph's x*0 identity: an empty const-branch block
             r = x + 1.0
         else:
             r = x + 2.0

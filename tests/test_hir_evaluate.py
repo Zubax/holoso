@@ -4,7 +4,7 @@ differential-oracle harness (``tests/_eeloracle.py``).
 
 Before the evaluator can indict a frontend, it must agree with CPython on kernels already known correct: every
 bundled example (validated end-to-end by the reference/cosim suites) plus the scheduling corner kernels are lowered
-through the OLD frontend -- the evaluator is frontend-agnostic -- and driven through full shared vector sequences.
+through the front end -- the evaluator is frontend-agnostic -- and driven through full shared vector sequences.
 Hand-built builder graphs pin the semantics no lowered kernel reaches: the poison family, the integer vocabulary,
 parallel phi snapshots, state carry/reset/commit atomicity, and the runaway bound.
 """
@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 import numpy as np
 import pytest
 
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import (
     BoolAnd,
     BoolOr,
@@ -62,7 +62,7 @@ from ._modelref import (
 
 
 def test_evaluator_layering() -> None:
-    for forbidden in ("holoso._mir", "holoso._lir", "holoso._eel", "holoso._frontend", "holoso._backend"):
+    for forbidden in ("holoso._mir", "holoso._lir", "holoso._eel", "holoso._backend"):
         assert forbidden_imports("holoso._hir._evaluate", forbidden) == []
 
 

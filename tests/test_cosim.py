@@ -20,7 +20,7 @@ from holoso import (
     OpConfig,
 )
 from holoso._backend.verilog import generate as generate_verilog
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import Lir, build, pooled_write_word
 from holoso._mir import lower as lower_to_mir
@@ -194,8 +194,8 @@ def test_cosim_min_max(sim: str) -> None:
     # Binary min/max lower to holoso_fsort. Taking BOTH min and max of one pair fuses to a SINGLE firing that writes
     # two wide registers at once -- the first operator to do so -- so this proves the generated RTL lands both results
     # bit-exactly against the model. The |a|,|b| sort in a second firing exercises the operand sign conditioners.
-    def kernel(a: float, b: float) -> list[float]:
-        return [min(a, b), max(a, b), min(abs(a), abs(b))]
+    def kernel(a: float, b: float) -> tuple[float, ...]:
+        return min(a, b), max(a, b), min(abs(a), abs(b))
 
     fmt = FloatFormat(8, 24)
     ops = OpConfig(
@@ -535,10 +535,10 @@ def test_cosim_mirrored_comparisons_swap_orientation(sim: str, config: OperatorC
     # RTL twin of test_schedule.test_commutative_comparator_swap_permutes_output_taps: mirrored comparisons over one
     # operand pair make the port assignment orient one comparator firing swapped (its lt tap moving to gt), so the
     # emitted module must still produce both relations bit-exactly through the permuted lane.
-    def kernel(a: float, b: float) -> list[float]:
+    def kernel(a: float, b: float) -> tuple[float, ...]:
         below = a < b
         above = b < a
-        return [float(below), float(above)]
+        return float(below), float(above)
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, kernel, fmt, f"mirrored_cmp_{config.label}", ops=config.make_ops(fmt))
@@ -601,14 +601,14 @@ def test_cosim_not_folding_sinks(sim: str, config: OperatorCase) -> None:
 def test_cosim_inverted_bool_phi_arm(sim: str, config: OperatorCase) -> None:
     # RTL twin of test_schedule.test_inverted_bool_phi_arm_installs_with_opposite_polarities: the conditional flag
     # negation rides the phi-arm install's inversion.
-    def kernel(a: float, b: float, c: float) -> list[float]:
+    def kernel(a: float, b: float, c: float) -> tuple[float, ...]:
         flag = a > b
         if c > 0.0:
             flag = not flag
             d = a / (c * c + 1.0)
         else:
             d = b
-        return [float(flag), d]
+        return float(flag), d
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, kernel, fmt, f"inverted_arm_{config.label}", ops=config.make_ops(fmt))
@@ -622,7 +622,7 @@ def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: Operat
     # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces ``a``. This
     # proves the de-coalesced residual install is bit-exact in RTL, not only against the Python cycle model. The
     # division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
-    def kernel(x: float, b: float, cc: float) -> list[float]:
+    def kernel(x: float, b: float, cc: float) -> tuple[float, ...]:
         if b < cc:
             a = x
             z = 1.0
@@ -631,7 +631,7 @@ def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: Operat
             a = -(x + 1.0)
             z = x
             d = x / b
-        return [a, z, d]
+        return a, z, d
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, kernel, fmt, f"coal_conflict_{config.label}", ops=config.make_ops(fmt))

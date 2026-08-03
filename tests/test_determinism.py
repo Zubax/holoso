@@ -85,7 +85,7 @@ def emit_cordic() -> None:
 
 
 def dump_two_carried_hir() -> None:
-    from holoso._frontend import lower
+    from holoso._eel import lower
 
     hir = lower(TwoCarried().step)
     for vid in sorted(hir.nodes):

@@ -14,7 +14,7 @@ import pytest
 from holoso import FloatFormat
 from holoso._backend.html import generate as generate_report
 from holoso._backend.verilog import generate as generate_verilog
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import build, RegRef
 from holoso._mir import lower as lower_to_mir

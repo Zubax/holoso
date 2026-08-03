@@ -13,8 +13,7 @@ from ._backend.html import generate as generate_html, HtmlOutput
 from ._backend.numerical import generate as generate_model, NumericalModel
 from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
-from ._eel import run_shadow
-from ._frontend import lower as lower_frontend
+from ._eel import lower as lower_frontend
 from ._hir import optimize
 from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, build
 from ._mir import lower as lower_to_mir
@@ -23,8 +22,9 @@ from ._operators import OpConfig
 type Target = Callable[..., Any]
 """
 Currently supported targets are:
-- A plain stateless function or lambda.
-- A bound method of a class instance -- stateful. Public attributes become additional output ports.
+- A plain stateless function. It must be importable, so a lambda is refused: its source cannot be recovered.
+- A bound method of a class instance -- stateful. An attribute the method WRITES becomes a state register, and a
+  public one additionally gets a ``state_<attr>`` output port; an attribute it only reads folds to its value.
 - Later on we may potentially add support for multiple methods per class, where the generated module will provide
   a selector port to choose which method to execute, all sharing the same state. In this case we would accept
   a tuple containing the class type and a list of its unbound methods. This remains to be seen.
@@ -87,7 +87,6 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
         _logger.info("\t%s: %s", field.name, getattr(ops, field.name))
 
     hir = optimize(lower_frontend(target))
-    run_shadow(target)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
     mir = lower_to_mir(hir, ops)

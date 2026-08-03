@@ -1,7 +1,8 @@
 """
 Sublayer 3: residual Eel -> HIR, mechanically. Every semantic decision was the partial evaluator's: operations
 arrive as ``IntrinsicCall`` nodes carrying their HIR operator, every assignment is typed, and control is
-structured branches only. The emitter keeps one environment of binding -> value id, forks it per branch arm,
+structured: branches, data-dependent loops with their carried phis, and the loop and inlined-frame exits. The emitter
+keeps one environment of binding -> value id, forks it per branch arm,
 and at the join keeps the intersection, phi-ing entries whose ids differ -- names bound on one side only were
 already dropped (and any later read rejected) by the partial evaluator's definite-assignment rule. Parameters
 become input ports in declaration order whether read or not: the module interface mirrors the signature.

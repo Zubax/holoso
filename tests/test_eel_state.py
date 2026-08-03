@@ -7,6 +7,7 @@ is pinned here in its original shape.
 """
 
 import dataclasses
+import functools
 import math
 import types
 from collections.abc import Callable, Sequence
@@ -603,6 +604,32 @@ class _HierarchicalComponent:
 
 def test_a_component_instance_call_is_the_ruled_hierarchical_refusal() -> None:
     _rejects(_HierarchicalComponent().step, "it is a separate component instance ._Inner.; hierarchical state")
+
+
+def _scale(factor: float, x: float) -> float:
+    return factor * x
+
+
+_PARTIAL = functools.partial(_scale, 0.5)
+
+
+def _calls_an_unregistered_numpy_function(x: float) -> float:
+    return float(np.sum(np.array([x, x])))
+
+
+def _calls_a_partial(x: float) -> float:
+    return _PARTIAL(x)
+
+
+def test_an_unregistered_callable_is_not_mistaken_for_a_component_instance() -> None:
+    # A component instance is one the compiler would have to inline: its class defines __call__ as a plain Python
+    # function. numpy's dispatchers, ufuncs and functools.partial are callable objects with an instance __dict__ but a
+    # C-level __call__, so they must draw the plain unregistered-callee refusal, not a message about hierarchical state.
+    for kernel in (_calls_an_unregistered_numpy_function, _calls_a_partial):
+        _rejects(kernel, "are not supported yet")
+        with pytest.raises(UnsupportedConstruct) as excinfo:
+            lower(kernel)
+        assert "component instance" not in excinfo.value.message
 
 
 # ---------------------------------------------------------------------- the trim and its finality

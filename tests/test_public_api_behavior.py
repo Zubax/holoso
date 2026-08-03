@@ -364,10 +364,10 @@ def test_logical_port_is_the_single_public_port_type() -> None:
     assert all(isinstance(port, holoso.LogicalPort) for port in (*sim.inputs, *sim.outputs))
 
 
-def _mixed_list_io(flag: bool, x: float) -> list[float]:
+def _mixed_list_io(flag: bool, x: float) -> tuple[float, ...]:
     # A LIST-literal return (vs the tuple above): the same aggregate-flattening path through a list, with a bool cast
     # into a float lane.
-    return [x + 1.0, float(flag)]
+    return [x + 1.0, float(flag)]  # type: ignore[return-value]  # a list literal is the point; sequences are one kind
 
 
 def test_mixed_list_io_metadata_and_values() -> None:

@@ -1,11 +1,14 @@
 """
 The corpus differential: every integer kernel is oracle-verified against CPython -- exact ints,
 multi-transaction, state included -- proving integers flow through Eel into HIR, and each one's MIR
-refusal is recorded (``_reject_integers`` runs until the integer hardware sprint). The float FIR and
-biquad kernels ride the same oracle; they lower all the way and graduate to ``examples/`` in M11.
+refusal is recorded (``_reject_integers`` runs until the integer hardware sprint). The float kernels ride
+the same oracle and lower all the way: the two residual-loop exit shapes, plus the FIR and biquad examples,
+whose exactness against CPython this suite adds on top of the tolerance-based example matrix.
 """
 
+import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -14,9 +17,13 @@ from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
 from holoso._mir import lower as lower_to_mir
 
-from ._eel_corpus import Biquad, Crc8, Debouncer, Fir4, IntUartRx, IntUartTx, Lfsr16, NcoPhase, PriorityEncoder, Pwm
+from ._eel_corpus import Crc8, Debouncer, IntUartRx, IntUartTx, Lfsr16, NcoPhase, PriorityEncoder, Pwm
 from ._eel_corpus import band_scan, convergence_steps
 from ._eeloracle import InputRow, assert_hir_matches_reference
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+from biquad import Biquad  # noqa: E402
+from fir import Fir4  # noqa: E402
 
 
 def _uart_tx_vectors() -> list[InputRow]:
@@ -62,8 +69,8 @@ _INT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]
 ]
 
 _FLOAT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]] = [
-    ("fir4", lambda: Fir4((0.25, 0.5, 0.25, 0.125)).step, _rows("x", [1.0, 2.0, -1.0, 0.5, 3.0, -2.5, 0.0])),
-    ("biquad", lambda: Biquad((0.2, 0.4, 0.2), (-0.5, 0.25)).step, _rows("x", [1.0, 0.0, 0.0, 2.0, -1.0, 0.5, 0.0])),
+    ("fir4", lambda: Fir4().__call__, _rows("x", [1.0, 2.0, -1.0, 0.5, 3.0, -2.5, 0.0])),
+    ("biquad", lambda: Biquad().__call__, _rows("x", [1.0, 0.0, 0.0, 2.0, -1.0, 0.5, 0.0])),
     (
         "convergence_steps",
         lambda: convergence_steps,

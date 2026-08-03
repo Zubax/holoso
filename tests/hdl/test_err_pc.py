@@ -27,7 +27,7 @@ from holoso import (
     OpConfig,
 )
 from holoso._backend.verilog import generate
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import build, pooled_write_word
 from holoso._mir import lower as lower_to_mir

@@ -17,7 +17,7 @@ import pytest
 
 from holoso import FloatFormat
 from holoso._backend.numerical import ModelInput, ModelOutput, NumericalSimulator
-from holoso._frontend import lower
+from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import Lir, build
 from holoso._mir import lower as lower_to_mir
@@ -143,8 +143,8 @@ def _count_down(n: float) -> float:
 # static metrics gate sees only the raised min_ii).
 _T, _F = True, False
 _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[ModelInput]], int]] = {
-    "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 6),
-    "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 20),
+    "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 5),
+    "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 14),
     "quadrature_encoder": (
         lambda: QuadratureEncoder().__call__,
         [[_T, _F], [_T, _T], [_F, _F], [_F, _T], [_T, _T], [_F, _F]],
@@ -160,13 +160,13 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
         [[_T, _T, _T, _F, _F, _F], [_T, _T, _T, _T, _T, _T], [_T, _F, _T, _F, _T, _F], [_F, _T, _T, _T, _T, _T]],
         17,
     ),
-    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 168),
+    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 160),
     "remainder": (
         lambda: remainder,
         [[1.0, 1.0], [7.0, 3.0], [1000.0, 1.0], [123.0, 4.0], [50.0, 7.0], [2.5, 2.5]],
-        381,
+        297,
     ),
-    "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 135),
+    "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 112),
 }
 
 
