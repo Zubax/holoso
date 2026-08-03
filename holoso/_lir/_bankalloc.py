@@ -27,15 +27,8 @@ from ._ir import *
 from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map, value_resident_at_entry
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
-from ._regalloc import Producer
-from ._build_base import (
-    Allocation,
-    BoolArmInstall,
-    ColorObjective,
-    FloatArmInstall,
-    OverlapLayout,
-    PooledConst,
-)
+from ._regalloc import Producer, RegallocTuning
+from ._build_base import Allocation, BoolArmInstall, ColorObjective, FloatArmInstall, OverlapLayout, PooledConst
 from ._construct import build_const_pool
 from ._coalesce import coalescable_arms, coalesce_and_color
 from ._layout import schedule_with_overlap
@@ -73,6 +66,7 @@ def layout_and_allocate(
     has_install_blocks: Mapping[int, bool],
     has_state_copy: bool,
     fetch_lag: int,
+    tuning: RegallocTuning,
 ) -> _LayoutAllocation:
     overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag)
     block_sched = overlap.block_sched
@@ -94,6 +88,7 @@ def layout_and_allocate(
         overlap.block_term_offset,
         overlap.block_inflight,
         fetch_lag,
+        tuning,
     )
     return _LayoutAllocation(overlap, inst_of, instances, consts, const_pool, alloc)
 
@@ -456,6 +451,7 @@ def _allocate_bank(
     block_term_offset: dict[int, int],
     block_inflight: dict[int, dict[ValueId, int]],
     fetch_lag: int,
+    tuning: RegallocTuning,
 ) -> _BankAlloc:
     """
     Color one physical register bank across the CFG. The bank descriptor supplies the conditioner,
@@ -616,7 +612,7 @@ def _allocate_bank(
             pinned,
             {slot_reg[s.name] for s in slots if s.name not in coalesced},
             lambda residual: interference.build(boundary_final, reads_final, residual),
-            ColorObjective(movable, obj_terms.consumer_ports, obj_terms.producer_key, fresh_start),
+            ColorObjective(movable, obj_terms.consumer_ports, obj_terms.producer_key, fresh_start, tuning),
         )
         if conflict is not None:
             demoted = slot_by_reg.get(conflict)
@@ -652,6 +648,7 @@ def _allocate(
     block_term_offset: dict[int, int],
     block_inflight: dict[int, dict[ValueId, int]],
     fetch_lag: int,
+    tuning: RegallocTuning,
 ) -> Allocation:
     """
     Assign wide and boolean registers across the CFG. Both banks are colored by hardware-frame liveness, reusing
@@ -672,10 +669,19 @@ def _allocate(
         for bid, spills in block_inflight.items()
     }
     float_alloc = _allocate_bank(
-        _WIDE, mir, float_mir, block_sched, inst_of, block_makespan, block_term_offset, float_inflight, fetch_lag
+        _WIDE,
+        mir,
+        float_mir,
+        block_sched,
+        inst_of,
+        block_makespan,
+        block_term_offset,
+        float_inflight,
+        fetch_lag,
+        tuning,
     )
     bool_alloc = _allocate_bank(
-        _BOOL, mir, bool_mir, block_sched, inst_of, block_makespan, block_term_offset, bool_inflight, fetch_lag
+        _BOOL, mir, bool_mir, block_sched, inst_of, block_makespan, block_term_offset, bool_inflight, fetch_lag, tuning
     )
 
     # A phi arm coalesced onto the merged register needs no install copy: the arm value already resides in the phi's

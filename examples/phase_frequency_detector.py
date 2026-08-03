@@ -40,16 +40,9 @@ class PhaseFrequencyDetector:
 
 
 def main() -> None:
-    float_format = holoso.FloatFormat(wexp=8, wman=36)
-    ops = holoso.OpConfig(
-        holoso.FAddOperator(float_format),
-        holoso.FMulOperator(float_format),
-        holoso.FDivOperator(float_format),
-        holoso.FMulILog2OperatorFamily(float_format),
-        holoso.FCmpOperator(float_format),
-    )
+    options = holoso.Options(holoso.OperatorOptions())  # purely boolean: no float operator, no float format
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    result = holoso.synthesize(PhaseFrequencyDetector().__call__, ops)
+    result = holoso.synthesize(PhaseFrequencyDetector().__call__, options)
     for filename, path in result.write(out_dir).items():
         print(f"{filename}: {path}")
 

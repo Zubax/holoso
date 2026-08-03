@@ -26,6 +26,7 @@ from ._portassign import assign_commutative_ports
 from ._schedule import resolve_pool
 from ._bankalloc import actual_install_blocks, install_source_commit, layout_and_allocate
 from ._build_base import Allocation, PooledConst
+from ._regalloc import RegallocTuning
 from ._construct import (
     bool_operand,
     build_inline_op,
@@ -42,15 +43,17 @@ from ._layout import install_inclusive_makespan, layout_blocks
 _logger = logging.getLogger(__name__)
 
 
-def build(mir: Mir, module_name: str, fetch_stages: int) -> Lir:
+def build(mir: Mir, module_name: str, fetch_stages: int, tuning: RegallocTuning) -> Lir:
     """
     Schedule, bind, and register-allocate selected MIR into a pipelined microprogram. A straight-line kernel is the
     degenerate single-``Ret``-block control-flow graph, so there is one build path for every kernel. ``fetch_stages``
     is the control-fetch pipeline depth; the datapath lags the fetch by one less than it, the lag threaded throughout.
     """
+    if fetch_stages != 3:
+        raise ValueError(f"only the 3-stage control fetch is implemented, got {fetch_stages}")
     if not mir.outputs:
         raise UnsupportedConstruct("Synthesized kernel must produce at least one output value")
-    lir = _build_program(mir, module_name, fetch_stages - 1)
+    lir = _build_program(mir, module_name, fetch_stages - 1, tuning)
     names = [port.name for port in lir.ports]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -122,7 +125,7 @@ def _has_state_copy(
     )
 
 
-def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
+def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocTuning) -> Lir:
     """
     Build the microprogram for any kernel (a straight-line kernel is the degenerate single-``Ret``-block graph):
     schedule each block independently, pool operator instances across the mutually-exclusive blocks, color both register
@@ -188,7 +191,9 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int) -> Lir:
     pinned_push: set[int] = set()
     state_copy_latched = False
     for round_index in range(3 * len(mir.blocks) + 4):
-        result = layout_and_allocate(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag)
+        result = layout_and_allocate(
+            mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag, tuning
+        )
         raw = actual_install_blocks(result.alloc, float_mir, bool_mir, result.overlap.block_sched)
         # The two derivations of install-bearing -- the CFG-shape seed and the post-allocation copies -- must agree on
         # the key universe: a block outside the seed can never install, so a wider ``raw`` means the derivations

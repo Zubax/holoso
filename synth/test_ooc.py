@@ -3,8 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from holoso import synthesize, SynthesisResult, FloatFormat
-from holoso import FAddOperator, FCmpOperator, FDivOperator, FMulILog2OperatorFamily, FMulOperator, OpConfig
+from holoso import (
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
+    FloatFormat,
+    OperatorOptions,
+    Options,
+    SynthesisResult,
+    synthesize,
+)
 
 from synth import OocDesign, SourceFile, SynthReport, build_compiler_ooc_design, build_ooc_wrapper
 from synth.flows import FlowId
@@ -30,15 +40,14 @@ def bool_gate(a: bool, b: bool) -> bool:
     return a and b
 
 
-OPS = OpConfig(
-    fadd=FAddOperator(FMT),
-    fmul=FMulOperator(FMT),
-    fdiv=FDivOperator(FMT),
-    fmul_ilog2=FMulILog2OperatorFamily(FMT),
-    fcmp=FCmpOperator(FMT),
+OPS = Options(
+    OperatorOptions(
+        fadd=FAddOptions(), fmul=FMulOptions(), fdiv=FDivOptions(), fmul_ilog2=FMulILog2Options(), fcmp=FCmpOptions()
+    ),
+    ffmt=FMT,
 )
-KERN: SynthesisResult = synthesize(kern, ops=OPS, name="kern")
-WIDE: SynthesisResult = synthesize(wide, ops=OPS, name="wide")
+KERN: SynthesisResult = synthesize(kern, OPS, name="kern")
+WIDE: SynthesisResult = synthesize(wide, OPS, name="wide")
 
 requires_diamond = pytest.mark.skipif(not DiamondEcp5Flow().available(), reason="Lattice Diamond not found")
 requires_vivado = pytest.mark.skipif(not VivadoArtix7Flow().available(), reason="Vivado not found")
@@ -91,7 +100,7 @@ def test_wrapper_buses_single_bit_input_word() -> None:
     # Regression: an all-boolean-input kernel makes io_in 1 bit wide. The wrapper still bit-slices io_in in the input
     # load, so io_in must be declared as a vector -- a collapsed scalar wire is rejected by strict elaborators
     # (Diamond/Vivado: "cannot index into non-array io_in"), though lenient Yosys accepts it.
-    wrapper = build_ooc_wrapper(synthesize(bool_gate, ops=OPS, name="bool_gate"))
+    wrapper = build_ooc_wrapper(synthesize(bool_gate, OPS, name="bool_gate"))
     assert wrapper.io_in_width == 1
     assert re.search(r"input\s+wire\s+\[\d+:0\]\s+io_in", wrapper.verilog), "io_in must be declared as a vector"
     assert "io_in[0:0]" in wrapper.verilog  # the load slice that requires io_in to be indexable

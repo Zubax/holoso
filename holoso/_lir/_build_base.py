@@ -11,7 +11,7 @@ from .._operators import BoolInversion, FloatSignControl
 from .._util import ValueId
 from ._ir import ReadPort
 from ._schedule import Schedule
-from ._regalloc import Producer
+from ._regalloc import Producer, RegallocTuning
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,11 +72,12 @@ class OverlapLayout:
 class ColorObjective:
     """
     One bank's steering inputs to quotient coloring, beyond the interference graph and pins: the deterministic movable
-    order, the per-value consumer read ports and producers (the write-select objective), and the first freely
-    assignable register. Threaded together because the colorer consumes them as a unit.
+    order, the per-value consumer read ports and producers (the write-select objective), the first freely assignable
+    register, and the allocator tuning. Threaded together because the colorer consumes them as a unit.
     """
 
     movable: list[ValueId]
     consumer_ports: dict[ValueId, set[ReadPort]]
     producer_key: dict[ValueId, frozenset[Producer]]
     fresh_start: int
+    tuning: RegallocTuning

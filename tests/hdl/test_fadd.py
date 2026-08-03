@@ -14,7 +14,8 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FAddOperator, FloatFormat
+from holoso import FAddOptions, FloatFormat
+from holoso._operators import FAddOperator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -116,7 +117,7 @@ STAGE_COMBOS = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
 def test_holoso_fadd(sim: str, stages: tuple[int, int, int]) -> None:
     stage_decode, stage_align, stage_output = stages
     operator = FAddOperator(
-        FloatFormat(8, 24), stage_decode=stage_decode, stage_align=stage_align, stage_output=stage_output
+        FloatFormat(8, 24), FAddOptions(stage_decode=stage_decode, stage_align=stage_align, stage_output=stage_output)
     )
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_d{stage_decode}a{stage_align}o{stage_output}"

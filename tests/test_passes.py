@@ -11,14 +11,16 @@ import pytest
 
 import holoso
 from holoso import (
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
     FloatFormat,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
 )
+from holoso._operators import FAddOperator, FDivOperator, FMulOperator, OpConfig
 from holoso._errors import SynthesisError, UnsupportedConstruct
 from holoso._util import ValueId
 from holoso._eel import lower
@@ -90,14 +92,25 @@ from holoso._hir import (
     IntType,
 )
 from holoso._hir import _if_convert as if_convert_pass
-from holoso._lir import build
+from ._modelref import build_lir
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
-from ._modelref import build_model
+from ._modelref import build_model, build_ops
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
+OPS = build_ops(
+    Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=FMT,
+    )
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,8 +141,8 @@ class OtherFold(Operator):
         return OtherConst(operand.value + 1)
 
 
-def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops)
+def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
+    return lower_to_mir(optimize(lower(target).hir), ops, fmt)
 
 
 def _op_count(mir: Mir, cls: type) -> int:
@@ -184,7 +197,7 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
     hir = builder.finish()
 
     try:
-        lower_to_mir(hir, OPS)
+        lower_to_mir(hir, OPS, FMT)
     except UnsupportedConstruct as ex:
         assert "no MIR lowering rule" in str(ex)
     else:
@@ -267,10 +280,19 @@ def test_wide_supported_pow2_uses_ilog2_operator() -> None:
         return a * 16.0
 
     fmt = FloatFormat(3, 4)
-    ops = OpConfig(
-        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    ops = build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(),
+                fmul=FMulOptions(),
+                fdiv=FDivOptions(),
+                fmul_ilog2=FMulILog2Options(),
+                fcmp=FCmpOptions(),
+            ),
+            ffmt=fmt,
+        )
     )
-    mir = _run(f, ops)
+    mir = _run(f, ops, fmt)
     selected = _ops(mir)
     assert [type(o.operator) for o in selected] == [FMulILog2Operator]
     assert isinstance(selected[0].operator, FMulILog2Operator) and selected[0].operator.k == 4
@@ -282,11 +304,20 @@ def test_unsupported_pow2_shift_is_rejected() -> None:
         return a * 64.0
 
     fmt = FloatFormat(3, 4)
-    ops = OpConfig(
-        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    ops = build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(),
+                fmul=FMulOptions(),
+                fdiv=FDivOptions(),
+                fmul_ilog2=FMulILog2Options(),
+                fcmp=FCmpOptions(),
+            ),
+            ffmt=fmt,
+        )
     )
     try:
-        _run(f, ops)
+        _run(f, ops, fmt)
     except UnsupportedConstruct as ex:
         assert "unsupported power-of-two float scale" in str(ex)
     else:
@@ -386,7 +417,7 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
     # LIR build) since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
     hir = lower(_deep_cfg_kernel).hir
     assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
-    model = build_model(build(_run(_deep_cfg_kernel), "deep", fetch_stages=3))
+    model = build_model(build_lir(_run(_deep_cfg_kernel), "deep"))
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
         assert float(model.run(x)[0]) == _deep_cfg_kernel(x)
 
@@ -588,7 +619,7 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
         assert (
             has_select == keeps_select
         ), f"{fn.__name__}: bool_select presence {has_select} != expected {keeps_select}"
-        model = build_model(build(lower_to_mir(hir, OPS), fn.__name__, fetch_stages=3))
+        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT), fn.__name__))
         for combo in itertools.product([False, True], repeat=arity):
             got = bool(model.run(*combo)[0])
             assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"
@@ -622,7 +653,7 @@ def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
         assert not any(
             isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, Select)) for n in hir.nodes.values()
         ), f"{kernel.__name__}: a mux over identical arms survived"
-        model = build_model(build(lower_to_mir(hir, OPS), kernel.__name__, fetch_stages=3))
+        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT), kernel.__name__))
         for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
             got, want = read(model.run(x)[0]), read(kernel(x))
             assert got == want, f"{kernel.__name__}({x}): got {got}, want {want}"
@@ -673,7 +704,7 @@ def test_speculatable_hir_operators_map_to_error_free_hardware() -> None:
     # error-bearing operator today, and it must stay unspeculatable. A future error-bearing operator must declare
     # speculatable=False (the default) on its HIR side, or if-conversion would assert the module error flag for a
     # never-taken path.
-    assert FDivOperator(FMT).error_ports and not HirFloatDiv.speculatable
+    assert FDivOperator(FMT, FDivOptions()).error_ports and not HirFloatDiv.speculatable
 
 
 def test_dead_diamond_frees_its_condition_cone() -> None:
@@ -818,7 +849,7 @@ def test_a_constant_integer_expression_folds_away_entirely() -> None:
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     (out,) = hir.outputs
     assert hir.nodes[out.value] == FloatConst(float(5 * 2**200))
-    lower_to_mir(hir, OPS)  # nothing integer is left, so MIR accepts it
+    lower_to_mir(hir, OPS, FMT)  # nothing integer is left, so MIR accepts it
 
 
 def test_integer_folding_is_exact_across_the_vocabulary() -> None:
@@ -869,7 +900,7 @@ def test_integer_folding_has_no_size_limit() -> None:
     hir = optimize(builder.finish())
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
-    lower_to_mir(hir, OPS)  # nothing integer survives, however wide the intermediate was
+    lower_to_mir(hir, OPS, FMT)  # nothing integer survives, however wide the intermediate was
 
 
 @pytest.mark.parametrize(
@@ -1238,7 +1269,7 @@ def test_integer_nodes_are_refused_by_mir_lowering(make: Callable[[HirBuilder], 
     make(builder)
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-        lower_to_mir(builder.finish(), OPS)
+        lower_to_mir(builder.finish(), OPS, FMT)
 
 
 def test_a_bool_select_repeating_its_condition_reduces_to_a_gate() -> None:
@@ -1261,7 +1292,7 @@ def test_a_bool_select_repeating_its_condition_reduces_to_a_gate() -> None:
         assert not any(isinstance(op, BoolSelect) for op in operators), f"{kernel.__name__}: the mux survived"
         assert any(isinstance(op, gate) for op in operators), f"{kernel.__name__}: expected a {gate.__name__}"
         # The shape alone cannot tell an `and` rewritten as an `or`; only the truth table can.
-        sim = build_model(build(_run(kernel), kernel.__name__, fetch_stages=3))
+        sim = build_model(build_lir(_run(kernel), kernel.__name__))
         for c in (False, True):
             for other in (False, True):
                 assert sim.run(c, other)[0] is kernel(c, other), f"{kernel.__name__}({c}, {other})"

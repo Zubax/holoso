@@ -15,7 +15,8 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FLog2Operator, FloatFormat
+from holoso import FLog2Options, FloatFormat
+from holoso._operators import FLog2Operator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -112,7 +113,7 @@ async def holoso_flog2_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_flog2(sim: str, stages: dict[str, int]) -> None:
-    operator = FLog2Operator(FloatFormat(8, 24), **stages)
+    operator = FLog2Operator(FloatFormat(8, 24), FLog2Options(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"flog2_{stage_tag(stages)}"
     runner.build(

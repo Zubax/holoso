@@ -25,12 +25,12 @@ import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
 from holoso._hir import optimize
-from holoso._lir import FloatStateSlot, build
+from holoso._lir import FloatStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS
-from ._modelref import default_ops
+from ._modelref import build_lir, default_ops, default_options
 
 # Kernel name -> frozen (min initiation interval, last microcode PC). last_pc is the out_valid boundary PC -- the
 # end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
@@ -72,10 +72,9 @@ _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
 @pytest.mark.parametrize("name", sorted(_FROZEN_SCHEDULE))
 def test_schedule_length_is_frozen(name: str) -> None:
     spec = _SPEC_BY_NAME[name]
-    lir = build(
-        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0])),
+    lir = build_lir(
+        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0]), spec.formats[0]),
         name,
-        fetch_stages=3,
     )
     got = (lir.min_initiation_interval, lir.last_pc)
     assert got == _FROZEN_SCHEDULE[name], (
@@ -125,9 +124,7 @@ _CHAINED_COPY: list[tuple[str, type[_Delay3] | type[_BoolShift3], tuple[int, int
 def test_chained_copy_schedule_is_frozen(
     name: str, kernel_cls: type[_Delay3] | type[_BoolShift3], frozen: tuple[int, int]
 ) -> None:
-    lir = build(
-        lower_to_mir(optimize(lower_frontend(kernel_cls().__call__).hir), default_ops(_FMT)), name, fetch_stages=3
-    )
+    lir = build_lir(lower_to_mir(optimize(lower_frontend(kernel_cls().__call__).hir), default_ops(_FMT), _FMT), name)
     slots: list[FloatStateSlot | BoolStateSlot] = [*lir.float_state_slots, *lir.bool_state_slots]
     assert all(
         slot.needs_copy for slot in slots
@@ -145,13 +142,15 @@ def test_chained_copy_captures_old_values() -> None:
     input by exactly three transactions. A value-blind schedule freeze cannot see a read-after-write miscompile here.
     """
     fmt = _FMT
-    fmodel = holoso.synthesize(_Delay3().__call__, default_ops(fmt), name="delay3").numerical_model.elaborate()
+    fmodel = holoso.synthesize(_Delay3().__call__, default_options(fmt), name="delay3").numerical_model.elaborate()
     fref = _Delay3()
     for raw in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0):
         x = fmt.decode(fmt.encode(raw))  # quantize so the model and the reference see the identical operand
         assert float(fmodel.run(x)[0]) == fref(x)
 
-    bmodel = holoso.synthesize(_BoolShift3().__call__, default_ops(fmt), name="bool_shift3").numerical_model.elaborate()
+    bmodel = holoso.synthesize(
+        _BoolShift3().__call__, default_options(fmt), name="bool_shift3"
+    ).numerical_model.elaborate()
     bref = _BoolShift3()
     for b in (True, False, True, True, False, False, True, False):
         assert bool(bmodel.run(b)[0]) == bref(b)

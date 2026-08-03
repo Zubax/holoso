@@ -1,6 +1,7 @@
 """Thin API for the low-level IR consumer contract."""
 
 from ._build import build as build
+from ._regalloc import RegallocTuning as RegallocTuning
 from ._ir import Lir as Lir
 from ._ir import (
     BoolConstRef as BoolConstRef,

@@ -18,22 +18,30 @@ import pytest
 
 import holoso
 from holoso import (
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
     FloatFormat,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
 )
 from holoso._errors import UnsupportedConstruct
 
 _FMT = FloatFormat(4, 8)
 
 
-def _ops() -> OpConfig:
-    return OpConfig(
-        FAddOperator(_FMT), FMulOperator(_FMT), FDivOperator(_FMT), FMulILog2OperatorFamily(_FMT), FCmpOperator(_FMT)
+def _ops() -> Options:
+    return Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=_FMT,
     )
 
 

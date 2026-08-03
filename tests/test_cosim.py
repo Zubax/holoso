@@ -10,23 +10,26 @@ import pytest
 from cocotb_tools.runner import get_runner
 
 from holoso import (
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
+    FSortOptions,
     FloatFormat,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    FSortOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
 )
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._lir import Lir, build, pooled_write_word
+from holoso._lir import Lir, pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
 from ._modelref import (
+    build_ops,
+    build_lir,
     ChainedSlots,
     COMPARATOR_OP_CASES,
     OperatorCase,
@@ -94,12 +97,17 @@ def test_cosim_staged_kernel(sim: str) -> None:
         return (a - b) * 0.25 + a * b
 
     fmt = FloatFormat(8, 24)
-    ops = OpConfig(
-        FAddOperator(fmt, stage_decode=1),
-        FMulOperator(fmt, stage_product=1),
-        FDivOperator(fmt),
-        FMulILog2OperatorFamily(fmt, stage_decode=1),
-        FCmpOperator(fmt),
+    ops = build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(stage_decode=1),
+                fmul=FMulOptions(stage_product=1),
+                fdiv=FDivOptions(),
+                fmul_ilog2=FMulILog2Options(stage_decode=1),
+                fcmp=FCmpOptions(),
+            ),
+            ffmt=fmt,
+        )
     )
     run_cosim(sim, kernel, fmt, "kernel_staged", ops=ops)
 
@@ -111,12 +119,17 @@ def test_cosim_staged_division(sim: str) -> None:
 
     # Exercise the STAGE_ALIGN (fadd) and STAGE_INPUT (fdiv) knobs end-to-end -- the combos the staged-kernel misses.
     fmt = FloatFormat(6, 18)
-    ops = OpConfig(
-        FAddOperator(fmt, stage_decode=1, stage_align=1),
-        FMulOperator(fmt),
-        FDivOperator(fmt, stage_input=1),
-        FMulILog2OperatorFamily(fmt),
-        FCmpOperator(fmt),
+    ops = build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(stage_decode=1, stage_align=1),
+                fmul=FMulOptions(),
+                fdiv=FDivOptions(stage_input=1),
+                fmul_ilog2=FMulILog2Options(),
+                fcmp=FCmpOptions(),
+            ),
+            ffmt=fmt,
+        )
     )
     run_cosim(sim, blend, fmt, "blend_staged", ops=ops)
 
@@ -198,13 +211,18 @@ def test_cosim_min_max(sim: str) -> None:
         return min(a, b), max(a, b), min(abs(a), abs(b))
 
     fmt = FloatFormat(8, 24)
-    ops = OpConfig(
-        FAddOperator(fmt),
-        FMulOperator(fmt),
-        FDivOperator(fmt),
-        FMulILog2OperatorFamily(fmt),
-        FCmpOperator(fmt),
-        fsort=FSortOperator(fmt),
+    ops = build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(),
+                fmul=FMulOptions(),
+                fdiv=FDivOptions(),
+                fmul_ilog2=FMulILog2Options(),
+                fcmp=FCmpOptions(),
+                fsort=FSortOptions(),
+            ),
+            ffmt=fmt,
+        )
     )
     run_cosim(sim, kernel, fmt, "min_max", ops=ops)
 
@@ -294,12 +312,17 @@ def test_cosim_new_operator_stages(sim: str) -> None:
     # Exercise the newly-shipped ZKF knobs end-to-end: fadd STAGE_INPUT/STAGE_NORMALIZE/STAGE_PACK, fmul STAGE_PACK,
     # fdiv STAGE_PACK, and fmul_ilog2 STAGE_INPUT -- all folded into the latency model and the latched datapath.
     fmt = FloatFormat(8, 24)
-    ops = OpConfig(
-        FAddOperator(fmt, stage_input=1, stage_normalize=2, stage_pack=1),
-        FMulOperator(fmt, stage_input=1, stage_pack=1),
-        FDivOperator(fmt, stage_pack=1),
-        FMulILog2OperatorFamily(fmt, stage_input=1),
-        FCmpOperator(fmt),
+    ops = build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(stage_input=1, stage_normalize=2, stage_pack=1),
+                fmul=FMulOptions(stage_input=1, stage_pack=1),
+                fdiv=FDivOptions(stage_pack=1),
+                fmul_ilog2=FMulILog2Options(stage_input=1),
+                fcmp=FCmpOptions(),
+            ),
+            ffmt=fmt,
+        )
     )
     run_cosim(sim, kernel, fmt, "new_stages", ops=ops)
 
@@ -388,7 +411,7 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"kdiv_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(kdiv).hir), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower(kdiv).hir), config.make_ops(fmt), fmt), name)
     bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -451,7 +474,7 @@ def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"klog2_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(klog2).hir), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower(klog2).hir), config.make_ops(fmt), fmt), name)
     bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -517,7 +540,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     # _modelref.overlap_div_err_kernel.
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel).hir), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower(overlap_div_err_kernel).hir), config.make_ops(fmt), fmt), name)
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)

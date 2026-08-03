@@ -18,9 +18,9 @@ write port fans into one place.
 
 Register count is a bounded *secondary* objective. A register costs flip-flops but no steering, so it is worth shedding
 only when doing so widens a write select modestly: the allocator colors twice -- once reach-minimal, once compacting
-into shared registers up to a write-select cap -- and keeps whichever minimizes ``reach + _REG_PRICE * registers`` (see
-those constants). The reach-minimal coloring is always a candidate, so trading for fewer registers never raises steering
-by more than the price paid per register freed.
+into shared registers up to a write-select cap -- and keeps whichever minimizes ``reach + price * registers`` (see
+:class:`RegallocTuning`). The reach-minimal coloring is always a candidate, so trading for fewer registers never raises
+steering by more than the price paid per register freed.
 
 The allocator is a port-affinity-biased graph coloring (each value takes the same-interference-free register of least
 marginal mux growth), refined by simulated annealing. Pinned values (input ports on the low load lanes, state live-ins
@@ -31,7 +31,6 @@ simply opens a new register.
 
 from collections import Counter
 from dataclasses import dataclass
-import os
 
 import numpy as np
 from scipy.optimize import dual_annealing
@@ -43,27 +42,21 @@ from ._ir import OperatorInstance, ReadPort
 # the write-select fan-in objective. The read-port identity ``ReadPort`` lives in ``_ir`` beside its enumerator.
 type Producer = OperatorInstance | str
 
-
-# Budget for the SciPy dual-annealing refinement. It only polishes an already-valid greedy seed (and is a no-op when
-# the seed is already at the reach floor), so the function-evaluation cap keeps build time bounded; raise it to trade
-# build time for a deeper search. The environment override is for testing only; eventually we might add an API handle.
-_REFINE_MAXITER = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "5000"))
-
-# Balance of reach against register count, layered on the hardware-accurate liveness. ``_REG_REUSE_WRITE_CAP`` bounds
-# how wide a per-register write select the compaction may build (the ":1" of the select -- the number of distinct
-# producers sharing a register); reuse never widens a read mux beyond a fresh register, so the write select is the only
-# mux a compacted coloring can grow. ``_REG_PRICE`` is what one freed register is worth in mux-arm units: the allocator
-# keeps whichever coloring minimizes ``reach + _REG_PRICE * registers``. The price bounds the spectrum -- price 0 stays
-# reach-minimal (registers only break a reach tie), price -> inf takes every register the cap can free, and a fractional
-# price compacts only when a register comes near reach-free. The default 2.0 sheds one register off each bundled small
-# kernel with f_max held and selects no wider than 2:1.
-#
-# These two are EXPERIMENTAL / ADVANCED knobs with no user-facing surface; they are read once from the environment for
-# tuning and may be promoted to proper parameters if a real need arises.
-_REG_REUSE_WRITE_CAP = int(os.getenv("HOLOSO_REG_REUSE_WRITE_CAP", "2"))
-_REG_PRICE = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
 _NO_CAP = 1 << 30  # an effectively unbounded write-select budget, used for the reach-minimal coloring
 _INFEASIBLE_COST = 1e18  # annealing penalty for an undecodable point (far above any real mux-fan-in objective)
+
+
+@dataclass(frozen=True, slots=True)
+class RegallocTuning:
+    """
+    ``effort`` is the annealing function-evaluation budget, ``reuse_write_cap`` bounds the per-register write select
+    the compaction may build, and ``register_price`` is what one freed register is worth in mux-arm units: the
+    allocator minimizes ``reach + register_price * registers``.
+    """
+
+    effort: int
+    reuse_write_cap: int
+    register_price: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +87,7 @@ class ColoringProblem:
     consumer_ports: dict[ValueId, set[ReadPort]]
     producer_key: dict[ValueId, frozenset[Producer]]
     fresh_start: int
+    tuning: RegallocTuning
 
 
 def color(problem: ColoringProblem) -> tuple[dict[ValueId, int], int]:
@@ -102,7 +96,7 @@ def color(problem: ColoringProblem) -> tuple[dict[ValueId, int], int]:
     cheaper of the two by ``reach + price * registers``, refined by simulated annealing. Reduces to the straight-line
     coloring on a single block because the interference graph there is exactly the interval-overlap graph.
     """
-    cap, price = _REG_REUSE_WRITE_CAP, _REG_PRICE
+    cap, price = problem.tuning.reuse_write_cap, problem.tuning.register_price
 
     def greedy_seed(compact: bool, budget: int) -> tuple[dict[ValueId, int], int]:
         seed = _color_greedy(problem, compact, budget)
@@ -233,7 +227,8 @@ def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int,
             writers[chosen].update(problem.producer_key[vid])
         return assign
 
-    if _REFINE_MAXITER <= 0:
+    effort = problem.tuning.effort
+    if effort <= 0:
         return seed
     best = seed
     best_cost = _objective(seed, problem.consumer_ports, problem.producer_key)
@@ -252,7 +247,7 @@ def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int,
 
     x0 = np.array([float(seed[vid]) for vid in order])
     bounds = [(0.0, nreg - 1e-6)] * len(order)
-    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=_REFINE_MAXITER, maxfun=_REFINE_MAXITER, no_local_search=True)
+    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=effort, maxfun=effort, no_local_search=True)
     return best
 
 

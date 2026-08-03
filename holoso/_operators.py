@@ -3,13 +3,14 @@
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from hashlib import blake2s
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import zkf
 
+from ._errors import UnsupportedConstruct
 from ._value import FloatValue
 from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
 
@@ -289,24 +290,28 @@ class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
 
 @dataclass(frozen=True, slots=True)
 class FAddOperator(FloatHardwareOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0  # takes any count of input register stages (extra stages relieve routing congestion)
+        stage_decode: int = 0
+        stage_align: int = 0
+        stage_normalize: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "fadd"
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # signed sum: a+b == b+a bit-for-bit
-    stage_input: int = 0  # takes any count of input register stages (extra stages relieve routing congestion)
-    stage_decode: int = 0
-    stage_align: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    opt: Options
 
     def __post_init__(self) -> None:
         model = zkf.AddModel(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            stage_input=self.stage_input,
-            stage_decode=self.stage_decode,
-            stage_align=self.stage_align,
-            stage_normalize=self.stage_normalize,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            stage_input=self.opt.stage_input,
+            stage_decode=self.opt.stage_decode,
+            stage_align=self.opt.stage_align,
+            stage_normalize=self.opt.stage_normalize,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -325,20 +330,26 @@ class FAddOperator(FloatHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class FMulOperator(FloatHardwareOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_product: int = 0  # splitting the product is rarely useful unless wman exceeds the DSP slice input width
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "fmul"
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # product: a*b == b*a bit-for-bit
-    stage_input: int = 0
-    stage_product: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    opt: Options
+    wmultiplier: int
 
     def __post_init__(self) -> None:
         model = zkf.MulModel(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            stage_input=self.stage_input,
-            stage_product=self.stage_product,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            wmultiplier=self.wmultiplier,
+            stage_input=self.opt.stage_input,
+            stage_product=self.opt.stage_product,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -357,18 +368,22 @@ class FMulOperator(FloatHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class FDivOperator(FloatHardwareOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "fdiv"
     error_ports: ClassVar[list[str]] = ["div0"]
-    stage_input: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    opt: Options
 
     def __post_init__(self) -> None:
         model = zkf.DivModel(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            stage_input=self.stage_input,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            stage_input=self.opt.stage_input,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -389,17 +404,21 @@ class FDivOperator(FloatHardwareOperator):
 class FMulILog2Operator(FloatHardwareOperator):
     """Exact scaling by a power of two, ``a * 2**k``; the concrete operator the family returns."""
 
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_decode: int = 0
+
     mnemonic: ClassVar[str] = "fmul_ilog2_const"
     k: int
-    stage_input: int = 0
-    stage_decode: int = 0
+    opt: Options
 
     def __post_init__(self) -> None:
         model = zkf.MulIlog2ConstModel(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
             k=self.k,
-            stage_input=self.stage_input,
-            stage_decode=self.stage_decode,
+            stage_input=self.opt.stage_input,
+            stage_decode=self.opt.stage_decode,
         )
         object.__setattr__(self, "_model", model)
 
@@ -420,12 +439,11 @@ class FMulILog2Operator(FloatHardwareOperator):
 class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
     """The ilog2 family: a factory whose stage knobs are baked into every concrete operator it instantiates."""
 
-    stage_input: int = 0
-    stage_decode: int = 0
+    opt: FMulILog2Operator.Options
 
     def instantiate(self, *params: int) -> FMulILog2Operator:
         (k,) = params
-        return FMulILog2Operator(fmt=self.fmt, k=k, stage_input=self.stage_input, stage_decode=self.stage_decode)
+        return FMulILog2Operator(fmt=self.fmt, k=k, opt=self.opt)
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,6 +454,10 @@ class FCmpOperator(FloatHardwareOperator):
     optional inversion (ZKF has no NaN, so the ordering is total and every relation is one flag or its complement);
     one instance therefore serves every relation, and several relations over the same operands fuse into one firing.
     """
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
 
     mnemonic: ClassVar[str] = "fcmp"
     output_hdl_ports: ClassVar[list[str]] = ["a_gt_b", "a_eq_b", "a_lt_b"]
@@ -458,10 +480,10 @@ class FCmpOperator(FloatHardwareOperator):
     # (eq fixed) -- the comparator is commutative under that flag exchange, which lets port assignment orient its
     # operands freely.
     swap_output_permutation: ClassVar[tuple[int, ...]] = (2, 1, 0)
-    stage_input: int = 0
+    opt: Options
 
     def __post_init__(self) -> None:
-        model = zkf.CmpModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.stage_input)
+        model = zkf.CmpModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.opt.stage_input)
         object.__setattr__(self, "_model", model)
 
     @property
@@ -496,16 +518,21 @@ class FCmpOperator(FloatHardwareOperator):
 class FRoundOperator(FloatHardwareOperator):
     """
     Round a float to an integral-valued float. One pooled instance serves all four modes (nearest-even, floor, ceil,
-    trunc) via the 2-bit ``round_mode`` immediate, as one comparator serves every relation. The zkf core is
-    combinational, so a register stage (``stage_output`` defaults to 1) keeps the pooled latency at least one cycle.
+    trunc) via the 2-bit ``round_mode`` immediate, as one comparator serves every relation.
     """
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        """The zkf core is combinational, hence the nonzero default: a pooled operator needs latency >= 1."""
+
+        stage_input: int = 1
+        stage_decode: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
 
     mnemonic: ClassVar[str] = "fround"
     immediate_ports: ClassVar[list[ImmediateField]] = [ImmediateField("round_mode", 2)]
-    stage_input: int = 0
-    stage_decode: int = 0
-    stage_pack: int = 0
-    stage_output: int = 1
+    opt: Options
 
     class Mode(IntEnum):
         """Matches the mode encoding in holoso_fround"""
@@ -525,10 +552,10 @@ class FRoundOperator(FloatHardwareOperator):
     def __post_init__(self) -> None:
         model = zkf.RoundModel(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            stage_input=self.stage_input,
-            stage_decode=self.stage_decode,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            stage_input=self.opt.stage_input,
+            stage_decode=self.opt.stage_decode,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
         if self.latency < 1:
@@ -556,25 +583,31 @@ class FFmaOperator(FloatHardwareOperator):
     explicit ``math.fma`` and the implicit ``a*b+c`` fusion. Not commutative under operand reversal (gives ``c*b+a``).
     """
 
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_product: int = 0
+        stage_decode: int = 0
+        stage_align: int = 0
+        stage_normalize: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "ffma"
-    stage_input: int = 0
-    stage_product: int = 0
-    stage_decode: int = 0
-    stage_align: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    opt: Options
+    wmultiplier: int
 
     def __post_init__(self) -> None:
         model = zkf.FmaModel(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            stage_input=self.stage_input,
-            stage_product=self.stage_product,
-            stage_decode=self.stage_decode,
-            stage_align=self.stage_align,
-            stage_normalize=self.stage_normalize,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            wmultiplier=self.wmultiplier,
+            stage_input=self.opt.stage_input,
+            stage_product=self.opt.stage_product,
+            stage_decode=self.opt.stage_decode,
+            stage_align=self.opt.stage_align,
+            stage_normalize=self.opt.stage_normalize,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -601,12 +634,16 @@ class FSortOperator(FloatHardwareOperator):
     operand, so swapping operands can flip the sign of a zero result (a -0 conditioned from a zero magnitude).
     """
 
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+
     mnemonic: ClassVar[str] = "fsort"
     output_hdl_ports: ClassVar[list[str]] = ["min", "max"]
-    stage_input: int = 0
+    opt: Options
 
     def __post_init__(self) -> None:
-        model = zkf.SortModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.stage_input)
+        model = zkf.SortModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.opt.stage_input)
         object.__setattr__(self, "_model", model)
 
     @property
@@ -632,21 +669,27 @@ class FSortOperator(FloatHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class FExp2Operator(FloatHardwareOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_reduce: int = 0
+        stage_product: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "fexp2"
-    stage_input: int = 0
-    stage_reduce: int = 0
-    stage_product: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    opt: Options
+    wmultiplier: int
 
     def __post_init__(self) -> None:
         model = zkf.Exp2Model(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            stage_input=self.stage_input,
-            stage_reduce=self.stage_reduce,
-            stage_product=self.stage_product,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            wmultiplier=self.wmultiplier,
+            stage_input=self.opt.stage_input,
+            stage_reduce=self.opt.stage_reduce,
+            stage_product=self.opt.stage_product,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -665,28 +708,34 @@ class FExp2Operator(FloatHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class FLog2Operator(FloatHardwareOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_decode: int = 0
+        stage_product: int = 0
+        stage_product_final: int = 0
+        stage_normalize: int = 0
+        stage_normalize_output: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "flog2"
     error_ports: ClassVar[list[str]] = ["domain_error", "pole"]
-    stage_input: int = 0
-    stage_decode: int = 0
-    stage_product: int = 0
-    stage_product_final: int = 0
-    stage_normalize: int = 0
-    stage_normalize_output: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    opt: Options
+    wmultiplier: int
 
     def __post_init__(self) -> None:
         model = zkf.Log2Model(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            stage_input=self.stage_input,
-            stage_decode=self.stage_decode,
-            stage_product=self.stage_product,
-            stage_product_final=self.stage_product_final,
-            stage_normalize=self.stage_normalize,
-            stage_normalize_output=self.stage_normalize_output,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            wmultiplier=self.wmultiplier,
+            stage_input=self.opt.stage_input,
+            stage_decode=self.opt.stage_decode,
+            stage_product=self.opt.stage_product,
+            stage_product_final=self.opt.stage_product_final,
+            stage_normalize=self.opt.stage_normalize,
+            stage_normalize_output=self.opt.stage_normalize_output,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -709,13 +758,6 @@ class _FCordicOperator(FloatHardwareOperator, ABC):
     These are NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring.
     """
 
-    unroll100: int = 100
-    stage_input: int = 0
-    stage_product: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
-
     def render_output(
         self, port: int, conditioner: "PortConditioner", *operands: str, immediates: tuple[int, ...] = ()
     ) -> str:
@@ -725,18 +767,30 @@ class _FCordicOperator(FloatHardwareOperator, ABC):
 
 @dataclass(frozen=True, slots=True)
 class FSincosOperator(_FCordicOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        unroll100: int = 100
+        stage_input: int = 0
+        stage_product: int = 0
+        stage_normalize: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "fsincos"
     output_hdl_ports: ClassVar[list[str]] = ["sin", "cos"]
+    opt: Options
+    wmultiplier: int
 
     def __post_init__(self) -> None:
         model = zkf.SincosModel(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            unroll100=self.unroll100,
-            stage_input=self.stage_input,
-            stage_product=self.stage_product,
-            stage_normalize=self.stage_normalize,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            wmultiplier=self.wmultiplier,
+            unroll100=self.opt.unroll100,
+            stage_input=self.opt.stage_input,
+            stage_product=self.opt.stage_product,
+            stage_normalize=self.opt.stage_normalize,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -756,18 +810,32 @@ class FSincosOperator(_FCordicOperator):
 
 @dataclass(frozen=True, slots=True)
 class FAtan2Operator(_FCordicOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        """A nearby hypot over the same operands folds into the magnitude port for free."""
+
+        unroll100: int = 100
+        stage_input: int = 0
+        stage_product: int = 0
+        stage_normalize: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
     mnemonic: ClassVar[str] = "fatan2"
     output_hdl_ports: ClassVar[list[str]] = ["theta", "mag"]
+    opt: Options
+    wmultiplier: int
 
     def __post_init__(self) -> None:
         model = zkf.Atan2Model(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            unroll100=self.unroll100,
-            stage_input=self.stage_input,
-            stage_product=self.stage_product,
-            stage_normalize=self.stage_normalize,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+            wmultiplier=self.wmultiplier,
+            unroll100=self.opt.unroll100,
+            stage_input=self.opt.stage_input,
+            stage_product=self.opt.stage_product,
+            stage_normalize=self.opt.stage_normalize,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
         )
         object.__setattr__(self, "_model", model)
 
@@ -788,8 +856,8 @@ class FAtan2Operator(_FCordicOperator):
 @dataclass(frozen=True, slots=True)
 class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
-    A boolean-logic operator (AND/OR/XOR): a plain ``& | ^`` gate folded into its boolean register's write. Never
-    added to :class:`OpConfig` -- it has no module and no configuration.
+    A boolean-logic operator (AND/OR/XOR): a plain ``& | ^`` gate folded into its boolean register's write.
+    Never added to :class:`OpConfig` -- it has no module and no configuration.
     """
 
 
@@ -909,12 +977,6 @@ class FloatIsNegInfOperator(FloatClassificationOperator):
 
 @dataclass(frozen=True, slots=True)
 class FloatToBoolOperator(InlineHardwareOperator):
-    """
-    A float->bool cast ``bool(x)``: true iff the operand is nonzero, i.e. its ZKF exponent field is nonzero (sign- and
-    mantissa-agnostic). Folded into the boolean register write as a call to the shared ``holoso_ftobool`` function;
-    never added to :class:`OpConfig`.
-    """
-
     mnemonic: ClassVar[str] = "ftobool"
     fmt: FloatFormat
 
@@ -940,10 +1002,10 @@ class FloatToBoolOperator(InlineHardwareOperator):
 class SelectOperator(InlineHardwareOperator):
     """
     A data mux ``cond ? a : b`` over wide values, folded into the destination register write as a ternary over the
-    operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings; never added to
-    :class:`OpConfig`. Each operand is a dedicated direct (unlatched) register read -- an area/timing characteristic of
-    inline operators; the cost is one mux per merged value, the same order as the per-arm phi-copy installs the branch
-    would otherwise need.
+    operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings.
+    Each operand is a dedicated direct (unlatched) register read -- an area/timing characteristic of inline operators;
+    the cost is one mux per merged value, the same order as the per-arm phi-copy installs the branch would otherwise
+    need.
     """
 
     mnemonic: ClassVar[str] = "select"
@@ -970,12 +1032,6 @@ class SelectOperator(InlineHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class BoolSelectOperator(InlineHardwareOperator):
-    """
-    A boolean mux ``cond ? a : b`` over 1-bit values, the dual of :class:`SelectOperator`, folded into the destination
-    boolean register write as a ternary over the operand nets. Format-agnostic (no ``fmt``); produced exclusively by
-    HIR if-conversion of a boolean-phi diamond; never added to :class:`OpConfig`.
-    """
-
     mnemonic: ClassVar[str] = "bool_select"
 
     @property
@@ -998,13 +1054,6 @@ class BoolSelectOperator(InlineHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class BoolToFloatOperator(InlineHardwareOperator):
-    """
-    A bool->float cast ``float(cond)``: ZKF ``1.0`` when true, ``+0.0`` when false. Folded into the wide register
-    write as a call to the shared ``holoso_ffrombool`` function; it reads a boolean register and writes a wide
-    register, the one operator that crosses from the boolean bank into the wide bank. Never added to
-    :class:`OpConfig`.
-    """
-
     mnemonic: ClassVar[str] = "ffrombool"
     fmt: FloatFormat
 
@@ -1025,34 +1074,37 @@ class BoolToFloatOperator(InlineHardwareOperator):
         return (FloatValue.from_float(self.fmt, 1.0 if a else 0.0),)
 
 
+class IMulOperator:
+    """Not implemented yet; this placeholder carries only its knobs."""
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_product: int = 0
+
+
 @dataclass(frozen=True)
 class OpConfig:
     """
-    The hardware operator configuration threaded into synthesis. Constructed by the user before synthesis.
-    Each field fixes one operator's format and parameters.
-
-    Some operators are optional, configured only by a kernel that uses them.
-    Selecting an unconfigured one is a clear error at MIR lowering.
+    This class only contains operators that are configurable.
+    Operators that don't have tunable parameters can be constructed ad-hoc instead.
     """
 
-    fadd: FAddOperator
-    fmul: FMulOperator
-    fdiv: FDivOperator
-    fmul_ilog2: FMulILog2OperatorFamily
-    fcmp: FCmpOperator
-    fround: FRoundOperator | None = None
-    ffma: FFmaOperator | None = None
-    fsort: FSortOperator | None = None
-    fexp2: FExp2Operator | None = None
-    flog2: FLog2Operator | None = None
-    fsincos: FSincosOperator | None = None
-    fatan2: FAtan2Operator | None = None
+    fadd: FAddOperator | None
+    fmul: FMulOperator | None
+    fdiv: FDivOperator | None
+    fmul_ilog2: FMulILog2OperatorFamily | None
+    fcmp: FCmpOperator | None
+    fround: FRoundOperator | None
+    ffma: FFmaOperator | None
+    fsort: FSortOperator | None
+    fexp2: FExp2Operator | None
+    flog2: FLog2Operator | None
+    fsincos: FSincosOperator | None
+    fatan2: FAtan2Operator | None
 
-    @property
-    def float_format(self) -> FloatFormat:
-        formats = {operator.fmt for field in fields(self) if (operator := getattr(self, field.name)) is not None}
-        if len(formats) != 1:
-            ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
-            raise ValueError(f"all floating-point operators must use the same format; got {ordered}")
-        (fmt,) = formats
-        return fmt  # type: ignore[no-any-return]
+    def require(self, name: str) -> Any:
+        """The named operator, or a refusal naming what needs configuring."""
+        operator = getattr(self, name)
+        if operator is None:
+            raise UnsupportedConstruct(f"the kernel needs the {name!r} operator, which is not configured")
+        return operator

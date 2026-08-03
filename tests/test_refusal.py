@@ -20,16 +20,16 @@ from collections.abc import Callable
 import pytest
 
 import holoso
-from holoso import FloatFormat, OpConfig
+from holoso import Options, FloatFormat
 from holoso._errors import SynthesisError
 
-from ._modelref import default_ops
+from ._modelref import default_options
 
 _FMT = FloatFormat(8, 23)
 
 
-def _ops() -> OpConfig:
-    return default_ops(_FMT)
+def _ops() -> Options:
+    return default_options(_FMT)
 
 
 def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:

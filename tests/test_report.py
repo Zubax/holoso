@@ -16,9 +16,9 @@ from holoso._backend.html import generate as generate_report
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._lir import build, RegRef
+from holoso._lir import RegRef
 from holoso._mir import lower as lower_to_mir
-from ._modelref import default_ops, overlap_spill_kernel
+from ._modelref import build_lir, default_ops, overlap_spill_kernel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -55,13 +55,13 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 
 
 def _report(name: str) -> str:
-    lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT)), name, fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT), _FMT), name)
     return generate_report(lir, generate_verilog(lir)).html
 
 
 @pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_report_renders_for_each_example(name: str) -> None:
-    lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT)), name, fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT), _FMT), name)
     html = generate_report(lir, generate_verilog(lir)).html
     assert html.lstrip().startswith("<!")
     assert "<h2>Schedule</h2>" in html
@@ -105,9 +105,7 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
 
     from holoso._backend.html._schedule import render_schedule
 
-    lir = build(
-        lower_to_mir(optimize(lower(overlap_spill_kernel).hir), default_ops(_FMT)), "overlap_spill", fetch_stages=3
-    )
+    lir = build_lir(lower_to_mir(optimize(lower(overlap_spill_kernel).hir), default_ops(_FMT), _FMT), "overlap_spill")
     html = render_schedule(lir)
     marker = "var data = "
     payload, _ = json.JSONDecoder().raw_decode(html, html.index(marker) + len(marker))

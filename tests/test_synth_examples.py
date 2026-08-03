@@ -34,7 +34,7 @@ def test_some_target_flow_is_available() -> None:
 
 
 # Heaviest-first so xdist starts the long wide-datapath rows immediately instead of scheduling them last and tailing.
-_BY_COST = sorted(TARGETS, key=lambda t: t.ops.float_format.wman, reverse=True)
+_BY_COST = sorted(TARGETS, key=lambda t: t.ops.ffmt.wman, reverse=True)
 
 
 @pytest.mark.parametrize("target", _BY_COST, ids=lambda t: t.label)

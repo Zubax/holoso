@@ -8,20 +8,7 @@ from typing import assert_never
 
 from ._const import Const
 from .._util import BlockId, ValueId
-from ._ir import (
-    Branch,
-    Hir,
-    HirBuilder,
-    InPort,
-    Jump,
-    Node,
-    Operation,
-    Phi,
-    Ret,
-    StateRead,
-    Terminator,
-    successors,
-)
+from ._ir import Branch, Hir, HirBuilder, InPort, Jump, Node, Operation, Phi, Ret, StateRead, Terminator, successors
 
 # A pass supplies one of these to rebuild each value into the target builder; it returns the new value id and may fold
 # an operation into a constant. The builder is already positioned at the value's block.

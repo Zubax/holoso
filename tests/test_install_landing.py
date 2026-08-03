@@ -16,18 +16,25 @@ from holoso import FloatFormat, FloatValue
 from holoso._eel import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
-from holoso._lir import BoolWrite, FloatCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, build
+from holoso._lir import BoolWrite, FloatCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS, ExampleSpec
-from ._modelref import Vector, assert_model_equals_interpreter, build_model_and_interpreter, default_ops
+from ._modelref import (
+    Vector,
+    assert_model_equals_interpreter,
+    build_lir,
+    build_model_and_interpreter,
+    build_ops,
+    default_options,
+    default_ops,
+)
 
 
 def _build(spec: ExampleSpec) -> Lir:
-    return build(
-        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0])),
+    return build_lir(
+        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0]), spec.formats[0]),
         spec.name,
-        fetch_stages=3,
     )
 
 
@@ -135,16 +142,17 @@ def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPa
     corrupt (the model vs a fresh Python reference, schedule-independent).
     """
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
-    ops = default_ops(FloatFormat(6, 18))
-    lir = build(
-        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir), ops),
+    options = default_options(FloatFormat(6, 18))
+    lir = build_lir(
+        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir), build_ops(options), options.ffmt),
         "hold_or_update_bool",
-        fetch_stages=3,
     )
     resident_non_const = [x for b in lir.blocks for x in b.bool_writes if x.resident_source and not x.is_const]
     assert resident_non_const, "the state-read phi arm did not install as a resident-source bool write"
 
-    model = holoso.synthesize(_HoldOrUpdateBool().__call__, ops, name="hold_or_update_bool").numerical_model.elaborate()
+    model = holoso.synthesize(
+        _HoldOrUpdateBool().__call__, options, name="hold_or_update_bool"
+    ).numerical_model.elaborate()
     reference = _HoldOrUpdateBool()
     for a, c in [(True, False), (False, False), (True, True), (False, False), (True, False), (False, True)]:
         assert tuple(bool(v) for v in model.run(a, c)) == reference(a, c)
@@ -180,10 +188,11 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     reading the source's home-block commit instead of the predecessor's ``commit_or_makespan`` -- makes the modeled
     install land far past the predecessor's terminator, and the assert raises (verified by injecting that lookup).
     """
-    ops = default_ops(FloatFormat(8, 36))
+    fmt = FloatFormat(8, 36)
+    ops = default_ops(fmt)
     kernel = _LiveThroughArm().__call__
-    lir = build(
-        lower_to_mir(optimize(lower_frontend(kernel).hir), ops), "live_through_arm", fetch_stages=3
+    lir = build_lir(
+        lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt), "live_through_arm"
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.copies if not c.resident_source]
     assert cross, "the kernel no longer exercises a non-coalesced cross-block-source install; the shape changed"
@@ -191,7 +200,7 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
         assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
-    model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm")
+    model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm", fmt)
     vectors: list[Vector] = [
         [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
         for c in (True, False)
@@ -229,9 +238,10 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     so a later change cannot silently drop it (miscompiling this shape) without failing here. Value correctness is held
     by the schedule-independent model-vs-interpreter differential.
     """
-    ops = default_ops(FloatFormat(8, 36))
+    fmt = FloatFormat(8, 36)
+    ops = default_ops(fmt)
     kernel = _LastWorkArmSource().__call__
-    lir = build(lower_to_mir(optimize(lower_frontend(kernel).hir), ops), "last_work_arm", fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt), "last_work_arm")
     pushed = [
         blk
         for blk in lir.blocks
@@ -243,7 +253,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
         assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
-    model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm")
+    model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm", fmt)
     vectors: list[Vector] = [
         [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
         for c in (True, False)

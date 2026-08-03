@@ -48,31 +48,37 @@ class Ekf1:
 def main() -> None:
     # The values stored in the object at the time of synthesize() become its reset values; here the dataclass defaults.
     filt = Ekf1()
-    # The kernel is float-format-agnostic, but each scalar width wants its own operator pipelining, so the OpConfig is
+    # The kernel is float-format-agnostic, but each scalar width wants its own operator pipelining, so the configuration is
     # built per float format. The narrow 24-bit default (e6/m18) closes single-cycle, so its operators take no extra
     # stages; the wide 44-bit datapath (e8/m36) needs deeper operator pipelines to close timing.
     narrow = holoso.FloatFormat(wexp=6, wman=18)
     wide = holoso.FloatFormat(wexp=8, wman=36)
     configs = [
-        holoso.OpConfig(
-            holoso.FAddOperator(narrow),
-            holoso.FMulOperator(narrow),
-            holoso.FDivOperator(narrow),
-            holoso.FMulILog2OperatorFamily(narrow),
-            holoso.FCmpOperator(narrow),
+        holoso.Options(
+            holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(),
+                fmul=holoso.FMulOptions(),
+                fdiv=holoso.FDivOptions(),
+                fmul_ilog2=holoso.FMulILog2Options(),
+                fcmp=holoso.FCmpOptions(),
+            ),
+            ffmt=narrow,
         ),
-        holoso.OpConfig(
-            holoso.FAddOperator(wide, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
-            holoso.FMulOperator(wide, stage_input=1, stage_product=1, stage_pack=1),
-            holoso.FDivOperator(wide, stage_input=1, stage_pack=1, stage_output=1),
-            holoso.FMulILog2OperatorFamily(wide),
-            holoso.FCmpOperator(wide),
+        holoso.Options(
+            holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
+                fdiv=holoso.FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+                fmul_ilog2=holoso.FMulILog2Options(),
+                fcmp=holoso.FCmpOptions(),
+            ),
+            ffmt=wide,
         ),
     ]
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    for ops in configs:
-        label = f"e{ops.float_format.wexp}m{ops.float_format.wman}"
-        result = holoso.synthesize(filt.update, ops=ops)
+    for options in configs:
+        label = f"e{options.ffmt.wexp}m{options.ffmt.wman}"
+        result = holoso.synthesize(filt.update, options)
         for filename, path in result.write(base / label).items():
             print(f"{label}/{filename}: {path}")
 

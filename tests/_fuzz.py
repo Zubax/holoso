@@ -43,7 +43,7 @@ from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
-from holoso._lir import Branch, Lir, RegRef, ScheduledOp, build, landing_cycle
+from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
 from holoso._lir import operand_read_cycle
 from holoso._mir import Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
 from holoso._mir import lower as lower_to_mir
@@ -52,6 +52,7 @@ from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue
 
 from ._modelref import (
+    build_lir,
     Vector,
     default_ops,
     default_tolerance,
@@ -1031,7 +1032,7 @@ class CampaignStats:
 
 
 def _build_with_lir(
-    fn: Callable[..., object], ops: OpConfig, name: str
+    fn: Callable[..., object], ops: OpConfig, name: str, fmt: FloatFormat
 ) -> tuple[Mir, Lir, NumericalSimulator, MirInterpreter]:
     """
     Lower the kernel ONCE to MIR/LIR, then build both the numerical model (from that LIR) and the interpreter (from the
@@ -1039,15 +1040,17 @@ def _build_with_lir(
     or touching simulator internals. Shared by the campaign runner and the regression replayer, so both drive the
     identical build path.
     """
-    mir = lower_to_mir(optimize(lower_frontend(fn).hir), ops)
-    lir = build(mir, name, fetch_stages=3)
+    mir = lower_to_mir(optimize(lower_frontend(fn).hir), ops, fmt)
+    lir = build_lir(mir, name)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)
     return mir, lir, model, interpreter
 
 
-def _build_all(fn: Callable[..., object], ops: OpConfig, name: str) -> tuple[Mir, NumericalSimulator, MirInterpreter]:
-    mir, _, model, interpreter = _build_with_lir(fn, ops, name)
+def _build_all(
+    fn: Callable[..., object], ops: OpConfig, name: str, fmt: FloatFormat
+) -> tuple[Mir, NumericalSimulator, MirInterpreter]:
+    mir, _, model, interpreter = _build_with_lir(fn, ops, name, fmt)
     return mir, model, interpreter
 
 
@@ -1475,7 +1478,7 @@ def run_kernel(
     reference diverges.
     """
     name = f"{kernel.name}__{op_label}"
-    mir, lir, model, interpreter = _build_with_lir(kernel.callable, ops, name)
+    mir, lir, model, interpreter = _build_with_lir(kernel.callable, ops, name, fmt)
     _assert_danger_survived(kernel, mir, op_label)
     if Shape.RELATION_PAIR in kernel.shapes:
         assert _has_fused_relation_pair(lir), f"{name}: relation-pair kernel did not fuse comparator order-flag taps"
@@ -1544,7 +1547,9 @@ def _armed_dead_arm_kernel(master_seed: int, index: int, fmt: FloatFormat) -> Ge
         assert kernel.dead_arm_chain_depth is not None
         # Verify the chain spills under EVERY op-config the forced batch asserts (``expect_armed``), not just the
         # default -- so a future config under which the chain happens not to spill cannot false-fail the campaign.
-        lirs = (_build_with_lir(kernel.callable, make_ops(fmt), kernel.name)[1] for make_ops in OP_CONFIGS.values())
+        lirs = (
+            _build_with_lir(kernel.callable, make_ops(fmt), kernel.name, fmt)[1] for make_ops in OP_CONFIGS.values()
+        )
         if all(_has_overlap_spill_at_depth(lir, kernel.dead_arm_chain_depth) for lir in lirs):
             return kernel
     raise DangerShapeLost(f"dead-arm generator failed to arm a spill in {_ARM_RETRIES} tries (index {index})")
@@ -1714,7 +1719,7 @@ def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object])
     """
     repro = ReproMeta.from_dict(meta)
     ops = OP_CONFIGS[repro.op_label](repro.fmt)
-    mir, model, interpreter = _build_all(kernel_callable, ops, f"{repro.kernel_name}__replay")
+    mir, model, interpreter = _build_all(kernel_callable, ops, f"{repro.kernel_name}__replay", repro.fmt)
     if [p.name for p in model.inputs] != list(repro.input_names):  # the reference binds by name in port order; pin it
         return (
             False,

@@ -34,14 +34,14 @@ import numpy as np
 import holoso
 from holoso import FloatFormat, FloatValue
 
-from ._modelref import default_ops, overlap_spill_kernel, staged_ops
+from ._modelref import default_ops, default_options, overlap_spill_kernel, staged_ops, staged_options
 
 FMT = FloatFormat(6, 18)
 
 
 def _pair(fn: Callable[..., object], name: str) -> tuple[holoso.NumericalSimulator, holoso.NumericalSimulator]:
-    short = holoso.synthesize(fn, default_ops(FMT), name=f"{name}_short").numerical_model.elaborate()
-    long = holoso.synthesize(fn, staged_ops(FMT), name=f"{name}_long").numerical_model.elaborate()
+    short = holoso.synthesize(fn, default_options(FMT), name=f"{name}_short").numerical_model.elaborate()
+    long = holoso.synthesize(fn, staged_options(FMT), name=f"{name}_long").numerical_model.elaborate()
     return short, long
 
 

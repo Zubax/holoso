@@ -27,18 +27,21 @@ def main() -> None:
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     for fmt in (holoso.FloatFormat(wexp=6, wman=18), holoso.FloatFormat(wexp=8, wman=36)):
         label = f"e{fmt.wexp}m{fmt.wman}"
-        ops = holoso.OpConfig(
-            holoso.FAddOperator(fmt),
-            holoso.FMulOperator(fmt),
-            holoso.FDivOperator(fmt),
-            holoso.FMulILog2OperatorFamily(fmt),
-            holoso.FCmpOperator(fmt),
-            fsincos=holoso.FSincosOperator(fmt),
-            fatan2=holoso.FAtan2Operator(fmt),
+        options = holoso.Options(
+            holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(),
+                fmul=holoso.FMulOptions(),
+                fdiv=holoso.FDivOptions(),
+                fmul_ilog2=holoso.FMulILog2Options(),
+                fcmp=holoso.FCmpOptions(),
+                fsincos=holoso.FSincosOptions(),
+                fatan2=holoso.FAtan2Options(),
+            ),
+            ffmt=fmt,
         )
         models = {}
         for fn in (to_polar, from_polar):
-            result = holoso.synthesize(fn, ops=ops)
+            result = holoso.synthesize(fn, options)
             models[fn.__name__] = result.numerical_model.elaborate()
             for filename, path in result.write(base / label / fn.__name__).items():
                 print(f"{label}/{fn.__name__}/{filename}: {path}")

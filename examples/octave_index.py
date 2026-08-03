@@ -32,15 +32,18 @@ def octave_index(x: float) -> float:
 
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
-    ops = holoso.OpConfig(
-        holoso.FAddOperator(float_format),
-        holoso.FMulOperator(float_format),
-        holoso.FDivOperator(float_format),
-        holoso.FMulILog2OperatorFamily(float_format),
-        holoso.FCmpOperator(float_format),
+    options = holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+        ),
+        ffmt=float_format,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    result = holoso.synthesize(octave_index, ops)
+    result = holoso.synthesize(octave_index, options)
     for filename, path in result.write(out_dir).items():
         print(f"{filename}: {path}")
 

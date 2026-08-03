@@ -13,7 +13,8 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FAtan2Operator, FloatFormat
+from holoso import FAtan2Options, FloatFormat
+from holoso._operators import FAtan2Operator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -104,7 +105,7 @@ async def holoso_fatan2_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fatan2(sim: str, stages: dict[str, int]) -> None:
-    operator = FAtan2Operator(FloatFormat(8, 24), **stages)
+    operator = FAtan2Operator(FloatFormat(8, 24), FAtan2Options(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fatan2_{stage_tag(stages)}"
     runner.build(

@@ -14,7 +14,8 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FloatFormat, FMulOperator
+from holoso import FMulOptions, FloatFormat
+from holoso._operators import FMulOperator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -112,7 +113,9 @@ async def holoso_fmul_cocotb(dut: Any) -> None:
 def test_holoso_fmul(sim: str, stages: tuple[int, int, int]) -> None:
     stage_input, stage_product, stage_output = stages
     operator = FMulOperator(
-        FloatFormat(8, 24), stage_input=stage_input, stage_product=stage_product, stage_output=stage_output
+        FloatFormat(8, 24),
+        FMulOptions(stage_input=stage_input, stage_product=stage_product, stage_output=stage_output),
+        0,
     )
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_i{stage_input}p{stage_product}o{stage_output}"

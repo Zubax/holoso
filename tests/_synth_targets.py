@@ -4,7 +4,7 @@ operator configuration). This is the single source of truth for what the example
 (test_synth_examples) asserts can close timing.
 
 Deliberately a dumb-simple data table -- literal frequencies, one explicit row per (example, flow), and a full typed
-OpConfig per row; duplication is preferred over indirection here. Catalogued example targets reuse the shared example
+Options per row; duplication is preferred over indirection here. Catalogued example targets reuse the shared example
 registry (_examples.SPECS) so each kernel is constructed once. Off-catalogue regression cores may be added as
 SynthTarget records with example=None.
 
@@ -16,18 +16,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from holoso import (
-    FAddOperator,
-    FAtan2Operator,
-    FCmpOperator,
-    FDivOperator,
-    FExp2Operator,
-    FFmaOperator,
+    FAddOptions,
+    FAtan2Options,
+    FCmpOptions,
+    FDivOptions,
+    FExp2Options,
+    FFmaOptions,
+    FLog2Options,
     FloatFormat,
-    FLog2Operator,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    FSincosOperator,
-    OpConfig,
+    FMulILog2Options,
+    FMulOptions,
+    FSincosOptions,
+    OperatorOptions,
+    Options,
 )
 from synth.flows import FlowId
 
@@ -41,57 +42,60 @@ F_e4m8 = FloatFormat(4, 8)  # the narrow uart byte format (per examples/uart.py)
 def op_config(
     fmt: FloatFormat,
     *,
-    fadd: FAddOperator | None = None,
-    fmul: FMulOperator | None = None,
-    fdiv: FDivOperator | None = None,
-    fmul_ilog2: FMulILog2OperatorFamily | None = None,
-    fcmp: FCmpOperator | None = None,
-    ffma: FFmaOperator | None = None,
-    fexp2: FExp2Operator | None = None,
-    flog2: FLog2Operator | None = None,
-    fsincos: FSincosOperator | None = None,
-    fatan2: FAtan2Operator | None = None,
-) -> OpConfig:
+    fadd: FAddOptions | None = None,
+    fmul: FMulOptions | None = None,
+    fdiv: FDivOptions | None = None,
+    fmul_ilog2: FMulILog2Options | None = None,
+    fcmp: FCmpOptions | None = None,
+    ffma: FFmaOptions | None = None,
+    fexp2: FExp2Options | None = None,
+    flog2: FLog2Options | None = None,
+    fsincos: FSincosOptions | None = None,
+    fatan2: FAtan2Options | None = None,
+) -> Options:
     """
-    The OpConfig for fmt; pass a fully-constructed operator to give it stage knobs, else that operator is lean.
+    The Options for fmt; pass an options object to give an operator stage knobs, else that operator is lean.
     ffma/fexp2/flog2/fsincos/fatan2 are absent unless supplied, so MAC chains stay expanded (fmul + fadd) and a
     kernel that uses no transcendental needs no such module.
     """
-    return OpConfig(
-        fadd=fadd or FAddOperator(fmt),
-        fmul=fmul or FMulOperator(fmt),
-        fdiv=fdiv or FDivOperator(fmt),
-        fmul_ilog2=fmul_ilog2 or FMulILog2OperatorFamily(fmt),
-        fcmp=fcmp or FCmpOperator(fmt),
-        ffma=ffma,
-        fexp2=fexp2,
-        flog2=flog2,
-        fsincos=fsincos,
-        fatan2=fatan2,
+    return Options(
+        OperatorOptions(
+            fadd=fadd or FAddOptions(),
+            fmul=fmul or FMulOptions(),
+            fdiv=fdiv or FDivOptions(),
+            fmul_ilog2=fmul_ilog2 or FMulILog2Options(),
+            fcmp=fcmp or FCmpOptions(),
+            ffma=ffma,
+            fexp2=fexp2,
+            flog2=flog2,
+            fsincos=fsincos,
+            fatan2=fatan2,
+        ),
+        ffmt=fmt,
     )
 
 
-def op_config_staged_output(fmt: FloatFormat) -> OpConfig:
+def op_config_staged_output(fmt: FloatFormat) -> Options:
     """
     op_config(fmt) with an output register stage on the wide arithmetic operators (fadd/fmul/fdiv), enabled locally on
     just the rows whose timing closure needs it. fmul_ilog2 and fcmp have no output stage and stay lean.
     """
     return op_config(
         fmt,
-        fadd=FAddOperator(fmt, stage_output=1),
-        fmul=FMulOperator(fmt, stage_output=1),
-        fdiv=FDivOperator(fmt, stage_output=1),
+        fadd=FAddOptions(stage_output=1),
+        fmul=FMulOptions(stage_output=1),
+        fdiv=FDivOptions(stage_output=1),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class SynthTarget:
-    """One synthesis closure target: a kernel synthesized for one flow under one OpConfig, asserted to meet f_max."""
+    """One synthesis closure target: a kernel synthesized for one flow under one Options, asserted to meet f_max."""
 
     kernel: Callable[[], Callable[..., object]]
     flow: FlowId
     target_frequency_MHz: float
-    ops: OpConfig
+    ops: Options
     name: str  # descriptive module/report label; unique per flow
     example: str | None = None  # the SPECS name this exercises; None for an off-catalogue regression core
 
@@ -107,7 +111,7 @@ def for_example(
     example: str,
     flow: FlowId,
     target_frequency_MHz: float,
-    ops: OpConfig,
+    ops: Options,
     *,
     kernel: Callable[[], Callable[..., object]] | None = None,
     name: str | None = None,
@@ -119,7 +123,7 @@ def for_example(
     rather than the cosim variant.
     """
     spec = _SPEC_BY_NAME[example]  # KeyError guards a typo'd example name
-    fmt = ops.float_format
+    fmt = ops.ffmt
     return SynthTarget(
         kernel=kernel or spec.make_kernel,
         flow=flow,
@@ -155,11 +159,11 @@ def _from_polar_kernel() -> Callable[..., object]:
 
 # One measured CORDIC config per polar kernel closes all three flows, so the three per-flow rows share it (unlike the
 # per-flow stage knobs elsewhere in the matrix).
-_TO_POLAR_FATAN2 = FAtan2Operator(F_e6m18, unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
-_FROM_POLAR_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=2)
+_TO_POLAR_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
+_FROM_POLAR_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
 # kepler's fsincos (coalesced sin+cos per Newton iteration) dominates timing, so its measured closure coincides with
 # from_polar's -- the same operator -- and one config closes all three flows.
-_KEPLER_FSINCOS = FSincosOperator(F_e6m18, stage_pack=1, stage_product=2, stage_normalize=2)
+_KEPLER_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
 
 
 TARGETS: list[SynthTarget] = [
@@ -170,11 +174,11 @@ TARGETS: list[SynthTarget] = [
     for_example("madd", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("poly3", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("poly3", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("poly3", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))),
+    for_example("poly3", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     for_example("signal_window", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("signal_window", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("signal_window", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_output=1))),
+    for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fadd=FAddOptions(stage_output=1))),
     for_example("iir1_lpf", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("iir1_lpf", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example(
@@ -183,14 +187,12 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_output=1),
-            fdiv=FDivOperator(F_e6m18, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_output=1),
+            fmul=FMulOptions(stage_output=1),
+            fdiv=FDivOptions(stage_output=1),
         ),
     ),
-    for_example(
-        "pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1, stage_output=1))
-    ),
+    for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOptions(stage_input=1, stage_output=1))),
     for_example("pid", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
@@ -210,13 +212,11 @@ TARGETS: list[SynthTarget] = [
     for_example("recip_newton", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     # Diamond's critical path here is the fmul post-product cone (DSP product register through pack/normalize into
     # the register file), 18 logic levels at 58% route. One pack stage splits it; the other two flows close lean.
-    for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_pack=1))),
+    for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fmul=FMulOptions(stage_pack=1))),
     for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("integrator", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("integrator", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
-    for_example(
-        "integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))
-    ),
+    for_example("integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     # Straight-line multiply-accumulate chains; both close lean on all three flows.
     for_example("fir", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example("fir", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
@@ -236,8 +236,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_input=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1, stage_output=1),
         ),
     ),
     for_example(
@@ -246,9 +246,9 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_input=1, stage_output=1),
-            fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1, stage_output=1),
+            fdiv=FDivOptions(stage_input=1, stage_output=1),
         ),
     ),
     for_example(
@@ -257,8 +257,8 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_product=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_product=1),
         ),
     ),
     for_example(
@@ -267,8 +267,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_input=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -278,9 +278,9 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_pack=1),
-            fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_pack=1),
+            fdiv=FDivOptions(stage_input=1, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -290,8 +290,8 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1),
-            fmul=FMulOperator(F_e6m18, stage_product=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fmul=FMulOptions(stage_product=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -301,8 +301,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_decode=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e6m18, stage_decode=1),
+            fadd=FAddOptions(stage_decode=1),
+            fmul_ilog2=FMulILog2Options(stage_decode=1),
         ),
     ),
     for_example(
@@ -311,13 +311,11 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e6m18, stage_decode=1),
+            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_decode=1),
         ),
     ),
-    for_example(
-        "cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))
-    ),
+    for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     for_example("octave_index", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example(
         "octave_index",
@@ -325,9 +323,9 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_output=1),
-            fdiv=FDivOperator(F_e6m18, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_output=1),
+            fdiv=FDivOptions(stage_output=1),
         ),
     ),
     for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
@@ -339,9 +337,9 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fmul=FMulOperator(F_e6m18, stage_pack=1),
-            fexp2=FExp2Operator(F_e6m18, stage_reduce=1, stage_product=2),
-            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=2, stage_pack=1),
+            fmul=FMulOptions(stage_pack=1),
+            fexp2=FExp2Options(stage_reduce=1, stage_product=2),
+            flog2=FLog2Options(stage_product=2, stage_product_final=2, stage_normalize=2, stage_pack=1),
         ),
     ),
     for_example(
@@ -350,8 +348,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fexp2=FExp2Operator(F_e6m18, stage_product=2),
-            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
+            fexp2=FExp2Options(stage_product=2),
+            flog2=FLog2Options(stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
     for_example(
@@ -360,9 +358,9 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_normalize=1),
-            fexp2=FExp2Operator(F_e6m18, stage_product=2),
-            flog2=FLog2Operator(F_e6m18, stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
+            fadd=FAddOptions(stage_normalize=1),
+            fexp2=FExp2Options(stage_product=2),
+            flog2=FLog2Options(stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
     for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
@@ -370,21 +368,19 @@ TARGETS: list[SynthTarget] = [
         "remainder",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(F_e6m18, fdiv=FDivOperator(F_e6m18, stage_input=1, stage_output=1)),
+        op_config(F_e6m18, fdiv=FDivOptions(stage_input=1, stage_output=1)),
     ),
-    for_example(
-        "remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_normalize=1))
-    ),
+    for_example("remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     for_example(
         "ekf1_stateless",
         FlowId.YOSYS_ECP5,
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1, stage_output=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_output=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_input=1, stage_decode=1),
+            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
+            fdiv=FDivOptions(stage_input=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
     ),
     for_example(
@@ -393,12 +389,12 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(
-                F_e8m36, stage_input=2, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+            fadd=FAddOptions(
+                stage_input=2, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
             ),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_decode=1),
+            fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
+            fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_decode=1),
         ),
     ),
     for_example(
@@ -407,9 +403,9 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
+            fadd=FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
+            fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
         ),
     ),
     for_example(
@@ -418,9 +414,9 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=2, stage_output=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e8m36, stage_input=1, stage_decode=1),
+            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_product=2, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -430,9 +426,9 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_input=2, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=3, stage_pack=1, stage_output=1),
+            fadd=FAddOptions(stage_input=2, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
+            fdiv=FDivOptions(stage_input=3, stage_pack=1, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -442,9 +438,9 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e8m36,
-            fadd=FAddOperator(F_e8m36, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
-            fmul=FMulOperator(F_e8m36, stage_input=1, stage_product=1, stage_pack=1),
-            fdiv=FDivOperator(F_e8m36, stage_input=1, stage_pack=1, stage_output=1),
+            fadd=FAddOptions(stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
+            fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -458,9 +454,9 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_decode=1),
-            fmul=FMulOperator(F_e6m18, stage_product=1),
-            fmul_ilog2=FMulILog2OperatorFamily(F_e6m18, stage_decode=1),
+            fadd=FAddOptions(stage_decode=1),
+            fmul=FMulOptions(stage_product=1),
+            fmul_ilog2=FMulILog2Options(stage_decode=1),
         ),
         name="imu_frame_transform_e6m18",
     ),
@@ -468,7 +464,7 @@ TARGETS: list[SynthTarget] = [
         kernel=_imu_frame_transform_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(F_e6m18, fadd=FAddOperator(F_e6m18, stage_input=1)),
+        ops=op_config(F_e6m18, fadd=FAddOptions(stage_input=1)),
         name="imu_frame_transform_e6m18",
     ),
     SynthTarget(
@@ -477,8 +473,8 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=150,
         ops=op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOperator(F_e6m18, stage_input=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1),
         ),
         name="imu_frame_transform_e6m18",
     ),
@@ -488,9 +484,9 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_input=1, stage_decode=1, stage_pack=1),
-            fmul=FMulOperator(F_e6m18, stage_product=1),
-            ffma=FFmaOperator(F_e6m18, stage_product=1, stage_decode=1, stage_normalize=1, stage_pack=1),
+            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_pack=1),
+            fmul=FMulOptions(stage_product=1),
+            ffma=FFmaOptions(stage_product=1, stage_decode=1, stage_normalize=1, stage_pack=1),
         ),
         name="imu_frame_transform_e6m18_fma",
     ),
@@ -500,9 +496,9 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(
             F_e6m18,
-            fadd=FAddOperator(F_e6m18, stage_normalize=1),
-            fmul=FMulOperator(F_e6m18, stage_output=1),
-            ffma=FFmaOperator(F_e6m18, stage_normalize=1, stage_pack=1),
+            fadd=FAddOptions(stage_normalize=1),
+            fmul=FMulOptions(stage_output=1),
+            ffma=FFmaOptions(stage_normalize=1, stage_pack=1),
         ),
         name="imu_frame_transform_e6m18_fma",
     ),
@@ -512,8 +508,8 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=150,
         ops=op_config(
             F_e6m18,
-            fmul=FMulOperator(F_e6m18, stage_product=1),
-            ffma=FFmaOperator(F_e6m18, stage_product=1, stage_normalize=1),
+            fmul=FMulOptions(stage_product=1),
+            ffma=FFmaOptions(stage_product=1, stage_normalize=1),
         ),
         name="imu_frame_transform_e6m18_fma",
     ),
@@ -558,7 +554,7 @@ TARGETS: list[SynthTarget] = [
         kernel=_from_polar_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=op_config(F_e6m18, fmul=FMulOperator(F_e6m18, stage_input=1), fsincos=_FROM_POLAR_FSINCOS),
+        ops=op_config(F_e6m18, fmul=FMulOptions(stage_input=1), fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.

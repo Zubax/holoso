@@ -22,7 +22,7 @@ import types
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from holoso import synthesize, FloatFormat, OpConfig
+from holoso import FloatFormat, OperatorOptions, Options, synthesize
 
 from ._synth import BUILD_ROOT, SynthReport, build_compiler_ooc_design
 from .flows import Flow, FlowId, make_flow
@@ -76,7 +76,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="FLOW:freq=MHz[,OP.KNOB=VALUE...]",
         help=(
             f"synthesis flow to run; repeatable; supported flows: {', '.join(FlowId)}; "
-            "optional operator knob fields are OP.KNOB, where OP is an OpConfig operator field"
+            "optional operator knob fields are OP.KNOB, where OP is an OperatorOptions field"
         ),
     )
     args = parser.parse_args(argv)
@@ -138,13 +138,12 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
 
 def _parse_op_knob(parser: argparse.ArgumentParser, spec: str, key: str, raw_value: str) -> _OperatorKnob | None:
     operator_name, separator, knob_name = key.partition(".")
-    operator_classes = _op_config_operator_classes()
+    operator_classes = _operator_options_classes()
     if not separator or operator_name not in operator_classes:
         return None
     if not knob_name:
         parser.error(f"knob {key!r} in {spec!r} is missing a name")
-    operator_cls = operator_classes[operator_name]
-    flds = {item.name: item for item in fields(operator_cls)}
+    flds = {item.name: item for item in fields(operator_classes[operator_name])}
     if knob_name not in flds:
         parser.error(f"unknown knob {operator_name}.{knob_name} in {spec!r}")
     try:
@@ -154,23 +153,16 @@ def _parse_op_knob(parser: argparse.ArgumentParser, spec: str, key: str, raw_val
     return _OperatorKnob(operator_name=operator_name, field_name=knob_name, value=value)
 
 
-def _op_config_operator_classes() -> dict[str, type]:
+def _operator_options_classes() -> dict[str, type]:
     classes: dict[str, type] = {}
-    for item in fields(OpConfig):
+    for item in fields(OperatorOptions):
         annotation = item.type
         if isinstance(annotation, types.UnionType):
             (annotation,) = [arg for arg in annotation.__args__ if arg is not type(None)]
         if not isinstance(annotation, type):
-            raise TypeError(f"OpConfig field {item.name!r} has unsupported annotation {item.type!r}")
+            raise TypeError(f"OperatorOptions field {item.name!r} has unsupported annotation {item.type!r}")
         classes[item.name] = annotation
     return classes
-
-
-def _instantiate_operator(operator_cls: type, fmt: FloatFormat, overrides: dict[str, object]) -> object:
-    try:
-        return operator_cls(fmt, **overrides)
-    except TypeError as exc:
-        raise TypeError(f"cannot construct OpConfig operator {operator_cls.__name__}: {exc}") from exc
 
 
 def _load_target(kernel: Path, expression: str) -> object:
@@ -183,16 +175,17 @@ def _load_target(kernel: Path, expression: str) -> object:
     return eval(expression, dict(vars(module)))
 
 
-def _op_config(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> OpConfig:
+def _options(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> Options:
+    """Every operator is configured except ffma, whose contraction is a numerical choice the caller must request."""
     grouped_overrides: dict[str, dict[str, object]] = {}
     for override in op_knobs:
         grouped_overrides.setdefault(override.operator_name, {})[override.field_name] = override.value
     operators: dict[str, object] = {}
-    for name, operator_cls in _op_config_operator_classes().items():
+    for name, options_cls in _operator_options_classes().items():
         if name == "ffma" and name not in grouped_overrides:
             continue
-        operators[name] = _instantiate_operator(operator_cls, fmt, grouped_overrides.get(name, {}))
-    return OpConfig(**operators)  # type: ignore
+        operators[name] = options_cls(**grouped_overrides.get(name, {}))
+    return Options(OperatorOptions(**operators), ffmt=fmt)  # type: ignore
 
 
 def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], list[FlowId]]:
@@ -209,13 +202,13 @@ def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], li
 
 def _run_flow(
     flow: Flow,
-    ops: OpConfig,
+    options: Options,
     target: Any,
     name: str,
     directory: Path,
 ) -> SynthReport | _Failure:
     try:
-        result = synthesize(target, ops=ops, name=name)
+        result = synthesize(target, options, name=name)
         result.write(directory / "holoso_result")
         return flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
     except Exception as exc:  # one tool's failure must not stop the others
@@ -264,17 +257,16 @@ def main() -> int:
         for selected in flows:
             flow = selected.flow
             directory = out_dir / type(flow).__name__
-            ops = _op_config(fmt, selected.request.op_knobs)
+            options = _options(fmt, selected.request.op_knobs)
             print(
                 f"🛠️ Synthesizing {args.kernel}::{args.expression} as {name} "
                 f"using {flow.__class__.__name__} in {directory}"
             )
             print("⚙ Operators:")
-            for field in fields(ops):
-                operator = getattr(ops, field.name)
-                print(f"    {field.name:12}: {operator}")
+            for field in fields(options.operator):
+                print(f"    {field.name:12}: {getattr(options.operator, field.name)}")
             print(flush=True)
-            futures[executor.submit(_run_flow, flow, ops, target, name, directory)] = flow
+            futures[executor.submit(_run_flow, flow, options, target, name, directory)] = flow
 
         for future in as_completed(futures):
             outcomes.append(future.result())

@@ -32,9 +32,9 @@ import pytest
 from holoso import FloatFormat
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._lir import Lir, build
+from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
-from ._modelref import default_ops
+from ._modelref import SHIPPED_TUNING, build_lir, default_ops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -112,25 +112,12 @@ class Metrics:
     max_block_span: int
 
 
-@pytest.fixture(autouse=True)
-def _pinned_regalloc_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Pin every register-allocation tuning knob to its shipped default so the frozen baselines are reproducible
-    regardless of the developer's environment (``HOLOSO_REGALLOC_EFFORT`` speed-ups, write-cap/price experiments).
-    The knobs are env-read-once at import, so the module attributes are patched to the named defaults; changing a
-    default deliberately re-freezes the baselines.
-    """
-    import holoso._lir._regalloc as regalloc
-
-    # Pinned to the knobs' default values (the getenv fallbacks in _regalloc), restated here as literals: the
-    # baselines are frozen against the defaults, so an env override must not leak into this gate.
-    monkeypatch.setattr(regalloc, "_REFINE_MAXITER", 5000)
-    monkeypatch.setattr(regalloc, "_REG_REUSE_WRITE_CAP", 2)
-    monkeypatch.setattr(regalloc, "_REG_PRICE", 2.0)
-
-
+# The baselines are frozen against the shipped allocator defaults, passed explicitly so no environment speed-up can
+# leak in here; changing a default deliberately re-freezes them.
 def _measure(name: str) -> Metrics:
-    lir: Lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT)), name, fetch_stages=3)
+    lir: Lir = build_lir(
+        lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT), _FMT), name, SHIPPED_TUNING
+    )
     straight = (
         len(lir.blocks) == 1
         and not lir.bool_state_slots

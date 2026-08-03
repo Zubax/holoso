@@ -6,6 +6,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 import inspect
 import logging
+import os
 import re
 
 from ._backend.cocotb import generate as generate_testbench, CocotbOutput
@@ -15,9 +16,26 @@ from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
 from ._eel import lower as lower_frontend
 from ._hir import optimize
-from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, build
+from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, RegallocTuning, build
 from ._mir import lower as lower_to_mir
-from ._operators import OpConfig
+from ._operators import (
+    FAddOperator,
+    FAtan2Operator,
+    FCmpOperator,
+    FDivOperator,
+    FExp2Operator,
+    FFmaOperator,
+    FLog2Operator,
+    FMulILog2Operator,
+    FMulILog2OperatorFamily,
+    FMulOperator,
+    FRoundOperator,
+    FSincosOperator,
+    FSortOperator,
+    IMulOperator,
+    OpConfig,
+)
+from ._type import FloatFormat
 
 type Target = Callable[..., Any]
 """
@@ -77,28 +95,133 @@ class SynthesisResult:
         return written
 
 
-def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> SynthesisResult:
+@dataclass(frozen=True, slots=True)
+class OperatorOptions:
+    """
+    ``None`` is not built, and a kernel needing it is refused by name; a configured but unused operator costs nothing.
+    Integer operators are always available, so only their knobs appear here.
+    """
+
+    fadd: FAddOperator.Options | None = None
+    fmul: FMulOperator.Options | None = None
+    fdiv: FDivOperator.Options | None = None
+    fmul_ilog2: FMulILog2Operator.Options | None = None
+    fcmp: FCmpOperator.Options | None = None
+    fround: FRoundOperator.Options | None = None
+    ffma: FFmaOperator.Options | None = None
+    fsort: FSortOperator.Options | None = None
+    fexp2: FExp2Operator.Options | None = None
+    flog2: FLog2Operator.Options | None = None
+    fsincos: FSincosOperator.Options | None = None
+    fatan2: FAtan2Operator.Options | None = None
+
+    imul: IMulOperator.Options = IMulOperator.Options()
+
+
+@dataclass(frozen=True, slots=True)
+class Options:
+    """Everything configurable that controls how the ZISC machine and its microcode are built."""
+
+    operator: OperatorOptions
+
+    ffmt: FloatFormat = FloatFormat(6, 18)
+    """wexp is usually 6..11 bits; wman is usually a multiple of the DSP tile operand width, 18 bits on most FPGAs."""
+
+    wint: int = 33
+    """
+    The native integer width. Integers are signed and saturating: the range is `[-(2**(wint-1)), 2**(wint-1)-1]`.
+    The wide regfile is shared for integers and floats, and the register width is therefore `max(wint, ffmt.width)`.
+    """
+
+    wmultiplier: int | None = None
+    """
+    The native DSP slice width, if known: lets the RTL split wide products along it rather than into equal halves,
+    usually saving DSP tiles and timing margin.
+    """
+
+    ucode_fetch_stages: int = 3
+    """Controller fmax/latency trade-off: a deeper fetch raises fmax but costs idle refills on a mispredicted branch."""
+
+    regalloc_effort: int = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "5000"))
+    """How hard to search for the best register allocation. Better machines take longer to build."""
+
+    regalloc_reuse_write_cap: int = int(os.getenv("HOLOSO_REG_REUSE_WRITE_CAP", "2"))
+    """
+    How wide a per-register write select the regfile compaction may build: more compact register file, larger and
+    slower steering fabric. A penalty rather than a hard cap, since some registers need an irreducibly wider select.
+    """
+
+    regalloc_register_price: float = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
+    """What one register is worth in steering mux arms. Greater values buy fewer registers with heavier steering."""
+
+    def __post_init__(self) -> None:
+        if self.wint < 2:
+            raise ValueError(f"wint must be >= 2, got {self.wint}")
+        if self.wmultiplier is not None and self.wmultiplier < 2:
+            raise ValueError(f"wmultiplier must be >= 2 when set, got {self.wmultiplier}")
+        if self.ucode_fetch_stages < 1:
+            raise ValueError(f"ucode_fetch_stages must be >= 1, got {self.ucode_fetch_stages}")
+        if self.regalloc_effort < 0:
+            raise ValueError(f"regalloc_effort must be >= 0, got {self.regalloc_effort}")
+        if self.regalloc_reuse_write_cap < 1:
+            raise ValueError(f"regalloc_reuse_write_cap must be >= 1, got {self.regalloc_reuse_write_cap}")
+        if self.regalloc_register_price <= 0:
+            raise ValueError(f"regalloc_register_price must be > 0, got {self.regalloc_register_price}")
+
+
+def _build_op_config(options: Options) -> OpConfig:
+    """The one place the user's configuration becomes hardware."""
+    fmt, wmul, op = options.ffmt, options.wmultiplier or 0, options.operator
+    return OpConfig(
+        fadd=FAddOperator(fmt, op.fadd) if op.fadd is not None else None,
+        fmul=FMulOperator(fmt, op.fmul, wmul) if op.fmul is not None else None,
+        fdiv=FDivOperator(fmt, op.fdiv) if op.fdiv is not None else None,
+        fmul_ilog2=FMulILog2OperatorFamily(fmt, op.fmul_ilog2) if op.fmul_ilog2 is not None else None,
+        fcmp=FCmpOperator(fmt, op.fcmp) if op.fcmp is not None else None,
+        fround=FRoundOperator(fmt, op.fround) if op.fround is not None else None,
+        ffma=FFmaOperator(fmt, op.ffma, wmul) if op.ffma is not None else None,
+        fsort=FSortOperator(fmt, op.fsort) if op.fsort is not None else None,
+        fexp2=FExp2Operator(fmt, op.fexp2, wmul) if op.fexp2 is not None else None,
+        flog2=FLog2Operator(fmt, op.flog2, wmul) if op.flog2 is not None else None,
+        fsincos=FSincosOperator(fmt, op.fsincos, wmul) if op.fsincos is not None else None,
+        fatan2=FAtan2Operator(fmt, op.fatan2, wmul) if op.fatan2 is not None else None,
+    )
+
+
+def synthesize(target: Target, /, options: Options, *, name: str | None = None) -> SynthesisResult:
     """
     Synthesize ``target`` (a plain function or a bound method of a constructed instance) into RTL.
-    ``ops`` is the operator configuration, constructed explicitly by the caller: each field fixes one operator's
-    float format and parameters, including any pipeline-stage knobs that lengthen its latency to ease timing closure.
-    ``name`` overrides the generated module name (inferred from target by default).
+    ``options`` configures the machine; ``name`` overrides the generated module name (inferred from target by default).
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)-5.5s %(name)s: %(message)s")  # no-op if already setup
     module_name: str = name or _default_module_name(target)
     _validate_module_name(module_name)
     _logger.info("Synthesis start: module=%r target=%r", module_name, target)
-    _logger.info("Configured operators:")
-    for field in fields(ops):
-        _logger.info("\t%s: %s", field.name, getattr(ops, field.name))
+    _logger.info("Options:")
+    for field in fields(options):
+        value = getattr(options, field.name)
+        if field.name == "operator":
+            for op_field in fields(value):
+                if (configured := getattr(value, op_field.name)) is not None:
+                    _logger.info("\toperator.%s: %s", op_field.name, configured)
+        else:
+            _logger.info("\t%s: %s", field.name, value)
 
     frontend = lower_frontend(target)
     hir = optimize(frontend.hir)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
-    mir = lower_to_mir(hir, ops)
-
-    lir = build(mir, module_name, fetch_stages=3)  # fetch_stages will be made configurable soon
+    mir = lower_to_mir(hir, _build_op_config(options), options.ffmt)
+    lir = build(
+        mir,
+        module_name,
+        options.ucode_fetch_stages,
+        RegallocTuning(
+            effort=options.regalloc_effort,
+            reuse_write_cap=options.regalloc_reuse_write_cap,
+            register_price=options.regalloc_register_price,
+        ),
+    )
     _logger.info("LIR ports:\n\t%s", "\n\t".join(f"{port}" for port in lir.ports))
 
     verilog_output = generate_verilog(lir)

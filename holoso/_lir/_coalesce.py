@@ -177,6 +177,7 @@ def _color_quotient(
             consumer_ports=q_ports,
             producer_key={head: frozenset(producers) for head, producers in q_producers.items()},
             fresh_start=objective.fresh_start,
+            tuning=objective.tuning,
         )
     )
     assign = {vid: q_assign[lead(vid)] for vid in interferes}

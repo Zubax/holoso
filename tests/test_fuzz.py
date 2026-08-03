@@ -117,7 +117,7 @@ def _surviving_forward_branches_for_probe(name: str, emit: Callable[[fuzz_impl._
         fragment.mode,
     )
     mir, _lir, _model, _interpreter = fuzz_impl._build_with_lir(
-        kernel.callable, fuzz_impl.OP_CONFIGS["default"](_FMT), name
+        kernel.callable, fuzz_impl.OP_CONFIGS["default"](_FMT), name, _FMT
     )
     return fuzz_impl.surviving_forward_branches(mir)
 
