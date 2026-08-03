@@ -6,7 +6,6 @@ residual seams. Locations off for goldens, on for logs.
 import dataclasses
 import math
 import os
-from enum import Enum
 
 from ._ir import *
 
@@ -188,9 +187,8 @@ def _operator(operator: object) -> str:
         return repr(operator)
     if not dataclasses.is_dataclass(operator) or isinstance(operator, type):
         return mnemonic
-    parts = [getattr(operator, field.name) for field in dataclasses.fields(operator)]
-    rendered = [part.value if isinstance(part, Enum) else repr(part) for part in parts]
-    return mnemonic + (f"<{','.join(str(r) for r in rendered)}>" if rendered else "")
+    parts = [repr(getattr(operator, field.name)) for field in dataclasses.fields(operator)]
+    return mnemonic + (f"<{','.join(parts)}>" if parts else "")
 
 
 def _item(item: Atom | StarArg) -> str:
