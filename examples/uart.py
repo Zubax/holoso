@@ -179,19 +179,22 @@ def main() -> None:
     # (largest finite magnitude 255).
     # TODO this is temporary until we have integer support.
     float_fmt = holoso.FloatFormat(wexp=4, wman=8)
-    ops = holoso.OpConfig(
-        holoso.FAddOperator(float_fmt),
-        holoso.FMulOperator(float_fmt),
-        holoso.FDivOperator(float_fmt),
-        holoso.FMulILog2OperatorFamily(float_fmt),
-        holoso.FCmpOperator(float_fmt),
+    options = holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+        ),
+        ffmt=float_fmt,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     for label, target in (
         ("uart_tx", UartTx(parity=False).__call__),  # 8E1: even parity
         ("uart_rx", UartRx(parity=False).__call__),
     ):
-        result = holoso.synthesize(target, ops, name=label)
+        result = holoso.synthesize(target, options, name=label)
         for filename, path in result.write(out_dir / label).items():
             print(f"{filename}: {path}")
 

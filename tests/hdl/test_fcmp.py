@@ -14,7 +14,11 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FCmpOperator, FloatFormat
+from holoso import (
+    FCmpOptions,
+    FloatFormat,
+)
+from holoso._operators import FCmpOperator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -131,7 +135,7 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fcmp(sim: str) -> None:
-    operator = FCmpOperator(FloatFormat(8, 24))
+    operator = FCmpOperator(FloatFormat(8, 24), FCmpOptions())
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fcmp"
     runner.build(

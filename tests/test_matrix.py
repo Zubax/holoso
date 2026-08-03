@@ -17,12 +17,17 @@ from numpy import matmul as _matmul
 from jaxtyping import Bool, Float, Float64, Int, Shaped
 
 import holoso
-from holoso import FFmaOperator, FloatFormat, UnsupportedConstruct
+from holoso._operators import FFmaOperator
+from holoso import (
+    FFmaOptions,
+    FloatFormat,
+    UnsupportedConstruct,
+)
 from holoso._eel import lower
 from holoso._hir import FloatAdd, FloatMul, optimize
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import arith_count as _arith_count, default_ops
+from ._modelref import arith_count as _arith_count, default_ops, default_options
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
 # against their own native numpy execution with a tight tolerance.
@@ -71,7 +76,7 @@ class TrackingFilter:
 
 
 def _sim(fn: Callable[..., object]) -> holoso.NumericalSimulator:
-    return holoso.synthesize(fn, default_ops(_FMT), name="kernel").numerical_model.elaborate()
+    return holoso.synthesize(fn, default_options(_FMT), name="kernel").numerical_model.elaborate()
 
 
 def _run(sim: holoso.NumericalSimulator, *arrays: np.ndarray | float) -> np.ndarray:
@@ -174,7 +179,7 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
     def mnemonic_counts(with_fma: bool) -> dict[str, int]:
         ops = default_ops(_FMT)
         if with_fma:
-            ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT))
+            ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT, FFmaOptions(), 0))
         mir = lower_to_mir(optimize(lower(dot).hir), ops)
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
@@ -773,7 +778,7 @@ def test_transpose_of_matrix_state_attribute() -> None:
             return self.P.T * s
 
     sim = holoso.synthesize(
-        Holder(np.array([[1.0, 2.0], [3.0, 4.0]])).step, default_ops(_FMT), name="pt"
+        Holder(np.array([[1.0, 2.0], [3.0, 4.0]])).step, default_options(_FMT), name="pt"
     ).numerical_model.elaborate()
     got = _run(sim, 2.0).reshape(2, 2)
     assert np.allclose(got, np.array([[1.0, 2.0], [3.0, 4.0]]).T * 2.0)
@@ -974,7 +979,7 @@ def test_matrix_state_update_matches_numpy_across_transactions() -> None:
         def step(self, f: Float64[np.ndarray, "2 2"]) -> None:
             self.P = f @ self.P @ f.T
 
-    sim = holoso.synthesize(Decay(np.eye(2)).step, default_ops(_FMT), name="decay").numerical_model.elaborate()
+    sim = holoso.synthesize(Decay(np.eye(2)).step, default_options(_FMT), name="decay").numerical_model.elaborate()
     assert [p.name for p in sim.outputs] == ["state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1"]
     reference = Decay(np.eye(2))
     f = np.array([[1.0, 0.125], [-0.25, 0.9375]])
@@ -1012,7 +1017,7 @@ def test_runtime_divisor_division_matches_numpy() -> None:
 
     scalar_cases = [(6.0, 3.0), (1.0, -4.0), (2.5, 0.5), (0.0, 7.0)]  # each divides exactly in both formats; last: 0/b
     for fmt in (_FMT, FloatFormat(6, 18)):  # a second, narrower datapath width also exercises the divide
-        sim = holoso.synthesize(scalar_div, default_ops(fmt), name="div").numerical_model.elaborate()
+        sim = holoso.synthesize(scalar_div, default_options(fmt), name="div").numerical_model.elaborate()
         for a, b in scalar_cases:
             assert np.allclose(_run(sim, a, b), a / b, rtol=1e-12, atol=1e-300), (fmt, a, b)
 
@@ -1028,7 +1033,7 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
     # Locks in the whole matrix feature surface composed in one stateful kernel across transactions: matrix/vector
     # parameters and carried state, ndarray module constants, ``@`` in every shape with transpose, elementwise scalar
     # broadcast, an annotated local, a static row loop, a shaped return, and the runtime-divisor Kalman gain.
-    sim = holoso.synthesize(TrackingFilter().update, default_ops(_FMT), name="tracker").numerical_model.elaborate()
+    sim = holoso.synthesize(TrackingFilter().update, default_options(_FMT), name="tracker").numerical_model.elaborate()
     assert [p.name for p in sim.outputs] == [
         "out_0", "out_1", "state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1", "state_x_0", "state_x_1",
     ]  # fmt: skip
@@ -1068,8 +1073,9 @@ def test_imu_frame_transform_fma_matches_numpy() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import imu_frame_transform
 
-    ops = dataclasses.replace(default_ops(_FMT), ffma=FFmaOperator(_FMT))
-    sim = holoso.synthesize(imu_frame_transform.transform, ops, name="imu_fma").numerical_model.elaborate()
+    options = default_options(_FMT)
+    options = dataclasses.replace(options, operator=dataclasses.replace(options.operator, ffma=FFmaOptions()))
+    sim = holoso.synthesize(imu_frame_transform.transform, options, name="imu_fma").numerical_model.elaborate()
     yaw90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
     roll90 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
     for rotation in (yaw90, roll90):

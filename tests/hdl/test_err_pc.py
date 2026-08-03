@@ -18,32 +18,40 @@ from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
 from holoso import (
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
     FloatFormat,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
 )
+from holoso._operators import FDivOperator, OpConfig
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._lir import build, pooled_write_word
+from holoso._lir import pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
+from .._modelref import build_lir, build_ops
 
 FMT = FloatFormat(6, 18)
 
 
 def _ops(stage_output: int) -> OpConfig:
-    return OpConfig(
-        FAddOperator(FMT),
-        FMulOperator(FMT),
-        FDivOperator(FMT, stage_output=stage_output),
-        FMulILog2OperatorFamily(FMT),
-        FCmpOperator(FMT),
+    return build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(),
+                fmul=FMulOptions(),
+                fdiv=FDivOptions(stage_output=stage_output),
+                fmul_ilog2=FMulILog2Options(),
+                fcmp=FCmpOptions(),
+            ),
+            ffmt=FMT,
+        )
     )
 
 
@@ -88,7 +96,7 @@ async def err_pc_latches_div0(dut: Any) -> None:
 @pytest.mark.parametrize("stage_output", [0, 1])
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_pc(sim: str, stage_output: int) -> None:
-    lir = build(lower_to_mir(optimize(lower(_divide).hir), _ops(stage_output)), "divide", fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower(_divide).hir), _ops(stage_output)), "divide")
     # The fdiv asserts div0 at its commit; err_pc latches the write word -- the
     # commit step itself (pooled_write_word). An fdiv output stage pushes the commit later, and the err flag and the
     # result still latch/land together: err_step is recomputed from this build's actual fdiv commit.

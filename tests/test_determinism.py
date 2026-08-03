@@ -70,9 +70,9 @@ def coalesce_conflict(x: float, b: float, cc: float) -> tuple[float, float, floa
 def emit_coalesce_conflict() -> None:
     from holoso import FloatFormat, synthesize
 
-    from ._modelref import default_ops
+    from ._modelref import default_options
 
-    result = synthesize(coalesce_conflict, default_ops(FloatFormat(6, 18)))
+    result = synthesize(coalesce_conflict, default_options(FloatFormat(6, 18)))
     _dump(result)
 
 
@@ -82,9 +82,9 @@ def emit_cordic() -> None:
 
     from holoso import FloatFormat, synthesize
 
-    from ._modelref import default_ops
+    from ._modelref import default_options
 
-    result = synthesize(CordicSinCos().__call__, default_ops(FloatFormat(6, 18)))
+    result = synthesize(CordicSinCos().__call__, default_options(FloatFormat(6, 18)))
     _dump(result)
 
 

@@ -14,7 +14,9 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FloatFormat
+from holoso import (
+    FloatFormat,
+)
 from holoso._operators import FMulILog2Operator
 
 from .hdl_float_oracle import (
@@ -107,7 +109,7 @@ CONFIG_MATRIX = [(k, 0) for k in K_VALUES] + [(0, 1)]
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fmul_ilog2_const(sim: str, config: tuple[int, int]) -> None:
     k, stage_decode = config
-    operator = FMulILog2Operator(fmt=FloatFormat(8, 24), k=k, stage_decode=stage_decode)
+    operator = FMulILog2Operator(FloatFormat(8, 24), k, FMulILog2Operator.Options(stage_decode=stage_decode))
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmlog_k{k}_d{stage_decode}"
     runner.build(

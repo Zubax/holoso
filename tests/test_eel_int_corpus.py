@@ -15,8 +15,10 @@ import pytest
 import holoso
 from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
+from holoso._operators import OpConfig
 from holoso._mir import lower as lower_to_mir
 
+from ._modelref import build_ops
 from ._eel_corpus import Crc8, Debouncer, IntUartRx, IntUartTx, Lfsr16, NcoPhase, PriorityEncoder, Pwm
 from ._eel_corpus import band_scan, convergence_steps
 from ._eeloracle import InputRow, assert_hir_matches_reference
@@ -93,14 +95,17 @@ def test_corpus_oracle(name: str, make: Callable[[], Callable[..., object]], vec
     assert compared == len(vectors)
 
 
-def _ops() -> holoso.OpConfig:
+def _ops() -> holoso.Options:
     fmt = holoso.FloatFormat(wexp=8, wman=23)
-    return holoso.OpConfig(
-        holoso.FAddOperator(fmt),
-        holoso.FMulOperator(fmt),
-        holoso.FDivOperator(fmt),
-        holoso.FMulILog2OperatorFamily(fmt),
-        holoso.FCmpOperator(fmt),
+    return holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+        ),
+        ffmt=fmt,
     )
 
 
@@ -109,11 +114,11 @@ def test_int_corpus_rejects_at_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
     with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-        lower_to_mir(lower(make()).hir, _ops())
+        lower_to_mir(lower(make()).hir, build_ops(_ops()))
 
 
 @pytest.mark.parametrize("name,make,vectors", _FLOAT_CASES, ids=[name for name, _, _ in _FLOAT_CASES])
 def test_float_corpus_lowers_through_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
-    lower_to_mir(lower(make()).hir, _ops())
+    lower_to_mir(lower(make()).hir, build_ops(_ops()))

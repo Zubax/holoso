@@ -11,21 +11,23 @@ from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
 from holoso import (
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
-    FExp2Operator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FExp2Options,
+    FLog2Options,
+    FMulILog2Options,
+    FMulOptions,
+    FSortOptions,
     FloatFormat,
-    FLog2Operator,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    FSortOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
 )
+from holoso._operators import OpConfig
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._lir import build
+from .._modelref import build_lir, build_ops
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
@@ -34,15 +36,20 @@ FMT = FloatFormat(6, 18)
 
 
 def _ops() -> OpConfig:
-    return OpConfig(
-        FAddOperator(FMT),
-        FMulOperator(FMT),
-        FDivOperator(FMT),
-        FMulILog2OperatorFamily(FMT),
-        FCmpOperator(FMT),
-        fsort=FSortOperator(FMT),
-        fexp2=FExp2Operator(FMT),
-        flog2=FLog2Operator(FMT),
+    return build_ops(
+        Options(
+            OperatorOptions(
+                fadd=FAddOptions(),
+                fmul=FMulOptions(),
+                fdiv=FDivOptions(),
+                fmul_ilog2=FMulILog2Options(),
+                fcmp=FCmpOptions(),
+                fsort=FSortOptions(),
+                fexp2=FExp2Options(),
+                flog2=FLog2Options(),
+            ),
+            ffmt=FMT,
+        )
     )
 
 
@@ -129,7 +136,7 @@ async def err_pc_safe_transcendentals(dut: Any) -> None:
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_safe_transcendental_err_pc(sim: str, case: _Case) -> None:
-    lir = build(lower_to_mir(optimize(lower(case.fn).hir), _ops()), f"err_{case.name}", fetch_stages=3)
+    lir = build_lir(lower_to_mir(optimize(lower(case.fn).hir), _ops()), f"err_{case.name}")
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"err_{case.name}_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / f"err_{case.name}.v"

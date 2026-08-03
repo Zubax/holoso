@@ -15,7 +15,7 @@ return tuple ``(float, bool, bool, bool, float)``):
   (comparison -> bool -> float cast -> float multiply) that the bool->float result must feed on time.
 
 The two ternary arms of ``clamped`` if-convert to selects, leaving a single straight-line block; the comparisons,
-connectives, and casts are combinational ops within it, so the kernel has no branch and no phi.
+connectives, and casts are combinational options within it, so the kernel has no branch and no phi.
 """
 
 from pathlib import Path
@@ -34,15 +34,18 @@ def signal_window(x: float, lo: float, hi: float) -> tuple[float, bool, bool, bo
 
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
-    ops = holoso.OpConfig(
-        holoso.FAddOperator(float_format),
-        holoso.FMulOperator(float_format),
-        holoso.FDivOperator(float_format),
-        holoso.FMulILog2OperatorFamily(float_format),
-        holoso.FCmpOperator(float_format),
+    options = holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+        ),
+        ffmt=float_format,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    result = holoso.synthesize(signal_window, ops)
+    result = holoso.synthesize(signal_window, options)
     for filename, path in result.write(out_dir).items():
         print(f"{filename}: {path}")
 

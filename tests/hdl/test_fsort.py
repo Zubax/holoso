@@ -16,7 +16,11 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FloatFormat, FSortOperator
+from holoso import (
+    FSortOptions,
+    FloatFormat,
+)
+from holoso._operators import FSortOperator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -124,7 +128,7 @@ async def holoso_fsort_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stage_input", (0, 1, 2), ids=lambda s: f"i{s}")
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fsort(sim: str, stage_input: int) -> None:
-    operator = FSortOperator(FloatFormat(8, 24), stage_input=stage_input)
+    operator = FSortOperator(FloatFormat(8, 24), FSortOptions(stage_input=stage_input))
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsort_i{stage_input}"
     runner.build(

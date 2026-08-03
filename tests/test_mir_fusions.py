@@ -5,24 +5,37 @@ from collections import Counter
 from collections.abc import Callable
 
 from holoso import (
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
     FloatFormat,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
 )
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._lir import build
+from ._modelref import build_lir, build_ops
+from holoso._operators import OpConfig
 from holoso._mir import Mir, MirOperation
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import build_model
 
 FMT = FloatFormat(6, 18)
-OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT))
+OPS = build_ops(
+    Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=FMT,
+    )
+)
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
@@ -47,7 +60,7 @@ def test_directional_inf_composites_lower_to_one_classifier() -> None:
     assert counts.get("fisposinf") == 2 and counts.get("fisneginf") == 2
     assert "band" not in counts and "fcmp" not in counts and "fisfinite" not in counts
 
-    model = build_model(build(mir, "directional_inf", fetch_stages=3))
+    model = build_model(build_lir(mir, "directional_inf"))
     for x in (float("inf"), float("-inf"), 1.0, -1.0, 0.0):
         got = model.run(x, x, x, x)
         want = [
@@ -72,7 +85,7 @@ def test_directional_inf_fusion_preserves_reused_predicates() -> None:
     assert counts.get("fcmp") == 1
     assert counts.get("band") == 1
 
-    model = build_model(build(mir, "directional_inf_reused", fetch_stages=3))
+    model = build_model(build_lir(mir, "directional_inf_reused"))
     for x in (float("inf"), float("-inf"), 1.0, -1.0):
         inf = math.isinf(x)
         pos = x > 0.0
@@ -90,7 +103,7 @@ def test_directional_inf_fusion_suppresses_predicate_shared_only_by_fused_ands()
     assert counts.get("fisneginf") == 1
     assert "fisfinite" not in counts and "fcmp" not in counts and "band" not in counts
 
-    model = build_model(build(mir, "directional_inf_shared", fetch_stages=3))
+    model = build_model(build_lir(mir, "directional_inf_shared"))
     for x in (float("inf"), float("-inf"), 1.0, -1.0):
         inf = math.isinf(x)
         assert model.run(x) == [inf and x > 0.0, inf and x < 0.0]

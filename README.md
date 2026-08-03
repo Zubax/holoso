@@ -115,21 +115,25 @@ The full configuration might look as follows:
 ```python
 import holoso
 
-# Select the floating-point format you wish to use.
-# Ideally, wman (mantissa width) should be a multiple of DSP tile operand width.
-fmt_f = holoso.FloatFormat(wexp=6, wman=18)
-
-# Define the numerical operators. This is where you can configure additional stages to close timings.
-operators = holoso.OpConfig(
-    holoso.FAddOperator(fmt_f, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
-    holoso.FMulOperator(fmt_f, stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-    holoso.FDivOperator(fmt_f, stage_input=1, stage_pack=1, stage_output=1),
-    holoso.FMulILog2OperatorFamily(fmt_f),
-    holoso.FCmpOperator(fmt_f),
+options = holoso.Options(
+    # Define the numerical operators. This is where you can configure additional stages to close timings.
+    holoso.OperatorOptions(
+        fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
+        fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
+        fdiv=holoso.FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+        fmul_ilog2=holoso.FMulILog2Options(),
+        fcmp=holoso.FCmpOptions(),
+    ),
+    # Select the floating-point format you wish to use.
+    # Ideally, wman (mantissa width) should be a multiple of DSP tile operand width.
+    ffmt=holoso.FloatFormat(wexp=6, wman=18),
 )
 ```
 
-Optional operators such as `fexp2` etc. are supplied the same way.
+You only need to set the options for the operators that the kernel actually uses.
+If the kernel needs an unconfigured operator, the behavior depends on whether Holoso can express the missing
+operator in terms of the configured ones. If it can, it will do so silently; if not, it will raise an error.
+For example, the fused multiply-add operator (`ffma`) is entirely optional, but `fadd` is not substitutable.
 
 How does one actually obtain the optimal staging configuration? Empirically.
 Start with the default configuration (all stages disabled) and see if it achieves timing closure at the target frequency.

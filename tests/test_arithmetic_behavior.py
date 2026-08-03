@@ -49,14 +49,15 @@ import pytest
 
 import holoso
 from holoso import (
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
     FloatFormat,
     FloatValue,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
     SynthesisError,
 )
 from ._modelref import default_tolerance, format_edge_bits, within
@@ -64,9 +65,16 @@ from ._modelref import default_tolerance, format_edge_bits, within
 FMT = FloatFormat(6, 18)
 
 
-def _ops() -> OpConfig:
-    return OpConfig(
-        FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT)
+def _ops() -> Options:
+    return Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=FMT,
     )
 
 
@@ -759,8 +767,15 @@ def test_a_power_of_two_scale_past_the_carrier_folds_to_an_infinity() -> None:
     # Strength reduction can mint a power-of-two scale whose host-precision fold overflows; it folds to the operand's
     # own infinity rather than letting an OverflowError escape as a raw traceback.
     fmt = FloatFormat(11, 53)
-    ops = OpConfig(
-        FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
+    ops = Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=fmt,
     )
     sim = holoso.synthesize(_scale_past_the_carrier, ops, name="pow2_carrier_overflow").numerical_model.elaborate()
     for c in (False, True):

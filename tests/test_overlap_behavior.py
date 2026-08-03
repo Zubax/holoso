@@ -26,14 +26,15 @@ import pytest
 import holoso
 from holoso import (
     BoolType,
-    FAddOperator,
-    FCmpOperator,
-    FDivOperator,
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
     FloatFormat,
     FloatType,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
 )
 
 from ._modelref import default_tolerance, within
@@ -41,9 +42,16 @@ from ._modelref import default_tolerance, within
 FMT = FloatFormat(6, 18)
 
 
-def _ops() -> OpConfig:
-    return OpConfig(
-        FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog2OperatorFamily(FMT), FCmpOperator(FMT)
+def _ops() -> Options:
+    return Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=FMT,
     )
 
 

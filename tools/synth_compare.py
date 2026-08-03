@@ -35,6 +35,7 @@ from holoso._lir import build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
 from synth import build_compiler_ooc_design  # noqa: E402
 from synth.flows import make_flow  # noqa: E402
+from tests._modelref import DEFAULT_FETCH_STAGES, DEFAULT_TUNING, build_ops  # noqa: E402
 from tests._synth_targets import TARGETS  # noqa: E402
 
 # Per-flow resource-primitive names for the LUT/FF/DSP/BRAM report columns; each tool names them differently.
@@ -61,7 +62,12 @@ def capture(out_path: str) -> None:
             "ops": repr(target.ops),
         }
         try:
-            lir = build(lower_to_mir(optimize(lower(target.kernel()).hir), target.ops), target.name, fetch_stages=3)
+            lir = build(
+                lower_to_mir(optimize(lower(target.kernel()).hir), build_ops(target.ops)),
+                target.name,
+                DEFAULT_FETCH_STAGES,
+                DEFAULT_TUNING,
+            )
             row["min_ii"] = lir.min_initiation_interval
             row["last_pc"] = lir.last_pc
             flow = make_flow(target.flow, target.target_frequency_MHz)

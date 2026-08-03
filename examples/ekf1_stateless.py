@@ -133,25 +133,31 @@ def main() -> None:
     narrow = holoso.FloatFormat(wexp=6, wman=18)
     wide = holoso.FloatFormat(wexp=8, wman=36)
     configs = [
-        holoso.OpConfig(
-            holoso.FAddOperator(narrow),
-            holoso.FMulOperator(narrow),
-            holoso.FDivOperator(narrow),
-            holoso.FMulILog2OperatorFamily(narrow),
-            holoso.FCmpOperator(narrow),
+        holoso.Options(
+            holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(),
+                fmul=holoso.FMulOptions(),
+                fdiv=holoso.FDivOptions(),
+                fmul_ilog2=holoso.FMulILog2Options(),
+                fcmp=holoso.FCmpOptions(),
+            ),
+            ffmt=narrow,
         ),
-        holoso.OpConfig(
-            holoso.FAddOperator(wide, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
-            holoso.FMulOperator(wide, stage_input=1, stage_product=1, stage_pack=1),
-            holoso.FDivOperator(wide, stage_input=1, stage_pack=1, stage_output=1),
-            holoso.FMulILog2OperatorFamily(wide),
-            holoso.FCmpOperator(wide),
+        holoso.Options(
+            holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
+                fdiv=holoso.FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+                fmul_ilog2=holoso.FMulILog2Options(),
+                fcmp=holoso.FCmpOptions(),
+            ),
+            ffmt=wide,
         ),
     ]
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    for ops in configs:
-        label = f"e{ops.float_format.wexp}m{ops.float_format.wman}"
-        result = holoso.synthesize(update_x_P, ops=ops)
+    for options in configs:
+        label = f"e{options.ffmt.wexp}m{options.ffmt.wman}"
+        result = holoso.synthesize(update_x_P, options)
         for filename, path in result.write(base / label).items():
             print(f"{label}/{filename}: {path}")
 

@@ -22,16 +22,19 @@ def eccentric_anomaly(mean_anomaly: float, eccentricity: float) -> float:
 
 def main() -> None:
     fmt = holoso.FloatFormat(wexp=8, wman=36)
-    ops = holoso.OpConfig(
-        holoso.FAddOperator(fmt),
-        holoso.FMulOperator(fmt),
-        holoso.FDivOperator(fmt),
-        holoso.FMulILog2OperatorFamily(fmt),
-        holoso.FCmpOperator(fmt),
-        fsincos=holoso.FSincosOperator(fmt),
+    options = holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+            fsincos=holoso.FSincosOptions(),
+        ),
+        ffmt=fmt,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    result = holoso.synthesize(eccentric_anomaly, ops=ops)
+    result = holoso.synthesize(eccentric_anomaly, options)
     for filename, path in result.write(out_dir).items():
         print(f"{filename}: {path}")
     model = result.numerical_model.elaborate()

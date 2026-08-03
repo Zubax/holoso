@@ -1,6 +1,11 @@
 """Holoso: a narrow Python-to-Verilog synthesizer for numeric kernels."""
 
-from ._api import synthesize as synthesize, SynthesisResult as SynthesisResult
+from ._api import (
+    OperatorOptions as OperatorOptions,
+    Options as Options,
+    SynthesisResult as SynthesisResult,
+    synthesize as synthesize,
+)
 from ._lir import (
     ControlInputPort as ControlInputPort,
     ControlOutputPort as ControlOutputPort,
@@ -34,21 +39,22 @@ from ._backend.numerical import (
 )
 from ._backend.verilog import VerilogOutput as VerilogOutput
 
-from ._operators import (
-    FAddOperator as FAddOperator,
-    FAtan2Operator as FAtan2Operator,
-    FDivOperator as FDivOperator,
-    FExp2Operator as FExp2Operator,
-    FLog2Operator as FLog2Operator,
-    FMulILog2OperatorFamily as FMulILog2OperatorFamily,
-    FMulOperator as FMulOperator,
-    FCmpOperator as FCmpOperator,
-    FFmaOperator as FFmaOperator,
-    FRoundOperator as FRoundOperator,
-    FSincosOperator as FSincosOperator,
-    FSortOperator as FSortOperator,
-    OpConfig as OpConfig,
-)
+from . import _operators
+
+# The user names an operator's knobs without naming the operator type, which is not part of the public API.
+FAddOptions = _operators.FAddOperator.Options
+FAtan2Options = _operators.FAtan2Operator.Options
+FCmpOptions = _operators.FCmpOperator.Options
+FDivOptions = _operators.FDivOperator.Options
+FExp2Options = _operators.FExp2Operator.Options
+FFmaOptions = _operators.FFmaOperator.Options
+FLog2Options = _operators.FLog2Operator.Options
+FMulILog2Options = _operators.FMulILog2Operator.Options
+FMulOptions = _operators.FMulOperator.Options
+FRoundOptions = _operators.FRoundOperator.Options
+FSincosOptions = _operators.FSincosOperator.Options
+FSortOptions = _operators.FSortOperator.Options
+IMulOptions = _operators.IMulOperator.Options
 
 __version__ = "0.2.0"
 __url__ = "https://holoso.digital"

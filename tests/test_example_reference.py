@@ -21,9 +21,12 @@ import numpy as np
 import pytest
 
 import holoso
-from holoso import BoolType, FloatFormat
+from holoso import (
+    BoolType,
+    FloatFormat,
+)
 from ._examples import SPECS, ExampleSpec, ReferenceComparison
-from ._modelref import default_ops, default_tolerance, flatten_value, within
+from ._modelref import default_ops, default_options, default_tolerance, flatten_value, within
 
 # A kernel the generic scalar-lane harness cannot drive (``ReferenceComparison.EXCLUDED``) is skipped here: it has
 # public VECTOR state this harness would read by a non-existent per-element attribute (``ekf1_stateful``); its
@@ -52,7 +55,7 @@ def _quantize(value: float | bool, fmt: FloatFormat) -> float | bool:
 def _model_for(spec: ExampleSpec, fmt: FloatFormat) -> holoso.NumericalSimulator:
     # Built through the public facade, exactly as a user would; ``_lir.ops`` (read once below for the tolerance op
     # count) is the only internal datum the result does not expose publicly.
-    return holoso.synthesize(spec.make_kernel(), default_ops(fmt), name=spec.name).numerical_model.elaborate()
+    return holoso.synthesize(spec.make_kernel(), default_options(fmt), name=spec.name).numerical_model.elaborate()
 
 
 @pytest.mark.parametrize("spec,fmt", _CASES)

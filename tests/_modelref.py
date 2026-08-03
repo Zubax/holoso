@@ -9,22 +9,27 @@ from typing import Any
 import numpy as np
 
 from holoso import (
-    FAddOperator,
-    FAtan2Operator,
-    FCmpOperator,
-    FDivOperator,
-    FExp2Operator,
-    FLog2Operator,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    FSincosOperator,
-    OpConfig,
+    FAddOptions,
+    FAtan2Options,
+    FCmpOptions,
+    FDivOptions,
+    FExp2Options,
+    FLog2Options,
+    FMulILog2Options,
+    FMulOptions,
+    FSincosOptions,
+    OperatorOptions,
+    Options,
 )
+from holoso._api import _build_op_config
+from holoso._lir import RegallocTuning
+from holoso._lir import build
+from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
 from holoso._hir import Hir, Operation, Operator, optimize
-from holoso._lir import Lir, build
-from holoso._mir import MirInterpreter, lower as lower_to_mir
+from holoso._lir import Lir
+from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat
 from holoso._value import FloatValue
 from holoso._eel._names import port_name as port_name
@@ -56,7 +61,7 @@ def build_model_and_interpreter(
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
     mir = lower_to_mir(optimize(lower_frontend(kernel).hir), ops)
-    return build_model(build(mir, name, fetch_stages=3)), MirInterpreter(mir)
+    return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 
 def arith_count(hir: Hir, op_type: type[Operator]) -> int:
@@ -190,30 +195,66 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
     return edges
 
 
-def _optional[T](build: Callable[[], T]) -> T | None:
+def _if_supported[O](operator: Callable[..., object], fmt: FloatFormat, opt: O) -> O | None:
+    """A transcendental without zkf tables for the format is left unconfigured."""
     try:
-        return build()
+        operator(fmt, opt, 0)
     except KeyError:
         return None
+    return opt
+
+
+def build_ops(options: Options) -> OpConfig:
+    """For the white-box tests that drive MIR lowering directly."""
+    return _build_op_config(options)
+
+
+DEFAULT_FETCH_STAGES = 3
+
+# Restated as literals so the frozen metric baselines cannot move with the environment overrides below.
+SHIPPED_TUNING = RegallocTuning(effort=5000, reuse_write_cap=2, register_price=2.0)
+
+
+# What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
+_DEFAULTS = Options(OperatorOptions())
+DEFAULT_TUNING = RegallocTuning(
+    effort=_DEFAULTS.regalloc_effort,
+    reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,
+    register_price=_DEFAULTS.regalloc_register_price,
+)
+
+
+def build_lir(mir: Mir, name: str, tuning: RegallocTuning = DEFAULT_TUNING) -> Lir:
+    """The default machine build shared by the white-box tests."""
+    return build(mir, name, DEFAULT_FETCH_STAGES, tuning)
+
+
+def default_options(fmt: FloatFormat) -> Options:
+    return Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+            fexp2=_if_supported(FExp2Operator, fmt, FExp2Options()),
+            flog2=_if_supported(FLog2Operator, fmt, FLog2Options()),
+            fsincos=_if_supported(FSincosOperator, fmt, FSincosOptions()),
+            fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options()),
+        ),
+        ffmt=fmt,
+    )
 
 
 def default_ops(fmt: FloatFormat) -> OpConfig:
-    return OpConfig(
-        FAddOperator(fmt),
-        FMulOperator(fmt),
-        FDivOperator(fmt),
-        FMulILog2OperatorFamily(fmt),
-        FCmpOperator(fmt),
-        fexp2=_optional(lambda: FExp2Operator(fmt)),
-        flog2=_optional(lambda: FLog2Operator(fmt)),
-        fsincos=_optional(lambda: FSincosOperator(fmt)),
-        fatan2=_optional(lambda: FAtan2Operator(fmt)),
-    )
+    return build_ops(default_options(fmt))
 
 
 def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
     """The default config with only the comparator's stage knob varied (latency ``1 + stage_input``)."""
-    return dataclasses.replace(default_ops(fmt), fcmp=FCmpOperator(fmt, stage_input=stage_input))
+    options = default_options(fmt)
+    operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=stage_input))
+    return build_ops(dataclasses.replace(options, operator=operator))
 
 
 def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
@@ -328,40 +369,50 @@ def overlap_div_err_kernel(x: float, y: float, z: float) -> float:
     return r
 
 
-def staged_ops(fmt: FloatFormat) -> OpConfig:
+def staged_options(fmt: FloatFormat) -> Options:
     """
     A deeply pipelined configuration, distinct enough from the default to exercise the schedule, register allocation,
     and handshake at a longer latency. Deliberately hardcoded -- it is a test fixture chosen for coverage, not a
     derived enumeration of operator knobs, so it stays valid as new (not necessarily stage-shaped) knobs are added.
     """
-    return OpConfig(
-        FAddOperator(
-            fmt, stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
-        ),
-        FMulOperator(fmt, stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-        FDivOperator(fmt, stage_input=1, stage_pack=1, stage_output=1),
-        FMulILog2OperatorFamily(fmt, stage_input=1, stage_decode=1),
-        FCmpOperator(fmt, stage_input=1),
-        fexp2=_optional(
-            lambda: FExp2Operator(fmt, stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1)
-        ),
-        flog2=_optional(
-            lambda: FLog2Operator(
+    cordic = FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1)  # bench-verified (tests/hdl)
+    return Options(
+        OperatorOptions(
+            fadd=FAddOptions(
+                stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+            ),
+            fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
+            fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
+            fcmp=FCmpOptions(stage_input=1),
+            fexp2=_if_supported(
+                FExp2Operator,
                 fmt,
-                stage_input=1,
-                stage_decode=1,
-                stage_product=1,
-                stage_product_final=1,
-                stage_normalize=1,
-                stage_normalize_output=1,
-                stage_pack=1,
-                stage_output=1,
-            )
+                FExp2Options(stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1),
+            ),
+            flog2=_if_supported(
+                FLog2Operator,
+                fmt,
+                FLog2Options(
+                    stage_input=1,
+                    stage_decode=1,
+                    stage_product=1,
+                    stage_product_final=1,
+                    stage_normalize=1,
+                    stage_normalize_output=1,
+                    stage_pack=1,
+                    stage_output=1,
+                ),
+            ),
+            fsincos=_if_supported(FSincosOperator, fmt, cordic),
+            fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options(**dataclasses.asdict(cordic))),
         ),
-        # A bench-verified CORDIC stage combo (tests/hdl/test_f{sincos,atan2}.py), so the latency formula is known-good.
-        fsincos=_optional(lambda: FSincosOperator(fmt, stage_product=1, stage_normalize=1, stage_pack=1)),
-        fatan2=_optional(lambda: FAtan2Operator(fmt, stage_product=1, stage_normalize=1, stage_pack=1)),
+        ffmt=fmt,
     )
+
+
+def staged_ops(fmt: FloatFormat) -> OpConfig:
+    return build_ops(staged_options(fmt))
 
 
 PIPELINE_OP_CASES = (

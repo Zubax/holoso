@@ -15,7 +15,11 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FloatFormat, FRoundOperator
+from holoso import (
+    FRoundOptions,
+    FloatFormat,
+)
+from holoso._operators import FRoundOperator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -121,10 +125,9 @@ def test_holoso_fround(sim: str, stages: tuple[int, int, int, int]) -> None:
     stage_input, stage_decode, stage_pack, stage_output = stages
     operator = FRoundOperator(
         FloatFormat(8, 24),
-        stage_input=stage_input,
-        stage_decode=stage_decode,
-        stage_pack=stage_pack,
-        stage_output=stage_output,
+        FRoundOptions(
+            stage_input=stage_input, stage_decode=stage_decode, stage_pack=stage_pack, stage_output=stage_output
+        ),
     )
     runner = get_runner(sim)
     build_dir = (

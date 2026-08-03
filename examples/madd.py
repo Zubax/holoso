@@ -15,15 +15,18 @@ def madd(a: float, b: float, c: float) -> float:
 
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=6, wman=18)
-    ops = holoso.OpConfig(
-        holoso.FAddOperator(float_format),
-        holoso.FMulOperator(float_format),
-        holoso.FDivOperator(float_format),
-        holoso.FMulILog2OperatorFamily(float_format),
-        holoso.FCmpOperator(float_format),
+    options = holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+        ),
+        ffmt=float_format,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    result = holoso.synthesize(madd, ops=ops)
+    result = holoso.synthesize(madd, options)
     for filename, path in result.write(out_dir).items():
         print(f"{filename}: {path}")
 

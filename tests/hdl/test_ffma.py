@@ -16,7 +16,11 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FloatFormat, FFmaOperator
+from holoso import (
+    FFmaOptions,
+    FloatFormat,
+)
+from holoso._operators import FFmaOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
@@ -119,13 +123,16 @@ def test_holoso_ffma(sim: str, stages: tuple[int, int, int, int, int, int, int])
     si, sp, sd, sa, sn, spk, so = stages
     operator = FFmaOperator(
         FloatFormat(8, 24),
-        stage_input=si,
-        stage_product=sp,
-        stage_decode=sd,
-        stage_align=sa,
-        stage_normalize=sn,
-        stage_pack=spk,
-        stage_output=so,
+        FFmaOptions(
+            stage_input=si,
+            stage_product=sp,
+            stage_decode=sd,
+            stage_align=sa,
+            stage_normalize=sn,
+            stage_pack=spk,
+            stage_output=so,
+        ),
+        0,
     )
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ffma_{''.join(str(v) for v in stages)}"

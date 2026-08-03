@@ -12,7 +12,11 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FloatFormat, FSincosOperator
+from holoso import (
+    FSincosOptions,
+    FloatFormat,
+)
+from holoso._operators import FSincosOperator
 
 from .hdl_float_oracle import (
     DIRECTED_F32,
@@ -97,7 +101,7 @@ async def holoso_fsincos_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fsincos(sim: str, stages: dict[str, int]) -> None:
-    operator = FSincosOperator(FloatFormat(8, 24), **stages)
+    operator = FSincosOperator(FloatFormat(8, 24), FSincosOptions(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsincos_{stage_tag(stages)}"
     runner.build(

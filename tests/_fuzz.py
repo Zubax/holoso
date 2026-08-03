@@ -43,7 +43,7 @@ from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
-from holoso._lir import Branch, Lir, RegRef, ScheduledOp, build, landing_cycle
+from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
 from holoso._lir import operand_read_cycle
 from holoso._mir import Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
 from holoso._mir import lower as lower_to_mir
@@ -52,6 +52,7 @@ from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue
 
 from ._modelref import (
+    build_lir,
     Vector,
     default_ops,
     default_tolerance,
@@ -1040,7 +1041,7 @@ def _build_with_lir(
     identical build path.
     """
     mir = lower_to_mir(optimize(lower_frontend(fn).hir), ops)
-    lir = build(mir, name, fetch_stages=3)
+    lir = build_lir(mir, name)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)
     return mir, lir, model, interpreter

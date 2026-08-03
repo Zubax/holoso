@@ -138,7 +138,7 @@ survives into HIR, so keeping their canonical text is what makes a front-end dec
 the compiler explaining itself, next to what it produced.
 
 A plain function synthesizes to a stateless module. A stateful module is requested by passing a bound method of a
-constructed instance, e.g. `synthesize(filt.update, ops)`: the instance's attribute snapshot seeds the reset state,
+constructed instance, e.g. `synthesize(filt.update, options)`: the instance's attribute snapshot seeds the reset state,
 and its method is the analyzed body; the constructor runs in plain Python, its arguments frozen into the build. The
 root package re-exports only the supported public API. A future second mode -- several methods sharing one state
 behind a runtime selector port -- is deferred.
@@ -164,11 +164,11 @@ float ones delegate to the external ZKF library. Each hardware operator owns its
 identity stem, so the fully specified operator instance is itself the resource-sharing key and equal operators
 time-share one module. Per-node-parameterized operators are factories that instantiate a concrete operator.
 
-Operators are chosen by a single `OpConfig`, constructed explicitly by the user and passed into `synthesize`; there is
-no implicit default. Its float format is verified consistent across the configured operators and drives HIR-to-MIR
-lowering; thereafter the format is derived from selected MIR. Latency-tuning knobs are named after the HDL parameters;
-some operators are optional. An operator may declare per-firing microcode-driven immediate inputs, and declares a
-per-instance initiation interval (most are II=1, fully pipelined).
+Every operator is optional, so presence is a semantic choice as well as an area one
+(`ffma` enables FMA contraction, `fsort` enables min/max); an unconfigured one is refused at MIR lowering.
+The float format drives HIR-to-MIR lowering. Latency-tuning knobs are named after the HDL parameters.
+An operator may declare per-firing microcode-driven immediate inputs, and declares a per-instance
+initiation interval (most are II=1, fully pipelined).
 
 ## Front-end
 
@@ -458,8 +458,8 @@ Why read-first plus a +1 dependency cycle, not write-through forwarding? Write-t
 forwarding muxes cost `O(NRD*NWR)` across many ports -- unsustainable; read-first plus the +1, hidden under pipelined
 overlap, is the better trade.
 
-Each operator instance carries its own Holoso-exposed parameters and float format, fixed at construction from the
-`OpConfig`; every instantiation lists every hardware parameter explicitly, turning a param-name mismatch into a loud
+Each operator instance carries its own options and float format, fixed at construction from the user's `Options`;
+every instantiation lists every hardware parameter explicitly, turning a param-name mismatch into a loud
 elaboration error. The auxiliary HDL ships as one self-contained `holoso_support.v`, assembled in memory from
 hand-written operator catalogues plus included external RTL, so the end application adds a single file to the
 synthesis input. The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is

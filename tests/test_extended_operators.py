@@ -12,21 +12,22 @@ import pytest
 
 import holoso
 from holoso import (
-    FAddOperator,
-    FAtan2Operator,
-    FCmpOperator,
-    FDivOperator,
-    FExp2Operator,
+    FAddOptions,
+    FAtan2Options,
+    FCmpOptions,
+    FDivOptions,
+    FExp2Options,
+    FFmaOptions,
+    FLog2Options,
+    FMulILog2Options,
+    FMulOptions,
+    FRoundOptions,
+    FSincosOptions,
+    FSortOptions,
     FloatFormat,
     FloatValue,
-    FFmaOperator,
-    FLog2Operator,
-    FMulILog2OperatorFamily,
-    FMulOperator,
-    FRoundOperator,
-    FSincosOperator,
-    FSortOperator,
-    OpConfig,
+    OperatorOptions,
+    Options,
     SynthesisError,
     UnsupportedConstruct,
 )
@@ -53,20 +54,23 @@ def _ops(
     with_log2: bool = True,
     with_sincos: bool = True,
     with_atan2: bool = True,
-) -> OpConfig:
-    return OpConfig(
-        FAddOperator(FMT),
-        FMulOperator(FMT),
-        FDivOperator(FMT),
-        FMulILog2OperatorFamily(FMT),
-        FCmpOperator(FMT),
-        fround=FRoundOperator(FMT) if with_round else None,
-        ffma=FFmaOperator(FMT) if with_fma else None,
-        fsort=FSortOperator(FMT) if with_sort else None,
-        fexp2=FExp2Operator(FMT) if with_exp2 else None,
-        flog2=FLog2Operator(FMT) if with_log2 else None,
-        fsincos=FSincosOperator(FMT) if with_sincos else None,
-        fatan2=FAtan2Operator(FMT) if with_atan2 else None,
+) -> Options:
+    return Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+            fround=FRoundOptions() if with_round else None,
+            ffma=FFmaOptions() if with_fma else None,
+            fsort=FSortOptions() if with_sort else None,
+            fexp2=FExp2Options() if with_exp2 else None,
+            flog2=FLog2Options() if with_log2 else None,
+            fsincos=FSincosOptions() if with_sincos else None,
+            fatan2=FAtan2Options() if with_atan2 else None,
+        ),
+        ffmt=FMT,
     )
 
 
