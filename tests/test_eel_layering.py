@@ -19,7 +19,7 @@ _SOURCE_SUFFIXES = (".py", ".md", ".toml", ".cfg", ".yml", ".yaml")
 # Modules allowed to import HIR within holoso._eel, as repo-relative posix paths under _eel.
 # `_pe/_ops.py` is the partial evaluator's sole HIR-facing module: it selects operators and folds through their
 # own `evaluate` (the one-answer mandate), while the rest of `_pe` stays HIR-free; `_lower.py` composes the
-# stages and returns an `Hir`.
+# stages and returns the lowered `Hir` alongside the printed Eel of each pass.
 _HIR_HOMES = {"_lib", "_emit", "_pe/_ops.py", "_lower.py"}
 
 

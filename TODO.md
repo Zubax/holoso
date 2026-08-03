@@ -23,7 +23,7 @@ The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debounc
 acceptance set: each is oracle-verified against CPython through HIR and records its MIR refusal, so lifting the gate
 turns those refusals into end-to-end coverage. `examples/uart.py` carries its counters as floats until then.
 
-## Frontend limitations -- to be addressed by the next frontend redesign
+## Frontend limitations
 
 Valid kernels that are conservatively rejected. None is a wrong answer; each is a located refusal with a rewrite.
 
@@ -55,8 +55,8 @@ unpack target (`first, *rest = v`).
 
 `while True:` with a data-dependent `break` exhausts the graph expansion budget rather than residualizing: a literal
 `True` header is decidable on every trip, so the loop unrolls until the budget stops it, while a runtime `break` opens
-an exit lane without ever closing the fall path. The exit condition belongs in the header. This is the ratified
-position -- every cheap detector for the shape misfires on the legitimate counter-spelled loop.
+an exit lane without ever closing the fall path. The exit condition belongs in the header. This is deliberate --
+every cheap detector for the shape misfires on the legitimate counter-spelled loop.
 
 A state attribute's shape and type come from the reset snapshot, so a field annotation contradicting it
 (`P: Float64[np.ndarray, "2 2"]` on an instance holding a 3x3) is documentation rather than a checked declaration.

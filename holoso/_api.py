@@ -50,6 +50,11 @@ class SynthesisResult:
     cocotb_output: CocotbOutput
     html_output: HtmlOutput
 
+    frontend_ir: list[str]
+    """
+    The front-end intermediate representation after each pass, earliest first (raw), final last (most refined).
+    """
+
     def write(self, out_dir: Path | str) -> dict[str, Path]:
         """
         Write every artifact to ``out_dir`` and return the written paths keyed by filename.
@@ -62,6 +67,7 @@ class SynthesisResult:
             **self.verilog_output.support_files,
             f"test_{self.module_name}.py": self.cocotb_output.testbench,
             f"{self.module_name}.html": self.html_output.html,
+            **{f"{self.module_name}.pass{i}.fir": text for i, text in enumerate(self.frontend_ir)},
         }
         written: dict[str, Path] = {}
         for filename, content in files.items():
@@ -86,7 +92,8 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
     for field in fields(ops):
         _logger.info("\t%s: %s", field.name, getattr(ops, field.name))
 
-    hir = optimize(lower_frontend(target))
+    frontend = lower_frontend(target)
+    hir = optimize(frontend.hir)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
     mir = lower_to_mir(hir, ops)
@@ -113,6 +120,7 @@ def synthesize(target: Target, /, ops: OpConfig, *, name: str | None = None) -> 
         numerical_model=model,
         cocotb_output=cocotb_output,
         html_output=html_output,
+        frontend_ir=frontend.passes,
     )
 
 

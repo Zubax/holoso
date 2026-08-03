@@ -61,7 +61,7 @@ def capture(out_path: str) -> None:
             "ops": repr(target.ops),
         }
         try:
-            lir = build(lower_to_mir(optimize(lower(target.kernel())), target.ops), target.name, fetch_stages=3)
+            lir = build(lower_to_mir(optimize(lower(target.kernel()).hir), target.ops), target.name, fetch_stages=3)
             row["min_ii"] = lir.min_initiation_interval
             row["last_pc"] = lir.last_pc
             flow = make_flow(target.flow, target.target_frequency_MHz)

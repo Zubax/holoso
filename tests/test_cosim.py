@@ -134,7 +134,7 @@ def test_cosim_comparison_at_branch_boundary(sim: str, config: OperatorCase) -> 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_overlap_spill(sim: str, config: OperatorCase) -> None:
-    # Cross-block software pipelining (M7): the entry block shrinks its terminator to a wide chain's write word, and
+    # Cross-block software pipelining: the entry block shrinks its terminator to a wide chain's write word, and
     # that result spills past the terminator into BOTH single-predecessor arms, which read it. If the arm read did not
     # wait for the in-flight landing in the successor frame -- or the spill mis-aligned by even one frame -- the RTL
     # would diverge from the cycle-accurate model here. The white-box twin
@@ -388,7 +388,7 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"kdiv_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(kdiv)), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(kdiv).hir), config.make_ops(fmt)), name, fetch_stages=3)
     bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -451,7 +451,7 @@ def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"klog2_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(klog2)), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(klog2).hir), config.make_ops(fmt)), name, fetch_stages=3)
     bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -510,14 +510,14 @@ async def overlap_div0_errpc(dut):
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
-    # M7 regression (review round 3, Codex P1): an error-bearing division whose result spills past a SHRUNK
+    # Overlap regression: an error-bearing division whose result spills past a SHRUNK
     # terminator must still latch err_pc to its OWN step, not the redirected non-fall-through successor frame. The data
     # is correct regardless (model == RTL), so only this step-exact err_pc cosim catches the regression. White-box
     # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See
     # _modelref.overlap_div_err_kernel.
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
-    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel)), config.make_ops(fmt)), name, fetch_stages=3)
+    lir = build(lower_to_mir(optimize(lower(overlap_div_err_kernel).hir), config.make_ops(fmt)), name, fetch_stages=3)
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)

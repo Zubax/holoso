@@ -1,6 +1,6 @@
 """
 The specializing interpreter: Eel -> residual Eel. Binding time is its whole product; the rest follows
-CPython or the ratified rulings, of which the non-obvious ones are recorded here.
+CPython or the subset's own rules, of which the non-obvious ones are recorded here.
 
 Static folds go through the selected HIR operator's own ``evaluate``, and a fold naming no number
 residualizes with constant operands: one expression, one answer, refusal survivor-based in HIR. No algebra

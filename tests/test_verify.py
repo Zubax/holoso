@@ -72,7 +72,7 @@ def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
 
 
 def _run(target: Callable[..., object]) -> Mir:
-    return lower_to_mir(optimize(lower(target)), OPS)
+    return lower_to_mir(optimize(lower(target).hir), OPS)
 
 
 def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
@@ -275,7 +275,7 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
                     self.s = 5.0  # written only on the else path's loop; must be persistent state
             return self.s
 
-    hir = lower(K().step)
+    hir = lower(K().step).hir
     assert "s" in {slot.name for slot in hir.state_slots}  # the loop-written attr must be registered as state
 
     model = build_model(build(_run(K().step), "k", fetch_stages=3))
@@ -307,7 +307,7 @@ def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
                     self.s = 5.0  # written only on the else path's loop; must be persistent state
             return self.s
 
-    hir = lower(K().step)
+    hir = lower(K().step).hir
     assert "s" in {slot.name for slot in hir.state_slots}  # the loop-written attr must be registered as state
 
     model = build_model(build(_run(K().step), "k", fetch_stages=3))
@@ -337,7 +337,7 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
         return r
 
     # With the stale binding resurrected, ``i`` folds to 0 -> ``0 < 0.0`` is always False -> r is always 200.0.
-    assert len(lower(kernel).blocks) > 1  # the comparison is a real branch, not folded away
+    assert len(lower(kernel).hir.blocks) > 1  # the comparison is a real branch, not folded away
     model = build_model(build(_run(kernel), "k", fetch_stages=3))
     for a in (-5.0, -0.5, 0.5, 7.0):
         assert float(model.run(a)[0]) == float(kernel(a)), f"mismatch at a={a}"
@@ -369,7 +369,7 @@ def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
     ops = OpConfig(
         FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
     )
-    model = build_model(build(lower_to_mir(optimize(lower(f)), ops), "f", fetch_stages=3))
+    model = build_model(build(lower_to_mir(optimize(lower(f).hir), ops), "f", fetch_stages=3))
     assert model.run(FloatValue.from_float(fmt, 0.5))[0] == FloatValue.from_float(fmt, 8.0)
 
 
@@ -405,7 +405,7 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
     ops = OpConfig(
         FAddOperator(fmt), FMulOperator(fmt), FDivOperator(fmt), FMulILog2OperatorFamily(fmt), FCmpOperator(fmt)
     )
-    mir = lower_to_mir(optimize(lower(f)), ops)
+    mir = lower_to_mir(optimize(lower(f).hir), ops)
     model = build_model(build(mir, "f", fetch_stages=3))
     got = model.run(
         FloatValue.from_bits(fmt, 0x42BF30E6505),
@@ -1515,7 +1515,7 @@ def test_statically_folded_branch_does_not_create_a_phantom_state_slot() -> None
                 self.y = self.y + u  # unreachable: must not become persistent state
             return self.x
 
-    hir = lower(K().__call__)
+    hir = lower(K().__call__).hir
     assert [slot.name for slot in hir.state_slots] == ["x"]  # y is not a phantom slot
     assert len(hir.blocks) == 1  # the guard folded; no branch
     model = build_model(build(_run(K().__call__), "phantom_if", fetch_stages=3))
@@ -1547,7 +1547,7 @@ def test_a_connective_guard_over_a_runtime_operand_keeps_its_dead_arm_alive() ->
                 self.y = self.y + u  # never taken at runtime, but the evaluator cannot see that
             return self.x
 
-    hir = lower(K().__call__)
+    hir = lower(K().__call__).hir
     assert [slot.name for slot in hir.state_slots] == ["x", "y"]
     model = build_model(build(_run(K().__call__), "connective_if", fetch_stages=3))
     reference = K()
@@ -1575,7 +1575,7 @@ def test_folded_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -> No
                 n = n + 1.0
             return self.acc
 
-    hir = lower(K().__call__)
+    hir = lower(K().__call__).hir
     assert [slot.name for slot in hir.state_slots] == ["acc"]  # dead is not carried
     model = build_model(build(_run(K().__call__), "phantom_loop", fetch_stages=3))
     assert float(model.run(1.0)[0]) == 3.0

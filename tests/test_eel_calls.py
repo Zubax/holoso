@@ -30,7 +30,7 @@ _SCALE = 4
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn), fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
@@ -224,7 +224,7 @@ def test_static_negative_base_powers_fold_through_the_stub_parity_lane() -> None
     assert "-128.0" in _residual_text(_neg_base_odd_exponent)
     _oracle(_dead_static_pow_fault, [{"x": 3.5}])
     with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_neg_base_fractional_exponent))
+        optimize(lower(_neg_base_fractional_exponent).hir)
 
 
 # ---------------------------------------------------------------------- user-function inlining
@@ -480,8 +480,8 @@ def _unimplemented_python_library(x: float) -> float:
 
 def test_unregistered_callables_are_uniform_no_library_is_special() -> None:
     """
-    Substitution is the _lib registry's decision alone; the interpreter knows no library names (maintainer
-    ruling). A plain-Python callable is ingested like user code wherever it lives, rejecting on its first
+    Substitution is the _lib registry's decision alone; the interpreter knows no library names.
+    A plain-Python callable is ingested like user code wherever it lives, rejecting on its first
     unsupported construct chain-attributed to the user's call site; a source-less callable rejects generically.
     """
     _rejects(_unimplemented_library, "calls to 'math.erf' are not supported yet")

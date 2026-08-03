@@ -1,7 +1,7 @@
 """
 The corpus differential: every integer kernel is oracle-verified against CPython -- exact ints,
 multi-transaction, state included -- proving integers flow through Eel into HIR, and each one's MIR
-refusal is recorded (``_reject_integers`` runs until the integer hardware sprint). The float kernels ride
+refusal is recorded (``_reject_integers`` runs until the integer backend lands). The float kernels ride
 the same oracle and lower all the way: the two residual-loop exit shapes, plus the FIR and biquad examples,
 whose exactness against CPython this suite adds on top of the tolerance-based example matrix.
 """
@@ -89,7 +89,7 @@ _CASES = _INT_CASES + _FLOAT_CASES
 @pytest.mark.parametrize("name,make,vectors", _CASES, ids=[name for name, _, _ in _CASES])
 def test_corpus_oracle(name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]) -> None:
     target = make()
-    compared = assert_hir_matches_reference(lower(target), target, vectors, label=name)
+    compared = assert_hir_matches_reference(lower(target).hir, target, vectors, label=name)
     assert compared == len(vectors)
 
 
@@ -109,11 +109,11 @@ def test_int_corpus_rejects_at_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
     with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-        lower_to_mir(lower(make()), _ops())
+        lower_to_mir(lower(make()).hir, _ops())
 
 
 @pytest.mark.parametrize("name,make,vectors", _FLOAT_CASES, ids=[name for name, _, _ in _FLOAT_CASES])
 def test_float_corpus_lowers_through_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
-    lower_to_mir(lower(make()), _ops())
+    lower_to_mir(lower(make()).hir, _ops())

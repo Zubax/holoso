@@ -9,7 +9,7 @@ floats included); it is judged at its USE site, never at capture -- desugar hois
 temp, and binding an unused NaN default is CPython-legal.
 
 Aggregate dtype widths are not modeled: leaves live in the subset's width-less int / binary64 float value
-model, the same ratified deviation scalars carry. The ``Allocation`` is the identity the ownership model
+model, the same deliberate deviation scalars carry. The ``Allocation`` is the identity the ownership model
 tracks: values are frozen and rebound while allocations persist and carry the monotone sharing state, so a
 store under a residual branch is a new value over the same allocation and joins leafwise.
 """

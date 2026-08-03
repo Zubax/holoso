@@ -113,7 +113,7 @@ class OtherMirInput(MirInput):
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target)), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops)
 
 
 def _view(mir: Mir) -> MirFloatView:
@@ -210,7 +210,7 @@ def test_branch_comparison_commits_at_block_makespan(config: OperatorCase) -> No
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: OperatorCase) -> None:
-    # Cross-block software pipelining (M7): a branch block whose every successor is single-predecessor shrinks its
+    # Cross-block software pipelining: a branch block whose every successor is single-predecessor shrinks its
     # terminator offset below the conservative drain boundary_step(makespan), so its in-flight results spill into the
     # successor frame instead of fully draining. Pins that the overlap actually engages. The overlap_spill_kernel
     # carries this shrink: a condition committing early gates a much later wide chain, so the block shrinks to
@@ -2474,7 +2474,7 @@ def test_bool_state_slot_carries_a_live_out_inversion() -> None:
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: OperatorCase) -> None:
-    # The headline M3 generalization end to end: a bool phi whose two arms reference the SAME base value under
+    # The headline NOT-folding generalization end to end: a bool phi whose two arms reference the SAME base value under
     # opposite inversions (one arm rewrites the flag as its own negation). The two install copies must carry
     # opposite-polarity sources, and the model must take the correct value on both paths. The division keeps the
     # diamond a real branch (bool-phi diamonds are refused by if-conversion anyway; the div makes it doubly so).

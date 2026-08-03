@@ -129,7 +129,7 @@ class OtherFold(Operator):
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target)), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops)
 
 
 def _op_count(mir: Mir, cls: type) -> int:
@@ -195,7 +195,7 @@ def test_hir_constant_folding_returns_float_const() -> None:
     def f() -> float:
         return 1.25 + 2.0
 
-    hir = optimize(lower(f))
+    hir = optimize(lower(f).hir)
     node = hir.nodes[hir.outputs[0].value]
     assert isinstance(node, FloatConst)
     assert node.value == 3.25
@@ -384,7 +384,7 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
     # in _copy.reverse_postorder (and the symmetric _lir._mir_facts.mir_rpo). With recursion in place, optimize()
     # raises; the iterative DFS compiles cleanly. Exercise the whole front-to-back pipeline (optimize, MIR lowering,
     # LIR build) since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
-    hir = lower(_deep_cfg_kernel)
+    hir = lower(_deep_cfg_kernel).hir
     assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
     model = build_model(build(_run(_deep_cfg_kernel), "deep", fetch_stages=3))
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
@@ -413,7 +413,7 @@ def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
 
 
 def _hir_of(target: object) -> Hir:
-    return optimize(lower(target))
+    return optimize(lower(target).hir)
 
 
 def test_if_conversion_collapses_a_pure_diamond() -> None:
@@ -1142,7 +1142,7 @@ def test_an_operation_outside_its_mathematical_domain_is_refused(
 def test_a_pole_the_operator_reference_answers_folds_to_that_value(
     operator: Operator, operand: float, expected: float
 ) -> None:
-    # Each evaluate follows its own registered np reference (maintainer ruling, M4): np.log2 answers the
+    # Each evaluate follows its own registered np reference: np.log2 answers the
     # one-sided -inf limit at the pole like the RTL, and an infinity passes through the rounding family.
     # These DO name the value the hardware computes, so the fold hands it back instead of refusing.
     hir = _optimized_constant_operation(operator, operand)
@@ -1166,7 +1166,7 @@ def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
             y = y + 1.0
         return y
 
-    hir = optimize(lower(never_returns))
+    hir = optimize(lower(never_returns).hir)
     assert any(isinstance(block.terminator, Ret) for block in hir.blocks)
     quotients = [
         node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)

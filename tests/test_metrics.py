@@ -130,7 +130,7 @@ def _pinned_regalloc_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _measure(name: str) -> Metrics:
-    lir: Lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]())), default_ops(_FMT)), name, fetch_stages=3)
+    lir: Lir = build(lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT)), name, fetch_stages=3)
     straight = (
         len(lir.blocks) == 1
         and not lir.bool_state_slots
@@ -206,12 +206,10 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=0, bnreg=6, steering=2, copies=0, min_ii=5, last_pc=5, max_block_span=5
     ),
     "majority_voter": Metrics(False, nreg=0, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
-    # The only two rows the cutover moved UPWARD. recip_newton's loop opens with a statically-true convergence test, so
-    # the partial evaluator peels the first trip: one more live value across the loop entry (nreg, steering) and one
-    # body's worth of extra microcode, in exchange for a shorter realized transaction (test_cycle_model).
+    # recip_newton's loop opens with a statically-true convergence test, so the partial evaluator peels the first
+    # trip: one more live value across the loop entry (nreg, steering) and one body's worth of extra microcode, in
+    # exchange for a shorter realized transaction (test_cycle_model).
     "recip_newton": Metrics(False, nreg=5, bnreg=1, steering=7, copies=1, min_ii=29, last_pc=46, max_block_span=23),
-    # remainder's HIR is structurally identical to the old frontend's (same blocks, ops, and nodes); only the value
-    # numbering order differs, which costs one register and buys four stages of schedule.
     "remainder": Metrics(False, nreg=9, bnreg=4, steering=11, copies=2, min_ii=37, last_pc=54, max_block_span=17),
     "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=14, last_pc=47, max_block_span=24),
     "cordic_sincos": Metrics(

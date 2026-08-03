@@ -2,8 +2,7 @@
 The partial-evaluator scalar core, driven black-box through the differential oracle wherever the behavior is
 observable (kernels defined here, lowered through ``holoso._eel`` and compared against CPython), with residual
 text pins only where the behavior is invisible to the oracle (static-control folding, orphan dropping,
-determinism). Rejections pin one located diagnostic per family; temporary gaps pin the catch-all their owner
-milestone will replace.
+determinism). Rejections pin one located diagnostic per family.
 """
 
 import math
@@ -38,7 +37,7 @@ _XS = (1.0, 2.0)
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn), fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
@@ -193,7 +192,7 @@ def _static_taken(x: float) -> float:
 
 def test_static_condition_folds_the_branch_away() -> None:
     _oracle(_static_taken, [{"x": 1.5}, {"x": -2.0}])
-    hir = lower(_static_taken)
+    hir = lower(_static_taken).hir
     assert not any(isinstance(block.terminator, Branch) for block in hir.blocks)
 
 
@@ -206,7 +205,7 @@ def _dead_arm_is_lazy(x: float) -> float:
 
 def test_dead_arm_semantics_are_never_judged() -> None:
     """
-    The ratified split: the desugar whitelist judges syntax even in dead arms, while the partial evaluator's
+    The split: the desugar whitelist judges syntax even in dead arms, while the partial evaluator's
     semantics (name resolution, typing) run only where evaluation reaches -- exactly CPython's laziness.
     """
     _oracle(_dead_arm_is_lazy, [{"x": 1.0}, {"x": -1.0}])
@@ -218,7 +217,7 @@ def _equal_static_arms(c: bool) -> float:
 
 def test_equal_arms_join_statically_and_drop_the_branch() -> None:
     _oracle(_equal_static_arms, [{"c": True}, {"c": False}])
-    hir = lower(_equal_static_arms)
+    hir = lower(_equal_static_arms).hir
     assert not any(isinstance(block.terminator, Branch) for block in hir.blocks)
 
 
@@ -509,7 +508,7 @@ def _returns_bare_none(x: float) -> None:
 def test_none_kernels_have_no_outputs() -> None:
     _oracle(_returns_nothing, [{"x": 1.0}])
     _oracle(_returns_bare_none, [{"x": 1.0}])
-    assert lower(_returns_nothing).outputs == []
+    assert lower(_returns_nothing).hir.outputs == []
 
 
 def _mixed_tuple(n: int, x: float) -> tuple[int, float, bool]:
@@ -747,7 +746,7 @@ def _static_fault_reaches_output(x: float) -> float:
 
 def test_static_fault_residualizes_for_survivor_refusal() -> None:
     """CPython raises ZeroDivisionError; the compiler builds, and the fault surfaces only if it survives."""
-    hir = lower(_static_fault_reaches_output)
+    hir = lower(_static_fault_reaches_output).hir
     with pytest.raises(NoNumber):
         HirEvaluator(hir).run(1.0)
 
@@ -762,7 +761,7 @@ def test_dead_fault_is_dropped() -> None:
     CPython raises on the unused division; dropping it is the charter's elision license, identical to HIR
     DCE running before the survivor sweep.
     """
-    assert HirEvaluator(lower(_dead_fault_is_dropped)).run(2.0) == [4.0]
+    assert HirEvaluator(lower(_dead_fault_is_dropped).hir).run(2.0) == [4.0]
 
 
 def _huge_int_promotion(x: float) -> float:
@@ -775,17 +774,17 @@ def _huge_int_ratio() -> float:
 
 def test_unrepresentable_promotion_residualizes() -> None:
     """
-    float(10**400) overflows: CPython raises at the multiply, the compiler refuses survivor-based. The ruling
-    extends to fully static division: `/` promotes BOTH operands to their float images first, per the ratified
+    float(10**400) overflows: CPython raises at the multiply, the compiler refuses survivor-based. The rule
+    extends to fully static division: `/` promotes BOTH operands to their float images first, per the
     C-promotion model, even though CPython's int/int true division would answer 0.5 without any float
     conversion -- folding it Python's way would let the same expression answer differently by binding time.
     """
     text = _residual_text(_huge_int_promotion)
     assert "int_to_float" in text
     with pytest.raises(NoNumber):
-        HirEvaluator(lower(_huge_int_promotion)).run(1.0)
+        HirEvaluator(lower(_huge_int_promotion).hir).run(1.0)
     with pytest.raises(NoNumber):
-        HirEvaluator(lower(_huge_int_ratio)).run()
+        HirEvaluator(lower(_huge_int_ratio).hir).run()
 
 
 def test_residual_is_deterministic() -> None:
@@ -830,7 +829,7 @@ def test_an_intrinsic_over_static_integers_stays_in_the_integer_lane() -> None:
         _floor_of_an_unholdable_int,
         _min_of_unholdable_ints,
     ):
-        assert HirEvaluator(lower(kernel)).run() == [kernel()], kernel.__name__
+        assert HirEvaluator(lower(kernel).hir).run() == [kernel()], kernel.__name__
     # The result keeps the integer TYPE too, so it composes with the integer operators rather than poisoning them.
     _oracle(_abs_stays_integer, [{"n": 4}, {"n": -1}])
 
@@ -876,4 +875,4 @@ def test_the_integer_lane_defers_to_the_registered_reference_where_the_host_decl
     make the expression answer differently for ``0`` and ``0.0``.
     """
     for kernel, want in ((_log2_of_an_integer_zero, -math.inf), (_exp2_of_an_integer_overflow, math.inf)):
-        assert HirEvaluator(lower(kernel)).run(0.0) == [want], kernel.__name__
+        assert HirEvaluator(lower(kernel).hir).run(0.0) == [want], kernel.__name__

@@ -110,7 +110,7 @@ def test_every_covered_name_is_verified_somewhere() -> None:
 
 @pytest.mark.parametrize("spec", _SPECS, ids=[spec.name for spec in _SPECS])
 def test_eel_oracle_on_examples(spec: ExampleSpec) -> None:
-    hir = lower(spec.make_kernel())
+    hir = lower(spec.make_kernel()).hir
     vectors = spec.reference_vectors()
     compared = assert_hir_matches_reference(hir, spec.make_kernel(), vectors, label=spec.name)
     assert compared == len(vectors)
@@ -119,5 +119,5 @@ def test_eel_oracle_on_examples(spec: ExampleSpec) -> None:
 @pytest.mark.parametrize("name,kernel,vectors", _VECTOR_KERNELS, ids=[name for name, _, _ in _VECTOR_KERNELS])
 def test_eel_oracle_on_array_kernels(name: str, kernel: object, vectors: list[InputRow]) -> None:
     assert callable(kernel)
-    compared = assert_hir_matches_reference(lower(kernel), kernel, vectors, label=name)
+    compared = assert_hir_matches_reference(lower(kernel).hir, kernel, vectors, label=name)
     assert compared == len(vectors)

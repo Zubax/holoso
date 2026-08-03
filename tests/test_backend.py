@@ -39,7 +39,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig) -> Mir:
-    return lower_to_mir(optimize(lower(target)), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:

@@ -1,6 +1,6 @@
 """
-The mutation/ownership model (ratified A1; the clause text is normative here, alongside the A5 state-install
-clauses enforced in ``_state``).
+The mutation/ownership model. The rules below are normative here, alongside the state-install disjointness
+rules enforced in ``_state``.
 
 Every aggregate value is an allocation with a MONOTONE state: unique, then shared or escaped -- never back.
 All events that create a second handle move the state forward:

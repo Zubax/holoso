@@ -6,8 +6,8 @@ The compiler had two hash-order-sensitive value-numbering points, both in the fr
 ids, hence every vid-keyed tie-break downstream) and the carried-state live-in materialization in while-loop headers
 (StateRead creation order). Both now iterate sorted. Since the hash seed is fixed per interpreter at startup, this
 suite spawns SUBPROCESSES under explicitly different seeds and checks the property end to end: byte-identical Verilog
-for a branch-heavy kernel, and an identical HIR node table for the loop-carried-state shape (whose vid permutation is
-masked downstream on small kernels, so RTL bytes alone would under-test the numbering claim).
+and frontend IR for a branch-heavy kernel, and an identical HIR node table for the loop-carried-state shape (whose vid
+permutation is masked downstream on small kernels, so RTL bytes alone would under-test the numbering claim).
 
 The subprocess entry points are the plain functions below (imported from this module by the child), so the kernels
 and operator configs are ordinary, type-checked Python rather than templated source strings.
@@ -18,8 +18,12 @@ import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from holoso import SynthesisResult
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -69,7 +73,7 @@ def emit_coalesce_conflict() -> None:
     from ._modelref import default_ops
 
     result = synthesize(coalesce_conflict, default_ops(FloatFormat(6, 18)))
-    sys.stdout.write(result.verilog_output.verilog)
+    _dump(result)
 
 
 def emit_cordic() -> None:
@@ -81,13 +85,20 @@ def emit_cordic() -> None:
     from ._modelref import default_ops
 
     result = synthesize(CordicSinCos().__call__, default_ops(FloatFormat(6, 18)))
+    _dump(result)
+
+
+def _dump(result: SynthesisResult) -> None:
+    # The frontend IR rides along because it is a shipped artifact whose canonical text is a determinism claim in
+    # its own right, and it sits closest to the merge points this suite exists to pin.
     sys.stdout.write(result.verilog_output.verilog)
+    sys.stdout.writelines(result.frontend_ir)
 
 
 def dump_two_carried_hir() -> None:
     from holoso._eel import lower
 
-    hir = lower(TwoCarried().step)
+    hir = lower(TwoCarried().step).hir
     for vid in sorted(hir.nodes):
         print(vid, repr(hir.nodes[vid]))
 

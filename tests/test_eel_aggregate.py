@@ -26,7 +26,7 @@ _WITH_NAN = (1.0, float("nan"))
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn), fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
@@ -261,7 +261,7 @@ def _shape_queries(x: float) -> tuple[int, int, int, int, int, float]:
 
 def test_shape_queries_and_scalar_rank_zero() -> None:
     # A plain Python float has no .ndim on the host, so the oracle cannot drive it; pin by evaluation.
-    hir = lower(_shape_queries)
+    hir = lower(_shape_queries).hir
     assert [out.name for out in hir.outputs] == ["out_0", "out_1", "out_2", "out_3", "out_4", "out_5"]
     assert HirEvaluator(hir).run(1.5) == [4, 2, 2, 0, 0, 1.5 + 4.0]
 
@@ -326,7 +326,7 @@ def test_linalg_shape_refusals_re_attribute_through_the_chain() -> None:
     _rejects(_matmul_list, "`@` on a Python list/tuple is not supported; build a numpy array")
 
 
-# ---------------------------------------------------------------------- the ratified bans
+# ---------------------------------------------------------------------- the bans
 
 
 def _truthy_list(x: float) -> float:
@@ -423,7 +423,7 @@ def _matrix_param(m: Float64[np.ndarray, "2 2"]) -> float:
 
 
 def test_matrix_parameter_decomposes_row_major() -> None:
-    hir = lower(_matrix_param)
+    hir = lower(_matrix_param).hir
     assert hir.input_names() == ["m_0_0", "m_0_1", "m_1_0", "m_1_1"]
     _oracle(_matrix_param, [{"m_0_0": 1.0, "m_0_1": 2.0, "m_1_0": 3.0, "m_1_1": 4.0}])
 
@@ -451,7 +451,7 @@ def _tuple_of_tensor(x: float) -> tuple[Float64[np.ndarray, "2"], float]:
 
 
 def test_aggregate_returns_flatten_row_major() -> None:
-    hir = lower(_tuple_of_tensor)
+    hir = lower(_tuple_of_tensor).hir
     assert [out.name for out in hir.outputs] == ["out_0_0", "out_0_1", "out_1"]
     _oracle(_tuple_of_tensor, [{"x": 3.0}])
 

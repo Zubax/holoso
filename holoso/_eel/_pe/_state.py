@@ -1,8 +1,8 @@
 """
-Persistent-state determination (ratified A2) and the reset snapshot with its disjointness invariant
-(ratified A5, clauses 2 and 3). S seeds from the syntactic may-write scan of the entry method, dead arms
-included; runs re-trim S to the attributes whose write was reached -- folding only kills writes, so the loop
-is monotone. A rejection under the conservative assumption is FINAL, annotated with the pinning writes.
+Persistent-state determination and the reset snapshot with its disjointness invariant. S seeds from the
+syntactic may-write scan of the entry method, dead arms included; runs re-trim S to the attributes whose write
+was reached -- folding only kills writes, so the loop is monotone. A rejection under the conservative
+assumption is FINAL, annotated with the pinning writes.
 
 Reset values come from the instance ``__dict__``, never through descriptors. Each build checks the state
 trees pairwise-disjoint, disjoint from everything the environment could hand the kernel (frozen siblings and
@@ -152,7 +152,7 @@ class StateModel:
         return None
 
     def check_capture(self, name: str, raw: object, origin: Origin) -> None:
-        """The A5 clause (2) guard: a captured aggregate must not overlap any state tree."""
+        """The capture guard: a captured aggregate must not overlap any state tree."""
         owner = self._overlap_owner(raw)
         if owner is not None:
             reject(
@@ -238,7 +238,7 @@ class StateModel:
         return image
 
     def _claim(self, attr: str, raw: list[object] | np.ndarray, path: SlotPath, origin: Origin) -> None:
-        """The A5 clause (3) within-tree and clause (2) cross-tree identity/storage registry, in one pass."""
+        """The within-tree and cross-tree identity/storage registry, in one pass."""
         owner = self._raw_ids.get(id(raw))
         if owner == attr:
             reject(

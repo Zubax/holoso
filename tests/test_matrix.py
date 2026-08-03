@@ -97,7 +97,7 @@ def test_matmul_shapes_and_port_layout() -> None:
     def mat_vec(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
 
-    hir = lower(mat_vec)
+    hir = lower(mat_vec).hir
     assert hir.input_names() == ["a_0_0", "a_0_1", "a_0_2", "a_1_0", "a_1_1", "a_1_2", "x_0", "x_1", "x_2"]
     assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
     assert _arith_count(hir, FloatMul) == 6 and _arith_count(hir, FloatAdd) == 4
@@ -107,21 +107,21 @@ def test_matmul_shapes_and_port_layout() -> None:
     def vec_mat(x: Float64[np.ndarray, "2"], a: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3"]:
         return x @ a  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(vec_mat).outputs] == ["out_0", "out_1", "out_2"]
+    assert [o.name for o in lower(vec_mat).hir.outputs] == ["out_0", "out_1", "out_2"]
     _assert_python_matches_holoso(vec_mat, np.array([1.0, -2.0]), np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
     _assert_python_matches_holoso(vec_mat, np.array([0.5, 2.0]), np.array([[-1.0, 0.25, 3.0], [2.0, -2.0, 1.0]]))
 
     def dot(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(dot).outputs] == ["out_0"]
+    assert [o.name for o in lower(dot).hir.outputs] == ["out_0"]
     _assert_python_matches_holoso(dot, np.array([1.0, 2.0, 3.0]), np.array([4.0, -5.0, 6.0]))
     _assert_python_matches_holoso(dot, np.array([0.5, -1.0, 2.0]), np.array([2.0, 3.0, -1.0]))
 
     def mat_mat(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "3 2"]) -> Float64[np.ndarray, "2 2"]:
         return a @ b  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(mat_mat).outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1"]
+    assert [o.name for o in lower(mat_mat).hir.outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1"]
     _assert_python_matches_holoso(
         mat_mat, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
     )
@@ -175,7 +175,7 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
         ops = default_ops(_FMT)
         if with_fma:
             ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT))
-        mir = lower_to_mir(optimize(lower(dot)), ops)
+        mir = lower_to_mir(optimize(lower(dot).hir), ops)
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
             operator = getattr(node, "operator", None)
@@ -197,8 +197,8 @@ def test_np_matmul_call_is_the_operator() -> None:
     def with_call(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return np.matmul(a, x)  # type: ignore[no-any-return]
 
-    ops = (_arith_count(lower(with_operator), FloatMul), _arith_count(lower(with_operator), FloatAdd))
-    assert ops == (_arith_count(lower(with_call), FloatMul), _arith_count(lower(with_call), FloatAdd))
+    ops = (_arith_count(lower(with_operator).hir, FloatMul), _arith_count(lower(with_operator).hir, FloatAdd))
+    assert ops == (_arith_count(lower(with_call).hir, FloatMul), _arith_count(lower(with_call).hir, FloatAdd))
     for kernel in (with_operator, with_call):
         _assert_python_matches_holoso(kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
         _assert_python_matches_holoso(kernel, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
@@ -214,7 +214,7 @@ def test_np_matmul_bare_name_import_resolves() -> None:
     def with_bare_name(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return _matmul(a, x)  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(with_bare_name).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(with_bare_name).hir.outputs] == ["out_0", "out_1"]
     _assert_python_matches_holoso(with_bare_name, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
     _assert_python_matches_holoso(with_bare_name, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
 
@@ -243,7 +243,7 @@ def test_augmented_assignment_to_array_is_rejected() -> None:
         a += s
         return a
 
-    assert [o.name for o in lower(scalar_ok).outputs] == ["out_0"]
+    assert [o.name for o in lower(scalar_ok).hir.outputs] == ["out_0"]
 
 
 def test_unary_minus_on_boolean_aggregate_is_rejected_with_location() -> None:
@@ -259,7 +259,7 @@ def test_elementwise_arithmetic_and_broadcast() -> None:
     def combos(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "2"], s: float) -> Float64[np.ndarray, "2"]:
         return (v + w) * s - w / 2.0 + (s - v) * w  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(combos).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(combos).hir.outputs] == ["out_0", "out_1"]
 
     def length_mismatch(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return v + w  # type: ignore[no-any-return]
@@ -398,7 +398,7 @@ def test_transpose_structure() -> None:
     def t(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3 2"]:
         return m.T
 
-    hir = lower(t)
+    hir = lower(t).hir
     assert [o.name for o in hir.outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1", "out_2_0", "out_2_1"]
     assert _arith_count(hir, FloatMul) == 0  # a pure reindexing, no hardware
     _assert_python_matches_holoso(t, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
@@ -407,7 +407,7 @@ def test_transpose_structure() -> None:
     def vector_identity(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v.T
 
-    assert [o.name for o in lower(vector_identity).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(vector_identity).hir.outputs] == ["out_0", "out_1"]
     _assert_python_matches_holoso(vector_identity, np.array([1.0, -2.0]))
     _assert_python_matches_holoso(vector_identity, np.array([0.5, 3.0]))
 
@@ -427,7 +427,7 @@ def test_state_attribute_named_t_shadows_transpose() -> None:
             self.T = self.T + a
             return self.T
 
-    hir = lower(Holder(0.0).step)
+    hir = lower(Holder(0.0).step).hir
     assert [s.name for s in hir.state_slots] == ["T"]
 
 
@@ -446,7 +446,7 @@ def test_state_attributes_named_shape_and_ndim_shadow_the_shape_queries() -> Non
             self.T = self.T - a
             return self.shape + self.ndim + self.T
 
-    hir = lower(Holder(0.0, 1.0, 2.0).step)
+    hir = lower(Holder(0.0, 1.0, 2.0).step).hir
     assert [s.name for s in hir.state_slots] == ["T", "ndim", "shape"]
 
     # The reset snapshot is read at synthesis time, so the reference instance must stay untouched until then.
@@ -464,7 +464,7 @@ def test_numpy_subscripts() -> None:
         column = m[:, 2]
         return m[0, 1], m[1][2], column[0], m[1:, 0][0]
 
-    assert [o.name for o in lower(picks).outputs] == ["out_0", "out_1", "out_2", "out_3"]
+    assert [o.name for o in lower(picks).hir.outputs] == ["out_0", "out_1", "out_2", "out_3"]
     _assert_python_matches_holoso(picks, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
     _assert_python_matches_holoso(picks, np.array([[-1.0, 0.5, 2.0], [3.0, -2.0, 0.25]]))
 
@@ -490,7 +490,7 @@ def test_multi_axis_index_on_list_is_rejected() -> None:
         m = [[a, b], [a]]
         return m[0][1]
 
-    assert [o.name for o in lower(ragged_chained).outputs] == ["out_0"]
+    assert [o.name for o in lower(ragged_chained).hir.outputs] == ["out_0"]
 
 
 def test_shaped_parameter_annotation_rejections() -> None:
@@ -521,7 +521,7 @@ def test_shaped_parameter_annotation_rejections() -> None:
     def integer(v: Int[np.ndarray, "2"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    assert lower(integer).input_names() == ["v_0", "v_1"]  # the integer family is supported alongside the float one
+    assert lower(integer).hir.input_names() == ["v_0", "v_1"]  # the integer family is supported alongside the float one
 
     def shape_only(v: Shaped[np.ndarray, "2"]) -> float:
         return v[0]  # type: ignore[no-any-return]
@@ -549,7 +549,7 @@ def test_wide_float_dtype_annotation_is_accepted() -> None:
     def f(v: Float[np.ndarray, "2"]) -> float:
         return v[0] + v[1]  # type: ignore[no-any-return]
 
-    assert lower(f).input_names() == ["v_0", "v_1"]
+    assert lower(f).hir.input_names() == ["v_0", "v_1"]
 
 
 def test_decomposed_parameter_port_collision_is_rejected() -> None:
@@ -564,12 +564,12 @@ def test_array_return_annotation_is_validated() -> None:
     def good(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v * 2.0
 
-    assert [o.name for o in lower(good).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(good).hir.outputs] == ["out_0", "out_1"]
 
     def nested(v: Float64[np.ndarray, "2"], flag: bool) -> tuple[Float64[np.ndarray, "2"], bool]:
         return v * 2.0, flag
 
-    assert [o.name for o in lower(nested).outputs] == ["out_0_0", "out_0_1", "out_1"]
+    assert [o.name for o in lower(nested).hir.outputs] == ["out_0_0", "out_0_1", "out_1"]
 
     def wrong_shape(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "3"]:
         return v * 2.0
@@ -681,7 +681,7 @@ def test_ndarray_constant_element_folds_in_static_position() -> None:
     def indexed(v: Float64[np.ndarray, "3"]) -> float:
         return v[_INDEX_CONST[0]]  # type: ignore[no-any-return]  # constant int-array element as a static index
 
-    assert [o.name for o in lower(indexed).outputs] == ["out_0"]
+    assert [o.name for o in lower(indexed).hir.outputs] == ["out_0"]
 
     def chained(a: float) -> float:
         if _GATE_CONST2[0][1] > 0.0:  # chained indexing of a 2-D constant, statically true
@@ -705,7 +705,7 @@ def test_readonly_ndarray_attribute_element_folds_a_branch() -> None:
                 out = a * 2.0  # statically dead
             return out
 
-    hir = lower(Filter(np.array([[0.0, 1.0]])).step)
+    hir = lower(Filter(np.array([[0.0, 1.0]])).step).hir
     assert [s.name for s in hir.state_slots] == []  # no spurious state from the statically-dead write
     assert [o.name for o in hir.outputs] == ["out_0"]
 
@@ -723,7 +723,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_slice = lower(WithSlice(0.0).step)
+    hir_slice = lower(WithSlice(0.0).step).hir
     assert [s.name for s in hir_slice.state_slots] == []
     assert [o.name for o in hir_slice.outputs] == ["out_0"]
 
@@ -736,7 +736,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
                 self.y = a  # statically dead
             return a
 
-    hir_t = lower(WithTranspose(0.0).step)
+    hir_t = lower(WithTranspose(0.0).step).hir
     assert [s.name for s in hir_t.state_slots] == []
     assert [o.name for o in hir_t.outputs] == ["out_0"]
 
@@ -750,7 +750,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_f = lower(WithFlatten(0.0).step)
+    hir_f = lower(WithFlatten(0.0).step).hir
     assert [s.name for s in hir_f.state_slots] == []
     assert [o.name for o in hir_f.outputs] == ["out_0"]
 
@@ -797,7 +797,7 @@ def test_unary_plus_rejects_boolean_but_is_identity_on_floats() -> None:
     def floats(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return +v
 
-    assert [o.name for o in lower(floats).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(floats).hir.outputs] == ["out_0", "out_1"]
 
 
 def test_ndarray_module_constant_rejections() -> None:
@@ -1091,7 +1091,8 @@ def test_operators_are_the_library_functions() -> None:
         return np.matmul(a, np.transpose(b))  # type: ignore[no-any-return]
 
     counts = [
-        (_arith_count(lower(k), FloatMul), _arith_count(lower(k), FloatAdd)) for k in (with_operators, with_calls)
+        (_arith_count(lower(k).hir, FloatMul), _arith_count(lower(k).hir, FloatAdd))
+        for k in (with_operators, with_calls)
     ]
     assert counts[0] == counts[1] == (12, 8)
     for kernel in (with_operators, with_calls):
@@ -1104,7 +1105,7 @@ def test_np_dot_is_the_matrix_product() -> None:
     def dot_kernel(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return np.dot(a, x)  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(dot_kernel).outputs] == ["out_0", "out_1"]
+    assert [o.name for o in lower(dot_kernel).hir.outputs] == ["out_0", "out_1"]
     _assert_python_matches_holoso(dot_kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
 
     def scalar_dot(a: float, x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
@@ -1119,14 +1120,14 @@ def test_np_trace_and_np_outer() -> None:
     def tr(m: Float64[np.ndarray, "3 3"]) -> float:
         return np.trace(m)  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(tr).outputs] == ["out_0"]
-    assert _arith_count(lower(tr), FloatMul) == 0  # a fold of the diagonal, no multiplies
+    assert [o.name for o in lower(tr).hir.outputs] == ["out_0"]
+    assert _arith_count(lower(tr).hir, FloatMul) == 0  # a fold of the diagonal, no multiplies
     _assert_python_matches_holoso(tr, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]))
 
     def outer(u: Float64[np.ndarray, "2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2 3"]:
         return np.outer(u, v)
 
-    assert _arith_count(lower(outer), FloatMul) == 6 and _arith_count(lower(outer), FloatAdd) == 0
+    assert _arith_count(lower(outer).hir, FloatMul) == 6 and _arith_count(lower(outer).hir, FloatAdd) == 0
     _assert_python_matches_holoso(outer, np.array([1.0, -2.0]), np.array([0.5, 3.0, -1.0]))
 
     def rect_trace(m: Float64[np.ndarray, "2 3"]) -> float:

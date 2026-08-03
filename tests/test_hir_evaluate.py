@@ -68,7 +68,7 @@ def test_evaluator_layering() -> None:
 def _assert_oracle(
     make_kernel: Callable[[], Callable[..., object]], vectors: Sequence[Mapping[str, float | bool]], label: str
 ) -> None:
-    hir = lower(make_kernel())
+    hir = lower(make_kernel()).hir
     compared = assert_hir_matches_reference(hir, make_kernel(), vectors, label=label)
     assert compared == len(vectors)
 
@@ -153,8 +153,8 @@ def test_straight_line_arithmetic() -> None:
 
 def test_operator_reference_poles() -> None:
     """
-    Maintainer ruling (M4 design consult): each evaluate follows its own registered np reference at the poles,
-    so a static fold answers the same value the RTL and the stub reference produce instead of refusing.
+    Each evaluate follows its own registered np reference at the poles, so a static fold answers the same
+    value the RTL and the stub reference produce instead of refusing.
     """
     inf = math.inf
     assert FloatLog2().evaluate([FloatConst(0.0)]) == FloatConst(-inf)
@@ -399,19 +399,19 @@ def _div_kernel(a: float, b: float) -> float:
 
 
 def test_reference_nan_discards_vector() -> None:
-    hir = lower(_sub_kernel)
+    hir = lower(_sub_kernel).hir
     vectors = [{"a": math.inf, "b": math.inf}, {"a": 3.0, "b": 1.0}]
     assert assert_hir_matches_reference(hir, _sub_kernel, vectors, label="nan_discard") == 1
 
 
 def test_reference_raise_discards_vector() -> None:
-    hir = lower(_div_kernel)
+    hir = lower(_div_kernel).hir
     vectors = [{"a": 1.0, "b": 0.0}, {"a": 1.0, "b": 2.0}]
     assert assert_hir_matches_reference(hir, _div_kernel, vectors, label="raise_discard") == 1
 
 
 def test_all_vectors_discarded_fails() -> None:
-    hir = lower(_div_kernel)
+    hir = lower(_div_kernel).hir
     with pytest.raises(AssertionError, match="no transaction survived"):
         assert_hir_matches_reference(hir, _div_kernel, [{"a": 1.0, "b": 0.0}], label="vacuous")
 
@@ -460,23 +460,23 @@ class _Hold:
 
 def test_output_divergence_convicts() -> None:
     with pytest.raises(AssertionError, match="out_0"):
-        assert_hir_matches_reference(lower(_sub_kernel), _add_kernel, [{"a": 3.0, "b": 1.0}], label="wrong_output")
+        assert_hir_matches_reference(lower(_sub_kernel).hir, _add_kernel, [{"a": 3.0, "b": 1.0}], label="wrong_output")
 
 
 def test_state_value_divergence_convicts() -> None:
-    hir = lower(_Gained(1.0).step)
+    hir = lower(_Gained(1.0).step).hir
     with pytest.raises(AssertionError, match="state _total"):
         assert_hir_matches_reference(hir, _Gained(2.0).step, [{"x": 3.0}], label="wrong_state")
 
 
 def test_missed_state_write_convicts() -> None:
-    hir = lower(_Gained(1.0).step)
+    hir = lower(_Gained(1.0).step).hir
     with pytest.raises(AssertionError, match="changed-slot sets diverge"):
         assert_hir_matches_reference(hir, _Sneaky().step, [{"x": 3.0}], label="missed_write")
 
 
 def test_change_status_divergence_convicts_within_ulp_tolerance() -> None:
-    hir = lower(_Drift().step)
+    hir = lower(_Drift().step).hir
     with pytest.raises(AssertionError, match="changed-slot sets diverge"):
         assert_hir_matches_reference(hir, _Hold().step, [{"x": 0.5}], label="drift")
 
@@ -508,7 +508,7 @@ def test_consumed_nan_fails_loudly() -> None:
     The documented comparable-domain edge: CPython consumes a NaN in a comparison without surfacing it in any leaf,
     so the discard rule cannot see it, and the evaluator's poisoned branch condition convicts for eye triage.
     """
-    hir = lower(_nan_branch_kernel)
+    hir = lower(_nan_branch_kernel).hir
     with pytest.raises(AssertionError, match="names no number"):
         assert_hir_matches_reference(hir, _nan_branch_kernel, [{"x": math.inf}], label="consumed_nan")
 
@@ -586,7 +586,7 @@ class _NanConfig:
 
 def test_nan_in_untouched_attribute_is_not_a_discard() -> None:
     """A frozen attribute the kernel never lowers may hold NaN; only the observable surface gates the discard."""
-    hir = lower(_NanConfig().step)
+    hir = lower(_NanConfig().step).hir
     vectors: list[dict[str, float | bool]] = [{"x": 1.0}, {"x": 2.0}]
     assert assert_hir_matches_reference(hir, _NanConfig().step, vectors, label="nan_config") == 2
 
@@ -637,7 +637,7 @@ class _SeqNan:
 
 
 def test_stateful_sequence_ends_at_first_discard() -> None:
-    hir = lower(_SeqNan().step)
+    hir = lower(_SeqNan().step).hir
     vectors: list[dict[str, float | bool]] = [{"x": 1.0}, {"x": math.inf}, {"x": 2.0}]
     assert assert_hir_matches_reference(hir, _SeqNan().step, vectors, label="seq_nan") == 1
 
@@ -648,7 +648,7 @@ def _big_kernel() -> int:
 
 def test_promoted_big_integer_compares_as_its_float_image() -> None:
     """
-    C-promotion at a join is a ratified type-system deviation, so a float lane meeting an int the reference states
+    C-promotion at a join is a deliberate type-system deviation, so a float lane meeting an int the reference states
     exactly carries ``float(int)`` -- rounding included -- and that is the faithful value, not a divergence.
     """
     builder = HirBuilder()
@@ -692,4 +692,4 @@ def test_state_port_exposing_private_slot_convicts() -> None:
 
 def test_typoed_vector_key_crashes_instead_of_discarding() -> None:
     with pytest.raises(KeyError):
-        assert_hir_matches_reference(lower(_add_kernel), _add_kernel, [{"a": 1.0, "WRONG": 2.0}], label="typo")
+        assert_hir_matches_reference(lower(_add_kernel).hir, _add_kernel, [{"a": 1.0, "WRONG": 2.0}], label="typo")

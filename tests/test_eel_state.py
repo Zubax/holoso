@@ -1,9 +1,7 @@
 """
-Persistent state per the ratified A2/A5 design: the FULL install-disjointness matrix in BOTH directions
-(rejections and admissions -- an implementation silently narrowing the ratified design is a failure too),
-the assumed-state trim with its conservative-rejection finality, the state aliasing events, early-return
-joins, and the slot loop carries. Every kernel that a consult round produced as a divergence counterexample
-is pinned here in its original shape.
+Persistent state: the FULL install-disjointness matrix in BOTH directions (rejections and admissions -- an
+implementation silently narrowing the design is a failure too), the assumed-state trim with its
+conservative-rejection finality, the state aliasing events, early-return joins, and the slot loop carries.
 """
 
 import dataclasses
@@ -26,7 +24,7 @@ type _Row = InputRow
 
 def _oracle(target: Callable[..., object], vectors: Sequence[_Row]) -> None:
     label = getattr(target, "__qualname__", "kernel")
-    compared = assert_hir_matches_reference(lower(target), target, vectors, label=label)
+    compared = assert_hir_matches_reference(lower(target).hir, target, vectors, label=label)
     assert compared == len(vectors)
 
 

@@ -1,6 +1,6 @@
 """
-The canonical printed Eel text: print-only (never parsed back), deterministic, golden-pinned at the desugar and
-residual seams. Locations off for goldens, on for logs.
+The canonical printed Eel text: print-only (never parsed back) and deterministic, so a difference between two
+runs means a transform changed. Locations off by default, on for logs and for the written artifacts.
 """
 
 import dataclasses
@@ -125,7 +125,7 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
             _block(body, depth + 1, lines, locations)
         case ResidualFrameReturn(origin=origin, values=values):
             # Spelled apart from a kernel return: this one converges at the frame exit and commits no
-            # outputs or slots, and a golden must not read the same for both.
+            # outputs or slots, and the printed form must not read the same for both.
             put("exit" if not values else f"exit {', '.join(_atom(v) for v in values)}", origin)
         case Raise(origin=origin, exc_type=exc_type, parts=parts):
             rendered = " ".join(repr(p) if isinstance(p, str) else _atom(p) for p in parts)

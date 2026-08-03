@@ -136,7 +136,7 @@ def _receiver_store(
 
 
 def _install(interp: Interpreter, origin: Origin, attr: str, spec: Spec, value: SequenceValue | TensorValue) -> None:
-    """A5 clause (1), plus clause (3) over the value model (tensor-only: in-model sequences are immutable)."""
+    """The install gate: an aggregate becomes state only if nothing else can still reach its storage."""
     for allocation in allocations(value):
         if allocation.joined:
             reject(

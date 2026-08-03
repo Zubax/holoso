@@ -1,6 +1,6 @@
 """
 Desugarer behavior pins: name classification (the TODO.md closure-freevar defect class), evaluation-order
-materialization, guarded conditional shapes, and the ratified dead-arm narrowing. Assertions are on the
+materialization, guarded conditional shapes, and the dead-arm narrowing. Assertions are on the
 canonical printed Eel text — the desugarer's public contract.
 """
 

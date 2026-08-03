@@ -1,8 +1,7 @@
 """
 The integer corpus: the kernels the float examples stand in for (``examples/uart.py``'s TODO(integers) notes),
 plus the residual-loop exit kernels. These lower through the Eel frontend and verify against CPython exactly,
-while MIR still refuses the integer ones until the integer hardware sprint. The float FIR and biquad that once
-lived here graduated to ``examples/fir.py`` and ``examples/biquad.py``.
+while MIR still refuses the integer ones until the integer backend lands.
 """
 
 OVERSAMPLE = 16

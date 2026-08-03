@@ -51,7 +51,7 @@ from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
-# The wide scalar datapath; the plan permits synthesizing only this configuration for the example matrix.
+# The wide scalar datapath: the one configuration the example matrix is synthesized in.
 _FMT = FloatFormat(8, 36)
 # Frozen random vectors per example (over and above the manual and edge vectors); scale via the env knob to trade
 # coverage for cosimulation wall-clock.

@@ -26,7 +26,7 @@ OPS = OpConfig(FAddOperator(FMT), FMulOperator(FMT), FDivOperator(FMT), FMulILog
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target)), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops)
 
 
 def _mir_operation_counts(mir: Mir) -> Counter[str]:

@@ -1039,7 +1039,7 @@ def _build_with_lir(
     or touching simulator internals. Shared by the campaign runner and the regression replayer, so both drive the
     identical build path.
     """
-    mir = lower_to_mir(optimize(lower_frontend(fn)), ops)
+    mir = lower_to_mir(optimize(lower_frontend(fn).hir), ops)
     lir = build(mir, name, fetch_stages=3)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)

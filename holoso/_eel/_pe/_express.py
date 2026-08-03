@@ -353,8 +353,8 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     if raw is list or raw is tuple:
         return _rebuild_sequence(interp, node, callee.name, frame, sink)
     if isinstance(raw, types.FunctionType):
-        # Ingested like user code wherever it lives: substitution is the registry's decision alone
-        # (maintainer ruling), and the interpreter knows no library names.
+        # Ingested like user code wherever it lives: substitution is the registry's decision alone,
+        # and the interpreter knows no library names.
         positional, keywords = _signature_arguments(interp, node, frame, sink)
         return interp.inline(node.origin, callee.name, raw, positional, keywords, frame, sink, positional_only=False)
     if inspect.ismethod(raw):

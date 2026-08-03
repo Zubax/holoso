@@ -26,7 +26,7 @@ _BUF = np.array([0.0, 0.0])
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn), fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
@@ -436,7 +436,7 @@ def _chained_read_poisons_the_array(v: float) -> float:
     return m[1][1]  # type: ignore[no-any-return]
 
 
-def test_chained_reads_poison_later_stores_by_ruling() -> None:
+def test_chained_reads_poison_later_stores() -> None:
     _rejects(_chained_read_poisons_the_array, "it is shared")
 
 

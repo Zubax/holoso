@@ -64,8 +64,9 @@ def floats_match(actual: float, expected: float, ulps: int) -> bool:
 
 def _as_float(context: str, value: object) -> float:
     """
-    An int meeting a float lane compares as its float image, rounding included: C-promotion at a join is a ratified
-    type-system deviation, and a wrongly-floated int lane cannot escape the frontend's annotation validation.
+    An int meeting a float lane compares as its float image, rounding included: C-promotion at a join is a
+    deliberate type-system deviation, and a wrongly-floated int lane cannot escape the frontend's annotation
+    validation.
     """
     numeric = isinstance(value, (float, np.floating)) or (
         isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))

@@ -896,7 +896,7 @@ def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None
 
 def test_a_constant_zero_base_computes_its_poles_through_the_composite() -> None:
     # ``0.0 ** e`` denotes a number for every e except a negative one. The general path is ``exp2(e * log2(b))``,
-    # and log2's evaluate answers the np reference's -inf at the folded zero base (the M4 pole ruling), so the
+    # and log2's evaluate answers the np reference's -inf at the folded zero base, so the
     # build no longer refuses: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
     # e==0 rung, 0.0 for a positive exponent, +inf past the negative pole (np.power semantics; math.pow raises
     # on the host there).

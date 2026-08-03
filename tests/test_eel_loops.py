@@ -20,7 +20,7 @@ type _Row = Mapping[str, float | bool | int]
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn), fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
@@ -865,6 +865,6 @@ def test_a_discarded_promote_pass_does_not_charge_the_budget() -> None:
     Regression: the promote fixpoint discards what the previous pass built but kept charging its budget spend, so a
     body over half the budget was refused for the sole reason that its accumulator was seeded ``0`` and not ``0.0``.
     """
-    fits = lower(_float_carry_fits)
-    promotes = lower(_int_carry_promotes_then_fits)
+    fits = lower(_float_carry_fits).hir
+    promotes = lower(_int_carry_promotes_then_fits).hir
     assert len(promotes.nodes) == len(fits.nodes)

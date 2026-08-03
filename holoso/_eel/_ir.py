@@ -72,7 +72,7 @@ class BinaryOp(Enum):
     BITAND = "&"
     BITOR = "|"
     BITXOR = "^"
-    AND = "and"  # the eager boolean gates: both operands always evaluate, per the ratified data model
+    AND = "and"  # the eager boolean gates: both operands always evaluate, deviating from Python deliberately
     OR = "or"
 
 

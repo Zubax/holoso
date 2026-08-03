@@ -132,6 +132,11 @@ runtime environment the binding-time front-end needs -- `__globals__`, closure c
 compile root; the boundary ("what to ignore") falls out of reachability + binding-time analysis, not manual
 enumeration.
 
+Beside the generated RTL, testbench, numerical model, and report, the result carries the front-end's own
+intermediate representation after each of its passes, written as indexed `.fir` documents. Neither Eel program
+survives into HIR, so keeping their canonical text is what makes a front-end decision reviewable after the fact --
+the compiler explaining itself, next to what it produced.
+
 A plain function synthesizes to a stateless module. A stateful module is requested by passing a bound method of a
 constructed instance, e.g. `synthesize(filt.update, ops)`: the instance's attribute snapshot seeds the reset state,
 and its method is the analyzed body; the constructor runs in plain Python, its arguments frozen into the build. The
@@ -167,133 +172,66 @@ per-instance initiation interval (most are II=1, fully pipelined).
 
 ## Front-end
 
-The front-end is three stages sharing one internal representation, the Eel: desugaring, partial evaluation, and HIR
-emission. The stages have disjoint charters, and the division exists to make the previous front-end's failure mode --
-special-casing accreting until the design drowns -- structurally impossible: Python's syntactic breadth is absorbed at
-exactly one seam, every semantic decision has exactly one owner, and a construct that does not desugar into the
-existing Eel vocabulary is a design amendment to be ruled on, never a patch downstream. The Eel has a canonical
-printed text form, logged after every stage, so what each transform did is always inspectable.
+The front-end is three stages over one representation, the Eel: desugaring, partial evaluation, and HIR emission.
+Their charters are disjoint so that special-casing cannot accrete: Python's syntactic breadth is absorbed at one
+seam, every semantic decision has exactly one owner, and a construct that does not desugar into the Eel vocabulary
+amends that vocabulary rather than patching downstream. The Eel has a canonical printed form, so what each stage did
+is inspectable.
 
-Desugaring turns the Python AST into Eel and owns syntax alone: lexical binding, source evaluation order, and
-lossless normalization to one spelling per construct. It is syntax-directed over an explicitly ruled whitelist of
-accepted shapes, judged against the original source shape, and everything outside the whitelist draws a located
-rejection -- rejection is the default, acceptance is enumerated. Dead code enjoys no exemption: an unsupported
-construct rejects even in a statically untaken arm (the one exception is the body of an `assert`, accepted and
-ignored wholesale as under `-O`). Name resolution reproduces CPython's own static classification of every name (an
-assignment anywhere makes a name local throughout; comprehensions are their own scopes), because the kernel must mean
-exactly what it means when the host runs it; free names resolve through closure cells, then module globals, then
-builtins, and are captured as data. Where Python's evaluation order is observable -- the walrus is the subset's one
-side effect -- the desugarer materializes that order with single-evaluation temporaries rather than assuming it,
-callee before arguments, in CPython's argument order. The desugarer knows no types, no shapes, and evaluates nothing.
+Desugaring owns syntax alone -- lexical binding, evaluation order, normalization to one spelling per construct --
+knowing no types and evaluating nothing. Rejection is the default, acceptance an enumerated whitelist over the
+original source shapes; dead code enjoys no exemption, an unsupported construct rejecting even in a statically
+untaken arm, the body of an `assert` being the one thing accepted and ignored wholesale, as under `-O`. Name
+resolution reproduces CPython's static classification of every name, because the kernel must mean what it means
+when the host runs it.
 
-Partial evaluation is the sole semantic owner within the front-end (value arithmetic stays the graph's, below). It is
-a specializing interpreter from Eel to residual Eel -- a pure function over an immutable tree, re-run from its inputs
-rather than patched in place, which is the central lesson of the abandoned rewrite: accumulated marks and mutable
-side tables are how fixpoint analyses go quietly wrong. It owns
-binding time, scalar types, shapes, aggregate semantics, reachability, unrolling, inlining, argument binding,
-mutation legality, and persistent-state determination. Static structure folds here -- shapes, indices, trip counts,
-frozen configuration, reachability -- while value arithmetic remains the graph's business as the fastmath charter
-demands, so one expression cannot answer two ways according to which layer evaluated it. Two folds run in host
-arithmetic instead: the static-exponent power chain the pow rule below grants, and a call whose every argument is a
-static integer, which answers as the Python call does so an integer stays an integer. The latter only ever ANSWERS --
-where the host declines, the operator's own reference decides, so it cannot turn a legal build into a refusal. Every structure-producing
-expansion (unrolling, comprehensions, inlining, repetition, power chains) draws from a single graph-size budget, so
-an accidental blow-up is a located rejection rather than a hang; the budget deliberately does not cap exact
-arbitrary-precision constant arithmetic. When a fold executed with host arithmetic raises, the failure is certain
-wherever the expression is evaluated -- evaluation judged under the subset's own semantics, eager gates included --
-so the compiler surfaces a compile-time diagnostic instead of masking the error into a runtime value, escalating it
-early and staying simple; folds through HIR operators keep the survivor-based refusal policy. That license extends
-no further: the compiler never PREDICTS host failures it is not itself forced to evaluate. Whether a kernel would
-raise at run time on the host -- a read-only buffer, an exhausted resource, any state of the host environment
-beyond the captured values -- is the user's responsibility, part of the standing contract that inputs are trusted
-and the kernel program is well-defined; the compiler synthesizes the datapath the code asks for, and if the
-program is not runnable as Python, all bets are off. Guards against such conditions are hostile-input hardening
-and are rejected as a matter of policy. A read the evaluator
-cannot prove bound on every residual path is a located
-rejection -- never a fall-through to a same-named global, where CPython would raise only at run time. The residual
-program is scalar and typed, its static control decided and only genuinely dynamic branches and loops remaining; HIR
-emission from it is mechanical. An early return is a residual terminator: each return site commits its own outputs
-and state live-outs, conformed against the one annotation-fixed table, and emission joins the sites in a single
-exit block -- extra control edges, never predication -- and a return site may sit inside a dynamic loop's body,
-where its edge simply leaves for the exit block before the latch. Every other exit is a pending lane rather than a
-terminator: a break, continue, or inlined-callee return holds its branch open while the surviving path's
-continuation nests into the other arm, and the exit's one consumer -- the enclosing loop for break and continue,
-the frame boundary for a callee return -- joins the lanes under the one join rule and seals the region. In an
-unrolled loop the consumed exits print as ordinary nested branches; a dynamic loop instead consumes its break and
-continue lanes into bare residual terminators, the values leaving on those edges riding ordinary join temps so
-emission's loop-exit and back-edge joins stay mechanical. A callee return crossing the callee's own dynamic loop
-cannot rejoin its siblings as branch arms, so the inlined callee region becomes a residual frame: each return site
-ends in a terminator carrying the residual result leaves, all sites converge at the frame's exit, and a result
-leaf statically identical across every site never leaves the value model. A loop body whose every path leaves the
-loop has no back edge and is rejected -- such a loop cannot iterate and is an `if` in disguise.
+Partial evaluation is the sole semantic owner -- binding time, types, shapes, reachability, unrolling, inlining, and
+state. A specializing interpreter producing residual Eel, it is a pure function over an immutable tree re-run from
+its inputs rather than patched in place: accumulated marks and mutable side tables are how fixpoint analyses go
+quietly wrong. Static structure folds here while value arithmetic stays the graph's business per the fastmath
+charter, so one expression cannot answer two ways -- excepting two folds taken in host arithmetic, the
+static-exponent power chain and the call whose every argument is a static integer, which answer as Python does so
+an integer stays an integer. The residual program is scalar and typed; early returns and loop exits lower to real
+control edges rather than predication, leaving emission mechanical.
 
-Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below, never here. Mixed int/float
-expressions promote to float C-style, true division always yields float as in Python, a power yields float unless it
-is fully folded with a nonnegative integer base (the one place exact integer powers survive), and floor division,
-modulo, shifts, and bitwise operators are integer-only -- except that the gates over two booleans remain boolean
-operations -- while booleans take no part in arithmetic, a small deliberate deviation from Python bought for clean
-typing.
-The gates `and`/`or` are eager rather than short-circuiting -- both operands always evaluate, as combinational
-logic does -- a second small deliberate deviation; every other conditionally-evaluated position (conditional
-expressions, comparison-chain suffixes) keeps Python's semantics through real branches.
-One join rule governs every meeting point -- branch merges, loop phis, early returns, state reset against live-out,
-and return validation: Int meeting Float promotes to Float with conversions on the integer arms, Bool joins only with
-Bool, and aggregates join only with identical kind and shape.
+Three policies bound that evaluation. The compiler never predicts host failures it is not itself forced to evaluate:
+what a kernel does at run time on the host is the user's responsibility, inputs are trusted, and guards against
+such conditions are hostile-input hardening, rejected as policy. Conservatism may cost a diagnostic, never a wrong
+value. Every structure-producing expansion draws on one graph-size budget, so an accidental blow-up is a located
+rejection rather than a hang.
 
-Aggregates are one structural container of two kinds derived from provenance, never inferred from shape: a
-sequence (spelled as a tuple or a list) is immutable structure -- construction, indexing, slicing, unpacking, and
-returns, with no arithmetic and no element stores -- while an array is the numerical kind, carrying a float or
-integer element family, elementwise arithmetic, and all mutation. A rectangular homogeneous list is still a
-sequence, never silently an array. Everything else about aggregates -- decomposition to scalar leaves, indexing,
-iteration, ports -- is uniform, and element dtype widths are not modeled: array leaves live in the same width-less
-int / binary64 float value model as scalars. Arrays never exist as hardware aggregates: matrices and vectors are
-compile-time bookkeeping over scalar wires, no aggregate survives partial evaluation, and only scalar leaves reach
-HIR.
+Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below. Four deviations from Python are
+deliberate: mixed int/float expressions promote to float C-style, a power yields float unless it is fully folded over
+a nonnegative integer base, booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both
+operands as combinational logic does, while other conditional positions still branch. One join rule governs every
+meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only with identical
+kind and shape.
 
-Mutation follows one principle: it is admitted only where reference semantics and value semantics cannot be told
-apart, and rejected with advice everywhere else -- a license, not a promise, so some value-safe spellings are
-rejected too. Mutation is array-only. A store or in-place update is legal only when every allocation along the
-store path, root through the written array, is still unique and unborrowed at the store step itself, judged after
-the stored value and indices are evaluated: reached by no other handle -- freshly built, never aliased, extracted,
-embedded, passed, returned, or installed, nor under live iteration -- so the compiler needs no heap model, no
-copy-versus-view knowledge, and no escape analysis; aggregates arriving from outside the kernel's own construction
-(globals, closures, defaults, parameters) are never mutable, since CPython would let the outside observe the change
-and hardware cannot. Persistent state is the one mutable resident: an element store through an unaliased state path is a
-state update, observably identical in both worlds. State trees must stay disjoint from each other, from everything
-captured, and internally -- otherwise a mutation in a later transaction would write through an alias that the flat
-state slots cannot represent -- and the invariant is established by the construction snapshot itself and preserved
-by every subsequent install, each policed at its own boundary.
+Aggregates are one container of two kinds fixed by provenance, not shape: a sequence is immutable structure, an
+array the numerical kind carrying elementwise arithmetic and all mutation, so a rectangular homogeneous list is still
+a sequence, never silently an array. Arrays never exist as hardware aggregates: matrices and vectors are compile-time
+bookkeeping over scalar wires, and only scalar leaves reach HIR.
 
-Whether an attribute is state is decided by running, not scanning: the partial evaluator assumes the entry method's
-syntactically written attributes are state, evaluates, and re-runs with the assumption shrunk when a write turned out
-dead -- monotone, bounded, and exact whenever the conservative run completes, which retires the old
-scan-versus-lowering duality outright. A rejection raised under a conservative assumption is final and names the
-write that pinned the attribute; conservatism may cost a diagnostic, never a wrong value. Persistent state otherwise
-falls out of the instance snapshot as before: written attributes become persistent registers, read-only attributes
-freeze into constants, public state is observable through output ports, and state identity is an attribute path, so
-composed stateful components remain expressible later without redesign. Only the entry method owns the state
-analysis -- an inlined method may read `self` but not write it.
+Mutation is admitted only where reference and value semantics cannot be told apart, and rejected with advice
+everywhere else, sparing the compiler a heap model and escape analysis. Persistent state is the one mutable
+resident; its trees stay disjoint from each other and from everything captured, or a later transaction would write
+through an alias the flat state slots cannot represent. Whether an attribute is state is decided by running, not
+scanning: the evaluator assumes every written attribute is state and re-runs with that assumption shrunk when a write
+turns out dead. Only the entry method owns that analysis -- an inlined method may read `self` but not write it.
 
-Calls are first-class in Eel and dispatch on the object identity the callee resolves to, not its spelled name.
-Inlining everything is the current lowering policy, not a representational fact, so separately compiled subroutines
-later change the policy and the emitter, never the desugarer. The math library keeps its one boundary: an intrinsic
-maps to a single semantic HIR operator, while a composite (linear algebra included) is ordinary Python in the
-supported subset, inlined like user code, so each composite is its own numerical reference; kernels compose by the
-same inlining, and a diagnostic arising inside a stub is re-attributed to the user's call site. The registry also
-binds array methods and attributes declaratively through the same identity keys — a numpy descriptor names its own
-owner and attribute, so ``m.T`` or ``m.flatten()`` resolves to the registered stub with no per-name compiler
-surface, and a registration may declare itself a non-copying derivation whose result keeps the source's storage
-identity.
+Calls dispatch on the object identity the callee resolves to, not its spelled name, and inlining everything is a
+lowering policy, not a representational fact. The math library keeps its one boundary: an intrinsic maps to a single
+semantic HIR operator, while a composite (linear algebra included) is ordinary Python in the supported subset,
+inlined like user code, so each is its own numerical reference.
 
-The guiding principle for the language subset is unchanged: follow Python semantics where the hardware can express
-them, otherwise reject rather than silently reinterpret. The supported source remains ordinary executable
-Python/numpy, so the same kernel runs unmodified on the host as its own (non-bit-exact) reference. A construct whose
-faithful meaning the hardware cannot express -- a data-dependent exception, for instance -- is rejected; an exception
-raised unconditionally (judged within the function that writes it, not at its call sites) folds into a compile-time
-diagnostic instead, which is how library stubs self-validate with plain `raise` statements. The module boundary is
-explicitly typed: parameters and the return value require annotations, decomposed row-major to scalar ports and
-validated against the inferred result; any divergence rejects the kernel. Annotations are detected structurally, so
-their libraries remain dependencies of the user's code only.
+The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
+reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
+(non-bit-exact) reference on the host. A construct whose faithful meaning the hardware cannot express -- a
+data-dependent exception, for instance -- is rejected; one raised unconditionally within the function that writes it,
+whatever its call sites, folds into a compile-time diagnostic instead, which is how library stubs self-validate with
+plain `raise`. The module boundary is explicitly typed: parameters and the return value require annotations,
+decomposed to scalar ports and checked against the inferred result, with the annotations detected structurally so
+their libraries stay dependencies of the user's code alone.
 
 ## HIR
 
@@ -344,8 +282,8 @@ than lowered to a counted back-edge loop, which needs a runtime integer counter;
 MIR, the counted back-edge loop becomes the natural follow-on.
 
 Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
-integer node reaching MIR is rejected as not-yet-lowerable until the remaining milestone, the integer backend sharing
-the wide register bank. A kernel whose integers stay compile-time is unaffected by the gap: a static integer has
+integer node reaching MIR is rejected as not-yet-lowerable; the integer backend, sharing the wide register bank,
+is future work. A kernel whose integers stay compile-time is unaffected by the gap: a static integer has
 already folded away before MIR ever sees it.
 
 ## MIR
