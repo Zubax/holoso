@@ -25,17 +25,7 @@ by repeating to a fixpoint, innermost-reachable first.
 import logging
 
 from .._util import BlockId, ValueId
-from ._ir import (
-    Block,
-    Branch,
-    Hir,
-    Jump,
-    Operation,
-    Phi,
-    predecessors,
-    renumber,
-    validate_phi_predecessors,
-)
+from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumber, validate_phi_predecessors
 
 _logger = logging.getLogger(__name__)
 

@@ -18,11 +18,7 @@ from jaxtyping import Bool, Float, Float64, Int, Shaped
 
 import holoso
 from holoso._operators import FFmaOperator
-from holoso import (
-    FFmaOptions,
-    FloatFormat,
-    UnsupportedConstruct,
-)
+from holoso import FFmaOptions, FloatFormat, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._hir import FloatAdd, FloatMul, optimize
 from holoso._mir import lower as lower_to_mir

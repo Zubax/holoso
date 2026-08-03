@@ -14,10 +14,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import (
-    FAddOptions,
-    FloatFormat,
-)
+from holoso import FAddOptions, FloatFormat
 from holoso._operators import FAddOperator
 
 from .hdl_float_oracle import (

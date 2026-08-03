@@ -20,10 +20,7 @@ from collections.abc import Callable
 import pytest
 
 import holoso
-from holoso import (
-    Options,
-    FloatFormat,
-)
+from holoso import Options, FloatFormat
 from holoso._errors import SynthesisError
 
 from ._modelref import default_options

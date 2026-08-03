@@ -12,10 +12,7 @@ of any input vector, so it holds for the data-dependent branch/loop kernels (uar
 import pytest
 
 import holoso
-from holoso import (
-    FloatFormat,
-    FloatValue,
-)
+from holoso import FloatFormat, FloatValue
 from holoso._eel import lower as lower_frontend
 from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize

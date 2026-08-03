@@ -28,14 +28,7 @@ from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map,
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import Producer, RegallocTuning
-from ._build_base import (
-    Allocation,
-    BoolArmInstall,
-    ColorObjective,
-    FloatArmInstall,
-    OverlapLayout,
-    PooledConst,
-)
+from ._build_base import Allocation, BoolArmInstall, ColorObjective, FloatArmInstall, OverlapLayout, PooledConst
 from ._construct import build_const_pool
 from ._coalesce import coalescable_arms, coalesce_and_color
 from ._layout import schedule_with_overlap

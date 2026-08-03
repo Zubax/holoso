@@ -22,12 +22,7 @@ import types
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from holoso import (
-    FloatFormat,
-    OperatorOptions,
-    Options,
-    synthesize,
-)
+from holoso import FloatFormat, OperatorOptions, Options, synthesize
 
 from ._synth import BUILD_ROOT, SynthReport, build_compiler_ooc_design
 from .flows import Flow, FlowId, make_flow

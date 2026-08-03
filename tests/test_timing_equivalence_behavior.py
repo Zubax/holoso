@@ -32,10 +32,7 @@ from collections.abc import Callable
 import numpy as np
 
 import holoso
-from holoso import (
-    FloatFormat,
-    FloatValue,
-)
+from holoso import FloatFormat, FloatValue
 
 from ._modelref import default_ops, default_options, overlap_spill_kernel, staged_ops, staged_options
 

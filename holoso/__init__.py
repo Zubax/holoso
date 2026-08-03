@@ -33,10 +33,7 @@ from ._errors import (
 
 from ._backend.cocotb import CocotbOutput as CocotbOutput
 from ._backend.html import HtmlOutput as HtmlOutput
-from ._backend.numerical import (
-    NumericalModel as NumericalModel,
-    NumericalSimulator as NumericalSimulator,
-)
+from ._backend.numerical import NumericalModel as NumericalModel, NumericalSimulator as NumericalSimulator
 from ._backend.verilog import VerilogOutput as VerilogOutput
 
 from . import _operators

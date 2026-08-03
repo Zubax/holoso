@@ -21,10 +21,7 @@ import numpy as np
 import pytest
 
 import holoso
-from holoso import (
-    BoolType,
-    FloatFormat,
-)
+from holoso import BoolType, FloatFormat
 from ._examples import SPECS, ExampleSpec, ReferenceComparison
 from ._modelref import default_ops, default_options, default_tolerance, flatten_value, within
 

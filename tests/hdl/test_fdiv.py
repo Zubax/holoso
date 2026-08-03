@@ -15,10 +15,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import (
-    FDivOptions,
-    FloatFormat,
-)
+from holoso import FDivOptions, FloatFormat
 from holoso._operators import FDivOperator
 
 from .hdl_float_oracle import (

@@ -12,10 +12,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import (
-    FSincosOptions,
-    FloatFormat,
-)
+from holoso import FSincosOptions, FloatFormat
 from holoso._operators import FSincosOperator
 
 from .hdl_float_oracle import (

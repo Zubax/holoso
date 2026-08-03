@@ -16,13 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from holoso import FloatFormat
-from ._modelref import (
-    bounded,
-    encode_inputs,
-    format_edge_bits,
-    log_uniform_positive,
-    spd_matrix,
-)
+from ._modelref import bounded, encode_inputs, format_edge_bits, log_uniform_positive, spd_matrix
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
