@@ -8,9 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from holoso import (
-    SynthesisResult,
-)
+from holoso import SynthesisResult
 
 from ._flow_id import FlowId
 from ._ooc import build_ooc_wrapper

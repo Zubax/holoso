@@ -10,9 +10,7 @@ import inspect
 import pkgutil
 
 import holoso
-from holoso import (
-    HolosoError,
-)
+from holoso import HolosoError
 
 
 def test_every_exception_derives_from_the_public_root() -> None:

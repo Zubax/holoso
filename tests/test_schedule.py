@@ -127,8 +127,8 @@ class OtherMirInput(MirInput):
     pass
 
 
-def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops)
+def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
+    return lower_to_mir(optimize(lower(target).hir), ops, fmt)
 
 
 def _view(mir: Mir) -> MirFloatView:
@@ -2085,7 +2085,7 @@ def test_optional_stages_raise_latency_without_changing_numerics() -> None:
 
     fmt = FloatFormat(8, 36)
     configs = {"default": default_ops(fmt), "staged": staged_ops(fmt)}
-    lirs = {name: build_lir(_run(kernel, ops), f"stages_{name}") for name, ops in configs.items()}
+    lirs = {name: build_lir(_run(kernel, ops, fmt), f"stages_{name}") for name, ops in configs.items()}
     assert lirs["default"].initiation_interval < lirs["staged"].initiation_interval
 
     def bits(outputs: list[FloatValue | bool]) -> list[int]:  # the kernel is all-float, so every output is a FloatValue
@@ -2752,7 +2752,7 @@ def test_forced_install_regrowth_pins_and_stays_correct(
     monkeypatch.setattr(_build, "actual_install_blocks", fake_installs)
     fmt = FloatFormat(6, 18)
     with caplog.at_level("INFO", logger="holoso._lir._build"):
-        model, interpreter = build_model_and_interpreter(kernel, default_ops(fmt), "forced_pin")
+        model, interpreter = build_model_and_interpreter(kernel, default_ops(fmt), "forced_pin", fmt)
     assert any("pinning regrown block" in r.message for r in caplog.records), "the faked narrowing did not pin"
     for x in (1.0, -2.0):
         for n in (1.0, 3.0):
@@ -2789,7 +2789,7 @@ def test_forced_state_copy_regrowth_latches_and_stays_correct(
     monkeypatch.setattr(_build, "_has_state_copy", fake_state)
     fmt = FloatFormat(8, 36)
     with caplog.at_level("INFO", logger="holoso._lir._build"):
-        model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_ops(fmt), "forced_latch")
+        model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_ops(fmt), "forced_latch", fmt)
     assert any("latching the state-copy charge" in r.message for r in caplog.records), "the fake did not latch"
     reference = Delay2()
     for raw in (1.0, 2.0, 3.0, 4.0, 5.0):

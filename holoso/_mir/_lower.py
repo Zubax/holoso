@@ -1,7 +1,7 @@
 """Lower optimized HIR to selected MIR."""
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 from .._errors import UnsupportedConstruct
 from .._hir import (
@@ -87,7 +87,7 @@ from .._operators import (
     Relation,
     SelectOperator,
 )
-from .._type import BoolType as ScalarBoolType, FloatType as ScalarFloatType, ScalarType
+from .._type import BoolType as ScalarBoolType, FloatFormat, FloatType as ScalarFloatType, ScalarType
 from ._ir import Mir, MirBuilder
 
 # The seam between the semantic relation and the comparator flag it taps; the two vocabularies meet only here.
@@ -380,11 +380,14 @@ def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
 
 
 class _LoweringContext:
-    def __init__(self, hir: Hir, ops: OpConfig) -> None:
+    def __init__(self, hir: Hir, ops: OpConfig, float_format: FloatFormat) -> None:
         self.hir = hir
         self.ops = ops
-        self.float_format = ops.float_format
-        self.builder = MirBuilder(self.float_format)
+        self.float_format = float_format
+        assert all(
+            getattr(ops, field.name) is None or getattr(ops, field.name).fmt == float_format for field in fields(ops)
+        ), "every configured operator must be built for the machine's float format"
+        self.builder = MirBuilder(float_format)
         self.remap: dict[ValueId, ValueId] = {}
         self.fma_plans = _plan_fma_fusions(hir, ops)
         self.fused_muls = {plan.mul for plan in self.fma_plans.values()}
@@ -946,7 +949,7 @@ class _FloatLowerer:
         return True
 
 
-def lower(hir: Hir, ops: OpConfig) -> Mir:
+def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat) -> Mir:
     """
     Select hardware operators from the configuration and fold semantic signs onto MIR sign controls.
 
@@ -954,4 +957,4 @@ def lower(hir: Hir, ops: OpConfig) -> Mir:
     ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
     _reject_integers(hir)
-    return _LoweringContext(hir, ops).run()
+    return _LoweringContext(hir, ops, float_format).run()

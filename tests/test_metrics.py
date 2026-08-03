@@ -29,9 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from holoso import (
-    FloatFormat,
-)
+from holoso import FloatFormat
 from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import Lir
@@ -117,7 +115,9 @@ class Metrics:
 # The baselines are frozen against the shipped allocator defaults, passed explicitly so no environment speed-up can
 # leak in here; changing a default deliberately re-freezes them.
 def _measure(name: str) -> Metrics:
-    lir: Lir = build_lir(lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT)), name, SHIPPED_TUNING)
+    lir: Lir = build_lir(
+        lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT), _FMT), name, SHIPPED_TUNING
+    )
     straight = (
         len(lir.blocks) == 1
         and not lir.bool_state_slots

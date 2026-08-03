@@ -15,9 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso import (
-    FloatFormat,
-)
+from holoso import FloatFormat
 from ._modelref import (
     bounded,
     encode_inputs,

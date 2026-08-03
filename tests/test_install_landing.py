@@ -36,7 +36,7 @@ from ._modelref import (
 
 def _build(spec: ExampleSpec) -> Lir:
     return build_lir(
-        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0])),
+        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0]), spec.formats[0]),
         spec.name,
     )
 
@@ -147,7 +147,7 @@ def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
     options = default_options(FloatFormat(6, 18))
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir), build_ops(options)),
+        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir), build_ops(options), options.ffmt),
         "hold_or_update_bool",
     )
     resident_non_const = [x for b in lir.blocks for x in b.bool_writes if x.resident_source and not x.is_const]
@@ -191,10 +191,11 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     reading the source's home-block commit instead of the predecessor's ``commit_or_makespan`` -- makes the modeled
     install land far past the predecessor's terminator, and the assert raises (verified by injecting that lookup).
     """
-    ops = default_ops(FloatFormat(8, 36))
+    fmt = FloatFormat(8, 36)
+    ops = default_ops(fmt)
     kernel = _LiveThroughArm().__call__
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel).hir), ops), "live_through_arm"
+        lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt), "live_through_arm"
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.copies if not c.resident_source]
     assert cross, "the kernel no longer exercises a non-coalesced cross-block-source install; the shape changed"
@@ -202,7 +203,7 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
         assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
-    model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm")
+    model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm", fmt)
     vectors: list[Vector] = [
         [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
         for c in (True, False)
@@ -240,9 +241,10 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     so a later change cannot silently drop it (miscompiling this shape) without failing here. Value correctness is held
     by the schedule-independent model-vs-interpreter differential.
     """
-    ops = default_ops(FloatFormat(8, 36))
+    fmt = FloatFormat(8, 36)
+    ops = default_ops(fmt)
     kernel = _LastWorkArmSource().__call__
-    lir = build_lir(lower_to_mir(optimize(lower_frontend(kernel).hir), ops), "last_work_arm")
+    lir = build_lir(lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt), "last_work_arm")
     pushed = [
         blk
         for blk in lir.blocks
@@ -254,7 +256,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
         assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
-    model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm")
+    model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm", fmt)
     vectors: list[Vector] = [
         [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
         for c in (True, False)

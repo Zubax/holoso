@@ -180,7 +180,7 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
         ops = default_ops(_FMT)
         if with_fma:
             ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT, FFmaOptions(), 0))
-        mir = lower_to_mir(optimize(lower(dot).hir), ops)
+        mir = lower_to_mir(optimize(lower(dot).hir), ops, _FMT)
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
             operator = getattr(node, "operator", None)

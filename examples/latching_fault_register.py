@@ -26,17 +26,7 @@ class LatchingFaultRegister:
 
 
 def main() -> None:
-    float_format = holoso.FloatFormat(wexp=8, wman=36)
-    options = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
-            fdiv=holoso.FDivOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
-        ),
-        ffmt=float_format,
-    )
+    options = holoso.Options(holoso.OperatorOptions())  # purely boolean: no float operator, no float format
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(LatchingFaultRegister().__call__, options)
     for filename, path in result.write(out_dir).items():

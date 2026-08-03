@@ -85,7 +85,7 @@ def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
 
 
 def _run(target: Callable[..., object]) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), OPS)
+    return lower_to_mir(optimize(lower(target).hir), OPS, FMT)
 
 
 def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
@@ -391,7 +391,7 @@ def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
             ffmt=fmt,
         )
     )
-    model = build_model(build_lir(lower_to_mir(optimize(lower(f).hir), ops), "f"))
+    model = build_model(build_lir(lower_to_mir(optimize(lower(f).hir), ops, fmt), "f"))
     assert model.run(FloatValue.from_float(fmt, 0.5))[0] == FloatValue.from_float(fmt, 8.0)
 
 
@@ -436,7 +436,7 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
             ffmt=fmt,
         )
     )
-    mir = lower_to_mir(optimize(lower(f).hir), ops)
+    mir = lower_to_mir(optimize(lower(f).hir), ops, fmt)
     model = build_model(build_lir(mir, "f"))
     got = model.run(
         FloatValue.from_bits(fmt, 0x42BF30E6505),
@@ -1616,7 +1616,7 @@ def test_folded_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -> No
 def test_merged_state_slots_preserve_behaviour() -> None:
     # The slot drop must not change behaviour: drive PFD across many transactions and confirm the model still agrees
     # with the schedule-independent MIR interpreter (blind to LIR faults), so the merged state persists correctly.
-    model, interpreter = build_model_and_interpreter(PhaseFrequencyDetector().__call__, OPS, "pfd_merge")
+    model, interpreter = build_model_and_interpreter(PhaseFrequencyDetector().__call__, OPS, "pfd_merge", FMT)
     vectors: list[list[FloatValue | bool]] = [
         [True, False, False],  # reference leads -> up
         [False, False, False],  # hold up
@@ -1672,7 +1672,7 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
 
     vectors: list[list[FloatValue | bool]] = [[True], [False], [True], [True], [False], [False], [True]]
     for cls in (Forward, Reversed):
-        model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__)
+        model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__, FMT)
         assert_model_equals_interpreter(model, interpreter, vectors, cls.__name__)
     build_lir(_run(InputPhi().__call__), "input_phi_alias")  # phi-of-inputs shape must compile
 

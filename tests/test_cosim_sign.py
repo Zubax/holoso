@@ -5,9 +5,7 @@ output taps. The ``remainder``/``pid`` specs already cover the inline-firing and
 
 import pytest
 
-from holoso import (
-    FloatFormat,
-)
+from holoso import FloatFormat
 from ._cosim import run_cosim
 from .hdl.hdl_float_oracle import SIMULATORS
 

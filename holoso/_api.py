@@ -211,7 +211,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     hir = optimize(frontend.hir)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
-    mir = lower_to_mir(hir, _build_op_config(options))
+    mir = lower_to_mir(hir, _build_op_config(options), options.ffmt)
     lir = build(
         mir,
         module_name,

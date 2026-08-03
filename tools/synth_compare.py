@@ -31,11 +31,11 @@ sys.path.insert(0, str(REPO))
 import holoso  # noqa: E402
 from holoso._eel import lower  # noqa: E402
 from holoso._hir import optimize  # noqa: E402
-from holoso._lir import build  # noqa: E402
+from holoso._lir import RegallocTuning, build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
 from synth import build_compiler_ooc_design  # noqa: E402
 from synth.flows import make_flow  # noqa: E402
-from tests._modelref import DEFAULT_FETCH_STAGES, DEFAULT_TUNING, build_ops  # noqa: E402
+from tests._modelref import build_ops  # noqa: E402
 from tests._synth_targets import TARGETS  # noqa: E402
 
 # Per-flow resource-primitive names for the LUT/FF/DSP/BRAM report columns; each tool names them differently.
@@ -59,14 +59,18 @@ def capture(out_path: str) -> None:
             "example": target.example,
             "flow": target.flow.value,
             "target_MHz": target.target_frequency_MHz,
-            "ops": repr(target.ops),
+            "ops": repr(target.ops.operator),
         }
         try:
             lir = build(
-                lower_to_mir(optimize(lower(target.kernel()).hir), build_ops(target.ops)),
+                lower_to_mir(optimize(lower(target.kernel()).hir), build_ops(target.ops), target.ops.ffmt),
                 target.name,
-                DEFAULT_FETCH_STAGES,
-                DEFAULT_TUNING,
+                target.ops.ucode_fetch_stages,
+                RegallocTuning(
+                    effort=target.ops.regalloc_effort,
+                    reuse_write_cap=target.ops.regalloc_reuse_write_cap,
+                    register_price=target.ops.regalloc_register_price,
+                ),
             )
             row["min_ii"] = lir.min_initiation_interval
             row["last_pc"] = lir.last_pc

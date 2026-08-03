@@ -129,7 +129,7 @@ def update_x_P(
 
 
 def main() -> None:
-    # Each scalar width wants its own operator pipelining to close timings, so the OpConfig is built per float format.
+    # Each scalar width wants its own operator pipelining to close timings, so the configuration is built per float format.
     narrow = holoso.FloatFormat(wexp=6, wman=18)
     wide = holoso.FloatFormat(wexp=8, wman=36)
     configs = [

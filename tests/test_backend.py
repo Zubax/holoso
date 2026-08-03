@@ -50,8 +50,8 @@ def _ops(fmt: FloatFormat) -> OpConfig:
     )
 
 
-def _run(target: object, ops: OpConfig) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops)
+def _run(target: object, ops: OpConfig, fmt: FloatFormat) -> Mir:
+    return lower_to_mir(optimize(lower(target).hir), ops, fmt)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
@@ -82,7 +82,7 @@ def test_operator_instance_names_include_hardware_identity() -> None:
         return a * 4.0 + b * 8.0
 
     fmt = FloatFormat(6, 18)
-    lir = build_lir(_run(scale, _ops(fmt)), "scale")
+    lir = build_lir(_run(scale, _ops(fmt), fmt), "scale")
     names = re.findall(
         r"\bholoso_fmul_ilog2_const\s+#\([^;]+?\)\s+u_([A-Za-z_][A-Za-z0-9_]*)\s+\(", generate(lir).verilog
     )
@@ -107,7 +107,7 @@ def test_comparisons_share_one_pooled_fcmp_instance() -> None:
             y = x
         return y
 
-    verilog = generate(build_lir(_run(kernel, _ops(FloatFormat(8, 24))), "two_cmp")).verilog
+    verilog = generate(build_lir(_run(kernel, _ops(FloatFormat(8, 24)), FloatFormat(8, 24)), "two_cmp")).verilog
     assert verilog.count("holoso_fcmp #") == 1
 
 
@@ -144,7 +144,7 @@ def test_small_kernel_elaborates(tmp_path: Path) -> None:
         return (a - b) * 0.25 + a * b
 
     fmt = FloatFormat(8, 24)
-    lir = build_lir(_run(kernel, _ops(fmt)), "kernel")
+    lir = build_lir(_run(kernel, _ops(fmt), fmt), "kernel")
     _elaborate("kernel", generate(lir).verilog, tmp_path)
 
 
@@ -154,7 +154,7 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
         return a / b + c * 2.0
 
     fmt = FloatFormat(6, 18)
-    lir = build_lir(_run(blend, _ops(fmt)), "blend")
+    lir = build_lir(_run(blend, _ops(fmt), fmt), "blend")
     _elaborate("blend", generate(lir).verilog, tmp_path)
 
 
@@ -166,7 +166,7 @@ def test_constant_only_module_elaborates(tmp_path: Path) -> None:
         return 3.5
 
     fmt = FloatFormat(8, 24)
-    lir = build_lir(_run(const_only, _ops(fmt)), "const_only")
+    lir = build_lir(_run(const_only, _ops(fmt), fmt), "const_only")
     _elaborate("const_only", generate(lir).verilog, tmp_path)
 
 
@@ -185,7 +185,7 @@ def test_boolean_output_port_is_one_bit_and_assigned() -> None:
             return self.y
 
     fmt = FloatFormat(8, 24)
-    lir = build_lir(_run(Trigger().__call__, _ops(fmt)), "bool_trigger")
+    lir = build_lir(_run(Trigger().__call__, _ops(fmt), fmt), "bool_trigger")
     (port,) = [port for port in lir.output_ports if port.name == "state_y"]
     assert isinstance(port.scalar_type, BoolType)
     assert port.width == 1
@@ -199,7 +199,7 @@ def test_boolean_input_port_is_one_bit_and_loaded() -> None:
         return flag
 
     fmt = FloatFormat(8, 24)
-    lir = build_lir(_run(passthrough, _ops(fmt)), "bool_input")
+    lir = build_lir(_run(passthrough, _ops(fmt), fmt), "bool_input")
     assert [load.name for load in lir.inputs] == ["flag"]
     assert isinstance(lir.bool_inputs[0].dst, BoolRegRef)
     assert not isinstance(lir.bool_inputs[0].dst, RegRef)
@@ -224,7 +224,7 @@ def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
             return self.flag
 
     fmt = FloatFormat(8, 24)
-    lir = build_lir(_run(Toggle().__call__, _ops(fmt)), "bool_toggle")
+    lir = build_lir(_run(Toggle().__call__, _ops(fmt), fmt), "bool_toggle")
     assert lir.input_ports == []
     (port,) = lir.output_ports
     assert port.name == "state_flag"
@@ -243,7 +243,7 @@ def test_parameter_name_colliding_with_control_port_is_rejected() -> None:
 
     fmt = FloatFormat(6, 18)
     with pytest.raises(UnsupportedConstruct, match="duplicate port"):
-        build_lir(_run(collide, _ops(fmt)), "collide")
+        build_lir(_run(collide, _ops(fmt), fmt), "collide")
 
 
 def test_kernel_without_outputs_is_rejected() -> None:
@@ -252,7 +252,7 @@ def test_kernel_without_outputs_is_rejected() -> None:
 
     fmt = FloatFormat(6, 18)
     with pytest.raises(UnsupportedConstruct, match="an empty aggregate cannot be returned"):
-        _run(empty, _ops(fmt))
+        _run(empty, _ops(fmt), fmt)
 
 
 @requires_iverilog
@@ -272,7 +272,7 @@ def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> No
             return self.y
 
     fmt = FloatFormat(8, 24)
-    lir = build_lir(_run(Collide().__call__, _ops(fmt)), "collide_state")
+    lir = build_lir(_run(Collide().__call__, _ops(fmt), fmt), "collide_state")
     _elaborate("collide_state", generate(lir).verilog, tmp_path)
 
 
@@ -282,7 +282,7 @@ def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     import ekf1_stateless
 
     fmt = FloatFormat(6, 18)
-    lir = build_lir(_run(ekf1_stateless.update_x_P, _ops(fmt)), "update_x_P")
+    lir = build_lir(_run(ekf1_stateless.update_x_P, _ops(fmt), fmt), "update_x_P")
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)
 
 
@@ -295,7 +295,7 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
     filt = ekf1_stateful.Ekf1(
         x=[0.0, 0.0, 0.0], P_urt=[1.0, 0.0, 0.0, 1.0, 0.0, 1.0], R_diag=[1.0, 1.0], Q_diag=np.array([1.0, 1.0, 1.0])
     )
-    lir = build_lir(_run(filt.update, _ops(fmt)), "ekf1_stateful")
+    lir = build_lir(_run(filt.update, _ops(fmt), fmt), "ekf1_stateful")
     _elaborate("ekf1_stateful", generate(lir).verilog, tmp_path)
 
 
@@ -317,7 +317,7 @@ def test_both_bank_lane_write_commit_rides_the_commit_step() -> None:
     from ._modelref import branch_boundary_kernel, fcmp_staged_ops
 
     fmt = FloatFormat(6, 18)
-    lir = build_lir(_run(branch_boundary_kernel, fcmp_staged_ops(fmt, 1)), "lane_steps")
+    lir = build_lir(_run(branch_boundary_kernel, fcmp_staged_ops(fmt, 1), fmt), "lane_steps")
     events = write_events(lir)
     write_books = write_codebook(events)
     fields = build_microcode(lir, read_codebook(lir), write_books, events, tapped_lanes(lir))
@@ -350,7 +350,9 @@ def test_error_gate_ors_over_multiple_landing_registers() -> None:
     # An error-bearing operator (fdiv) whose result lands in >=2 distinct registers reconstructs its commit window as
     # the OR, over those registers, of ``uc_op_<reg> == <its source code>``. No bundled example produces a multi-term
     # err gate, and the numerical model does not simulate ``err``, so cosim cannot reach it -- pin the reconstruction.
-    verilog = generate(build_lir(_run(_two_division_kernel, _ops(FloatFormat(6, 18))), "two_div")).verilog
+    verilog = generate(
+        build_lir(_run(_two_division_kernel, _ops(FloatFormat(6, 18)), FloatFormat(6, 18)), "two_div")
+    ).verilog
     err = next(line.strip() for line in verilog.splitlines() if line.strip().startswith("assign err ="))
     assert err.count("uc_op_") >= 2 and " | " in err and "div0" in err, err
 
@@ -434,13 +436,13 @@ def _madd_only(a: float, b: float, c: float) -> float:
 def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
     # A purely-boolean kernel uses no wide bank, and an arithmetic kernel with no booleans uses no boolean bank; the
     # unused bank must be omitted entirely rather than declared as a zero-length reg array (illegal Verilog).
-    bool_lir = build_lir(_run(_and_gate, _ops(FloatFormat(8, 24))), "and_gate")
+    bool_lir = build_lir(_run(_and_gate, _ops(FloatFormat(8, 24)), FloatFormat(8, 24)), "and_gate")
     assert bool_lir.regfile.nreg == 0
     bool_v = generate(bool_lir).verilog
     assert "reg  [W-1:0] regs" not in bool_v and "NREG" not in bool_v and "[0:-1]" not in bool_v
     _elaborate("and_gate", bool_v, tmp_path)
 
-    float_lir = build_lir(_run(_madd_only, _ops(FloatFormat(8, 24))), "madd_only")
+    float_lir = build_lir(_run(_madd_only, _ops(FloatFormat(8, 24)), FloatFormat(8, 24)), "madd_only")
     assert float_lir.bool_regfile.nreg == 0
     float_v = generate(float_lir).verilog
     assert "bregs" not in float_v and "NBREG" not in float_v and "[0:-1]" not in float_v
@@ -472,7 +474,7 @@ def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(tmp_path: P
     # kernel is cosimulated in test_cosim.py, so here only the premise and the elaboration are checked.
     from holoso._backend.verilog._microcode import write_events
 
-    lir = build_lir(_run(SharedLiveOut().step, _ops(FloatFormat(6, 18))), "shared_live_out")
+    lir = build_lir(_run(SharedLiveOut().step, _ops(FloatFormat(6, 18)), FloatFormat(6, 18)), "shared_live_out")
     steps: dict[object, list[int]] = {}
     for event in write_events(lir):
         steps.setdefault(event.dst, []).append(event.step)

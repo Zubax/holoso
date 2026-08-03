@@ -28,9 +28,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from holoso import (
-    FloatFormat,
-)
+from holoso import FloatFormat
 from ._cosim import run_cosim
 from ._examples import SPECS, ExampleSpec
 from ._modelref import PIPELINE_OP_CASES, OperatorCase

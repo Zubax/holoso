@@ -52,7 +52,7 @@ def build_model(lir: Lir) -> NumericalSimulator:
 
 
 def build_model_and_interpreter(
-    kernel: Callable[..., object], ops: OpConfig, name: str
+    kernel: Callable[..., object], ops: OpConfig, name: str, fmt: FloatFormat
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
@@ -60,7 +60,7 @@ def build_model_and_interpreter(
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(optimize(lower_frontend(kernel).hir), ops)
+    mir = lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 
@@ -375,7 +375,9 @@ def staged_options(fmt: FloatFormat) -> Options:
     and handshake at a longer latency. Deliberately hardcoded -- it is a test fixture chosen for coverage, not a
     derived enumeration of operator knobs, so it stays valid as new (not necessarily stage-shaped) knobs are added.
     """
-    cordic = FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1)  # bench-verified (tests/hdl)
+    # Bench-verified stage combos (tests/hdl/test_f{sincos,atan2}.py), so the latency formula is known-good.
+    sincos = FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1)
+    atan2 = FAtan2Options(stage_product=1, stage_normalize=1, stage_pack=1)
     return Options(
         OperatorOptions(
             fadd=FAddOptions(
@@ -404,8 +406,8 @@ def staged_options(fmt: FloatFormat) -> Options:
                     stage_output=1,
                 ),
             ),
-            fsincos=_if_supported(FSincosOperator, fmt, cordic),
-            fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options(**dataclasses.asdict(cordic))),
+            fsincos=_if_supported(FSincosOperator, fmt, sincos),
+            fatan2=_if_supported(FAtan2Operator, fmt, atan2),
         ),
         ffmt=fmt,
     )

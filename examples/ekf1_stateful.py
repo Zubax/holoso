@@ -48,7 +48,7 @@ class Ekf1:
 def main() -> None:
     # The values stored in the object at the time of synthesize() become its reset values; here the dataclass defaults.
     filt = Ekf1()
-    # The kernel is float-format-agnostic, but each scalar width wants its own operator pipelining, so the OpConfig is
+    # The kernel is float-format-agnostic, but each scalar width wants its own operator pipelining, so the configuration is
     # built per float format. The narrow 24-bit default (e6/m18) closes single-cycle, so its operators take no extra
     # stages; the wide 44-bit datapath (e8/m36) needs deeper operator pipelines to close timing.
     narrow = holoso.FloatFormat(wexp=6, wman=18)

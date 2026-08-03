@@ -39,7 +39,7 @@ OPS = build_ops(
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops)
+    return lower_to_mir(optimize(lower(target).hir), ops, FMT)
 
 
 def _mir_operation_counts(mir: Mir) -> Counter[str]:

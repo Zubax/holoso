@@ -3,7 +3,7 @@
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from hashlib import blake2s
 from typing import Any, ClassVar
@@ -1108,14 +1108,3 @@ class OpConfig:
         if operator is None:
             raise UnsupportedConstruct(f"the kernel needs the {name!r} operator, which is not configured")
         return operator
-
-    @property
-    def float_format(self) -> FloatFormat:
-        formats = {operator.fmt for field in fields(self) if (operator := getattr(self, field.name)) is not None}
-        if not formats:
-            raise UnsupportedConstruct("no float operator is configured, so the machine has no float format")
-        if len(formats) != 1:
-            ordered = ", ".join(str(fmt) for fmt in sorted(formats, key=lambda fmt: (fmt.wexp, fmt.wman)))
-            raise ValueError(f"all floating-point operators must use the same format; got {ordered}")
-        (fmt,) = formats
-        return fmt  # type: ignore[no-any-return]

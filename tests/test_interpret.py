@@ -65,7 +65,7 @@ _EXAMPLE_CASES = [
 
 @pytest.mark.parametrize("spec,fmt", _EXAMPLE_CASES)
 def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    model, interpreter = build_model_and_interpreter(spec.make_kernel(), default_ops(fmt), spec.name)
+    model, interpreter = build_model_and_interpreter(spec.make_kernel(), default_ops(fmt), spec.name, fmt)
     vectors = [_decode_spec_vector(model, fmt, row) for row in spec.vectors(fmt)]
     assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
 
@@ -107,7 +107,7 @@ def test_interpreter_matches_model_on_corners(
     label: str, make_kernel: Callable[[], Callable[..., object]], ops_factory: Callable[[FloatFormat], OpConfig]
 ) -> None:
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(make_kernel(), ops_factory(fmt), label)
+    model, interpreter = build_model_and_interpreter(make_kernel(), ops_factory(fmt), label, fmt)
     rng = np.random.default_rng(0xC0FFEE)
     vectors = _bounded_vectors(model, fmt, rng, 64)
     assert_model_equals_interpreter(model, interpreter, vectors, f"{label}-{ops_factory.__name__}")
@@ -115,7 +115,7 @@ def test_interpreter_matches_model_on_corners(
 
 def test_interpreter_matches_model_on_edge_bits() -> None:
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_ops(fmt), "branch_boundary")
+    model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_ops(fmt), "branch_boundary", fmt)
     rng = np.random.default_rng(0x5EED)
     vectors: list[Vector] = [
         [FloatValue.from_bits(fmt, random_legal_bits(fmt, rng)) for _ in model.inputs] for _ in range(256)
@@ -130,7 +130,7 @@ def test_loop_header_phi_swap_resolves_in_parallel() -> None:
     either oracle -- or one shared by both -- surfaces as a divergence. Integer-valued inputs keep every output exact.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(phi_swap_loop, default_ops(fmt), "phi_swap_loop")
+    model, interpreter = build_model_and_interpreter(phi_swap_loop, default_ops(fmt), "phi_swap_loop", fmt)
     for x in (2.0, -3.0, 0.5, 5.0):
         for n in (1.0, 2.0, 3.0, 4.0):
             vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
@@ -151,7 +151,7 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
     the same LIR, and interp==model is asserted so a divergence localizes the guilty layer.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_ops(fmt), "phi_swap_computed")
+    model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_ops(fmt), "phi_swap_computed", fmt)
     for x in (1.0, 2.0, -1.5):
         for n in (1.0, 2.0, 3.0, 4.0):
             vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
@@ -168,7 +168,7 @@ def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> N
     """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not FloatCopys."""
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(
-        bool_phi_swap_computed_loop, default_ops(fmt), "bool_phi_swap_computed"
+        bool_phi_swap_computed_loop, default_ops(fmt), "bool_phi_swap_computed", fmt
     )
     for x in (False, True):
         for n in (1.0, 2.0, 3.0, 4.0):
@@ -190,7 +190,9 @@ def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
     arm's install and the residence assert trips), so the value grid is secondary to synthesis itself.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(branchy_swap_mixed_arm_loop, default_ops(fmt), "mixed_arm_swap")
+    model, interpreter = build_model_and_interpreter(
+        branchy_swap_mixed_arm_loop, default_ops(fmt), "mixed_arm_swap", fmt
+    )
     for x in (1.0, -1.0):
         for n in (1.0, 2.0, 3.0):
             vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, 4.0), FloatValue.from_float(fmt, n)]
@@ -209,7 +211,7 @@ def test_state_slot_swap_writeback_is_parallel() -> None:
     surfaces. Integer inputs keep the output exact.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(SlotSwap().step, default_ops(fmt), "slot_swap")
+    model, interpreter = build_model_and_interpreter(SlotSwap().step, default_ops(fmt), "slot_swap", fmt)
     reference = SlotSwap()
     for x in (0.0, 1.0, -2.0, 3.0, -4.0, 5.0):
         vector = [FloatValue.from_float(fmt, x)]

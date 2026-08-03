@@ -165,8 +165,8 @@ identity stem, so the fully specified operator instance is itself the resource-s
 time-share one module. Per-node-parameterized operators are factories that instantiate a concrete operator.
 
 Every operator is optional, so presence is a semantic choice as well as an area one
-(`ffma` enables FMA contraction, `fsort` enables min/max); an unconfigured one is refused at MIR lowering.
-The float format drives HIR-to-MIR lowering. Latency-tuning knobs are named after the HDL parameters.
+(`ffma` enables FMA contraction, `fsort` enables min/max); what a kernel cannot reach through the operators
+it was given is refused at MIR lowering.
 An operator may declare per-firing microcode-driven immediate inputs, and declares a per-instance
 initiation interval (most are II=1, fully pipelined).
 
