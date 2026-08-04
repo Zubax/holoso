@@ -475,6 +475,11 @@ module {top} (
     wire [{width - 1}:0] dut_rem;
     wire dut_saturated;
     wire dut_div0;
+    {KEEP_ATTR} reg [{width - 1}:0] r_quo;
+    {KEEP_ATTR} reg [{width - 1}:0] r_rem;
+    {KEEP_ATTR} reg r_saturated;
+    {KEEP_ATTR} reg r_div0;
+    {KEEP_ATTR} reg r_dut_valid;
     {KEEP_ATTR} reg r_out_valid;
     {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
 
@@ -489,18 +494,24 @@ module {top} (
     always @(posedge clk) begin
         if (in_sel) r_den <= io_in;
         else        r_num <= io_in;
+        r_quo <= dut_quo;
+        r_rem <= dut_rem;
+        r_saturated <= dut_saturated;
+        r_div0 <= dut_div0;
         case (out_sel)
-            2'd0: r_io_out <= dut_quo;
-            2'd1: r_io_out <= dut_rem;
-            2'd2: r_io_out <= {{{width}{{dut_saturated}}}};
-            default: r_io_out <= {{{width}{{dut_div0}}}};
+            2'd0: r_io_out <= r_quo;
+            2'd1: r_io_out <= r_rem;
+            2'd2: r_io_out <= {{{width}{{r_saturated}}}};
+            default: r_io_out <= {{{width}{{r_div0}}}};
         endcase
         if (rst) begin
             r_in_valid <= 1'b0;
+            r_dut_valid <= 1'b0;
             r_out_valid <= 1'b0;
         end else begin
             r_in_valid <= in_valid;
-            r_out_valid <= dut_out_valid;
+            r_dut_valid <= dut_out_valid;
+            r_out_valid <= r_dut_valid;
         end
     end
 endmodule
