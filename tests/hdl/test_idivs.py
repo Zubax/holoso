@@ -84,7 +84,7 @@ def _directed(width: int) -> list[int]:
 async def idivs_cocotb(dut: Any) -> None:
     width = int(os.environ["HOLOSO_IDIVS_WIDTH"])
     quotient_floor = bool(int(os.environ["HOLOSO_IDIVS_QUOTIENT_FLOOR"]))
-    latency = 2 + (width + 1) // 2
+    latency = 3 + (width + 1) // 2
     mask = (1 << width) - 1
     scoreboard = PipelineScoreboard(
         dut,
@@ -149,7 +149,7 @@ async def idivs_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("quotient_floor", (0, 1), ids=lambda mode: "trunc" if mode == 0 else "floor")
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_idivs(sim: str, width: int, quotient_floor: int) -> None:
-    latency = 2 + (width + 1) // 2
+    latency = 3 + (width + 1) // 2
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"holoso_idivs_w{width}_f{quotient_floor}"
     runner = get_runner(sim)
     runner.build(

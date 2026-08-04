@@ -10,7 +10,7 @@ from synth.test_integer_ooc import _render_divider_wrapper
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, drive_reset, sources, start_clock
 
 _WIDTH = 24
-_LATENCY = 14
+_LATENCY = 15
 
 
 @cocotb.test()

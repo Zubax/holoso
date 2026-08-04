@@ -7,7 +7,7 @@
 //  holoso_iadds    | Signed addition, saturated            | 2     | a, b              | y, saturated
 //  holoso_isubs    | Signed subtraction, saturated         | 2     | a, b              | y, saturated
 //  holoso_imuls    | Signed multiplication, saturated      | 2..6  | a, b              | y, saturated
-//  holoso_idivs    | Signed division and modulo, saturated | 2+W/2 | num, den          | quo, rem, saturated, div0
+//  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den          | quo, rem, saturated, div0
 //  holoso_iabss    | Absolute value, saturated             | 2     | x                 | y, saturated
 //  holoso_ashift   | Arith. shift, left+/right-            | 2     | x,shamt,saturating| y, saturated
 //  holoso_ashiftc  | Like holoso_ashift but by a constant  | 0     | x, shamt          | (inline comb function)
@@ -377,7 +377,7 @@ endmodule
 // Signed saturating division with Python floor or truncation-toward-zero quotient semantics.
 // Division by zero returns MIN for a negative numerator and MAX otherwise, preserves the numerator as remainder,
 // and asserts outputs div0 and saturated.
-// LATENCY = 2 + ceil(W/2)
+// LATENCY = 3 + ceil(W/2)
 module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
@@ -393,7 +393,7 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
     localparam integer NSTEPS = (W + 1) / 2;
     localparam integer WPAD = 2 * NSTEPS;
     localparam integer WDIV = W + WPAD;
-    localparam integer LATENCY_REF = 2 + NSTEPS;
+    localparam integer LATENCY_REF = 3 + NSTEPS;
     localparam signed [W-1:0] MIN = {1'b1, {(W-1){1'b0}}};
     localparam signed [W-1:0] MAX = {1'b0, {(W-1){1'b1}}};
 
@@ -403,13 +403,15 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
         end
     endgenerate
 
-    wire [W-1:0] num_magnitude = num[W-1] ? -num : num;
-    wire [W-1:0] den_magnitude = den[W-1] ? -den : den;
+    reg signed [W-1:0] input_num;
+    reg signed [W-1:0] input_den;
+    wire [W-1:0] num_magnitude = input_num[W-1] ? -input_num : input_num;
+    wire [W-1:0] den_magnitude = input_den[W-1] ? -input_den : input_den;
     wire [W+1:0] den_magnitude3 = {1'b0, den_magnitude, 1'b0} + {2'b00, den_magnitude};
-    wire input_div0 = den == {W{1'b0}};
-    wire input_overflow = (num == MIN) && (den == {W{1'b1}});
+    wire input_div0 = input_den == {W{1'b0}};
+    wire input_overflow = (input_num == MIN) && (input_den == {W{1'b1}});
 
-    reg [NSTEPS:0] valid_q;
+    reg [NSTEPS+1:0] valid_q;
     reg [WDIV-1:0] work_q [0:NSTEPS];
     reg [W-1:0] den_q [0:NSTEPS];
     reg [W+1:0] den3_q [0:NSTEPS];
@@ -473,11 +475,13 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
 
     integer i;
     always @(posedge clk) begin
+        input_num <= num;
+        input_den <= den;
         work_q[0] <= {{WPAD{1'b0}}, num_magnitude};
         den_q[0] <= den_magnitude;
         den3_q[0] <= den_magnitude3;
-        num_negative_q[0] <= num[W-1];
-        den_negative_q[0] <= den[W-1];
+        num_negative_q[0] <= input_num[W-1];
+        den_negative_q[0] <= input_den[W-1];
         div0_q[0] <= input_div0;
         overflow_q[0] <= input_overflow;
         for (i = 1; i <= NSTEPS; i = i + 1) begin
@@ -502,11 +506,11 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
         saturated <= div0_q[NSTEPS] | overflow_q[NSTEPS];
         div0 <= div0_q[NSTEPS];
         if (rst) begin
-            valid_q <= {(NSTEPS+1){1'b0}};
+            valid_q <= {(NSTEPS+2){1'b0}};
             out_valid <= 1'b0;
         end else begin
-            valid_q <= {valid_q[NSTEPS-1:0], in_valid};
-            out_valid <= valid_q[NSTEPS];
+            valid_q <= {valid_q[NSTEPS:0], in_valid};
+            out_valid <= valid_q[NSTEPS+1];
         end
     end
 endmodule

@@ -54,7 +54,7 @@ class _DividerTarget:
 
     def __post_init__(self) -> None:
         assert self.quotient_floor in (0, 1)
-        assert self.latency == 2 + (self.width + 1) // 2
+        assert self.latency == 3 + (self.width + 1) // 2
 
     @property
     def label(self) -> str:
@@ -84,18 +84,18 @@ _MULTIPLIER_TARGETS = (
 )
 
 _DIVIDER_TARGETS = (
-    _DividerTarget(24, 0, FlowId.YOSYS_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 0, FlowId.DIAMOND_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=14),
-    _DividerTarget(24, 1, FlowId.YOSYS_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 1, FlowId.DIAMOND_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=14),
-    _DividerTarget(44, 0, FlowId.YOSYS_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 0, FlowId.DIAMOND_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=24),
-    _DividerTarget(44, 1, FlowId.YOSYS_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 1, FlowId.DIAMOND_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=24),
+    _DividerTarget(24, 0, FlowId.YOSYS_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 0, FlowId.DIAMOND_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=15),
+    _DividerTarget(24, 1, FlowId.YOSYS_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 1, FlowId.DIAMOND_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=15),
+    _DividerTarget(44, 0, FlowId.YOSYS_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 0, FlowId.DIAMOND_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=25),
+    _DividerTarget(44, 1, FlowId.YOSYS_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 1, FlowId.DIAMOND_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=25),
 )
 
 
