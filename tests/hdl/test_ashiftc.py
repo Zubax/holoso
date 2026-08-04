@@ -9,7 +9,7 @@ from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
-from .hdl_integer_oracle import ashift
+from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, ashift
 
 
 @cocotb.test()
@@ -22,10 +22,10 @@ async def holoso_ashiftc_cocotb(dut: Any) -> None:
         dut.shamt.value = b
         await Timer(1, unit="ns")
         actual = int(dut.y.value) & mask
-        expected = ashift(a, b, width)
+        expected, _ = ashift(a, b, width, saturating=False)
         assert actual == expected, f"WINT={width} a=0x{a:x} b=0x{b:x}: got 0x{actual:x}, want 0x{expected:x}"
 
-    if width <= 6:
+    if width <= EXHAUSTIVE_MAX_WIDTH:
         for a in range(1 << width):
             for b in range(1 << width):
                 await check(a, b)
@@ -44,7 +44,7 @@ async def holoso_ashiftc_cocotb(dut: Any) -> None:
             )
 
 
-@pytest.mark.parametrize("width", (2, 3, 4, 5, 6, 24, 33, 44), ids=lambda width: f"w{width}")
+@pytest.mark.parametrize("width", TEST_WIDTHS, ids=lambda width: f"w{width}")
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_ashiftc(sim: str, width: int) -> None:
     runner = get_runner(sim)

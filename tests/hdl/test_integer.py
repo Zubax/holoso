@@ -17,13 +17,13 @@ from .hdl_float_oracle import (
     sources,
     start_clock,
 )
-from .hdl_integer_oracle import ashift, signed
+from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, ashift, signed
 
 _OPERATORS = ("holoso_iadds", "holoso_isubs", "holoso_iabss", "holoso_icmp", "holoso_ashift")
 _UNARY = frozenset(("holoso_iabss",))
 
 
-def _expected(operator: str, a_bits: int, b_bits: int, width: int) -> dict[str, int | str]:
+def _expected(operator: str, a_bits: int, b_bits: int, width: int, saturating: bool) -> dict[str, int | str]:
     modulus = 1 << width
     minimum = -(1 << (width - 1))
     maximum = (1 << (width - 1)) - 1
@@ -32,7 +32,8 @@ def _expected(operator: str, a_bits: int, b_bits: int, width: int) -> dict[str, 
     if operator == "holoso_icmp":
         return {"a_gt_b": int(a > b), "a_eq_b": int(a == b), "a_lt_b": int(a < b)}
     if operator == "holoso_ashift":
-        return {"y": ashift(a_bits, b_bits, width)}
+        y, sat = ashift(a_bits, b_bits, width, saturating)
+        return {"y": y, "saturated": sat}
     exact = {
         "holoso_iadds": a + b,
         "holoso_isubs": a - b,
@@ -48,18 +49,18 @@ async def integer_operator_cocotb(dut: Any) -> None:
     width = int(os.environ["HOLOSO_INTEGER_WIDTH"])
     if operator == "holoso_icmp":
         outputs = [("a_gt_b", "a_gt_b"), ("a_eq_b", "a_eq_b"), ("a_lt_b", "a_lt_b")]
-    elif operator == "holoso_ashift":
-        outputs = [("y", "y")]
     else:
         outputs = [("y", "y"), ("saturated", "saturated")]
+    modes = (False, True) if operator == "holoso_ashift" else (False,)
     scoreboard = PipelineScoreboard(dut, outputs, latency=2)
     await start_clock(dut)
     await drive_reset(dut)
 
-    async def step(a: int, b: int = 0, valid: bool = True) -> None:
+    async def step(a: int, b: int = 0, valid: bool = True, saturating: bool = False) -> None:
         if operator == "holoso_ashift":
             dut.x.value = a
             dut.shamt.value = b
+            dut.saturating.value = int(saturating)
         elif operator == "holoso_iabss":
             dut.x.value = a
         else:
@@ -68,20 +69,21 @@ async def integer_operator_cocotb(dut: Any) -> None:
             dut.b.value = b
         dut.in_valid.value = valid
         if valid:
-            expected = _expected(operator, a, b, width)
-            expected["_desc"] = f"{operator} W={width} a=0x{a:x} b=0x{b:x}"
+            expected = _expected(operator, a, b, width, saturating)
+            expected["_desc"] = f"{operator} W={width} a=0x{a:x} b=0x{b:x} sat={int(saturating)}"
             scoreboard.push(expected)
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         scoreboard.sample()
 
-    if width <= 6:
+    if width <= EXHAUSTIVE_MAX_WIDTH:
         for a in range(1 << width):
             if operator in _UNARY:
                 await step(a)
             else:
                 for b in range(1 << width):
-                    await step(a, b)
+                    for saturating in modes:
+                        await step(a, b, saturating=saturating)
     else:
         mask = (1 << width) - 1
         minimum = 1 << (width - 1)
@@ -96,13 +98,26 @@ async def integer_operator_cocotb(dut: Any) -> None:
                         value & mask for value in (0, 1, -1, width - 1, 1 - width, width, -width, width + 1, -width - 1)
                     ]
                 for b in operands_b:
-                    await step(a, b)
+                    for saturating in modes:
+                        await step(a, b, saturating=saturating)
+        if operator == "holoso_ashift":
+            # Straddle the exact/overflow boundary of every left shift amount, which is what the overflow mask
+            # actually decides. The boundary is asymmetric by one -- -2**k shifts exactly where +2**k already
+            # overflows -- so both signs are driven on both sides of it; the trailing corners pin the two operands
+            # whose magnitude alone cannot decide them.
+            for shift in range(width + 1):
+                headroom = 1 << (width - 1 - shift) if shift < width else 0
+                for value in (headroom, headroom - 1, -headroom, -headroom - 1):
+                    await step(value & mask, shift, saturating=True)
+            for value, shift in ((-minimum, 0), (-minimum, 1), (-1, width - 1), (-1, width)):
+                await step(value & mask, shift, saturating=True)
         rng = np.random.default_rng(int(os.environ.get("HOLOSO_TEST_SEED", "12345")))
         for _ in range(int(os.environ.get("HOLOSO_INTEGER_RANDOM", "1000"))):
             b = int(rng.integers(0, 1 << width, dtype=np.uint64))
             if operator == "holoso_ashift" and rng.random() < 0.5:
                 b = int(rng.integers(-width - 2, width + 3)) & mask
-            await step(int(rng.integers(0, 1 << width, dtype=np.uint64)), b, bool(rng.random() >= 0.2))
+            saturating = operator == "holoso_ashift" and rng.random() < 0.5
+            await step(int(rng.integers(0, 1 << width, dtype=np.uint64)), b, bool(rng.random() >= 0.2), saturating)
 
     await scoreboard.drain()
     mask = (1 << width) - 1
@@ -110,6 +125,7 @@ async def integer_operator_cocotb(dut: Any) -> None:
         if operator == "holoso_ashift":
             dut.x.value = value & mask
             dut.shamt.value = (value + 1) & mask
+            dut.saturating.value = value & 1
         elif operator == "holoso_iabss":
             dut.x.value = value & mask
         else:
@@ -128,7 +144,7 @@ async def integer_operator_cocotb(dut: Any) -> None:
         assert not int(dut.out_valid.value)
 
 
-@pytest.mark.parametrize("width", (2, 3, 4, 5, 6, 24, 44), ids=lambda width: f"w{width}")
+@pytest.mark.parametrize("width", TEST_WIDTHS, ids=lambda width: f"w{width}")
 @pytest.mark.parametrize("operator", _OPERATORS)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_integer_operator(sim: str, operator: str, width: int) -> None:

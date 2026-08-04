@@ -12,7 +12,7 @@ from synth._synth import BUILD_ROOT
 from synth.flows import FlowId, make_flow
 
 _SATURATING = ("holoso_iadds", "holoso_isubs", "holoso_iabss")
-_SINGLE_OUTPUT = ("holoso_ashift",)
+_SHIFT = ("holoso_ashift",)
 _UNARY = frozenset(("holoso_iabss",))
 
 
@@ -65,7 +65,7 @@ class _DividerTarget:
 
 _TARGETS = tuple(
     _Target(operator, width, flow, frequency)
-    for operator in (*_SATURATING, "holoso_icmp", *_SINGLE_OUTPUT)
+    for operator in (*_SATURATING, "holoso_icmp", *_SHIFT)
     for width in (24, 44)
     for flow, frequency in (
         (FlowId.YOSYS_ECP5, 100.0),
@@ -237,7 +237,7 @@ def _build_ooc_design(operator: str, width: int) -> OocDesign:
     top = f"{operator}_w{width}_ooc"
     if operator == "holoso_icmp":
         wrapper = _render_cmp_wrapper(top, width)
-    elif operator in _SINGLE_OUTPUT:
+    elif operator in _SHIFT:
         wrapper = _render_shift_wrapper(top, width)
     else:
         wrapper = _render_saturating_wrapper(top, operator, width)
@@ -636,33 +636,41 @@ module {top} (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-    input  wire in_sel,
+    input  wire [1:0] in_sel,
     input  wire [{width - 1}:0] io_in,
     output wire out_valid,
+    input  wire out_sel,
     output wire [{width - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
     {KEEP_ATTR} reg [{width - 1}:0] r_x;
     {KEEP_ATTR} reg [{width - 1}:0] r_shamt;
+    {KEEP_ATTR} reg r_saturating;
     wire dut_out_valid;
     wire [{width - 1}:0] dut_y;
+    wire dut_saturated;
     {KEEP_ATTR} reg r_out_valid;
     {KEEP_ATTR} reg [{width - 1}:0] r_y;
+    {KEEP_ATTR} reg r_saturated;
     {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
 
     assign out_valid = r_out_valid;
     assign io_out = r_io_out;
 
     holoso_ashift#(.W({width}), .LATENCY(2)) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
-        .out_valid(dut_out_valid), .y(dut_y)
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt), .saturating(r_saturating),
+        .out_valid(dut_out_valid), .y(dut_y), .saturated(dut_saturated)
     );
 
     always @(posedge clk) begin
-        if (in_sel) r_shamt <= io_in;
-        else        r_x <= io_in;
+        case (in_sel)
+            2'd0: r_x <= io_in;
+            2'd1: r_shamt <= io_in;
+            default: r_saturating <= io_in[0];
+        endcase
         r_y <= dut_y;
-        r_io_out <= r_y;
+        r_saturated <= dut_saturated;
+        r_io_out <= out_sel ? r_saturated : r_y;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
