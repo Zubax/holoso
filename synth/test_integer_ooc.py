@@ -455,7 +455,6 @@ endmodule
 
 def _render_divider_wrapper(top: str, width: int, latency: int, quotient_floor: int) -> str:
     assert quotient_floor in (0, 1)
-    zero_padding = f"{{{width - 1}{{1'b0}}}}"
     return f"""`default_nettype none
 
 module {top} (
@@ -493,8 +492,8 @@ module {top} (
         case (out_sel)
             2'd0: r_io_out <= dut_quo;
             2'd1: r_io_out <= dut_rem;
-            2'd2: r_io_out <= {{{zero_padding}, dut_saturated}};
-            default: r_io_out <= {{{zero_padding}, dut_div0}};
+            2'd2: r_io_out <= {{{width}{{dut_saturated}}}};
+            default: r_io_out <= {{{width}{{dut_div0}}}};
         endcase
         if (rst) begin
             r_in_valid <= 1'b0;
@@ -554,7 +553,7 @@ module {top} (
 {operand_load}
         r_y <= dut_y;
         r_saturated <= dut_saturated;
-        r_io_out <= out_sel ? r_saturated : r_y;
+        r_io_out <= out_sel ? {{{width}{{r_saturated}}}} : r_y;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
@@ -670,7 +669,7 @@ module {top} (
         endcase
         r_y <= dut_y;
         r_saturated <= dut_saturated;
-        r_io_out <= out_sel ? r_saturated : r_y;
+        r_io_out <= out_sel ? {{{width}{{r_saturated}}}} : r_y;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;

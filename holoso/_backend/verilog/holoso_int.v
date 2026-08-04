@@ -614,7 +614,9 @@ module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
     localparam integer PW = $clog2(SW);
     localparam integer GROUP_BITS = 2;
     localparam integer GROUP = 1 << GROUP_BITS;
-    localparam integer NGROUPS = (W - 2 + GROUP) / GROUP;  // ceil((W-1)/GROUP)
+    // Sized by the index range rather than by the data, so no shift amount can walk the group select off the end;
+    // the groups past the magnitude are constant zero and fold away.
+    localparam integer NGROUPS = ((1 << SW) + GROUP - 1) / GROUP;
     localparam [SW:0] W_AMOUNT = W;
     localparam signed [W-1:0] MIN = {1'b1, {(W-1){1'b0}}};
     localparam signed [W-1:0] MAX = {1'b0, {(W-1){1'b1}}};
@@ -652,8 +654,6 @@ module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
     // all, and only the straddled group needs a bit-level mask. Masking the whole word instead, which reads more
     // directly, stacks a decode and a word-wide reduction behind the shift amount and fails the timing closure.
     // A shift past the word is exact only for zero, which the magnitude alone cannot tell from -1, hence the branch.
-    // When GROUP divides W-1 the last group index runs one past the array, but that happens only at s == W-1, whose
-    // offset is zero and whose mask is therefore empty, so the out-of-range read never reaches the result.
     wire [W-2:0] magnitude = x_q[W-2:0] ^ {(W-1){x_q[W-1]}};
     wire [NGROUPS*GROUP-1:0] lost_order;
     wire [NGROUPS-1:0] group_any;
