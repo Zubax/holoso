@@ -13,10 +13,10 @@ from .._mir import (
     MirBoolView,
     MirBranch,
     MirFloatStateSlot,
-    MirFloatView,
     MirPhi,
     MirStateRead,
     MirStateSlot,
+    MirWideView,
 )
 from .._operators import PortConditioner
 from .._util import ValueId
@@ -34,9 +34,9 @@ from ._construct import (
     build_outputs,
     build_pooled_op,
     build_terminator,
-    operand_signed,
     rebase_op,
     tapped_wide_lanes,
+    wide_operand,
 )
 from ._layout import install_inclusive_makespan, layout_blocks
 
@@ -101,22 +101,22 @@ def _drop_redundant_state_slots(mir: Mir) -> Mir:
 
 
 def _has_state_copy(
-    float_mir: MirFloatView, bool_mir: MirBoolView, alloc: Allocation, const_pool: dict[ValueId, PooledConst]
+    wide_mir: MirWideView, bool_mir: MirBoolView, alloc: Allocation, const_pool: dict[ValueId, PooledConst]
 ) -> bool:
     """
     Whether the single Ret block's state live-out does NOT coalesce onto its slot register. A non-coalesced slot
     installs by a read-first boundary copy that lands a fetch-pipeline past the live-out, so the Ret block's drain must
     reach it (``boundary_step(makespan)``, bank-independent). A coalesced slot writes its register in place and needs no
-    copy (no charge). True iff any slot, float or boolean, is non-coalesced. Recomputed from the allocation each
+    copy (no charge). True iff any slot, wide or boolean, is non-coalesced. Recomputed from the allocation each
     coalescing-fixpoint round through the same ``*_liveout_coalesced`` predicates ``build`` applies when it emits the
     install, so the drain charge and the emitted install cannot drift.
     """
     return any(
-        not float_liveout_coalesced(
-            operand_signed(float_mir, slot.live_out, slot.sign, alloc, const_pool),
-            RegRef(alloc.float_slot_reg[slot.name]),
+        not wide_liveout_coalesced(
+            wide_operand(wide_mir, slot.live_out, slot.sign, alloc, const_pool),
+            RegRef(alloc.wide_slot_reg[slot.name]),
         )
-        for slot in float_mir.state_slots
+        for slot in wide_mir.state_slots
     ) or any(
         not bool_liveout_coalesced(
             bool_operand(bool_mir, bslot.live_out, alloc, bslot.inversion), BoolRegRef(alloc.bool_slot_reg[bslot.name])
@@ -133,7 +133,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     live-outs by pc-gated copy, and lay the blocks out in the ROM with the single ``Ret`` as the out_valid boundary.
     """
     mir = _drop_redundant_state_slots(mir)
-    float_mir = MirFloatView.from_mir(mir)
+    wide_mir = MirWideView.from_mir(mir)
     bool_mir = MirBoolView.from_mir(mir)
     # A branch whose condition is a phi with an arm FROM THE BRANCHING BLOCK cannot be sequenced: the arm's install
     # copy lands in the condition register exactly when the terminator reads it, so the branch would consult the next
@@ -177,11 +177,11 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     # The same fixpoint also drives the state slot's read-first boundary-copy drain charge: ``has_state_copy`` starts
     # conservative (a state slot needs a copy), usually clears as coalescing removes the copy, and latches back on the
     # regrowth channel noted in the loop. It is a single bool: the MIR has one Ret, so the charge is op-wide there.
-    has_install_blocks = block_has_install(mir, float_mir, bool_mir)
+    has_install_blocks = block_has_install(mir, wide_mir, bool_mir)
     ret_block = mir.ret_block
     # Conservative seed for the state-copy fixpoint -- the pre-allocation form of ``_has_state_copy``: assume every
     # state slot needs a boundary copy.
-    has_state_copy = bool(float_mir.state_slots or bool_mir.state_slots)
+    has_state_copy = bool(wide_mir.state_slots or bool_mir.state_slots)
     # Iteration bound. Every non-final round makes one of the bounded monotone moves per block -- a push-bit narrowing,
     # an install-set key removal, or a pin (a pinned block never moves again), at most three over the run -- or moves
     # the state-copy charge along its drop-then-latch chain (at most two moves). Worst case is their SUM plus a
@@ -192,9 +192,9 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     state_copy_latched = False
     for round_index in range(3 * len(mir.blocks) + 4):
         result = layout_and_allocate(
-            mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag, tuning
+            mir, wide_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag, tuning
         )
-        raw = actual_install_blocks(result.alloc, float_mir, bool_mir, result.overlap.block_sched)
+        raw = actual_install_blocks(result.alloc, wide_mir, bool_mir, result.overlap.block_sched)
         # The two derivations of install-bearing -- the CFG-shape seed and the post-allocation copies -- must agree on
         # the key universe: a block outside the seed can never install, so a wider ``raw`` means the derivations
         # drifted, which must fail loudly rather than be absorbed as a silent permanent pin. On the FIRST round the
@@ -219,7 +219,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         actual = raw | dict.fromkeys(pinned_push, True)
         # The state-copy charge has its own regrowth channel (a final pin conflict can force a slot back out of
         # coalescing onto a copy), so it is a one-way latch rather than a pure descent.
-        raw_state = _has_state_copy(float_mir, bool_mir, result.alloc, result.const_pool)
+        raw_state = _has_state_copy(wide_mir, bool_mir, result.alloc, result.const_pool)
         if raw_state and not has_state_copy:
             if not state_copy_latched:
                 _logger.info("Install fixpoint round %d: latching the state-copy charge", round_index)
@@ -254,7 +254,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     consts, const_pool = result.consts, result.const_pool
     alloc = result.alloc
     leaders = {leader for sched in block_sched.values() for leader in sched.firings}
-    swap = assign_commutative_ports(mir.nodes, inst_of, leaders, alloc.float_reg)
+    swap = assign_commutative_ports(mir.nodes, inst_of, leaders, alloc.wide_reg)
 
     blocks: list[LirBlock] = []
     for block in mir.blocks:
@@ -264,11 +264,11 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         # port; every inline operator (boolean logic, the float<->bool casts) becomes an InlineScheduledOp. Each
         # issues as soon as its own operands have landed, with no barrier.
         ops = [
-            build_pooled_op(mir, float_mir, bool_mir, members, sched, inst_of, alloc, const_pool, swap)
+            build_pooled_op(mir, wide_mir, bool_mir, members, sched, inst_of, alloc, const_pool, swap)
             for _, members in sorted(sched.firings.items(), key=lambda kv: (sched.issue_cycle[kv[0]], kv[0]))
         ]
         inline_ops = [
-            build_inline_op(mir, float_mir, bool_mir, vid, sched.issue_cycle[vid], alloc, const_pool)
+            build_inline_op(mir, wide_mir, bool_mir, vid, sched.issue_cycle[vid], alloc, const_pool)
             for vid in sorted(
                 (v for v in sched.issue_cycle if v not in sched.inst_of),
                 key=lambda v: (sched.issue_cycle[v], v),
@@ -278,11 +278,12 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         # A None commit from ``install_source_commit`` is a block-entry-resident source needing no read-first
         # sampling. The placement (``install_issue_cycle``) charges the +1 only for a computed source committing at
         # the makespan; a resident or earlier-committing computed source pays none.
-        copies = []
-        for c in alloc.copies.get(block.id, []):
-            fsrc = operand_signed(float_mir, c.source, c.sign, alloc, const_pool)
-            commit = install_source_commit(sched, float_mir.nodes[c.source], c.source)
-            copies.append(FloatCopy(RegRef(c.dst), fsrc, install_issue_cycle(work_makespan, commit), commit is None))
+        wide_copies = []
+        for c in alloc.wide_copies.get(block.id, []):
+            src = wide_operand(wide_mir, c.source, c.conditioner, alloc, const_pool)
+            commit = install_source_commit(sched, wide_mir.nodes[c.source], c.source)
+            issue = install_issue_cycle(work_makespan, commit)
+            wide_copies.append(WideCopy(RegRef(c.dst), src, issue, commit is None))
         bool_writes = []
         for w in alloc.bool_writes.get(block.id, []):
             bsrc = bool_operand(bool_mir, w.source, alloc, w.inversion)
@@ -308,7 +309,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         # but a Ret wrap drops it -- a silently dead install. This is the vector-independent structural invariant that a
         # value cosim cannot see (a dead install that does not change outputs passes every value comparison).
         term_offset = overlap.block_term_offset[block.id]
-        installs: list[FloatCopy | BoolWrite] = [*copies, *bool_writes]
+        installs: list[WideCopy | BoolWrite] = [*wide_copies, *bool_writes]
         install_landings = [x.landing(fetch_lag) for x in installs]
         assert all(
             landing <= term_offset for landing in install_landings
@@ -328,7 +329,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
                 block.id,
                 ops,
                 inline_ops,
-                copies,
+                wide_copies,
                 bool_writes,
                 build_terminator(block.terminator, alloc),
                 block_makespan,
@@ -345,15 +346,15 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     # A coalesced slot's live-out tap resolves to the slot register itself (its operator wrote it directly, no copy); a
     # non-coalesced slot taps the live-out's own register, installed at ``install_cycle`` -- absolutized here by adding
     # the Ret block's base, since the install fires inside the (last-laid-out) Ret block (``ret_block`` above).
-    float_state_slots = [
-        FloatStateSlot(
+    wide_state_slots = [
+        WideStateSlot(
             slot.name,
-            RegRef(alloc.float_slot_reg[slot.name]),
+            RegRef(alloc.wide_slot_reg[slot.name]),
             slot.reset_value,
-            operand_signed(float_mir, slot.live_out, slot.sign, alloc, const_pool),
-            block_base[ret_block] + alloc.float_install[slot.name],
+            wide_operand(wide_mir, slot.live_out, slot.sign, alloc, const_pool),
+            block_base[ret_block] + alloc.wide_install[slot.name],
         )
-        for slot in float_mir.state_slots
+        for slot in wide_mir.state_slots
     ]
     bool_state_slots = [
         BoolStateSlot(
@@ -364,24 +365,24 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         )
         for bslot in bool_mir.state_slots
     ]
-    outputs = build_outputs(mir, float_mir, bool_mir, alloc, const_pool)
+    outputs = build_outputs(mir, wide_mir, bool_mir, alloc, const_pool)
     lir = Lir(
         module_name=module_name,
         instances=instances,
-        float_consts=consts,
-        float_format=float_mir.fmt,
+        wide_consts=consts,
+        float_format=wide_mir.fmt,
         int_format=mir.int_format,
         regfile=RegFileLayout(
-            width=float_mir.fmt.width,
+            width=wide_mir.fmt.width,
             nreg=alloc.nreg,
             nrd=sum(inst.operator.arity for inst in instances),
             nwr=len(tapped_wide_lanes(blocks)),
-            nload=len(float_mir.input_ids),
+            nload=len(wide_mir.input_ids),
         ),
-        inputs=build_inputs(mir, float_mir, bool_mir, alloc),
+        inputs=build_inputs(mir, wide_mir, bool_mir, alloc),
         ops=flat_ops,
         outputs=outputs,
-        float_state_slots=float_state_slots,
+        wide_state_slots=wide_state_slots,
         blocks=blocks,
         block_base=block_base,
         entry=mir.entry,
@@ -391,12 +392,12 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         bool_state_slots=bool_state_slots,
         fetch_lag=fetch_lag,
     )
-    # A non-coalesced float slot's writeback fires read-first at ``state_copy_step``, at last_pc for a boundary install
+    # A non-coalesced wide slot's writeback fires read-first at ``state_copy_step``, at last_pc for a boundary install
     # or below it for an early one. A boundary that collapsed below the install would drop the writeback and freeze the
     # persistent state; the per-block ``term_offset <= drained boundary`` invariant in ``schedule_with_overlap`` is the
     # matching guard for the opposite slip (a boundary install degrading into an early one). Backstop, not a live
     # failure.
-    for slot in lir.float_state_slots:
+    for slot in lir.wide_state_slots:
         if slot.needs_copy:
             assert (
                 lir.state_copy_step(slot) <= last_pc

@@ -19,12 +19,12 @@ from string import ascii_letters
 from ..._lir import (
     BoolOperand,
     BoolRegRef,
-    FloatConstRef,
-    FloatOperand,
     Lir,
     OperatorInstance,
     PooledScheduledOp,
     RegRef,
+    WideConstRef,
+    WideOperand,
     pooled_write_word,
 )
 from ..._operators import BoolInversion, InlineHardwareOperator, PortConditioner
@@ -72,7 +72,7 @@ def code_width(count: int) -> int:
 # Source descriptors: value-equal keys the codebooks dedup on, and which the emitter renders to an RHS net/expression.
 # A read source reuses the LIR refs directly (``regs[i]`` / ``const_i``); the write sources below discriminate
 # the three ways a register takes a value.
-type ReadSource = RegRef | FloatConstRef  # a constant key is its nonnegative-pool magnitude; the sign rides uc_*sgn
+type ReadSource = RegRef | WideConstRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +92,7 @@ class InlineWriteSource:
     """An inline-operator combinational result; structurally identical results dedup to one opcode (loop bodies)."""
 
     operator: InlineHardwareOperator
-    operands: tuple[FloatOperand | BoolOperand, ...]
+    operands: tuple[WideOperand | BoolOperand, ...]
     conditioner: PortConditioner
 
 
@@ -100,7 +100,7 @@ class InlineWriteSource:
 class MoveWriteSource:
     """A move of one operand into a register: a phi-arm copy/write, a constant install, or an early state writeback."""
 
-    operand: FloatOperand | BoolOperand
+    operand: WideOperand | BoolOperand
 
 
 type WriteSource = OpWriteSource | InlineWriteSource | MoveWriteSource
@@ -203,7 +203,7 @@ def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
         sources[key] = [RegRef(reg) for reg in regs]
     for op in lir.ops:
         for pos, operand in enumerate(op.operands):
-            if isinstance(operand, FloatOperand) and isinstance(operand.source, FloatConstRef):
+            if isinstance(operand, WideOperand) and isinstance(operand.source, WideConstRef):
                 book = sources[(op.inst, pos)]
                 if operand.source not in book:
                     book.append(operand.source)
@@ -235,12 +235,12 @@ def write_events(lir: Lir) -> list[WriteEvent]:
         for inline_op in block.inline_ops:
             source = InlineWriteSource(inline_op.operator, tuple(inline_op.operands), inline_op.write.conditioner)
             events.append(WriteEvent(inline_op.write.dst, source, base + inline_op.commit_cycle))
-        for copy in block.copies:
+        for copy in block.wide_copies:
             events.append(WriteEvent(copy.dst, MoveWriteSource(copy.source), base + copy.issue_cycle))
         for bwrite in block.bool_writes:
             events.append(WriteEvent(bwrite.dst, MoveWriteSource(bwrite.source), base + bwrite.issue_cycle))
-    for slot in lir.float_state_slots:
-        if slot.needs_copy and not lir.float_state_install_is_boundary(slot):
+    for slot in lir.wide_state_slots:
+        if slot.needs_copy and not lir.wide_state_install_is_boundary(slot):
             events.append(WriteEvent(slot.reg, MoveWriteSource(slot.tap), lir.state_copy_step(slot) - lir.fetch_lag))
     return events
 
@@ -314,8 +314,8 @@ def build_microcode(
         for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
             put(f_imm(base, imm.name), ci, value)
         for pos, operand in enumerate(op.operands):
-            assert isinstance(operand, FloatOperand), "pooled operators read only wide operands today (no read lane)"
-            put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.sign.encoded)
+            assert isinstance(operand, WideOperand), "pooled operators read only wide operands today (no read lane)"
+            put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
             field = f_rd(base, PORT_LETTERS[pos])
             if field in fields:
                 put(field, ci, read_books[(op.inst, pos)].code(operand.source))

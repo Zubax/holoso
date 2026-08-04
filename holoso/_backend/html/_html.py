@@ -157,9 +157,9 @@ def _highlight_verilog_code(code: str) -> str:
 
 
 def _constants(lir: Lir) -> str:
-    if not lir.float_consts:
+    if not lir.wide_consts:
         return ""
     chips = "".join(
-        f"<span class='const'>c{index} = {_esc(repr(value))}</span>" for index, value in enumerate(lir.float_consts)
+        f"<span class='const'>c{index} = {_esc(repr(value))}</span>" for index, value in enumerate(lir.wide_consts)
     )
     return f"<h2>Constants</h2><div>{chips}</div>"

@@ -16,19 +16,19 @@ from ._regalloc import Producer, RegallocTuning
 
 @dataclass(frozen=True, slots=True)
 class PooledConst:
-    """A constant's place in the magnitude pool: its index, plus the sign that recovers the original signed value."""
+    """A constant's place in the pool."""
 
     index: int
-    sign: FloatSignControl
+    conditioner: FloatSignControl
 
 
 @dataclass(frozen=True, slots=True)
-class FloatArmInstall:
-    """A wide phi-arm install at a predecessor's tail: destination register, source value, and the arm's folded sign."""
+class WideArmInstall:
+    """A wide phi-arm install at a predecessor's tail: destination register, source value, folded conditioner."""
 
     dst: int
     source: ValueId
-    sign: FloatSignControl
+    conditioner: FloatSignControl
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,14 +42,14 @@ class BoolArmInstall:
 
 @dataclass(frozen=True, slots=True)
 class Allocation:
-    float_reg: dict[ValueId, int]
-    float_slot_reg: dict[str, int]
-    float_install: dict[str, int]  # slot name -> Ret-block-relative scheduler-frame install cycle of its live-out
+    wide_reg: dict[ValueId, int]
+    wide_slot_reg: dict[str, int]
+    wide_install: dict[str, int]  # slot name -> Ret-block-relative scheduler-frame install cycle of its live-out
     nreg: int
     bool_reg: dict[ValueId, int]
     bool_slot_reg: dict[str, int]
     nbreg: int
-    copies: dict[int, list[FloatArmInstall]]  # block -> wide phi-arm installs at its tail
+    wide_copies: dict[int, list[WideArmInstall]]  # block -> wide phi-arm installs at its tail
     bool_writes: dict[int, list[BoolArmInstall]]  # block -> boolean phi-arm installs at its tail
 
 

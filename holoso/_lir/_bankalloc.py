@@ -14,12 +14,12 @@ from .._mir import (
     MirFloatInput,
     MirFloatOutput,
     MirFloatStateSlot,
-    MirFloatView,
     MirNode,
     MirOperation,
     MirPhi,
     MirStateRead,
     MirStateSlot,
+    MirWideView,
 )
 from .._operators import BoolInversion, FloatSignControl, HardwareOperator, PooledHardwareOperator, PortConditioner
 from .._util import ValueId
@@ -28,7 +28,7 @@ from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map,
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import Producer, RegallocTuning
-from ._build_base import Allocation, BoolArmInstall, ColorObjective, FloatArmInstall, OverlapLayout, PooledConst
+from ._build_base import Allocation, BoolArmInstall, ColorObjective, OverlapLayout, PooledConst, WideArmInstall
 from ._construct import build_const_pool
 from ._coalesce import coalescable_arms, coalesce_and_color
 from ._layout import schedule_with_overlap
@@ -60,7 +60,7 @@ class _LayoutAllocation:
 
 def layout_and_allocate(
     mir: Mir,
-    float_mir: MirFloatView,
+    wide_mir: MirWideView,
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: Mapping[int, bool],
@@ -68,7 +68,7 @@ def layout_and_allocate(
     fetch_lag: int,
     tuning: RegallocTuning,
 ) -> _LayoutAllocation:
-    overlap = schedule_with_overlap(mir, float_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag)
+    overlap = schedule_with_overlap(mir, wide_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag)
     block_sched = overlap.block_sched
     inst_of: dict[ValueId, OperatorInstance] = {}
     inst_count: dict[PooledHardwareOperator, int] = {}
@@ -77,10 +77,10 @@ def layout_and_allocate(
         for inst in sched.instances:
             inst_count[inst.operator] = max(inst_count.get(inst.operator, 0), inst.index + 1)
     instances = [OperatorInstance(operator, i) for operator in inst_count for i in range(inst_count[operator])]
-    consts, const_pool = build_const_pool(float_mir, bool_mir.operation_nodes)
+    consts, const_pool = build_const_pool(wide_mir, bool_mir.operation_nodes)
     alloc = _allocate(
         mir,
-        float_mir,
+        wide_mir,
         bool_mir,
         block_sched,
         inst_of,
@@ -114,7 +114,7 @@ def _install_pushes_makespan(sched: Schedule, source_node: MirNode, source: Valu
 
 
 def actual_install_blocks(
-    alloc: Allocation, float_mir: MirFloatView, bool_mir: MirBoolView, block_sched: Mapping[int, Schedule]
+    alloc: Allocation, wide_mir: MirWideView, bool_mir: MirBoolView, block_sched: Mapping[int, Schedule]
 ) -> dict[int, bool]:
     """
     The post-coalescing install classification (the refinement ``block_has_install`` seeds): each block that actually
@@ -126,7 +126,7 @@ def actual_install_blocks(
     builder).
     """
     install: dict[int, bool] = {}
-    for nodes, bank_installs in ((float_mir.nodes, alloc.copies), (bool_mir.nodes, alloc.bool_writes)):
+    for nodes, bank_installs in ((wide_mir.nodes, alloc.wide_copies), (bool_mir.nodes, alloc.bool_writes)):
         for bid, entries in bank_installs.items():
             sched = block_sched[bid]
             for entry in entries:
@@ -199,7 +199,7 @@ def _movable_order(
     return sorted(candidates, key=lambda vid: (rpo_pos[block_of[vid]], op_commit.get(vid, -3), vid))
 
 
-type _BankView = MirFloatView | MirBoolView
+type _BankView = MirWideView | MirBoolView
 
 _SlotT = TypeVar("_SlotT", MirFloatStateSlot, MirBoolStateSlot)  # one bank's concrete state-slot type
 
@@ -284,7 +284,7 @@ class _WideBank(_Bank[MirFloatStateSlot]):
     identity = FloatSignControl()
 
     def state_slots(self, view: _BankView) -> list[MirFloatStateSlot]:
-        assert isinstance(view, MirFloatView)
+        assert isinstance(view, MirWideView)
         return view.state_slots
 
     def slot_identity(self, slot: MirFloatStateSlot) -> bool:
@@ -640,7 +640,7 @@ def _allocate_bank(
 
 def _allocate(
     mir: Mir,
-    float_mir: MirFloatView,
+    wide_mir: MirWideView,
     bool_mir: MirBoolView,
     block_sched: dict[int, Schedule],
     inst_of: dict[ValueId, OperatorInstance],
@@ -660,23 +660,23 @@ def _allocate(
     ``block_inflight`` carries each block's received cross-block spills (split per bank), reserving a spilled value's
     register across every successor frame it lands in even where the value is dataflow-dead.
     """
-    float_inflight = {
-        bid: {vid: land for vid, land in spills.items() if vid in float_mir.operation_nodes}
+    wide_inflight = {
+        bid: {vid: land for vid, land in spills.items() if vid in wide_mir.operation_nodes}
         for bid, spills in block_inflight.items()
     }
     bool_inflight = {
         bid: {vid: land for vid, land in spills.items() if vid in bool_mir.operation_nodes}
         for bid, spills in block_inflight.items()
     }
-    float_alloc = _allocate_bank(
+    wide_alloc = _allocate_bank(
         _WIDE,
         mir,
-        float_mir,
+        wide_mir,
         block_sched,
         inst_of,
         block_makespan,
         block_term_offset,
-        float_inflight,
+        wide_inflight,
         fetch_lag,
         tuning,
     )
@@ -686,13 +686,13 @@ def _allocate(
 
     # A phi arm coalesced onto the merged register needs no install copy: the arm value already resides in the phi's
     # register (they share a coloring class). Only the residual (non-coalesced) arms install by a pc-gated copy.
-    copies: dict[int, list[FloatArmInstall]] = {}
-    for vid, phi in float_mir.phi_nodes.items():
+    wide_copies: dict[int, list[WideArmInstall]] = {}
+    for vid, phi in wide_mir.phi_nodes.items():
         for pred, value, sign in phi.arms:
             assert isinstance(sign, FloatSignControl)
-            if (pred, vid) in float_alloc.coalesced:
+            if (pred, vid) in wide_alloc.coalesced:
                 continue
-            copies.setdefault(pred, []).append(FloatArmInstall(float_alloc.reg[vid], value, sign))
+            wide_copies.setdefault(pred, []).append(WideArmInstall(wide_alloc.reg[vid], value, sign))
 
     bool_writes: dict[int, list[BoolArmInstall]] = {}
     for vid, phi in bool_mir.phi_nodes.items():
@@ -715,13 +715,13 @@ def _allocate(
         bool_writes.setdefault(block_id, []).append(BoolArmInstall(bool_reg[cond], cond, BoolInversion()))
 
     return Allocation(
-        float_reg=float_alloc.reg,
-        float_slot_reg=float_alloc.slot_reg,
-        float_install=float_alloc.install,
-        nreg=float_alloc.nreg,
+        wide_reg=wide_alloc.reg,
+        wide_slot_reg=wide_alloc.slot_reg,
+        wide_install=wide_alloc.install,
+        nreg=wide_alloc.nreg,
         bool_reg=bool_reg,
         bool_slot_reg=bool_alloc.slot_reg,
         nbreg=nbreg,
-        copies=copies,
+        wide_copies=wide_copies,
         bool_writes=bool_writes,
     )

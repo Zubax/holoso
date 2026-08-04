@@ -136,8 +136,8 @@ def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) 
     lir = build_lir(
         lower_to_mir(optimize(lower(_ConstInstallState().__call__).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), name
     )
-    slots = lir.float_state_slots
-    assert slots, "kernel must have a float state slot with a cycle-0 const install"
+    slots = lir.wide_state_slots
+    assert slots, "kernel must have a wide state slot with a cycle-0 const install"
     slot = slots[0]
     env = {
         "HOLOSO_DWELL_K": k,

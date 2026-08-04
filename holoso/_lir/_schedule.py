@@ -158,7 +158,7 @@ def schedule_ops(
     """
     Place every firing of ``schedulable`` (one block's operations, across both register banks) on the earliest cycle
     its operands are ready and -- for a pooled firing -- a free instance exists. A single dependency-aware pass spans
-    float and boolean-result operations, so cross-bank chains (a value feeding a comparison feeding a cast) schedule
+    wide and boolean-result operations, so cross-bank chains (a value feeding a comparison feeding a cast) schedule
     correctly without a barrier. Operands outside ``schedulable`` are block live-ins; under per-block draining each is
     resident at the block start (a prior block's drained result, a state read, an input, or a phi), but a predecessor
     result spilled past an OVERLAPPED boundary lands mid-block instead -- ``livein_landing`` carries its block-local

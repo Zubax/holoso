@@ -18,7 +18,6 @@ from ._ir import (
     MirFloatOutput as MirFloatOutput,
     MirFloatStateRead as MirFloatStateRead,
     MirFloatStateSlot as MirFloatStateSlot,
-    MirFloatView as MirFloatView,
     MirInput as MirInput,
     MirJump as MirJump,
     MirNode as MirNode,
@@ -28,6 +27,7 @@ from ._ir import (
     MirStateRead as MirStateRead,
     MirStateSlot as MirStateSlot,
     MirTerminator as MirTerminator,
+    MirWideView as MirWideView,
 )
 from ._interpret import MirInterpreter as MirInterpreter
 from ._lower import lower as lower

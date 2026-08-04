@@ -69,7 +69,6 @@ from .._operators import (
     BoolAndOperator,
     BoolInversion,
     BoolOrOperator,
-    BoolSelectOperator,
     BoolToFloatOperator,
     BoolXorOperator,
     FloatClassificationOperator,
@@ -538,7 +537,9 @@ class _LoweringContext:
             case Operation(operator=BoolSelect() as semantic, operands=(cond, a, b)):
                 # The boolean if-conversion mux: a NOT chain on the condition or either arm folds into that operand's
                 # inversion conditioner, exactly like float Select's sign folding -- so ``a if not c else b`` is free.
-                self._lower_bool_logic(old_id, _select_hardware(semantic, BoolSelectOperator()), [cond, a, b])
+                self._lower_bool_logic(
+                    old_id, _select_hardware(semantic, SelectOperator(ScalarBoolType())), [cond, a, b]
+                )
                 return True
             case Operation(operator=BoolNot(), operands=(_,)):
                 # A NOT never materializes hardware: every consumer position collapses the chain into its own
@@ -703,7 +704,7 @@ class _FloatLowerer:
                 base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
                 base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
                 return self.context.builder.operation(
-                    _select_hardware(semantic, SelectOperator(self.context.float_format)),
+                    _select_hardware(semantic, SelectOperator(ScalarFloatType(self.context.float_format))),
                     [self.context.remap[base_c], self.context.remap[base_a], self.context.remap[base_b]],
                     [inv_c, sign_a, sign_b],
                 )
@@ -905,7 +906,7 @@ class _FloatLowerer:
         sign_b: FloatSignControl = FloatSignControl(),
     ) -> ValueId:
         return self.context.builder.operation(
-            _select_hardware(Select(), SelectOperator(self.context.float_format)),
+            _select_hardware(Select(), SelectOperator(ScalarFloatType(self.context.float_format))),
             [cond, a, b],
             [BoolInversion(), sign_a, sign_b],
         )

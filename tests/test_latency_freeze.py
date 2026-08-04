@@ -25,7 +25,7 @@ import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
 from holoso._hir import optimize
-from holoso._lir import FloatStateSlot
+from holoso._lir import WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
 
@@ -132,7 +132,7 @@ def test_chained_copy_schedule_is_frozen(
     lir = build_lir(
         lower_to_mir(optimize(lower_frontend(kernel_cls().__call__).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), name
     )
-    slots: list[FloatStateSlot | BoolStateSlot] = [*lir.float_state_slots, *lir.bool_state_slots]
+    slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
     assert all(
         slot.needs_copy for slot in slots
     ), f"{name}: a chained-copy slot unexpectedly coalesced; the tapped_by_other path is no longer exercised"

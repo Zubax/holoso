@@ -93,7 +93,7 @@ class Metrics:
     (:attr:`Lir.write_select_fanin`, which counts every write-chain driver the backend synthesizes: pooled lanes,
     inline casts, phi-arm copies, and slot installs). Counting the copies matters here: phi-arm coalescing trades
     pc-gated copies for shared pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a
-    regression. ``copies`` is the total phi-arm install count (float copies plus boolean writes), the direct measure
+    regression. ``copies`` is the total phi-arm install count (wide copies plus boolean writes), the direct measure
     of how many phi arms still install by copy rather than coalescing onto the merged register.
 
     ``last_pc`` is the static ROM length (:attr:`Lir.initiation_interval`) -- the total stage count: blocks tile the
@@ -123,11 +123,11 @@ def _measure(name: str) -> Metrics:
     straight = (
         len(lir.blocks) == 1
         and not lir.bool_state_slots
-        and not any(b.inline_ops or b.copies or b.bool_writes for b in lir.blocks)
+        and not any(b.inline_ops or b.wide_copies or b.bool_writes for b in lir.blocks)
         and lir.bool_regfile.nreg == 0
     )
     read_fanin = sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
-    copies = sum(len(block.copies) + len(block.bool_writes) for block in lir.blocks)
+    copies = sum(len(block.wide_copies) + len(block.bool_writes) for block in lir.blocks)
     return Metrics(
         straight_line=straight,
         nreg=lir.regfile.nreg,

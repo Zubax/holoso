@@ -21,8 +21,6 @@ from ._type import (
     FloatFormat as FloatFormat,
     FloatType as FloatType,
     IntFormat as IntFormat,
-    LogicalPort as LogicalPort,
-    ScalarType as ScalarType,
 )
 from ._value import FloatValue as FloatValue
 from ._errors import (

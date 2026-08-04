@@ -78,11 +78,11 @@ def _wire(width: int) -> str:
     return f"wire [{width - 1:2}:0] " if width > 1 else "wire        "
 
 
-def _source_net(source: RegRef | FloatConstRef) -> str:
-    return f"const_{source.index}" if isinstance(source, FloatConstRef) else f"regs[{source.index}]"
+def _source_net(source: RegRef | WideConstRef) -> str:
+    return f"const_{source.index}" if isinstance(source, WideConstRef) else f"regs[{source.index}]"
 
 
-def _signed_source_net(source: RegRef | FloatConstRef, sign: FloatSignControl) -> str:
+def _signed_source_net(source: RegRef | WideConstRef, sign: FloatSignControl) -> str:
     """A source net with its folded sign applied inline via ``holoso_fsgnop``, or bare when the sign is identity."""
     raw = _source_net(source)
     return raw if sign == FloatSignControl() else f"holoso_fsgnop({raw}, 2'd{sign.encoded})"
@@ -96,10 +96,10 @@ def _bool_operand_rhs(operand: BoolOperand) -> str:
     return f"~{net}" if operand.inversion.invert else net
 
 
-def _operand_rhs(operand: FloatOperand | BoolOperand) -> str:
+def _operand_rhs(operand: WideOperand | BoolOperand) -> str:
     match operand:
-        case FloatOperand():
-            return _signed_source_net(operand.source, operand.sign)
+        case WideOperand():
+            return _signed_source_net(operand.source, operand.conditioner)
         case BoolOperand():
             return _bool_operand_rhs(operand)
         case _:
@@ -107,10 +107,10 @@ def _operand_rhs(operand: FloatOperand | BoolOperand) -> str:
 
 
 def _render_inline(
-    operator: InlineHardwareOperator, operands: tuple[FloatOperand | BoolOperand, ...], conditioner: PortConditioner
+    operator: InlineHardwareOperator, operands: tuple[WideOperand | BoolOperand, ...], conditioner: PortConditioner
 ) -> str:
     """
-    An inline firing's combinational RHS: the operator's own expression over its operand nets (a float operand's folded
+    An inline firing's combinational RHS: the operator's own expression over its operand nets (a wide operand's folded
     sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds into the
     expression; sign-conditioned wide inline results have no producer yet.
     """
@@ -232,9 +232,9 @@ def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> No
 localparam           WEXP      ={fmt.wexp:4};  // Float exponent bits fixed by the static schedule
 localparam           WMAN      ={fmt.wman:4};  // Float mantissa bits fixed by the static schedule
 localparam           WFLT      = WEXP + WMAN;
-// TODO: WINT is carried down from the configuration but is not wired into the datapath yet -- the integer backend is
-// still pending, so no operator reads it and the wide register file is sized by WFLT alone rather than by the wider of
-// the two. To be completed when integers start flowing through the wide bank.
+// WINT sizes the integer helper in the support header below, but is not wired into the datapath yet -- the integer
+// backend is still pending, so no operator produces integer values and the wide register file is sized by WFLT alone
+// rather than by the wider of the two. To be completed when integers start flowing through the wide bank.
 localparam           WINT      ={ifmt.width:4};  // Native integer width fixed by the configuration{nreg_line}
 localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
@@ -299,9 +299,9 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
     fmt = lir.float_format
     width = fmt.width
     digits = (width + 3) // 4
-    for index, value in enumerate(lir.float_consts):
+    for index, value in enumerate(lir.wide_consts):
         w(f"wire [WFLT-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
-    if lir.float_consts:
+    if lir.wide_consts:
         w("")
 
 
@@ -568,12 +568,12 @@ def _emit_reg_write(
 def _emit_clocked(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, WriteCodebook]) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, register writes, and control state."""
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
-    float_slots = {slot.reg.index: slot for slot in lir.float_state_slots}
+    wide_slots = {slot.reg.index: slot for slot in lir.wide_state_slots}
     bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
-    float_loads = {load.dst.index: load for load in lir.float_inputs}
+    wide_loads = {load.dst.index: load for load in lir.wide_inputs}
     bool_loads = {load.dst.index: load for load in lir.bool_inputs}
 
-    def load_arm(loads: Mapping[int, FloatInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
+    def load_arm(loads: Mapping[int, WideInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
         load = loads.get(reg)
         return [("in_ready && in_valid", f"in_{load.name}")] if load else []
 
@@ -593,7 +593,7 @@ always @(posedge clk) begin
     # high-fanout reset net off the wide cone (only control/valid state is reset); contents are don't-care until a
     # valid write lands. A register with neither an input load nor any opcode source is simply omitted.
     nonslot_wide = [
-        reg for reg in range(nreg) if reg not in float_slots and (RegRef(reg) in write_books or reg in float_loads)
+        reg for reg in range(nreg) if reg not in wide_slots and (RegRef(reg) in write_books or reg in wide_loads)
     ]
     nonslot_bool = [
         reg for reg in range(nbreg) if reg not in bool_slots and (BoolRegRef(reg) in write_books or reg in bool_loads)
@@ -601,7 +601,7 @@ always @(posedge clk) begin
     if nonslot_wide or nonslot_bool:
         w("// Register writes (reset-unconditional): one opcode-selected statement per register.")
         for reg in nonslot_wide:
-            _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(float_loads, reg))
+            _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(wide_loads, reg))
         for reg in nonslot_bool:
             _emit_reg_write(
                 w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), load_arm(bool_loads, reg)
@@ -619,7 +619,7 @@ always @(posedge clk) begin
     w("pc            <= 0;")
     w("err_pc_q      <= 0;")
     w("transacting_q <= 0;")
-    for slot in lir.float_state_slots:
+    for slot in lir.wide_state_slots:
         bits = f"{fmt.width}'h{fmt.encode(slot.reset_value):0{digits}x}"
         w(f"regs[{slot.reg.index}] <= {bits};  // {slot.name} reset snapshot")
     for bslot in lir.bool_state_slots:
@@ -634,9 +634,9 @@ always @(posedge clk) begin
     # A non-coalesced slot installs its live-out read-first at the accepted-output boundary (out_valid && out_ready, so
     # a held boundary copies exactly once), a lower-priority arm of the same statement; an early install is an ordinary
     # opcode source (see write_events). Boolean state installs are boundary-only.
-    for reg, slot in sorted(float_slots.items()):
-        arms = load_arm(float_loads, reg)
-        if slot.needs_copy and lir.float_state_install_is_boundary(slot):
+    for reg, slot in sorted(wide_slots.items()):
+        arms = load_arm(wide_loads, reg)
+        if slot.needs_copy and lir.wide_state_install_is_boundary(slot):
             # This arm outranks the opcode case below it and must not shadow it, here or in the boolean bank below.
             # It cannot: the install executes at ``present_step``, and ``build_microcode`` -- already run, over every
             # write event -- asserts each rides a strictly earlier step, so the word presented alongside the install

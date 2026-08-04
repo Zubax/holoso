@@ -13,12 +13,12 @@ from .._mir import (
     MirFloatConst,
     MirFloatInput,
     MirFloatOutput,
-    MirFloatView,
     MirJump,
     MirOperation,
     MirPhi,
     MirRet,
     MirTerminator,
+    MirWideView,
 )
 from .._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner
 from .._util import ValueId
@@ -36,29 +36,29 @@ def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversi
 
 
 def _typed_operand(
-    float_mir: MirFloatView,
+    wide_mir: MirWideView,
     bool_mir: MirBoolView,
     vid: ValueId,
     conditioner: PortConditioner,
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
-) -> FloatOperand | BoolOperand:
+) -> WideOperand | BoolOperand:
     if vid in bool_mir.nodes:
         assert isinstance(conditioner, BoolInversion)
         return bool_operand(bool_mir, vid, alloc, conditioner)
     assert isinstance(conditioner, FloatSignControl)
-    return operand_signed(float_mir, vid, conditioner, alloc, pool)
+    return wide_operand(wide_mir, vid, conditioner, alloc, pool)
 
 
-def _value_dst(float_mir: MirFloatView, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
-    if vid in float_mir.operation_nodes:
-        return RegRef(alloc.float_reg[vid])
+def _value_dst(wide_mir: MirWideView, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
+    if vid in wide_mir.operation_nodes:
+        return RegRef(alloc.wide_reg[vid])
     return BoolRegRef(alloc.bool_reg[vid])
 
 
 def build_inline_op(
     mir: Mir,
-    float_mir: MirFloatView,
+    wide_mir: MirWideView,
     bool_mir: MirBoolView,
     vid: ValueId,
     issue_cycle: int,
@@ -68,14 +68,14 @@ def build_inline_op(
     node = mir_operation(mir, vid)
     assert isinstance(node.operator, InlineHardwareOperator)
     operands = [
-        _typed_operand(float_mir, bool_mir, operand, conditioner, alloc, pool)
+        _typed_operand(wide_mir, bool_mir, operand, conditioner, alloc, pool)
         for operand, conditioner in zip(node.operands, node.operand_conditioners, strict=True)
     ]
     return InlineScheduledOp(
         operator=node.operator,
         operands=operands,
         write=PortWrite(
-            port=node.output_port, dst=_value_dst(float_mir, alloc, vid), conditioner=node.output_conditioner
+            port=node.output_port, dst=_value_dst(wide_mir, alloc, vid), conditioner=node.output_conditioner
         ),
         issue_cycle=issue_cycle,
         latency=node.operator.latency,
@@ -84,7 +84,7 @@ def build_inline_op(
 
 def build_pooled_op(
     mir: Mir,
-    float_mir: MirFloatView,
+    wide_mir: MirWideView,
     bool_mir: MirBoolView,
     members: list[ValueId],
     sched: Schedule,
@@ -101,7 +101,7 @@ def build_pooled_op(
     leader = min(members)
     node = mir_operation(mir, leader)
     operands = [
-        _typed_operand(float_mir, bool_mir, operand, conditioner, alloc, pool)
+        _typed_operand(wide_mir, bool_mir, operand, conditioner, alloc, pool)
         for operand, conditioner in zip(node.operands, node.operand_conditioners, strict=True)
     ]
     swapped = bool(swap.get(leader))
@@ -122,7 +122,7 @@ def build_pooled_op(
     writes = [
         PortWrite(
             port=tap_port(member),
-            dst=_value_dst(float_mir, alloc, member),
+            dst=_value_dst(wide_mir, alloc, member),
             conditioner=mir_operation(mir, member).output_conditioner,
         )
         for member in sorted(members, key=tap_port)
@@ -137,38 +137,38 @@ def build_pooled_op(
     )
 
 
-def operand_signed(
-    float_mir: MirFloatView,
+def wide_operand(
+    wide_mir: MirWideView,
     vid: ValueId,
-    sign: FloatSignControl,
+    conditioner: FloatSignControl,
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
-) -> FloatOperand:
-    node = float_mir.nodes[vid]
+) -> WideOperand:
+    node = wide_mir.nodes[vid]
     if isinstance(node, MirFloatConst):
         entry = pool[vid]
-        return FloatOperand(FloatConstRef(entry.index), entry.sign.then(sign))
-    return FloatOperand(RegRef(alloc.float_reg[vid]), sign)
+        return WideOperand(WideConstRef(entry.index), entry.conditioner.then(conditioner))
+    return WideOperand(RegRef(alloc.wide_reg[vid]), conditioner)
 
 
 def build_outputs(
     mir: Mir,
-    float_mir: MirFloatView,
+    wide_mir: MirWideView,
     bool_mir: MirBoolView,
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
-) -> list[FloatOutputWire | BoolOutputWire]:
-    outputs: list[FloatOutputWire | BoolOutputWire] = []
+) -> list[WideOutputWire | BoolOutputWire]:
+    outputs: list[WideOutputWire | BoolOutputWire] = []
     for out in mir.outputs:
         if isinstance(out, MirFloatOutput):
-            node = float_mir.nodes[out.value]
+            node = wide_mir.nodes[out.value]
             if isinstance(node, MirFloatConst):
                 entry = pool[out.value]
                 outputs.append(
-                    FloatOutputWire(out.name, FloatOperand(FloatConstRef(entry.index), entry.sign.then(out.sign)))
+                    WideOutputWire(out.name, WideOperand(WideConstRef(entry.index), entry.conditioner.then(out.sign)))
                 )
             else:
-                outputs.append(FloatOutputWire(out.name, FloatOperand(RegRef(alloc.float_reg[out.value]), out.sign)))
+                outputs.append(WideOutputWire(out.name, WideOperand(RegRef(alloc.wide_reg[out.value]), out.sign)))
         elif isinstance(out, MirBoolOutput):
             outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.inversion)))
         else:
@@ -200,7 +200,7 @@ def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
 
 
 def build_const_pool(
-    mir: MirFloatView, bool_operations: dict[ValueId, MirOperation] | None = None
+    mir: MirWideView, bool_operations: dict[ValueId, MirOperation] | None = None
 ) -> tuple[list[float], dict[ValueId, PooledConst]]:
     """
     Build the immediate/ROM pool keyed by magnitude: every constant is stored as a nonnegative value, and its sign is
@@ -209,14 +209,14 @@ def build_const_pool(
     for a magnitude that encodes to zero, where the sign must NOT be folded: ZKF has no negative zero, so a folded
     negate over a zero-encoding magnitude would emit an illegal ``-0`` instead of the canonical ``+0`` that the signed
     value itself encodes to. Such constants therefore keep an identity sign control. ``bool_operations`` (the
-    bool-result combinational ops -- comparisons, boolean logic, the float->bool cast) contribute their float operand
+    bool-result combinational ops -- comparisons, boolean logic, the float->bool cast) contribute their wide operand
     constants too.
     """
     ids: list[ValueId] = []
     seen: set[ValueId] = set()
 
     def note(vid: ValueId) -> None:
-        node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the float view; skip it
+        node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the wide view; skip it
         if isinstance(node, MirFloatConst) and vid not in seen:
             seen.add(vid)
             ids.append(vid)
@@ -264,14 +264,14 @@ def tapped_wide_lanes(blocks: list[LirBlock]) -> set[tuple[OperatorInstance, int
 
 
 def build_inputs(
-    mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView, alloc: Allocation
-) -> list[FloatInputLoad | BoolInputLoad]:
-    loads: list[FloatInputLoad | BoolInputLoad] = []
+    mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, alloc: Allocation
+) -> list[WideInputLoad | BoolInputLoad]:
+    loads: list[WideInputLoad | BoolInputLoad] = []
     for vid in mir.input_ids:
-        float_node = float_mir.nodes.get(vid)
+        float_node = wide_mir.nodes.get(vid)
         bool_node = bool_mir.nodes.get(vid)
         if isinstance(float_node, MirFloatInput):
-            loads.append(FloatInputLoad(float_node.name, RegRef(alloc.float_reg[vid])))
+            loads.append(WideInputLoad(float_node.name, RegRef(alloc.wide_reg[vid])))
         elif isinstance(bool_node, MirBoolInput):
             loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool_reg[vid])))
         else:

@@ -26,7 +26,7 @@ from ._modelref import DEFAULT_IFMT, build_lir, build_model, default_options, ge
 from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._hir import _if_convert as if_convert_pass
-from holoso._lir import FloatStateSlot, Lir
+from holoso._lir import Lir, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import Mir, lower as lower_to_mir
 from ._modelref import (
@@ -400,8 +400,8 @@ def test_model_handles_unused_input_ports() -> None:
         return b
 
     model = build_model(build_lir(_run(f), "f"))
-    assert [load.name for load in model._lir.float_inputs] == ["a", "b"]
-    assert [load.dst.index for load in model._lir.float_inputs] == [0, 1]
+    assert [load.name for load in model._lir.wide_inputs] == ["a", "b"]
+    assert [load.dst.index for load in model._lir.wide_inputs] == [0, 1]
     assert model._lir.regfile.nload == 2
     assert model.run(1.0, 2.0)[0] == FloatValue.from_float(FMT, 2.0)
 
@@ -835,7 +835,7 @@ def test_model_attribute_written_only_in_loop_is_persistent_state() -> None:
             return self.acc
 
     model = build_model(build_lir(_run(LoopAccumulator().__call__), "accum"))
-    assert [slot.name for slot in model._lir.float_state_slots] == ["acc"]
+    assert [slot.name for slot in model._lir.wide_state_slots] == ["acc"]
     reference = LoopAccumulator()
     assert float(model.run(1.0)[0]) == reference(1.0)
     assert float(model.run(2.0)[0]) == reference(2.0)  # state carried across calls
@@ -928,8 +928,8 @@ def _bool_slot(lir: Lir, name: str) -> BoolStateSlot:
     return next(s for s in lir.bool_state_slots if s.name == name)
 
 
-def _float_slot(lir: Lir, name: str) -> FloatStateSlot:
-    return next(s for s in lir.float_state_slots if s.name == name)
+def _wide_slot(lir: Lir, name: str) -> WideStateSlot:
+    return next(s for s in lir.wide_state_slots if s.name == name)
 
 
 def test_inplace_bool_conditional_sticky_latch() -> None:
@@ -1042,7 +1042,7 @@ def test_inplace_float_conditional_accumulator() -> None:
             return self._acc
 
     lir = build_lir(_run(FloatCondAccum().__call__), "accum")
-    assert not _float_slot(lir, "_acc").needs_copy  # the select live-out coalesced onto the slot register
+    assert not _wide_slot(lir, "_acc").needs_copy  # the select live-out coalesced onto the slot register
     model = build_model(lir)
     reference = FloatCondAccum()
     t, f = True, False
@@ -1050,7 +1050,7 @@ def test_inplace_float_conditional_accumulator() -> None:
         assert float(model.run(x, en)[0]) == reference(x, en)
 
 
-def test_chained_float_slots_do_not_coalesce() -> None:
+def test_chained_wide_slots_do_not_coalesce() -> None:
     class ChainedFloatSlots:
         # A chained copy ``self.a = self.b``: a's live-out is b's live-in, so NEITHER may coalesce in place -- writing
         # b's update before a captures b's old value would corrupt a. Both keep their copy-back (tapped_by_other guard).
@@ -1064,8 +1064,8 @@ def test_chained_float_slots_do_not_coalesce() -> None:
             return self.a
 
     lir = build_lir(_run(ChainedFloatSlots().__call__), "chain")
-    assert _float_slot(lir, "a").needs_copy  # chained copy of b's live-in -- must not coalesce in place
-    assert _float_slot(lir, "b").needs_copy  # tapped by a's live-out -- must not coalesce in place
+    assert _wide_slot(lir, "a").needs_copy  # chained copy of b's live-in -- must not coalesce in place
+    assert _wide_slot(lir, "b").needs_copy  # tapped by a's live-out -- must not coalesce in place
     model = build_model(lir)
     reference = ChainedFloatSlots()
     for x in [2.0, 3.0, 4.0, 1.0]:
@@ -1090,7 +1090,7 @@ def test_inplace_multiarm_float_phi() -> None:
             return self._s
 
     lir = build_lir(_run(MultiArmFloatPhi().__call__), "multiarm")
-    assert not _float_slot(lir, "_s").needs_copy  # the live-in is the else arm, so the live-out commits in place
+    assert not _wide_slot(lir, "_s").needs_copy  # the live-in is the else arm, so the live-out commits in place
     model = build_model(lir)
     reference = MultiArmFloatPhi()
     for x in [5.0, 15.0, -1.0, -1.0, 2.0, 30.0, -3.0]:
@@ -1118,7 +1118,7 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: py
 
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real branch with phis
     lir = build_lir(_run(LiveInFeedsAnotherSlotPhi().__call__), "livein_other_slot")  # must not crash the colorer
-    assert _float_slot(lir, "x").needs_copy  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
+    assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
     model = build_model(lir)
     reference = LiveInFeedsAnotherSlotPhi()
     ports = [port.name for port in model.outputs]  # the returned leaves fold onto the state ports; match by name
@@ -1144,7 +1144,7 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytes
 
     monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamonds real branches with phis
     lir = build_lir(_run(LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")  # must not crash the colorer
-    assert _float_slot(lir, "x").needs_copy  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
+    assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
     model = build_model(lir)
     reference = LiveInFeedsUnrelatedPhi()
     for cond in [True, False, True, False, True]:
@@ -1264,7 +1264,7 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
             return self._s2
 
     model = build_model(build_lir(_run(CounterGatedWhileState().step), "cgws"))
-    assert "_s2" in {slot.name for slot in build_lir(_run(CounterGatedWhileState().step), "cgws").float_state_slots}
+    assert "_s2" in {slot.name for slot in build_lir(_run(CounterGatedWhileState().step), "cgws").wide_state_slots}
     reference = CounterGatedWhileState()
     for a in [10.0, 9.0, 8.0, 0.0, -3.0, 12.0]:
         assert float(model.run(a)[0]) == reference.step(a)
@@ -1322,7 +1322,7 @@ def test_model_statically_dead_attribute_write_is_not_state() -> None:
     kernels: list[tuple[type[DeadLoopWrite] | type[DeadIfWrite], float]] = [(DeadLoopWrite, 1.25), (DeadIfWrite, 2.5)]
     for kernel, constant in kernels:
         lir = build_lir(_run(kernel().__call__), "dead")
-        assert [slot.name for slot in lir.float_state_slots] == []  # no state slot; no crash building it
+        assert [slot.name for slot in lir.wide_state_slots] == []  # no state slot; no crash building it
         model = build_model(lir)
         assert float(model.run(9.0)[0]) == constant  # unchanged across calls -- it never became state
         assert float(model.run(-3.0)[0]) == constant
@@ -1353,11 +1353,11 @@ def test_model_counter_dependent_empty_inner_loop_is_not_state() -> None:
             return self.s
 
     dead = build_lir(_run(CounterDependentEmptyInner().__call__), "f6dead")
-    assert [slot.name for slot in dead.float_state_slots] == []
+    assert [slot.name for slot in dead.wide_state_slots] == []
     assert float(build_model(dead).run(9.0)[0]) == 1.25  # builds without KeyError; y stays constant
 
     live = build_lir(_run(CounterDependentLiveInner().__call__), "f6live")
-    assert [slot.name for slot in live.float_state_slots] == ["s"]
+    assert [slot.name for slot in live.wide_state_slots] == ["s"]
     model, reference = build_model(live), CounterDependentLiveInner()
     for x in [1.0, 1.0, 2.0]:
         assert float(model.run(x)[0]) == reference(x)
@@ -1378,7 +1378,7 @@ def test_model_return_in_literal_if_arm_ends_the_scan() -> None:
             return self.y
 
     lir = build_lir(_run(ReturnInLiteralIfArm().__call__), "f7")
-    assert [slot.name for slot in lir.float_state_slots] == []
+    assert [slot.name for slot in lir.wide_state_slots] == []
     assert float(build_model(lir).run(5.0)[0]) == 7.0
 
 
@@ -1402,7 +1402,7 @@ def test_model_loop_counter_does_not_leak_across_branch_arms_in_scan() -> None:
             return self.y
 
     lir = build_lir(_run(CounterLeakAcrossArms().__call__), "f8")
-    assert [slot.name for slot in lir.float_state_slots] == []
+    assert [slot.name for slot in lir.wide_state_slots] == []
     assert float(build_model(lir).run(1.0)[0]) == 1.0  # y stays the reset constant
 
 

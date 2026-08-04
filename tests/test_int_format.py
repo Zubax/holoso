@@ -14,6 +14,8 @@ from holoso import FloatFormat, IntFormat, OperatorOptions, Options
 from holoso._eel import lower as lower_frontend
 from holoso._hir import optimize
 from holoso._mir import lower as lower_to_mir
+from holoso._operators import SelectOperator
+from holoso._type import BoolType, IntType
 
 from ._modelref import build_lir, build_ops, default_options
 
@@ -47,6 +49,25 @@ def test_range_round_trip_and_saturation(width: int) -> None:
 def test_decode_walks_the_whole_bit_space() -> None:
     fmt = IntFormat(4)
     assert [fmt.decode(bits) for bits in range(16)] == [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1]
+
+
+@pytest.mark.parametrize("width", (2, 17, 33))
+def test_int_type_lands_in_the_wide_bank(width: int) -> None:
+    ty = IntType(IntFormat(width))
+    assert ty.width == width
+    assert ty.is_wide, "integers share the wide data register bank with floats; IntFormat forbids width < 2"
+    assert str(ty) == f"int{width}"
+
+
+@pytest.mark.parametrize("width", (2, 17, 33))
+def test_select_carries_an_integer_scalar_type_through_its_signature(width: int) -> None:
+    # Signature only, and deliberately so: ``evaluate``'s operand contract is ``FloatValue | bool`` and there is no
+    # ``IntValue`` yet, while ``_reject_integers`` refuses every integer HIR value before lowering begins, so an
+    # integer select can be neither evaluated nor lowered into MIR. This pins the generalization, not working muxes.
+    ty = IntType(IntFormat(width))
+    signature = SelectOperator(ty).signature
+    assert signature.operand_types == (BoolType(), ty, ty)
+    assert signature.result_types == (ty,)
 
 
 def _add(a: float, b: float) -> float:

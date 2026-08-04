@@ -116,6 +116,18 @@ def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
     raise TypeError(f"no conditioner is defined for ports of {scalar_type!r}")
 
 
+def value_class(scalar_type: ScalarType) -> type[FloatValue] | type[bool]:
+    """
+    The runtime value class a port of this scalar type carries, letting a type-polymorphic operator assert its
+    payloads without naming a concrete class.
+    """
+    if isinstance(scalar_type, FloatType):
+        return FloatValue
+    if isinstance(scalar_type, BoolType):
+        return bool
+    raise TypeError(f"no runtime value class is defined for {scalar_type!r}")
+
+
 @dataclass(frozen=True)
 class HardwareOperator(ABC):
     """
@@ -1001,19 +1013,19 @@ class FloatToBoolOperator(InlineHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class SelectOperator(InlineHardwareOperator):
     """
-    A data mux ``cond ? a : b`` over wide values, folded into the destination register write as a ternary over the
-    operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings.
+    A data mux ``cond ? a : b`` over same-typed values, folded into the destination register write as a ternary over
+    the operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings.
     Each operand is a dedicated direct (unlatched) register read -- an area/timing characteristic of inline operators;
     the cost is one mux per merged value, the same order as the per-arm phi-copy installs the branch would otherwise
     need.
     """
 
     mnemonic: ClassVar[str] = "select"
-    fmt: FloatFormat
+    scalar_type: ScalarType
 
     @property
     def signature(self) -> ScalarSignature:
-        ty = FloatType(self.fmt)
+        ty = self.scalar_type
         return ScalarSignature((BoolType(), ty, ty), (ty,))
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -1024,32 +1036,11 @@ class SelectOperator(InlineHardwareOperator):
         cond, a, b = operand_nets
         return f"({cond} ? {a} : {b})"
 
-    def evaluate(self, *operands: "FloatValue | bool", immediates: tuple[int, ...] = ()) -> tuple[FloatValue]:
+    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[FloatValue | bool, ...]:
         cond, a, b = operands
-        assert isinstance(cond, bool) and isinstance(a, FloatValue) and isinstance(b, FloatValue)
+        assert isinstance(cond, bool)
+        assert isinstance(a, value_class(self.scalar_type)) and isinstance(b, value_class(self.scalar_type))
         return (a if cond else b,)
-
-
-@dataclass(frozen=True, slots=True)
-class BoolSelectOperator(InlineHardwareOperator):
-    mnemonic: ClassVar[str] = "bool_select"
-
-    @property
-    def signature(self) -> ScalarSignature:
-        ty = BoolType()
-        return ScalarSignature((ty, ty, ty), (ty,))
-
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
-        cond, a, b = operands
-        return f"{cond}?{a}:{b}"
-
-    def verilog_expr(self, *operand_nets: str) -> str:
-        cond, a, b = operand_nets
-        return f"({cond} ? {a} : {b})"
-
-    def evaluate(self, *operands: FloatValue | bool, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        cond, a, b = operands
-        return (bool(a) if bool(cond) else bool(b),)
 
 
 @dataclass(frozen=True, slots=True)

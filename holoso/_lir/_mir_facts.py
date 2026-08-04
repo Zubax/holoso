@@ -10,7 +10,6 @@ from .._mir import (
     MirBoolView,
     MirBranch,
     MirConst,
-    MirFloatView,
     MirInput,
     MirJump,
     MirNode,
@@ -18,6 +17,7 @@ from .._mir import (
     MirPhi,
     MirRet,
     MirStateRead,
+    MirWideView,
 )
 from .._util import ValueId
 
@@ -128,9 +128,9 @@ def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueI
     return conditions
 
 
-def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) -> dict[int, bool]:
+def block_has_install(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView) -> dict[int, bool]:
     """
-    Each install-bearing block mapped to whether it carries a COMPUTED-source install -- a float copy or a bool write
+    Each install-bearing block mapped to whether it carries a COMPUTED-source install -- a wide copy or a bool write
     whose source is an operator result rather than block-entry RESIDENT (a literal constant, including a phi-arm const
     arm or a const branch condition, an input, a state read, or a phi result). This is the
     CONSERVATIVE seed for the makespan +1: a computed source MIGHT be the block's own last work, which the install must
@@ -141,9 +141,9 @@ def block_has_install(mir: Mir, float_mir: MirFloatView, bool_mir: MirBoolView) 
     this classification so the per-block makespan and drain agree.
     """
     install: dict[int, bool] = {}
-    for phi in float_mir.phi_nodes.values():
+    for phi in wide_mir.phi_nodes.values():
         for pred, value, _conditioner in phi.arms:
-            install[pred] = install.get(pred, False) or not value_resident_at_entry(float_mir.nodes[value])
+            install[pred] = install.get(pred, False) or not value_resident_at_entry(wide_mir.nodes[value])
     for phi in bool_mir.phi_nodes.values():
         for pred, value, _conditioner in phi.arms:
             install[pred] = install.get(pred, False) or not value_resident_at_entry(bool_mir.nodes[value])

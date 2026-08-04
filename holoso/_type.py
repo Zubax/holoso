@@ -146,6 +146,18 @@ class FloatType(ScalarType):
 
 
 @dataclass(frozen=True, slots=True)
+class IntType(ScalarType):
+    fmt: IntFormat
+
+    @property
+    def width(self) -> int:
+        return self.fmt.width
+
+    def __str__(self) -> str:
+        return str(self.fmt)
+
+
+@dataclass(frozen=True, slots=True)
 class BoolType(ScalarType):
     """The storage type of branch conditions and boolean state."""
 

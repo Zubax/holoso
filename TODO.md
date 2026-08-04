@@ -3,12 +3,28 @@
 ## Integer support adjacent
 
 The front end carries integers end to end -- Eel has a width-less int type with C promotion, HIR has the int
-vocabulary -- and everything below HIR refuses them at `_reject_integers` (`_mir/_lower.py:101`). Lifting that gate is
+vocabulary -- and everything below HIR refuses them at `_reject_integers` (`_mir/_lower.py`). Lifting that gate is
 what this section is about.
 
 The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.py`); they need a
-`FloatValue | IntValue` union, a typed `lir.wide_consts` pool (constants are float-encoded across
+`FloatValue | IntValue` union, a typed payload for the `lir.wide_consts` pool (constants are float-encoded across
 microcode/emit/html/model today), and one shared scalar port codec (cocotb and the model duplicate it).
+
+`IntType` and `IntValue` need the mappings their float siblings have: `identity_conditioner` refuses `IntType`
+outright, and `value_class` has no `IntValue` to return, so `SelectOperator(IntType(...))` is constructible and
+well-typed but its `evaluate` assertion refuses every payload (and under `-O`, where that assertion is gone, it
+would pass integers through unchecked). None of this is reachable regardless: `_reject_integers` refuses the kernel
+before lowering even begins. Integer sign conditioning cannot ride a port sideband the way `holoso_fsgnop` does,
+since `holoso_iabss` is a pooled module with a latency and a saturation output.
+
+`scalar_type_of` (`_lir/_ir.py`) recovers the scalar family from the LIR node class, so it still answers
+`FloatType(fmt)` for the bank-named `WideInputLoad`/`WideOutputWire` carriers. When integer ports land the
+discriminator must be re-established by giving those nodes a `scalar_type` field, not by reintroducing nominal
+`Float*`/`Int*` sibling classes. Fixing `scalar_type_of` alone is not enough, because several consumers decide the
+same thing independently rather than routing through it: `_coerce_inputs` and `NumericalSimulator.__init__` in
+`_backend/numerical.py` and `_emit_consts` in the Verilog backend all read a wide carrier as float directly. Input
+ports would at least fail loudly there (`_coerce_input` rejects a non-float), but wide constants and state would be
+encoded as floats without a word. They must be converged onto the one dispatch first.
 
 Strength reduction is float-keyed (`cval: dict[ValueId, float]`) and needs an int sibling with a typed-constant cache.
 

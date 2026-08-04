@@ -165,7 +165,7 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
 
 
 def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
-    """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not FloatCopys."""
+    """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not WideCopys."""
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(
         bool_phi_swap_computed_loop, default_ops(fmt), "bool_phi_swap_computed", fmt

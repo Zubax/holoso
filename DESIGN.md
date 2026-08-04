@@ -156,8 +156,9 @@ Runtime values are only:
 The two hardware formats are configured together (`ffmt` and `ifmt`) and carried side by side from `Options` through
 MIR into LIR, so every layer below the front-end knows both without rediscovering either. Integers are signed two's
 complement and saturate at the extremes rather than wrapping. The integer width surfaces in emitted RTL as the `WINT`
-localparam, but nothing reads it yet: until the integer backend lands, the wide register file is sized by `WFLT`
-alone rather than by the wider of the two.
+localparam, which already sizes the integer helper in the inline support header every module carries -- stripping it
+breaks elaboration even of a float-only kernel. What is pending is the integer backend: no operator produces integer
+values yet, so the wide register file is sized by `WFLT` alone rather than by the wider of the two.
 
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
 reach HIR, and remain unlowerable past MIR until the integer backend lands (see DEFERRED).
@@ -311,17 +312,22 @@ error-bearing primitive.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is
-carried through as typed per-resource-family views (float and boolean sharing the block skeleton), then scheduled per
-block and register-allocated over the whole CFG.
+carried through as per-bank views sharing the block skeleton -- the wide data bank and the boolean bank -- then
+scheduled per block and register-allocated over the whole CFG. The wide view selects operations and phis
+structurally, on scalar width, so it is neutral storage rather than a float family; its leaves are still selected
+nominally, and nothing but floats can reach it until the integer backend lands.
 
 ## LIR
 
 LIR is the scheduled, bound, register-allocated microprogram. Its resources are the bound operator instances, the
 float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a pool of nonnegative
-float constants (the sign rides the consumer's sideband), and the typed input loads and output wires. Each scheduled
-firing carries its operands and conditioners, its register writes, and an issue cycle; the makespan is the last
-commit cycle. LIR exposes a minimal API plus shared analysis helpers (per-cycle grouping, liveness, read/writer sets)
-so backends do not each re-derive them.
+wide constants (float-encoded today, the sign riding the consumer's sideband), and the typed input loads and output
+wires. LIR names its carriers after the bank that holds them rather than after the scalar family -- `WideOperand`,
+`WideCopy`, `WideStateSlot` against their `Bool*` duals -- because it is the physical binding layer. MIR names its
+banks the same way but keeps the opposite convention for its leaves, one nominal type per scalar family. Each
+scheduled firing carries its operands and conditioners, its register writes, and an issue cycle; the makespan is the
+last commit cycle. LIR exposes a minimal API plus shared analysis helpers (per-cycle grouping, liveness, read/writer
+sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach

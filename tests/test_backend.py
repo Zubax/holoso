@@ -359,9 +359,6 @@ def test_error_gate_ors_over_multiple_landing_registers() -> None:
 
 def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Path) -> None:
     from holoso._lir import (
-        FloatInputLoad,
-        FloatOperand,
-        FloatOutputWire,
         Lir,
         LirBlock,
         OperatorInstance,
@@ -369,6 +366,9 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         PortWrite,
         RegFileLayout,
         Ret,
+        WideInputLoad,
+        WideOperand,
+        WideOutputWire,
         boundary_step,
     )
     from holoso._lir._ir import BoolRegFileLayout
@@ -380,7 +380,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
     inst = OperatorInstance(FSortOperator(fmt, FSortOptions()), 0)
     op = PooledScheduledOp(
         inst=inst,
-        operands=[FloatOperand(RegRef(0)), FloatOperand(RegRef(1))],
+        operands=[WideOperand(RegRef(0)), WideOperand(RegRef(1))],
         writes=[
             PortWrite(0, RegRef(2), FloatSignControl()),
             PortWrite(1, RegRef(3), FloatSignControl(negate=True)),
@@ -392,15 +392,15 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
     lir = Lir(
         module_name="fsort_probe",
         instances=[inst],
-        float_consts=[],
+        wide_consts=[],
         float_format=fmt,
         int_format=DEFAULT_IFMT,
         fetch_lag=_FETCH_LAG,
         regfile=RegFileLayout(width=fmt.width, nreg=4, nrd=2, nwr=2, nload=2),
-        inputs=[FloatInputLoad("a", RegRef(0)), FloatInputLoad("b", RegRef(1))],
+        inputs=[WideInputLoad("a", RegRef(0)), WideInputLoad("b", RegRef(1))],
         ops=[op],
-        outputs=[FloatOutputWire("out_0", FloatOperand(RegRef(2))), FloatOutputWire("out_1", FloatOperand(RegRef(3)))],
-        float_state_slots=[],
+        outputs=[WideOutputWire("out_0", WideOperand(RegRef(2))), WideOutputWire("out_1", WideOperand(RegRef(3)))],
+        wide_state_slots=[],
         blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
         block_base=[0],
         entry=0,
@@ -483,8 +483,8 @@ def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(tmp_path: P
         steps.setdefault(event.dst, []).append(event.step)
     coexisting = [
         slot
-        for slot in lir.float_state_slots
-        if slot.needs_copy and lir.float_state_install_is_boundary(slot) and slot.reg in steps
+        for slot in lir.wide_state_slots
+        if slot.needs_copy and lir.wide_state_install_is_boundary(slot) and slot.reg in steps
     ]
     assert coexisting, "the premise needs a boundary-installing slot whose own register also takes opcode writes"
     for slot in coexisting:

@@ -301,9 +301,11 @@ class _MirBankView(ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class MirFloatView(_MirBankView):
+class MirWideView(_MirBankView):
     """
-    WIDE data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per block.
+    The wide data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per
+    block. The bank is physical, not a scalar family: :meth:`from_mir` admits operations and phis structurally, on
+    ``scalar_type.is_wide``, and only the leaves nominally.
     """
 
     nodes: dict[ValueId, MirFloatNode]
@@ -333,7 +335,7 @@ class MirFloatView(_MirBankView):
         }
 
     @classmethod
-    def from_mir(cls, mir: Mir) -> "MirFloatView":
+    def from_mir(cls, mir: Mir) -> "MirWideView":
         nodes: dict[ValueId, MirFloatNode] = {}
         formats: set[FloatFormat] = set()
         for vid, node in mir.nodes.items():

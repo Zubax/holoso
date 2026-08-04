@@ -506,7 +506,7 @@ def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
     """
     The boolean-bank twin of :func:`phi_swap_computed_loop`: the same cross-referencing loop-header phis with one
     computed back-edge arm, carried in the 1-bit bank so the latch installs are ``BoolWrite``s rather than
-    ``FloatCopy``s. The two banks derive install placement through the same helpers but emit through separate paths,
+    ``WideCopy``s. The two banks derive install placement through the same helpers but emit through separate paths,
     so each needs its own pin.
     """
     a = False
