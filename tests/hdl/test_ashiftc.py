@@ -44,7 +44,7 @@ async def holoso_ashiftc_cocotb(dut: Any) -> None:
             )
 
 
-@pytest.mark.parametrize("width", (2, 3, 4, 5, 6, 24, 44), ids=lambda width: f"w{width}")
+@pytest.mark.parametrize("width", (2, 3, 4, 5, 6, 24, 33, 44), ids=lambda width: f"w{width}")
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_ashiftc(sim: str, width: int) -> None:
     runner = get_runner(sim)

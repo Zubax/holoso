@@ -384,7 +384,6 @@ class _LoweringContext:
         self.hir = hir
         self.ops = ops
         self.float_format = float_format
-        self.int_format = int_format
         assert all(
             getattr(ops, field.name) is None or getattr(ops, field.name).fmt == float_format for field in fields(ops)
         ), "every configured operator must be built for the machine's float format"
