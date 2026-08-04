@@ -23,7 +23,7 @@ async def holoso_ashiftc_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         actual = int(dut.y.value) & mask
         expected = ashift(a, b, width)
-        assert actual == expected, f"W={width} a=0x{a:x} b=0x{b:x}: got 0x{actual:x}, want 0x{expected:x}"
+        assert actual == expected, f"WINT={width} a=0x{a:x} b=0x{b:x}: got 0x{actual:x}, want 0x{expected:x}"
 
     if width <= 6:
         for a in range(1 << width):
@@ -53,7 +53,7 @@ def test_holoso_ashiftc(sim: str, width: int) -> None:
         sources=[*sources(), Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
         includes=[HDL_DIR],
         hdl_toplevel="holoso_ashiftc_tb",
-        parameters={"W": width},
+        parameters={"WINT": width},
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,

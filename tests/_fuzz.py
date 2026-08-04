@@ -52,6 +52,7 @@ from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue
 
 from ._modelref import (
+    DEFAULT_IFMT,
     build_lir,
     Vector,
     default_ops,
@@ -1040,7 +1041,7 @@ def _build_with_lir(
     or touching simulator internals. Shared by the campaign runner and the regression replayer, so both drive the
     identical build path.
     """
-    mir = lower_to_mir(optimize(lower_frontend(fn).hir), ops, fmt)
+    mir = lower_to_mir(optimize(lower_frontend(fn).hir), ops, fmt, DEFAULT_IFMT)
     lir = build_lir(mir, name)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)

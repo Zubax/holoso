@@ -20,6 +20,7 @@ from ._type import (
     BoolType as BoolType,
     FloatFormat as FloatFormat,
     FloatType as FloatType,
+    IntFormat as IntFormat,
     LogicalPort as LogicalPort,
     ScalarType as ScalarType,
 )

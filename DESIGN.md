@@ -153,6 +153,12 @@ Runtime values are only:
 - `int` -- a semantic integer, width-less through the front-end and HIR; its hardware width binds at MIR and below
   (the LIR wide data register file is already neutral storage). Mixed int/float expressions promote to float, C-style.
 
+The two hardware formats are configured together (`ffmt` and `ifmt`) and carried side by side from `Options` through
+MIR into LIR, so every layer below the front-end knows both without rediscovering either. Integers are signed two's
+complement and saturate at the extremes rather than wrapping. The integer width surfaces in emitted RTL as the `WINT`
+localparam, but nothing reads it yet: until the integer backend lands, the wide register file is sized by `WFLT`
+alone rather than by the wider of the two.
+
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
 reach HIR, and remain unlowerable past MIR until the integer backend lands (see DEFERRED).
 

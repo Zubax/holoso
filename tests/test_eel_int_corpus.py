@@ -114,11 +114,11 @@ def test_int_corpus_rejects_at_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
     with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-        lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt)
+        lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt, _ops().ifmt)
 
 
 @pytest.mark.parametrize("name,make,vectors", _FLOAT_CASES, ids=[name for name, _, _ in _FLOAT_CASES])
 def test_float_corpus_lowers_through_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
-    lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt)
+    lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt, _ops().ifmt)

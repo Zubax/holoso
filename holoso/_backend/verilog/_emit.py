@@ -221,7 +221,7 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
-    fmt = lir.float_format
+    fmt, ifmt = lir.float_format, lir.int_format
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     fetch_lag = lir.fetch_lag
     fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
@@ -231,7 +231,11 @@ def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> No
     w(f"""
 localparam           WEXP      ={fmt.wexp:4};  // Float exponent bits fixed by the static schedule
 localparam           WMAN      ={fmt.wman:4};  // Float mantissa bits fixed by the static schedule
-localparam           W         = WEXP + WMAN;{nreg_line}
+localparam           WFLT      = WEXP + WMAN;
+// TODO: WINT is carried down from the configuration but is not wired into the datapath yet -- the integer backend is
+// still pending, so no operator reads it and the wide register file is sized by WFLT alone rather than by the wider of
+// the two. To be completed when integers start flowing through the wide bank.
+localparam           WINT      ={ifmt.width:4};  // Native integer width fixed by the configuration{nreg_line}
 localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
 localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
@@ -267,27 +271,27 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
 """)
     w("")
     if lir.regfile.nreg:
-        w("reg  [W-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
+        w("reg  [WFLT-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
     if lir.bool_regfile.nreg:
-        w("reg          bregs [0:NBREG-1];")
+        w("reg             bregs [0:NBREG-1];")
     w("")
     for inst in lir.instances:
         sig = _sig(inst)
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
             assert operand_type.is_wide, "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
-            w(f"reg  [W-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
-        # One net per TAPPED output port -- the raw operator output (wide W-bit or boolean 1-bit). The in_valid and
+            w(f"reg  [WFLT-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
+        # One net per TAPPED output port -- the raw operator output (wide WFLT-bit or boolean 1-bit). The in_valid and
         # sign-control ports bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in tapped:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
             if result_type.is_wide:
-                w(f"wire [W-1:0] {sig}_y{q};")
+                w(f"wire [WFLT-1:0] {sig}_y{q};")
             else:
-                w(f"wire         {sig}_y{q};")
+                w(f"wire            {sig}_y{q};")
         for port in inst.operator.error_ports:
-            w(f"wire         {sig}_{port};")
+            w(f"wire            {sig}_{port};")
     w("")
 
 
@@ -296,7 +300,7 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
     width = fmt.width
     digits = (width + 3) // 4
     for index, value in enumerate(lir.float_consts):
-        w(f"wire [W-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
+        w(f"wire [WFLT-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
     if lir.float_consts:
         w("")
 

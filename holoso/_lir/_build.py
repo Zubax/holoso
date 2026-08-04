@@ -370,6 +370,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         instances=instances,
         float_consts=consts,
         float_format=float_mir.fmt,
+        int_format=mir.int_format,
         regfile=RegFileLayout(
             width=float_mir.fmt.width,
             nreg=alloc.nreg,

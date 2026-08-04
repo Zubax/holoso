@@ -13,7 +13,7 @@ from .._operators import (
     identity_conditioner,
 )
 from .._errors import UnsupportedConstruct
-from .._type import BoolType, FloatFormat, FloatType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, ScalarType
 from .._util import BlockId, ValueId
 
 
@@ -258,6 +258,7 @@ class Mir:
     """A selected graph arranged into a CFG of basic blocks; ``blocks[0]`` is the entry."""
 
     float_format: FloatFormat
+    int_format: IntFormat
     nodes: dict[ValueId, MirNode]
     blocks: list[MirBlock]
     input_ids: list[ValueId]
@@ -459,8 +460,9 @@ class MirBuilder:
     is sealed by :meth:`jump` / :meth:`branch` / :meth:`ret`.
     """
 
-    def __init__(self, float_format: FloatFormat) -> None:
+    def __init__(self, float_format: FloatFormat, int_format: IntFormat) -> None:
         self._float_format = float_format
+        self._int_format = int_format
         self._nodes: dict[ValueId, MirNode] = {}
         self._global_intern: dict[object, ValueId] = {}
         self._block_intern: dict[object, ValueId] = {}
@@ -667,6 +669,7 @@ class MirBuilder:
             blocks.append(MirBlock(bid, tuple(ub.phis), tuple(ub.operations), ub.terminator))
         return Mir(
             float_format=self._float_format,
+            int_format=self._int_format,
             nodes=dict(self._nodes),
             blocks=blocks,
             input_ids=list(self._input_ids),

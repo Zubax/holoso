@@ -17,7 +17,7 @@ from .._operators import (
     PooledHardwareOperator,
     PortConditioner,
 )
-from .._type import BoolType, FloatFormat, FloatType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, ScalarType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 # The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the numerical
@@ -680,6 +680,7 @@ class Lir:
     instances: list[OperatorInstance]
     float_consts: list[float]  # constant pool: index -> value
     float_format: FloatFormat
+    int_format: IntFormat
     regfile: RegFileLayout
     inputs: list[FloatInputLoad | BoolInputLoad]  # ordered as the function parameters
     ops: list[PooledScheduledOp]  # the pipelined pooled firings, flattened across blocks with ABSOLUTE issue cycles

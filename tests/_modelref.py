@@ -30,7 +30,7 @@ from holoso._eel import lower as lower_frontend
 from holoso._hir import Hir, Operation, Operator, optimize
 from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
-from holoso._type import FloatFormat
+from holoso._type import FloatFormat, IntFormat
 from holoso._value import FloatValue
 from holoso._eel._names import port_name as port_name
 
@@ -60,7 +60,7 @@ def build_model_and_interpreter(
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt)
+    mir = lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt, DEFAULT_IFMT)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 
@@ -217,6 +217,7 @@ SHIPPED_TUNING = RegallocTuning(effort=5000, reuse_write_cap=2, register_price=2
 
 # What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
 _DEFAULTS = Options(OperatorOptions())
+DEFAULT_IFMT: IntFormat = _DEFAULTS.ifmt
 DEFAULT_TUNING = RegallocTuning(
     effort=_DEFAULTS.regalloc_effort,
     reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,

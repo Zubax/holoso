@@ -35,7 +35,7 @@ from ._operators import (
     IMulOperator,
     OpConfig,
 )
-from ._type import FloatFormat
+from ._type import FloatFormat, IntFormat
 
 type Target = Callable[..., Any]
 """
@@ -127,10 +127,11 @@ class Options:
     ffmt: FloatFormat = FloatFormat(6, 18)
     """wexp is usually 6..11 bits; wman is usually a multiple of the DSP tile operand width, 18 bits on most FPGAs."""
 
-    wint: int = 33
+    ifmt: IntFormat = IntFormat(33)
     """
-    The native integer width. Integers are signed and saturating: the range is `[-(2**(wint-1)), 2**(wint-1)-1]`.
-    The wide regfile is shared for integers and floats, and the register width is therefore `max(wint, ffmt.width)`.
+    The native integer format. Integers are signed and saturating.
+    The wide regfile is shared for integers and floats, and if both are used, the register width is therefore
+    `max(ifmt.width, ffmt.width)`; otherwise it takes the width of the used format.
     """
 
     wmultiplier: int | None = None
@@ -155,8 +156,6 @@ class Options:
     """What one register is worth in steering mux arms. Greater values buy fewer registers with heavier steering."""
 
     def __post_init__(self) -> None:
-        if self.wint < 2:
-            raise ValueError(f"wint must be >= 2, got {self.wint}")
         if self.wmultiplier is not None and self.wmultiplier < 2:
             raise ValueError(f"wmultiplier must be >= 2 when set, got {self.wmultiplier}")
         if self.ucode_fetch_stages < 1:
@@ -211,7 +210,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     hir = optimize(frontend.hir)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
-    mir = lower_to_mir(hir, _build_op_config(options), options.ffmt)
+    mir = lower_to_mir(hir, _build_op_config(options), options.ffmt, options.ifmt)
     lir = build(
         mir,
         module_name,

@@ -30,7 +30,7 @@ from holoso._lir import BoolRegRef, RegRef, pooled_write_word
 from holoso._mir import Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
-from ._modelref import build_lir, build_ops
+from ._modelref import DEFAULT_IFMT, build_lir, build_ops
 
 requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
 
@@ -51,7 +51,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig, fmt: FloatFormat) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops, fmt)
+    return lower_to_mir(optimize(lower(target).hir), ops, fmt, DEFAULT_IFMT)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
@@ -394,6 +394,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         instances=[inst],
         float_consts=[],
         float_format=fmt,
+        int_format=DEFAULT_IFMT,
         fetch_lag=_FETCH_LAG,
         regfile=RegFileLayout(width=fmt.width, nreg=4, nrd=2, nwr=2, nload=2),
         inputs=[FloatInputLoad("a", RegRef(0)), FloatInputLoad("b", RegRef(1))],
@@ -413,7 +414,9 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         # Each per-port result is a combinational output wire (s_..._y{q}, no _q register) that drives the register
         # write directly.
         assert f"_y{q}_q" not in verilog, "the per-port result register must not be emitted"
-        assert re.search(rf"wire\s+\[W-1:0\]\s+s_fsort_\w+_0_y{q}\s*;", verilog), "per-port combinational result wire"
+        assert re.search(
+            rf"wire\s+\[WFLT-1:0\]\s+s_fsort_\w+_0_y{q}\s*;", verilog
+        ), "per-port combinational result wire"
         assert re.search(
             rf"regs\[\d+\] <= s_fsort_\w+_0_y{q}\b", verilog
         ), "the wide write must read the combinational output wire directly"
@@ -439,7 +442,7 @@ def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
     bool_lir = build_lir(_run(_and_gate, _ops(FloatFormat(8, 24)), FloatFormat(8, 24)), "and_gate")
     assert bool_lir.regfile.nreg == 0
     bool_v = generate(bool_lir).verilog
-    assert "reg  [W-1:0] regs" not in bool_v and "NREG" not in bool_v and "[0:-1]" not in bool_v
+    assert "reg  [WFLT-1:0] regs" not in bool_v and "NREG" not in bool_v and "[0:-1]" not in bool_v
     _elaborate("and_gate", bool_v, tmp_path)
 
     float_lir = build_lir(_run(_madd_only, _ops(FloatFormat(8, 24)), FloatFormat(8, 24)), "madd_only")
