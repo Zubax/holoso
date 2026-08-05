@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 EXHAUSTIVE_MAX_WIDTH = 9
 """
 At and below this width the integer HDL tests drive every operand combination, so they prove the operator at those
@@ -7,7 +9,8 @@ widths instead of sampling it. The widest exhaustive case is a few hundred thous
 TEST_WIDTHS = (2, 3, 4, 5, 6, 7, 8, 9, 24, 33, 44)
 """
 Every width up to the exhaustive limit, then the two production formats and the default one. Widths where 4 divides
-``width - 1`` matter to the shifter, whose group decomposition runs its last index one past the array there.
+``width - 1`` matter to the shifter: its magnitude ends exactly on a group boundary there, so the largest shift
+amounts select a group that lies wholly in the padding.
 """
 
 
@@ -16,28 +19,29 @@ def signed(bits: int, width: int) -> int:
     return bits - (1 << width) if bits & sign else bits
 
 
-def ashift(a_bits: int, b_bits: int, width: int, saturating: bool) -> tuple[int, int]:
+@dataclass(frozen=True, slots=True)
+class ShiftResult:
+    shft: int
+    prod: int
+    saturated: bool
+
+
+def ishift(a_bits: int, b_bits: int, width: int) -> ShiftResult:
     """
-    Returns the result bits and the saturation flag. A left shift is a multiplication by a power of two, so under
-    `saturating` it clamps to the representable range instead of letting the high bits fall off the word.
+    A left shift is a multiplication by a power of two, so it can overflow: `shft` lets the high bits fall off the
+    word while `prod` clamps to the representable range. Right shifts cannot overflow and the two agree there.
     """
+    assert width >= 2
     mask = (1 << width) - 1
     minimum = -(1 << (width - 1))
     maximum = (1 << (width - 1)) - 1
+    assert 0 <= a_bits <= mask and 0 <= b_bits <= mask
     b = signed(b_bits, width)
     a = signed(a_bits, width)
     if b < 0:
-        if b <= -width:
-            return mask if a < 0 else 0, 0
-        return (a >> -b) & mask, 0
-    if saturating:
-        if a == 0:
-            return 0, 0
-        if b >= width:  # the shift amount is unbounded, so a nonzero operand overflows without evaluating the shift
-            return (maximum if a > 0 else minimum) & mask, 1
-        exact = a << b
-        clamped = min(max(exact, minimum), maximum)
-        return clamped & mask, int(clamped != exact)
-    if b >= width:
-        return 0, 0
-    return (a_bits << b) & mask, 0
+        y = (a >> min(-b, width)) & mask
+        return ShiftResult(y, y, False)
+    shift = min(b, width)  # any larger amount is indistinguishable from width inside a width-bit word
+    exact = a << shift
+    clamped = min(max(exact, minimum), maximum)
+    return ShiftResult((a_bits << shift) & mask, clamped & mask, clamped != exact)

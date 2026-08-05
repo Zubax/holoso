@@ -2,16 +2,16 @@
 //
 // Every operator has a mandatory input and output latches, exposing no combinational circuits outside.
 //
-//  Module          | Operation                             |Latency| Inputs            | Outputs
-//  ----------------|---------------------------------------|-------|-------------------|---------------------------
-//  holoso_iadds    | Signed addition, saturated            | 2     | a, b              | y, saturated
-//  holoso_isubs    | Signed subtraction, saturated         | 2     | a, b              | y, saturated
-//  holoso_imuls    | Signed multiplication, saturated      | 2..6  | a, b              | y, saturated
-//  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den          | quo, rem, saturated, div0
-//  holoso_iabss    | Absolute value, saturated             | 2     | x                 | y, saturated
-//  holoso_ashift   | Arith. shift, left+/right-            | 2     | x,shamt,saturating| y, saturated
-//  holoso_ashiftc  | Like holoso_ashift but by a constant  | 0     | x, shamt          | (inline comb function)
-//  holoso_icmp     | Signed comparison                     | 2     | a, b              | a_gt_b, a_eq_b, a_lt_b
+//  Module          | Operation                             |Latency| Inputs    | Outputs
+//  ----------------|---------------------------------------|-------|-----------|---------------------------
+//  holoso_iadds    | Signed addition, saturated            | 2     | a, b      | y, saturated
+//  holoso_isubs    | Signed subtraction, saturated         | 2     | a, b      | y, saturated
+//  holoso_imuls    | Signed multiplication, saturated      | 2..6  | a, b      | y, saturated
+//  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den  | quo, rem, saturated, div0
+//  holoso_iabss    | Absolute value, saturated             | 2     | x         | y, saturated
+//  holoso_ishift   | Arith. shift, left+/right-            | 2     | x, shamt  | shft, prod, saturated
+//  holoso_ishiftc  | Like holoso_ishift shft, const shamt  | 0     | x, shamt  | (inline comb function)
+//  holoso_icmp     | Signed comparison                     | 2     | a, b      | a_gt_b, a_eq_b, a_lt_b
 
 `timescale 1ns/1ps
 
@@ -597,20 +597,20 @@ module holoso_iabss#(parameter W = 44, parameter integer LATENCY = 0) (
 endmodule
 
 // Signed integer barrel shifter: shift left if shamt>0, shift right if shamt<0.
-// A left shift can overflow, so `saturating` selects between the two readings of that event:
-// deasserted it is a raw bit shift that lets the high bits fall off the word;
-// asserted it is saturating arithmetic that clamps to the representable range and reports the clamp on `saturated`.
-// Right shifts cannot overflow, so the flag is inert for them.
-// For constant shamt use ordinary inline combinational shift expression instead.
-module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
+// A left shift can overflow, and both readings of that event are emitted at once: `shft` is the raw bit shift that
+// lets the high bits fall off the word, while `prod` is the saturating multiplication by a power of two that clamps
+// to the representable range and reports the clamp on `saturated`.
+// Right shifts cannot overflow, so there the two results agree and the flag stays low.
+// For constant shamt use holoso_ishiftc instead.
+module holoso_ishift#(parameter W = 44, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
     input  wire signed [W-1:0] x,
     input  wire signed [W-1:0] shamt,
-    input  wire saturating,
     output reg out_valid,
-    output reg signed [W-1:0] y,
+    output reg signed [W-1:0] shft,
+    output reg signed [W-1:0] prod,
     output reg saturated
 );
     localparam integer LATENCY_REF = 2;
@@ -632,7 +632,6 @@ module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
 
     reg signed [W-1:0] x_q;
     reg signed [W-1:0] shamt_q;
-    reg saturating_q;
     reg input_valid_q;
     wire [SW-1:0] shamt_narrow = shamt_q[SW-1:0];
     wire [SW-1:0] right_prefix [0:PW];
@@ -679,10 +678,10 @@ module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
     wire [GROUP-1:0] straddled_group = lost_order[group_index*GROUP +: GROUP];
     wire [GROUP-1:0] straddled_mask = ~({GROUP{1'b1}} << group_offset);
     wire left_overflow = left_large ? (|x_q) : (|(group_any & whole_groups) | |(straddled_group & straddled_mask));
-    wire clamp = saturating_q & ~shamt_q[W-1] & left_overflow;
+    wire clamp = ~shamt_q[W-1] & left_overflow;
 
     // Zero fill and sign fill are the same uniform word once the direction is known, so folding the two range flags
-    // into one select leaves every output bit a six-input function of three selects, the operand sign and the two
+    // into one select leaves every `prod` bit a six-input function of three selects, the operand sign and the two
     // shifter bits: one slice rank on a 4-LUT fabric.
     wire unshifted = shamt_q[W-1] ? right_large : left_large;
     wire fill = shamt_q[W-1] & x_q[W-1];
@@ -690,12 +689,16 @@ module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
     always @(posedge clk) begin
         x_q <= x;
         shamt_q <= shamt;
-        saturating_q <= saturating;
+        casez ({unshifted, shamt_q[W-1]})
+            2'b1?: shft <= {W{fill}};
+            2'b00: shft <= shifted_left;
+            2'b01: shft <= shifted_right;
+        endcase
         casez ({clamp, unshifted, shamt_q[W-1]})
-            3'b1??: y <= x_q[W-1] ? MIN : MAX;
-            3'b01?: y <= {W{fill}};
-            3'b000: y <= shifted_left;
-            3'b001: y <= shifted_right;
+            3'b1??: prod <= x_q[W-1] ? MIN : MAX;
+            3'b01?: prod <= {W{fill}};
+            3'b000: prod <= shifted_left;
+            3'b001: prod <= shifted_right;
         endcase
         saturated <= clamp;
         if (rst) begin

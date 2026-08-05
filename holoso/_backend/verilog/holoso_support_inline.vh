@@ -1,7 +1,8 @@
 // BEGIN holoso_support_inline.vh: the file is spliced into each generated module.
 
-// Arithmetic shift by a constant. Positive shamt shifts left. For variable shamt use holoso_ashift.
-function signed [WINT-1:0] holoso_ashiftc;
+// Arithmetic shift by a constant. Positive shamt shifts left. This is the raw bit shift -- the `shft` output of
+// holoso_ishift, which is also the module to use when shamt is variable. There is no saturating counterpart here.
+function signed [WINT-1:0] holoso_ishiftc;
     input signed [WINT-1:0] x;
     input signed [WINT-1:0] shamt;
     reg signed [WINT:0] shamt_ext;
@@ -14,13 +15,13 @@ function signed [WINT-1:0] holoso_ashiftc;
         shifted_left = x << shamt_narrow;
         shifted_right = x >>> -shamt_narrow;
         if (shamt_ext >= WINT) begin
-            holoso_ashiftc = {WINT{1'b0}};
+            holoso_ishiftc = {WINT{1'b0}};
         end else if (shamt_ext <= -WINT) begin
-            holoso_ashiftc = {WINT{x[WINT-1]}};
+            holoso_ishiftc = {WINT{x[WINT-1]}};
         end else if (shamt[WINT-1]) begin
-            holoso_ashiftc = shifted_right;
+            holoso_ishiftc = shifted_right;
         end else begin
-            holoso_ashiftc = shifted_left;
+            holoso_ishiftc = shifted_left;
         end
     end
 endfunction

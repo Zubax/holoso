@@ -9,11 +9,11 @@ from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
-from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, ashift
+from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, ishift
 
 
 @cocotb.test()
-async def holoso_ashiftc_cocotb(dut: Any) -> None:
+async def holoso_ishiftc_cocotb(dut: Any) -> None:
     width = int(os.environ["HOLOSO_INTEGER_WIDTH"])
     mask = (1 << width) - 1
 
@@ -22,7 +22,7 @@ async def holoso_ashiftc_cocotb(dut: Any) -> None:
         dut.shamt.value = b
         await Timer(1, unit="ns")
         actual = int(dut.y.value) & mask
-        expected, _ = ashift(a, b, width, saturating=False)
+        expected = ishift(a, b, width).shft
         assert actual == expected, f"WINT={width} a=0x{a:x} b=0x{b:x}: got 0x{actual:x}, want 0x{expected:x}"
 
     if width <= EXHAUSTIVE_MAX_WIDTH:
@@ -32,7 +32,9 @@ async def holoso_ashiftc_cocotb(dut: Any) -> None:
     else:
         minimum = 1 << (width - 1)
         values = (0, 1, 2, minimum - 1, minimum, minimum + 1, mask - 1, mask)
-        shifts = tuple(value & mask for value in (0, 1, -1, width - 1, 1 - width, width, -width, width + 1, -width - 1))
+        shifts = tuple(
+            value & mask for value in (0, 1, -1, width - 1, 1 - width, width, -width, width + 1, -width - 1, -minimum)
+        )
         for a in values:
             for b in shifts:
                 await check(a, b)
@@ -46,13 +48,13 @@ async def holoso_ashiftc_cocotb(dut: Any) -> None:
 
 @pytest.mark.parametrize("width", TEST_WIDTHS, ids=lambda width: f"w{width}")
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_ashiftc(sim: str, width: int) -> None:
+def test_holoso_ishiftc(sim: str, width: int) -> None:
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ashiftc_w{width}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ishiftc_w{width}"
     runner.build(
         sources=[*sources(), Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
         includes=[HDL_DIR],
-        hdl_toplevel="holoso_ashiftc_tb",
+        hdl_toplevel="holoso_ishiftc_tb",
         parameters={"WINT": width},
         build_args=build_args(sim),
         build_dir=build_dir,
@@ -60,8 +62,8 @@ def test_holoso_ashiftc(sim: str, width: int) -> None:
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel="holoso_ashiftc_tb",
-        test_module="tests.hdl.test_ashiftc",
+        hdl_toplevel="holoso_ishiftc_tb",
+        test_module="tests.hdl.test_ishiftc",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={"HOLOSO_INTEGER_WIDTH": str(width)},

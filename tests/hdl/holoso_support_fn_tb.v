@@ -6,7 +6,7 @@
 `default_nettype none
 
 // The spliced file defines the float helpers too, so even a shift-only harness must name a float format for them.
-module holoso_ashiftc_tb #(parameter WINT = 24) (
+module holoso_ishiftc_tb #(parameter WINT = 24) (
     input  wire signed [WINT-1:0] x,
     input  wire signed [WINT-1:0] shamt,
     output wire signed [WINT-1:0] y
@@ -15,7 +15,7 @@ module holoso_ashiftc_tb #(parameter WINT = 24) (
     localparam WMAN = 18;
     localparam WFLT = WEXP + WMAN;
     `include "holoso_support_inline.vh"
-    assign y = holoso_ashiftc(x, shamt);
+    assign y = holoso_ishiftc(x, shamt);
 endmodule
 
 module holoso_fisfinite_tb #(parameter WEXP = 6, parameter WMAN = 18) (
