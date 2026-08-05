@@ -323,11 +323,15 @@ LIR is the scheduled, bound, register-allocated microprogram. Its resources are 
 float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a pool of nonnegative
 wide constants (float-encoded today, the sign riding the consumer's sideband), and the typed input loads and output
 wires. LIR names its carriers after the bank that holds them rather than after the scalar family -- `WideOperand`,
-`WideCopy`, `WideStateSlot` against their `Bool*` duals -- because it is the physical binding layer. MIR names its
-banks the same way but keeps the opposite convention for its leaves, one nominal type per scalar family. Each
-scheduled firing carries its operands and conditioners, its register writes, and an issue cycle; the makespan is the
-last commit cycle. LIR exposes a minimal API plus shared analysis helpers (per-cycle grouping, liveness, read/writer
-sets) so backends do not each re-derive them.
+`WideCopy`, `WideStateSlot` against their `Bool*` duals -- because it is the physical binding layer. A carrier's
+folded conditioner follows the same rule: it is typed as whatever the bank may hold rather than as a sign control,
+because what a port can fold is a property of its scalar family. A float port folds a sign into the free `fsgnop`
+sideband and a boolean port an inversion, but an integer port folds nothing, since two's-complement negation is not
+free in fabric. Consequently nothing compares a conditioner against a bank-wide identity constant; each conditioner
+answers for its own identity. MIR names its banks the same way but keeps the opposite convention for its leaves, one
+nominal type per scalar family. Each scheduled firing carries its operands and conditioners, its register writes, and
+an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API plus shared analysis helpers
+(per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach

@@ -1,4 +1,4 @@
-"""Hardware operator models and folded floating-point sign controls."""
+"""Hardware operator models and folded port conditioners."""
 
 import re
 from abc import ABC, abstractmethod
@@ -12,7 +12,7 @@ import zkf
 
 from ._errors import UnsupportedConstruct
 from ._value import FloatValue
-from ._type import BoolType, FloatFormat, FloatType, ScalarSignature, ScalarType
+from ._type import BoolType, FloatFormat, FloatType, IntType, ScalarSignature, ScalarType
 
 
 def _instance_stem_text(text: str) -> str:
@@ -51,8 +51,29 @@ class FloatSignControl:
         return text
 
     @property
+    def is_identity(self) -> bool:
+        return not self.negate and not self.absolute
+
+    @property
     def encoded(self) -> int:
         return (1 if self.negate else 0) | (2 if self.absolute else 0)
+
+
+@dataclass(frozen=True, slots=True)
+class IntIdentity:
+    """
+    The conditioner of an integer port, which is always the identity: two's-complement negation is not free in fabric
+    the way ``holoso_fsgnop`` is, so an integer port folds nothing into a sideband. Deliberately without ``then``
+    (nothing composes), ``encoded`` (there is no sign opcode to ride the wrapper), and any value application (there is
+    no integer runtime value yet) -- a wide port's conditioner is not a sign algebra.
+    """
+
+    @property
+    def is_identity(self) -> bool:
+        return True
+
+    def decorate(self, text: str) -> str:
+        return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,11 +96,17 @@ class BoolInversion:
         return f"~{text}" if self.invert else text
 
     @property
+    def is_identity(self) -> bool:
+        return not self.invert
+
+    @property
     def encoded(self) -> int:
         return 1 if self.invert else 0
 
 
-type PortConditioner = FloatSignControl | BoolInversion
+# The wide bank is shared across scalar families, so what a wide port may fold depends on the family it holds.
+type WideConditioner = FloatSignControl | IntIdentity
+type PortConditioner = WideConditioner | BoolInversion
 
 
 class Relation(Enum):
@@ -111,6 +138,8 @@ class ImmediateField:
 def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
     if isinstance(scalar_type, FloatType):
         return FloatSignControl()
+    if isinstance(scalar_type, IntType):
+        return IntIdentity()
     if isinstance(scalar_type, BoolType):
         return BoolInversion()
     raise TypeError(f"no conditioner is defined for ports of {scalar_type!r}")

@@ -21,7 +21,7 @@ from .._mir import (
     MirStateSlot,
     MirWideView,
 )
-from .._operators import BoolInversion, FloatSignControl, HardwareOperator, PooledHardwareOperator, PortConditioner
+from .._operators import BoolInversion, HardwareOperator, PooledHardwareOperator
 from .._util import ValueId
 from ._ir import *
 from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map, value_resident_at_entry
@@ -246,12 +246,11 @@ class _InstallContext:
 class _Bank(ABC, Generic[_SlotT]):
     """
     The policy surface for one physical register bank. The liveness/coalescing/coloring skeleton in
-    :func:`_allocate_bank` is shared; each subclass supplies the wide/boolean specifics -- identity
-    conditioner, slot/boundary/objective extraction, and the install policy.
+    :func:`_allocate_bank` is shared; each subclass supplies the wide/boolean specifics --
+    slot/boundary/objective extraction and the install policy.
     """
 
     label: ClassVar[str]
-    identity: ClassVar[PortConditioner]  # the no-op conditioner whose absence lets a live-out commit into its slot
 
     @abstractmethod
     def state_slots(self, view: _BankView) -> list[_SlotT]:
@@ -281,14 +280,13 @@ class _Bank(ABC, Generic[_SlotT]):
 
 class _WideBank(_Bank[MirFloatStateSlot]):
     label = "wide"
-    identity = FloatSignControl()
 
     def state_slots(self, view: _BankView) -> list[MirFloatStateSlot]:
         assert isinstance(view, MirWideView)
         return view.state_slots
 
     def slot_identity(self, slot: MirFloatStateSlot) -> bool:
-        return slot.sign == FloatSignControl()
+        return slot.sign.is_identity
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
@@ -344,14 +342,13 @@ class _WideBank(_Bank[MirFloatStateSlot]):
 
 class _BoolBank(_Bank[MirBoolStateSlot]):
     label = "bool"
-    identity = BoolInversion()
 
     def state_slots(self, view: _BankView) -> list[MirBoolStateSlot]:
         assert isinstance(view, MirBoolView)
         return view.state_slots
 
     def slot_identity(self, slot: MirBoolStateSlot) -> bool:
-        return slot.inversion == BoolInversion()
+        return slot.inversion.is_identity
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
@@ -516,7 +513,7 @@ def _allocate_bank(
         if slot.live_out in values:
             boundary_oracle[ret_block].add(slot.live_out)
     coalesce_graph = interference.build(boundary_oracle, reads, {})
-    candidate_arms = coalescable_arms(phi_nodes, values, bank.identity)
+    candidate_arms = coalescable_arms(phi_nodes, values)
     phi_order = _movable_order(mir, list(phi_nodes), {}, phi_block, {})
     ret_present = block_makespan[ret_block] + 1
     # Last operand-read cycle of each value in the Ret block, from the shared liveness facts so read-cycle semantics
@@ -688,11 +685,11 @@ def _allocate(
     # register (they share a coloring class). Only the residual (non-coalesced) arms install by a pc-gated copy.
     wide_copies: dict[int, list[WideArmInstall]] = {}
     for vid, phi in wide_mir.phi_nodes.items():
-        for pred, value, sign in phi.arms:
-            assert isinstance(sign, FloatSignControl)
+        for pred, value, conditioner in phi.arms:
+            assert not isinstance(conditioner, BoolInversion)
             if (pred, vid) in wide_alloc.coalesced:
                 continue
-            wide_copies.setdefault(pred, []).append(WideArmInstall(wide_alloc.reg[vid], value, sign))
+            wide_copies.setdefault(pred, []).append(WideArmInstall(wide_alloc.reg[vid], value, conditioner))
 
     bool_writes: dict[int, list[BoolArmInstall]] = {}
     for vid, phi in bool_mir.phi_nodes.items():

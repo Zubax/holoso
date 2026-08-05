@@ -27,7 +27,7 @@ from ..._lir import (
     WideOperand,
     pooled_write_word,
 )
-from ..._operators import BoolInversion, InlineHardwareOperator, PortConditioner
+from ..._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -78,8 +78,9 @@ type ReadSource = RegRef | WideConstRef
 @dataclass(frozen=True, slots=True)
 class OpWriteSource:
     """
-    A pooled operator output lane. A boolean lane folds its fabric inversion into ``invert``; a wide lane's sign rides
-    the wrapper (the ``y*sgn`` field), so its ``invert`` is always False and equal signs never split the opcode.
+    A pooled operator output lane. A boolean lane folds its fabric inversion into ``invert``; a wide lane conditions on
+    the wrapper instead (a float's sign on the ``y*sgn`` field, nothing at all for any other family), so its ``invert``
+    is always False and equal conditioners never split the opcode.
     """
 
     inst: OperatorInstance
@@ -115,9 +116,8 @@ class WriteEvent:
     step: int
 
     def __post_init__(self) -> None:
-        # A wide lane's sign rides the ysgn wrapper; only a boolean lane folds an inversion into OpWriteSource.invert.
         if isinstance(self.source, OpWriteSource) and self.source.invert:
-            assert isinstance(self.dst, BoolRegRef)
+            assert isinstance(self.dst, BoolRegRef), "a wide lane conditions on the wrapper, so it never inverts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +223,7 @@ def write_events(lir: Lir) -> list[WriteEvent]:
     for op in lir.ops:
         for write in op.writes:
             if isinstance(write.dst, RegRef):
-                invert = False  # a wide lane's sign rides the wrapper, not the opcode
+                invert = False  # a wide lane conditions on the wrapper, not on the opcode
             else:
                 assert isinstance(write.conditioner, BoolInversion)
                 invert = write.conditioner.invert
@@ -315,13 +315,15 @@ def build_microcode(
             put(f_imm(base, imm.name), ci, value)
         for pos, operand in enumerate(op.operands):
             assert isinstance(operand, WideOperand), "pooled operators read only wide operands today (no read lane)"
+            assert isinstance(operand.conditioner, FloatSignControl), "only a float has a sign field to ride"
             put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
             field = f_rd(base, PORT_LETTERS[pos])
             if field in fields:
                 put(field, ci, read_books[(op.inst, pos)].code(operand.source))
         for write in op.writes:
             if isinstance(write.dst, RegRef):
-                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # wide result sign rides the wrapper
+                assert isinstance(write.conditioner, FloatSignControl), "only a float has a sign field to ride"
+                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)
 
     for event in events:
         assert (

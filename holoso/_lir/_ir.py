@@ -2,7 +2,7 @@
 The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
 
 A :class:`Lir` is controller-agnostic -- it describes which hardware operators issue on which cycle, reading/writing
-which typed storage resources, with which folded sign controls.
+which typed storage resources, with which folded port conditioners.
 """
 
 from bisect import bisect_right
@@ -11,11 +11,11 @@ from typing import TypeVar, assert_never
 
 from .._operators import (
     BoolInversion,
-    FloatSignControl,
     HardwareOperator,
     InlineHardwareOperator,
     PooledHardwareOperator,
     PortConditioner,
+    WideConditioner,
 )
 from .._type import BoolType, FloatFormat, FloatType, IntFormat, ScalarType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
@@ -299,7 +299,7 @@ class Operand:
 @dataclass(frozen=True, slots=True)
 class WideOperand(Operand):
     source: RegRef | WideConstRef
-    conditioner: FloatSignControl = FloatSignControl()
+    conditioner: WideConditioner
 
     @property
     def stable_label(self) -> str:
@@ -320,8 +320,8 @@ class WideInputLoad(InputLoad):
 
 
 def wide_liveout_coalesced(tap: WideOperand, reg: RegRef) -> bool:
-    """A wide state live-out shares its slot register (no install copy) iff its tap is exactly ``reg``, unsigned."""
-    return tap.source == reg and tap.conditioner == FloatSignControl()
+    """A wide state live-out shares its slot register (no install copy) iff its tap is ``reg`` with the identity."""
+    return tap.source == reg and tap.conditioner.is_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,7 +372,7 @@ type BoolSource = BoolRegRef | BoolConstRef
 class BoolOperand:
     """
     A boolean operand: a boolean register read or an immediate True/False, with an optional folded inversion -- the
-    1-bit dual of :class:`WideOperand`'s sign control, free in fabric. An inverted immediate folds to its negated
+    1-bit dual of :class:`WideOperand`'s conditioner, free in fabric. An inverted immediate folds to its negated
     value at construction, so a constant operand always carries the identity inversion.
     """
 
@@ -394,9 +394,9 @@ class BoolOperand:
 @dataclass(frozen=True, slots=True)
 class PortWrite:
     """
-    One tapped output port of a firing: the ``port``-th result lands in ``dst`` through its type's conditioner (a
-    folded sign control on a wide destination, an optional inversion on a boolean one). Untapped ports of the firing
-    simply have no PortWrite -- the module output is left unconnected.
+    One tapped output port of a firing: the ``port``-th result lands in ``dst`` through the conditioner its scalar
+    type admits -- a folded sign control for a float, an inversion for a boolean, nothing at all for an integer.
+    Untapped ports of the firing simply have no PortWrite -- the module output is left unconnected.
     """
 
     port: int
@@ -627,7 +627,7 @@ def _trace_landing(
 
 def bool_liveout_coalesced(live_out: BoolOperand, reg: BoolRegRef) -> bool:
     """A bool state live-out shares its slot register (no install copy) iff it is exactly ``reg``, uninverted."""
-    return isinstance(live_out.source, BoolRegRef) and live_out.source == reg and not live_out.inversion.invert
+    return isinstance(live_out.source, BoolRegRef) and live_out.source == reg and live_out.inversion.is_identity
 
 
 @dataclass(frozen=True, slots=True)

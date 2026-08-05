@@ -332,6 +332,7 @@ class NumericalSimulator(_Kernel):
                 if isinstance(wide_source, WideConstRef)
                 else self.regs[wide_source.index]
             )
+            assert isinstance(operand.conditioner, FloatSignControl), "the model stores every wide value as a float"
             return operand.conditioner.apply_value(base)
         bool_source = operand.source
         if isinstance(bool_source, BoolConstRef):

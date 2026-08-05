@@ -4,7 +4,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from .._mir import MirPhi
-from .._operators import PortConditioner
 from .._util import ValueId
 from ._ir import ReadPort
 from ._regalloc import ColoringProblem, Producer, color, find_coloring_conflict
@@ -18,22 +17,23 @@ class _PhiCoalescing:
 
 
 def coalescable_arms(
-    phi_nodes: Mapping[ValueId, MirPhi], values: set[ValueId], identity: PortConditioner
+    phi_nodes: Mapping[ValueId, MirPhi], values: set[ValueId]
 ) -> dict[ValueId, list[tuple[int, ValueId]]]:
     """
     Per phi, the register-backed, identity-conditioner arms eligible to coalesce (so the arm flows into the merged
     register with no install copy). An arm that ANOTHER arm of the same phi reads under a non-identity conditioner is
     excluded: its residual copy would become a same-step self-conditioned copy (``r <= -r`` / ``b <= ~b``) into the
-    merged register, which the install-free oracle cannot see and which the final interference rightly flags. Both banks
-    differ only in their identity conditioner (:class:`FloatSignControl` vs :class:`BoolInversion`).
+    merged register, which the install-free oracle cannot see and which the final interference rightly flags. Each
+    conditioner answers for its own identity, so this serves both banks -- and a wide bank holding more than one scalar
+    family, which has no single identity to compare against.
     """
     candidates: dict[ValueId, list[tuple[int, ValueId]]] = {}
     for vid, phi in phi_nodes.items():
-        conditioned = {arm for _p, arm, cond in phi.arms if arm in values and cond != identity}
+        conditioned = {arm for _p, arm, cond in phi.arms if arm in values and not cond.is_identity}
         candidates[vid] = [
             (pred, arm)
             for pred, arm, conditioner in phi.arms
-            if arm in values and conditioner == identity and arm not in conditioned
+            if arm in values and conditioner.is_identity and arm not in conditioned
         ]
     return candidates
 

@@ -1,7 +1,8 @@
 """
-The native integer format: its arithmetic surface, and its plumbing from ``Options`` down into the emitted RTL. No
-operator reads the format yet, so its only hardware footprint is the ``WINT`` localparam -- which is nevertheless
-enough to pin the whole chain from the public entry point through MIR and LIR to the Verilog backend.
+The native integer format and type: the arithmetic surface, the plumbing from ``Options`` down into the emitted RTL,
+and the port conditioning an integer type admits. No operator reads the format yet, so its only hardware footprint is
+the ``WINT`` localparam -- which is nevertheless enough to pin the whole chain from the public entry point through MIR
+and LIR to the Verilog backend.
 """
 
 import dataclasses
@@ -13,8 +14,8 @@ import holoso
 from holoso import FloatFormat, IntFormat, OperatorOptions, Options
 from holoso._eel import lower as lower_frontend
 from holoso._hir import optimize
-from holoso._mir import lower as lower_to_mir
-from holoso._operators import SelectOperator
+from holoso._mir import MirOperation, MirPhi, lower as lower_to_mir
+from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, SelectOperator, identity_conditioner
 from holoso._type import BoolType, IntType
 
 from ._modelref import build_lir, build_ops, default_options
@@ -68,6 +69,46 @@ def test_select_carries_an_integer_scalar_type_through_its_signature(width: int)
     signature = SelectOperator(ty).signature
     assert signature.operand_types == (BoolType(), ty, ty)
     assert signature.result_types == (ty,)
+
+
+@pytest.mark.parametrize("width", (2, 17, 33))
+def test_integer_ports_condition_with_the_identity_and_nothing_else(width: int) -> None:
+    # An integer port folds nothing into a sideband: two's-complement negation is not free in fabric the way
+    # holoso_fsgnop is. So the wide bank has no single conditioner algebra.
+    ty = IntType(IntFormat(width))
+    assert identity_conditioner(ty) == IntIdentity()
+    assert IntIdentity().is_identity
+    assert IntIdentity().decorate("r3") == "r3"
+
+    operation = MirOperation(
+        SelectOperator(ty), [0, 1, 2], [BoolInversion(), IntIdentity(), IntIdentity()], 0, IntIdentity(), ()
+    )
+    assert operation.scalar_type == ty
+
+    with pytest.raises(TypeError):
+        MirOperation(
+            SelectOperator(ty),
+            [0, 1, 2],
+            [BoolInversion(), FloatSignControl(negate=True), IntIdentity()],
+            0,
+            IntIdentity(),
+            (),
+        )
+
+    # The phi path matters separately: it is what the wide-bank allocator narrows when lowering a merge into
+    # per-predecessor install copies.
+    assert MirPhi(ty, ((0, 1, IntIdentity()), (2, 3, IntIdentity()))).scalar_type == ty
+    with pytest.raises(TypeError):
+        MirPhi(ty, ((0, 1, IntIdentity()), (2, 3, FloatSignControl(absolute=True))))
+
+
+def test_float_and_bool_ports_keep_their_own_conditioners() -> None:
+    assert identity_conditioner(holoso.FloatType(FMT)) == FloatSignControl()
+    assert identity_conditioner(BoolType()) == BoolInversion()
+    assert FloatSignControl().is_identity and BoolInversion().is_identity
+    assert not FloatSignControl(negate=True).is_identity
+    assert not FloatSignControl(absolute=True).is_identity
+    assert not BoolInversion(invert=True).is_identity
 
 
 def _add(a: float, b: float) -> float:

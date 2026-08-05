@@ -82,10 +82,12 @@ def _source_net(source: RegRef | WideConstRef) -> str:
     return f"const_{source.index}" if isinstance(source, WideConstRef) else f"regs[{source.index}]"
 
 
-def _signed_source_net(source: RegRef | WideConstRef, sign: FloatSignControl) -> str:
-    """A source net with its folded sign applied inline via ``holoso_fsgnop``, or bare when the sign is identity."""
+def _wide_source_net(source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
+    """A source net with its folded conditioner applied inline; only a float one has hardware, and it is fsgnop."""
+    # Ahead of the identity shortcut, which would otherwise absorb every non-float conditioner before the check.
+    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
     raw = _source_net(source)
-    return raw if sign == FloatSignControl() else f"holoso_fsgnop({raw}, 2'd{sign.encoded})"
+    return raw if conditioner.is_identity else f"holoso_fsgnop({raw}, 2'd{conditioner.encoded})"
 
 
 def _bool_operand_rhs(operand: BoolOperand) -> str:
@@ -99,7 +101,7 @@ def _bool_operand_rhs(operand: BoolOperand) -> str:
 def _operand_rhs(operand: WideOperand | BoolOperand) -> str:
     match operand:
         case WideOperand():
-            return _signed_source_net(operand.source, operand.conditioner)
+            return _wide_source_net(operand.source, operand.conditioner)
         case BoolOperand():
             return _bool_operand_rhs(operand)
         case _:
@@ -110,15 +112,16 @@ def _render_inline(
     operator: InlineHardwareOperator, operands: tuple[WideOperand | BoolOperand, ...], conditioner: PortConditioner
 ) -> str:
     """
-    An inline firing's combinational RHS: the operator's own expression over its operand nets (a wide operand's folded
+    An inline firing's combinational RHS: the operator's own expression over its operand nets (a float operand's folded
     sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds into the
-    expression; sign-conditioned wide inline results have no producer yet.
+    expression; conditioned wide inline results have no producer yet.
     """
     nets = [_operand_rhs(operand) for operand in operands]
     expr = operator.verilog_expr(*nets)
     if isinstance(conditioner, BoolInversion):
         return conditioner.decorate(f"({expr})") if conditioner.invert else expr
-    assert conditioner == FloatSignControl(), "no pass produces sign-conditioned wide inline results yet"
+    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
+    assert conditioner.is_identity, "no pass produces conditioned wide inline results yet"
     return expr
 
 

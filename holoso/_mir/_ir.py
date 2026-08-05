@@ -37,7 +37,10 @@ class MirConst:
 
 
 def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType, role: str) -> None:
-    """A port's conditioner must be the type's own: a sign control on a float port, an inversion on a boolean one."""
+    """
+    A port's conditioner must be the type's own: a sign control on a float port, an inversion on a boolean one, and
+    the identity on an integer port, which has no free sideband to fold into.
+    """
     expected = type(identity_conditioner(port_type))  # the single owner of the type -> conditioner-class mapping
     if not isinstance(conditioner, expected):
         raise TypeError(f"{role} conditioner must be {expected.__name__} for {port_type!r}, got {conditioner!r}")
@@ -169,7 +172,8 @@ class MirPhi:
     """
     An SSA merge at a block's entry: one ``(predecessor_block, value, conditioner)`` arm per incoming edge, of one
     scalar type. The arm conditioner is the type's own sideband, applied when the arm value is installed: a folded
-    sign control on a float arm (``y = -x`` on one branch), an optional inversion on a boolean arm (``f = not g``).
+    sign control on a float arm (``y = -x`` on one branch), an optional inversion on a boolean arm (``f = not g``),
+    and nothing at all on an integer arm, which has no free sideband to fold into.
     """
 
     scalar_type: ScalarType

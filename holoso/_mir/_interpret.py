@@ -16,7 +16,7 @@ It is a first-class verification peer of the numerical model, not a test helper,
 
 from typing import assert_never
 
-from .._operators import FloatSignControl, PortConditioner
+from .._operators import BoolInversion, FloatSignControl, PortConditioner
 from .._util import ValueId
 from .._type import FloatFormat, LogicalPort
 from .._value import FloatValue
@@ -52,6 +52,7 @@ def _apply_conditioner(conditioner: PortConditioner, value: _Value) -> _Value:
     if isinstance(conditioner, FloatSignControl):
         assert isinstance(value, FloatValue), "a float sign control applies only to a FloatValue"
         return conditioner.apply_value(value)
+    assert isinstance(conditioner, BoolInversion), "the interpreter carries no value a wide non-float port could hold"
     assert isinstance(value, bool), "a boolean inversion applies only to a bool"
     return conditioner.apply(value)
 

@@ -20,7 +20,7 @@ from .._mir import (
     MirTerminator,
     MirWideView,
 )
-from .._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner
+from .._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner, WideConditioner
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
@@ -46,7 +46,7 @@ def _typed_operand(
     if vid in bool_mir.nodes:
         assert isinstance(conditioner, BoolInversion)
         return bool_operand(bool_mir, vid, alloc, conditioner)
-    assert isinstance(conditioner, FloatSignControl)
+    assert not isinstance(conditioner, BoolInversion)  # negatively, so a new wide conditioner needs no edit here
     return wide_operand(wide_mir, vid, conditioner, alloc, pool)
 
 
@@ -140,13 +140,14 @@ def build_pooled_op(
 def wide_operand(
     wide_mir: MirWideView,
     vid: ValueId,
-    conditioner: FloatSignControl,
+    conditioner: WideConditioner,
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
 ) -> WideOperand:
     node = wide_mir.nodes[vid]
     if isinstance(node, MirFloatConst):
         entry = pool[vid]
+        assert isinstance(conditioner, FloatSignControl), "the pool folds sign, so its consumers condition as floats"
         return WideOperand(WideConstRef(entry.index), entry.conditioner.then(conditioner))
     return WideOperand(RegRef(alloc.wide_reg[vid]), conditioner)
 

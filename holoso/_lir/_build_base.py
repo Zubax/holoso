@@ -7,7 +7,7 @@ here) to keep those stage modules acyclic.
 
 from dataclasses import dataclass
 
-from .._operators import BoolInversion, FloatSignControl
+from .._operators import BoolInversion, FloatSignControl, WideConditioner
 from .._util import ValueId
 from ._ir import ReadPort
 from ._schedule import Schedule
@@ -16,7 +16,11 @@ from ._regalloc import Producer, RegallocTuning
 
 @dataclass(frozen=True, slots=True)
 class PooledConst:
-    """A constant's place in the pool."""
+    """
+    A constant's place in the pool. The conditioner stays a float sign control rather than widening with the other
+    wide-bank carriers because the pool folds sign into a free ``holoso_fsgnop`` sideband, which two's complement
+    cannot do; an integer pool needs a different scheme, not a wider field.
+    """
 
     index: int
     conditioner: FloatSignControl
@@ -28,7 +32,7 @@ class WideArmInstall:
 
     dst: int
     source: ValueId
-    conditioner: FloatSignControl
+    conditioner: WideConditioner
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,12 +10,21 @@ The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.
 `FloatValue | IntValue` union, a typed payload for the `lir.wide_consts` pool (constants are float-encoded across
 microcode/emit/html/model today), and one shared scalar port codec (cocotb and the model duplicate it).
 
-`IntType` and `IntValue` need the mappings their float siblings have: `identity_conditioner` refuses `IntType`
-outright, and `value_class` has no `IntValue` to return, so `SelectOperator(IntType(...))` is constructible and
-well-typed but its `evaluate` assertion refuses every payload (and under `-O`, where that assertion is gone, it
-would pass integers through unchecked). None of this is reachable regardless: `_reject_integers` refuses the kernel
-before lowering even begins. Integer sign conditioning cannot ride a port sideband the way `holoso_fsgnop` does,
-since `holoso_iabss` is a pooled module with a latency and a saturation output.
+`IntType` still lacks the value mapping its float sibling has: `value_class` has no `IntValue` to return, so
+`SelectOperator(IntType(...))` is constructible and well-typed but its `evaluate` assertion refuses every payload
+(and under `-O`, where that assertion is gone, it would pass integers through unchecked). Not reachable regardless:
+`_reject_integers` refuses the kernel before lowering even begins.
+
+The conditioner mapping is already in place -- an integer port carries `IntIdentity` and nothing else, because
+integer sign conditioning cannot ride a port sideband the way `holoso_fsgnop` does (`holoso_iabss` is a pooled module
+with a latency and a saturation output). What that did NOT reach is the float sign wiring in the microcode packer and
+the Verilog emitter: the tapped-result sign field and its `_sgnop` wrapper binding are keyed on `is_wide` rather than
+on the port's scalar type, and the per-operand pair is keyed on nothing at all -- it runs unconditionally over the
+operator's arity. An integer pooled operator has no such ports, so all four must be keyed on `FloatType` when the
+integer backend lands; they are left alone for now because both arms would be dead and untestable until an integer
+operator exists to take the other one. Relatedly, `_Bank` in `_lir/_bankalloc.py` is generic over a
+CONSTRAINED type variable, which cannot express `MirFloatStateSlot | MirIntStateSlot` for one wide bank; lifting it
+means giving `MirFloatStateSlot.sign` and `MirBoolStateSlot.inversion` a common `conditioner` field.
 
 `scalar_type_of` (`_lir/_ir.py`) recovers the scalar family from the LIR node class, so it still answers
 `FloatType(fmt)` for the bank-named `WideInputLoad`/`WideOutputWire` carriers. When integer ports land the

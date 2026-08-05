@@ -380,7 +380,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
     inst = OperatorInstance(FSortOperator(fmt, FSortOptions()), 0)
     op = PooledScheduledOp(
         inst=inst,
-        operands=[WideOperand(RegRef(0)), WideOperand(RegRef(1))],
+        operands=[WideOperand(RegRef(0), FloatSignControl()), WideOperand(RegRef(1), FloatSignControl())],
         writes=[
             PortWrite(0, RegRef(2), FloatSignControl()),
             PortWrite(1, RegRef(3), FloatSignControl(negate=True)),
@@ -399,7 +399,10 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         regfile=RegFileLayout(width=fmt.width, nreg=4, nrd=2, nwr=2, nload=2),
         inputs=[WideInputLoad("a", RegRef(0)), WideInputLoad("b", RegRef(1))],
         ops=[op],
-        outputs=[WideOutputWire("out_0", WideOperand(RegRef(2))), WideOutputWire("out_1", WideOperand(RegRef(3)))],
+        outputs=[
+            WideOutputWire("out_0", WideOperand(RegRef(2), FloatSignControl())),
+            WideOutputWire("out_1", WideOperand(RegRef(3), FloatSignControl())),
+        ],
         wide_state_slots=[],
         blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
         block_base=[0],
