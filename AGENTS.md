@@ -130,13 +130,8 @@ if (b) foo <= baz;
 
 ### Other
 
-Keep in-code documentation brief. Long-form belongs in design docs and other non-code files.
-
 When altering code behavior, do not comment on the changes; e.g., avoid constructs like "this used to be such and such"
 or "this is done like this -- no longer like so". Document only the current state.
-
-Do not add comments that add no new information, such as describing code behavior that is already clear from the code itself.
-Only add comments that explain the rationale or any non-obvious implications or considerations.
 
 In all source code and documentation, units of measure are given in the correct SI-compliant capitalization
 regardless of any coding style. For example, `target_frequency_MHz` is correct as a lowercase snake_case name
@@ -230,6 +225,8 @@ Use your best judgement as to which features do not need test coverage. For exam
 - HTML layout correctness;
 - white-box tests of implementation details rather than behaviors;
 - rejection of invalid inputs where an exception is raised.
+
+Never write tests for tests or test fixtures.
 
 ## Review loop
 

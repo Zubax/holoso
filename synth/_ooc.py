@@ -175,12 +175,13 @@ def _render(
     lines.append("    wire dut_out_valid;")
     lines += [f"    wire {_decl(s.width)}dut_{s.port_name};" for s in out_slots]
     lines += [f"    {KEEP_ATTR} reg {_decl(s.width)}r_{s.port_name};" for s in out_slots]
-    lines.append(f"    {KEEP_ATTR} reg {_decl(io_out_width)}r_io_out;")
+    if out_sel_width > 0:
+        lines.append(f"    reg {_decl(io_out_width)}io_out_mux;")
     lines += [
         "",
         "    assign in_ready  = r_in_ready;",
         "    assign out_valid = r_out_valid;",
-        "    assign io_out    = r_io_out;",
+        f"    assign io_out    = {'io_out_mux' if out_sel_width > 0 else _zext(f'r_{out_slots[0].port_name}', out_slots[0].width, io_out_width)};",
         "",
     ]
 
@@ -220,8 +221,8 @@ def _render(
     lines.append("    always @(posedge clk) begin")
     lines += _input_load_lines(in_slots, in_sel_width)
     lines += [f"        r_{s.port_name} <= dut_{s.port_name};" for s in out_slots]
-    lines += _output_mux_lines(out_slots, out_sel_width, io_out_width)
     lines.append("    end")
+    lines += _output_mux_lines(out_slots, out_sel_width, io_out_width)
 
     lines += ["endmodule", "", "`default_nettype wire", ""]
     return "\n".join(lines)
@@ -242,15 +243,16 @@ def _input_load_lines(in_slots: list[WordSlot], in_sel_width: int) -> list[str]:
 
 def _output_mux_lines(out_slots: list[WordSlot], out_sel_width: int, io_out_width: int) -> list[str]:
     if out_sel_width == 0:
-        only = out_slots[0]
-        return [f"        r_io_out <= {_zext(f'r_{only.port_name}', only.width, io_out_width)};"]
-    out = ["        case (out_sel)"]
+        return []
+    out = ["", "    always @* begin", "        case (out_sel)"]
     for s in out_slots:
         out.append(
-            f"            {out_sel_width}'d{s.selector}: r_io_out <= {_zext(f'r_{s.port_name}', s.width, io_out_width)};"
+            f"            {out_sel_width}'d{s.selector}: io_out_mux = "
+            f"{_zext(f'r_{s.port_name}', s.width, io_out_width)};"
         )
     out += [
-        f"            default: r_io_out <= {_zext(f'r_{out_slots[0].port_name}', out_slots[0].width, io_out_width)};",
+        f"            default: io_out_mux = {_zext(f'r_{out_slots[0].port_name}', out_slots[0].width, io_out_width)};",
         "        endcase",
+        "    end",
     ]
     return out

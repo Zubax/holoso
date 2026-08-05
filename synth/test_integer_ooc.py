@@ -548,12 +548,10 @@ module {top} (
     wire dut_saturated;
     {KEEP_ATTR} reg [{width - 1}:0] r_y;
     {KEEP_ATTR} reg r_saturated;
-    {KEEP_ATTR} reg r_dut_valid;
     {KEEP_ATTR} reg r_out_valid;
-    {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
 
     assign out_valid = r_out_valid;
-    assign io_out = r_io_out;
+    assign io_out = out_sel ? {{{width}{{r_saturated}}}} : r_y;
 
     {operator}#({parameters}) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .{first_operand_port}(r_a){operand_port},
@@ -564,15 +562,12 @@ module {top} (
 {operand_load}
         r_y <= dut_y;
         r_saturated <= dut_saturated;
-        r_io_out <= out_sel ? {{{width}{{r_saturated}}}} : r_y;
         if (rst) begin
             r_in_valid <= 1'b0;
-            r_dut_valid <= 1'b0;
             r_out_valid <= 1'b0;
         end else begin
             r_in_valid <= in_valid;
-            r_dut_valid <= dut_out_valid;
-            r_out_valid <= r_dut_valid;
+            r_out_valid <= dut_out_valid;
         end
     end
 endmodule
@@ -605,12 +600,19 @@ module {top} (
     {KEEP_ATTR} reg r_a_gt_b;
     {KEEP_ATTR} reg r_a_eq_b;
     {KEEP_ATTR} reg r_a_lt_b;
-    {KEEP_ATTR} reg r_dut_valid;
     {KEEP_ATTR} reg r_out_valid;
-    {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
+    reg [{width - 1}:0] io_out_mux;
 
     assign out_valid = r_out_valid;
-    assign io_out = r_io_out;
+    assign io_out = io_out_mux;
+
+    always @* begin
+        case (out_sel)
+            2'd0: io_out_mux = {{{zero_padding}, r_a_gt_b}};
+            2'd1: io_out_mux = {{{zero_padding}, r_a_eq_b}};
+            default: io_out_mux = {{{zero_padding}, r_a_lt_b}};
+        endcase
+    end
 
     holoso_icmp#(.W({width}), .LATENCY(2)) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a), .b(r_b), .out_valid(dut_out_valid),
@@ -623,19 +625,12 @@ module {top} (
         r_a_gt_b <= dut_a_gt_b;
         r_a_eq_b <= dut_a_eq_b;
         r_a_lt_b <= dut_a_lt_b;
-        case (out_sel)
-            2'd0: r_io_out <= {{{zero_padding}, r_a_gt_b}};
-            2'd1: r_io_out <= {{{zero_padding}, r_a_eq_b}};
-            default: r_io_out <= {{{zero_padding}, r_a_lt_b}};
-        endcase
         if (rst) begin
             r_in_valid <= 1'b0;
-            r_dut_valid <= 1'b0;
             r_out_valid <= 1'b0;
         end else begin
             r_in_valid <= in_valid;
-            r_dut_valid <= dut_out_valid;
-            r_out_valid <= r_dut_valid;
+            r_out_valid <= dut_out_valid;
         end
     end
 endmodule
@@ -667,12 +662,19 @@ module {top} (
     {KEEP_ATTR} reg [{width - 1}:0] r_shft;
     {KEEP_ATTR} reg [{width - 1}:0] r_prod;
     {KEEP_ATTR} reg r_saturated;
-    {KEEP_ATTR} reg r_dut_valid;
     {KEEP_ATTR} reg r_out_valid;
-    {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
+    reg [{width - 1}:0] io_out_mux;
 
     assign out_valid = r_out_valid;
-    assign io_out = r_io_out;
+    assign io_out = io_out_mux;
+
+    always @* begin
+        case (out_sel)
+            2'd0: io_out_mux = r_shft;
+            2'd1: io_out_mux = r_prod;
+            default: io_out_mux = {{{width}{{r_saturated}}}};
+        endcase
+    end
 
     holoso_ishift#(.W({width}), .LATENCY(2)) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
@@ -685,19 +687,12 @@ module {top} (
         r_shft <= dut_shft;
         r_prod <= dut_prod;
         r_saturated <= dut_saturated;
-        case (out_sel)
-            2'd0: r_io_out <= r_shft;
-            2'd1: r_io_out <= r_prod;
-            default: r_io_out <= {{{width}{{r_saturated}}}};
-        endcase
         if (rst) begin
             r_in_valid <= 1'b0;
-            r_dut_valid <= 1'b0;
             r_out_valid <= 1'b0;
         end else begin
             r_in_valid <= in_valid;
-            r_dut_valid <= dut_out_valid;
-            r_out_valid <= r_dut_valid;
+            r_out_valid <= dut_out_valid;
         end
     end
 endmodule
