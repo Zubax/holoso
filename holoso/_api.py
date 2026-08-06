@@ -140,6 +140,9 @@ class Options:
     usually saving DSP tiles and timing margin.
     """
 
+    ifconv_max_ops: int = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
+    """Per-arm budget for diamond if-conversion; 0=disable."""
+
     ucode_fetch_stages: int = 3
     """Controller fmax/latency trade-off: a deeper fetch raises fmax but costs idle refills on a mispredicted branch."""
 
@@ -158,6 +161,8 @@ class Options:
     def __post_init__(self) -> None:
         if self.wmultiplier is not None and self.wmultiplier < 2:
             raise ValueError(f"wmultiplier must be >= 2 when set, got {self.wmultiplier}")
+        if self.ifconv_max_ops < 0:
+            raise ValueError(f"ifconv_max_ops must be >= 0, got {self.ifconv_max_ops}")
         if self.ucode_fetch_stages < 1:
             raise ValueError(f"ucode_fetch_stages must be >= 1, got {self.ucode_fetch_stages}")
         if self.regalloc_effort < 0:
@@ -208,7 +213,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
             _logger.info("\t%s: %s", field.name, value)
 
     frontend = lower_frontend(target)
-    hir = optimize(frontend.hir)
+    hir = optimize(frontend.hir, options.ifconv_max_ops)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
     mir = lower_to_mir(hir, _build_op_config(options), options.ffmt, options.ifmt)

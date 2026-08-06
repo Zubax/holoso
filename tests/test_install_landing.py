@@ -9,18 +9,20 @@ output-redundant on the vectors. Only a structural invariant catches it. The che
 of any input vector, so it holds for the data-dependent branch/loop kernels (uart_rx error frames included) too.
 """
 
+import dataclasses
+
 import pytest
 
 import holoso
 from holoso import FloatFormat, FloatValue
 from holoso._eel import lower as lower_frontend
-from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import BoolWrite, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, WideCopy
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS, ExampleSpec
 from ._modelref import (
+    DEFAULT_IFCONV_MAX_OPS,
     DEFAULT_IFMT,
     Vector,
     assert_model_equals_interpreter,
@@ -35,7 +37,7 @@ from ._modelref import (
 def _build(spec: ExampleSpec) -> Lir:
     return build_lir(
         lower_to_mir(
-            optimize(lower_frontend(spec.make_kernel()).hir),
+            optimize(lower_frontend(spec.make_kernel()).hir, DEFAULT_IFCONV_MAX_OPS),
             default_ops(spec.formats[0]),
             spec.formats[0],
             DEFAULT_IFMT,
@@ -138,7 +140,7 @@ class _HoldOrUpdateBool:
         return out, self.s
 
 
-def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_state_read_sourced_install_is_inline_class() -> None:
     """
     A phi arm that is a STATE READ is resident at block entry (the slot register holds it from the start), so its tail
     install is inline-class -- the generalization's third source kind. Disable if-conversion so the diamond stays a real
@@ -147,11 +149,13 @@ def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPa
     held value is the OLD state across a hold/update sweep, which an early-read or clobbered state-read install would
     corrupt (the model vs a fresh Python reference, schedule-independent).
     """
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
-    options = default_options(FloatFormat(6, 18))
+    options = dataclasses.replace(default_options(FloatFormat(6, 18)), ifconv_max_ops=0)
     lir = build_lir(
         lower_to_mir(
-            optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir), build_ops(options), options.ffmt, options.ifmt
+            optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir, options.ifconv_max_ops),
+            build_ops(options),
+            options.ffmt,
+            options.ifmt,
         ),
         "hold_or_update_bool",
     )
@@ -200,7 +204,8 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     ops = default_ops(fmt)
     kernel = _LiveThroughArm().__call__
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt, DEFAULT_IFMT), "live_through_arm"
+        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT),
+        "live_through_arm",
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.wide_copies if not c.resident_source]
     assert cross, "the kernel no longer exercises a non-coalesced cross-block-source install; the shape changed"
@@ -249,7 +254,10 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     fmt = FloatFormat(8, 36)
     ops = default_ops(fmt)
     kernel = _LastWorkArmSource().__call__
-    lir = build_lir(lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt, DEFAULT_IFMT), "last_work_arm")
+    lir = build_lir(
+        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT),
+        "last_work_arm",
+    )
     pushed = [
         blk
         for blk in lir.blocks

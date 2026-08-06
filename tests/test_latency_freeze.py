@@ -30,7 +30,7 @@ from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS
-from ._modelref import DEFAULT_IFMT, build_lir, default_ops, default_options
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, default_ops, default_options
 
 # Kernel name -> frozen (min initiation interval, last microcode PC). last_pc is the out_valid boundary PC -- the
 # end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
@@ -74,7 +74,7 @@ def test_schedule_length_is_frozen(name: str) -> None:
     spec = _SPEC_BY_NAME[name]
     lir = build_lir(
         lower_to_mir(
-            optimize(lower_frontend(spec.make_kernel()).hir),
+            optimize(lower_frontend(spec.make_kernel()).hir, DEFAULT_IFCONV_MAX_OPS),
             default_ops(spec.formats[0]),
             spec.formats[0],
             DEFAULT_IFMT,
@@ -130,7 +130,13 @@ def test_chained_copy_schedule_is_frozen(
     name: str, kernel_cls: type[_Delay3] | type[_BoolShift3], frozen: tuple[int, int]
 ) -> None:
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel_cls().__call__).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), name
+        lower_to_mir(
+            optimize(lower_frontend(kernel_cls().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
+            default_ops(_FMT),
+            _FMT,
+            DEFAULT_IFMT,
+        ),
+        name,
     )
     slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
     assert all(

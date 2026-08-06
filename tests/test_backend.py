@@ -43,7 +43,7 @@ from holoso._lir import BoolRegRef, RegRef, pooled_write_word
 from holoso._mir import Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
-from ._modelref import DEFAULT_IFMT, build_lir, build_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_ops
 
 requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
 
@@ -64,7 +64,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig, fmt: FloatFormat) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops, fmt, DEFAULT_IFMT)
+    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:

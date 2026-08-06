@@ -26,7 +26,6 @@ from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOper
 from holoso._errors import UnsupportedConstruct
 from holoso._operators import Relation
 from holoso._eel import lower
-from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import (
     BoolOperand,
@@ -75,7 +74,7 @@ from holoso._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from ._modelref import DEFAULT_IFMT, build_lir, build_model
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_model
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType, ScalarType
 
@@ -127,8 +126,13 @@ class OtherMirInput(MirInput):
     pass
 
 
-def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops, fmt, DEFAULT_IFMT)
+def _run(
+    target: Callable[..., object],
+    ops: OpConfig = OPS,
+    fmt: FloatFormat = FMT,
+    ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
+) -> Mir:
+    return lower_to_mir(optimize(lower(target).hir, ifconv_max_ops), ops, fmt, DEFAULT_IFMT)
 
 
 def _view(mir: Mir) -> MirWideView:
@@ -503,7 +507,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
         ), f"reg {index}: landings {sorted(pcs)} not all model writebacks {sorted(actual.get(index, set()))}"
 
 
-def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bool_only_block_drains_at_the_work_boundary() -> None:
     # A drained block that does WORK carrying only boolean values at its boundary lands at boundary_step(makespan) (the
     # one bank-independent drain). The drain distinction that remains is the install's SOURCE, not its bank: a tail
     # INSTALL whose source is COMPUTED in-block reads-first one step past the work makespan (its block_makespan absorbs
@@ -537,7 +541,6 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
     # forced by ``return r, <arm>`` keeping the c-false arm live past the merge so it cannot coalesce onto the phi
     # register; if-conversion is disabled so each diamond stays a real branch rather than collapsing to a select.
     # (In-place state commit elided the former majority_voter sticky-fault installs.)
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
 
     def bool_install_blocks(lir: Lir) -> list[LirBlock]:  # bool-only blocks carrying a tail bool install
         return [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]
@@ -549,7 +552,9 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
             r = a or b
         return r, x
 
-    computed = bool_install_blocks(build_lir(_run(computed_source_install), "computed_source_install"))
+    computed = bool_install_blocks(
+        build_lir(_run(computed_source_install, ifconv_max_ops=0), "computed_source_install")
+    )
     assert computed and all(
         not w.resident_source for b in computed for w in b.bool_writes
     ), "no computed-source bool install to exercise the later-draining case"
@@ -564,7 +569,9 @@ def test_bool_only_block_drains_at_the_work_boundary(monkeypatch: pytest.MonkeyP
             r = a and b
         return r, a
 
-    resident = bool_install_blocks(build_lir(_run(resident_source_install), "resident_source_install"))
+    resident = bool_install_blocks(
+        build_lir(_run(resident_source_install, ifconv_max_ops=0), "resident_source_install")
+    )
     assert resident and all(
         w.resident_source for b in resident for w in b.bool_writes
     ), "no resident-source bool install to exercise the inline-class drain"
@@ -1438,9 +1445,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     assert operand_read_cycle(op.inst.operator, op.issue_cycle, _FETCH_LAG) == op.issue_cycle + _FETCH_LAG
 
 
-def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # the subject is the branchy phi-copy machinery
-
+def test_cfg_phi_merge_register_shows_residence() -> None:
     # A diamond merging two CONSTANT arms: constants are not register-backed, so neither coalesces -- the merged
     # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Before
     # phi-copy residence was added to reg_liveness, such a register had a use but no def and so collapsed to an empty
@@ -1452,7 +1457,7 @@ def test_cfg_phi_merge_register_shows_residence(monkeypatch: pytest.MonkeyPatch)
             z = 2.0
         return z
 
-    lir = build_lir(_run(f), "diamond")
+    lir = build_lir(_run(f, ifconv_max_ops=0), "diamond")
     assert any(block.wide_copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
     (out,) = lir.wide_outputs
     assert isinstance(out.tap.source, RegRef)
@@ -1509,9 +1514,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
     assert abs(first - 2.0) < 1e-3 and 2.5 < second < 3.0
 
 
-def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # the subject is branch-condition register reuse
-
+def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
     # Sequential data-dependent branches: each condition is computed, tested at its boundary, and dead before the next,
     # so the boolean bank reuses one register across them instead of allocating one per branch.
     def f(x: float, y: float, z: float) -> float:
@@ -1524,7 +1527,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers(monkeypatch: pytest.Monke
             a = a + 4.0
         return a
 
-    lir = build_lir(_run(f), "branches")
+    lir = build_lir(_run(f, ifconv_max_ops=0), "branches")
     comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons
@@ -1544,12 +1547,10 @@ def _coalescing_self_copies(lir: Lir) -> int:
     )
 
 
-def test_diamond_op_result_arms_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_diamond_op_result_arms_coalesce() -> None:
     # A forced float diamond merges two op-result arms in mutually exclusive blocks; with no interference they coalesce
     # onto the merged register, so the phi installs NO copy at all (and certainly no no-op self-copy). The result stays
     # correct on both arms -- bit-exact value preservation against the RTL is the cosim's job; here we pin the win.
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real phi merge, not a select
-
     def f(x: float, y: float) -> float:
         if x > 0.0:
             z = x + y
@@ -1557,7 +1558,7 @@ def test_diamond_op_result_arms_coalesce(monkeypatch: pytest.MonkeyPatch) -> Non
             z = x * y
         return z * x  # an operator use of the merged value, not only the boundary output
 
-    lir = build_lir(_run(f), "phicoal")
+    lir = build_lir(_run(f, ifconv_max_ops=0), "phicoal")
     assert (
         sum(len(b.wide_copies) for b in lir.blocks) == 0
     ), "the diamond's op-result arms must coalesce away their copies"

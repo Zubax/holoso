@@ -1,5 +1,6 @@
 """Unit tests for HIR optimization and MIR selection passes."""
 
+import dataclasses
 import math
 import sys
 from collections.abc import Callable
@@ -91,8 +92,7 @@ from holoso._hir import (
     IntToFloat,
     IntType,
 )
-from holoso._hir import _if_convert as if_convert_pass
-from ._modelref import DEFAULT_IFMT, build_lir
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
@@ -142,7 +142,7 @@ class OtherFold(Operator):
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), ops, fmt, DEFAULT_IFMT)
+    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT)
 
 
 def _op_count(mir: Mir, cls: type) -> int:
@@ -208,7 +208,7 @@ def test_hir_constant_folding_returns_float_const() -> None:
     def f() -> float:
         return 1.25 + 2.0
 
-    hir = optimize(lower(f).hir)
+    hir = optimize(lower(f).hir, DEFAULT_IFCONV_MAX_OPS)
     node = hir.nodes[hir.outputs[0].value]
     assert isinstance(node, FloatConst)
     assert node.value == 3.25
@@ -222,7 +222,7 @@ def test_hir_constant_folding_preserves_const_subclass() -> None:
     builder.output("out_0", y)
     builder.ret()
 
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     node = hir.nodes[hir.outputs[0].value]
     assert isinstance(node, OtherConst)
     assert node.value == 11
@@ -435,7 +435,7 @@ def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
     builder.output("or_id", builder.operation(BoolOr(), [x, false_]))
     builder.output("and_id", builder.operation(BoolAnd(), [x, true_]))
     builder.ret()
-    reduced = optimize(builder.finish())
+    reduced = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     out = {o.name: reduced.nodes[o.value] for o in reduced.outputs}
     assert out["or_abs"] == BoolConst(True)  # x or True  -> True   (absorbing)
     assert out["and_abs"] == BoolConst(False)  # x and False -> False  (absorbing)
@@ -443,8 +443,8 @@ def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
     assert isinstance(out["and_id"], InPort) and out["and_id"].name == "x"  # x and True -> x  (identity dropped)
 
 
-def _hir_of(target: object) -> Hir:
-    return optimize(lower(target).hir)
+def _hir_of(target: object, ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Hir:
+    return optimize(lower(target).hir, ifconv_max_ops)
 
 
 def test_if_conversion_collapses_a_pure_diamond() -> None:
@@ -475,23 +475,35 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
     assert not any(isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values())
 
 
-def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 1)
-
+def test_if_conversion_respects_the_arm_size_budget() -> None:
     def f(a: float, b: float) -> float:
         if a > b:
-            y = (a + b) * a + b  # three operations: over the per-arm budget of one
+            y = (a + b) * a + b  # three operations, one over the budget below
         else:
-            y = a - b
+            y = a - b  # a negate and an add: exactly at the budget, so only the then-arm can refuse
         return y
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 4
+    assert len(_hir_of(f, 2).blocks) == 4
+    assert len(_hir_of(f, 3).blocks) == 1
 
 
-def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
+def test_if_conversion_knob_zero_disables_the_pass() -> None:
+    # Operation-free arms: they fit every budget including zero, so only the disable can keep the diamond a branch.
+    def f(a: float, b: float) -> float:
+        if a > b:
+            y = 1.0
+        else:
+            y = 2.0
+        return y
 
+    assert len(_hir_of(f, 1).blocks) == 1
+    hir = _hir_of(f, 0)
+    assert len(hir.blocks) == 4 and not any(
+        isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values()
+    )
+
+
+def test_synthesize_honors_the_ifconv_option() -> None:
     def f(a: float, b: float) -> float:
         if a > b:
             y = a + b
@@ -499,10 +511,34 @@ def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPat
             y = a - b
         return y
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 4 and not any(
-        isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values()
-    )
+    # A converted diamond leaves one straight-line block, so the II is exact; a surviving branch makes it data-dependent.
+    options = Options(OperatorOptions(fadd=FAddOptions(), fcmp=FCmpOptions()), ffmt=FMT, ifconv_max_ops=2)
+    assert holoso.synthesize(f, options, name="ifconv_on").initiation_interval[1] is not None
+    disabled = dataclasses.replace(options, ifconv_max_ops=0)
+    assert holoso.synthesize(f, disabled, name="ifconv_off").initiation_interval[1] is None
+
+
+def test_ifconv_budget_changes_the_schedule_but_never_the_result() -> None:
+    # The knob's whole contract. The II inequality is what keeps it honest: without it the comparison would still
+    # pass if the budget stopped having any effect at all.
+    def f(a: float, b: float, c: float) -> float:
+        if a > b:
+            y = a + b
+        else:
+            y = a * c
+        if y > c:
+            z = y + 1.0
+        else:
+            z = y - c
+        return z
+
+    options = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(), fcmp=FCmpOptions()), ffmt=FMT)
+    branchy = holoso.synthesize(f, dataclasses.replace(options, ifconv_max_ops=0), name="ifconv_branchy")
+    converted = holoso.synthesize(f, dataclasses.replace(options, ifconv_max_ops=64), name="ifconv_converted")
+    assert branchy.initiation_interval != converted.initiation_interval, "the budget no longer moves the schedule"
+    left, right = branchy.numerical_model.elaborate(), converted.numerical_model.elaborate()
+    for a, b, c in [(1.0, 0.5, 2.0), (0.5, 1.0, -2.0), (-3.0, -4.0, 0.25), (0.0, 0.0, 1.0), (2.0, 2.0, -1.0)]:
+        assert left.run(a, b, c) == right.run(a, b, c), f"if-conversion changed the result at ({a}, {b}, {c})"
 
 
 def test_if_conversion_converts_a_boolean_phi_merge() -> None:
@@ -866,7 +902,7 @@ def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_valu
     builder.output("masked_off", builder.operation(IntBwAnd(), [n, zero]))
     builder.ret()
 
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     outputs = {out.name: hir.nodes[out.value] for out in hir.outputs}
     assert isinstance(outputs["identities"], InPort), "every identity must drop, leaving the input itself"
     assert outputs["killed"] == outputs["masked_off"] == IntConst(0)
@@ -884,7 +920,7 @@ def test_a_constant_integer_expression_folds_away_entirely() -> None:
     builder.output("y", builder.operation(IntToFloat(), [value]))
     builder.ret()
 
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     (out,) = hir.outputs
     assert hir.nodes[out.value] == FloatConst(float(5 * 2**200))
@@ -919,7 +955,7 @@ def test_integer_folding_is_exact_across_the_vocabulary() -> None:
         builder.block()
         builder.output("y", builder.operation(operator, [builder.int_const(operand) for operand in operands]))
         builder.ret()
-        hir = optimize(builder.finish())
+        hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
         assert not [node for node in hir.nodes.values() if isinstance(node, Operation)], operator
         assert hir.nodes[hir.outputs[0].value] == IntConst(expected), operator
 
@@ -936,7 +972,7 @@ def test_integer_folding_has_no_size_limit() -> None:
     )
     builder.ret()
 
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
     lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT)  # nothing integer survives, however wide the intermediate was
@@ -975,7 +1011,7 @@ def _wrapped_infinity_times_zero(wrapper: Operator) -> Hir:
     wrapped = builder.operation(wrapper, [builder.float_const(math.inf)])
     builder.output("y", builder.operation(FloatMul(), [wrapped, builder.float_const(0.0)]))
     builder.ret()
-    return optimize(builder.finish())
+    return optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
 
 
 def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression() -> None:
@@ -1001,7 +1037,7 @@ def test_a_self_division_erases_an_operand_that_names_no_number() -> None:
     settled = builder.operation(FloatAdd(), [builder.float_const(math.inf), builder.float_const(-math.inf)])
     builder.output("y", builder.operation(HirFloatDiv(), [settled, settled]))
     builder.ret()
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     assert hir.nodes[hir.outputs[0].value] == FloatConst(1.0)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
 
@@ -1039,7 +1075,7 @@ def test_an_operand_known_only_through_a_merge_still_blocks_the_identity(operato
     builder.output("y", builder.operation(operator, [infinite, builder.float_const(other)]))
     builder.ret()
     with pytest.raises(SynthesisError, match="names no number"):
-        optimize(builder.finish())
+        optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
 
 
 @pytest.mark.parametrize(
@@ -1085,7 +1121,7 @@ def test_a_constant_condition_selects_a_mux_arm_in_every_scalar_family() -> None
     )
     builder.ret()
 
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     chosen = {out.name: hir.nodes[out.value] for out in hir.outputs}
     assert chosen["float"] == FloatConst(3.0)
     assert chosen["bool"] == BoolConst(True)
@@ -1103,7 +1139,7 @@ def test_the_integer_float_round_trip_is_not_an_identity() -> None:
     n = builder.input("n", IntType())
     builder.output("y", builder.operation(FloatToInt(), [builder.operation(IntToFloat(), [n])]))
     builder.ret()
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     assert [node.operator for node in hir.nodes.values() if isinstance(node, Operation)] == [IntToFloat(), FloatToInt()]
 
     def constant_round_trip(value: int) -> Hir:
@@ -1113,7 +1149,7 @@ def test_the_integer_float_round_trip_is_not_an_identity() -> None:
             "y", builder.operation(FloatToInt(), [builder.operation(IntToFloat(), [builder.int_const(value)])])
         )
         builder.ret()
-        return optimize(builder.finish())
+        return optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
 
     assert constant_round_trip(5).nodes[constant_round_trip(5).outputs[0].value] == IntConst(5)
     rounded = constant_round_trip(2**53 + 1)
@@ -1131,7 +1167,7 @@ def test_the_float_integer_round_trip_is_a_truncation() -> None:
     builder.output("idempotent", builder.operation(FloatTrunc(), [builder.operation(FloatFloor(), [x])]))
     builder.ret()
 
-    hir = optimize(builder.finish())
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     operators = sorted((n.operator for n in hir.nodes.values() if isinstance(n, Operation)), key=lambda op: op.mnemonic)
     assert operators == [FloatFloor(), FloatTrunc()]
     assert hir.nodes[hir.outputs[0].value] == Operation(FloatTrunc(), (hir.input_ids[0],))
@@ -1150,7 +1186,7 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
         result = builder.operation(IntToFloat(), [result])
     builder.output("y", result)
     builder.ret()
-    return optimize(builder.finish())
+    return optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
 
 
 @pytest.mark.parametrize(
@@ -1236,7 +1272,7 @@ def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
             y = y + 1.0
         return y
 
-    hir = optimize(lower(never_returns).hir)
+    hir = optimize(lower(never_returns).hir, DEFAULT_IFCONV_MAX_OPS)
     assert any(isinstance(block.terminator, Ret) for block in hir.blocks)
     quotients = [
         node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)

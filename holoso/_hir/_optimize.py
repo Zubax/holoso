@@ -4,7 +4,7 @@ from . import _dce, _if_convert, _refuse_nameless, _strength_reduce, _thread_mer
 from ._ir import Hir
 
 
-def optimize(hir: Hir) -> Hir:
+def optimize(hir: Hir, ifconv_max_ops: int) -> Hir:
     """
     Run all hardware-agnostic HIR optimizations. Strength reduction folds and rewrites in one reverse-postorder walk,
     so a chain of dependent reductions collapses in a single pass. If-conversion runs after it (the constant conditions
@@ -22,7 +22,7 @@ def optimize(hir: Hir) -> Hir:
     inlining substituted into the graph.
     """
     hir = _strength_reduce.run(hir)
-    hir = _if_convert.run(hir)
+    hir = _if_convert.run(hir, ifconv_max_ops)
     hir = _strength_reduce.run(hir)
     hir = _thread_merges.run(hir)
     hir = _dce.run(hir)

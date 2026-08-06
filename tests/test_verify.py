@@ -22,10 +22,9 @@ from holoso import (
     Options,
     UnsupportedConstruct,
 )
-from ._modelref import DEFAULT_IFMT, build_lir, build_model, default_options, generate
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_model, default_options, generate
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._hir import _if_convert as if_convert_pass
 from holoso._lir import Lir, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import Mir, lower as lower_to_mir
@@ -84,8 +83,8 @@ def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
         assert all(math.isfinite(float(v)) for v in out), f"log2 sideband at note={x}: {[float(v) for v in out]}"
 
 
-def _run(target: Callable[..., object]) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir), OPS, FMT, DEFAULT_IFMT)
+def _run(target: Callable[..., object], ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Mir:
+    return lower_to_mir(optimize(lower(target).hir, ifconv_max_ops), OPS, FMT, DEFAULT_IFMT)
 
 
 def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
@@ -391,7 +390,9 @@ def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
             ffmt=fmt,
         )
     )
-    model = build_model(build_lir(lower_to_mir(optimize(lower(f).hir), ops, fmt, DEFAULT_IFMT), "f"))
+    model = build_model(
+        build_lir(lower_to_mir(optimize(lower(f).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT), "f")
+    )
     assert model.run(FloatValue.from_float(fmt, 0.5))[0] == FloatValue.from_float(fmt, 8.0)
 
 
@@ -436,7 +437,7 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
             ffmt=fmt,
         )
     )
-    mir = lower_to_mir(optimize(lower(f).hir), ops, fmt, DEFAULT_IFMT)
+    mir = lower_to_mir(optimize(lower(f).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT)
     model = build_model(build_lir(mir, "f"))
     got = model.run(
         FloatValue.from_bits(fmt, 0x42BF30E6505),
@@ -1097,7 +1098,7 @@ def test_inplace_multiarm_float_phi() -> None:
         assert float(model.run(x)[0]) == reference(x)
 
 
-def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_state_livein_feeding_another_slot_phi_does_not_coalesce() -> None:
     class LiveInFeedsAnotherSlotPhi:
         # Regression: slot ``x``'s live-in is the if-arm of slot ``w``'s phi. ``x``'s live-out must NOT coalesce in
         # place -- the residual install of ``w``'s arm reads x's live-in at the predecessor tail where x's in-place
@@ -1116,8 +1117,7 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: py
                 self.w = 0.0
             return self.x, self.w
 
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamond a real branch with phis
-    lir = build_lir(_run(LiveInFeedsAnotherSlotPhi().__call__), "livein_other_slot")  # must not crash the colorer
+    lir = build_lir(_run(LiveInFeedsAnotherSlotPhi().__call__, ifconv_max_ops=0), "livein_other_slot")
     assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
     model = build_model(lir)
     reference = LiveInFeedsAnotherSlotPhi()
@@ -1128,7 +1128,7 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce(monkeypatch: py
         assert (got["state_x"], got["state_w"]) == (want_x, want_w), (cond, y, got)
 
 
-def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_state_livein_feeding_unrelated_phi_does_not_coalesce() -> None:
     class LiveInFeedsUnrelatedPhi:
         # Regression: slot ``x``'s live-in is an arm of an unrelated (non-state) phi. With x's live-out coalesced and
         # the slot register unreserved, the unrelated phi could absorb x's live-in and inherit the slot pin, colliding
@@ -1142,8 +1142,7 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce(monkeypatch: pytes
             self.x = 1.0 if cond else 2.0
             return new_y, self.x
 
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the diamonds real branches with phis
-    lir = build_lir(_run(LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")  # must not crash the colorer
+    lir = build_lir(_run(LiveInFeedsUnrelatedPhi().__call__, ifconv_max_ops=0), "livein_unrelated")
     assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
     model = build_model(lir)
     reference = LiveInFeedsUnrelatedPhi()
@@ -1630,13 +1629,11 @@ def test_merged_state_slots_preserve_behaviour() -> None:
     assert_model_equals_interpreter(model, interpreter, vectors, "pfd_merge")
 
 
-def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_aliased_slot_with_phi_live_in_builds() -> None:
     # Regression (review): aliased state slots whose shared live-out is a SURVIVING phi (real branch, if-conversion
     # disabled) must compile. The drop is gated off phi live-outs: an earlier register-pinning merge tripped a
     # coloring/backstop assert on these shapes, and an ungated drop tripped a phi-install-past-terminator assert. Both
     # attribute orders and a phi-of-inputs shape are exercised; the un-merged builds must still match the interpreter.
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)  # keep the phi so the aliased live-in is read at a merge
-
     class Forward:
         def __init__(self) -> None:
             self.x = 0.0
@@ -1672,9 +1669,9 @@ def test_aliased_slot_with_phi_live_in_builds(monkeypatch: pytest.MonkeyPatch) -
 
     vectors: list[list[FloatValue | bool]] = [[True], [False], [True], [True], [False], [False], [True]]
     for cls in (Forward, Reversed):
-        model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__, FMT)
+        model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__, FMT, ifconv_max_ops=0)
         assert_model_equals_interpreter(model, interpreter, vectors, cls.__name__)
-    build_lir(_run(InputPhi().__call__), "input_phi_alias")  # phi-of-inputs shape must compile
+    build_lir(_run(InputPhi().__call__, ifconv_max_ops=0), "input_phi_alias")  # phi-of-inputs shape must compile
 
 
 def test_polar_example_round_trip_and_native_reference() -> None:

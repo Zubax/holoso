@@ -35,7 +35,7 @@ from holoso._lir import pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
-from .._modelref import DEFAULT_IFMT, build_lir, build_ops
+from .._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_ops
 
 FMT = FloatFormat(6, 18)
 
@@ -96,7 +96,10 @@ async def err_pc_latches_div0(dut: Any) -> None:
 @pytest.mark.parametrize("stage_output", [0, 1])
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_pc(sim: str, stage_output: int) -> None:
-    lir = build_lir(lower_to_mir(optimize(lower(_divide).hir), _ops(stage_output), FMT, DEFAULT_IFMT), "divide")
+    lir = build_lir(
+        lower_to_mir(optimize(lower(_divide).hir, DEFAULT_IFCONV_MAX_OPS), _ops(stage_output), FMT, DEFAULT_IFMT),
+        "divide",
+    )
     # The fdiv asserts div0 at its commit; err_pc latches the write word -- the
     # commit step itself (pooled_write_word). An fdiv output stage pushes the commit later, and the err flag and the
     # result still latch/land together: err_step is recomputed from this build's actual fdiv commit.

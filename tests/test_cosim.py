@@ -28,6 +28,7 @@ from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
 from ._modelref import (
+    DEFAULT_IFCONV_MAX_OPS,
     DEFAULT_IFMT,
     build_ops,
     build_lir,
@@ -412,7 +413,9 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"kdiv_{config.label}"
-    lir = build_lir(lower_to_mir(optimize(lower(kdiv).hir), config.make_ops(fmt), fmt, DEFAULT_IFMT), name)
+    lir = build_lir(
+        lower_to_mir(optimize(lower(kdiv).hir, DEFAULT_IFCONV_MAX_OPS), config.make_ops(fmt), fmt, DEFAULT_IFMT), name
+    )
     bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -475,7 +478,9 @@ def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
 
     fmt = FloatFormat(6, 18)
     name = f"klog2_{config.label}"
-    lir = build_lir(lower_to_mir(optimize(lower(klog2).hir), config.make_ops(fmt), fmt, DEFAULT_IFMT), name)
+    lir = build_lir(
+        lower_to_mir(optimize(lower(klog2).hir, DEFAULT_IFCONV_MAX_OPS), config.make_ops(fmt), fmt, DEFAULT_IFMT), name
+    )
     bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
     _run_err_bench(sim, name, fmt, lir, bench)
 
@@ -542,7 +547,10 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
     lir = build_lir(
-        lower_to_mir(optimize(lower(overlap_div_err_kernel).hir), config.make_ops(fmt), fmt, DEFAULT_IFMT), name
+        lower_to_mir(
+            optimize(lower(overlap_div_err_kernel).hir, DEFAULT_IFCONV_MAX_OPS), config.make_ops(fmt), fmt, DEFAULT_IFMT
+        ),
+        name,
     )
     entry = next(block for block in lir.blocks if block.index == lir.entry)
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]

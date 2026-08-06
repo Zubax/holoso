@@ -22,7 +22,7 @@ from holoso._hir import optimize
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFMT, build_lir, default_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, default_ops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -66,7 +66,10 @@ def _drive(model: NumericalSimulator, inputs: list[ModelInput]) -> tuple[list[Mo
 def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., object]]) -> None:
     # The hand-driven tick loop and the run() convenience must produce the same outputs: run() is just a tick
     # driver, and the cycle count it would observe is the loop count below.
-    lir = build_lir(lower_to_mir(optimize(lower(factory()).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), name)
+    lir = build_lir(
+        lower_to_mir(optimize(lower(factory()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT),
+        name,
+    )
     by_tick = NumericalSimulator(lir)
     by_call = NumericalSimulator(lir)
     rng = random.Random(1)
@@ -88,7 +91,10 @@ def test_single_path_latency_is_the_static_initiation_interval(name: str) -> Non
         "ekf1_stateless": lambda: update_x_P,
     }
     factory = factories[name]
-    lir = build_lir(lower_to_mir(optimize(lower(factory()).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), name)
+    lir = build_lir(
+        lower_to_mir(optimize(lower(factory()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT),
+        name,
+    )
     model = NumericalSimulator(lir)
     rng = random.Random(7)
     for _ in range(8):
@@ -100,7 +106,13 @@ def test_loop_latency_grows_with_the_trip_count() -> None:
     # Newton's reciprocal iterates until convergence, so a harder input runs more loop trips and a strictly longer
     # transaction -- the data-dependent latency a fixed ``initiation_interval`` cannot express.
     lir = build_lir(
-        lower_to_mir(optimize(lower(NewtonReciprocal().__call__).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), "recip"
+        lower_to_mir(
+            optimize(lower(NewtonReciprocal().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
+            default_ops(_FMT),
+            _FMT,
+            DEFAULT_IFMT,
+        ),
+        "recip",
     )
     model = NumericalSimulator(lir)
     latencies = {_drive(model, [x])[1] for x in (0.5, 0.9, 1.3, 1.7, 2.5, 3.5, 6.0, 12.0)}
@@ -112,7 +124,10 @@ def test_deep_loop_runs_in_bounded_memory() -> None:
     # The per-clock model holds only the register files and a small in-flight buffer, so a loop with a very high trip
     # count executes without unbounded growth. ``count_down`` runs ``n`` iterations; at n=20000 that is hundreds of
     # thousands of ticks completing in bounded memory and time -- a global-timeline design would be O(trips^2).
-    lir = build_lir(lower_to_mir(optimize(lower(_count_down).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), "count_down")
+    lir = build_lir(
+        lower_to_mir(optimize(lower(_count_down).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT),
+        "count_down",
+    )
     shallow_cycles = _drive(NumericalSimulator(lir), [10.0])[1]
     model = NumericalSimulator(lir)
     out, deep_cycles = _drive(model, [20000.0])
@@ -179,7 +194,10 @@ def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
     # re-inflates the count, amplified across loop trips. Freezing the post-optimization figure makes the gate fail on
     # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is ``<=``).
     factory, vectors, worst = _WORST_CASE_LATENCY[name]
-    lir = build_lir(lower_to_mir(optimize(lower(factory()).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), name)
+    lir = build_lir(
+        lower_to_mir(optimize(lower(factory()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT),
+        name,
+    )
     model = NumericalSimulator(lir)
     waited = [_drive(model, inputs)[1] for inputs in vectors]
     assert max(waited) <= worst, f"{name}: realized worst-case latency regressed {worst} -> {max(waited)} ({waited})"

@@ -39,6 +39,16 @@ type Path = tuple[int | str, ...]
 
 type Vector = list[FloatValue | bool]
 
+# What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
+_DEFAULTS = Options(OperatorOptions())
+DEFAULT_IFCONV_MAX_OPS: int = _DEFAULTS.ifconv_max_ops
+DEFAULT_IFMT: IntFormat = _DEFAULTS.ifmt
+DEFAULT_TUNING = RegallocTuning(
+    effort=_DEFAULTS.regalloc_effort,
+    reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,
+    register_price=_DEFAULTS.regalloc_register_price,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class OperatorCase:
@@ -52,7 +62,11 @@ def build_model(lir: Lir) -> NumericalSimulator:
 
 
 def build_model_and_interpreter(
-    kernel: Callable[..., object], ops: OpConfig, name: str, fmt: FloatFormat
+    kernel: Callable[..., object],
+    ops: OpConfig,
+    name: str,
+    fmt: FloatFormat,
+    ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
@@ -60,7 +74,7 @@ def build_model_and_interpreter(
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt, DEFAULT_IFMT)
+    mir = lower_to_mir(optimize(lower_frontend(kernel).hir, ifconv_max_ops), ops, fmt, DEFAULT_IFMT)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 
@@ -213,16 +227,6 @@ DEFAULT_FETCH_STAGES = 3
 
 # Restated as literals so the frozen metric baselines cannot move with the environment overrides below.
 SHIPPED_TUNING = RegallocTuning(effort=5000, reuse_write_cap=2, register_price=2.0)
-
-
-# What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
-_DEFAULTS = Options(OperatorOptions())
-DEFAULT_IFMT: IntFormat = _DEFAULTS.ifmt
-DEFAULT_TUNING = RegallocTuning(
-    effort=_DEFAULTS.regalloc_effort,
-    reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,
-    register_price=_DEFAULTS.regalloc_register_price,
-)
 
 
 def build_lir(mir: Mir, name: str, tuning: RegallocTuning = DEFAULT_TUNING) -> Lir:

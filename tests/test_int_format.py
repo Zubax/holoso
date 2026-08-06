@@ -129,7 +129,9 @@ def test_default_options_carry_the_documented_int_format() -> None:
 def test_configured_int_format_reaches_the_scheduled_machine() -> None:
     ifmt = IntFormat(17)
     options = dataclasses.replace(default_options(FMT), ifmt=ifmt)
-    mir = lower_to_mir(optimize(lower_frontend(_add).hir), build_ops(options), options.ffmt, options.ifmt)
+    mir = lower_to_mir(
+        optimize(lower_frontend(_add).hir, options.ifconv_max_ops), build_ops(options), options.ffmt, options.ifmt
+    )
     assert mir.int_format == ifmt
     assert build_lir(mir, "int_format_probe").int_format == ifmt
 

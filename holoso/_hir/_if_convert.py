@@ -12,13 +12,12 @@ after this pass. Conversion turns control dependence into data dependence: a dia
 unused frees its condition cone for DCE like any other dead code, so an error-bearing operation feeding only such a
 condition stops reporting -- consistent with the error sideband's contract (executed operators only).
 
-Both arms are computed, so conversion only pays where arms are cheap: the per-arm operation budget is the
-HOLOSO_IFCONV_MAX_OPS knob. A boolean mux's constant arms (the common True/False of a state-machine merge)
+Both arms are computed, so conversion only pays where arms are cheap: the per-arm operation budget is
+``Options.ifconv_max_ops``. A boolean mux's constant arms (the common True/False of a state-machine merge)
 reduce to and/or/not in the strength-reduction pass that re-runs after if-conversion.
 """
 
 import logging
-import os
 
 from ._const import BoolConst
 from .._util import BlockId
@@ -26,16 +25,14 @@ from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumbe
 from ._operators import BoolSelect, FloatSelect, IntSelect
 from ._types import BoolType, FloatType, IntType
 
-_IFCONV_MAX_OPS = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))  # 0 to disable
-
 _logger = logging.getLogger(__name__)
 
 
-def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, pred: BlockId) -> bool:
+def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, pred: BlockId, max_ops: int) -> bool:
     """A convertible arm: single-pred from ``pred``, phi-free, all-speculatable ops within budget, one Jump out."""
     if preds[arm.id] != {pred} or arm.phis or not isinstance(arm.terminator, Jump):
         return False
-    if len(arm.operations) > _IFCONV_MAX_OPS:
+    if len(arm.operations) > max_ops:
         return False
     for vid in arm.operations:
         node = hir.nodes[vid]
@@ -45,7 +42,9 @@ def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, p
     return True
 
 
-def _find_diamond(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, Block, Block, Block] | None:
+def _find_diamond(
+    hir: Hir, preds: dict[BlockId, set[BlockId]], max_ops: int
+) -> tuple[Block, Block, Block, Block] | None:
     """The first convertible diamond ``(P, T, F, M)`` in block order, or None."""
     blocks_by_id = {block.id: block for block in hir.blocks}
     for block in hir.blocks:
@@ -59,7 +58,10 @@ def _find_diamond(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, 
             # pin the untaken arm live through the select forever.
             continue
         arm_t, arm_f = blocks_by_id[block.terminator.if_true], blocks_by_id[block.terminator.if_false]
-        if not (_arm_convertible(hir, preds, arm_t, block.id) and _arm_convertible(hir, preds, arm_f, block.id)):
+        if not (
+            _arm_convertible(hir, preds, arm_t, block.id, max_ops)
+            and _arm_convertible(hir, preds, arm_f, block.id, max_ops)
+        ):
             continue
         assert isinstance(arm_t.terminator, Jump) and isinstance(arm_f.terminator, Jump)
         if arm_t.terminator.target != arm_f.terminator.target:
@@ -112,11 +114,12 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
-def run(hir: Hir) -> Hir:
-    if _IFCONV_MAX_OPS <= 0:
+def run(hir: Hir, max_ops: int) -> Hir:
+    assert max_ops >= 0
+    if max_ops == 0:
         return hir
     converted = 0
-    while (diamond := _find_diamond(hir, predecessors(hir.blocks))) is not None:
+    while (diamond := _find_diamond(hir, predecessors(hir.blocks), max_ops)) is not None:
         hir = _splice(hir, diamond)
         converted += 1
     if converted:

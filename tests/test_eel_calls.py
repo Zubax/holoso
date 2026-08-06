@@ -21,6 +21,7 @@ from holoso._errors import SynthesisError, UnsupportedConstruct
 from holoso._hir import IntSelect, Operation, optimize
 
 from ._eeloracle import assert_hir_matches_reference
+from ._modelref import DEFAULT_IFCONV_MAX_OPS
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -45,7 +46,7 @@ def _residual_text(fn: Callable[..., object]) -> str:
 
 
 def _lowered_ops(fn: Callable[..., object]) -> list[str]:
-    hir = optimize(lower(fn).hir)
+    hir = optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS)
     return [type(node.operator).__name__ for node in hir.nodes.values() if isinstance(node, Operation)]
 
 
@@ -127,7 +128,7 @@ def test_a_symbol_whose_python_answer_is_an_integer_lowers_over_integers() -> No
     _oracle(_min_max_of_ints, [{"a": 3, "b": 5}, {"a": 5, "b": 3}, {"a": -4, "b": -4}])
     _oracle(_sign_of_int, [{"n": -9}, {"n": 0}, {"n": 2}])
     # The compare-and-select entries cost one mux rather than control flow, which is if-conversion's doing.
-    hir = optimize(lower(_min_max_of_ints).hir)
+    hir = optimize(lower(_min_max_of_ints).hir, DEFAULT_IFCONV_MAX_OPS)
     assert sum(isinstance(node, Operation) and isinstance(node.operator, IntSelect) for node in hir.nodes.values()) == 2
     assert len(hir.blocks) == 1
 
@@ -174,7 +175,7 @@ def test_a_rounding_answers_what_its_own_spelling_answers() -> None:
     _oracle(_math_roundings_of_a_float, vectors)
     _oracle(_numpy_roundings_of_a_float, vectors)
     # The cast costs nothing where a float consumes the result: it reduces back to the bare rounder.
-    hir = optimize(lower(_floor_consumed_as_a_float).hir)
+    hir = optimize(lower(_floor_consumed_as_a_float).hir, DEFAULT_IFCONV_MAX_OPS)
     lowered = [type(node.operator).__name__ for node in hir.nodes.values() if isinstance(node, Operation)]
     assert lowered == ["FloatFloor"]
 
@@ -308,7 +309,7 @@ def test_static_negative_base_powers_fold_through_the_stub_parity_lane() -> None
     assert "-128.0" in _residual_text(_neg_base_odd_exponent)
     _oracle(_dead_static_pow_fault, [{"x": 3.5}])
     with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_neg_base_fractional_exponent).hir)
+        optimize(lower(_neg_base_fractional_exponent).hir, DEFAULT_IFCONV_MAX_OPS)
 
 
 def _pow_static_int_pair(n: int) -> int:

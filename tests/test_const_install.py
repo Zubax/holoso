@@ -14,7 +14,7 @@ from holoso import FloatFormat
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
 from holoso._hir import optimize
-from ._modelref import DEFAULT_IFMT, build_lir
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
@@ -37,7 +37,10 @@ def _multi_const_install(x: float) -> float:
 def test_multi_distinct_const_install_selects_among_constants() -> None:
     """A register must select among >=2 distinct constants; otherwise the cosim below would not exercise that mux."""
     lir = build_lir(
-        lower_to_mir(optimize(lower(_multi_const_install).hir), default_ops(_FMT), _FMT, DEFAULT_IFMT), "multi_const"
+        lower_to_mir(
+            optimize(lower(_multi_const_install).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT
+        ),
+        "multi_const",
     )
     per_reg: dict[str, set[str]] = {}
     for reg, const in re.findall(r"regs\[(\d+)\] <= const_(\d+);", generate_verilog(lir).verilog):
