@@ -228,8 +228,8 @@ class SliceRead:
 class SliceSel:
     """One sliced axis of a multi-dimensional subscript; bounds are hoisted atoms or open."""
 
-    lo: "Atom | None"
-    hi: "Atom | None"
+    lo: Atom | None
+    hi: Atom | None
 
 
 @dataclass(frozen=True, slots=True)

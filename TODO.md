@@ -31,7 +31,11 @@ the Verilog emitter: the tapped-result sign field and its `_sgnop` wrapper bindi
 on the port's scalar type, and the per-operand pair is keyed on nothing at all -- it runs unconditionally over the
 operator's arity. An integer pooled operator has no such ports, so all four must be keyed on `FloatType` when the
 integer backend lands; they are left alone for now because both arms would be dead and untestable until a lowering
-selects an integer operator. `_Bank` in `_lir/_bankalloc.py` is generic over a CONSTRAINED type variable,
+selects an integer operator. Underneath them the families disagree on what `module_name` denotes: a float operator
+names a Holoso wrapper that already carries the sign-conditioning ports, an integer one names the bare core, so the
+wrapper the emitter assumes is not there on that side. Either the integer cores gain wrappers or the emitter learns
+the difference, and that choice belongs with the four sign sites rather than before them.
+`_Bank` in `_lir/_bankalloc.py` is generic over a CONSTRAINED type variable,
 which cannot express `MirFloatStateSlot | MirIntStateSlot` for one wide bank; lifting it
 means giving `MirFloatStateSlot.sign` and `MirBoolStateSlot.inversion` a common `conditioner` field.
 

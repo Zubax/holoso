@@ -168,10 +168,10 @@ reach HIR, and remain unlowerable past MIR until the integer backend lands (see 
 HIR carries pure semantic operations from a HIR-local operator hierarchy; an operation is one operator applied to
 operand value IDs. Concrete hardware operators are frozen dataclasses whose fields are Holoso-exposed parameters;
 float ones delegate their timing and their reference arithmetic to the external ZKF library, while integer ones carry
-a closed-form latency and their own saturating arithmetic. Each hardware operator owns its signature, the port names
-of the module it stands for, and a compact HDL-safe identity stem, so the fully specified operator instance is itself
-the resource-sharing key and equal operators time-share one module. Per-node-parameterized operators are factories
-that instantiate a concrete operator.
+a closed-form latency and their own saturating arithmetic. Every hardware operator owns its signature, and a pooled
+one also owns the port names of the module it stands for and a compact HDL-safe identity stem, so the fully specified
+operator instance is itself the resource-sharing key and equal operators time-share one module.
+Per-node-parameterized operators are factories that instantiate a concrete operator.
 
 Every float operator is optional, so presence is a semantic choice as well as an area one
 (`ffma` enables FMA contraction, `fsort` enables min/max); what a kernel cannot reach through the operators

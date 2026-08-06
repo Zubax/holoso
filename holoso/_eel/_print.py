@@ -197,7 +197,7 @@ def _item(item: Atom | StarArg) -> str:
     return _atom(item)
 
 
-def _axis(axis: "Atom | SliceSel") -> str:
+def _axis(axis: Atom | SliceSel) -> str:
     if isinstance(axis, SliceSel):
         return f"{'' if axis.lo is None else _atom(axis.lo)}:{'' if axis.hi is None else _atom(axis.hi)}"
     return _atom(axis)

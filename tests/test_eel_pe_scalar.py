@@ -447,7 +447,9 @@ def _global_scalar(x: float) -> float:
     return x * _GAIN + _SCALE
 
 
-def _quoted_annotations(x: float) -> float:
+def _quoted_annotations(x: "float") -> "float":
+    # The quotes are the fixture: a kernel may still spell its annotations as strings, which the front end resolves
+    # with eval_str. Unquoting them here would leave the test unable to fail for the reason it exists.
     return x * 2.0
 
 
