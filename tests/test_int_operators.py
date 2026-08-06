@@ -2,9 +2,11 @@
 The pooled integer operators: their reference semantics, their closed-form timing, and the one knob among them.
 No lowering selects these yet, so they are driven directly.
 
-The sweeps score ``evaluate`` against the very oracle the HDL benches score the RTL against, which is what makes the
-"matches the RTL bit-for-bit" claim a checked one rather than a stated one. The latencies are pinned against the
-hardware separately, by the elaboration probe in ``test_backend.py`` and by the benches.
+The sweeps score ``evaluate`` against the very oracle the HDL benches score the RTL against, so the values are
+checked rather than merely claimed. What they do NOT check is the configuration the hardware is built in: the
+latencies, the RTL parameters and the port names are pinned elsewhere -- by the elaboration probe in
+``test_backend.py`` and by the benches, which take all three from the operator itself. A wrong ``QUOTIENT_FLOOR``
+would leave every assertion here passing and fail there.
 """
 
 from collections.abc import Callable
