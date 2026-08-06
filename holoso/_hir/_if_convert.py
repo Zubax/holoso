@@ -2,23 +2,19 @@
 Diamond if-conversion: a small, pure branch diamond collapses into ``select`` data muxes.
 
 A diamond is ``P: Branch(c, T, F)`` where both arms are single-predecessor, phi-free, operation-only blocks jumping
-to one merge block ``M`` whose only predecessors they are. When every arm operation is speculatable (no error
-sideband -- division is excluded, since a speculated div-by-zero would raise the module's error flag for a path
-never taken) and each arm is small enough, the diamond is spliced into ``P``: both arms' operations run
-unconditionally, each of ``M``'s phis becomes a mux under its original value id -- ``select(c, true_arm, false_arm)``
-for a float phi, ``bool_select`` for a boolean phi (so downstream references need no rewrite) -- and ``M``'s
-terminator replaces the branch. The pass repeats until no diamond converts, so nested chains collapse from the inside
-out; the dead branch condition (when nothing else reads it) falls to DCE, which runs after this pass. Conversion turns
-control dependence into data dependence: a diamond whose merged results are entirely unused frees its condition cone
-for DCE like any other dead code, so an error-bearing operation feeding only such a condition stops reporting --
-consistent with the error sideband's contract (executed operators only; an unused division is dead code with or
-without a branch around it).
+to one merge block ``M`` whose only predecessors they are. When every arm operation is speculatable and each arm is
+small enough, the diamond is spliced into ``P``: both arms' operations run unconditionally,
+each of ``M``'s phis becomes a mux under its original value id -- ``select(c, true_arm, false_arm)``
+for a float phi, ``int_select`` for an integer one and ``bool_select`` for a boolean one (so downstream references
+need no rewrite) -- and ``M``'s terminator replaces the branch. The pass repeats until no diamond converts, so nested
+chains collapse from the inside out; the dead branch condition (when nothing else reads it) falls to DCE, which runs
+after this pass. Conversion turns control dependence into data dependence: a diamond whose merged results are entirely
+unused frees its condition cone for DCE like any other dead code, so an error-bearing operation feeding only such a
+condition stops reporting -- consistent with the error sideband's contract (executed operators only).
 
 Both arms are computed, so conversion only pays where arms are cheap: the per-arm operation budget is the
-``HOLOSO_IFCONV_MAX_OPS`` knob (developer-only, read once; 0 disables the pass entirely). A diamond with any phi that
-is neither float nor boolean -- an integer one, until that backend lands -- is left as a real branch. A boolean mux's
-constant arms (the common ``True``/``False`` of a state-machine merge) reduce to ``and``/``or``/``not`` in the
-strength-reduction pass that re-runs after if-conversion.
+HOLOSO_IFCONV_MAX_OPS knob. A boolean mux's constant arms (the common True/False of a state-machine merge)
+reduce to and/or/not in the strength-reduction pass that re-runs after if-conversion.
 """
 
 import logging
@@ -27,10 +23,10 @@ import os
 from ._const import BoolConst
 from .._util import BlockId
 from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumber
-from ._operators import BoolSelect, Select
-from ._types import BoolType, FloatType
+from ._operators import BoolSelect, FloatSelect, IntSelect
+from ._types import BoolType, FloatType, IntType
 
-_IFCONV_MAX_OPS = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
+_IFCONV_MAX_OPS = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))  # 0 to disable
 
 _logger = logging.getLogger(__name__)
 
@@ -71,7 +67,7 @@ def _find_diamond(hir: Hir, preds: dict[BlockId, set[BlockId]]) -> tuple[Block, 
         merge = blocks_by_id[arm_t.terminator.target]
         if merge.id == block.id or preds[merge.id] != {arm_t.id, arm_f.id}:
             continue
-        if not all(isinstance(hir.nodes[vid].type, (FloatType, BoolType)) for vid in merge.phis):
+        if not all(isinstance(hir.nodes[vid].type, (FloatType, IntType, BoolType)) for vid in merge.phis):
             continue
         return block, arm_t, arm_f, merge
     return None
@@ -89,7 +85,9 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
         arm_value = dict(phi.arms)
         match phi.type:
             case FloatType():
-                op: Select | BoolSelect = Select()
+                op: FloatSelect | IntSelect | BoolSelect = FloatSelect()
+            case IntType():
+                op = IntSelect()
             case BoolType():
                 op = BoolSelect()
             case _:

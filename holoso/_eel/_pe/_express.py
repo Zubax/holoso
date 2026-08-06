@@ -1,15 +1,15 @@
-"""The expression side of the specializing interpreter: operators, attribute reads, calls, and powers."""
+"""The expression side of the specializing interpreter: operators, attribute reads, and calls."""
 
 import dataclasses
 import inspect
 import types
-import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .._annotations import annotation_stype
 from .._ir import *
-from .._lib import Conversion, Factory, Intrinsic, Library, resolve
+from .._lib import Array, Conversion, Factory, Operand, ScalarFunction, resolve
 from . import _aggregate, _ops
 from ._ownership import share
 from ._reject import reject
@@ -30,27 +30,6 @@ if TYPE_CHECKING:
     from ._interpret import Frame, Interpreter, Sink
 
 _AGGREGATE = (SequenceValue, TensorValue)
-
-_SCALAR_ANNOTATIONS: list[tuple[type, ScalarType]] = [
-    (bool, ScalarType.BOOL),
-    (int, ScalarType.INT),
-    (float, ScalarType.FLOAT),
-]
-
-
-def annotation_stype(annotation: object) -> ScalarType | None:
-    return next((stype for ty, stype in _SCALAR_ANNOTATIONS if annotation is ty), None)
-
-
-def _library_anchor(key: object) -> Library:
-    """The registry is fully populated at import, so the operator-lowering anchors resolve once."""
-    found = resolve(key)
-    assert isinstance(found, Library), key
-    return found
-
-
-_POW = _library_anchor(pow)
-_MATMUL = _library_anchor(np.matmul)
 
 # ------------------------------------------------------------------ attribute reads
 
@@ -98,9 +77,9 @@ def _tensor_attr(
         return SequenceValue(dims, Allocation())
     descriptor = getattr(np.ndarray, attr, None)
     found = resolve(descriptor)
-    if isinstance(found, Library):
+    if isinstance(found, Array):
         if inspect.isdatadescriptor(descriptor):
-            return _library_call(interp, origin, f".{attr}", found, [tensor], frame, sink)
+            return _array_call(interp, origin, f".{attr}", found, [tensor], frame, sink)
         share(tensor)
         return TensorMethod(tensor, attr)
     reject(origin, f"an array has no supported attribute {attr!r}")
@@ -187,12 +166,10 @@ def _scalar_leaf(origin: Origin, leaf: Scalar | Opaque) -> Scalar:
 
 def binary(interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink) -> Value:
     if op is BinaryOp.MATMUL:
-        if isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue):
-            reject(origin, "`@` on a Python list/tuple is not supported; build a numpy array with np.array([...])")
         for operand in (lv, rv):
             if isinstance(operand, _AGGREGATE):
                 share(operand)
-        return _library_call(interp, origin, "np.matmul", _MATMUL, [lv, rv], frame, sink)
+        return _operator_call(interp, origin, op, [lv, rv], frame, sink)
     tensors = isinstance(lv, TensorValue) or isinstance(rv, TensorValue)
     sequences = isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue)
     if (tensors or sequences) and op in (BinaryOp.AND, BinaryOp.OR):
@@ -258,7 +235,7 @@ def _binary_scalars(
                 return apply(interp, _ops.INT_BINARY[op], [left, right], origin, sink)
             reject(origin, f"the bitwise operator `{op.value}` requires two ints or two bools")
         case BinaryOp.POW:
-            return _pow(interp, origin, left, right, frame, sink)
+            return scalar(_operator_call(interp, origin, op, [left, right], frame, sink), origin)
         case _:
             pass
     if ScalarType.BOOL in (left.stype, right.stype):
@@ -318,21 +295,12 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         reject(node.origin, "the callee is not a callable object")
     raw = callee.value
     match resolve(raw) if callable(raw) else None:
-        case Intrinsic() as match:
-            return _intrinsic(interp, node, callee.name, raw, match, frame, sink)
-        case Library(stub=stub) as library:
+        case ScalarFunction() as match:
+            values = _operand_arguments(interp, node, callee.name, frame, sink)
+            return _scalar_call(interp, node.origin, callee.name, match, values, frame, sink)
+        case Array() as match:
             values = _positional_arguments(interp, node, callee.name, frame, sink)
-            if stub is _POW.stub:
-                # All pow spellings share the ** lowering.
-                if len(values) != 2:
-                    reject(node.origin, f"{callee.name}() takes 2 argument(s), got {len(values)}")
-                base = scalar(values[0], node.origin)
-                exponent = scalar(values[1], node.origin)
-                return _pow(interp, node.origin, base, exponent, frame, sink)
-            integer = _integer_lane(node.origin, raw, values)
-            if integer is not None:
-                return integer
-            return _library_call(interp, node.origin, callee.name, library, values, frame, sink)
+            return _array_call(interp, node.origin, callee.name, match, values, frame, sink)
         case Factory() as match:
             return _factory(interp, node, callee.name, match, frame, sink)
         case Conversion(copies=copies):
@@ -439,69 +407,72 @@ def _signature_arguments(
     return positional, keywords
 
 
-def _integral(raw: object) -> int | None:
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw
-    return int(raw) if isinstance(raw, np.integer) else None
-
-
-def _integer_lane(origin: Origin, raw: object, values: list[Value]) -> Value | None:
-    """
-    Registry dispatch is by callee identity alone, so every entry names float hardware -- yet abs, min, max, the
-    roundings and sign keep an integer integral in Python. Conforming a static integer into the float lane rounds it
-    before the fold, and the fold then erases the integer before the runtime-integer gate below HIR can refuse it, so
-    the wrong constant reaches the hardware. Where every argument is a static integer the fold is the call itself.
-
-    Opportunistic: anything the host declines to compute -- a float result, an exception, a warning-turned-error --
-    falls through to the float lane, where the operator's own registered reference decides. Convicting here would
-    answer for a host call the compiler was never forced to make, and would refuse ``math.log2(0)`` where
-    ``math.log2(0.0)`` folds. Signals are silenced so the answer cannot depend on the process-global numpy policy.
-    """
-    if not values or not all(isinstance(v, StaticScalar) and v.stype is ScalarType.INT for v in values):
-        return None
-    assert callable(raw)
-    try:
-        with np.errstate(all="ignore"), warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            answer = raw(*(_ops.const_value(v.const) for v in values if isinstance(v, StaticScalar)))
-    except Exception:
-        return None
-    integral = _integral(answer)
-    return None if integral is None else StaticScalar(_ops.make_const(integral))
-
-
-def _intrinsic(
-    interp: Interpreter, node: Call, display: str, raw: object, match: Intrinsic, frame: Frame, sink: Sink
+def _operator_call(
+    interp: Interpreter, origin: Origin, op: BinaryOp, values: list[Value], frame: Frame, sink: Sink
 ) -> Value:
-    operator = match.operator
-    values = _operand_arguments(interp, node, display, frame, sink)
-    stypes = _ops.operand_stypes(operator)
-    if len(values) != len(stypes):
-        reject(node.origin, f"{display}() takes {len(stypes)} argument(s), got {len(values)}")
-    first = values[0]
-    if match.integral and isinstance(first, (StaticScalar, ResidualScalar)) and first.stype is ScalarType.INT:
-        return first  # rounding an integer is the identity, at either binding time
-    integer = _integer_lane(node.origin, raw, values)
-    if integer is not None:
-        return integer
-    operands = [
-        interp.conform(value, stype, node.origin, sink, f"argument {i + 1} of {display}()")
-        for i, (value, stype) in enumerate(zip(values, stypes, strict=True))
-    ]
-    return apply(interp, operator, operands, node.origin, sink)
+    """The spelled call resolves this same entry, so an operator and its spellings cannot drift apart."""
+    found = resolve(op)
+    assert found is not None, op
+    display = op.value
+    match found:
+        case ScalarFunction() as match:
+            return _scalar_call(interp, origin, display, match, values, frame, sink)
+        case Array() as match:
+            return _array_call(interp, origin, display, match, values, frame, sink)
+        case _:
+            raise AssertionError(found)
 
 
-def _library_call(
+def _scalar_call(
     interp: Interpreter,
     origin: Origin,
     display: str,
-    match: Library,
+    match: ScalarFunction,
     values: list[Value],
     frame: Frame,
     sink: Sink,
 ) -> Value:
+    if len(values) != match.arity:
+        reject(origin, f"{display}() takes {match.arity} argument(s), got {len(values)}")
+    operands = [scalar(value, origin) for value in values]
+    chosen = match.select([_operand(operand) for operand in operands])
+    if chosen is None:
+        served = " or ".join(stype.value for stype in match.domains)
+        got = ", ".join(operand.stype.value for operand in operands)
+        boolean = any(operand.stype is ScalarType.BOOL for operand in operands)
+        note = "; a boolean is not a number, cast explicitly with int(...) or float(...)" if boolean else ""
+        reject(origin, f"{display}() takes {served} operands, got {got}{note}")
+    # Both kinds of lowering, so inlining judges base types alone and never learns what a refinement is.
+    conformed = [
+        interp.conform(operand, declared.stype, origin, sink, f"argument {i + 1} of {display}()")
+        for i, (operand, declared) in enumerate(zip(operands, chosen.operands, strict=True))
+    ]
+    if chosen.operator is None:
+        promoted: list[Value] = list(conformed)
+        return interp.inline(origin, display, chosen.stub, promoted, {}, frame, sink, positional_only=True)
+    return apply(interp, chosen.operator, conformed, origin, sink)
+
+
+def _operand(value: Scalar) -> Operand:
+    if isinstance(value, StaticScalar):
+        const = _ops.const_value(value.const)
+        assert isinstance(const, (bool, int, float))
+        return Operand(value.stype, const)
+    return Operand(value.stype)
+
+
+def _array_call(
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    match: Array,
+    values: list[Value],
+    frame: Frame,
+    sink: Sink,
+) -> Value:
+    if any(isinstance(value, SequenceValue) for value in values):
+        # Before the stub, so the rejection reads the same however the operation was spelled.
+        reject(origin, "an array operation on a Python list/tuple is not supported; build one with np.array([...])")
     result = interp.inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
     if match.derives and isinstance(values[0], TensorValue) and isinstance(result, TensorValue):
         share(values[0])
@@ -511,13 +482,13 @@ def _library_call(
 
 def _tensor_method(interp: Interpreter, node: Call, method: TensorMethod, frame: Frame, sink: Sink) -> Value:
     found = resolve(getattr(np.ndarray, method.name))
-    assert isinstance(found, Library), "a minted method stays resolvable"
+    assert isinstance(found, Array), "a minted method stays resolvable"
     display = f".{method.name}"
     values = _positional_arguments(interp, node, display, frame, sink)
     arity = found.stub.__code__.co_argcount - 1
     if len(values) != arity:
         reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
-    return _library_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
+    return _array_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
 
 
 def _factory(interp: Interpreter, node: Call, display: str, match: Factory, frame: Frame, sink: Sink) -> Value:
@@ -690,71 +661,3 @@ def _cast(interp: Interpreter, node: Call, target: type, frame: Frame, sink: Sin
     if operand.stype is declared:
         return operand
     return apply(interp, _ops.CONVERT[(operand.stype, declared)], [operand], node.origin, sink)
-
-
-# ------------------------------------------------------------------ powers
-
-
-def _pow(interp: Interpreter, origin: Origin, base: Scalar, exponent: Scalar, frame: Frame, sink: Sink) -> Scalar:
-    if ScalarType.BOOL in (base.stype, exponent.stype):
-        reject(origin, "booleans take no part in arithmetic; cast explicitly with int(...) or float(...)")
-    if isinstance(exponent, StaticScalar) and exponent.stype is ScalarType.INT:
-        n = _ops.const_value(exponent.const)
-        assert isinstance(n, int)
-        if isinstance(base, StaticScalar):
-            return _fold_pow(origin, base, n)
-        return _pow_chain(interp, origin, interp.as_float(base, origin, sink), n, sink)
-    if isinstance(base, StaticScalar) and isinstance(exponent, StaticScalar):
-        # The host as the raise oracle only: the folded VALUE still comes from the stub body, so the
-        # answer cannot depend on binding time. A complex host result is no raise; the stub's log2
-        # domain owns that refusal.
-        b = _ops.const_value(base.const)
-        e = _ops.const_value(exponent.const)
-        assert isinstance(b, (int, float)) and isinstance(e, (int, float))
-        try:
-            b**e
-        except (OverflowError, ZeroDivisionError) as error:
-            reject(origin, f"this power always raises on the host: {type(error).__name__}: {error}")
-    promoted: list[Value] = [interp.as_float(base, origin, sink), interp.as_float(exponent, origin, sink)]
-    value = interp.inline(origin, "pow", _POW.stub, promoted, {}, frame, sink, positional_only=True)
-    return scalar(value, origin)
-
-
-def _fold_pow(origin: Origin, base: StaticScalar, n: int) -> StaticScalar:
-    """
-    Exact host arithmetic; the result stays an int only for a nonnegative int base — every power the
-    compiler cannot fold is float, so a negative base folds to its float image.
-    """
-    value = _ops.const_value(base.const)
-    assert isinstance(value, (int, float))
-    try:
-        folded = value**n
-    except (OverflowError, ZeroDivisionError) as error:
-        reject(origin, f"this power always raises on the host: {type(error).__name__}: {error}")
-    assert type(folded) in (int, float), "an integer exponent cannot yield a complex power"
-    if isinstance(folded, int) and value < 0:
-        try:
-            folded = float(folded)
-        except OverflowError:
-            reject(origin, "the folded power of a negative base does not fit a binary64 float")
-    return StaticScalar(_ops.make_const(folded))
-
-
-def _pow_chain(interp: Interpreter, origin: Origin, base: Scalar, n: int, sink: Sink) -> Scalar:
-    assert base.stype is ScalarType.FLOAT
-    if n < 0:
-        chain = _chain(interp, origin, base, -n, sink)
-        one = StaticScalar(_ops.make_const(1.0))
-        return apply(interp, _ops.FLOAT_DIV, [one, chain], origin, sink)
-    if n == 0:
-        return StaticScalar(_ops.make_const(1.0))
-    return _chain(interp, origin, base, n, sink)
-
-
-def _chain(interp: Interpreter, origin: Origin, base: Scalar, n: int, sink: Sink) -> Scalar:
-    assert n >= 1
-    result = base
-    for _ in range(n - 1):
-        interp.budget.spend(1, origin, "the power chain")
-        result = apply(interp, _ops.FLOAT_MUL, [result, base], origin, sink)
-    return result

@@ -54,6 +54,7 @@ from ._operators import (
     FloatNeg as FloatNeg,
     FloatNotEqual as FloatNotEqual,
     FloatRound as FloatRound,
+    FloatSelect as FloatSelect,
     FloatSin as FloatSin,
     FloatSqrt as FloatSqrt,
     FloatToBool as FloatToBool,
@@ -83,7 +84,6 @@ from ._operators import (
     IntToFloat as IntToFloat,
     NoNumber as NoNumber,
     Operator as Operator,
-    Select as Select,
 )
 from ._optimize import optimize as optimize
 from ._types import (

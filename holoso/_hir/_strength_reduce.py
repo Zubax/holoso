@@ -23,16 +23,16 @@ from ._operators import (
     FloatMulPow2,
     FloatNeg,
     FloatRound,
+    FloatSelect,
     FloatToInt,
     FloatTrunc,
     IntSelect,
     IntToFloat,
     NoNumber,
     Operator,
-    Select,
 )
 
-_MUX = (Select, BoolSelect, IntSelect)  # the three scalar families share both universal mux identities
+_MUX = (FloatSelect, BoolSelect, IntSelect)  # the three scalar families share both universal mux identities
 
 
 def _sole_operand(node: Node) -> ValueId:

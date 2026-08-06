@@ -8,11 +8,10 @@ expression or comparison chain) assigns its result temp in both arms.
 
 The tree is pure syntax: no numpy, no function objects, and no HIR beyond one opacity -- a residual
 ``IntrinsicCall`` carries the operator the partial evaluator selected, typed ``object`` here and downcast only by
-emit, so the boundary is an IMPORT boundary rather than a representational one. The partial
-evaluator keeps the pairing between
-an EelFunction and its FunctionType on the side. Every node carries an Origin — a source location plus the
-inline frame chain, which is empty at desugar and grows as the partial evaluator inlines calls — so any
-rejection raised inside library-stub code is re-attributed to the user's call site.
+emit, so the boundary is an IMPORT boundary rather than a representational one.
+The partial evaluator keeps the pairing between an EelFunction and its FunctionType on the side. Every node carries
+an Origin — a source location plus the inline frame chain, which is empty at desugar and grows as the partial
+evaluator inlines calls — so any rejection raised inside library-stub code is re-attributed to the user's call site.
 
 Store targets stay syntactic (a root name plus a selector chain, with only index expressions hoisted to atoms):
 the ownership model exempts store-target-prefix reads from sharing, which requires the prefix to remain a path

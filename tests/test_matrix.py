@@ -852,8 +852,9 @@ def test_power_of_boolean_is_rejected_with_location() -> None:
 
 
 def test_boolean_operand_to_float_builtin_or_intrinsic_is_rejected_with_location() -> None:
-    # Regression: abs/min/max/round and the math/numpy float intrinsics passed a boolean operand straight to HIR
+    # Regression: abs/min/max/round and the math/numpy intrinsics passed a boolean operand straight to HIR
     # construction, raising a bare location-less ValueError; each must reject it with a source-located error.
+    # No entry serves booleans, so the rejection names the domains the callee does serve.
     def with_abs(flag: bool) -> float:
         return abs(flag)
 
@@ -867,7 +868,7 @@ def test_boolean_operand_to_float_builtin_or_intrinsic_is_rejected_with_location
         return np.floor(flag)  # type: ignore[no-any-return]
 
     for kernel in (with_abs, with_min, with_round, with_floor):
-        with pytest.raises(UnsupportedConstruct, match="has type bool where the annotation declares float"):
+        with pytest.raises(UnsupportedConstruct, match=r"takes .*float operands, got .*bool"):
             lower(kernel)
 
 
@@ -1084,8 +1085,7 @@ def test_imu_frame_transform_fma_matches_numpy() -> None:
 
 
 def test_operators_are_the_library_functions() -> None:
-    # ``@`` and ``.T`` lower by resolving np.matmul / np.transpose in the registry, so the operator and its spelled
-    # call cannot drift apart: identical HIR, not merely identical values.
+    # Two keys on one entry, so an operator and its spelled call give identical HIR, not merely identical values.
     def with_operators(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "2 2"]:
         return a @ b.T  # type: ignore[no-any-return]
 
@@ -1162,7 +1162,7 @@ def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
     def bad(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match=r"in np\.matmul\(\).*mismatch") as excinfo:
+    with pytest.raises(UnsupportedConstruct, match=r"in @\(\).*mismatch") as excinfo:
         lower(bad)
     assert excinfo.value.location is not None
     assert excinfo.value.location.line is not None and "a @ x" in excinfo.value.location.line

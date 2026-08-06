@@ -196,10 +196,10 @@ Partial evaluation is the sole semantic owner -- binding time, types, shapes, re
 state. A specializing interpreter producing residual Eel, it is a pure function over an immutable tree re-run from
 its inputs rather than patched in place: accumulated marks and mutable side tables are how fixpoint analyses go
 quietly wrong. Static structure folds here while value arithmetic stays the graph's business per the fastmath
-charter, so one expression cannot answer two ways -- excepting two folds taken in host arithmetic, the
-static-exponent power chain and the call whose every argument is a static integer, which answer as Python does so
-an integer stays an integer. The residual program is scalar and typed; early returns and loop exits lower to real
-control edges rather than predication, leaving emission mechanical.
+charter, so one expression cannot answer two ways: every fold runs the very lowering the hardware runs, the host is
+never consulted for a value, and a lowering that exists only for compile-time operands says so in its own signature
+rather than being taken as a shortcut. The residual program is scalar and typed; early returns and loop exits lower
+to real control edges rather than predication, leaving emission mechanical.
 
 Three policies bound that evaluation. The compiler never predicts host failures it is not itself forced to evaluate:
 what a kernel does at run time on the host is the user's responsibility, inputs are trusted, and guards against
@@ -208,11 +208,12 @@ value. Every structure-producing expansion draws on one graph-size budget, so an
 rejection rather than a hang.
 
 Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below. Four deviations from Python are
-deliberate: mixed int/float expressions promote to float C-style, a power yields float unless it is fully folded over
-a nonnegative integer base, booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both
-operands as combinational logic does, while other conditional positions still branch. One join rule governs every
-meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only with identical
-kind and shape.
+deliberate: mixed int/float expressions promote to float C-style, a power yields float unless its base is an int
+and its exponent a compile-time nonnegative int (only a known exponent expands into multiplications, so anything
+else promotes), booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both operands as
+combinational logic does, while other conditional positions still branch. One join
+rule governs every meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only
+with identical kind and shape.
 
 Aggregates are one container of two kinds fixed by provenance, not shape: a sequence is immutable structure, an
 array the numerical kind carrying elementwise arithmetic and all mutation, so a rectangular homogeneous list is still
@@ -227,9 +228,19 @@ scanning: the evaluator assumes every written attribute is state and re-runs wit
 turns out dead. Only the entry method owns that analysis -- an inlined method may read `self` but not write it.
 
 Calls dispatch on the object identity the callee resolves to, not its spelled name, and inlining everything is a
-lowering policy, not a representational fact. The math library keeps its one boundary: an intrinsic maps to a single
-semantic HIR operator, while a composite (linear algebra included) is ordinary Python in the supported subset,
-inlined like user code, so each is its own numerical reference.
+lowering policy, not a representational fact. A subset operator is a registry key like any callee object, so `**` and
+every spelling of it, or `@` and `np.matmul`, resolve one entry and cannot drift apart. The math library keeps its one
+boundary, in two kinds. A scalar callee carries a group of typed lowerings, each either a single semantic HIR operator
+or an inlined composite; each declares a domain PER OPERAND POSITION, read off the stub's own annotations, so a symbol
+whose Python answer differs by operand type -- `min` is sort hardware over floats and a compare-and-select over
+integers, which have none -- says so once, with neither type privileged and no operand types quietly promoted into a
+domain nothing serves. A position may also carry a refinement -- `StaticNonNegative[T]` or `StaticNegative[T]` --
+demanding a compile-time value of that sign, which is what lets `**` name an exact integer power, a multiply chain,
+its reciprocal, and a transcendental composite in one table. Selection takes the
+most refined lowering every one of whose positions accepts the operand; registration rejects any two lowerings that
+are neither ordered by that specificity nor separated by accepting nothing in common, so the choice is unique.
+An array composite declares no scalar domain, rank and shape deciding its meaning. Every stub is ordinary Python in
+the supported subset, so each is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
@@ -290,8 +301,10 @@ MIR, the counted back-edge loop becomes the natural follow-on.
 
 Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
 integer node reaching MIR is rejected as not-yet-lowerable; the integer backend, sharing the wide register bank,
-is future work. A kernel whose integers stay compile-time is unaffected by the gap: a static integer has
-already folded away before MIR ever sees it.
+is future work. A static integer folds away before MIR ever sees it, but a kernel need not name an integer to raise
+one: the roundings answer an integer over a float, as Python does, so a float-only kernel can meet the gate, and
+which ones survive is decided by the reductions that sink an integer back into the float datapath rather than by
+any rule worth stating.
 
 ## MIR
 

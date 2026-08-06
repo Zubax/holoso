@@ -44,6 +44,7 @@ from .._hir import (
     FloatNeg,
     FloatNotEqual,
     FloatRound,
+    FloatSelect,
     FloatSin,
     FloatSqrt,
     FloatToBool,
@@ -58,7 +59,6 @@ from .._hir import (
     Operator,
     Phi,
     Ret,
-    Select,
     StateRead,
     StateSlot,
     Terminator,
@@ -536,7 +536,7 @@ class _LoweringContext:
                 return True
             case Operation(operator=BoolSelect() as semantic, operands=(cond, a, b)):
                 # The boolean if-conversion mux: a NOT chain on the condition or either arm folds into that operand's
-                # inversion conditioner, exactly like float Select's sign folding -- so ``a if not c else b`` is free.
+                # inversion conditioner, exactly like FloatSelect's sign folding -- so ``a if not c else b`` is free.
                 self._lower_bool_logic(
                     old_id, _select_hardware(semantic, SelectOperator(ScalarBoolType())), [cond, a, b]
                 )
@@ -697,7 +697,7 @@ class _FloatLowerer:
                     [self.context.remap[base]],
                     [inversion],
                 )
-            case Operation(operator=Select() as semantic, operands=(cond, a, b)):
+            case Operation(operator=FloatSelect() as semantic, operands=(cond, a, b)):
                 # The if-conversion mux: arm signs and a condition NOT chain fold into the operand conditioners
                 # (``x if c else -x`` and ``a if not c else b`` cost no hardware beyond the mux itself).
                 base_c, inv_c = _collapse_bool_inversions(self.context.hir.nodes, cond)
@@ -906,7 +906,7 @@ class _FloatLowerer:
         sign_b: FloatSignControl = FloatSignControl(),
     ) -> ValueId:
         return self.context.builder.operation(
-            _select_hardware(Select(), SelectOperator(ScalarFloatType(self.context.float_format))),
+            _select_hardware(FloatSelect(), SelectOperator(ScalarFloatType(self.context.float_format))),
             [cond, a, b],
             [BoolInversion(), sign_a, sign_b],
         )

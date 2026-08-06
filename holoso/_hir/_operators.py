@@ -104,6 +104,8 @@ class Operator(ABC):
     # Whether evaluating this operation on a not-taken path is unobservable: a speculatable operation has no error
     # sideband and no effect beyond its result value, so if-conversion may execute it unconditionally. Division is
     # not speculatable (a speculated div-by-zero would assert the module's error flag for a branch never taken).
+    # A partial fold is not an error sideband and does not bar speculation: mul, add, the casts and the shifts all
+    # decline to name a number somewhere in their domain, and the mux discards that arm in hardware regardless.
     # The default is False so a future error-bearing operator that omits the declaration is a missed optimization
     # rather than a silent spurious-error bug; pure operators opt in explicitly.
     speculatable: ClassVar[bool] = False
@@ -636,7 +638,7 @@ class BoolNot(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class Select(Operator):
+class FloatSelect(Operator):
     """
     A data mux ``a if cond else b`` over float values. In HIR it is produced by the if-conversion pass, which refuses
     constant conditions; MIR composite lowerings may also use the selected inline hardware mux directly.
@@ -657,7 +659,7 @@ class Select(Operator):
 @dataclass(frozen=True, slots=True)
 class BoolSelect(Operator):
     """
-    A boolean mux ``a if cond else b`` over boolean values, the 1-bit dual of :class:`Select`. Produced exclusively by
+    A boolean mux ``a if cond else b`` over boolean values, the 1-bit dual of :class:`FloatSelect`. Produced only by
     if-conversion of a boolean-phi diamond. Its constant arms (the common ``True``/``False`` arms of a state-machine
     merge) are reduced to ``and``/``or``/``not``/passthrough by strength reduction.
     """
@@ -975,7 +977,7 @@ class IntGreater(IntComparison):
 
 @dataclass(frozen=True, slots=True)
 class IntSelect(Operator):
-    """A data mux ``a if cond else b`` over integer values, the integer dual of :class:`Select`."""
+    """A data mux ``a if cond else b`` over integer values, the integer dual of :class:`FloatSelect`."""
 
     mnemonic: ClassVar[str] = "int_select"
     speculatable: ClassVar[bool] = True

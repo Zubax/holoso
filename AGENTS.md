@@ -19,6 +19,7 @@ Clear designs are easier to verify, maintain, and refactor, and they are more li
 Do not write any comments or docs unless they add something that is impossible to infer from the source code,
 such as design rationale, high-level context, non-obvious implications, etc.
 Comments that describe what the code does or restate what is inferrable from the type system are strictly prohibited.
+The best comment is no comment.
 
 ### Reset strategy
 

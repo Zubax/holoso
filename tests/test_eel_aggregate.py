@@ -322,8 +322,9 @@ def test_linalg_stubs_lower_and_match_the_host() -> None:
 
 
 def test_linalg_shape_refusals_re_attribute_through_the_chain() -> None:
-    _rejects(_matmul_scalar, r"in np.matmul\(\): ValueError: ")
-    _rejects(_matmul_list, "`@` on a Python list/tuple is not supported; build a numpy array")
+    # ``@`` IS the matmul entry, so the frame names the operator the user wrote rather than a spelling of it.
+    _rejects(_matmul_scalar, r"in @\(\): ValueError: ")
+    _rejects(_matmul_list, "an array operation on a Python list/tuple is not supported; build one with np.array")
 
 
 # ---------------------------------------------------------------------- the bans

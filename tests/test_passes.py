@@ -43,7 +43,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, Ret, Select
+from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, Ret, FloatSelect
 from holoso._hir import (
     FloatAbs,
     FloatAtan2,
@@ -457,7 +457,7 @@ def test_if_conversion_collapses_a_pure_diamond() -> None:
 
     hir = _hir_of(f)
     assert len(hir.blocks) == 1
-    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)]
+    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, FloatSelect)]
     assert len(selects) == 1
 
 
@@ -472,7 +472,7 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
 
     hir = _hir_of(f)
     assert len(hir.blocks) == 4  # the diamond survives as a real branch
-    assert not any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values())
 
 
 def test_if_conversion_respects_the_arm_size_budget(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -501,7 +501,7 @@ def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPat
 
     hir = _hir_of(f)
     assert len(hir.blocks) == 4 and not any(
-        isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values()
+        isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values()
     )
 
 
@@ -518,7 +518,35 @@ def test_if_conversion_converts_a_boolean_phi_merge() -> None:
     hir = _hir_of(f)
     assert len(hir.blocks) == 1
     assert any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
-    assert not any(isinstance(n, Operation) and isinstance(n.operator, Select) for n in hir.nodes.values())
+
+
+def test_if_conversion_converts_an_integer_phi_merge() -> None:
+    # The integer dual of the two above, so min/max/sign cost one mux rather than a branch.
+    def f(a: int, b: int) -> int:
+        if a > b:
+            y = a + b
+        else:
+            y = a - b
+        return y
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 1
+    assert any(isinstance(n, Operation) and isinstance(n.operator, IntSelect) for n in hir.nodes.values())
+
+
+def test_an_error_bearing_integer_arm_stays_behind_its_guard() -> None:
+    # Floor-division and modulo assert the div-by-zero flag, so a never-taken arm holding one must not be speculated.
+    def f(a: int, b: int) -> int:
+        if a > b:
+            y = a + b
+        else:
+            y = a // b
+        return y
+
+    hir = _hir_of(f)
+    assert len(hir.blocks) == 4
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, IntSelect) for n in hir.nodes.values())
+    assert not any(isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values())
 
 
 def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
@@ -535,7 +563,7 @@ def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
     assert len(hir.blocks) == 1
     # bool_select(a>b, True, hold) == (a>b) or hold -- reduced away, no select of either flavor remains.
     assert not any(
-        isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, Select)) for n in hir.nodes.values()
+        isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
     )
 
 
@@ -651,7 +679,7 @@ def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
     for kernel, read in ((identical_bool_arms, bool), (identical_float_arms, float)):
         hir = _hir_of(kernel)
         assert not any(
-            isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, Select)) for n in hir.nodes.values()
+            isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
         ), f"{kernel.__name__}: a mux over identical arms survived"
         model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT), kernel.__name__))
         for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
@@ -673,7 +701,7 @@ def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
 
     hir = _hir_of(f)
     assert len(hir.blocks) == 1
-    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)]
+    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, FloatSelect)]
     assert len(selects) == 2
 
 
@@ -691,7 +719,7 @@ def test_if_conversion_repoints_loop_header_phi_arms() -> None:
         return w
 
     hir = _hir_of(f)
-    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, Select)]
+    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, FloatSelect)]
     assert len(selects) == 1
     block_ids = {b.id for b in hir.blocks}
     for node in hir.nodes.values():
@@ -1038,7 +1066,7 @@ def test_a_constant_condition_selects_a_mux_arm_in_every_scalar_family() -> None
     runtime_int = builder.operation(FloatToInt(), [x])
     runtime_bool = builder.operation(FloatToBool(), [x])
     true, false = builder.bool_const(True), builder.bool_const(False)
-    builder.output("float", builder.operation(Select(), [true, builder.float_const(3.0), x]))
+    builder.output("float", builder.operation(FloatSelect(), [true, builder.float_const(3.0), x]))
     builder.output("bool", builder.operation(BoolSelect(), [false, runtime_bool, builder.bool_const(True)]))
     builder.output(
         "int",

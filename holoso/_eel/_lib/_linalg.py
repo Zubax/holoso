@@ -14,7 +14,8 @@ from typing import Any
 
 import numpy as np
 
-from ._registry import lib
+from .._ir import BinaryOp
+from ._registry import array
 
 
 def _dot(u: np.ndarray, v: np.ndarray) -> Any:
@@ -25,8 +26,8 @@ def _dot(u: np.ndarray, v: np.ndarray) -> Any:
     return acc
 
 
-@lib(np.transpose, np.ndarray.T, np.ndarray.transpose, derives=True)
-def transpose_(a: np.ndarray) -> Any:
+@array(np.transpose, np.ndarray.T, np.ndarray.transpose, derives=True)
+def transpose(a: np.ndarray) -> Any:
     if a.ndim == 0:
         raise ValueError("cannot transpose a scalar value")
     if a.ndim > 2:
@@ -36,8 +37,8 @@ def transpose_(a: np.ndarray) -> Any:
     return np.array([[a[i][j] for i in range(len(a))] for j in range(len(a[0]))])
 
 
-@lib(np.ravel, np.ndarray.flatten, np.ndarray.ravel, derives=True)
-def flatten_(a: np.ndarray) -> Any:
+@array(np.ravel, np.ndarray.flatten, np.ndarray.ravel, derives=True)
+def flatten(a: np.ndarray) -> Any:
     if a.ndim == 0:
         raise ValueError("cannot flatten a scalar value")
     if a.ndim > 2:
@@ -48,8 +49,8 @@ def flatten_(a: np.ndarray) -> Any:
     return np.asarray([a[k // width, k % width] for k in range(len(a) * width)])
 
 
-@lib(np.matmul, np.dot, np.ndarray.dot)
-def matmul_(a: np.ndarray, b: np.ndarray) -> Any:
+@array(np.dot, np.ndarray.dot, np.matmul, BinaryOp.MATMUL)
+def matmul(a: np.ndarray, b: np.ndarray) -> Any:
     """
     numpy's shape rules for 1-D and 2-D operands: inner dimensions must agree, a 1-D left operand is promoted to a row
     and a 1-D right operand to a column, and each promoted axis is dropped from the result -- so vector @ vector is a
@@ -66,14 +67,14 @@ def matmul_(a: np.ndarray, b: np.ndarray) -> Any:
         if a.ndim == 1:
             return _dot(a, b)
         return np.array([_dot(a[i], b) for i in range(len(a))])
-    bt = transpose_(b)  # the columns of b, so every output element is the dot product of two rows
+    bt = transpose(b)  # the columns of b, so every output element is the dot product of two rows
     if a.ndim == 1:
         return np.array([_dot(a, bt[j]) for j in range(len(bt))])
     return np.array([[_dot(a[i], bt[j]) for j in range(len(bt))] for i in range(len(a))])
 
 
-@lib(np.trace, np.ndarray.trace)
-def trace_(a: np.ndarray) -> Any:
+@array(np.trace, np.ndarray.trace)
+def trace(a: np.ndarray) -> Any:
     """FIXME Support non-square matrices by running the shorter diagonal."""
     if a.ndim != 2:
         raise ValueError(f"trace requires a matrix, got a {a.ndim}-D value")
@@ -85,8 +86,8 @@ def trace_(a: np.ndarray) -> Any:
     return acc
 
 
-@lib(np.outer)
-def outer_(u: np.ndarray, v: np.ndarray) -> Any:
+@array(np.outer)
+def outer(u: np.ndarray, v: np.ndarray) -> Any:
     """FIXME Currently does not flatten its operands."""
     if u.ndim != 1 or v.ndim != 1:
         raise ValueError(f"outer requires 1-D operands, got {u.ndim}-D and {v.ndim}-D")
