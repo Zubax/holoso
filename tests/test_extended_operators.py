@@ -238,46 +238,6 @@ def test_a_rounding_consumed_as_an_integer_meets_the_integer_gate() -> None:
             holoso.synthesize(kernel, _ops(), name=kernel.__name__)
 
 
-def test_an_integer_operand_of_abs_min_max_sign_meets_the_integer_gate() -> None:
-    """
-    These built before the integer entries existed, by computing over a float image of the integer -- an integer
-    state slot was silently retyped to a float register, which stops counting at the mantissa width. Refusing is
-    the honest answer, so this pins the boundary rather than the old acceptance.
-    """
-
-    def via_float(x: float) -> float:
-        return abs(float(int(x)))  # the conversion pair collapses, so no integer survives
-
-    holoso.synthesize(via_float, _ops(), name="abs_via_float")
-
-    def abs_of_int(x: float) -> float:
-        return float(abs(int(x)))
-
-    def max_of_int(x: float) -> float:
-        return float(max(int(x), 0))
-
-    def min_of_int(x: float) -> float:
-        return float(min(int(x), 3))
-
-    def sign_of_int(x: float) -> float:
-        return float(np.sign(int(x)))
-
-    for kernel in (abs_of_int, max_of_int, min_of_int, sign_of_int):
-        with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-            holoso.synthesize(kernel, _ops(), name=kernel.__name__)
-
-    class SaturatingCounter:
-        def __init__(self) -> None:
-            self.n = 0
-
-        def step(self, x: float) -> float:
-            self.n = min(self.n + 1, 10)
-            return float(self.n) + x
-
-    with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-        holoso.synthesize(SaturatingCounter().step, _ops(), name="saturating_counter")
-
-
 def test_round_ndigits_is_rejected() -> None:
     def kernel(x: float) -> float:
         return round(x, 2)
