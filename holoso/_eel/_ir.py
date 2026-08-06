@@ -242,7 +242,7 @@ class MultiIndexRead:
 
     origin: Origin
     base: Atom
-    axes: tuple["Atom | SliceSel", ...]
+    axes: tuple[Atom | SliceSel, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,13 +250,13 @@ class TupleExpr:
     """A starred item splices an aggregate in place; the partial evaluator expands it once shapes are known."""
 
     origin: Origin
-    items: tuple["Atom | StarArg", ...]
+    items: tuple[Atom | StarArg, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ListExpr:
     origin: Origin
-    items: tuple["Atom | StarArg", ...]
+    items: tuple[Atom | StarArg, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,7 +281,7 @@ class Comp:
     origin: Origin
     target: str
     iterable: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
     element: Atom
 
 
@@ -378,8 +378,8 @@ class AugAssign:
 class If:
     origin: Origin
     cond: Atom
-    then: tuple["Stmt", ...]
-    orelse: tuple["Stmt", ...]
+    then: tuple[Stmt, ...]
+    orelse: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,9 +387,9 @@ class While:
     """The header re-executes before every test: the condition's temps live there."""
 
     origin: Origin
-    header: tuple["Stmt", ...]
+    header: tuple[Stmt, ...]
     cond: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,7 +397,7 @@ class For:
     origin: Origin
     target: LocalBind
     iterable: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,9 +420,9 @@ class ResidualWhile:
 
     origin: Origin
     phis: tuple[LoopPhi, ...]
-    header: tuple["Stmt", ...]
+    header: tuple[Stmt, ...]
     cond: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,7 +494,7 @@ class ResidualFrame:
 
     origin: Origin
     rows: tuple[FrameRow, ...]
-    body: "Block"
+    body: Block
 
 
 @dataclass(frozen=True, slots=True)

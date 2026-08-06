@@ -72,7 +72,7 @@ class Allocation:
 
 @dataclass(frozen=True, slots=True)
 class SequenceValue:
-    items: tuple["Value", ...]
+    items: tuple[Value, ...]
     allocation: Allocation
 
 

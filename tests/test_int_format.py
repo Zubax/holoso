@@ -1,8 +1,8 @@
 """
 The native integer format and type: the arithmetic surface, the plumbing from ``Options`` down into the emitted RTL,
-and the port conditioning an integer type admits. No operator reads the format yet, so its only hardware footprint is
-the ``WINT`` localparam -- which is nevertheless enough to pin the whole chain from the public entry point through MIR
-and LIR to the Verilog backend.
+and the port conditioning an integer type admits. No lowering selects an integer operator yet, so the format's only
+hardware footprint is the ``WINT`` localparam -- which is nevertheless enough to pin the whole chain from the public
+entry point through MIR and LIR to the Verilog backend.
 """
 
 import dataclasses
@@ -17,6 +17,7 @@ from holoso._hir import optimize
 from holoso._mir import MirOperation, MirPhi, lower as lower_to_mir
 from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, SelectOperator, identity_conditioner
 from holoso._type import BoolType, IntType
+from holoso._value import IntValue
 
 from ._modelref import build_lir, build_ops, default_options
 
@@ -62,13 +63,19 @@ def test_int_type_lands_in_the_wide_bank(width: int) -> None:
 
 @pytest.mark.parametrize("width", (2, 17, 33))
 def test_select_carries_an_integer_scalar_type_through_its_signature(width: int) -> None:
-    # Signature only, and deliberately so: ``evaluate``'s operand contract is ``FloatValue | bool`` and there is no
-    # ``IntValue`` yet, while ``_reject_integers`` refuses every integer HIR value before lowering begins, so an
-    # integer select can be neither evaluated nor lowered into MIR. This pins the generalization, not working muxes.
+    # The mux is type-polymorphic and now answers for integers too, though nothing reaches it: ``_reject_integers``
+    # refuses every integer HIR value before lowering begins, so this pins the generalization, not a wired-up mux.
     ty = IntType(IntFormat(width))
+    fmt = ty.fmt
     signature = SelectOperator(ty).signature
     assert signature.operand_types == (BoolType(), ty, ty)
     assert signature.result_types == (ty,)
+
+    arms = (IntValue.from_int(fmt, fmt.max), IntValue.from_int(fmt, fmt.min))
+    assert SelectOperator(ty).evaluate(True, *arms) == (arms[0],)
+    assert SelectOperator(ty).evaluate(False, *arms) == (arms[1],)
+    with pytest.raises(AssertionError):
+        SelectOperator(ty).evaluate(True, True, False)  # a boolean payload is not an integer one
 
 
 @pytest.mark.parametrize("width", (2, 17, 33))

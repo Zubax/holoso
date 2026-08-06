@@ -18,11 +18,24 @@ from holoso import (
     FMulOptions,
     FSortOptions,
     FloatFormat,
+    IMulOptions,
+    IntFormat,
     OperatorOptions,
     Options,
     UnsupportedConstruct,
 )
-from holoso._operators import FSortOperator, OpConfig
+from holoso._operators import (
+    FSortOperator,
+    IAbsOperator,
+    IAddOperator,
+    ICmpOperator,
+    IDivOperator,
+    IMulOperator,
+    IShiftOperator,
+    ISubOperator,
+    IntHardwareOperator,
+    OpConfig,
+)
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from holoso._hir import optimize
@@ -136,6 +149,63 @@ endmodule
     result = _compile("wrong_latency", verilog, tmp_path)
     assert result.returncode != 0
     assert "_zkf_invalid_latency_mismatch" in result.stderr
+
+
+def _integer_operators(ifmt: IntFormat) -> list[IntHardwareOperator]:
+    return [
+        IAddOperator(ifmt),
+        ISubOperator(ifmt),
+        IDivOperator(ifmt),
+        IAbsOperator(ifmt),
+        IShiftOperator(ifmt),
+        ICmpOperator(ifmt),
+        *(IMulOperator(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
+    ]
+
+
+def _integer_probe(name: str, operators: list[IntHardwareOperator]) -> str:
+    """A module instantiating each operator through the port names and parameters it declares for itself."""
+    lines = [f"module {name};", "    wire clk = 1'b0;", "    wire rst = 1'b0;", "    wire in_valid = 1'b0;"]
+    for index, operator in enumerate(operators):
+        high = operator.fmt.width - 1
+        operands = operator.operand_hdl_ports
+        results = [operator.output_hdl_ports[q] for q in range(len(operator.signature.result_types))]
+        for port in operands:
+            lines.append(f"    wire signed [{high}:0] u{index}_{port} = {operator.fmt.width}'d0;")
+        for port, result_type in zip(results, operator.signature.result_types, strict=True):
+            lines.append(f"    wire {f'signed [{high}:0] ' if result_type.is_wide else ''}u{index}_{port};")
+        for port in operator.error_ports:
+            lines.append(f"    wire u{index}_{port};")
+        params = ", ".join(f".{pname}({value})" for pname, value in operator.params.items())
+        # out_valid and the saturation sideband are deliberately left out: an omitted named port is unconnected.
+        connections = ", ".join(f".{port}(u{index}_{port})" for port in operands + results)
+        errors = "".join(f", .{port}(u{index}_{port})" for port in operator.error_ports)
+        lines.append(
+            f"    {operator.module_name} #({params}) u{index} "
+            f"(.clk(clk), .rst(rst), .in_valid(in_valid), {connections}{errors});"
+        )
+    return "\n".join([*lines, "endmodule", ""])
+
+
+@requires_iverilog
+@pytest.mark.parametrize("width", (2, 3, 24, 33, 44))
+def test_integer_operators_elaborate_as_they_declare_themselves(width: int, tmp_path: Path) -> None:
+    # A wrong latency instantiates the undefined _holoso_invalid_integer_latency; an odd width is mandatory because
+    # that is where the divider's ceiling can slip.
+    name = f"int_probe_w{width}"
+    _elaborate(name, _integer_probe(name, _integer_operators(IntFormat(width))), tmp_path)
+
+
+@requires_iverilog
+def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
+    # The negative twin of the probe above, so its silence means something.
+    operator = IDivOperator(IntFormat(33))
+    verilog = _integer_probe("wrong_int_latency", [operator]).replace(
+        f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
+    )
+    result = _compile("wrong_int_latency", verilog, tmp_path)
+    assert result.returncode != 0
+    assert "_holoso_invalid_integer_latency" in result.stderr
 
 
 @requires_iverilog

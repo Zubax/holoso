@@ -339,7 +339,7 @@ class MirWideView(_MirBankView):
         }
 
     @classmethod
-    def from_mir(cls, mir: Mir) -> "MirWideView":
+    def from_mir(cls, mir: Mir) -> MirWideView:
         nodes: dict[ValueId, MirFloatNode] = {}
         formats: set[FloatFormat] = set()
         for vid, node in mir.nodes.items():
@@ -430,7 +430,7 @@ class MirBoolView(_MirBankView):
         }
 
     @classmethod
-    def from_mir(cls, mir: Mir) -> "MirBoolView":
+    def from_mir(cls, mir: Mir) -> MirBoolView:
         nodes: dict[ValueId, MirBoolNode] = {}
         for vid, node in mir.nodes.items():
             if isinstance(node, (MirBoolInput, MirBoolStateRead, MirBoolConst)):

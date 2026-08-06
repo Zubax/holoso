@@ -45,3 +45,73 @@ def ishift(a_bits: int, b_bits: int, width: int) -> ShiftResult:
     exact = a << shift
     clamped = min(max(exact, minimum), maximum)
     return ShiftResult((a_bits << shift) & mask, clamped & mask, clamped != exact)
+
+
+def expected_simple(module: str, a_bits: int, b_bits: int, width: int) -> dict[str, int]:
+    """
+    What one of the modules taking no parameter beyond the width answers, keyed by its own output port names.
+    This and its two configurable siblings below are the reference the HDL benches score every module against, so
+    they are also what the Python operator model must reproduce.
+    """
+    modulus = 1 << width
+    minimum = -(1 << (width - 1))
+    maximum = (1 << (width - 1)) - 1
+    a = signed(a_bits, width)
+    b = signed(b_bits, width)
+    if module == "holoso_icmp":
+        return {"a_gt_b": int(a > b), "a_eq_b": int(a == b), "a_lt_b": int(a < b)}
+    if module == "holoso_ishift":
+        shifted = ishift(a_bits, b_bits, width)
+        return {"shft": shifted.shft, "prod": shifted.prod, "saturated": int(shifted.saturated)}
+    exact = {
+        "holoso_iadds": a + b,
+        "holoso_isubs": a - b,
+        "holoso_iabss": abs(a),
+    }[module]
+    clamped = min(max(exact, minimum), maximum)
+    return {"y": clamped & (modulus - 1), "saturated": int(clamped != exact)}
+
+
+def expected_imuls(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
+    minimum = -(1 << (width - 1))
+    maximum = (1 << (width - 1)) - 1
+    exact = signed(a_bits, width) * signed(b_bits, width)
+    clamped = min(max(exact, minimum), maximum)
+    return {"y": clamped & ((1 << width) - 1), "saturated": int(clamped != exact)}
+
+
+def expected_idivs(num_bits: int, den_bits: int, width: int, quotient_floor: bool) -> dict[str, int]:
+    mask = (1 << width) - 1
+    minimum = -(1 << (width - 1))
+    maximum = (1 << (width - 1)) - 1
+    num = signed(num_bits, width)
+    den = signed(den_bits, width)
+    if den == 0:
+        quotient = minimum if num < 0 else maximum
+        remainder = num
+        saturated = 1
+        div0 = 1
+    elif num == minimum and den == -1:
+        quotient = maximum
+        remainder = 0
+        saturated = 1
+        div0 = 0
+    else:
+        if quotient_floor:
+            quotient = num // den
+        else:
+            quotient_magnitude = abs(num) // abs(den)
+            quotient = -quotient_magnitude if (num < 0) != (den < 0) else quotient_magnitude
+        remainder = num - den * quotient
+        saturated = 0
+        div0 = 0
+        assert num == den * quotient + remainder
+        assert abs(remainder) < abs(den)
+        if remainder:
+            assert (remainder < 0) == ((den if quotient_floor else num) < 0)
+    return {
+        "quo": quotient & mask,
+        "rem": remainder & mask,
+        "saturated": saturated,
+        "div0": div0,
+    }

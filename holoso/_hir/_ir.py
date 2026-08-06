@@ -73,7 +73,7 @@ class Ret:
 type Terminator = Jump | Branch | Ret
 
 
-def successors(block: "Block") -> list[BlockId]:
+def successors(block: Block) -> list[BlockId]:
     match block.terminator:
         case Jump(target=target):
             return [target]
@@ -85,7 +85,7 @@ def successors(block: "Block") -> list[BlockId]:
             assert_never(block.terminator)
 
 
-def predecessors(blocks: list["Block"]) -> dict[BlockId, set[BlockId]]:
+def predecessors(blocks: list[Block]) -> dict[BlockId, set[BlockId]]:
     preds: dict[BlockId, set[BlockId]] = {block.id: set() for block in blocks}
     for block in blocks:
         for target in successors(block):
@@ -106,7 +106,7 @@ class Block:
     terminator: Terminator
 
 
-def renumber(hir: "Hir") -> "Hir":
+def renumber(hir: Hir) -> Hir:
     """
     Compact block ids to a dense 0..n-1 range, rewriting terminator targets and phi-arm predecessors. The CFG passes
     (if-conversion, merge threading) delete blocks and leave gaps; the downstream rebuild machinery relies on dense ids.
@@ -138,7 +138,7 @@ def renumber(hir: "Hir") -> "Hir":
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
-def validate_phi_predecessors(hir: "Hir") -> None:
+def validate_phi_predecessors(hir: Hir) -> None:
     """
     Every phi must carry exactly one arm per CFG predecessor of its block. Shared by the builder (a never-closed
     loop-header phi, a stale arm) and the block-deleting CFG passes (if-conversion, merge threading), so a malformed

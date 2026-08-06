@@ -1651,7 +1651,7 @@ class ReproMeta:
         }
 
     @classmethod
-    def from_dict(cls, meta: Mapping[str, Any]) -> "ReproMeta":
+    def from_dict(cls, meta: Mapping[str, Any]) -> ReproMeta:
         """Parse a saved ``META`` dict into the typed record -- the single place the on-disk format is decoded."""
         return cls(
             kernel_name=str(meta["kernel_name"]),

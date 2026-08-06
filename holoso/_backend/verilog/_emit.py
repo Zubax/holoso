@@ -312,23 +312,25 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
     for inst in lir.instances:
         sig, base = _sig(inst), base_name(inst)
         operator = inst.operator
-        letters = PORT_LETTERS[: operator.arity]
+        letters = PORT_LETTERS[: operator.signature.arity]
+        # The module names its own operand ports; the nets and microcode fields they connect to stay positional.
+        operand_ports = operator.operand_hdl_ports
         params = ", ".join(f".{name}({value})" for name, value in operator.params.items())
         w(f"{operator.module_name} #(", f"    {params}", f") u_{base} (")
         w.push()
         w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")
         for imm in operator.immediate_ports:
             w(f".{imm.name}({f_imm(base, imm.name)}),")
-        for letter in letters:
-            w(f".{letter}_sgnop({f_osgn(base, letter)}),")
+        for port, letter in zip(operand_ports, letters, strict=True):
+            w(f".{port}_sgnop({f_osgn(base, letter)}),")
         # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
         # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
         for q, result_type in enumerate(operator.signature.result_types):
             if result_type.is_wide:
                 conditioner = f_ysgn(base, q) if (inst, q) in tapped else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
-        for letter in letters:
-            w(f".{letter}({sig}_{letter}),")
+        for port, letter in zip(operand_ports, letters, strict=True):
+            w(f".{port}({sig}_{letter}),")
         # out_valid is left unconnected: the static schedule already knows when each result is ready.
         w(".out_valid(),")
         outputs = [
@@ -528,7 +530,7 @@ def _emit_read_muxes(
     for inst in lir.instances:
         sig = _sig(inst)
         base = base_name(inst)
-        for pos in range(inst.operator.arity):
+        for pos in range(inst.operator.signature.arity):
             _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", f_rd(base, PORT_LETTERS[pos]), read_books[(inst, pos)])
     w.pop()
     w("end")

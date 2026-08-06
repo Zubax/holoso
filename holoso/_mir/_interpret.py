@@ -128,7 +128,9 @@ class MirInterpreter:
                     for operand, conditioner in zip(operation.operands, operation.operand_conditioners, strict=True)
                 ]
                 results = operation.operator.evaluate(*operands, immediates=operation.immediates)
-                env[op_id] = _apply_conditioner(operation.output_conditioner, results[operation.output_port])
+                result = results[operation.output_port]
+                assert isinstance(result, FloatValue | bool), "no lowering selects an integer operator yet"
+                env[op_id] = _apply_conditioner(operation.output_conditioner, result)
             terminator = block.terminator
             match terminator:
                 case MirRet():

@@ -7,6 +7,9 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
+from holoso import IntFormat
+from holoso._operators import IDivOperator
+
 from .hdl_float_oracle import (
     HDL_DIR,
     REPO_ROOT,
@@ -17,44 +20,7 @@ from .hdl_float_oracle import (
     sources,
     start_clock,
 )
-from .hdl_integer_oracle import signed
-
-
-def _expected(num_bits: int, den_bits: int, width: int, quotient_floor: bool) -> dict[str, int | str]:
-    mask = (1 << width) - 1
-    minimum = -(1 << (width - 1))
-    maximum = (1 << (width - 1)) - 1
-    num = signed(num_bits, width)
-    den = signed(den_bits, width)
-    if den == 0:
-        quotient = minimum if num < 0 else maximum
-        remainder = num
-        saturated = 1
-        div0 = 1
-    elif num == minimum and den == -1:
-        quotient = maximum
-        remainder = 0
-        saturated = 1
-        div0 = 0
-    else:
-        if quotient_floor:
-            quotient = num // den
-        else:
-            quotient_magnitude = abs(num) // abs(den)
-            quotient = -quotient_magnitude if (num < 0) != (den < 0) else quotient_magnitude
-        remainder = num - den * quotient
-        saturated = 0
-        div0 = 0
-        assert num == den * quotient + remainder
-        assert abs(remainder) < abs(den)
-        if remainder:
-            assert (remainder < 0) == ((den if quotient_floor else num) < 0)
-    return {
-        "quo": quotient & mask,
-        "rem": remainder & mask,
-        "saturated": saturated,
-        "div0": div0,
-    }
+from .hdl_integer_oracle import expected_idivs, signed
 
 
 def _directed(width: int) -> list[int]:
@@ -97,18 +63,16 @@ async def idivs_cocotb(dut: Any) -> None:
     async def step(num: int, den: int, valid: bool = True) -> None:
         num &= mask
         den &= mask
-        dut.num.value = num
-        dut.den.value = den
+        numerator_port, denominator_port = os.environ["HOLOSO_IDIVS_OPERANDS"].split(",")
+        getattr(dut, numerator_port).value = num
+        getattr(dut, denominator_port).value = den
         dut.in_valid.value = valid
         if valid:
-            expected = _expected(num, den, width, quotient_floor)
-            expected["_desc"] = (
-                f"W={width} floor={int(quotient_floor)} num={signed(num, width)} den={signed(den, width)}"
-            )
-            scoreboard.push(expected)
+            desc = f"W={width} floor={int(quotient_floor)} num={signed(num, width)} den={signed(den, width)}"
+            scoreboard.push({**expected_idivs(num, den, width, quotient_floor), "_desc": desc})
         await RisingEdge(dut.clk)
-        dut.num.value = (~num) & mask
-        dut.den.value = (~den) & mask
+        getattr(dut, numerator_port).value = (~num) & mask
+        getattr(dut, denominator_port).value = (~den) & mask
         await Timer(1, unit="ns")
         scoreboard.sample()
 
@@ -130,9 +94,10 @@ async def idivs_cocotb(dut: Any) -> None:
             await step(num, den, bool(rng.random() >= 0.2))
 
     await scoreboard.drain()
+    numerator_port, denominator_port = os.environ["HOLOSO_IDIVS_OPERANDS"].split(",")
     for value in range(latency):
-        dut.num.value = value & mask
-        dut.den.value = (value + 1) & mask
+        getattr(dut, numerator_port).value = value & mask
+        getattr(dut, denominator_port).value = (value + 1) & mask
         dut.in_valid.value = 1
         await RisingEdge(dut.clk)
     dut.rst.value = 1
@@ -149,14 +114,19 @@ async def idivs_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("quotient_floor", (0, 1), ids=lambda mode: "trunc" if mode == 0 else "floor")
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_idivs(sim: str, width: int, quotient_floor: int) -> None:
+    # The floor rows take the operator's own parameters, so a wrong QUOTIENT_FLOOR would compute the other division;
+    # the truncating rows no operator can ask for keep their own, pinned against the same closed form.
+    hardware = IDivOperator(IntFormat(width))
     latency = 3 + (width + 1) // 2
+    assert latency == hardware.latency
+    parameters = hardware.params if quotient_floor else {"W": width, "QUOTIENT_FLOOR": 0, "LATENCY": latency}
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"holoso_idivs_w{width}_f{quotient_floor}"
     runner = get_runner(sim)
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel="holoso_idivs",
-        parameters={"W": width, "QUOTIENT_FLOOR": quotient_floor, "LATENCY": latency},
+        parameters=parameters,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -170,6 +140,7 @@ def test_idivs(sim: str, width: int, quotient_floor: int) -> None:
         extra_env={
             "HOLOSO_IDIVS_WIDTH": str(width),
             "HOLOSO_IDIVS_QUOTIENT_FLOOR": str(quotient_floor),
+            "HOLOSO_IDIVS_OPERANDS": ",".join(hardware.operand_hdl_ports),
         },
         results_xml=str(build_dir / "results.xml"),
     )

@@ -98,13 +98,13 @@ class Domain:
         demand = _DEMANDS[self.refinement]
         return demand.runtime if operand.const is None else operand.sign in demand.signs
 
-    def within(self, other: "Domain") -> bool:
+    def within(self, other: Domain) -> bool:
         """Whether every operand this domain accepts the other accepts too -- the specificity order."""
         mine, theirs = _DEMANDS[self.refinement], _DEMANDS[other.refinement]
         types = accepted_stypes(self.stype) <= accepted_stypes(other.stype)
         return types and (theirs.runtime or not mine.runtime) and mine.signs <= theirs.signs
 
-    def apart(self, other: "Domain") -> bool:
+    def apart(self, other: Domain) -> bool:
         """Whether no operand at all satisfies both, which lets two incomparable lowerings coexist."""
         mine, theirs = _DEMANDS[self.refinement], _DEMANDS[other.refinement]
         if accepted_stypes(self.stype).isdisjoint(accepted_stypes(other.stype)):
@@ -128,10 +128,10 @@ class ScalarLowering:
     operator: Operator | None
     operands: tuple[Domain, ...]
 
-    def within(self, other: "ScalarLowering") -> bool:
+    def within(self, other: ScalarLowering) -> bool:
         return all(a.within(b) for a, b in zip(self.operands, other.operands, strict=True))
 
-    def apart(self, other: "ScalarLowering") -> bool:
+    def apart(self, other: ScalarLowering) -> bool:
         return any(a.apart(b) for a, b in zip(self.operands, other.operands, strict=True))
 
 

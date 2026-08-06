@@ -446,7 +446,7 @@ def _global_scalar(x: float) -> float:
     return x * _GAIN + _SCALE
 
 
-def _quoted_annotations(x: "float") -> "float":
+def _quoted_annotations(x: float) -> float:
     return x * 2.0
 
 

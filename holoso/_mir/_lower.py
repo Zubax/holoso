@@ -80,6 +80,7 @@ from .._operators import (
     FloatToBoolOperator,
     FRoundOperator,
     HardwareOperator,
+    IntHardwareOperator,
     OpConfig,
     PortConditioner,
     PooledHardwareOperator,
@@ -383,9 +384,13 @@ class _LoweringContext:
         self.hir = hir
         self.ops = ops
         self.float_format = float_format
+        # Keyed on the operator, not on the format it happens to carry: asking a format which family it belongs to
+        # can only confirm that it matches its own kind, never that the operator was built for the right one.
         assert all(
-            getattr(ops, field.name) is None or getattr(ops, field.name).fmt == float_format for field in fields(ops)
-        ), "every configured operator must be built for the machine's float format"
+            operator is None
+            or operator.fmt == (int_format if isinstance(operator, IntHardwareOperator) else float_format)
+            for operator in (getattr(ops, field.name) for field in fields(ops))
+        ), "every configured operator must be built for the machine's format of its own scalar family"
         self.builder = MirBuilder(float_format, int_format)
         self.remap: dict[ValueId, ValueId] = {}
         self.fma_plans = _plan_fma_fusions(hir, ops)

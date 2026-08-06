@@ -7,6 +7,16 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
+from holoso import IntFormat
+from holoso._operators import (
+    IAbsOperator,
+    IAddOperator,
+    ICmpOperator,
+    IShiftOperator,
+    ISubOperator,
+    IntHardwareOperator,
+)
+
 from .hdl_float_oracle import (
     HDL_DIR,
     REPO_ROOT,
@@ -17,68 +27,41 @@ from .hdl_float_oracle import (
     sources,
     start_clock,
 )
-from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, ishift, signed
+from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, expected_simple
 
-_OPERATORS = ("holoso_iadds", "holoso_isubs", "holoso_iabss", "holoso_icmp", "holoso_ishift")
-_UNARY = frozenset(("holoso_iabss",))
-
-
-def _expected(operator: str, a_bits: int, b_bits: int, width: int) -> dict[str, int | str]:
-    modulus = 1 << width
-    minimum = -(1 << (width - 1))
-    maximum = (1 << (width - 1)) - 1
-    a = signed(a_bits, width)
-    b = signed(b_bits, width)
-    if operator == "holoso_icmp":
-        return {"a_gt_b": int(a > b), "a_eq_b": int(a == b), "a_lt_b": int(a < b)}
-    if operator == "holoso_ishift":
-        shifted = ishift(a_bits, b_bits, width)
-        return {"shft": shifted.shft, "prod": shifted.prod, "saturated": shifted.saturated}
-    exact = {
-        "holoso_iadds": a + b,
-        "holoso_isubs": a - b,
-        "holoso_iabss": abs(a),
-    }[operator]
-    clamped = min(max(exact, minimum), maximum)
-    return {"y": clamped & (modulus - 1), "saturated": int(clamped != exact)}
+# The operator model is the source of the module name, its RTL parameters, its port names and its latency, so a
+# declaration that drifted from the hardware fails right here, across every width the sweep covers.
+_OPERATORS = (IAddOperator, ISubOperator, IAbsOperator, ICmpOperator, IShiftOperator)
 
 
 @cocotb.test()
 async def integer_operator_cocotb(dut: Any) -> None:
     operator = os.environ["HOLOSO_INTEGER_OPERATOR"]
     width = int(os.environ["HOLOSO_INTEGER_WIDTH"])
-    if operator == "holoso_icmp":
-        outputs = [("a_gt_b", "a_gt_b"), ("a_eq_b", "a_eq_b"), ("a_lt_b", "a_lt_b")]
-    elif operator == "holoso_ishift":
-        outputs = [("shft", "shft"), ("prod", "prod"), ("saturated", "saturated")]
-    else:
-        outputs = [("y", "y"), ("saturated", "saturated")]
-    scoreboard = PipelineScoreboard(dut, outputs, latency=2)
+    operands = os.environ["HOLOSO_INTEGER_OPERANDS"].split(",")
+    results = os.environ["HOLOSO_INTEGER_RESULTS"].split(",")
+    unary = len(operands) == 1
+    outputs = [(port, port) for port in results + (["saturated"] if operator != "holoso_icmp" else [])]
+    scoreboard = PipelineScoreboard(dut, outputs, latency=int(os.environ["HOLOSO_EXPECTED_LATENCY"]))
     await start_clock(dut)
     await drive_reset(dut)
 
     async def step(a: int, b: int = 0, valid: bool = True) -> None:
-        if operator == "holoso_ishift":
-            dut.x.value = a
-            dut.shamt.value = b
-        elif operator == "holoso_iabss":
-            dut.x.value = a
-        else:
-            dut.a.value = a
-        if operator not in _UNARY and operator != "holoso_ishift":
-            dut.b.value = b
+        # Driven through the operator's own operand port names, in its own order, so a misdeclared pair miscomputes.
+        for port, value in zip(operands, (a, b), strict=False):
+            getattr(dut, port).value = value
         dut.in_valid.value = valid
         if valid:
-            expected = _expected(operator, a, b, width)
-            expected["_desc"] = f"{operator} W={width} a=0x{a:x} b=0x{b:x}"
-            scoreboard.push(expected)
+            scoreboard.push(
+                {**expected_simple(operator, a, b, width), "_desc": f"{operator} W={width} a=0x{a:x} b=0x{b:x}"}
+            )
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         scoreboard.sample()
 
     if width <= EXHAUSTIVE_MAX_WIDTH:
         for a in range(1 << width):
-            if operator in _UNARY:
+            if unary:
                 await step(a)
             else:
                 for b in range(1 << width):
@@ -88,7 +71,7 @@ async def integer_operator_cocotb(dut: Any) -> None:
         minimum = 1 << (width - 1)
         directed = [0, 1, 2, minimum - 1, minimum, minimum + 1, mask - 1, mask]
         for a in directed:
-            if operator in _UNARY:
+            if unary:
                 await step(a)
             else:
                 operands_b = directed
@@ -120,15 +103,8 @@ async def integer_operator_cocotb(dut: Any) -> None:
     await scoreboard.drain()
     mask = (1 << width) - 1
     for value in range(4):
-        if operator == "holoso_ishift":
-            dut.x.value = value & mask
-            dut.shamt.value = (value + 1) & mask
-        elif operator == "holoso_iabss":
-            dut.x.value = value & mask
-        else:
-            dut.a.value = value & mask
-        if operator not in _UNARY and operator != "holoso_ishift":
-            dut.b.value = (value + 1) & mask
+        for port, driven in zip(operands, (value & mask, (value + 1) & mask), strict=False):
+            getattr(dut, port).value = driven
         dut.in_valid.value = 1
         await RisingEdge(dut.clk)
     dut.rst.value = 1
@@ -142,16 +118,18 @@ async def integer_operator_cocotb(dut: Any) -> None:
 
 
 @pytest.mark.parametrize("width", TEST_WIDTHS, ids=lambda width: f"w{width}")
-@pytest.mark.parametrize("operator", _OPERATORS)
+@pytest.mark.parametrize("operator_class", _OPERATORS, ids=lambda cls: cls.mnemonic)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_integer_operator(sim: str, operator: str, width: int) -> None:
+def test_integer_operator(sim: str, operator_class: type[IntHardwareOperator], width: int) -> None:
+    hardware = operator_class(IntFormat(width))
+    operator = hardware.module_name
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"{operator}_w{width}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
         hdl_toplevel=operator,
-        parameters={"W": width, "LATENCY": 2},
+        parameters=hardware.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
@@ -162,6 +140,12 @@ def test_integer_operator(sim: str, operator: str, width: int) -> None:
         test_module="tests.hdl.test_integer",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_INTEGER_OPERATOR": operator, "HOLOSO_INTEGER_WIDTH": str(width)},
+        extra_env={
+            "HOLOSO_INTEGER_OPERATOR": operator,
+            "HOLOSO_INTEGER_WIDTH": str(width),
+            "HOLOSO_INTEGER_OPERANDS": ",".join(hardware.operand_hdl_ports),
+            "HOLOSO_INTEGER_RESULTS": ",".join(hardware.output_hdl_ports),
+            "HOLOSO_EXPECTED_LATENCY": str(hardware.latency),
+        },
         results_xml=str(build_dir / "results.xml"),
     )

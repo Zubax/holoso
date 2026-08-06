@@ -184,6 +184,7 @@ def _build_op_config(options: Options) -> OpConfig:
         flog2=FLog2Operator(fmt, op.flog2, wmul) if op.flog2 is not None else None,
         fsincos=FSincosOperator(fmt, op.fsincos, wmul) if op.fsincos is not None else None,
         fatan2=FAtan2Operator(fmt, op.fatan2, wmul) if op.fatan2 is not None else None,
+        imul=IMulOperator(options.ifmt, op.imul),
     )
 
 

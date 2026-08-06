@@ -763,6 +763,19 @@ def test_operator_layer_does_not_import_hir() -> None:
     assert not offenders, f"the operator layer transitively imports HIR: {offenders}"
 
 
+def test_the_operator_families_are_leaves_over_one_shared_vocabulary() -> None:
+    """
+    The families answer only to ``_common``: were one to import another, the shared vocabulary would have to live in
+    whichever family happened to be lowest, which is how a family module becomes everyone's dumping ground.
+    """
+    families = ["holoso._operators._float", "holoso._operators._int", "holoso._operators._bool"]
+    for family in families:
+        for other in families:
+            if family != other:
+                assert not forbidden_imports(family, other), f"{family} reaches into {other}"
+        assert not forbidden_imports("holoso._operators._common", family), f"the shared vocabulary reaches {family}"
+
+
 def test_a_reduction_minted_constant_does_not_reach_the_datapath() -> None:
     # A reduction can mint what another rule would erase: the one-shot latch below reduces to ``first and False``,
     # which is the constant False written the long way. Every connective a reduction mints therefore passes through

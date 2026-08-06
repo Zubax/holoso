@@ -66,7 +66,7 @@ class _Case:
     name: str
     fn: Callable[..., float]
     inputs: tuple[str, ...]
-    vectors: tuple["_Vector", ...]
+    vectors: tuple[_Vector, ...]
 
 
 @dataclass(frozen=True, slots=True)

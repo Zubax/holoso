@@ -225,10 +225,11 @@ class OperatorInstance:
         # A pooled result commits at issue + latency, so latency >= 1 keeps its write opcode off the held ``ucode[0]``
         # (the accept-dwell word) -- a latency-0 pooled operator would re-commit every idle cycle (see ``transacting``).
         assert self.operator.latency >= 1, f"{self.operator.mnemonic}: pooled operator latency must be >= 1"
-        # Every pooled operator passes through here, so its three hand-synchronized per-port declarations are
-        # validated once at the source: HDL port names align with the result types, and the commutation permutation
-        # (when declared) is a type-preserving bijection -- a bad future declaration fails here, not in emission.
+        # Every pooled operator passes through here, so its hand-synchronized per-port declarations are validated
+        # once at the source: HDL port names align with the operands and the result types, and the commutation
+        # permutation (when declared) is a type-preserving bijection -- a bad declaration fails here, not in emission.
         result_types = self.operator.signature.result_types
+        assert len(self.operator.operand_hdl_ports) == self.operator.signature.arity, self.operator.mnemonic
         assert len(self.operator.output_hdl_ports) == len(result_types), self.operator.mnemonic
         permutation = self.operator.swap_output_permutation
         if permutation is not None:

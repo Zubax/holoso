@@ -35,7 +35,7 @@ class ScalarSpec:
 
 @dataclass(frozen=True, slots=True)
 class SequenceSpec:
-    items: tuple["Spec", ...]
+    items: tuple[Spec, ...]
 
 
 @dataclass(frozen=True, slots=True)

@@ -197,7 +197,7 @@ def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
     the position over ``code_width`` bits; a single-source port keeps its lone source and needs no opcode field.
     """
     sources: dict[tuple[OperatorInstance, int], list[ReadSource]] = {
-        (inst, pos): [] for inst in lir.instances for pos in range(inst.operator.arity)
+        (inst, pos): [] for inst in lir.instances for pos in range(inst.operator.signature.arity)
     }
     for key, regs in lir.read_set_per_port.items():
         sources[key] = [RegRef(reg) for reg in regs]
@@ -295,7 +295,7 @@ def build_microcode(
         add(f_issue(base), 1, gated=True)
         for imm in inst.operator.immediate_ports:
             add(f_imm(base, imm.name), imm.width)
-        for pos in range(inst.operator.arity):
+        for pos in range(inst.operator.signature.arity):
             add(f_osgn(base, PORT_LETTERS[pos]), 2)
             read_book = read_books[(inst, pos)]
             if len(read_book.sources) > 1:

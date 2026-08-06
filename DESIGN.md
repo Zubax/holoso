@@ -155,10 +155,10 @@ Runtime values are only:
 
 The two hardware formats are configured together (`ffmt` and `ifmt`) and carried side by side from `Options` through
 MIR into LIR, so every layer below the front-end knows both without rediscovering either. Integers are signed two's
-complement and saturate at the extremes rather than wrapping. The integer width surfaces in emitted RTL as the `WINT`
-localparam, which already sizes the integer helper in the inline support header every module carries -- stripping it
-breaks elaboration even of a float-only kernel. What is pending is the integer backend: no operator produces integer
-values yet, so the wide register file is sized by `WFLT` alone rather than by the wider of the two.
+complement and saturate at the extremes rather than wrapping. Saturation is defined behaviour, the dual of a float
+overflowing to infinity, so it is not an error flag -- were it one, an if-converted arm that saturated would raise an
+error the untaken path never earned. What is pending is the integer backend: the hardware operators exist but no
+lowering selects one, so the wide register file is sized by `WFLT` alone rather than by the wider of the two.
 
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
 reach HIR, and remain unlowerable past MIR until the integer backend lands (see DEFERRED).
@@ -167,13 +167,16 @@ reach HIR, and remain unlowerable past MIR until the integer backend lands (see 
 
 HIR carries pure semantic operations from a HIR-local operator hierarchy; an operation is one operator applied to
 operand value IDs. Concrete hardware operators are frozen dataclasses whose fields are Holoso-exposed parameters;
-float ones delegate to the external ZKF library. Each hardware operator owns its signature and a compact HDL-safe
-identity stem, so the fully specified operator instance is itself the resource-sharing key and equal operators
-time-share one module. Per-node-parameterized operators are factories that instantiate a concrete operator.
+float ones delegate their timing and their reference arithmetic to the external ZKF library, while integer ones carry
+a closed-form latency and their own saturating arithmetic. Each hardware operator owns its signature, the port names
+of the module it stands for, and a compact HDL-safe identity stem, so the fully specified operator instance is itself
+the resource-sharing key and equal operators time-share one module. Per-node-parameterized operators are factories
+that instantiate a concrete operator.
 
-Every operator is optional, so presence is a semantic choice as well as an area one
+Every float operator is optional, so presence is a semantic choice as well as an area one
 (`ffma` enables FMA contraction, `fsort` enables min/max); what a kernel cannot reach through the operators
-it was given is refused at MIR lowering.
+it was given is refused at MIR lowering. An integer operator is never optional, only tuned: the vocabulary is small
+enough that a kernel using integers needs essentially all of it, so only the knobs are configurable.
 An operator may declare per-firing microcode-driven immediate inputs, and declares a per-instance
 initiation interval (most are II=1, fully pipelined).
 
@@ -300,8 +303,10 @@ than lowered to a counted back-edge loop, which needs a runtime integer counter;
 MIR, the counted back-edge loop becomes the natural follow-on.
 
 Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
-integer node reaching MIR is rejected as not-yet-lowerable; the integer backend, sharing the wide register bank,
-is future work. A static integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
+integer node reaching MIR is rejected as not-yet-lowerable. The pooled integer hardware exists and answers for its
+own timing and arithmetic, so what remains is the transport: selecting those operators at MIR, and giving the wide
+register bank, its constants, its state and its port codecs a scalar family rather than assuming float. A static
+integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
 runtime integer: every symbol answering what Python answers -- the roundings over a float, and `abs`/`min`/`max`/
 `np.sign` over an integer however it arose, including an integer state slot -- now keeps it, where a float-only
 lowering would have computed over its float image instead. Which such kernels still build is decided by the
