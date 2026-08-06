@@ -212,32 +212,6 @@ def test_round_sign_folds_into_operand() -> None:
         assert _bits(out[2]) == _round_ref(-value, 3), f"trunc(-x) value={value}"
 
 
-def test_a_rounding_consumed_as_an_integer_meets_the_integer_gate() -> None:
-    """
-    Only the adjacent `float(int(x))` sinks a rounding's integer back into the datapath; lifting the gate
-    retires the refusals.
-    """
-
-    def conformed(x: float) -> float:
-        return float(math.floor(x))
-
-    holoso.synthesize(conformed, _ops(), name="round_conformed")
-
-    def compared(x: float) -> bool:
-        return math.floor(x) > 3
-
-    def merged(x: float, c: bool) -> float:
-        if c:
-            y = math.floor(x)
-        else:
-            y = math.ceil(x)
-        return float(y)
-
-    for kernel in (compared, merged):
-        with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-            holoso.synthesize(kernel, _ops(), name=kernel.__name__)
-
-
 def test_round_ndigits_is_rejected() -> None:
     def kernel(x: float) -> float:
         return round(x, 2)

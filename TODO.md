@@ -51,8 +51,9 @@ the same is already true of float `mul`/`add` and the casts. Landing the backend
 and RTL on what an out-of-domain operand answers.
 
 The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the
-acceptance set: each is oracle-verified against CPython through HIR and records its MIR refusal, so lifting the gate
-turns those refusals into end-to-end coverage. `examples/uart.py` carries its counters as floats until then.
+acceptance set: each is oracle-verified against CPython through HIR, so lifting the gate extends that to end-to-end
+coverage by adding them to the MIR-lowering parametrization. `examples/uart.py` carries its counters as floats
+until then.
 
 ## Frontend limitations
 
