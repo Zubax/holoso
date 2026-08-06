@@ -44,7 +44,14 @@ same thing independently rather than routing through it: `_coerce_inputs` and `N
 ports would at least fail loudly there (`_coerce_input` rejects a non-float), but wide constants and state would be
 encoded as floats without a word. They must be converged onto the one dispatch first.
 
-Strength reduction is float-keyed (`cval: dict[ValueId, float]`) and needs an int sibling with a typed-constant cache.
+Strength reduction folds integer constants and applies the algebra each operator declares, so `x*0`, `x*1`, `x+0`,
+`x&0`, `x|-1`, `x&-1`, `x|0` and `x^0` reduce, and the mux identities cover `iselect` beside its float and bool
+siblings. Deferred is everything past that. The non-commutative integer operators declare no identity deliberately,
+because the shared algebra drops an identity operand wherever it sits and so would rewrite `0 - x` to `x`; `x-0`,
+`x//1`, `x%1`, `x<<0` and `x>>0` therefore survive and need rules of their own. So do the integer counterparts of the
+float-specific rewrites -- `x*-1` to `ineg`, multiplication and floor division by a power of two to a shift, and the
+value-equality folds `x-x`, `x^x` and `x&x`. Each of those must answer for saturation at the format extremes, a
+question the float rules never faced.
 
 A kernel that never names an integer can still raise one and hit the gate: the roundings answer an integer over a
 float, and `abs`/`min`/`max`/`np.sign` keep one they are handed. Only the adjacent `IntToFloat(FloatToInt(x))`
