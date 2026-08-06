@@ -211,9 +211,9 @@ Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and be
 deliberate: mixed int/float expressions promote to float C-style, a power yields float unless its base is an int
 and its exponent a compile-time nonnegative int (only a known exponent expands into multiplications, so anything
 else promotes), booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both operands as
-combinational logic does, while other conditional positions still branch. One join
-rule governs every meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only
-with identical kind and shape.
+combinational logic does, while other conditional positions still branch. One join rule governs every meeting
+point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only with identical kind
+and shape.
 
 Aggregates are one container of two kinds fixed by provenance, not shape: a sequence is immutable structure, an
 array the numerical kind carrying elementwise arithmetic and all mutation, so a rectangular homogeneous list is still
@@ -236,11 +236,11 @@ whose Python answer differs by operand type -- `min` is sort hardware over float
 integers, which have none -- says so once, with neither type privileged and no operand types quietly promoted into a
 domain nothing serves. A position may also carry a refinement -- `StaticNonNegative[T]` or `StaticNegative[T]` --
 demanding a compile-time value of that sign, which is what lets `**` name an exact integer power, a multiply chain,
-its reciprocal, and a transcendental composite in one table. Selection takes the
-most refined lowering every one of whose positions accepts the operand; registration rejects any two lowerings that
-are neither ordered by that specificity nor separated by accepting nothing in common, so the choice is unique.
-An array composite declares no scalar domain, rank and shape deciding its meaning. Every stub is ordinary Python in
-the supported subset, so each is its own numerical reference.
+its reciprocal, and a transcendental composite in one table. Selection takes the most refined lowering every one
+of whose positions accepts the operand; registration rejects any two lowerings that are neither ordered by that
+specificity nor separated by accepting nothing in common, so the choice is unique. An array composite declares no
+scalar domain, rank and shape deciding its meaning. Every stub is ordinary Python in the supported subset, so each
+is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
@@ -301,10 +301,11 @@ MIR, the counted back-edge loop becomes the natural follow-on.
 
 Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
 integer node reaching MIR is rejected as not-yet-lowerable; the integer backend, sharing the wide register bank,
-is future work. A static integer folds away before MIR ever sees it, but a kernel need not name an integer to raise
-one: the roundings answer an integer over a float, as Python does, so a float-only kernel can meet the gate, and
-which ones survive is decided by the reductions that sink an integer back into the float datapath rather than by
-any rule worth stating.
+is future work. A static integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
+runtime integer: every symbol answering what Python answers -- the roundings over a float, and `abs`/`min`/`max`/
+`np.sign` over an integer however it arose, including an integer state slot -- now keeps it, where a float-only
+lowering would have computed over its float image instead. Which such kernels still build is decided by the
+reductions that sink an integer back into the float datapath rather than by any rule worth stating.
 
 ## MIR
 

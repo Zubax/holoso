@@ -37,9 +37,12 @@ encoded as floats without a word. They must be converged onto the one dispatch f
 
 Strength reduction is float-keyed (`cval: dict[ValueId, float]`) and needs an int sibling with a typed-constant cache.
 
-The roundings answer an integer over a float, so a float-only kernel can raise a runtime integer and hit the gate.
-Only the adjacent `IntToFloat(FloatToInt(x))` reduces today, so `float(math.floor(x))` builds while
-`math.floor(x) > 3`, `float(math.floor(x) + 1)` and an integer phi merging `floor` with `ceil` do not. Sinking
+A kernel that never names an integer can still raise one and hit the gate: the roundings answer an integer over a
+float, and `abs`/`min`/`max`/`np.sign` keep one they are handed. Only the adjacent `IntToFloat(FloatToInt(x))`
+reduces today, so `float(math.floor(x))` and `abs(float(int(x)))` build while `math.floor(x) > 3`,
+`float(math.floor(x) + 1)`, `float(abs(int(x)))`, `float(max(int(x), 0))`, an integer phi merging `floor` with
+`ceil`, and any integer state slot do not. These lowerings are right -- the alternative silently computes over a
+float image, and retyped an integer slot to a float register that stops counting at the mantissa width. Sinking
 `IntToFloat` through a select and through the exactly-representable int arithmetic would recover most of them;
 lifting the gate recovers all of them and is the real fix.
 

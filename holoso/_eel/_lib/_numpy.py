@@ -12,7 +12,7 @@ pins each primitive to the numpy/math variant matching the hardware behavior -- 
 the hardware where math.exp2 would raise -- so a composite built on the stubs inherits that hardware-faithful behavior,
 and its plain-Python run uses exactly the primitives (and fast-math choices) it lowers to.
 
-Stub names are irrelevant to dispatch; underscores dodge the builtin names.
+Stub names are irrelevant to dispatch.
 """
 
 import math
