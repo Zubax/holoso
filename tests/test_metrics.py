@@ -159,7 +159,7 @@ def _measure(name: str) -> Metrics:
 #   scratch register. A validate-and-retry loop demotes any slot whose in-place commit the colorer finds unsound (a
 #   live-in feeding another phi, or a dominator-arm clobber) back to a copy-back.
 # - min_ii reflects uniform dependency edges (both banks read latch-free), diamond if-conversion (small pure branch
-#   diamonds become muxes -- a float select, or a bool_select reduced to and/or/not for a boolean/mixed merge),
+#   diamonds become muxes -- an fselect, or a bselect reduced to and/or/not for a boolean/mixed merge),
 #   NOT-folding (a semantic NOT is a free consumer-side inversion), and cross-block software pipelining. Bool-phi
 #   if-conversion runs both arms unconditionally, so it can RAISE min_ii (the shortest static path) while LOWERING
 #   realized per-transaction latency -- the true goal, guarded by test_cycle_model. A converted diamond keeps both

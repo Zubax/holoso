@@ -47,7 +47,7 @@ float image, and retyped an integer slot to a float register that stops counting
 lifting the gate recovers all of them and is the real fix.
 
 A speculated shift can carry an out-of-domain count, where `evaluate` names no number but the RTL defines a result;
-the same is already true of float `mul`/`add` and the casts. Landing the backend means reconciling fold, MIR model
+the same is already true of float `fmul`/`fadd` and the casts. Landing the backend means reconciling fold, MIR model
 and RTL on what an out-of-domain operand answers.
 
 The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the
@@ -93,18 +93,3 @@ every cheap detector for the shape misfires on the legitimate counter-spelled lo
 A state attribute's shape and type come from the reset snapshot, so a field annotation contradicting it
 (`P: Float64[np.ndarray, "2 2"]` on an instance holding a 3x3) is documentation rather than a checked declaration.
 Parameter and return annotations are checked, so the module boundary is judged while the state boundary is not.
-
-## HIR operator mnemonics
-
-The operator class names are uniform (`Float*`, `Int*`, `Bool*`); the mnemonics they carry are not, in three ways.
-
-Twenty-five float mnemonics carry no family marker where every int and bool one does -- `add`, `mul`, `select`
-against `iadd`, `band` -- so float reads as the namespace default. The float comparisons contradict even that, being
-marked (`flt`, `feq`), so one family is spelled two ways. Marking the rest is the floatism to remove, at the cost of
-churning residual Eel dumps, HIR printouts, HTML reports and the test assertions over them.
-
-The muxes name their family with a word, `bool_select` and `int_select`, where the rest of the vocabulary uses a
-letter.
-
-The integer bitwise operators drop the `Bw` their class names carry; extend `iand`, `ior`, `ixor` and `inot` to
-`ibwand`, `ibwor`, `ibwxor` and `ibwnot`.

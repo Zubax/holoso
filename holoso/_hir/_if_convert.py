@@ -1,11 +1,11 @@
 """
-Diamond if-conversion: a small, pure branch diamond collapses into ``select`` data muxes.
+Diamond if-conversion: a small, pure branch diamond collapses into ``fselect`` data muxes.
 
 A diamond is ``P: Branch(c, T, F)`` where both arms are single-predecessor, phi-free, operation-only blocks jumping
 to one merge block ``M`` whose only predecessors they are. When every arm operation is speculatable and each arm is
 small enough, the diamond is spliced into ``P``: both arms' operations run unconditionally,
-each of ``M``'s phis becomes a mux under its original value id -- ``select(c, true_arm, false_arm)``
-for a float phi, ``int_select`` for an integer one and ``bool_select`` for a boolean one (so downstream references
+each of ``M``'s phis becomes a mux under its original value id -- ``fselect(c, true_arm, false_arm)``
+for a float phi, ``iselect`` for an integer one and ``bselect`` for a boolean one (so downstream references
 need no rewrite) -- and ``M``'s terminator replaces the branch. The pass repeats until no diamond converts, so nested
 chains collapse from the inside out; the dead branch condition (when nothing else reads it) falls to DCE, which runs
 after this pass. Conversion turns control dependence into data dependence: a diamond whose merged results are entirely

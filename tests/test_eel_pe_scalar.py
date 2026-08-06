@@ -305,7 +305,7 @@ def _pow_zero_orphans(a: float, b: float) -> float:
 def test_zero_power_orphans_its_base() -> None:
     _oracle(_pow_zero_orphans, [{"a": 2.0, "b": 3.0}])
     text = _residual_text(_pow_zero_orphans)
-    assert "mul" not in text
+    assert "fmul" not in text
     assert "return 1.0" in text
 
 
@@ -368,7 +368,7 @@ def test_residual_powers_lower_through_the_pow_stub() -> None:
     _oracle(_pow_negative_base_high_exponent, [{"x": -2.0}, {"x": -1.5}, {"x": 3.0}])
     _oracle(_pow_float_exponent, [{"x": 0.0}])
     _oracle(_zero_base_pow, [{"e": 2.5}, {"e": 0.5}])
-    assert "log2" not in _residual_text(_zero_base_pow)
+    assert "flog2" not in _residual_text(_zero_base_pow)
 
 
 def _zero_to_negative_power(x: float) -> float:
@@ -407,7 +407,7 @@ def _dead_pole(x: float) -> float:
 
 def test_a_dead_static_pole_is_not_convicted() -> None:
     """Unlike the old host-raise oracle, an unused pole is no longer a diagnostic: only a survivor is judged."""
-    assert "div" not in _residual_text(_dead_pole)
+    assert "fdiv" not in _residual_text(_dead_pole)
     optimize(lower(_dead_pole).hir)
 
 

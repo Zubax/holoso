@@ -77,7 +77,7 @@ def _aliased_intrinsic(x: float) -> float:
 
 def test_callee_dispatch_is_identity_not_spelling() -> None:
     _oracle(_aliased_intrinsic, [{"x": 4.0}, {"x": 2.25}])
-    assert "sqrt" in _residual_text(_aliased_intrinsic)
+    assert "fsqrt" in _residual_text(_aliased_intrinsic)
 
 
 def sqrt(v: float) -> float:
@@ -90,7 +90,7 @@ def _shadowing_user_function(x: float) -> float:
 
 def test_a_user_function_spelled_like_a_library_one_inlines_as_user_code() -> None:
     _oracle(_shadowing_user_function, [{"x": 4.0}, {"x": -1.0}])
-    assert "sqrt" not in _residual_text(_shadowing_user_function)
+    assert "fsqrt" not in _residual_text(_shadowing_user_function)
 
 
 def _sqrt_of_int(n: int) -> float:

@@ -247,7 +247,7 @@ def test_mul_by_pow2_const_becomes_ilog2() -> None:
     assert isinstance(ops[0].operator, FMulILog2Operator) and ops[0].operator.k == -2
 
 
-def test_left_const_mul_pow2_is_commutative() -> None:
+def test_left_const_fmul_pow2_is_commutative() -> None:
     def f(a: float) -> float:
         return 2 * a
 
@@ -506,8 +506,8 @@ def test_if_conversion_knob_zero_disables_the_pass(monkeypatch: pytest.MonkeyPat
 
 
 def test_if_conversion_converts_a_boolean_phi_merge() -> None:
-    # Bool-phi if-conversion: a diamond merging a boolean collapses to one block, the merge becoming a bool_select
-    # (a float select is the wide dual). Both arms here are dynamic comparisons, so strength reduction keeps the mux.
+    # Bool-phi if-conversion: a diamond merging a boolean collapses to one block, the merge becoming a bselect
+    # (an fselect is the wide dual). Both arms here are dynamic comparisons, so strength reduction keeps the mux.
     def f(a: float, b: float, c: float) -> float:
         if a > b:
             flag = b > c
@@ -550,7 +550,7 @@ def test_an_error_bearing_integer_arm_stays_behind_its_guard() -> None:
 
 
 def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
-    # The state-machine merge shape: arms are boolean constants, so the bool_select reduces to and/or/not via strength
+    # The state-machine merge shape: arms are boolean constants, so the bselect reduces to and/or/not via strength
     # reduction (no select node survives), exactly the schmitt/pfd collapse to a single straight-line block.
     def f(a: float, b: float, hold: bool) -> float:
         if a > b:
@@ -561,14 +561,14 @@ def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
 
     hir = _hir_of(f)
     assert len(hir.blocks) == 1
-    # bool_select(a>b, True, hold) == (a>b) or hold -- reduced away, no select of either flavor remains.
+    # bselect(a>b, True, hold) == (a>b) or hold -- reduced away, no select of either flavor remains.
     assert not any(
         isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
     )
 
 
-def test_bool_select_reductions_are_truth_table_correct() -> None:
-    # The bool-mux strength-reduction identities (a bool_select with constant arms collapses to and/or/not/passthrough)
+def test_bselect_reductions_are_truth_table_correct() -> None:
+    # The bool-mux strength-reduction identities (a bselect with constant arms collapses to and/or/not/passthrough)
     # must be bit-exact. Each shape is run through the numerical model over every boolean input combination and checked
     # against its Python reference; a wrong identity -- e.g. (c,False,True) reduced to c not ~c -- mismatches here.
     import itertools
@@ -615,7 +615,7 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
             y = False
         return y
 
-    def s_dyn_dyn(c: bool, t: bool, f: bool) -> bool:  # (c, t, f) -> bool_select kept
+    def s_dyn_dyn(c: bool, t: bool, f: bool) -> bool:  # (c, t, f) -> bselect kept
         if c:
             y = t
         else:
@@ -637,16 +637,14 @@ def test_bool_select_reductions_are_truth_table_correct() -> None:
         (s_dyn_t, lambda c, t: (not c) or t, 2, False),
         (s_dyn_f, lambda c, t: c and t, 2, False),
         (s_dyn_dyn, lambda c, t, f: t if c else f, 3, True),
-        # A surviving bool_select whose arm carries a NOT-folded inversion: the inversion rides the arm conditioner
+        # A surviving bselect whose arm carries a NOT-folded inversion: the inversion rides the arm conditioner
         # (the generic inline-operand inversion path), distinct from the constant-arm reductions above.
         (s_dyn_not_dyn, lambda c, t, f: t if c else (not f), 3, True),
     ]
     for fn, ref, arity, keeps_select in cases:
         hir = _hir_of(fn)
         has_select = any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
-        assert (
-            has_select == keeps_select
-        ), f"{fn.__name__}: bool_select presence {has_select} != expected {keeps_select}"
+        assert has_select == keeps_select, f"{fn.__name__}: bselect presence {has_select} != expected {keeps_select}"
         model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT), fn.__name__))
         for combo in itertools.product([False, True], repeat=arity):
             got = bool(model.run(*combo)[0])
@@ -1300,9 +1298,9 @@ def test_integer_nodes_are_refused_by_mir_lowering(make: Callable[[HirBuilder], 
         lower_to_mir(builder.finish(), OPS, FMT, DEFAULT_IFMT)
 
 
-def test_a_bool_select_repeating_its_condition_reduces_to_a_gate() -> None:
-    # ``if c: r = a`` over a boolean leaves bool_select(c, a, c) -- Python's eager ``and`` shape written as a branch --
-    # and its dual leaves bool_select(c, c, b). Both are pure gates, so the mux must not reach the hardware.
+def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:
+    # ``if c: r = a`` over a boolean leaves bselect(c, a, c) -- Python's eager ``and`` shape written as a branch --
+    # and its dual leaves bselect(c, c, b). Both are pure gates, so the mux must not reach the hardware.
     def and_shape(c: bool, a: bool) -> bool:
         r = c
         if c:

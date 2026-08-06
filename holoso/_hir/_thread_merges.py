@@ -1,7 +1,7 @@
 """
 Empty merge-block elimination (jump-threading).
 
-If-conversion collapses a small, speculatable diamond into a ``select``; a diamond whose arm holds a non-speculatable
+If-conversion collapses a small, speculatable diamond into an ``fselect``; a diamond whose arm holds a non-speculatable
 operation (a variable-divisor division) stays a real branch with a separate phi merge block. When that merge feeds a
 following control structure -- a loop header, a sibling/cascade merge, another diamond -- and has no operation of its
 own to host, it is a pure pass-through: phis but no operations, a single ``Jump`` out, and (because every phi-arm
