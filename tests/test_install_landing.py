@@ -125,17 +125,17 @@ def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:
 class _HoldOrUpdateBool:
     """
     A boolean state held on one arm and updated on the other: ``out`` takes the STATE READ ``self.s`` when ``c`` is
-    false and the input ``a`` when true. No bundled example installs a state read as a phi arm, so this pins the third
+    false and ``a and b`` when true. No bundled example installs a state read as a phi arm, so this pins the third
     entry-resident source kind (after constants and inputs).
     """
 
     def __init__(self) -> None:
         self.s = False
 
-    def __call__(self, a: bool, c: bool) -> tuple[bool, bool]:
+    def __call__(self, a: bool, b: bool, c: bool) -> tuple[bool, bool]:
         out = self.s
         if c:
-            out = a
+            out = a and b
         self.s = a
         return out, self.s
 
@@ -143,11 +143,11 @@ class _HoldOrUpdateBool:
 def test_state_read_sourced_install_is_inline_class() -> None:
     """
     A phi arm that is a STATE READ is resident at block entry (the slot register holds it from the start), so its tail
-    install is inline-class -- the generalization's third source kind. Disable if-conversion so the diamond stays a real
-    branch and the hold arm installs ``self.s`` by a pc-gated bool write rather than collapsing to a select. Pin both
-    that the install is so classified (a non-const resident-source bool write) and -- the black-box teeth -- that the
-    held value is the OLD state across a hold/update sweep, which an early-read or clobbered state-read install would
-    corrupt (the model vs a fresh Python reference, schedule-independent).
+    install is inline-class -- the generalization's third source kind. A zero if-conversion budget keeps the diamond a
+    real branch, so the hold arm installs ``self.s`` by a pc-gated bool write rather than collapsing to a select.
+    Pin both that the install is so classified (a non-const resident-source bool write) and -- the black-box teeth --
+    that the held value is the OLD state across a hold/update sweep, which an early-read or clobbered state-read
+    install would corrupt (the model vs a fresh Python reference, schedule-independent).
     """
     options = dataclasses.replace(default_options(FloatFormat(6, 18)), ifconv_max_ops=0)
     lir = build_lir(
@@ -166,8 +166,8 @@ def test_state_read_sourced_install_is_inline_class() -> None:
         _HoldOrUpdateBool().__call__, options, name="hold_or_update_bool"
     ).numerical_model.elaborate()
     reference = _HoldOrUpdateBool()
-    for a, c in [(True, False), (False, False), (True, True), (False, False), (True, False), (False, True)]:
-        assert tuple(bool(v) for v in model.run(a, c)) == reference(a, c)
+    for a, b, c in [(True, True, False), (False, True, False), (True, True, True), (False, False, False)]:
+        assert tuple(bool(v) for v in model.run(a, b, c)) == reference(a, b, c)
 
 
 class _LiveThroughArm:

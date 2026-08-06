@@ -1137,19 +1137,23 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce() -> None:
         def __init__(self) -> None:
             self.x = 0.0
 
-        def __call__(self, cond: bool) -> tuple[float, float]:
-            new_y = self.x if cond else 0.0  # an unrelated phi taking x's live-in as an arm
-            self.x = 1.0 if cond else 2.0
+        def __call__(self, cond: bool, d: float) -> tuple[float, float]:
+            if cond:
+                new_y = self.x  # an unrelated phi taking x's live-in as an arm
+                self.x = 1.0 / d
+            else:
+                new_y = 0.0
+                self.x = 2.0
             return new_y, self.x
 
-    lir = build_lir(_run(LiveInFeedsUnrelatedPhi().__call__, ifconv_max_ops=0), "livein_unrelated")
+    lir = build_lir(_run(LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")
     assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
     model = build_model(lir)
     reference = LiveInFeedsUnrelatedPhi()
-    for cond in [True, False, True, False, True]:
-        got = tuple(float(v) for v in model.run(cond))
-        exp = tuple(float(v) for v in reference(cond))
-        assert got == exp, (cond, got, exp)
+    for cond, d in [(True, 4.0), (False, 1.0), (True, 0.5), (False, 2.0), (True, 8.0)]:
+        got = tuple(float(v) for v in model.run(cond, d))
+        exp = tuple(float(v) for v in reference(cond, d))
+        assert got == exp, (cond, d, got, exp)
 
 
 def test_model_while_loop_accumulates() -> None:
@@ -1630,18 +1634,22 @@ def test_merged_state_slots_preserve_behaviour() -> None:
 
 
 def test_aliased_slot_with_phi_live_in_builds() -> None:
-    # Regression (review): aliased state slots whose shared live-out is a SURVIVING phi (real branch, if-conversion
-    # disabled) must compile. The drop is gated off phi live-outs: an earlier register-pinning merge tripped a
-    # coloring/backstop assert on these shapes, and an ungated drop tripped a phi-install-past-terminator assert. Both
-    # attribute orders and a phi-of-inputs shape are exercised; the un-merged builds must still match the interpreter.
+    # Regression (review): aliased state slots whose shared live-out is a SURVIVING phi (a real branch) must compile.
+    # The drop is gated off phi live-outs: an earlier register-pinning merge tripped a coloring/backstop assert on
+    # these shapes, and an ungated drop tripped a phi-install-past-terminator assert. Both attribute orders and a
+    # phi-of-inputs shape are exercised; the un-merged builds must still match the interpreter.
     class Forward:
         def __init__(self) -> None:
             self.x = 0.0
             self._alias = 0.0
 
-        def __call__(self, cond: bool) -> tuple[float, float]:
-            y = self.x if cond else 0.0
-            self.x = 1.0 if cond else 2.0
+        def __call__(self, cond: bool, k: float) -> tuple[float, float]:
+            if cond:
+                y = self.x
+                self.x = k + 1.0
+            else:
+                y = 0.0
+                self.x = 2.0
             self._alias = self.x
             return y, self.x
 
@@ -1650,9 +1658,13 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
             self._alias = 0.0
             self.x = 0.0
 
-        def __call__(self, cond: bool) -> tuple[float, float]:
-            y = self.x if cond else 0.0
-            self.x = 1.0 if cond else 2.0
+        def __call__(self, cond: bool, k: float) -> tuple[float, float]:
+            if cond:
+                y = self.x
+                self.x = k + 1.0
+            else:
+                y = 0.0
+                self.x = 2.0
             self._alias = self.x
             return y, self.x
 
@@ -1661,13 +1673,22 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
             self.x = 0.0
             self._alias = 0.0
 
-        def __call__(self, cond: bool, a: float, b: float) -> tuple[float, float]:
-            old = self.x if cond else 0.0
-            self.x = a if cond else b
+        def __call__(self, cond: bool, a: float, b: float) -> tuple[float, float, float]:
+            if cond:
+                old = self.x
+                self.x = a
+                w = a + b
+            else:
+                old = 0.0
+                self.x = b
+                w = 0.0
             self._alias = self.x
-            return old, self.x
+            return old, self.x, w
 
-    vectors: list[list[FloatValue | bool]] = [[True], [False], [True], [True], [False], [False], [True]]
+    vectors: list[list[FloatValue | bool]] = [
+        [cond, FloatValue.from_float(FMT, k)]
+        for cond, k in [(True, 1.0), (False, 1.0), (True, 3.0), (True, -2.0), (False, 0.5), (False, 4.0), (True, 0.0)]
+    ]
     for cls in (Forward, Reversed):
         model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__, FMT, ifconv_max_ops=0)
         assert_model_equals_interpreter(model, interpreter, vectors, cls.__name__)

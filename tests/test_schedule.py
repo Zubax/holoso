@@ -1450,16 +1450,18 @@ def test_cfg_phi_merge_register_shows_residence() -> None:
     # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Before
     # phi-copy residence was added to reg_liveness, such a register had a use but no def and so collapsed to an empty
     # (untinted) live set -- the CFG-report liveness gap.
-    def f(x: float) -> float:
+    def f(x: float, d: float) -> tuple[float, float]:
         if x > 0.0:
             z = 1.0
+            w = x / d
         else:
             z = 2.0
-        return z
+            w = 0.0
+        return z, w
 
-    lir = build_lir(_run(f, ifconv_max_ops=0), "diamond")
+    lir = build_lir(_run(f), "diamond")
     assert any(block.wide_copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
-    (out,) = lir.wide_outputs
+    out = lir.wide_outputs[0]
     assert isinstance(out.tap.source, RegRef)
     assert lir.reg_liveness.get(out.tap.source), "the phi-merged output register must be tinted live in the report"
 

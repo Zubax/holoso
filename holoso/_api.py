@@ -141,7 +141,7 @@ class Options:
     """
 
     ifconv_max_ops: int = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
-    """Per-arm budget for diamond if-conversion; 0=disable."""
+    """Per-arm operation budget for diamond if-conversion; 0 converts only the operation-free diamonds."""
 
     ucode_fetch_stages: int = 3
     """Controller fmax/latency trade-off: a deeper fetch raises fmax but costs idle refills on a mispredicted branch."""

@@ -487,20 +487,25 @@ def test_if_conversion_respects_the_arm_size_budget() -> None:
     assert len(_hir_of(f, 3).blocks) == 1
 
 
-def test_if_conversion_knob_zero_disables_the_pass() -> None:
-    # Operation-free arms: they fit every budget including zero, so only the disable can keep the diamond a branch.
-    def f(a: float, b: float) -> float:
+def test_zero_budget_still_converts_the_operation_free_diamond() -> None:
+    def constant_arms(a: float, b: float) -> float:
         if a > b:
             y = 1.0
         else:
             y = 2.0
         return y
 
-    assert len(_hir_of(f, 1).blocks) == 1
-    hir = _hir_of(f, 0)
-    assert len(hir.blocks) == 4 and not any(
-        isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values()
-    )
+    def one_op_arm(a: float, b: float) -> float:
+        if a > b:
+            y = a + b
+        else:
+            y = 1.0
+        return y
+
+    hir = _hir_of(constant_arms, 0)
+    assert len(hir.blocks) == 1
+    assert any(isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values())
+    assert len(_hir_of(one_op_arm, 0).blocks) == 4
 
 
 def test_synthesize_honors_the_ifconv_option() -> None:

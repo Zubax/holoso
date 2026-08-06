@@ -116,8 +116,6 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
 
 def run(hir: Hir, max_ops: int) -> Hir:
     assert max_ops >= 0
-    if max_ops == 0:
-        return hir
     converted = 0
     while (diamond := _find_diamond(hir, predecessors(hir.blocks), max_ops)) is not None:
         hir = _splice(hir, diamond)
