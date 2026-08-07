@@ -18,7 +18,7 @@ from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import RegRef
 from holoso._mir import lower as lower_to_mir
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, default_ops, overlap_spill_kernel
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops, overlap_spill_kernel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -57,7 +57,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 def _report(name: str) -> str:
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT
+            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
         ),
         name,
     )
@@ -68,7 +68,7 @@ def _report(name: str) -> str:
 def test_report_renders_for_each_example(name: str) -> None:
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT
+            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
         ),
         name,
     )
@@ -117,7 +117,10 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
 
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(overlap_spill_kernel).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT
+            optimize(lower(overlap_spill_kernel).hir, DEFAULT_IFCONV_MAX_OPS),
+            default_ops(_FMT),
+            _FMT,
+            default_ifmt(_FMT),
         ),
         "overlap_spill",
     )

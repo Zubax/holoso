@@ -34,7 +34,7 @@ from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, SHIPPED_TUNING, build_lir, default_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, SHIPPED_TUNING, build_lir, default_ops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -117,7 +117,7 @@ class Metrics:
 def _measure(name: str) -> Metrics:
     lir: Lir = build_lir(
         lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT
+            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
         ),
         name,
         SHIPPED_TUNING,

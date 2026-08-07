@@ -7,13 +7,12 @@ boundary live here too.
 from abc import ABC
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import IntEnum
 from typing import ClassVar
 
 import zkf
 
-from .._value import FloatValue, ScalarValue
-from .._type import BoolType, FloatFormat, FloatType
+from .._value import FloatValue, IntValue, RoundMode, ScalarValue
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType
 from ._common import (
     ComparatorOperator,
     FloatSignControl,
@@ -25,9 +24,19 @@ from ._common import (
     ScalarSignature,
 )
 
+_ROUND_LABEL: dict[RoundMode, str] = {
+    RoundMode.NEAREST_EVEN: "round",
+    RoundMode.FLOOR: "floor",
+    RoundMode.CEIL: "ceil",
+    RoundMode.TRUNC: "trunc",
+}
+"""Rendered into the report and the ROM comments, so it is pinned here rather than taken from zkf's member names."""
+
 
 @dataclass(frozen=True, slots=True)
-class FloatHardwareOperator(PooledHardwareOperator, ABC):
+class ZkfBackedOperator(PooledHardwareOperator, ABC):
+    """The float format parameterizes every ZKF-backed module, including one whose operand or result is an integer."""
+
     fmt: FloatFormat
 
     _model: zkf.OperatorModel = field(init=False, compare=False, repr=False)
@@ -44,19 +53,19 @@ class FloatHardwareOperator(PooledHardwareOperator, ABC):
     def params(self) -> dict[str, int]:
         return self._model.params
 
+
+@dataclass(frozen=True, slots=True)
+class FloatHardwareOperator(ZkfBackedOperator, ABC):
+    """Float on both sides, which is what makes the narrowed operand validator below sound."""
+
     @property
     def scalar_type(self) -> FloatType:
         return FloatType(self.fmt)
 
-    def _validated_operands(self, operands: tuple[ScalarValue, ...], arity: int) -> tuple[FloatValue, ...]:
-        if len(operands) != arity:
-            raise ValueError(f"{self.mnemonic} expected {arity} operands, got {len(operands)}")
+    def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[FloatValue, ...]:
         validated: list[FloatValue] = []
-        for index, operand in enumerate(operands):
-            if not isinstance(operand, FloatValue):
-                raise TypeError(f"{self.mnemonic} operand {index} must be FloatValue, got {type(operand).__name__}")
-            if operand.fmt != self.fmt:
-                raise ValueError(f"{self.mnemonic} operand {index} has {operand.fmt}, expected {self.fmt}")
+        for operand in super()._validated_operands(operands):
+            assert isinstance(operand, FloatValue)
             validated.append(operand)
         return tuple(validated)
 
@@ -100,7 +109,7 @@ class FAddOperator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return (a + b,)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -140,7 +149,7 @@ class FMulOperator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return (a * b,)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -176,7 +185,7 @@ class FDivOperator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return (a / b,)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -213,7 +222,7 @@ class FMulILog2Operator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands, 1)
+        (a,) = self._validated_operands(operands)
         return (a.scale_pow2(self.k),)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -248,7 +257,7 @@ class FCmpOperator(FloatHardwareOperator, ComparatorOperator):
         object.__setattr__(self, "_model", model)
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         ordering = a.compare(b)
         return ordering > 0, ordering == 0, ordering < 0
 
@@ -275,19 +284,11 @@ class FRoundOperator(FloatHardwareOperator):
     immediate_ports: ClassVar[list[ImmediateField]] = [ImmediateField("round_mode", 2)]
     opt: Options
 
-    class Mode(IntEnum):
-        """Matches the mode encoding in holoso_fround"""
-
-        ROUND = 0
-        FLOOR = 1
-        CEIL = 2
-        TRUNC = 3
-
-    _EVAL: ClassVar[dict[Mode, Callable[[FloatValue], FloatValue]]] = {
-        Mode.ROUND: FloatValue.round,
-        Mode.FLOOR: FloatValue.floor,
-        Mode.CEIL: FloatValue.ceil,
-        Mode.TRUNC: FloatValue.trunc,
+    _EVAL: ClassVar[dict[RoundMode, Callable[[FloatValue], FloatValue]]] = {
+        RoundMode.NEAREST_EVEN: FloatValue.round,
+        RoundMode.FLOOR: FloatValue.floor,
+        RoundMode.CEIL: FloatValue.ceil,
+        RoundMode.TRUNC: FloatValue.trunc,
     }
 
     def __post_init__(self) -> None:
@@ -307,14 +308,14 @@ class FRoundOperator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands, 1)
+        (a,) = self._validated_operands(operands)
         (mode,) = immediates
-        return (self._EVAL[self.Mode(mode)](a),)
+        return (self._EVAL[RoundMode(mode)](a),)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
         (mode,) = immediates
-        return f"{self.Mode(mode).name.lower()}({a})"
+        return f"{_ROUND_LABEL[RoundMode(mode)]}({a})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,7 +360,7 @@ class FFmaOperator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 3, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        a, b, c = self._validated_operands(operands, 3)
+        a, b, c = self._validated_operands(operands)
         return (FloatValue.fma(a, b, c),)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -395,7 +396,7 @@ class FSortOperator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,) * 2)
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return FloatValue.sort(a, b)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -443,7 +444,7 @@ class FExp2Operator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands, 1)
+        (a,) = self._validated_operands(operands)
         return (a.exp2(),)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -491,7 +492,7 @@ class FLog2Operator(FloatHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands, 1)
+        (a,) = self._validated_operands(operands)
         return (a.log2(),)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -547,7 +548,7 @@ class FSincosOperator(_FCordicOperator):
         return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,) * 2)
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands, 1)
+        (a,) = self._validated_operands(operands)
         return a.sincos()
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -592,7 +593,7 @@ class FAtan2Operator(_FCordicOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,) * 2)
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        y, x = self._validated_operands(operands, 2)
+        y, x = self._validated_operands(operands)
         return FloatValue.atan2(y, x)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -622,7 +623,7 @@ class FloatIsFiniteOperator(FloatClassificationOperator):
         return f"holoso_fisfinite({a})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        (a,) = operands
+        (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
         return (a.fmt.is_finite(a.bits),)
 
@@ -640,7 +641,7 @@ class FloatIsPosInfOperator(FloatClassificationOperator):
         return f"holoso_fisposinf({a})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        (a,) = operands
+        (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
         return (not a.fmt.is_finite(a.bits) and not a.negative,)
 
@@ -658,7 +659,7 @@ class FloatIsNegInfOperator(FloatClassificationOperator):
         return f"holoso_fisneginf({a})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        (a,) = operands
+        (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
         return (not a.fmt.is_finite(a.bits) and a.negative,)
 
@@ -681,7 +682,7 @@ class FloatToBoolOperator(InlineHardwareOperator):
         return f"holoso_ftobool({a})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        (a,) = operands
+        (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
         return (a.exponent != 0,)
 
@@ -704,8 +705,96 @@ class BoolToFloatOperator(InlineHardwareOperator):
         return f"holoso_ffrombool({a})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        (a,) = operands
+        (a,) = self._validated_operands(operands)
+        assert isinstance(a, bool)
         return (FloatValue.from_float(self.fmt, 1.0 if a else 0.0),)
 
 
-# TODO: int<->float conversions go here (pooled sequential).
+@dataclass(frozen=True, slots=True)
+class FloatIntConversionOperator(ZkfBackedOperator, ABC):
+    """
+    A conversion belongs to neither family, so it declares no scalar family and its signature names both formats.
+    The RTL's own ``WEXP`` guards are not mirrored in the ZKF Python models; they fail loudly at elaboration.
+    """
+
+    ifmt: IntFormat
+
+
+@dataclass(frozen=True, slots=True)
+class FFromIntOperator(FloatIntConversionOperator):
+    """Signed integer to float, nearest with ties to even; a magnitude past the finite range becomes an infinity."""
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_normalize: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
+    mnemonic: ClassVar[str] = "ffromint"
+    operand_hdl_ports: ClassVar[list[str]] = ["a"]
+    output_hdl_ports: ClassVar[list[str]] = ["y"]
+    opt: Options
+
+    def __post_init__(self) -> None:
+        model = zkf.FromIntModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            wint=self.ifmt.width,
+            stage_input=self.opt.stage_input,
+            stage_normalize=self.opt.stage_normalize,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
+        )
+        object.__setattr__(self, "_model", model)
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((IntType(self.ifmt),), (FloatType(self.fmt),))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands)
+        assert isinstance(a, IntValue)
+        return (a.to_float(self.fmt),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"float({a})"
+
+
+@dataclass(frozen=True, slots=True)
+class FToIntOperator(FloatIntConversionOperator):
+    """
+    Float to signed integer, saturating at the rails, an infinity reaching one of them. One pooled instance serves
+    all four modes through the ``round_mode`` immediate, as ``fround`` does.
+    """
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+
+    mnemonic: ClassVar[str] = "ftoint"
+    operand_hdl_ports: ClassVar[list[str]] = ["a"]
+    output_hdl_ports: ClassVar[list[str]] = ["y"]
+    immediate_ports: ClassVar[list[ImmediateField]] = [ImmediateField("round_mode", 2)]
+    opt: Options
+
+    def __post_init__(self) -> None:
+        model = zkf.ToIntModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), wint=self.ifmt.width, stage_input=self.opt.stage_input
+        )
+        object.__setattr__(self, "_model", model)
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((FloatType(self.fmt),), (IntType(self.ifmt),))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        (a,) = self._validated_operands(operands)
+        assert isinstance(a, FloatValue)
+        (mode,) = immediates
+        return (IntValue.from_float(self.ifmt, a, RoundMode(mode)),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        (mode,) = immediates
+        return f"i{_ROUND_LABEL[RoundMode(mode)]}({a})"

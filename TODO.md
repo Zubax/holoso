@@ -14,28 +14,37 @@ saturating reading, `idivs` the quotient and the remainder together. There is no
 because HIR marks the saturating operations speculatable and an if-converted arm must not raise the error flag; were
 a kernel ever to want the flag it belongs on the operator as an ordinary boolean result lane, never in `error_ports`.
 
-The operators still missing all have their RTL already; what is absent is the Python model. The int/float boundary
-needs one for `holoso_ffromint`/`holoso_ftoint`, zkf-backed and float-parameterized rather than integer-family. The
-inline integer operators need one each for the bitwise ops, the bool casts, and the constant shift `holoso_ishiftc`;
-the mux already answers for integers, needing only its lowering.
+`holoso_fmul_ilog2`, the power-of-two scale by a RUNTIME exponent, is the one module still unmodelled. Its exponent
+is a signed `WINT`-wide operand, so it can have no caller until integers lower; whether it earns its keep or is dead
+RTL is part of lifting the gate.
+
+Two obligations those operators decline. HIR shift counts are width-less while the constant shift serves only counts
+that are shifts at all -- one reaching the word answers a constant or a sign fill, and zero the identity -- so folding
+and clamping are the lowering's job. And `FloatToInt` over a `FloatRound` is NOT unconditionally the one `ftoint`
+carrying that mode: where the float rounding itself overflows, the rounded value is an infinity that saturates to a
+rail while the direct conversion answers the integer. In `ZkfFormat(2, 4)`, `3.5` rounds to `+inf` and thence to
+`INT_MAX` where a direct nearest-even conversion gives `4`. It needs a format whose largest finite value is
+non-integral, so most never show it, and `TRUNC` never mismatches because truncation cannot increase magnitude.
+The fastmath charter applies here.
 
 The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.py`); they need a
 `FloatValue | IntValue` union, a typed payload for the `lir.wide_consts` pool (constants are float-encoded across
-microcode/emit/html/model today), and one shared scalar port codec (cocotb and the model duplicate it). The value
-half is in place: `IntValue` is the saturating dual of `FloatValue` and `value_class` answers for `IntType`.
+microcode/emit/html/model today), and one shared scalar port codec (cocotb and the model duplicate it).
 
 The conditioner mapping is already in place -- an integer port carries `IntIdentity` and nothing else, because
 integer sign conditioning cannot ride a port sideband the way `holoso_fsgnop` does (`holoso_iabss` is a pooled module
-with a latency and a saturation output). What that did NOT reach is the float sign wiring in the microcode packer and
-the Verilog emitter: the tapped-result sign field and its `_sgnop` wrapper binding are keyed on `is_wide` rather than
-on the port's scalar type, and the per-operand pair is keyed on nothing at all -- it runs unconditionally over the
-operator's arity. An integer pooled operator has no such ports, so all four must be keyed on `FloatType` when the
-integer backend lands; they are left alone for now because both arms would be dead and untestable until a lowering
-selects an integer operator. Underneath them the families disagree on what `module_name` denotes: a float operator
-names a Holoso wrapper that already carries the sign-conditioning ports, an integer one names the bare core, so the
-wrapper the emitter assumes is not there on that side. Either the integer cores gain wrappers or the emitter learns
-the difference, and that choice belongs with the four sign sites rather than before them.
-`_Bank` in `_lir/_bankalloc.py` is generic over a CONSTRAINED type variable,
+with a latency and a saturation output). What that did NOT reach is the wide datapath below MIR, which assumes float
+wherever it keys on `is_wide` or on nothing at all, where it must key on `FloatType`. None of it is reachable until a
+lowering selects an integer operator, so it is left alone rather than fixed blind, but the sites do not fail alike and
+the order of the eventual fix matters. Three refuse loudly: `_wide_source_net` and `_render_inline` assert a wide
+conditioner is a `FloatSignControl`, where an integer carries `IntIdentity`; the operator instantiation binds a
+`_sgnop` per operand and per wide result unconditionally, which `ffromint`'s integer operand and `ftoint`'s integer
+result do not have; and the microcode packer allocates and asserts the matching sign fields on both sides. Two would
+MISCOMPILE in silence, and are today masked only by the loud ones: `_emit_declarations` sizes every pooled operand
+read-mux register and every wide result wire at `WFLT` rather than at the port's own width, so an integer port wider
+than the float silently loses its top bits, and `_emit_consts` encodes every wide constant through the float codec
+(unreachable while `wide_consts` is typed `list[float]`, which is what stops an integer reaching it). Fix the silent
+pair first, or fixing the loud ones uncovers them. `_Bank` in `_lir/_bankalloc.py` is generic over a CONSTRAINED type variable,
 which cannot express `MirFloatStateSlot | MirIntStateSlot` for one wide bank; lifting it
 means giving `MirFloatStateSlot.sign` and `MirBoolStateSlot.inversion` a common `conditioner` field.
 
@@ -70,6 +79,13 @@ A speculated shift can carry an out-of-domain count, where the HIR fold names no
 the same is already true of float `fmul`/`fadd` and the casts. The hardware side has since picked its answer -- the
 shift operator is total over every representable count, saturating the amount at the word, as its module does -- so
 what remains is reconciling the fold with the model and the RTL, which now agree.
+
+The emitted RTL requires an empirical study of the optimal way to bit-extend float results into the register file
+when WREG>WFLT. The default treatment of `x <= y` where x is wider than y is to zero-fill the higher bits,
+which may potentially require a wider mux and extra wires while we don't care about the value of those bits.
+We must explore the possible alternatives, such as marking them explicitly as don't-care,
+e.g., `x <= {{X{1'bx}}, result8}` for X extra bits, or a similar solution.
+The winner will be chosen based on the synthesis metrics across Diamond, Vivado, and Yosys.
 
 The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the
 acceptance set: each is oracle-verified against CPython through HIR, so lifting the gate extends that to end-to-end

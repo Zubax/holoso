@@ -28,6 +28,8 @@ class OpConfig:
     flog2: FLog2Operator | None
     fsincos: FSincosOperator | None
     fatan2: FAtan2Operator | None
+    ffromint: FFromIntOperator | None
+    ftoint: FToIntOperator | None
 
     imul: IMulOperator
 

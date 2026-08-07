@@ -9,7 +9,10 @@ import numpy as np
 import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
-from zkf import FromIntModel, ZkfFormat
+from zkf import ZkfFormat
+
+from holoso import FFromIntOptions, FloatFormat, IntFormat
+from holoso._operators import FFromIntOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
@@ -39,14 +42,17 @@ class _Config:
     default_latency: bool = False
 
     @property
-    def model(self) -> FromIntModel:
-        return FromIntModel(
-            ZkfFormat(self.wexp, self.wman),
-            wint=self.wint,
-            stage_input=self.stage_input,
-            stage_normalize=self.stage_normalize,
-            stage_pack=self.stage_pack,
-            stage_output=self.stage_output,
+    def operator(self) -> FFromIntOperator:
+        """The module name, its RTL parameters and its latency all come from the operator, so a drift fails here."""
+        return FFromIntOperator(
+            FloatFormat(self.wexp, self.wman),
+            IntFormat(self.wint),
+            FFromIntOptions(
+                stage_input=self.stage_input,
+                stage_normalize=self.stage_normalize,
+                stage_pack=self.stage_pack,
+                stage_output=self.stage_output,
+            ),
         )
 
     @property
@@ -62,6 +68,7 @@ _CONFIGS = (
     _Config(6, 18, 44),
     _Config(6, 18, 44, stage_input=1, default_latency=True),
     _Config(6, 18, 44, stage_normalize=1),
+    _Config(6, 18, 44, stage_normalize=2),  # max(wint, wman+3) >= 17, the precondition of the deepest normalizer
     _Config(6, 18, 44, stage_pack=1),
     _Config(6, 18, 44, stage_output=1),
     _Config(6, 18, 44, stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
@@ -152,16 +159,16 @@ async def holoso_ffromint_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("config", _CONFIGS, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_ffromint(sim: str, config: _Config) -> None:
-    model = config.model
-    parameters = dict(model.params)
+    operator = config.operator
+    parameters = dict(operator.params)
     if config.default_latency:
-        del parameters["LATENCY"]
+        del parameters["LATENCY"]  # the only coverage of the wrapper's own LATENCY == 0 default path
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ffromint_{config.label}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
-        hdl_toplevel="holoso_ffromint",
+        hdl_toplevel=operator.module_name,
         parameters=parameters,
         build_args=build_args(sim),
         build_dir=build_dir,
@@ -169,7 +176,7 @@ def test_holoso_ffromint(sim: str, config: _Config) -> None:
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel="holoso_ffromint",
+        hdl_toplevel=operator.module_name,
         test_module="tests.hdl.test_ffromint",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
@@ -177,7 +184,7 @@ def test_holoso_ffromint(sim: str, config: _Config) -> None:
             "HOLOSO_WEXP": str(config.wexp),
             "HOLOSO_WMAN": str(config.wman),
             "HOLOSO_WINT": str(config.wint),
-            "HOLOSO_EXPECTED_LATENCY": str(model.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latency),
         },
         results_xml=str(build_dir / "results.xml"),
     )

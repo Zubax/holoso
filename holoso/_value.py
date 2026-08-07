@@ -1,9 +1,11 @@
 """Runtime values and exact arithmetic for Zubax Kulibin float and for the native saturating integer."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NamedTuple, Self
 
 import zkf
+from zkf import RoundMode as RoundMode
 
 from ._type import FloatFormat, IntFormat
 
@@ -152,7 +154,7 @@ class FloatValue:
 
     @property
     def _zval(self) -> zkf.Zkf:
-        return zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman).wrap(self.bits)
+        return _zkf_format(self.fmt).wrap(self.bits)
 
 
 class DivResult(NamedTuple):
@@ -200,6 +202,19 @@ class IntValue:
             raise ValueError(f"{value} is out of range for {fmt}: [{fmt.min}, {fmt.max}]")
         return cls._wrap(fmt, value)
 
+    @classmethod
+    def from_float(cls, fmt: IntFormat, value: FloatValue, mode: RoundMode) -> Self:
+        """Matches ``holoso_ftoint``: rounds by ``mode``, saturating at the rails, an infinity reaching one of them."""
+        _check_int_format(fmt)
+        if not isinstance(value, FloatValue):
+            raise TypeError(f"value must be FloatValue, got {type(value).__name__}")
+        return cls._wrap(fmt, _TO_INT[RoundMode(mode)](_zkf_format(value.fmt).wrap(value.bits), fmt.width))
+
+    def to_float(self, fmt: FloatFormat) -> FloatValue:
+        """Matches ``holoso_ffromint``: nearest, ties to even; a magnitude past the finite range becomes an infinity."""
+        _check_format(fmt)
+        return FloatValue.from_bits(fmt, _zkf_format(fmt).from_int(self.fmt.width, self.value).bits)
+
     @property
     def bits(self) -> int:
         return self.fmt.encode(self.value)
@@ -243,6 +258,20 @@ class IntValue:
         truncated = fmt.decode(exact & ((1 << fmt.width) - 1))
         return ShiftResult(self._wrap(fmt, truncated), self._wrap(fmt, fmt.saturate(exact)))
 
+    # Bitwise combination cannot leave the range a two's-complement word already spans (``~min == max``), so these
+    # wrap where the arithmetic operators saturate; ``_wrap``'s assertion is what makes that a checked claim.
+    def __and__(self, other: IntValue) -> IntValue:
+        return self._wrap(_matching_int_format(self, other), self.value & other.value)
+
+    def __or__(self, other: IntValue) -> IntValue:
+        return self._wrap(_matching_int_format(self, other), self.value | other.value)
+
+    def __xor__(self, other: IntValue) -> IntValue:
+        return self._wrap(_matching_int_format(self, other), self.value ^ other.value)
+
+    def __invert__(self) -> IntValue:
+        return self._wrap(self.fmt, ~self.value)
+
     def compare(self, other: IntValue) -> int:
         """-1/0/+1 three-way compare, the exact-arithmetic dual of :meth:`FloatValue.compare`."""
         _matching_int_format(self, other)
@@ -262,6 +291,17 @@ class IntValue:
 
 # The value dual of ScalarType: what a port of any scalar family may carry at run time.
 type ScalarValue = FloatValue | IntValue | bool
+
+_TO_INT: dict[RoundMode, Callable[[zkf.Zkf, int], int]] = {
+    RoundMode.NEAREST_EVEN: zkf.Zkf.round_int,
+    RoundMode.FLOOR: zkf.Zkf.floor_int,
+    RoundMode.CEIL: zkf.Zkf.ceil_int,
+    RoundMode.TRUNC: zkf.Zkf.trunc_int,
+}
+
+
+def _zkf_format(fmt: FloatFormat) -> zkf.ZkfFormat:
+    return zkf.ZkfFormat(fmt.wexp, fmt.wman)
 
 
 def _check_format(fmt: FloatFormat) -> None:

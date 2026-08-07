@@ -142,20 +142,6 @@ def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
     raise TypeError(f"no conditioner is defined for ports of {scalar_type!r}")
 
 
-def value_class(scalar_type: ScalarType) -> type[FloatValue] | type[IntValue] | type[bool]:
-    """
-    The runtime value class a port of this scalar type carries, letting a type-polymorphic operator assert its
-    payloads without naming a concrete class.
-    """
-    if isinstance(scalar_type, FloatType):
-        return FloatValue
-    if isinstance(scalar_type, IntType):
-        return IntValue
-    if isinstance(scalar_type, BoolType):
-        return bool
-    raise TypeError(f"no runtime value class is defined for {scalar_type!r}")
-
-
 @dataclass(frozen=True, slots=True)
 class ScalarSignature:
     """
@@ -230,6 +216,23 @@ class HardwareOperator(ABC):
     @abstractmethod
     def signature(self) -> ScalarSignature: ...
 
+    def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[ScalarValue, ...]:
+        """Driven by the signature's per-port type, so a cross-family operator needs no check of its own."""
+        signature = self.signature
+        if len(operands) != signature.arity:
+            raise ValueError(f"{self.mnemonic} expected {signature.arity} operands, got {len(operands)}")
+        for index, (operand, ty) in enumerate(zip(operands, signature.operand_types, strict=True)):
+            match ty, operand:
+                case FloatType(), FloatValue() if operand.fmt == ty.fmt:
+                    pass
+                case IntType(), IntValue() if operand.fmt == ty.fmt:
+                    pass
+                case BoolType(), bool():
+                    pass
+                case _:
+                    raise TypeError(f"{self.mnemonic} operand {index} must be {ty}, got {operand!r}")
+        return operands
+
     @abstractmethod
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[ScalarValue, ...]:
         """
@@ -266,11 +269,6 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     @abstractmethod
     def params(self) -> dict[str, int]:
         """The complete RTL ``#(.NAME(value))`` parameter set (WEXP/WMAN, LATENCY, and every operator knob)."""
-
-    @property
-    @abstractmethod
-    def scalar_type(self) -> ScalarType:
-        """The scalar family this module computes in; its boolean outputs, if any, are not of it."""
 
 
 @dataclass(frozen=True)
@@ -331,6 +329,11 @@ class ComparatorOperator(PooledHardwareOperator, ABC):
     swap_output_permutation: ClassVar[tuple[int, ...]] = (2, 1, 0)
 
     @property
+    @abstractmethod
+    def scalar_type(self) -> ScalarType:
+        """The family being compared -- the one pooled place where operands and results belong to different ones."""
+
+    @property
     def signature(self) -> ScalarSignature:
         return ScalarSignature((self.scalar_type,) * 2, (BoolType(), BoolType(), BoolType()))
 
@@ -378,7 +381,6 @@ class SelectOperator(InlineHardwareOperator):
         return f"({cond} ? {a} : {b})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[ScalarValue, ...]:
-        cond, a, b = operands
+        cond, a, b = self._validated_operands(operands)
         assert isinstance(cond, bool)
-        assert isinstance(a, value_class(self.scalar_type)) and isinstance(b, value_class(self.scalar_type))
         return (a if cond else b,)

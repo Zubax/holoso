@@ -92,7 +92,7 @@ from holoso._hir import (
     IntToFloat,
     IntType,
 )
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir
 from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
@@ -142,7 +142,7 @@ class OtherFold(Operator):
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT)
+    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt))
 
 
 def _op_count(mir: Mir, cls: type) -> int:
@@ -197,7 +197,7 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
     hir = builder.finish()
 
     try:
-        lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT)
+        lower_to_mir(hir, OPS, FMT, default_ifmt(FMT))
     except UnsupportedConstruct as ex:
         assert "no MIR lowering rule" in str(ex)
     else:
@@ -686,7 +686,7 @@ def test_bselect_reductions_are_truth_table_correct() -> None:
         hir = _hir_of(fn)
         has_select = any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
         assert has_select == keeps_select, f"{fn.__name__}: bselect presence {has_select} != expected {keeps_select}"
-        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT), fn.__name__))
+        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, default_ifmt(FMT)), fn.__name__))
         for combo in itertools.product([False, True], repeat=arity):
             got = bool(model.run(*combo)[0])
             assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"
@@ -720,7 +720,7 @@ def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
         assert not any(
             isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
         ), f"{kernel.__name__}: a mux over identical arms survived"
-        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT), kernel.__name__))
+        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, default_ifmt(FMT)), kernel.__name__))
         for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
             got, want = read(model.run(x)[0]), read(kernel(x))
             assert got == want, f"{kernel.__name__}({x}): got {got}, want {want}"
@@ -929,7 +929,7 @@ def test_a_constant_integer_expression_folds_away_entirely() -> None:
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     (out,) = hir.outputs
     assert hir.nodes[out.value] == FloatConst(float(5 * 2**200))
-    lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT)  # nothing integer is left, so MIR accepts it
+    lower_to_mir(hir, OPS, FMT, default_ifmt(FMT))  # nothing integer is left, so MIR accepts it
 
 
 def test_integer_folding_is_exact_across_the_vocabulary() -> None:
@@ -980,7 +980,7 @@ def test_integer_folding_has_no_size_limit() -> None:
     hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
-    lower_to_mir(hir, OPS, FMT, DEFAULT_IFMT)  # nothing integer survives, however wide the intermediate was
+    lower_to_mir(hir, OPS, FMT, default_ifmt(FMT))  # nothing integer survives, however wide the intermediate was
 
 
 @pytest.mark.parametrize(
@@ -1349,7 +1349,7 @@ def test_integer_nodes_are_refused_by_mir_lowering(make: Callable[[HirBuilder], 
     make(builder)
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
-        lower_to_mir(builder.finish(), OPS, FMT, DEFAULT_IFMT)
+        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT))
 
 
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:

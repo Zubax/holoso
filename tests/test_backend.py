@@ -14,9 +14,11 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FDivOptions,
+    FFromIntOptions,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
+    FToIntOptions,
     FloatFormat,
     IMulOptions,
     IntFormat,
@@ -25,7 +27,9 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._operators import (
+    FFromIntOperator,
     FSortOperator,
+    FToIntOperator,
     IAbsOperator,
     IAddOperator,
     ICmpOperator,
@@ -33,9 +37,10 @@ from holoso._operators import (
     IMulOperator,
     IShiftOperator,
     ISubOperator,
-    IntHardwareOperator,
     OpConfig,
+    PooledHardwareOperator,
 )
+from holoso._type import FloatType, IntType, ScalarType
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from holoso._hir import optimize
@@ -43,7 +48,7 @@ from holoso._lir import BoolRegRef, RegRef, pooled_write_word
 from holoso._mir import Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_ops
 
 requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
 
@@ -64,7 +69,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig, fmt: FloatFormat) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT)
+    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt))
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
@@ -151,7 +156,7 @@ endmodule
     assert "_zkf_invalid_latency_mismatch" in result.stderr
 
 
-def _integer_operators(ifmt: IntFormat) -> list[IntHardwareOperator]:
+def _integer_operators(ifmt: IntFormat) -> list[PooledHardwareOperator]:
     return [
         IAddOperator(ifmt),
         ISubOperator(ifmt),
@@ -163,26 +168,51 @@ def _integer_operators(ifmt: IntFormat) -> list[IntHardwareOperator]:
     ]
 
 
-def _integer_probe(name: str, operators: list[IntHardwareOperator]) -> str:
-    """A module instantiating each operator through the port names and parameters it declares for itself."""
+def _conversion_operators(ffmt: FloatFormat, ifmt: IntFormat) -> list[PooledHardwareOperator]:
+    return [
+        FFromIntOperator(ffmt, ifmt, FFromIntOptions()),
+        FFromIntOperator(ffmt, ifmt, FFromIntOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1)),
+        FToIntOperator(ffmt, ifmt, FToIntOptions()),
+        FToIntOperator(ffmt, ifmt, FToIntOptions(stage_input=2)),
+    ]
+
+
+def _net(scalar_type: ScalarType) -> str:
+    if isinstance(scalar_type, IntType):
+        return f"signed [{scalar_type.width - 1}:0] "
+    return f"[{scalar_type.width - 1}:0] " if scalar_type.is_wide else ""
+
+
+def _pooled_probe(name: str, operators: list[PooledHardwareOperator]) -> str:
+    """
+    A module instantiating each operator through the ports, widths, parameters and immediates it declares for itself,
+    all read off its signature -- so a declaration that drifted from the RTL fails right here. A sign-conditioning
+    sideband exists on a float port and on no other, which is what makes the two conversion wrappers asymmetric.
+    """
     lines = [f"module {name};", "    wire clk = 1'b0;", "    wire rst = 1'b0;", "    wire in_valid = 1'b0;"]
     for index, operator in enumerate(operators):
-        high = operator.fmt.width - 1
-        operands = operator.operand_hdl_ports
-        results = [operator.output_hdl_ports[q] for q in range(len(operator.signature.result_types))]
-        for port in operands:
-            lines.append(f"    wire signed [{high}:0] u{index}_{port} = {operator.fmt.width}'d0;")
-        for port, result_type in zip(results, operator.signature.result_types, strict=True):
-            lines.append(f"    wire {f'signed [{high}:0] ' if result_type.is_wide else ''}u{index}_{port};")
+        signature = operator.signature
+        connections = []
+        for port, ty in zip(operator.operand_hdl_ports, signature.operand_types, strict=True):
+            lines.append(f"    wire {_net(ty)}u{index}_{port} = {ty.width}'d0;")
+            connections.append(f".{port}(u{index}_{port})")
+            if isinstance(ty, FloatType):
+                connections.append(f".{port}_sgnop(2'd0)")
+        for port, ty in zip(operator.output_hdl_ports, signature.result_types, strict=True):
+            lines.append(f"    wire {_net(ty)}u{index}_{port};")
+            connections.append(f".{port}(u{index}_{port})")
+            if isinstance(ty, FloatType):
+                connections.append(f".{port}_sgnop(2'd0)")
+        for immediate in operator.immediate_ports:
+            connections.append(f".{immediate.name}({immediate.width}'d0)")
         for port in operator.error_ports:
             lines.append(f"    wire u{index}_{port};")
+            connections.append(f".{port}(u{index}_{port})")
         params = ", ".join(f".{pname}({value})" for pname, value in operator.params.items())
         # out_valid and the saturation sideband are deliberately left out: an omitted named port is unconnected.
-        connections = ", ".join(f".{port}(u{index}_{port})" for port in operands + results)
-        errors = "".join(f", .{port}(u{index}_{port})" for port in operator.error_ports)
         lines.append(
             f"    {operator.module_name} #({params}) u{index} "
-            f"(.clk(clk), .rst(rst), .in_valid(in_valid), {connections}{errors});"
+            f"(.clk(clk), .rst(rst), .in_valid(in_valid), {', '.join(connections)});"
         )
     return "\n".join([*lines, "endmodule", ""])
 
@@ -193,19 +223,50 @@ def test_integer_operators_elaborate_as_they_declare_themselves(width: int, tmp_
     # A wrong latency instantiates the undefined _holoso_invalid_integer_latency; an odd width is mandatory because
     # that is where the divider's ceiling can slip.
     name = f"int_probe_w{width}"
-    _elaborate(name, _integer_probe(name, _integer_operators(IntFormat(width))), tmp_path)
+    _elaborate(name, _pooled_probe(name, _integer_operators(IntFormat(width))), tmp_path)
+
+
+@requires_iverilog
+@pytest.mark.parametrize("wexp,wman,wint", ((6, 18, 44), (8, 36, 24), (3, 4, 12), (6, 18, 17)))
+def test_conversion_operators_elaborate_as_they_declare_themselves(
+    wexp: int, wman: int, wint: int, tmp_path: Path
+) -> None:
+    # Several triples because the integer side is sized independently of the float one.
+    name = f"conv_probe_e{wexp}m{wman}i{wint}"
+    operators = _conversion_operators(FloatFormat(wexp, wman), IntFormat(wint))
+    _elaborate(name, _pooled_probe(name, operators), tmp_path)
 
 
 @requires_iverilog
 def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     # The negative twin of the probe above, so its silence means something.
     operator = IDivOperator(IntFormat(33))
-    verilog = _integer_probe("wrong_int_latency", [operator]).replace(
+    verilog = _pooled_probe("wrong_int_latency", [operator]).replace(
         f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
     )
     result = _compile("wrong_int_latency", verilog, tmp_path)
     assert result.returncode != 0
     assert "_holoso_invalid_integer_latency" in result.stderr
+
+
+@requires_iverilog
+@pytest.mark.parametrize(
+    "operator",
+    (
+        FFromIntOperator(FloatFormat(6, 18), IntFormat(44), FFromIntOptions()),
+        FToIntOperator(FloatFormat(6, 18), IntFormat(44), FToIntOptions()),
+    ),
+    ids=lambda operator: operator.mnemonic,
+)
+def test_conversion_wrapper_rejects_wrong_latency(operator: PooledHardwareOperator, tmp_path: Path) -> None:
+    # The negative twin on the conversion side, so the probe's silence means something.
+    name = f"wrong_conv_latency_{operator.mnemonic}"
+    verilog = _pooled_probe(name, [operator]).replace(
+        f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
+    )
+    result = _compile(name, verilog, tmp_path)
+    assert result.returncode != 0
+    assert "_zkf_invalid_latency_mismatch" in result.stderr
 
 
 @requires_iverilog
@@ -464,9 +525,9 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         instances=[inst],
         wide_consts=[],
         float_format=fmt,
-        int_format=DEFAULT_IFMT,
+        int_format=default_ifmt(fmt),
         fetch_lag=_FETCH_LAG,
-        regfile=RegFileLayout(width=fmt.width, nreg=4, nrd=2, nwr=2, nload=2),
+        regfile=RegFileLayout(width=default_ifmt(fmt).width, nreg=4, nrd=2, nwr=2, nload=2),
         inputs=[WideInputLoad("a", RegRef(0)), WideInputLoad("b", RegRef(1))],
         ops=[op],
         outputs=[
@@ -510,18 +571,21 @@ def _madd_only(a: float, b: float, c: float) -> float:
 
 @requires_iverilog
 def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
-    # A purely-boolean kernel uses no wide bank, and an arithmetic kernel with no booleans uses no boolean bank; the
-    # unused bank must be omitted entirely rather than declared as a zero-length reg array (illegal Verilog).
+    # A purely-boolean kernel uses no wide bank, and an arithmetic kernel with no booleans uses no boolean bank. The
+    # count localparam is stated either way; what must not appear is the register array itself, which at zero length
+    # is illegal Verilog.
     bool_lir = build_lir(_run(_and_gate, _ops(FloatFormat(8, 24)), FloatFormat(8, 24)), "and_gate")
     assert bool_lir.regfile.nreg == 0
     bool_v = generate(bool_lir).verilog
-    assert "reg  [WFLT-1:0] regs" not in bool_v and "NREG" not in bool_v and "[0:-1]" not in bool_v
+    assert "NREG      =   0;" in bool_v
+    assert "reg  [WREG-1:0] regs" not in bool_v and "[0:-1]" not in bool_v
     _elaborate("and_gate", bool_v, tmp_path)
 
     float_lir = build_lir(_run(_madd_only, _ops(FloatFormat(8, 24)), FloatFormat(8, 24)), "madd_only")
     assert float_lir.bool_regfile.nreg == 0
     float_v = generate(float_lir).verilog
-    assert "bregs" not in float_v and "NBREG" not in float_v and "[0:-1]" not in float_v
+    assert "NBREG     =   0;" in float_v
+    assert "bregs" not in float_v and "[0:-1]" not in float_v
     _elaborate("madd_only", float_v, tmp_path)
 
 

@@ -26,7 +26,7 @@ from holoso._hir import optimize
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, default_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, sources
 
 _HDL_DIR = Path(__file__).resolve().parent / "hdl"
@@ -54,7 +54,8 @@ class _ConstInstallState:
 def _verilog(fn: Callable[..., object], name: str) -> str:
     return generate_verilog(
         build_lir(
-            lower_to_mir(optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT), name
+            lower_to_mir(optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)),
+            name,
         )
     ).verilog
 
@@ -128,7 +129,7 @@ def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pyt
     name = f"gate_edge_k{k}"
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(_cycle0_kernel).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, DEFAULT_IFMT
+            optimize(lower(_cycle0_kernel).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
         ),
         name,
     )
@@ -145,7 +146,7 @@ def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) 
             optimize(lower(_ConstInstallState().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
             default_ops(_FMT),
             _FMT,
-            DEFAULT_IFMT,
+            default_ifmt(_FMT),
         ),
         name,
     )

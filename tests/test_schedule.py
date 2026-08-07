@@ -74,7 +74,7 @@ from holoso._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_model
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_model
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType, ScalarType
 
@@ -132,7 +132,7 @@ def _run(
     fmt: FloatFormat = FMT,
     ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, ifconv_max_ops), ops, fmt, DEFAULT_IFMT)
+    return lower_to_mir(optimize(lower(target).hir, ifconv_max_ops), ops, fmt, default_ifmt(fmt))
 
 
 def _view(mir: Mir) -> MirWideView:
@@ -1278,7 +1278,7 @@ def test_phi_install_does_not_clobber_the_branch_condition() -> None:
     # (model and RTL agreed with each other, so only a semantics check catches it). The frontend currently routes
     # every phi arm through a dedicated jump block, so this CFG is built directly; cross-block scheduling will make
     # such shapes routine.
-    builder = MirBuilder(FMT, DEFAULT_IFMT)
+    builder = MirBuilder(FMT, default_ifmt(FMT))
     entry = builder.block()
     then = builder.block()
     merge = builder.block()
@@ -1307,7 +1307,7 @@ def test_branch_on_phi_installed_in_the_branching_block_is_rejected() -> None:
     # refuse this shape (the frontend never emits it; a future cross-block pass might) rather than miscompile: before
     # the guard, a self-loop header `phi = phi(entry: cond, header: not phi); branch(phi, header, exit)` ran its body
     # one trip short with model and RTL agreeing on the wrong count.
-    builder = MirBuilder(FMT, DEFAULT_IFMT)
+    builder = MirBuilder(FMT, default_ifmt(FMT))
     entry = builder.block()
     header = builder.block()
     exit_block = builder.block()
@@ -1385,7 +1385,7 @@ def test_build_lir_small_kernel() -> None:
     lir = build_lir(_run(f), "kernel")
     assert lir.module_name == "kernel"
     assert lir.float_format == FMT
-    assert lir.regfile.width == lir.float_format.width
+    assert lir.regfile.width == lir.int_format.width >= lir.float_format.width
     assert lir.regfile.nreg >= 1
     assert {i.name for i in lir.wide_inputs} == {"a", "b"}
     assert lir.regfile.nload == 2  # both inputs are preloaded via the regfile load port (registers 0..1)
@@ -1907,7 +1907,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
     other = FloatFormat(8, 24)
     mir = Mir(
         FMT,
-        DEFAULT_IFMT,
+        default_ifmt(FMT),
         nodes={
             0: MirFloatInput("a", FloatType(FMT)),
             1: MirOperation(
@@ -1930,7 +1930,7 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
 
 def test_mir_builder_rejects_mixed_float_operand_formats() -> None:
     other = FloatFormat(8, 24)
-    builder = MirBuilder(FMT, DEFAULT_IFMT)
+    builder = MirBuilder(FMT, default_ifmt(FMT))
     a = builder.float_input("a", FloatType(FMT))
     b = builder.float_input("b", FloatType(other))
     with pytest.raises(ValueError, match="expects operands"):
@@ -1981,7 +1981,7 @@ def test_mir_operation_validates_invariants() -> None:
 def test_wide_view_rejects_non_float_mir_before_scheduling() -> None:
     mir = Mir(
         FMT,
-        DEFAULT_IFMT,
+        default_ifmt(FMT),
         nodes={0: OtherMirInput("a", OtherScalarType())},
         blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[0],
@@ -1995,7 +1995,7 @@ def test_wide_view_rejects_non_float_mir_before_scheduling() -> None:
 def test_wide_view_rejects_non_input_input_id() -> None:
     mir = Mir(
         FMT,
-        DEFAULT_IFMT,
+        default_ifmt(FMT),
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
         blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[0],
@@ -2009,7 +2009,7 @@ def test_wide_view_rejects_non_input_input_id() -> None:
 def test_wide_view_rejects_missing_input_id() -> None:
     mir = Mir(
         FMT,
-        DEFAULT_IFMT,
+        default_ifmt(FMT),
         nodes={0: MirFloatConst(FloatType(FMT), 1.0)},
         blocks=[MirBlock(0, (), (), MirRet())],
         input_ids=[1],
@@ -2237,7 +2237,7 @@ class _ThrottledAdd(FAddOperator):
 def test_initiation_interval_spaces_firings_on_one_instance() -> None:
     # Two independent additions contend for the single throttled instance: the second may not issue until the
     # first's busy window elapses, so their issues are at least II cycles apart (with II=1 they would share cycle 1).
-    builder = MirBuilder(FMT, DEFAULT_IFMT)
+    builder = MirBuilder(FMT, default_ifmt(FMT))
     builder.block()
     a = builder.float_input("a", FloatType(FMT))
     b = builder.float_input("b", FloatType(FMT))

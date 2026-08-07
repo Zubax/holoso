@@ -72,8 +72,9 @@ def _metrics(lir: Lir) -> str:
         op_counts[inst.operator.mnemonic] = op_counts.get(inst.operator.mnemonic, 0) + 1
     rows: list[tuple[str, object]] = [
         ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
+        ("integer format", str(lir.int_format)),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
-        ("registers", lir.regfile.nreg),
+        ("registers", f"{lir.regfile.nreg} × {lir.regfile.width}-bit"),
         ("regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
         ("II min [cycles]", lir.initiation_interval),
     ]

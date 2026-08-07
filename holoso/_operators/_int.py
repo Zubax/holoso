@@ -1,12 +1,22 @@
-"""The integer operators. Each carries its own closed-form latency and its own saturating arithmetic."""
+"""
+The integer operators. The pooled ones each carry their own closed-form latency and their own saturating arithmetic;
+the inline ones are native Verilog over the whole wide bank, sound only under the carrier contract in DESIGN.md.
+"""
 
 from abc import ABC
 from dataclasses import dataclass
 from typing import ClassVar
 
 from .._value import IntValue, ScalarValue
-from .._type import IntFormat, IntType
-from ._common import ComparatorOperator, IntIdentity, PooledHardwareOperator, PortConditioner, ScalarSignature
+from .._type import BoolType, IntFormat, IntType
+from ._common import (
+    ComparatorOperator,
+    InlineHardwareOperator,
+    IntIdentity,
+    PooledHardwareOperator,
+    PortConditioner,
+    ScalarSignature,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,7 +25,7 @@ class IntHardwareOperator(PooledHardwareOperator, ABC):
     The dual of :class:`FloatHardwareOperator`, each operator carries its own closed-form latency and RTL parameters.
     Saturation is what the integer type does at its extremes rather than a failure, and HIR marks the saturating
     operations speculatable, so the ``saturated`` sideband every module raises stays unconnected and unmodeled -- an
-    if-converted arm that saturates must not raise the machine's error flag. Only a division by zero is an error.
+    if-converted arm that saturates must not raise the machine's error flag.
     """
 
     fmt: IntFormat
@@ -33,15 +43,10 @@ class IntHardwareOperator(PooledHardwareOperator, ABC):
     def params(self) -> dict[str, int]:
         return {"W": self.fmt.width, "LATENCY": self.latency}
 
-    def _validated_operands(self, operands: tuple[ScalarValue, ...], arity: int) -> tuple[IntValue, ...]:
-        if len(operands) != arity:
-            raise ValueError(f"{self.mnemonic} expected {arity} operands, got {len(operands)}")
+    def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[IntValue, ...]:
         validated: list[IntValue] = []
-        for index, operand in enumerate(operands):
-            if not isinstance(operand, IntValue):
-                raise TypeError(f"{self.mnemonic} operand {index} must be IntValue, got {type(operand).__name__}")
-            if operand.fmt != self.fmt:
-                raise ValueError(f"{self.mnemonic} operand {index} has {operand.fmt}, expected {self.fmt}")
+        for operand in super()._validated_operands(operands):
+            assert isinstance(operand, IntValue)
             validated.append(operand)
         return tuple(validated)
 
@@ -58,7 +63,7 @@ class IAddOperator(IntHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return (a + b,)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -79,7 +84,7 @@ class ISubOperator(IntHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return (a - b,)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -91,7 +96,8 @@ class ISubOperator(IntHardwareOperator):
 class IMulOperator(IntHardwareOperator):
     @dataclass(frozen=True, slots=True)
     class Options:
-        stage_product: int = 0  # splitting the product is rarely useful unless the width exceeds the DSP slice input
+        stage_product: int = 0
+        """Splitting the product is useful when the width exceeds the DSP slice input. See Verilog holoso_imuls."""
 
     mnemonic: ClassVar[str] = "imuls"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
@@ -116,7 +122,7 @@ class IMulOperator(IntHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return (a * b,)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -126,7 +132,7 @@ class IMulOperator(IntHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class IDivOperator(IntHardwareOperator):
-    """Floor division and its remainder together: one firing answers both, as the sorter answers min and max."""
+    """Floor division and its remainder together: one firing answers both."""
 
     mnemonic: ClassVar[str] = "idivs"
     operand_hdl_ports: ClassVar[list[str]] = ["num", "den"]
@@ -148,7 +154,7 @@ class IDivOperator(IntHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,) * 2)
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return a.divmod_floor(b)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -174,7 +180,7 @@ class IAbsOperator(IntHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        (a,) = self._validated_operands(operands, 1)
+        (a,) = self._validated_operands(operands)
         return (abs(a),)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -199,7 +205,7 @@ class IShiftOperator(IntHardwareOperator):
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,) * 2)
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         return a.shift(b)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
@@ -220,6 +226,174 @@ class ICmpOperator(IntHardwareOperator, ComparatorOperator):
     mnemonic: ClassVar[str] = "icmp"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        a, b = self._validated_operands(operands, 2)
+        a, b = self._validated_operands(operands)
         ordering = a.compare(b)
         return ordering > 0, ordering == 0, ordering < 0
+
+
+@dataclass(frozen=True, slots=True)
+class IntInlineOperator(InlineHardwareOperator, ABC):
+    """The inline dual of :class:`IntHardwareOperator`."""
+
+    fmt: IntFormat
+
+    @property
+    def scalar_type(self) -> IntType:
+        return IntType(self.fmt)
+
+    def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[IntValue, ...]:
+        validated: list[IntValue] = []
+        for operand in super()._validated_operands(operands):
+            assert isinstance(operand, IntValue)
+            validated.append(operand)
+        return tuple(validated)
+
+
+@dataclass(frozen=True, slots=True)
+class IntBitwiseOperator(IntInlineOperator, ABC):
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
+
+
+@dataclass(frozen=True, slots=True)
+class IntBwAndOperator(IntBitwiseOperator):
+    mnemonic: ClassVar[str] = "ibwand"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        a, b = operand_nets
+        return f"{a} & {b}"
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        a, b = self._validated_operands(operands)
+        return (a & b,)
+
+
+@dataclass(frozen=True, slots=True)
+class IntBwOrOperator(IntBitwiseOperator):
+    mnemonic: ClassVar[str] = "ibwor"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        a, b = operand_nets
+        return f"{a} | {b}"
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        a, b = self._validated_operands(operands)
+        return (a | b,)
+
+
+@dataclass(frozen=True, slots=True)
+class IntBwXorOperator(IntBitwiseOperator):
+    mnemonic: ClassVar[str] = "ibwxor"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        a, b = operand_nets
+        return f"{a} ^ {b}"
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        a, b = self._validated_operands(operands)
+        return (a ^ b,)
+
+
+@dataclass(frozen=True, slots=True)
+class IntBwNotOperator(IntInlineOperator):
+    mnemonic: ClassVar[str] = "ibwnot"
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,), (self.scalar_type,))
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"~{a}"
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        (a,) = self._validated_operands(operands)
+        return (~a,)
+
+
+@dataclass(frozen=True, slots=True)
+class IntShiftConstOperator(IntInlineOperator):
+    """
+    An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
+    drops what leaves the word rather than saturating as the pooled ``holoso_ishift`` also offers.
+    Shift by 0 or by an amount exceeding the operand width is a compile-time error (must fold/reject before LIR).
+    """
+
+    mnemonic: ClassVar[str] = "ishiftc"
+    shamt: int
+
+    def __post_init__(self) -> None:
+        if self.shamt == 0:
+            raise ValueError("ishiftc by 0 is the identity, which HIR or MIR must fold rather than select hardware")
+        if abs(self.shamt) >= self.fmt.width:
+            raise ValueError(
+                f"ishiftc by {self.shamt} is not a shift within {self.fmt}: a count reaching the word answers a "
+                f"constant or a sign fill, and clamping a width-less count to the word is the lowering's job"
+            )
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,), (self.scalar_type,))
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        if self.shamt < 0:
+            return f"$signed({a}) >>> {-self.shamt}"
+        return f"{a} << {self.shamt}"
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"{a}<<{self.shamt}" if self.shamt > 0 else f"{a}>>{-self.shamt}"
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        (a,) = self._validated_operands(operands)
+        return (a.shift(IntValue.from_int(self.fmt, self.shamt)).shft,)
+
+
+@dataclass(frozen=True, slots=True)
+class IntToBoolOperator(InlineHardwareOperator):
+    mnemonic: ClassVar[str] = "itobool"
+    fmt: IntFormat
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((IntType(self.fmt),), (BoolType(),))
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"bool({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        return f"|{a}"
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+        (a,) = self._validated_operands(operands)
+        assert isinstance(a, IntValue)
+        return (a.value != 0,)
+
+
+@dataclass(frozen=True, slots=True)
+class BoolToIntOperator(InlineHardwareOperator):
+    mnemonic: ClassVar[str] = "ifrombool"
+    fmt: IntFormat
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((BoolType(),), (IntType(self.fmt),))
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"int({a})"
+
+    def verilog_expr(self, *operand_nets: str) -> str:
+        (a,) = operand_nets
+        # Concatenation makes the widening self-determined: an operand net carrying a folded inversion arrives as
+        # `~net`, and a bare one spliced into a wide register write would complement the carrier, not the single bit.
+        return f"{{1'b0, {a}}}"
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        (a,) = self._validated_operands(operands)
+        assert isinstance(a, bool)
+        return (IntValue.from_int(self.fmt, int(a)),)

@@ -16,7 +16,7 @@ from holoso import (
 )
 from holoso._eel import lower
 from holoso._hir import optimize
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_ops
 from holoso._operators import OpConfig
 from holoso._mir import Mir, MirOperation
 from holoso._mir import lower as lower_to_mir
@@ -39,7 +39,7 @@ OPS = build_ops(
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, FMT, DEFAULT_IFMT)
+    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, FMT, default_ifmt(FMT))
 
 
 def _mir_operation_counts(mir: Mir) -> Counter[str]:

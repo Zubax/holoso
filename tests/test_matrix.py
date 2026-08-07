@@ -23,7 +23,7 @@ from holoso._eel import lower
 from holoso._hir import FloatAdd, FloatMul, optimize
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, arith_count as _arith_count, default_ops, default_options
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, arith_count as _arith_count, default_ops, default_options
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
 # against their own native numpy execution with a tight tolerance.
@@ -176,7 +176,7 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
         ops = default_ops(_FMT)
         if with_fma:
             ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT, FFmaOptions(), 0))
-        mir = lower_to_mir(optimize(lower(dot).hir, DEFAULT_IFCONV_MAX_OPS), ops, _FMT, DEFAULT_IFMT)
+        mir = lower_to_mir(optimize(lower(dot).hir, DEFAULT_IFCONV_MAX_OPS), ops, _FMT, default_ifmt(_FMT))
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
             operator = getattr(node, "operator", None)

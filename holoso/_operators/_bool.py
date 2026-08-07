@@ -16,53 +16,52 @@ class BoolLogicOperator(InlineHardwareOperator, ABC):
     Never added to :class:`OpConfig` -- it has no module and no configuration.
     """
 
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
+
+    def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[bool, ...]:
+        validated: list[bool] = []
+        for operand in super()._validated_operands(operands):
+            assert isinstance(operand, bool)
+            validated.append(operand)
+        return tuple(validated)
+
 
 @dataclass(frozen=True, slots=True)
 class BoolAndOperator(BoolLogicOperator):
     mnemonic: ClassVar[str] = "band"
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"{a} & {b}"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        a, b = operands
-        return (bool(a) and bool(b),)
+        a, b = self._validated_operands(operands)
+        return (a and b,)
 
 
 @dataclass(frozen=True, slots=True)
 class BoolOrOperator(BoolLogicOperator):
     mnemonic: ClassVar[str] = "bor"
 
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
-
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"{a} | {b}"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        a, b = operands
-        return (bool(a) or bool(b),)
+        a, b = self._validated_operands(operands)
+        return (a or b,)
 
 
 @dataclass(frozen=True, slots=True)
 class BoolXorOperator(BoolLogicOperator):
     mnemonic: ClassVar[str] = "bxor"
 
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
-
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"{a} ^ {b}"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
-        a, b = operands
-        return (bool(a) != bool(b),)
+        a, b = self._validated_operands(operands)
+        return (a != b,)

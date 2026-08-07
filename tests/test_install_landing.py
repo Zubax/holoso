@@ -23,7 +23,7 @@ from holoso._mir import lower as lower_to_mir
 from ._examples import SPECS, ExampleSpec
 from ._modelref import (
     DEFAULT_IFCONV_MAX_OPS,
-    DEFAULT_IFMT,
+    default_ifmt,
     Vector,
     assert_model_equals_interpreter,
     build_lir,
@@ -40,7 +40,7 @@ def _build(spec: ExampleSpec) -> Lir:
             optimize(lower_frontend(spec.make_kernel()).hir, DEFAULT_IFCONV_MAX_OPS),
             default_ops(spec.formats[0]),
             spec.formats[0],
-            DEFAULT_IFMT,
+            default_ifmt(spec.formats[0]),
         ),
         spec.name,
     )
@@ -204,7 +204,7 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     ops = default_ops(fmt)
     kernel = _LiveThroughArm().__call__
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT),
+        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt)),
         "live_through_arm",
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.wide_copies if not c.resident_source]
@@ -255,7 +255,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     ops = default_ops(fmt)
     kernel = _LastWorkArmSource().__call__
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, DEFAULT_IFMT),
+        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt)),
         "last_work_arm",
     )
     pushed = [

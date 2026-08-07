@@ -74,7 +74,7 @@ def test_select_carries_an_integer_scalar_type_through_its_signature(width: int)
     arms = (IntValue.from_int(fmt, fmt.max), IntValue.from_int(fmt, fmt.min))
     assert SelectOperator(ty).evaluate(True, *arms) == (arms[0],)
     assert SelectOperator(ty).evaluate(False, *arms) == (arms[1],)
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         SelectOperator(ty).evaluate(True, True, False)  # a boolean payload is not an integer one
 
 
@@ -126,22 +126,25 @@ def test_default_options_carry_the_documented_int_format() -> None:
     assert Options(OperatorOptions()).ifmt == IntFormat(33)
 
 
-def test_configured_int_format_reaches_the_scheduled_machine() -> None:
-    ifmt = IntFormat(17)
-    options = dataclasses.replace(default_options(FMT), ifmt=ifmt)
+@pytest.mark.parametrize("wint_min,width", ((2, 24), (17, 24), (33, 33), (44, 44)))
+def test_the_int_format_is_never_narrower_than_the_float(wint_min: int, width: int) -> None:
+    options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
+    assert options.ifmt == IntFormat(width)
     mir = lower_to_mir(
         optimize(lower_frontend(_add).hir, options.ifconv_max_ops), build_ops(options), options.ffmt, options.ifmt
     )
-    assert mir.int_format == ifmt
-    assert build_lir(mir, "int_format_probe").int_format == ifmt
+    assert mir.int_format == options.ifmt
+    assert build_lir(mir, "int_format_probe").int_format == options.ifmt
 
 
-@pytest.mark.parametrize("width", (2, 17, 33, 44))
-def test_configured_int_format_surfaces_as_wint_in_the_rtl(width: int) -> None:
-    # The end-to-end pin: driven through the public entry point, so a build that dropped ``Options.ifmt`` anywhere
+@pytest.mark.parametrize("wint_min,width", ((2, 24), (17, 24), (33, 33), (44, 44)))
+def test_the_int_format_sizes_the_wide_register_bank_in_the_rtl(wint_min: int, width: int) -> None:
+    # The end-to-end pin: driven through the public entry point, so a build that dropped the derivation anywhere
     # between here and the Verilog backend -- or substituted a plausible-but-wrong width -- fails right here.
-    options = dataclasses.replace(default_options(FMT), ifmt=IntFormat(width))
+    options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
     verilog = holoso.synthesize(_add, options, name="WintProbe").verilog_output.verilog
-    (emitted,) = re.findall(r"^localparam\s+WINT\s*=\s*(\d+);", verilog, re.MULTILINE)
-    assert int(emitted) == width
-    assert "WFLT      = WEXP + WMAN;" in verilog, "the float width stays independent of the integer width"
+    (wint,) = re.findall(r"^localparam\s+WINT\s*=\s*(\d+);", verilog, re.MULTILINE)
+    (wreg,) = re.findall(r"^localparam\s+WREG\s*=\s*(\d+);", verilog, re.MULTILINE)
+    assert int(wint) == width and int(wreg) == width
+    assert "WFLT      = WEXP + WMAN;" in verilog, "the float keeps its own width inside the wider register"
+    assert re.search(r"reg\s+\[WREG-1:0\]\s+regs\b", verilog)

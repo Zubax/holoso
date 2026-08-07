@@ -700,7 +700,9 @@ class Lir:
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
 
     def __post_init__(self) -> None:
-        assert self.regfile.width == self.float_format.width
+        assert self.int_format.width >= self.float_format.width
+        assert self.regfile.width == max(self.float_format.width, self.int_format.width)
+        assert self.regfile.width == self.int_format.width
         assert self.fetch_lag in (1, 2), self.fetch_lag
         # Cross-block instance reuse on a DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
         # header, the Ret), which carries no per-instance busy residue -- needs the instance provably idle by the

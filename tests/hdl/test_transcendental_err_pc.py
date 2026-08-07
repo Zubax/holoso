@@ -27,7 +27,7 @@ from holoso._operators import OpConfig
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from holoso._hir import optimize
-from .._modelref import DEFAULT_IFCONV_MAX_OPS, DEFAULT_IFMT, build_lir, build_ops
+from .._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_ops
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
@@ -137,7 +137,7 @@ async def err_pc_safe_transcendentals(dut: Any) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_safe_transcendental_err_pc(sim: str, case: _Case) -> None:
     lir = build_lir(
-        lower_to_mir(optimize(lower(case.fn).hir, DEFAULT_IFCONV_MAX_OPS), _ops(), FMT, DEFAULT_IFMT),
+        lower_to_mir(optimize(lower(case.fn).hir, DEFAULT_IFCONV_MAX_OPS), _ops(), FMT, default_ifmt(FMT)),
         f"err_{case.name}",
     )
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"err_{case.name}_w{FMT.wexp}_{FMT.wman}"

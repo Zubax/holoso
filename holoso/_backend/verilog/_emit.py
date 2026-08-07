@@ -224,27 +224,24 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
-    fmt, ifmt = lir.float_format, lir.int_format
+    fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.regfile.width
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     fetch_lag = lir.fetch_lag
     fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
-    # An unused bank emits no localparam and no register array (a zero-length reg array is illegal Verilog).
-    nreg_line = f"\nlocalparam           NREG      ={nreg:4};" if nreg else ""
-    nbreg_line = f"\nlocalparam           NBREG     ={nbreg:4};" if nbreg else ""
     w(f"""
-localparam           WEXP      ={fmt.wexp:4};  // Float exponent bits fixed by the static schedule
-localparam           WMAN      ={fmt.wman:4};  // Float mantissa bits fixed by the static schedule
+localparam           WEXP      ={fmt.wexp:4};  // float exponent bits fixed by the static schedule
+localparam           WMAN      ={fmt.wman:4};  // float mantissa bits fixed by the static schedule
 localparam           WFLT      = WEXP + WMAN;
-// WINT sizes the integer helper in the support header below, but is not wired into the datapath yet -- the integer
-// backend is still pending, so no operator produces integer values and the wide register file is sized by WFLT alone
-// rather than by the wider of the two. To be completed when integers start flowing through the wide bank.
-localparam           WINT      ={ifmt.width:4};  // Native integer width fixed by the configuration{nreg_line}
+localparam           WINT      ={ifmt.width:4};  // native integer width
+localparam           WREG      ={wreg:4};  // wide register width
+localparam           NREG      ={nreg:4};  // wide register count
 localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
 localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
 localparam [PCW-1:0] PRESENT   ={lir.present_step:4};  // executing step on which the outputs are valid in the array
 localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // = PRESENT + FETCH_LAG; out_valid asserts here
-localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields{nbreg_line}
+localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
+localparam           NBREG     ={nbreg:4};  // boolean register count
 // pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
 """)
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
@@ -274,7 +271,7 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
 """)
     w("")
     if lir.regfile.nreg:
-        w("reg  [WFLT-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
+        w("reg  [WREG-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
     if lir.bool_regfile.nreg:
         w("reg             bregs [0:NBREG-1];")
     w("")
@@ -303,7 +300,7 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
     width = fmt.width
     digits = (width + 3) // 4
     for index, value in enumerate(lir.wide_consts):
-        w(f"wire [WFLT-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
+        w(f"wire [WREG-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
     if lir.wide_consts:
         w("")
 

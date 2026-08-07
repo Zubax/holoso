@@ -1,5 +1,6 @@
 """Hardware operator models, their folded port conditioners, and the configuration that selects them."""
 
+from .._value import RoundMode as RoundMode
 from ._common import (
     BoolInversion as BoolInversion,
     FloatSignControl as FloatSignControl,
@@ -26,6 +27,7 @@ from ._float import (
     FDivOperator as FDivOperator,
     FExp2Operator as FExp2Operator,
     FFmaOperator as FFmaOperator,
+    FFromIntOperator as FFromIntOperator,
     FLog2Operator as FLog2Operator,
     FMulILog2Operator as FMulILog2Operator,
     FMulILog2OperatorFamily as FMulILog2OperatorFamily,
@@ -33,14 +35,19 @@ from ._float import (
     FRoundOperator as FRoundOperator,
     FSincosOperator as FSincosOperator,
     FSortOperator as FSortOperator,
+    FToIntOperator as FToIntOperator,
     FloatClassificationOperator as FloatClassificationOperator,
     FloatHardwareOperator as FloatHardwareOperator,
+    FloatIntConversionOperator as FloatIntConversionOperator,
     FloatIsFiniteOperator as FloatIsFiniteOperator,
     FloatIsNegInfOperator as FloatIsNegInfOperator,
     FloatIsPosInfOperator as FloatIsPosInfOperator,
+    FloatParameterizedHardwareOperator as FloatParameterizedHardwareOperator,
     FloatToBoolOperator as FloatToBoolOperator,
+    ZkfBackedOperator as ZkfBackedOperator,
 )
 from ._int import (
+    BoolToIntOperator as BoolToIntOperator,
     IAbsOperator as IAbsOperator,
     IAddOperator as IAddOperator,
     ICmpOperator as ICmpOperator,
@@ -48,6 +55,13 @@ from ._int import (
     IMulOperator as IMulOperator,
     IShiftOperator as IShiftOperator,
     ISubOperator as ISubOperator,
+    IntBwAndOperator as IntBwAndOperator,
+    IntBwNotOperator as IntBwNotOperator,
+    IntBwOrOperator as IntBwOrOperator,
+    IntBwXorOperator as IntBwXorOperator,
     IntHardwareOperator as IntHardwareOperator,
+    IntInlineOperator as IntInlineOperator,
+    IntShiftConstOperator as IntShiftConstOperator,
+    IntToBoolOperator as IntToBoolOperator,
 )
 from ._config import OpConfig as OpConfig

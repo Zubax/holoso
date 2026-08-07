@@ -10,7 +10,6 @@
 //  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den  | quo, rem, saturated, div0
 //  holoso_iabss    | Absolute value, saturated             | 2     | x         | y, saturated
 //  holoso_ishift   | Arith. shift, left+/right-            | 2     | x, shamt  | shft, prod, saturated
-//  holoso_ishiftc  | Like holoso_ishift shft, const shamt  | 0     | x, shamt  | (inline comb function)
 //  holoso_icmp     | Signed comparison                     | 2     | a, b      | a_gt_b, a_eq_b, a_lt_b
 
 `timescale 1ns/1ps
@@ -601,7 +600,6 @@ endmodule
 // lets the high bits fall off the word, while `prod` is the saturating multiplication by a power of two that clamps
 // to the representable range and reports the clamp on `saturated`.
 // Right shifts cannot overflow, so there the two results agree and the flag stays low.
-// For constant shamt use holoso_ishiftc instead.
 module holoso_ishift#(parameter W = 44, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,

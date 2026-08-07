@@ -4,7 +4,9 @@ from pathlib import Path
 import shutil
 
 import pytest
+from holoso import FFromIntOptions, FToIntOptions, FloatFormat, IntFormat
 from holoso._backend.verilog._support import support_files
+from holoso._operators import FFromIntOperator, FToIntOperator
 from synth import OocDesign, SourceFile
 
 from synth._ooc import KEEP_ATTR
@@ -145,12 +147,25 @@ class _FromIntTarget(_MixedTarget):
         self._validate()
 
     @property
+    def _model(self) -> FFromIntOperator:
+        return FFromIntOperator(
+            FloatFormat(self.wexp, self.wman),
+            IntFormat(self.wint),
+            FFromIntOptions(
+                stage_input=self.stage_input,
+                stage_normalize=self.stage_normalize,
+                stage_pack=self.stage_pack,
+                stage_output=self.stage_output,
+            ),
+        )
+
+    @property
     def operator(self) -> str:
-        return "holoso_ffromint"
+        return self._model.module_name
 
     @property
     def latency(self) -> int:
-        return 1 + self.stage_input + self.stage_normalize + self.stage_pack + self.stage_output
+        return self._model.latency
 
     @property
     def stage_label(self) -> str:
@@ -165,12 +180,18 @@ class _ToIntTarget(_MixedTarget):
         self._validate()
 
     @property
+    def _model(self) -> FToIntOperator:
+        return FToIntOperator(
+            FloatFormat(self.wexp, self.wman), IntFormat(self.wint), FToIntOptions(stage_input=self.stage_input)
+        )
+
+    @property
     def operator(self) -> str:
-        return "holoso_ftoint"
+        return self._model.module_name
 
     @property
     def latency(self) -> int:
-        return 4 + self.stage_input
+        return self._model.latency
 
     @property
     def stage_label(self) -> str:

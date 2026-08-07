@@ -153,12 +153,18 @@ Runtime values are only:
 - `int` -- a semantic integer, width-less through the front-end and HIR; its hardware width binds at MIR and below
   (the LIR wide data register file is already neutral storage). Mixed int/float expressions promote to float, C-style.
 
-The two hardware formats are configured together (`ffmt` and `ifmt`) and carried side by side from `Options` through
-MIR into LIR, so every layer below the front-end knows both without rediscovering either. Integers are signed two's
+The two hardware formats are carried side by side from `Options` through MIR into LIR, so every layer below the
+front-end knows both without rediscovering either. Only the float format and a lower bound on the integer width are
+configured; the integer format itself is derived, never narrower than the float. Integers are signed two's
 complement and saturate at the extremes rather than wrapping. Saturation is defined behaviour, the dual of a float
 overflowing to infinity, so it is not an error flag -- were it one, an if-converted arm that saturated would raise an
 error the untaken path never earned. What is pending is the integer backend: the hardware operators exist but no
-lowering selects one, so the wide register file is sized by `WFLT` alone rather than by the wider of the two.
+lowering selects one.
+
+One wide register holds either family whole: it is as wide as the integer format, which is never narrower than the
+float, so an integer fills it exactly and a float occupies its low bits. The inline integer operators are then native
+Verilog over the whole register. Floats pay in unused flip-flops and slightly wider read muxes whenever the
+integer is the wider format; one representation with no edge cases is worth more than the bits it wastes.
 
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
 reach HIR, and remain unlowerable past MIR until the integer backend lands (see DEFERRED).
@@ -303,10 +309,11 @@ than lowered to a counted back-edge loop, which needs a runtime integer counter;
 MIR, the counted back-edge loop becomes the natural follow-on.
 
 Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
-integer node reaching MIR is rejected as not-yet-lowerable. The pooled integer hardware exists and answers for its
-own timing and arithmetic, so what remains is the transport: selecting those operators at MIR, and giving the wide
-register bank, its constants, its state and its port codecs a scalar family rather than assuming float. A static
-integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
+integer node reaching MIR is rejected as not-yet-lowerable. The integer hardware exists and answers for its own timing
+and arithmetic -- the pooled operators, the inline bitwise gates, casts and constant shift, and the two conversions
+that join the int and float halves -- so what remains is the transport: selecting those operators at MIR, and giving
+the wide register bank, its constants, its state and its port codecs a scalar family rather than assuming float.
+A static integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
 runtime integer: every symbol answering what Python answers -- the roundings over a float, and `abs`/`min`/`max`/
 `np.sign` over an integer however it arose, including an integer state slot -- now keeps it, where a float-only
 lowering would have computed over its float image instead. Which such kernels still build is decided by the

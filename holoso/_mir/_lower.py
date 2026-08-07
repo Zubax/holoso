@@ -76,18 +76,25 @@ from .._operators import (
     FloatIsFiniteOperator,
     FloatIsNegInfOperator,
     FloatIsPosInfOperator,
+    FloatParameterizedHardwareOperator,
     FloatSignControl,
     FloatToBoolOperator,
-    FRoundOperator,
     HardwareOperator,
-    IntHardwareOperator,
     OpConfig,
     PortConditioner,
     PooledHardwareOperator,
     Relation,
+    RoundMode,
     SelectOperator,
 )
-from .._type import BoolType as ScalarBoolType, FloatFormat, FloatType as ScalarFloatType, IntFormat, ScalarType
+from .._type import (
+    BoolType as ScalarBoolType,
+    FloatFormat,
+    FloatType as ScalarFloatType,
+    IntFormat,
+    IntType as ScalarIntType,
+    ScalarType,
+)
 from ._ir import Mir, MirBuilder
 
 # The seam between the semantic relation and the comparator flag it taps; the two vocabularies meet only here.
@@ -379,18 +386,39 @@ def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     return plans
 
 
+def _operator_formats_match(
+    operator: HardwareOperator | FloatParameterizedHardwareOperator | None,
+    float_format: FloatFormat,
+    int_format: IntFormat,
+) -> bool:
+    """
+    Every port of a configured operator must carry the machine's format for its own family. Read off the signature
+    rather than off the operator's ``fmt``, because a conversion operator carries one format per side and asking a
+    format which family it belongs to can only confirm that it matches its own kind.
+    """
+    if operator is None:
+        return True
+    if isinstance(operator, HardwareOperator):
+        signature = operator.signature
+        return all(
+            (ty.fmt == float_format if isinstance(ty, ScalarFloatType) else True)
+            and (ty.fmt == int_format if isinstance(ty, ScalarIntType) else True)
+            for ty in signature.operand_types + signature.result_types
+        )
+    # A parameterized family has no signature until it instantiates; it bakes one format into everything it makes.
+    return operator.fmt == float_format
+
+
 class _LoweringContext:
     def __init__(self, hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat) -> None:
         self.hir = hir
         self.ops = ops
         self.float_format = float_format
-        # Keyed on the operator, not on the format it happens to carry: asking a format which family it belongs to
-        # can only confirm that it matches its own kind, never that the operator was built for the right one.
-        assert all(
-            operator is None
-            or operator.fmt == (int_format if isinstance(operator, IntHardwareOperator) else float_format)
-            for operator in (getattr(ops, field.name) for field in fields(ops))
-        ), "every configured operator must be built for the machine's format of its own scalar family"
+        assert int_format.width >= float_format.width, "one wide register holds either family whole"
+        for field in fields(ops):
+            assert _operator_formats_match(
+                getattr(ops, field.name), float_format, int_format
+            ), f"the configured {field.name!r} is not built for the machine's format of every family its ports name"
         self.builder = MirBuilder(float_format, int_format)
         self.remap: dict[ValueId, ValueId] = {}
         self.fma_plans = _plan_fma_fusions(hir, ops)
@@ -752,10 +780,10 @@ class _FloatLowerer:
 
     def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
         mode = {
-            FloatRound: FRoundOperator.Mode.ROUND,
-            FloatFloor: FRoundOperator.Mode.FLOOR,
-            FloatCeil: FRoundOperator.Mode.CEIL,
-            FloatTrunc: FRoundOperator.Mode.TRUNC,
+            FloatRound: RoundMode.NEAREST_EVEN,
+            FloatFloor: RoundMode.FLOOR,
+            FloatCeil: RoundMode.CEIL,
+            FloatTrunc: RoundMode.TRUNC,
         }[type(semantic)]
         return self._lower_unary_pooled(semantic, self.context.ops.require("fround"), a, immediates=(int(mode),))
 
