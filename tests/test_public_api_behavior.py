@@ -361,17 +361,6 @@ def test_mixed_tuple_io_metadata_and_values() -> None:
                     assert float(got[2]) == diff, f"flag={flag} xy={xy}: {float(got[2])} vs {diff}"
 
 
-def test_logical_port_is_the_single_public_port_type() -> None:
-    """
-    W9 unified the two oracle port types into one: ``holoso.LogicalPort`` is the single public port type both oracles
-    speak, and the old model-specific ``NumericalModelPort`` name is gone.
-    """
-    assert holoso.LogicalPort.__module__ == "holoso._type"
-    assert not hasattr(holoso, "NumericalModelPort"), "the old model-specific port name must be gone after W9"
-    sim = _sim(_mixed_tuple_io, "mixed_tuple_ports")
-    assert all(isinstance(port, holoso.LogicalPort) for port in (*sim.inputs, *sim.outputs))
-
-
 def _mixed_list_io(flag: bool, x: float) -> tuple[float, ...]:
     # A LIST-literal return (vs the tuple above): the same aggregate-flattening path through a list, with a bool cast
     # into a float lane.

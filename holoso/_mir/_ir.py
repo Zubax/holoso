@@ -13,7 +13,7 @@ from .._operators import (
     identity_conditioner,
 )
 from .._errors import UnsupportedConstruct
-from .._type import BoolType, FloatFormat, FloatType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, ScalarType
 from .._util import BlockId, ValueId
 
 
@@ -37,7 +37,10 @@ class MirConst:
 
 
 def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType, role: str) -> None:
-    """A port's conditioner must be the type's own: a sign control on a float port, an inversion on a boolean one."""
+    """
+    A port's conditioner must be the type's own: a sign control on a float port, an inversion on a boolean one, and
+    the identity on an integer port, which has no free sideband to fold into.
+    """
     expected = type(identity_conditioner(port_type))  # the single owner of the type -> conditioner-class mapping
     if not isinstance(conditioner, expected):
         raise TypeError(f"{role} conditioner must be {expected.__name__} for {port_type!r}, got {conditioner!r}")
@@ -169,7 +172,8 @@ class MirPhi:
     """
     An SSA merge at a block's entry: one ``(predecessor_block, value, conditioner)`` arm per incoming edge, of one
     scalar type. The arm conditioner is the type's own sideband, applied when the arm value is installed: a folded
-    sign control on a float arm (``y = -x`` on one branch), an optional inversion on a boolean arm (``f = not g``).
+    sign control on a float arm (``y = -x`` on one branch), an optional inversion on a boolean arm (``f = not g``),
+    and nothing at all on an integer arm, which has no free sideband to fold into.
     """
 
     scalar_type: ScalarType
@@ -258,6 +262,7 @@ class Mir:
     """A selected graph arranged into a CFG of basic blocks; ``blocks[0]`` is the entry."""
 
     float_format: FloatFormat
+    int_format: IntFormat
     nodes: dict[ValueId, MirNode]
     blocks: list[MirBlock]
     input_ids: list[ValueId]
@@ -300,9 +305,11 @@ class _MirBankView(ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class MirFloatView(_MirBankView):
+class MirWideView(_MirBankView):
     """
-    WIDE data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per block.
+    The wide data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per
+    block. The bank is physical, not a scalar family: :meth:`from_mir` admits operations and phis structurally, on
+    ``scalar_type.is_wide``, and only the leaves nominally.
     """
 
     nodes: dict[ValueId, MirFloatNode]
@@ -332,7 +339,7 @@ class MirFloatView(_MirBankView):
         }
 
     @classmethod
-    def from_mir(cls, mir: Mir) -> "MirFloatView":
+    def from_mir(cls, mir: Mir) -> MirWideView:
         nodes: dict[ValueId, MirFloatNode] = {}
         formats: set[FloatFormat] = set()
         for vid, node in mir.nodes.items():
@@ -423,7 +430,7 @@ class MirBoolView(_MirBankView):
         }
 
     @classmethod
-    def from_mir(cls, mir: Mir) -> "MirBoolView":
+    def from_mir(cls, mir: Mir) -> MirBoolView:
         nodes: dict[ValueId, MirBoolNode] = {}
         for vid, node in mir.nodes.items():
             if isinstance(node, (MirBoolInput, MirBoolStateRead, MirBoolConst)):
@@ -459,8 +466,9 @@ class MirBuilder:
     is sealed by :meth:`jump` / :meth:`branch` / :meth:`ret`.
     """
 
-    def __init__(self, float_format: FloatFormat) -> None:
+    def __init__(self, float_format: FloatFormat, int_format: IntFormat) -> None:
         self._float_format = float_format
+        self._int_format = int_format
         self._nodes: dict[ValueId, MirNode] = {}
         self._global_intern: dict[object, ValueId] = {}
         self._block_intern: dict[object, ValueId] = {}
@@ -667,6 +675,7 @@ class MirBuilder:
             blocks.append(MirBlock(bid, tuple(ub.phis), tuple(ub.operations), ub.terminator))
         return Mir(
             float_format=self._float_format,
+            int_format=self._int_format,
             nodes=dict(self._nodes),
             blocks=blocks,
             input_ids=list(self._input_ids),

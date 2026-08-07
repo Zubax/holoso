@@ -23,7 +23,8 @@ class SignHold:
 
 
 @pytest.mark.cosim
+@pytest.mark.parametrize("wint_min", (None, 33))
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_sign_conditioning_cosim(sim: str) -> None:
+def test_sign_conditioning_cosim(sim: str, wint_min: int | None) -> None:
     fmt = FloatFormat(wexp=6, wman=18)
-    run_cosim(sim, SignHold().__call__, fmt, "sign_hold")
+    run_cosim(sim, SignHold().__call__, fmt, "sign_hold", wint_min=wint_min)

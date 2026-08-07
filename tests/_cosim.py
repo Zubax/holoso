@@ -1,6 +1,7 @@
 """Test-only driver that compiles a kernel and cosimulates the generated module against its bit-exact model."""
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from holoso import FloatFormat
 from holoso._backend.cocotb import generate as generate_testbench
@@ -8,12 +9,11 @@ from holoso._backend.numerical import generate
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
 from holoso._hir import optimize
-from ._modelref import build_lir
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, build_ops, default_options
 from holoso._operators import OpConfig
 from holoso._mir import lower as lower_to_mir
 from cocotb_tools.runner import get_runner
 
-from ._modelref import default_ops
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, sources
 
 
@@ -24,18 +24,21 @@ def run_cosim(
     name: str,
     ops: OpConfig | None = None,
     vectors: list[Mapping[str, int]] | None = None,
+    wint_min: int | None = None,
 ) -> None:
     """
     ``ops`` defaults to the minimum-latency configuration (no optional stages). ``vectors`` is an explicit input
     sequence (each maps an input-port name to its ZKF bits); when omitted the bench draws its own fixed-seed sweep.
     """
-    ops = default_ops(fmt) if ops is None else ops
-    lir = build_lir(lower_to_mir(optimize(lower(fn).hir), ops, fmt), name)
+    options = default_options(fmt) if wint_min is None else replace(default_options(fmt), wint_min=wint_min)
+    ops = build_ops(options) if ops is None else ops
+    ifmt = options.ifmt
+    lir = build_lir(lower_to_mir(optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, ifmt), name)
     model = generate(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
-    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}"
+    gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}_r{ifmt.width}"
     gen_dir.mkdir(parents=True, exist_ok=True)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"synth_{name}_w{fmt.wexp}_{fmt.wman}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"synth_{name}_w{fmt.wexp}_{fmt.wman}_r{ifmt.width}"
     verilog_path = gen_dir / f"{name}.v"
     verilog_path.write_text(generate_verilog(lir).verilog)
     # The generated bench embeds the bit-exact model and checks the DUT's output bits exactly.

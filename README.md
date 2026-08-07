@@ -224,8 +224,6 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
 
 - Static typing only.
 
-- No implicit type conversions.
-
 - Boolean short-circuiting is not supported, all operands evaluated eagerly.
 
 - Floating-point precision depends on the selected floating-point format.

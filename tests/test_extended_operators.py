@@ -881,13 +881,11 @@ def test_trig_of_constants_fold() -> None:
 def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None:
     # The composite steers a zero base away from log2's pole, but only a POSITIVE exponent leaves the base itself:
     # 0**-1 diverges. Regression: the shortcut returned the base for every exponent, so 0**-1 answered 0.0.
-    # A fully CONSTANT pole is a located diagnostic rather than a fold, because ``math.pow(0.0, -1.0)`` raises on the
-    # host and the compiler never invents an answer the host itself refuses to give (the host-raise license).
+    # A constant pole folds through that same composite, answering +inf as the datapath does; the host raises here.
     def constant_pole(x: float) -> float:
         return x + math.pow(0.0, -1.0)
 
-    with pytest.raises(UnsupportedConstruct, match="this power always raises on the host"):
-        _sim(constant_pole, "pow_zero_negative")
+    assert math.isinf(float(_sim(constant_pole, "pow_zero_negative").run(1.0)[0]))
 
     def runtime_pole(b: float, e: float) -> float:
         return math.pow(b, e)

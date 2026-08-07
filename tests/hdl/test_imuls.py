@@ -8,6 +8,9 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
+from holoso import IMulOptions, IntFormat
+from holoso._operators import IMulOperator
+
 from .hdl_float_oracle import (
     HDL_DIR,
     REPO_ROOT,
@@ -18,15 +21,7 @@ from .hdl_float_oracle import (
     sources,
     start_clock,
 )
-from .hdl_integer_oracle import signed
-
-
-def _expected(a_bits: int, b_bits: int, width: int) -> dict[str, int | str]:
-    minimum = -(1 << (width - 1))
-    maximum = (1 << (width - 1)) - 1
-    exact = signed(a_bits, width) * signed(b_bits, width)
-    clamped = min(max(exact, minimum), maximum)
-    return {"y": clamped & ((1 << width) - 1), "saturated": int(clamped != exact)}
+from .hdl_integer_oracle import expected_imuls, signed
 
 
 def _directed(width: int) -> list[int]:
@@ -55,7 +50,7 @@ def _directed(width: int) -> list[int]:
 async def imuls_cocotb(dut: Any) -> None:
     width = int(os.environ["HOLOSO_IMULS_WIDTH"])
     stage_product = int(os.environ["HOLOSO_IMULS_STAGE_PRODUCT"])
-    latency = 2 + stage_product
+    latency = int(os.environ["HOLOSO_EXPECTED_LATENCY"])
     mask = (1 << width) - 1
     scoreboard = PipelineScoreboard(dut, (("y", "y"), ("saturated", "saturated")), latency=latency)
     await start_clock(dut)
@@ -66,11 +61,8 @@ async def imuls_cocotb(dut: Any) -> None:
         dut.b.value = b & mask
         dut.in_valid.value = valid
         if valid:
-            expected = _expected(a & mask, b & mask, width)
-            expected["_desc"] = (
-                f"W={width} stage={stage_product} a={signed(a & mask, width)} b={signed(b & mask, width)}"
-            )
-            scoreboard.push(expected)
+            desc = f"W={width} stage={stage_product} a={signed(a & mask, width)} b={signed(b & mask, width)}"
+            scoreboard.push({**expected_imuls(a & mask, b & mask, width), "_desc": desc})
         await RisingEdge(dut.clk)
         dut.a.value = (~a) & mask
         dut.b.value = (~b) & mask
@@ -119,31 +111,30 @@ _CONFIGURATIONS = tuple((width, stage) for width in (*range(2, 7), 24, 44) for s
 )
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_imuls(sim: str, width: int, stage_product: int) -> None:
+    # The Python operator model supplies the RTL parameters and the expected latency, so a drifted closed form fails.
+    hardware = IMulOperator(IntFormat(width), IMulOptions(stage_product=stage_product))
     runner = get_runner(sim)
     tag = f"holoso_imuls_w{width}_s{stage_product}"
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / tag
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
-        hdl_toplevel="holoso_imuls",
-        parameters={
-            "W": width,
-            "STAGE_PRODUCT": stage_product,
-            "LATENCY": 2 + stage_product,
-        },
+        hdl_toplevel=hardware.module_name,
+        parameters=hardware.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel="holoso_imuls",
+        hdl_toplevel=hardware.module_name,
         test_module="tests.hdl.test_imuls",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={
             "HOLOSO_IMULS_WIDTH": str(width),
             "HOLOSO_IMULS_STAGE_PRODUCT": str(stage_product),
+            "HOLOSO_EXPECTED_LATENCY": str(hardware.latency),
         },
         results_xml=str(build_dir / "results.xml"),
     )

@@ -4,7 +4,9 @@ from pathlib import Path
 import shutil
 
 import pytest
+from holoso import FFromIntOptions, FToIntOptions, FloatFormat, IntFormat
 from holoso._backend.verilog._support import support_files
+from holoso._operators import FFromIntOperator, FToIntOperator
 from synth import OocDesign, SourceFile
 
 from synth._ooc import KEEP_ATTR
@@ -12,7 +14,6 @@ from synth._synth import BUILD_ROOT
 from synth.flows import FlowId, make_flow
 
 _SATURATING = ("holoso_iadds", "holoso_isubs", "holoso_iabss")
-_SINGLE_OUTPUT = ("holoso_ashift",)
 _UNARY = frozenset(("holoso_iabss",))
 
 
@@ -54,7 +55,7 @@ class _DividerTarget:
 
     def __post_init__(self) -> None:
         assert self.quotient_floor in (0, 1)
-        assert self.latency == 2 + (self.width + 1) // 2
+        assert self.latency == 3 + (self.width + 1) // 2
 
     @property
     def label(self) -> str:
@@ -65,7 +66,7 @@ class _DividerTarget:
 
 _TARGETS = tuple(
     _Target(operator, width, flow, frequency)
-    for operator in (*_SATURATING, "holoso_icmp", *_SINGLE_OUTPUT)
+    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishift")
     for width in (24, 44)
     for flow, frequency in (
         (FlowId.YOSYS_ECP5, 100.0),
@@ -84,18 +85,18 @@ _MULTIPLIER_TARGETS = (
 )
 
 _DIVIDER_TARGETS = (
-    _DividerTarget(24, 0, FlowId.YOSYS_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 0, FlowId.DIAMOND_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=14),
-    _DividerTarget(24, 1, FlowId.YOSYS_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 1, FlowId.DIAMOND_ECP5, 100.0, latency=14),
-    _DividerTarget(24, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=14),
-    _DividerTarget(44, 0, FlowId.YOSYS_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 0, FlowId.DIAMOND_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=24),
-    _DividerTarget(44, 1, FlowId.YOSYS_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 1, FlowId.DIAMOND_ECP5, 100.0, latency=24),
-    _DividerTarget(44, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=24),
+    _DividerTarget(24, 0, FlowId.YOSYS_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 0, FlowId.DIAMOND_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=15),
+    _DividerTarget(24, 1, FlowId.YOSYS_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 1, FlowId.DIAMOND_ECP5, 100.0, latency=15),
+    _DividerTarget(24, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=15),
+    _DividerTarget(44, 0, FlowId.YOSYS_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 0, FlowId.DIAMOND_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 0, FlowId.VIVADO_ARTIX7, 150.0, latency=25),
+    _DividerTarget(44, 1, FlowId.YOSYS_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 1, FlowId.DIAMOND_ECP5, 100.0, latency=25),
+    _DividerTarget(44, 1, FlowId.VIVADO_ARTIX7, 150.0, latency=25),
 )
 
 
@@ -146,12 +147,25 @@ class _FromIntTarget(_MixedTarget):
         self._validate()
 
     @property
+    def _model(self) -> FFromIntOperator:
+        return FFromIntOperator(
+            FloatFormat(self.wexp, self.wman),
+            IntFormat(self.wint),
+            FFromIntOptions(
+                stage_input=self.stage_input,
+                stage_normalize=self.stage_normalize,
+                stage_pack=self.stage_pack,
+                stage_output=self.stage_output,
+            ),
+        )
+
+    @property
     def operator(self) -> str:
-        return "holoso_ffromint"
+        return self._model.module_name
 
     @property
     def latency(self) -> int:
-        return 1 + self.stage_input + self.stage_normalize + self.stage_pack + self.stage_output
+        return self._model.latency
 
     @property
     def stage_label(self) -> str:
@@ -166,12 +180,18 @@ class _ToIntTarget(_MixedTarget):
         self._validate()
 
     @property
+    def _model(self) -> FToIntOperator:
+        return FToIntOperator(
+            FloatFormat(self.wexp, self.wman), IntFormat(self.wint), FToIntOptions(stage_input=self.stage_input)
+        )
+
+    @property
     def operator(self) -> str:
-        return "holoso_ftoint"
+        return self._model.module_name
 
     @property
     def latency(self) -> int:
-        return 4 + self.stage_input
+        return self._model.latency
 
     @property
     def stage_label(self) -> str:
@@ -237,7 +257,7 @@ def _build_ooc_design(operator: str, width: int) -> OocDesign:
     top = f"{operator}_w{width}_ooc"
     if operator == "holoso_icmp":
         wrapper = _render_cmp_wrapper(top, width)
-    elif operator in _SINGLE_OUTPUT:
+    elif operator == "holoso_ishift":
         wrapper = _render_shift_wrapper(top, width)
     else:
         wrapper = _render_saturating_wrapper(top, operator, width)
@@ -455,7 +475,6 @@ endmodule
 
 def _render_divider_wrapper(top: str, width: int, latency: int, quotient_floor: int) -> str:
     assert quotient_floor in (0, 1)
-    zero_padding = f"{{{width - 1}{{1'b0}}}}"
     return f"""`default_nettype none
 
 module {top} (
@@ -476,6 +495,11 @@ module {top} (
     wire [{width - 1}:0] dut_rem;
     wire dut_saturated;
     wire dut_div0;
+    {KEEP_ATTR} reg [{width - 1}:0] r_quo;
+    {KEEP_ATTR} reg [{width - 1}:0] r_rem;
+    {KEEP_ATTR} reg r_saturated;
+    {KEEP_ATTR} reg r_div0;
+    {KEEP_ATTR} reg r_dut_valid;
     {KEEP_ATTR} reg r_out_valid;
     {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
 
@@ -490,18 +514,24 @@ module {top} (
     always @(posedge clk) begin
         if (in_sel) r_den <= io_in;
         else        r_num <= io_in;
+        r_quo <= dut_quo;
+        r_rem <= dut_rem;
+        r_saturated <= dut_saturated;
+        r_div0 <= dut_div0;
         case (out_sel)
-            2'd0: r_io_out <= dut_quo;
-            2'd1: r_io_out <= dut_rem;
-            2'd2: r_io_out <= {{{zero_padding}, dut_saturated}};
-            default: r_io_out <= {{{zero_padding}, dut_div0}};
+            2'd0: r_io_out <= r_quo;
+            2'd1: r_io_out <= r_rem;
+            2'd2: r_io_out <= {{{width}{{r_saturated}}}};
+            default: r_io_out <= {{{width}{{r_div0}}}};
         endcase
         if (rst) begin
             r_in_valid <= 1'b0;
+            r_dut_valid <= 1'b0;
             r_out_valid <= 1'b0;
         end else begin
             r_in_valid <= in_valid;
-            r_out_valid <= dut_out_valid;
+            r_dut_valid <= dut_out_valid;
+            r_out_valid <= r_dut_valid;
         end
     end
 endmodule
@@ -537,13 +567,12 @@ module {top} (
 {operand_reg}    wire dut_out_valid;
     wire [{width - 1}:0] dut_y;
     wire dut_saturated;
-    {KEEP_ATTR} reg r_out_valid;
     {KEEP_ATTR} reg [{width - 1}:0] r_y;
     {KEEP_ATTR} reg r_saturated;
-    {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
+    {KEEP_ATTR} reg r_out_valid;
 
     assign out_valid = r_out_valid;
-    assign io_out = r_io_out;
+    assign io_out = out_sel ? {{{width}{{r_saturated}}}} : r_y;
 
     {operator}#({parameters}) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .{first_operand_port}(r_a){operand_port},
@@ -554,7 +583,6 @@ module {top} (
 {operand_load}
         r_y <= dut_y;
         r_saturated <= dut_saturated;
-        r_io_out <= out_sel ? r_saturated : r_y;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
@@ -590,14 +618,22 @@ module {top} (
     wire dut_a_gt_b;
     wire dut_a_eq_b;
     wire dut_a_lt_b;
-    {KEEP_ATTR} reg r_out_valid;
     {KEEP_ATTR} reg r_a_gt_b;
     {KEEP_ATTR} reg r_a_eq_b;
     {KEEP_ATTR} reg r_a_lt_b;
-    {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
+    {KEEP_ATTR} reg r_out_valid;
+    reg [{width - 1}:0] io_out_mux;
 
     assign out_valid = r_out_valid;
-    assign io_out = r_io_out;
+    assign io_out = io_out_mux;
+
+    always @* begin
+        case (out_sel)
+            2'd0: io_out_mux = {{{zero_padding}, r_a_gt_b}};
+            2'd1: io_out_mux = {{{zero_padding}, r_a_eq_b}};
+            default: io_out_mux = {{{zero_padding}, r_a_lt_b}};
+        endcase
+    end
 
     holoso_icmp#(.W({width}), .LATENCY(2)) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a), .b(r_b), .out_valid(dut_out_valid),
@@ -610,11 +646,6 @@ module {top} (
         r_a_gt_b <= dut_a_gt_b;
         r_a_eq_b <= dut_a_eq_b;
         r_a_lt_b <= dut_a_lt_b;
-        case (out_sel)
-            2'd0: r_io_out <= {{{zero_padding}, r_a_gt_b}};
-            2'd1: r_io_out <= {{{zero_padding}, r_a_eq_b}};
-            default: r_io_out <= {{{zero_padding}, r_a_lt_b}};
-        endcase
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
@@ -639,30 +670,44 @@ module {top} (
     input  wire in_sel,
     input  wire [{width - 1}:0] io_in,
     output wire out_valid,
+    input  wire [1:0] out_sel,
     output wire [{width - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
     {KEEP_ATTR} reg [{width - 1}:0] r_x;
     {KEEP_ATTR} reg [{width - 1}:0] r_shamt;
     wire dut_out_valid;
-    wire [{width - 1}:0] dut_y;
+    wire [{width - 1}:0] dut_shft;
+    wire [{width - 1}:0] dut_prod;
+    wire dut_saturated;
+    {KEEP_ATTR} reg [{width - 1}:0] r_shft;
+    {KEEP_ATTR} reg [{width - 1}:0] r_prod;
+    {KEEP_ATTR} reg r_saturated;
     {KEEP_ATTR} reg r_out_valid;
-    {KEEP_ATTR} reg [{width - 1}:0] r_y;
-    {KEEP_ATTR} reg [{width - 1}:0] r_io_out;
+    reg [{width - 1}:0] io_out_mux;
 
     assign out_valid = r_out_valid;
-    assign io_out = r_io_out;
+    assign io_out = io_out_mux;
 
-    holoso_ashift#(.W({width}), .LATENCY(2)) dut (
+    always @* begin
+        case (out_sel)
+            2'd0: io_out_mux = r_shft;
+            2'd1: io_out_mux = r_prod;
+            default: io_out_mux = {{{width}{{r_saturated}}}};
+        endcase
+    end
+
+    holoso_ishift#(.W({width}), .LATENCY(2)) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
-        .out_valid(dut_out_valid), .y(dut_y)
+        .out_valid(dut_out_valid), .shft(dut_shft), .prod(dut_prod), .saturated(dut_saturated)
     );
 
     always @(posedge clk) begin
         if (in_sel) r_shamt <= io_in;
         else        r_x <= io_in;
-        r_y <= dut_y;
-        r_io_out <= r_y;
+        r_shft <= dut_shft;
+        r_prod <= dut_prod;
+        r_saturated <= dut_saturated;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;

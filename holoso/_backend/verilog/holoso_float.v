@@ -542,7 +542,8 @@ module holoso_ffromint#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT 
 endmodule
 
 // Float-to-signed-integer conversion with input sign conditioning.
-// Finite values round to nearest, ties-to-even. Saturation is normal behavior, not an error.
+// round_mode picks how a finite value reaches an integer -- 0 nearest-even, 1 floor, 2 ceil, 3 truncate, the same
+// encoding zkf_round takes. Saturation is normal behavior, not an error.
 // Values above 2^(WINT-1)-1 saturate to that maximum; values below -2^(WINT-1) saturate to that minimum (incl. infs).
 module holoso_ftoint#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = WEXP + WMAN,
                       parameter STAGE_INPUT = 0, parameter integer LATENCY = 0) (

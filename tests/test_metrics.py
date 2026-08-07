@@ -34,7 +34,7 @@ from holoso._eel import lower
 from holoso._hir import optimize
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
-from ._modelref import SHIPPED_TUNING, build_lir, default_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, SHIPPED_TUNING, build_lir, default_ops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -93,7 +93,7 @@ class Metrics:
     (:attr:`Lir.write_select_fanin`, which counts every write-chain driver the backend synthesizes: pooled lanes,
     inline casts, phi-arm copies, and slot installs). Counting the copies matters here: phi-arm coalescing trades
     pc-gated copies for shared pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a
-    regression. ``copies`` is the total phi-arm install count (float copies plus boolean writes), the direct measure
+    regression. ``copies`` is the total phi-arm install count (wide copies plus boolean writes), the direct measure
     of how many phi arms still install by copy rather than coalescing onto the merged register.
 
     ``last_pc`` is the static ROM length (:attr:`Lir.initiation_interval`) -- the total stage count: blocks tile the
@@ -116,16 +116,20 @@ class Metrics:
 # leak in here; changing a default deliberately re-freezes them.
 def _measure(name: str) -> Metrics:
     lir: Lir = build_lir(
-        lower_to_mir(optimize(lower(_EXAMPLES[name]()).hir), default_ops(_FMT), _FMT), name, SHIPPED_TUNING
+        lower_to_mir(
+            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
+        ),
+        name,
+        SHIPPED_TUNING,
     )
     straight = (
         len(lir.blocks) == 1
         and not lir.bool_state_slots
-        and not any(b.inline_ops or b.copies or b.bool_writes for b in lir.blocks)
+        and not any(b.inline_ops or b.wide_copies or b.bool_writes for b in lir.blocks)
         and lir.bool_regfile.nreg == 0
     )
     read_fanin = sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
-    copies = sum(len(block.copies) + len(block.bool_writes) for block in lir.blocks)
+    copies = sum(len(block.wide_copies) + len(block.bool_writes) for block in lir.blocks)
     return Metrics(
         straight_line=straight,
         nreg=lir.regfile.nreg,
@@ -157,7 +161,7 @@ def _measure(name: str) -> Metrics:
 #   scratch register. A validate-and-retry loop demotes any slot whose in-place commit the colorer finds unsound (a
 #   live-in feeding another phi, or a dominator-arm clobber) back to a copy-back.
 # - min_ii reflects uniform dependency edges (both banks read latch-free), diamond if-conversion (small pure branch
-#   diamonds become muxes -- a float select, or a bool_select reduced to and/or/not for a boolean/mixed merge),
+#   diamonds become muxes -- an fselect, or a bselect reduced to and/or/not for a boolean/mixed merge),
 #   NOT-folding (a semantic NOT is a free consumer-side inversion), and cross-block software pipelining. Bool-phi
 #   if-conversion runs both arms unconditionally, so it can RAISE min_ii (the shortest static path) while LOWERING
 #   realized per-transaction latency -- the true goal, guarded by test_cycle_model. A converted diamond keeps both

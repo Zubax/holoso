@@ -6,20 +6,20 @@ Math domain violations raise in plain Python but garbage-in-garbage-out in hardw
 with the error output signals asserted; refer to the operator RTL for details. A violation the compiler happens to
 prove statically is refused at build time instead -- a liberty it takes where a fold reaches, never a guarantee.
 
-Composites compute through the intrinsic stubs (exp2_, atan2_, ...) instead of the library functions directly even
+Composites compute through the intrinsic stubs (exp2, atan2, ...) instead of the library functions directly even
 though the library spellings would lower identically (they are registered intrinsic keys too). The intrinsic stub
-pins each primitive to the numpy/math variant matching the hardware behavior -- e.g. exp2_ saturates to inf like
+pins each primitive to the numpy/math variant matching the hardware behavior -- e.g. exp2 saturates to inf like
 the hardware where math.exp2 would raise -- so a composite built on the stubs inherits that hardware-faithful behavior,
 and its plain-Python run uses exactly the primitives (and fast-math choices) it lowers to.
 
-Stub names are irrelevant to dispatch; underscores dodge the builtin names.
+Stub names are irrelevant to dispatch.
 """
 
 import math
 
 import numpy as np
 
-from ._intrinsics import atan2_, cos_, exp2_, isinf_, log2_, round_, sin_, sqrt_
+from ._intrinsics import atan2, ceil, cos, exp2, floor, isinf, log2, round_, sin, sqrt
 from ._registry import lib
 
 _LOG2E = math.log2(math.e)
@@ -30,8 +30,58 @@ _RAD_PER_DEG = math.pi / 180.0
 _INF = math.inf
 
 
+@lib(math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix, round, np.round, np.around)
+def integral(x: int) -> int:
+    """An integer entry exists exactly where the Python spelling's own answer is an integer."""
+    return x
+
+
+# On a float the math spellings answer an int where the numpy ones answer a float, so the two share no symbol.
+# A float consumer reduces the cast back to the bare rounder.
+@lib(math.floor)
+def floor_to_int(x: float) -> int:
+    return int(floor(x))
+
+
+@lib(math.ceil)
+def ceil_to_int(x: float) -> int:
+    return int(ceil(x))
+
+
+@lib(math.trunc)
+def trunc_to_int(x: float) -> int:
+    return int(x)  # truncation toward zero is what the cast already is
+
+
+@lib(round)
+def round_to_int(x: float) -> int:
+    return int(round_(x))
+
+
+@lib(min, np.minimum, np.fmin)
+def min_int(a: int, b: int) -> int:
+    """There is no hardware min/max operator for integers."""
+    return a if a <= b else b  # the tie answers a, as CPython's min does
+
+
+@lib(max, np.maximum, np.fmax)
+def max_int(a: int, b: int) -> int:
+    return a if b <= a else b
+
+
 @lib(np.sign)
-def sign_(x: float) -> float:
+def sign_int(x: int) -> int:
+    if x > 0:
+        r = 1
+    elif x < 0:
+        r = -1
+    else:
+        r = 0
+    return r
+
+
+@lib(np.sign)
+def sign_float(x: float) -> float:
     if x > 0.0:
         r = +1.0
     elif x < 0.0:
@@ -42,18 +92,18 @@ def sign_(x: float) -> float:
 
 
 @lib(math.cbrt, np.cbrt)
-def cbrt_(x: float) -> float:
+def cbrt(x: float) -> float:
     """Fastmath: cbrt(−0.0) may return +0.0"""
-    return sign_(x) * exp2_(log2_(abs(x)) / 3.0) if bool(x) else 0.0
+    return sign_float(x) * exp2(log2(abs(x)) / 3.0) if bool(x) else 0.0
 
 
 @lib(math.tan, np.tan)
-def tan_(x: float) -> float:
+def tan(x: float) -> float:
     """
     tan = sin/cos may diverge to +-inf at a pole where cos rounds to zero (the format-nearest pi/2),
     whereas the float64 reference stays finite there.
     """
-    s, c = sin_(x), cos_(x)
+    s, c = sin(x), cos(x)
     if c == 0.0:  # a real branch (div is unspeculatable), so the pole skips the divide and asserts no div-by-zero flag
         r = _INF if s >= 0.0 else -_INF
     else:
@@ -62,118 +112,98 @@ def tan_(x: float) -> float:
 
 
 @lib(math.atan, np.arctan, np.atan)
-def atan_(x: float) -> float:
-    return atan2_(x, 1.0)
+def atan(x: float) -> float:
+    return atan2(x, 1.0)
 
 
 @lib(math.asin, np.arcsin, np.asin)
-def asin_(x: float) -> float:
-    return atan2_(x, sqrt_(1.0 - x * x))
+def asin(x: float) -> float:
+    return atan2(x, sqrt(1.0 - x * x))
 
 
 @lib(math.acos, np.arccos, np.acos)
-def acos_(x: float) -> float:
-    return atan2_(sqrt_(1.0 - x * x), x)
+def acos(x: float) -> float:
+    return atan2(sqrt(1.0 - x * x), x)
 
 
 @lib(math.exp, np.exp)
-def exp_(x: float) -> float:
-    return exp2_(x * _LOG2E)
+def exp(x: float) -> float:
+    return exp2(x * _LOG2E)
 
 
 @lib(math.log, np.log)
-def log_(x: float) -> float:
-    return log2_(x) * _LN2
+def log(x: float) -> float:
+    return log2(x) * _LN2
 
 
 @lib(math.log10, np.log10)
-def log10_(x: float) -> float:
-    return log2_(x) * _LOG10_2
+def log10(x: float) -> float:
+    return log2(x) * _LOG10_2
 
 
 @lib(math.expm1, np.expm1)
-def expm1_(x: float) -> float:
+def expm1(x: float) -> float:
     """FIXME Loses the small-argument precision the reference exists to preserve."""
-    return exp_(x) - 1.0
+    return exp(x) - 1.0
 
 
 @lib(math.log1p, np.log1p)
-def log1p_(x: float) -> float:
+def log1p(x: float) -> float:
     """FIXME Loses the small-argument precision the reference exists to preserve."""
-    return log_(1.0 + x)
+    return log(1.0 + x)
 
 
 @lib(math.sinh, np.sinh)
-def sinh_(x: float) -> float:
-    return exp_(x - _LN2) - exp_(-x - _LN2)  # the /2 folded into the exponent, so exp does not overflow before it
+def sinh(x: float) -> float:
+    return exp(x - _LN2) - exp(-x - _LN2)  # the /2 folded into the exponent, so exp does not overflow before it
 
 
 @lib(math.cosh, np.cosh)
-def cosh_(x: float) -> float:
-    return exp_(x - _LN2) + exp_(-x - _LN2)
+def cosh(x: float) -> float:
+    return exp(x - _LN2) + exp(-x - _LN2)
 
 
 @lib(math.tanh, np.tanh)
-def tanh_(x: float) -> float:
+def tanh(x: float) -> float:
     """Stable sigmoid form: no exp overflow for large |x|. FIXME Loses precision to cancellation near zero."""
-    return 2.0 / (1.0 + exp2_(-2.0 * x * _LOG2E)) - 1.0
+    return 2.0 / (1.0 + exp2(-2.0 * x * _LOG2E)) - 1.0
 
 
 @lib(math.asinh, np.asinh, np.arcsinh)
-def asinh_(x: float) -> float:
+def asinh(x: float) -> float:
     """
     Sign/abs form avoids the large-negative-x cancellation; the branch avoids x*x overflowing (to +inf, over a huge
     in-range band) before the sqrt recovers -- there sqrt(x*x + 1) == |x|, so asinh(x) == sign(x)*ln(2|x|).
     """
     t = x * x
-    if isinf_(t):
-        r = sign_(x) * (log_(abs(x)) + _LN2)
+    if isinf(t):
+        r = sign_float(x) * (log(abs(x)) + _LN2)
     else:
-        r = sign_(x) * log_(abs(x) + sqrt_(t + 1.0))
+        r = sign_float(x) * log(abs(x) + sqrt(t + 1.0))
     return r
 
 
 @lib(math.acosh, np.acosh, np.arccosh)
-def acosh_(x: float) -> float:
+def acosh(x: float) -> float:
     """The branch avoids x*x overflowing before the sqrt; there sqrt(x*x - 1) == x, so acosh(x) == ln(2x)."""
     t = x * x
-    if isinf_(t):
-        r = log_(x) + _LN2
+    if isinf(t):
+        r = log(x) + _LN2
     else:
-        r = log_(x + sqrt_(t - 1.0))
+        r = log(x + sqrt(t - 1.0))
     return r
 
 
 @lib(math.atanh, np.atanh, np.arctanh)
-def atanh_(x: float) -> float:
-    return 0.5 * log_((1.0 + x) / (1.0 - x))
+def atanh(x: float) -> float:
+    return 0.5 * log((1.0 + x) / (1.0 - x))
 
 
 @lib(math.degrees, np.degrees, np.rad2deg)
-def degrees_(x: float) -> float:
+def degrees(x: float) -> float:
     return x * _DEG_PER_RAD
 
 
 @lib(math.radians, np.radians, np.deg2rad)
-def radians_(x: float) -> float:
+def radians(x: float) -> float:
     return x * _RAD_PER_DEG
-
-
-@lib(pow, math.pow, np.power, np.pow, np.float_power)
-def pow_(b: float, e: float) -> float:
-    """
-    Optimized for exactly one exp2 and one log2 as they dominate the hardware cost.
-    The parity test is exact over the whole float range: every float >= 2**53 is even.
-    """
-    # Schedule the speculable general-case ops early so they overlap with the guards.
-    integral = round_(e) == e
-    half = e * 0.5  # from e, not round_(e): the two rounds then schedule in parallel; equal when it matters
-    odd = round_(half) != half
-    if e == 0.0 or b == 1.0 or (b == -1.0 and isinf_(e)):  # |b|==1 with non-finite e: exp2(inf*0), IEEE says 1
-        r = 1.0
-    elif b == 0.0:  # keeps the log2 pole (and its error sideband) away from the degenerate base
-        r = 0.0 if e > 0.0 else _INF if e < 0.0 else e  # e == 0 is unreachable here, so the last arm is NaN
-    else:
-        t = exp2_(e * log2_(abs(b) if integral else b))
-        r = -t if b < 0.0 and integral and odd else t
-    return r

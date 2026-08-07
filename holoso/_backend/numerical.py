@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import assert_never
 
 from .._value import FloatValue
-from .._lir import BoolInputLoad, FloatConstRef, FloatInputLoad, FloatOperand
+from .._lir import BoolInputLoad, WideConstRef, WideInputLoad, WideOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
@@ -65,7 +65,7 @@ def _coerce_bool_input(value: ModelInput, index: int) -> bool:
 
 
 def _coerce_inputs(lir: Lir, inputs: tuple[ModelInput, ...]) -> tuple[list[FloatValue], list[bool]]:
-    """Split the flat positional inputs into the float and boolean banks, in port order, coercing/validating each."""
+    """Split the flat positional inputs into the wide and boolean banks, in port order, coercing/validating each."""
     if len(inputs) != len(lir.inputs):
         raise ValueError(f"expected {len(lir.inputs)} inputs, got {len(inputs)}")
     fmt = lir.float_format
@@ -73,7 +73,7 @@ def _coerce_inputs(lir: Lir, inputs: tuple[ModelInput, ...]) -> tuple[list[Float
     bool_values: list[bool] = []
     for index, (load, raw_input) in enumerate(zip(lir.inputs, inputs, strict=True)):
         match load:
-            case FloatInputLoad():
+            case WideInputLoad():
                 float_values.append(_coerce_input(raw_input, fmt, index))
             case BoolInputLoad():
                 bool_values.append(_coerce_bool_input(raw_input, index))
@@ -96,7 +96,7 @@ class _OpEvent:
 
 @dataclass(frozen=True, slots=True)
 class _Install:
-    source: FloatOperand | BoolOperand
+    source: WideOperand | BoolOperand
     dst: _Dst
 
 
@@ -138,7 +138,7 @@ class _Kernel:
 class NumericalSimulator(_Kernel):
     """
     The runnable cycle-accurate, bit-exact model of a generated module (see the module docstring). ``regs``/``bregs``
-    are the live register files, ``consts`` the float constant pool, ``pc`` the fetch program counter; :meth:`tick`
+    are the live register files, ``consts`` the wide constant pool, ``pc`` the fetch program counter; :meth:`tick`
     advances one clock and :attr:`output_values` reads the result while :attr:`out_valid`. The persistent state is just
     the slot registers within ``regs``/``bregs``, carried across transactions.
     Construct one from a :class:`NumericalModel` via :meth:`NumericalModel.elaborate`.
@@ -146,7 +146,7 @@ class NumericalSimulator(_Kernel):
 
     def __init__(self, lir: Lir) -> None:
         self._lir = lir
-        self.consts: list[FloatValue] = [FloatValue.from_float(lir.float_format, value) for value in lir.float_consts]
+        self.consts: list[FloatValue] = [FloatValue.from_float(lir.float_format, value) for value in lir.wide_consts]
         self.regs: dict[int, FloatValue] = {}  # wide register file (Verilog ``regs``)
         self.bregs: dict[int, bool] = {}  # boolean register file (Verilog ``bregs``)
         self.pc = 0
@@ -163,7 +163,7 @@ class NumericalSimulator(_Kernel):
         fmt = self._lir.float_format
         self.pc = 0
         self.regs = {
-            slot.reg.index: FloatValue.from_float(fmt, slot.reset_value) for slot in self._lir.float_state_slots
+            slot.reg.index: FloatValue.from_float(fmt, slot.reset_value) for slot in self._lir.wide_state_slots
         }
         self.bregs = {slot.reg.index: slot.reset_value for slot in self._lir.bool_state_slots}
         self._pending = {}
@@ -175,8 +175,8 @@ class NumericalSimulator(_Kernel):
         before the first executing step, so writing them when presented is observationally identical).
         """
         float_values, bool_values = _coerce_inputs(self._lir, inputs)
-        for float_load, float_value in zip(self._lir.float_inputs, float_values):
-            self.regs[float_load.dst.index] = float_value
+        for wide_load, float_value in zip(self._lir.wide_inputs, float_values):
+            self.regs[wide_load.dst.index] = float_value
         for bool_load, bool_value in zip(self._lir.bool_inputs, bool_values):
             self.bregs[bool_load.dst.index] = bool_value
 
@@ -258,7 +258,7 @@ class NumericalSimulator(_Kernel):
             for op in block_ops:
                 read_pc = operand_read_cycle(op.operator, base + op.issue_cycle, lir.fetch_lag)
                 self._op_events.setdefault(read_pc, []).append(_OpEvent(op, base + op.commit_cycle))
-            for copy in block.copies:
+            for copy in block.wide_copies:
                 self._installs.setdefault(base + copy.fire_step(lir.fetch_lag), []).append(
                     _Install(copy.source, copy.dst)
                 )
@@ -271,10 +271,10 @@ class NumericalSimulator(_Kernel):
         # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at
         # the boundary (gated on the accepted-output edge). A boolean slot always installs at the accepted boundary
         # edge.
-        for slot in lir.float_state_slots:
+        for slot in lir.wide_state_slots:
             if not slot.needs_copy:
                 continue
-            if lir.float_state_install_is_boundary(slot):
+            if lir.wide_state_install_is_boundary(slot):
                 self._boundary.append(_Install(slot.tap, slot.reg))
             else:
                 self._installs.setdefault(lir.state_copy_step(slot), []).append(_Install(slot.tap, slot.reg))
@@ -324,15 +324,16 @@ class NumericalSimulator(_Kernel):
         for dst, value in resolved:
             self._pending.setdefault(install_landing(pc), []).append((dst, value))
 
-    def _read(self, operand: FloatOperand | BoolOperand) -> _Value:
-        if isinstance(operand, FloatOperand):
-            float_source = operand.source
+    def _read(self, operand: WideOperand | BoolOperand) -> _Value:
+        if isinstance(operand, WideOperand):
+            wide_source = operand.source
             base = (
-                self.consts[float_source.index]
-                if isinstance(float_source, FloatConstRef)
-                else self.regs[float_source.index]
+                self.consts[wide_source.index]
+                if isinstance(wide_source, WideConstRef)
+                else self.regs[wide_source.index]
             )
-            return operand.sign.apply_value(base)
+            assert isinstance(operand.conditioner, FloatSignControl), "the model stores every wide value as a float"
+            return operand.conditioner.apply_value(base)
         bool_source = operand.source
         if isinstance(bool_source, BoolConstRef):
             return operand.inversion.apply(bool_source.value)

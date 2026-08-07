@@ -137,7 +137,7 @@ def test_frontend_ir_records_the_passes(tmp_path: Path) -> None:
     # The desugarer knows no types and keeps the source spelling; partial evaluation types the boundary and
     # resolves the operators, so the subtraction has become a negate-and-add pair by the second document.
     assert "fn _kernel(a, b):" in desugared and "a - b" in desugared
-    assert "fn _kernel(a: float, b: float):" in refined and "intrinsic neg(b)" in refined
+    assert "fn _kernel(a: float, b: float):" in refined and "intrinsic fneg(b)" in refined
     # Locations are on, which is the whole point of shipping these next to the RTL.
     assert all(f"# {Path(__file__).name}:" in doc for doc in result.frontend_ir)
     result.write(tmp_path)

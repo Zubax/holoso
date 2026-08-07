@@ -104,6 +104,8 @@ class Operator(ABC):
     # Whether evaluating this operation on a not-taken path is unobservable: a speculatable operation has no error
     # sideband and no effect beyond its result value, so if-conversion may execute it unconditionally. Division is
     # not speculatable (a speculated div-by-zero would assert the module's error flag for a branch never taken).
+    # A partial fold is not an error sideband and does not bar speculation: mul, add, the casts and the shifts all
+    # decline to name a number somewhere in their domain, and the mux discards that arm in hardware regardless.
     # The default is False so a future error-bearing operator that omits the declaration is a missed optimization
     # rather than a silent spurious-error bug; pure operators opt in explicitly.
     speculatable: ClassVar[bool] = False
@@ -144,7 +146,7 @@ class Operator(ABC):
 
 @dataclass(frozen=True, slots=True)
 class FloatAdd(Operator):
-    mnemonic: ClassVar[str] = "add"
+    mnemonic: ClassVar[str] = "fadd"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -161,7 +163,7 @@ class FloatAdd(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatMul(Operator):
-    mnemonic: ClassVar[str] = "mul"
+    mnemonic: ClassVar[str] = "fmul"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -183,7 +185,7 @@ class FloatMul(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatDiv(Operator):
-    mnemonic: ClassVar[str] = "div"
+    mnemonic: ClassVar[str] = "fdiv"
 
     @property
     def signature(self) -> Signature:
@@ -195,7 +197,7 @@ class FloatDiv(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatNeg(Operator):
-    mnemonic: ClassVar[str] = "neg"
+    mnemonic: ClassVar[str] = "fneg"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -209,7 +211,7 @@ class FloatNeg(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatAbs(Operator):
-    mnemonic: ClassVar[str] = "abs"
+    mnemonic: ClassVar[str] = "fabs"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -225,7 +227,7 @@ class FloatAbs(Operator):
 class FloatMulPow2(Operator):
     """Exact semantic scaling by a power of two, introduced by strength reduction."""
 
-    mnemonic: ClassVar[str] = "mul_pow2"
+    mnemonic: ClassVar[str] = "fmul_pow2"
     speculatable: ClassVar[bool] = True
     k: int
 
@@ -243,7 +245,7 @@ class FloatMulPow2(Operator):
 class FloatRound(Operator):
     """Round a float to the nearest integral-valued float, ties to even."""
 
-    mnemonic: ClassVar[str] = "round"
+    mnemonic: ClassVar[str] = "fround"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -258,7 +260,7 @@ class FloatRound(Operator):
 class FloatFloor(Operator):
     """Round a float toward negative infinity to an integral-valued float."""
 
-    mnemonic: ClassVar[str] = "floor"
+    mnemonic: ClassVar[str] = "ffloor"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -273,7 +275,7 @@ class FloatFloor(Operator):
 class FloatCeil(Operator):
     """Round a float toward positive infinity to an integral-valued float."""
 
-    mnemonic: ClassVar[str] = "ceil"
+    mnemonic: ClassVar[str] = "fceil"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -288,7 +290,7 @@ class FloatCeil(Operator):
 class FloatTrunc(Operator):
     """Round a float toward zero to an integral-valued float."""
 
-    mnemonic: ClassVar[str] = "trunc"
+    mnemonic: ClassVar[str] = "ftrunc"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -301,7 +303,7 @@ class FloatTrunc(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatExp2(Operator):
-    mnemonic: ClassVar[str] = "exp2"
+    mnemonic: ClassVar[str] = "fexp2"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -316,7 +318,7 @@ class FloatExp2(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatLog2(Operator):
-    mnemonic: ClassVar[str] = "log2"
+    mnemonic: ClassVar[str] = "flog2"
 
     @property
     def signature(self) -> Signature:
@@ -329,7 +331,7 @@ class FloatLog2(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatSin(Operator):
-    mnemonic: ClassVar[str] = "sin"
+    mnemonic: ClassVar[str] = "fsin"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -342,7 +344,7 @@ class FloatSin(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatCos(Operator):
-    mnemonic: ClassVar[str] = "cos"
+    mnemonic: ClassVar[str] = "fcos"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -355,7 +357,7 @@ class FloatCos(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatSqrt(Operator):
-    mnemonic: ClassVar[str] = "sqrt"
+    mnemonic: ClassVar[str] = "fsqrt"
 
     @property
     def signature(self) -> Signature:
@@ -367,7 +369,7 @@ class FloatSqrt(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatAtan2(Operator):
-    mnemonic: ClassVar[str] = "atan2"
+    mnemonic: ClassVar[str] = "fatan2"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -385,7 +387,7 @@ class FloatHypot2(Operator):
     If not, it is expected to be lowered as the ordinary sqrt(x**2+y**2).
     """
 
-    mnemonic: ClassVar[str] = "hypot2"
+    mnemonic: ClassVar[str] = "fhypot2"
 
     @property
     def signature(self) -> Signature:
@@ -397,7 +399,7 @@ class FloatHypot2(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatIsFinite(Operator):
-    mnemonic: ClassVar[str] = "isfinite"
+    mnemonic: ClassVar[str] = "fisfinite"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -411,7 +413,7 @@ class FloatIsFinite(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatIsInf(Operator):
-    mnemonic: ClassVar[str] = "isinf"
+    mnemonic: ClassVar[str] = "fisinf"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -425,7 +427,7 @@ class FloatIsInf(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatIsPosInf(Operator):
-    mnemonic: ClassVar[str] = "isposinf"
+    mnemonic: ClassVar[str] = "fisposinf"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -439,7 +441,7 @@ class FloatIsPosInf(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatIsNegInf(Operator):
-    mnemonic: ClassVar[str] = "isneginf"
+    mnemonic: ClassVar[str] = "fisneginf"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -455,7 +457,7 @@ class FloatIsNegInf(Operator):
 class FloatFma(Operator):
     """Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds."""
 
-    mnemonic: ClassVar[str] = "fma"
+    mnemonic: ClassVar[str] = "ffma"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -468,7 +470,7 @@ class FloatFma(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatMin(Operator):
-    mnemonic: ClassVar[str] = "min"
+    mnemonic: ClassVar[str] = "fmin"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -482,7 +484,7 @@ class FloatMin(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatMax(Operator):
-    mnemonic: ClassVar[str] = "max"
+    mnemonic: ClassVar[str] = "fmax"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -636,13 +638,13 @@ class BoolNot(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class Select(Operator):
+class FloatSelect(Operator):
     """
     A data mux ``a if cond else b`` over float values. In HIR it is produced by the if-conversion pass, which refuses
     constant conditions; MIR composite lowerings may also use the selected inline hardware mux directly.
     """
 
-    mnemonic: ClassVar[str] = "select"
+    mnemonic: ClassVar[str] = "fselect"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -657,12 +659,12 @@ class Select(Operator):
 @dataclass(frozen=True, slots=True)
 class BoolSelect(Operator):
     """
-    A boolean mux ``a if cond else b`` over boolean values, the 1-bit dual of :class:`Select`. Produced exclusively by
+    A boolean mux ``a if cond else b`` over boolean values, the 1-bit dual of :class:`FloatSelect`. Produced only by
     if-conversion of a boolean-phi diamond. Its constant arms (the common ``True``/``False`` arms of a state-machine
     merge) are reduced to ``and``/``or``/``not``/passthrough by strength reduction.
     """
 
-    mnemonic: ClassVar[str] = "bool_select"
+    mnemonic: ClassVar[str] = "bselect"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -841,7 +843,7 @@ class IntShiftRight(Operator):
 
 @dataclass(frozen=True, slots=True)
 class IntBwAnd(Operator):
-    mnemonic: ClassVar[str] = "iand"
+    mnemonic: ClassVar[str] = "ibwand"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -861,7 +863,7 @@ class IntBwAnd(Operator):
 
 @dataclass(frozen=True, slots=True)
 class IntBwOr(Operator):
-    mnemonic: ClassVar[str] = "ior"
+    mnemonic: ClassVar[str] = "ibwor"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -881,7 +883,7 @@ class IntBwOr(Operator):
 
 @dataclass(frozen=True, slots=True)
 class IntBwXor(Operator):
-    mnemonic: ClassVar[str] = "ixor"
+    mnemonic: ClassVar[str] = "ibwxor"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -897,7 +899,7 @@ class IntBwXor(Operator):
 
 @dataclass(frozen=True, slots=True)
 class IntBwNot(Operator):
-    mnemonic: ClassVar[str] = "inot"
+    mnemonic: ClassVar[str] = "ibwnot"
     speculatable: ClassVar[bool] = True
 
     @property
@@ -975,9 +977,9 @@ class IntGreater(IntComparison):
 
 @dataclass(frozen=True, slots=True)
 class IntSelect(Operator):
-    """A data mux ``a if cond else b`` over integer values, the integer dual of :class:`Select`."""
+    """A data mux ``a if cond else b`` over integer values, the integer dual of :class:`FloatSelect`."""
 
-    mnemonic: ClassVar[str] = "int_select"
+    mnemonic: ClassVar[str] = "iselect"
     speculatable: ClassVar[bool] = True
 
     @property

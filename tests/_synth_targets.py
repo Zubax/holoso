@@ -162,7 +162,7 @@ def _from_polar_kernel() -> Callable[..., object]:
 _TO_POLAR_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
 _FROM_POLAR_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
 # kepler's fsincos (coalesced sin+cos per Newton iteration) dominates timing, so its measured closure coincides with
-# from_polar's -- the same operator -- and one config closes all three flows.
+# from_polar's -- the same operator.
 _KEPLER_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
 
 
@@ -498,7 +498,7 @@ TARGETS: list[SynthTarget] = [
             F_e6m18,
             fadd=FAddOptions(stage_normalize=1),
             fmul=FMulOptions(stage_output=1),
-            ffma=FFmaOptions(stage_normalize=1, stage_pack=1),
+            ffma=FFmaOptions(stage_product=1, stage_normalize=1, stage_pack=1),
         ),
         name="imu_frame_transform_e6m18_fma",
     ),
@@ -547,7 +547,7 @@ TARGETS: list[SynthTarget] = [
         kernel=_from_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
+        ops=op_config(F_e6m18, fmul=FMulOptions(stage_pack=1), fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
     ),
     SynthTarget(
@@ -559,7 +559,12 @@ TARGETS: list[SynthTarget] = [
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
     for_example("kepler", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
-    for_example("kepler", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
+    for_example(
+        "kepler",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(F_e6m18, fsincos=FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=1)),
+    ),
     for_example("kepler", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
 ]
 

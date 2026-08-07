@@ -41,7 +41,6 @@ import numpy as np
 
 from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
-from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
 from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
 from holoso._lir import operand_read_cycle
@@ -52,6 +51,8 @@ from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue
 
 from ._modelref import (
+    DEFAULT_IFCONV_MAX_OPS,
+    default_ifmt,
     build_lir,
     Vector,
     default_ops,
@@ -135,7 +136,7 @@ class _Fragment:
 
 
 type _Body = list[tuple[int, str]]
-_OVERBUDGET_ARM_OPS = max(1, if_convert_pass._IFCONV_MAX_OPS + 1)  # noqa: SLF001 -- tests track the active knob.
+_OVERBUDGET_ARM_OPS = DEFAULT_IFCONV_MAX_OPS + 1
 _DEFAULT_EXACT_FMT = FloatFormat(6, 18)
 
 
@@ -1040,7 +1041,7 @@ def _build_with_lir(
     or touching simulator internals. Shared by the campaign runner and the regression replayer, so both drive the
     identical build path.
     """
-    mir = lower_to_mir(optimize(lower_frontend(fn).hir), ops, fmt)
+    mir = lower_to_mir(optimize(lower_frontend(fn).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt))
     lir = build_lir(mir, name)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)
@@ -1650,7 +1651,7 @@ class ReproMeta:
         }
 
     @classmethod
-    def from_dict(cls, meta: Mapping[str, Any]) -> "ReproMeta":
+    def from_dict(cls, meta: Mapping[str, Any]) -> ReproMeta:
         """Parse a saved ``META`` dict into the typed record -- the single place the on-disk format is decoded."""
         return cls(
             kernel_name=str(meta["kernel_name"]),

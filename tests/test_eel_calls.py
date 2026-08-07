@@ -1,7 +1,7 @@
 """
 The call machinery, driven black-box through the differential oracle wherever the behavior is observable:
-registry identity dispatch (intrinsics and Library stubs under every spelling), user-function inlining with
-CPython signature binding, boundary conformance, the pow one-behavior rule, raise semantics, and the
+registry identity dispatch (every spelling, and the typed lowering each operand domain selects), user-function
+inlining with CPython signature binding, boundary conformance, the pow one-behavior rule, raise semantics, and the
 re-attribution of every rejection arising inside an inlined callee to the user's call site.
 """
 
@@ -18,9 +18,10 @@ from holoso._eel._desugar import desugar
 from holoso._eel._pe import partial_evaluate
 from holoso._eel._print import print_eel
 from holoso._errors import SynthesisError, UnsupportedConstruct
-from holoso._hir import optimize
+from holoso._hir import IntSelect, Operation, optimize
 
 from ._eeloracle import assert_hir_matches_reference
+from ._modelref import DEFAULT_IFCONV_MAX_OPS
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -42,6 +43,11 @@ def _rejects(fn: object, match: str) -> None:
 def _residual_text(fn: Callable[..., object]) -> str:
     assert isinstance(fn, types.FunctionType)
     return print_eel(partial_evaluate(desugar(fn), fn))
+
+
+def _lowered_ops(fn: Callable[..., object]) -> list[str]:
+    hir = optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS)
+    return [type(node.operator).__name__ for node in hir.nodes.values() if isinstance(node, Operation)]
 
 
 def _line_of(fn: Callable[..., object], needle: str) -> int:
@@ -72,7 +78,7 @@ def _aliased_intrinsic(x: float) -> float:
 
 def test_callee_dispatch_is_identity_not_spelling() -> None:
     _oracle(_aliased_intrinsic, [{"x": 4.0}, {"x": 2.25}])
-    assert "sqrt" in _residual_text(_aliased_intrinsic)
+    assert "fsqrt" in _residual_text(_aliased_intrinsic)
 
 
 def sqrt(v: float) -> float:
@@ -85,7 +91,7 @@ def _shadowing_user_function(x: float) -> float:
 
 def test_a_user_function_spelled_like_a_library_one_inlines_as_user_code() -> None:
     _oracle(_shadowing_user_function, [{"x": 4.0}, {"x": -1.0}])
-    assert "sqrt" not in _residual_text(_shadowing_user_function)
+    assert "fsqrt" not in _residual_text(_shadowing_user_function)
 
 
 def _sqrt_of_int(n: int) -> float:
@@ -96,12 +102,91 @@ def test_intrinsic_operands_promote_per_signature() -> None:
     _oracle(_sqrt_of_int, [{"n": 4}, {"n": 2}, {"n": 0}])
 
 
+# ---------------------------------------------------------------------- typed library dispatch
+
+
 def _abs_of_int(n: int) -> int:
     return abs(n)
 
 
-def test_intrinsic_results_are_float_so_an_int_boundary_rejects_honestly() -> None:
-    _rejects(_abs_of_int, "the returned value has type float where the annotation declares int")
+def _abs_of_int_composes_with_the_integer_operators(n: int) -> int:
+    return abs(n) % 3
+
+
+def _min_max_of_ints(a: int, b: int) -> int:
+    return min(a, b) * 10 + max(a, b)
+
+
+def _sign_of_int(n: int) -> int:
+    return int(np.sign(n))
+
+
+def test_a_symbol_whose_python_answer_is_an_integer_lowers_over_integers() -> None:
+    """Regression: every entry named a float operator, so a runtime integer promoted and came back a float."""
+    _oracle(_abs_of_int, [{"n": -3}, {"n": 0}, {"n": 7}])
+    _oracle(_abs_of_int_composes_with_the_integer_operators, [{"n": -8}, {"n": 5}])
+    _oracle(_min_max_of_ints, [{"a": 3, "b": 5}, {"a": 5, "b": 3}, {"a": -4, "b": -4}])
+    _oracle(_sign_of_int, [{"n": -9}, {"n": 0}, {"n": 2}])
+    # The compare-and-select entries cost one mux rather than control flow, which is if-conversion's doing.
+    hir = optimize(lower(_min_max_of_ints).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert sum(isinstance(node, Operation) and isinstance(node.operator, IntSelect) for node in hir.nodes.values()) == 2
+    assert len(hir.blocks) == 1
+
+
+def _fabs_of_int(n: int) -> float:
+    return math.fabs(n)
+
+
+def _fabs_of_int_declared_int(n: int) -> int:
+    return math.fabs(n)  # type: ignore[return-value]
+
+
+def _rint_of_int_declared_int(n: int) -> int:
+    return np.rint(n)  # type: ignore[no-any-return]
+
+
+def _mixed_min(a: int, x: float) -> float:
+    return min(a, x)
+
+
+def test_a_float_answering_spelling_keeps_its_own_domain() -> None:
+    """Each is its own symbol; the int return annotation is what makes the float visible, a float one converting."""
+    _oracle(_fabs_of_int, [{"n": -3}, {"n": 4}])
+    for kernel in (_fabs_of_int_declared_int, _rint_of_int_declared_int):
+        _rejects(kernel, "the returned value has type float where the annotation declares int")
+    _oracle(_mixed_min, [{"a": 3, "x": 5.5}, {"a": 7, "x": -1.25}])  # one float operand takes the whole call to floats
+
+
+def _math_roundings_of_a_float(x: float) -> tuple[int, int, int, int]:
+    return math.floor(x), math.ceil(x), math.trunc(x), round(x)
+
+
+def _numpy_roundings_of_a_float(x: float) -> tuple[float, float, float, float]:
+    return float(np.floor(x)), float(np.ceil(x)), float(np.trunc(x)), float(np.round(x))
+
+
+def _floor_consumed_as_a_float(x: float) -> float:
+    return math.floor(x)
+
+
+def test_a_rounding_answers_what_its_own_spelling_answers() -> None:
+    """math.floor/ceil/trunc and round of a float answer an int; the numpy spellings of the same answer a float."""
+    vectors = [{"x": 2.5}, {"x": -2.5}, {"x": 3.7}, {"x": -0.5}, {"x": 4.0}]
+    _oracle(_math_roundings_of_a_float, vectors)
+    _oracle(_numpy_roundings_of_a_float, vectors)
+    # The cast costs nothing where a float consumes the result: it reduces back to the bare rounder.
+    hir = optimize(lower(_floor_consumed_as_a_float).hir, DEFAULT_IFCONV_MAX_OPS)
+    lowered = [type(node.operator).__name__ for node in hir.nodes.values() if isinstance(node, Operation)]
+    assert lowered == ["FloatFloor"]
+
+
+def _dot_of_static_ints(x: float) -> float:
+    return float(np.dot(2, 3)) + x
+
+
+def test_an_array_composite_judges_scalars_by_its_own_rank_guard() -> None:
+    # Regression: a static-integer fold ran the host callee, so np.dot(2, 3) answered 6 where np.dot(2.0, 3.0) was refused.
+    _rejects(_dot_of_static_ints, "does not accept scalar operands")
 
 
 # ---------------------------------------------------------------------- composite stubs
@@ -120,7 +205,7 @@ def _tan(x: float) -> float:
 
 
 def test_a_stub_opening_with_tuple_unpacking_inlines() -> None:
-    # tan_ opens with ``s, c = sin_(x), cos_(x)``, so it exercises tuple unpacking inside an inlined stub.
+    # tan opens with ``s, c = sin(x), cos(x)``, so it exercises tuple unpacking inside an inlined stub.
     _oracle(_tan, [{"x": 0.5}, {"x": -1.0}, {"x": 2.0}, {"x": 0.0}])
 
 
@@ -129,7 +214,7 @@ def _cbrt(x: float) -> float:
 
 
 def test_sibling_library_stub_calls_inline_through_the_user_path() -> None:
-    # cbrt_ calls sign_ (a Library stub that is NOT its own registry key) plus the exp2_/log2_ intrinsics.
+    # cbrt calls sign_float (reached by name here, not through its own registry key) plus the exp2/log2 intrinsics.
     _oracle(_cbrt, [{"x": 8.0}, {"x": -27.0}, {"x": 0.5}, {"x": 0.0}])
 
 
@@ -224,7 +309,68 @@ def test_static_negative_base_powers_fold_through_the_stub_parity_lane() -> None
     assert "-128.0" in _residual_text(_neg_base_odd_exponent)
     _oracle(_dead_static_pow_fault, [{"x": 3.5}])
     with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_neg_base_fractional_exponent).hir)
+        optimize(lower(_neg_base_fractional_exponent).hir, DEFAULT_IFCONV_MAX_OPS)
+
+
+def _pow_static_int_pair(n: int) -> int:
+    return (2**3) // 3 + n
+
+
+def _pow_static_negative_exponent(x: float) -> float:
+    return 2**-1 + x
+
+
+def _pow_runtime_base_static_exponent(x: float) -> float:
+    return x**3
+
+
+def _pow_runtime_base_negative_exponent(x: float) -> float:
+    return x**-2
+
+
+def _pow_runtime_int_base(n: int) -> int:
+    return n**2
+
+
+def _pow_runtime_exponent(x: float, n: int) -> float:
+    return x**n
+
+
+def test_the_pow_table_selects_a_lowering_per_operand_position() -> None:
+    """One entry, four lowerings, chosen by the type AND the binding time/sign of each position independently."""
+    _oracle(_pow_static_int_pair, [{"n": 0}, {"n": 5}])
+    assert "2" in _residual_text(_pow_static_int_pair)  # the fold stayed integral, so `//` accepted it
+    _oracle(_pow_static_negative_exponent, [{"x": 0.0}, {"x": 1.5}])
+    assert "0.5" in _residual_text(_pow_static_negative_exponent)
+    # On the optimized HIR, so the chain's leading multiply by one is elided as it is in hardware.
+    assert _lowered_ops(_pow_runtime_base_static_exponent) == ["FloatMul", "FloatMul"]
+    assert _lowered_ops(_pow_runtime_base_negative_exponent) == ["FloatMul", "FloatDiv"]
+    assert _lowered_ops(_pow_runtime_int_base) == ["IntMul"]  # a runtime int base stays integral, as in CPython
+    general = _lowered_ops(_pow_runtime_exponent)
+    assert "FloatLog2" in general and "FloatExp2" in general
+    _oracle(_pow_runtime_base_static_exponent, [{"x": 2.0}, {"x": -1.5}])
+    _oracle(_pow_runtime_base_negative_exponent, [{"x": 2.0}, {"x": -1.5}])
+    _oracle(_pow_runtime_int_base, [{"n": 3}, {"n": -4}])
+    _oracle(_pow_runtime_exponent, [{"x": 2.0, "n": 3}, {"x": 0.5, "n": -2}])
+
+
+def _bool_pow_operator(flag: bool) -> float:
+    return flag**2
+
+
+def _bool_pow_spelled(flag: bool) -> float:
+    return pow(flag, 2)
+
+
+def test_a_boolean_power_rejects_the_same_way_under_the_operator_and_its_spelling() -> None:
+    """The operator resolves the entry the spelling resolves, so a domain refusal cannot differ between them."""
+    messages = []
+    for fn in (_bool_pow_operator, _bool_pow_spelled):
+        with pytest.raises(UnsupportedConstruct) as excinfo:
+            lower(fn)
+        messages.append(excinfo.value.message.split("() ", 1)[1])
+    assert messages[0] == messages[1]
+    assert "boolean is not a number" in messages[0]
 
 
 # ---------------------------------------------------------------------- user-function inlining
@@ -396,7 +542,7 @@ def test_binding_and_conformance_rejections() -> None:
         (_wrong_arity, r"math.sqrt\(\) takes 1 argument\(s\), got 2"),
         (_kw_to_positional_only, "the arguments do not bind: .*positional-only"),
         (_missing_argument, "the arguments do not bind: missing a required argument: 'a'"),
-        (_bool_to_stub, "argument 1 of math.sqrt\\(\\) has type bool where the annotation declares float"),
+        (_bool_to_stub, r"math\.sqrt\(\) takes float operands, got bool"),
         (_bool_to_helper, "the argument 'a' has type bool where the annotation declares float"),
     ]:
         _rejects(fn, match)

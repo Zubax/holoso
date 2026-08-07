@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirFloatView
+from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirWideView
 from .._operators import HardwareOperator, PooledHardwareOperator
 from .._util import ValueId
 from ._ir import *
@@ -110,7 +110,7 @@ def _spill_local_cycle(bid: int, block_local_cycle: int, term_offset: int) -> in
 
 def schedule_with_overlap(
     mir: Mir,
-    float_mir: MirFloatView,
+    wide_mir: MirWideView,
     bool_mir: MirBoolView,
     pool: Mapping[type[HardwareOperator], int],
     has_install_blocks: Mapping[int, bool],
@@ -149,7 +149,7 @@ def schedule_with_overlap(
         sched = schedule_ops(
             mir.nodes,
             pool,
-            schedulable=set(float_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
+            schedulable=set(wide_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
             fetch_lag=fetch_lag,
             entry_busy=inherited.entry_busy,
             livein_landing=livein_landing,

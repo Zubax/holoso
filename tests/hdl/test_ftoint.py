@@ -10,7 +10,10 @@ import numpy as np
 import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
-from zkf import ToIntModel, ZkfFormat
+from zkf import ZkfFormat
+
+from holoso import FToIntOptions, FloatFormat, IntFormat
+from holoso._operators import FToIntOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
@@ -37,8 +40,11 @@ class _Config:
     stage_input: int = 0
 
     @property
-    def model(self) -> ToIntModel:
-        return ToIntModel(ZkfFormat(self.wexp, self.wman), wint=self.wint, stage_input=self.stage_input)
+    def operator(self) -> FToIntOperator:
+        """The module name, its RTL parameters and its latency all come from the operator, so a drift fails here."""
+        return FToIntOperator(
+            FloatFormat(self.wexp, self.wman), IntFormat(self.wint), FToIntOptions(stage_input=self.stage_input)
+        )
 
     @property
     def label(self) -> str:
@@ -103,7 +109,8 @@ async def holoso_ftoint_cocotb(dut: Any) -> None:
     wfull = wexp + wman
     fmt = ZkfFormat(wexp, wman)
     assert len(dut.y) == wint
-    assert len(dut.round_mode) == 2
+    (immediate,) = FToIntOperator.immediate_ports
+    assert len(getattr(dut, immediate.name)) == immediate.width
     await start_clock(dut)
     await drive_reset(dut)
 
@@ -167,21 +174,21 @@ async def holoso_ftoint_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("config", _CONFIGS, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_ftoint(sim: str, config: _Config) -> None:
-    model = config.model
+    operator = config.operator
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ftoint_{config.label}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
-        hdl_toplevel="holoso_ftoint",
-        parameters=model.params,
+        hdl_toplevel=operator.module_name,
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel="holoso_ftoint",
+        hdl_toplevel=operator.module_name,
         test_module="tests.hdl.test_ftoint",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
@@ -189,7 +196,7 @@ def test_holoso_ftoint(sim: str, config: _Config) -> None:
             "HOLOSO_WEXP": str(config.wexp),
             "HOLOSO_WMAN": str(config.wman),
             "HOLOSO_WINT": str(config.wint),
-            "HOLOSO_EXPECTED_LATENCY": str(model.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latency),
         },
         results_xml=str(build_dir / "results.xml"),
     )

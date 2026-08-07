@@ -6,20 +6,20 @@ from ._registry import factory
 
 
 @factory(np.zeros)
-def zeros_(shape: int | tuple[int, ...]) -> object:
+def zeros(shape: int | tuple[int, ...]) -> object:
     return np.zeros(shape)
 
 
 @factory(np.ones)
-def ones_(shape: int | tuple[int, ...]) -> object:
+def ones(shape: int | tuple[int, ...]) -> object:
     return np.ones(shape)
 
 
 @factory(np.full)
-def full_(shape: int | tuple[int, ...], fill: float) -> object:
+def full(shape: int | tuple[int, ...], fill: float) -> object:
     return np.full(shape, fill)
 
 
 @factory(np.eye)
-def eye_(rows: int, columns: int | None = None) -> object:
+def eye(rows: int, columns: int | None = None) -> object:
     return np.eye(rows, columns)

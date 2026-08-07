@@ -18,9 +18,10 @@ from holoso._eel._lower import resolve_target
 from holoso._eel._pe import partial_evaluate
 from holoso._eel._print import print_eel
 from holoso._errors import SynthesisError, UnsupportedConstruct
-from holoso._hir import Branch, HirEvaluator, NoNumber
+from holoso._hir import Branch, HirEvaluator, NoNumber, optimize
 
 from ._eeloracle import assert_hir_matches_reference
+from ._modelref import DEFAULT_IFCONV_MAX_OPS
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -305,7 +306,7 @@ def _pow_zero_orphans(a: float, b: float) -> float:
 def test_zero_power_orphans_its_base() -> None:
     _oracle(_pow_zero_orphans, [{"a": 2.0, "b": 3.0}])
     text = _residual_text(_pow_zero_orphans)
-    assert "mul" not in text
+    assert "fmul" not in text
     assert "return 1.0" in text
 
 
@@ -368,7 +369,7 @@ def test_residual_powers_lower_through_the_pow_stub() -> None:
     _oracle(_pow_negative_base_high_exponent, [{"x": -2.0}, {"x": -1.5}, {"x": 3.0}])
     _oracle(_pow_float_exponent, [{"x": 0.0}])
     _oracle(_zero_base_pow, [{"e": 2.5}, {"e": 0.5}])
-    assert "log2" not in _residual_text(_zero_base_pow)
+    assert "flog2" not in _residual_text(_zero_base_pow)
 
 
 def _zero_to_negative_power(x: float) -> float:
@@ -387,36 +388,56 @@ def _overflowing_static_float_power(x: float) -> float:
     return x + 1e300**3.0  # type: ignore[no-any-return]
 
 
-def test_a_static_fold_that_raises_on_the_host_is_a_diagnostic() -> None:
-    for fn, exc in [
-        (_zero_to_negative_power, "ZeroDivisionError"),
-        (_overflowing_static_power, "OverflowError"),
-        (_zero_to_negative_float_power, "ZeroDivisionError"),
-        (_overflowing_static_float_power, "OverflowError"),
-    ]:
-        _rejects(fn, f"this power always raises on the host: {exc}")
+def test_a_static_power_the_host_refuses_saturates_like_the_datapath() -> None:
+    """
+    The lowering owns the answer at every binding time: a fold runs the very stub the hardware runs, so an
+    overflow saturates to inf as ``exp2`` already does, and each exponent domain answers its pole the way its own
+    datapath does -- the composite's guarded +inf under a float exponent, a division that names no number under an
+    integer one, judged by the survivor sweep rather than predicted.
+    """
+    for fn in (_overflowing_static_power, _overflowing_static_float_power, _zero_to_negative_float_power):
+        assert "inf" in _residual_text(fn), fn
+    with pytest.raises(SynthesisError, match="names no number"):
+        optimize(lower(_zero_to_negative_power).hir, DEFAULT_IFCONV_MAX_OPS)
+
+
+def _dead_pole(x: float) -> float:
+    y = 0.0**-1  # noqa: F841
+    return x
+
+
+def test_a_dead_static_pole_is_not_convicted() -> None:
+    """Unlike the old host-raise oracle, an unused pole is no longer a diagnostic: only a survivor is judged."""
+    assert "fdiv" not in _residual_text(_dead_pole)
+    optimize(lower(_dead_pole).hir, DEFAULT_IFCONV_MAX_OPS)
 
 
 def _nonnegative_int_fold_stays_int(x: float) -> float:
     return float((3**5) // 2) * x
 
 
-def _negative_base_fold_is_float(x: float) -> float:
+def _negative_base_fold_stays_int(x: float) -> float:
     return float(((-3) ** 5) // 2) * x
 
 
-def test_exact_ints_exist_only_for_nonnegative_folds() -> None:
+def test_the_exact_fold_is_the_sign_blind_one_python_gives() -> None:
+    """The base's sign plays no part: only a negative EXPONENT leaves the integers, as in CPython."""
     _oracle(_nonnegative_int_fold_stays_int, [{"x": 2.0}])
-    _rejects(_negative_base_fold_is_float, "`//` is integer-only")
+    _oracle(_negative_base_fold_stays_int, [{"x": 2.0}])
+    assert "-122" in _residual_text(_negative_base_fold_stays_int)
 
 
-def _pow_budget_kill(x: float) -> float:
+def _pow_huge_exponent(x: float) -> float:
     return x ** (10**9)
 
 
-def test_huge_exponent_is_a_located_budget_rejection() -> None:
-    """The TODO.md huge-exponent hang class: the chain draws the budget down and rejects instead of spinning."""
-    _rejects(_pow_budget_kill, "expansion budget is exhausted")
+def test_a_huge_exponent_expands_logarithmically() -> None:
+    """
+    The TODO.md huge-exponent hang class: square-and-multiply spends one trip per exponent BIT, so an exponent no
+    linear chain could ever expand costs a few dozen multiplies instead of exhausting the budget.
+    """
+    hir = lower(_pow_huge_exponent).hir
+    assert sum(len(block.operations) for block in hir.blocks) < 100
 
 
 # ---------------------------------------------------------------------- environment snapshots
@@ -427,6 +448,8 @@ def _global_scalar(x: float) -> float:
 
 
 def _quoted_annotations(x: "float") -> "float":
+    # The quotes are the fixture: a kernel may still spell its annotations as strings, which the front end resolves
+    # with eval_str. Unquoting them here would leave the test unable to fail for the reason it exists.
     return x * 2.0
 
 
@@ -817,11 +840,10 @@ def _abs_stays_integer(n: int) -> int:
     return abs(-3) + n
 
 
-def test_an_intrinsic_over_static_integers_stays_in_the_integer_lane() -> None:
+def test_a_static_integer_folds_in_the_integer_domain() -> None:
     """
-    Regression: these are registered against float operators, so a static integer argument was rounded before the
-    fold -- ``abs(-(2**53+1))`` compared equal to 2**53 -- and the integer was gone before the runtime-integer gate
-    below HIR could refuse it.
+    Regression: every entry named a float operator, so a static integer was rounded before the fold --
+    ``abs(-(2**53+1))`` compared equal to 2**53 -- and gone before the gate below HIR could refuse it.
     """
     for kernel in (
         _abs_of_an_unholdable_int,
@@ -832,6 +854,20 @@ def test_an_intrinsic_over_static_integers_stays_in_the_integer_lane() -> None:
         assert HirEvaluator(lower(kernel).hir).run() == [kernel()], kernel.__name__
     # The result keeps the integer TYPE too, so it composes with the integer operators rather than poisoning them.
     _oracle(_abs_stays_integer, [{"n": 4}, {"n": -1}])
+
+
+def _abs_at_the_int64_boundary() -> int:
+    return abs(-(2**63))
+
+
+def _np_abs_at_the_int64_boundary() -> int:
+    return int(np.abs(-(2**63)))
+
+
+def test_the_integer_abs_is_exact_at_arbitrary_precision() -> None:
+    """Both spellings share the one IntAbs entry, where the host has numpy wrapping under int64 and ``abs`` not."""
+    for kernel in (_abs_at_the_int64_boundary, _np_abs_at_the_int64_boundary):
+        assert HirEvaluator(lower(kernel).hir).run() == [2**63], kernel.__name__
 
 
 def _log2_of_an_integer_zero(x: float) -> float:
@@ -851,8 +887,7 @@ def _rounding_chain_of_a_runtime_integer(a: int) -> int:
 
 
 def test_rounding_an_integer_is_the_identity_at_either_binding_time() -> None:
-    # floor/ceil/trunc/round round a float to an integral value, so on an integer they lower to nothing at all --
-    # which keeps the integer lane open through them instead of widening the operand to a float.
+    # Their integer entry is the identity stub, so they lower to nothing and the operand stays an integer.
     assert _residual_text(_floor_of_a_runtime_integer).splitlines()[-1].strip() == "return a"
     _oracle(_floor_of_a_runtime_integer, [{"a": -7}, {"a": 0}, {"a": 5}])
     _oracle(_rounding_chain_of_a_runtime_integer, [{"a": 7}, {"a": -4}])
@@ -862,17 +897,15 @@ def _sign_of_a_static_integer(x: float) -> float:
     return x + float(np.sign(-7) % 3)
 
 
-def test_the_integer_lane_covers_composite_dispatch_too() -> None:
-    # ``np.sign`` is registered as a composite stub rather than as one operator, but Python still keeps its integer
-    # argument integral, so the lane must reach both dispatch kinds -- otherwise the `%` below has a float operand.
+def test_an_integer_entry_can_be_a_composite_as_well_as_an_operator() -> None:
+    # np.sign's integer entry is a composite where abs above is one operator; both must select the integer domain.
     _oracle(_sign_of_a_static_integer, [{"x": 1.5}, {"x": -0.25}])
 
 
-def test_the_integer_lane_defers_to_the_registered_reference_where_the_host_declines() -> None:
+def test_a_symbol_with_no_integer_entry_promotes_rather_than_asking_the_host() -> None:
     """
-    Regression: the integer lane folds through the callee the user named, and a raise there is not an answer --
-    ``math.log2(0)`` raises where the operator's reference computes -inf. Convicting would refuse a legal build and
-    make the expression answer differently for ``0`` and ``0.0``.
+    Regression: a static integer used to fold by CALLING the named callee, and a raise there is not an answer --
+    ``math.log2(0)`` raises where the operator's reference computes -inf. Promotion cannot differ for 0 and 0.0.
     """
     for kernel, want in ((_log2_of_an_integer_zero, -math.inf), (_exp2_of_an_integer_overflow, math.inf)):
         assert HirEvaluator(lower(kernel).hir).run(0.0) == [want], kernel.__name__

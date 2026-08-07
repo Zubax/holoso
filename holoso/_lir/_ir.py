@@ -2,7 +2,7 @@
 The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
 
 A :class:`Lir` is controller-agnostic -- it describes which hardware operators issue on which cycle, reading/writing
-which typed storage resources, with which folded sign controls.
+which typed storage resources, with which folded port conditioners.
 """
 
 from bisect import bisect_right
@@ -11,13 +11,13 @@ from typing import TypeVar, assert_never
 
 from .._operators import (
     BoolInversion,
-    FloatSignControl,
     HardwareOperator,
     InlineHardwareOperator,
     PooledHardwareOperator,
     PortConditioner,
+    WideConditioner,
 )
-from .._type import BoolType, FloatFormat, FloatType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, ScalarType
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 # The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the numerical
@@ -187,7 +187,7 @@ def residence_rows(
     the boundary edge BEFORE clocking in the new live-out. A read on such a def's PC therefore belongs to the PRIOR
     value, not the def landing there -- the opposite attribution from a normal landing. So the prior value keeps reads
     up to and INCLUDING a read-first next def, and a read-first def's own value keeps only reads strictly after it.
-    Shared by the float- and boolean-bank liveness so both banks compute residence in exactly one place.
+    Shared by the wide- and boolean-bank liveness so both banks compute residence in exactly one place.
     """
     writes = sorted(defs)
     reads = sorted(uses)
@@ -225,10 +225,11 @@ class OperatorInstance:
         # A pooled result commits at issue + latency, so latency >= 1 keeps its write opcode off the held ``ucode[0]``
         # (the accept-dwell word) -- a latency-0 pooled operator would re-commit every idle cycle (see ``transacting``).
         assert self.operator.latency >= 1, f"{self.operator.mnemonic}: pooled operator latency must be >= 1"
-        # Every pooled operator passes through here, so its three hand-synchronized per-port declarations are
-        # validated once at the source: HDL port names align with the result types, and the commutation permutation
-        # (when declared) is a type-preserving bijection -- a bad future declaration fails here, not in emission.
+        # Every pooled operator passes through here, so its hand-synchronized per-port declarations are validated
+        # once at the source: HDL port names align with the operands and the result types, and the commutation
+        # permutation (when declared) is a type-preserving bijection -- a bad declaration fails here, not in emission.
         result_types = self.operator.signature.result_types
+        assert len(self.operator.operand_hdl_ports) == self.operator.signature.arity, self.operator.mnemonic
         assert len(self.operator.output_hdl_ports) == len(result_types), self.operator.mnemonic
         permutation = self.operator.swap_output_permutation
         if permutation is not None:
@@ -288,7 +289,7 @@ class ConstRef:
 
 
 @dataclass(frozen=True, slots=True)
-class FloatConstRef(ConstRef): ...
+class WideConstRef(ConstRef): ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,13 +298,13 @@ class Operand:
 
 
 @dataclass(frozen=True, slots=True)
-class FloatOperand(Operand):
-    source: RegRef | FloatConstRef
-    sign: FloatSignControl = FloatSignControl()
+class WideOperand(Operand):
+    source: RegRef | WideConstRef
+    conditioner: WideConditioner
 
     @property
     def stable_label(self) -> str:
-        return self.sign.decorate(self.source.stable_label)
+        return self.conditioner.decorate(self.source.stable_label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,26 +316,26 @@ class InputLoad:
 
 
 @dataclass(frozen=True, slots=True)
-class FloatInputLoad(InputLoad):
+class WideInputLoad(InputLoad):
     dst: RegRef
 
 
-def float_liveout_coalesced(tap: FloatOperand, reg: RegRef) -> bool:
-    """A float state live-out shares its slot register (no install copy) iff its tap is exactly ``reg``, unsigned."""
-    return tap.source == reg and tap.sign == FloatSignControl()
+def wide_liveout_coalesced(tap: WideOperand, reg: RegRef) -> bool:
+    """A wide state live-out shares its slot register (no install copy) iff its tap is ``reg`` with the identity."""
+    return tap.source == reg and tap.conditioner.is_identity
 
 
 @dataclass(frozen=True, slots=True)
-class FloatStateSlot:
+class WideStateSlot:
     """
-    A persistent float state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
+    A persistent wide state register: reset to ``reset_value``, holding the slot's live-in (carried over from the
     previous initiation) until the install copy replaces it with the slot's live-out.
 
-    ``tap`` is the live-out's source tap (register/constant + folded sign), the same primitive an output wire taps; here
-    the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity sign the live-out
-    coalesced onto the slot register (its producing operator -- or, for a conditional/loop update, the arms of its phi
-    -- wrote it in place) and the backend emits no copy; otherwise the backend fires a reg->reg copy for it, scheduled
-    at ``install_cycle`` -- as early as the old live-in is last read and
+    ``tap`` is the live-out's source tap (register/constant + folded conditioner), the same primitive an output wire
+    taps; here the sink is the slot register rather than a port. When the tap is exactly ``reg`` with an identity
+    conditioner the live-out coalesced onto the slot register (its producing operator -- or, for a conditional/loop
+    update, the arms of its phi -- wrote it in place) and the backend emits no copy; otherwise the backend fires a
+    pc-gated copy for it, scheduled at ``install_cycle`` -- as early as the old live-in is last read and
     the source is available, the initiation boundary at the latest. The copy samples the tap on its fetch step
     (``inline_fire_cycle(install_cycle)``) and the new live-out lands one fetch step later (``install_landing``) for an
     early install, or read-first at the boundary (``LASTPC``) for a boundary install. Installing before the boundary
@@ -345,12 +346,12 @@ class FloatStateSlot:
     name: str
     reg: RegRef
     reset_value: float
-    tap: FloatOperand
+    tap: WideOperand
     install_cycle: int  # scheduler-frame install cycle; hardware fire = inline_fire_cycle(it); makespan+1 = boundary
 
     @property
     def needs_copy(self) -> bool:
-        return not float_liveout_coalesced(self.tap, self.reg)
+        return not wide_liveout_coalesced(self.tap, self.reg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,7 +373,7 @@ type BoolSource = BoolRegRef | BoolConstRef
 class BoolOperand:
     """
     A boolean operand: a boolean register read or an immediate True/False, with an optional folded inversion -- the
-    1-bit dual of :class:`FloatOperand`'s sign control, free in fabric. An inverted immediate folds to its negated
+    1-bit dual of :class:`WideOperand`'s conditioner, free in fabric. An inverted immediate folds to its negated
     value at construction, so a constant operand always carries the identity inversion.
     """
 
@@ -394,9 +395,9 @@ class BoolOperand:
 @dataclass(frozen=True, slots=True)
 class PortWrite:
     """
-    One tapped output port of a firing: the ``port``-th result lands in ``dst`` through its type's conditioner (a
-    folded sign control on a wide destination, an optional inversion on a boolean one). Untapped ports of the firing
-    simply have no PortWrite -- the module output is left unconnected.
+    One tapped output port of a firing: the ``port``-th result lands in ``dst`` through the conditioner its scalar
+    type admits -- a folded sign control for a float, an inversion for a boolean, nothing at all for an integer.
+    Untapped ports of the firing simply have no PortWrite -- the module output is left unconnected.
     """
 
     port: int
@@ -415,7 +416,7 @@ class PooledScheduledOp:
     """
 
     inst: OperatorInstance
-    operands: list[FloatOperand | BoolOperand]
+    operands: list[WideOperand | BoolOperand]
     writes: list[PortWrite]
     issue_cycle: int
     latency: int
@@ -445,7 +446,7 @@ class InlineScheduledOp:
     """
 
     operator: InlineHardwareOperator
-    operands: list[FloatOperand | BoolOperand]
+    operands: list[WideOperand | BoolOperand]
     write: PortWrite
     issue_cycle: int
     latency: int
@@ -468,12 +469,12 @@ class OutputWire:
     """An output port: a named external sink driven at the present step by a typed source tap."""
 
     name: str
-    tap: FloatOperand | BoolOperand
+    tap: WideOperand | BoolOperand
 
 
 @dataclass(frozen=True, slots=True)
-class FloatOutputWire(OutputWire):
-    tap: FloatOperand
+class WideOutputWire(OutputWire):
+    tap: WideOperand
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,15 +483,17 @@ class BoolOutputWire(OutputWire):
 
 
 def scalar_type_of(
-    node: FloatInputLoad | BoolInputLoad | FloatOutputWire | BoolOutputWire, fmt: FloatFormat
+    node: WideInputLoad | BoolInputLoad | WideOutputWire | BoolOutputWire, fmt: FloatFormat
 ) -> ScalarType:
     """
-    The scalar type carried by an input load or output wire: a float port carries the module format ``fmt``, a boolean
-    port is a single bit. The single dispatch every consumer routes through (RTL ports and the numerical model alike),
-    so the float/boolean choice cannot drift between them.
+    The scalar type carried by an input load or output wire: a wide port carries the module float format ``fmt``,
+    a boolean port is a single bit. The one dispatch the advertised port metadata routes through, RTL and numerical
+    model alike, so the wide/boolean choice cannot drift between the two port lists. The model's input coercion still
+    decides separately (``TODO.md`` records converging it). The wide arm hardcodes ``FloatType`` because the carrier
+    class no longer names a scalar family; integer ports will need a per-node discriminator here.
     """
     match node:
-        case FloatInputLoad() | FloatOutputWire():
+        case WideInputLoad() | WideOutputWire():
             return FloatType(fmt)
         case BoolInputLoad() | BoolOutputWire():
             return BoolType()
@@ -499,9 +502,9 @@ def scalar_type_of(
 
 
 @dataclass(frozen=True, slots=True)
-class FloatCopy:
+class WideCopy:
     """
-    A register-to-register move installing a phi arm's value into the merged register at a predecessor's tail: ``dst``
+    A pc-gated move installing a phi arm's value into the merged register at a predecessor's tail: ``dst``
     takes ``source`` on the block-relative ``issue_cycle``. Used when a phi arm is not an operator result that can be
     coalesced directly onto the merged register (e.g. an input, a constant, or a value defined in another block).
     ``resident_source`` records whether ``source`` is available at block entry (``value_resident_at_entry``, which a
@@ -510,14 +513,14 @@ class FloatCopy:
     """
 
     dst: RegRef
-    source: FloatOperand
+    source: WideOperand
     issue_cycle: int
     resident_source: bool
 
     @property
     def is_const(self) -> bool:
         """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
-        return isinstance(self.source.source, FloatConstRef)
+        return isinstance(self.source.source, WideConstRef)
 
     def fire_step(self, fetch_lag: int) -> int:
         return inline_fire_cycle(self.issue_cycle, fetch_lag)
@@ -532,7 +535,7 @@ class BoolWrite:
     A boolean register install of a phi arm (a bool const or another bool register, with the arm's folded inversion)
     on a block-relative cycle. ``resident_source`` records whether ``source`` is available at block entry
     (``value_resident_at_entry``) rather than computed -- informational; the placement is ``install_issue_cycle``'s
-    (see :class:`FloatCopy`).
+    (see :class:`WideCopy`).
     """
 
     dst: BoolRegRef
@@ -588,22 +591,21 @@ def terminator_arms(terminator: Terminator) -> list[int]:
 class LirBlock:
     """
     One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). ``ops``
-    (pooled firings), ``inline_ops``, ``copies``, and ``bool_writes`` are the block's datapath events; ``terminator``
-    redirects the fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside the block (0 if
-    it has none). ``term_offset`` is the block-relative fetch cycle at which the terminator redirects the PC -- the
-    block's boundary step -- and is the single source of truth for the terminator PC (the successor frame begins one
-    step later, at ``term_pc + 1``). For a block that drains (a multi-predecessor successor or a phi/const install) it
-    is the latest cycle a value LANDS in the block's frame -- taken per landing event (every result, pooled or inline,
-    wide or boolean, lands at the one bank-independent ``landing_cycle``) -- but cross-block software pipelining shrinks
-    it to the issue-side envelope when the block's in-flight results may spill into single-predecessor successors --
-    so a
-    consumer reads it here rather than re-deriving the boundary.
+    (pooled firings), ``inline_ops``, ``wide_copies``, and ``bool_writes`` are the block's datapath events;
+    ``terminator`` redirects the fetch PC at the block boundary. ``block_makespan`` is the last commit cycle inside
+    the block (0 if it has none). ``term_offset`` is the block-relative fetch cycle at which the terminator redirects
+    the PC -- the block's boundary step -- and is the single source of truth for the terminator PC (the successor
+    frame begins one step later, at ``term_pc + 1``). For a block that drains (a multi-predecessor successor or a
+    phi/const install) it is the latest cycle a value LANDS in the block's frame -- taken per landing event (every
+    result, pooled or inline, wide or boolean, lands at the one bank-independent ``landing_cycle``) -- but cross-block
+    software pipelining shrinks it to the issue-side envelope when the block's in-flight results may spill into
+    single-predecessor successors -- so a consumer reads it here rather than re-deriving the boundary.
     """
 
     index: int
     ops: list[PooledScheduledOp]
     inline_ops: list[InlineScheduledOp]
-    copies: list[FloatCopy]
+    wide_copies: list[WideCopy]
     bool_writes: list[BoolWrite]
     terminator: Terminator
     block_makespan: int
@@ -626,7 +628,7 @@ def _trace_landing(
 
 def bool_liveout_coalesced(live_out: BoolOperand, reg: BoolRegRef) -> bool:
     """A bool state live-out shares its slot register (no install copy) iff it is exactly ``reg``, uninverted."""
-    return isinstance(live_out.source, BoolRegRef) and live_out.source == reg and not live_out.inversion.invert
+    return isinstance(live_out.source, BoolRegRef) and live_out.source == reg and live_out.inversion.is_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,7 +637,7 @@ class BoolStateSlot:
     A persistent boolean state register: reset to ``reset_value``, holding the slot's live-in throughout the
     transaction and installing its live-out (``live_out``, a boolean register or constant with a folded inversion)
     at the boundary, read-first
-    -- so an output or branch that still reads the live-in sees the old value, exactly like a float slot. When the
+    -- so an output or branch that still reads the live-in sees the old value, exactly like a wide slot. When the
     live-out already resides in the slot register uninverted it coalesced there (its producing operation, or the arms
     of its phi for a conditional/loop update, wrote it in place) and ``needs_copy`` is False -- no boundary copy.
     """
@@ -678,13 +680,14 @@ type ScheduledOp = PooledScheduledOp | InlineScheduledOp
 class Lir:
     module_name: str
     instances: list[OperatorInstance]
-    float_consts: list[float]  # constant pool: index -> value
+    wide_consts: list[float]  # constant pool: index -> value
     float_format: FloatFormat
+    int_format: IntFormat
     regfile: RegFileLayout
-    inputs: list[FloatInputLoad | BoolInputLoad]  # ordered as the function parameters
+    inputs: list[WideInputLoad | BoolInputLoad]  # ordered as the function parameters
     ops: list[PooledScheduledOp]  # the pipelined pooled firings, flattened across blocks with ABSOLUTE issue cycles
-    outputs: list[FloatOutputWire | BoolOutputWire]
-    float_state_slots: list[FloatStateSlot]  # persistent registers, ordered by attribute path
+    outputs: list[WideOutputWire | BoolOutputWire]
+    wide_state_slots: list[WideStateSlot]  # persistent registers, ordered by attribute path
     # Control-flow overlay. A straight-line kernel has a single block ending in Ret; ``blocks[0]`` is the entry,
     # ``block_base[i]`` is block i's absolute start PC, and ``last_pc`` is the out_valid boundary (the single Ret).
     blocks: list[LirBlock]
@@ -697,7 +700,9 @@ class Lir:
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
 
     def __post_init__(self) -> None:
-        assert self.regfile.width == self.float_format.width
+        assert self.int_format.width >= self.float_format.width
+        assert self.regfile.width == max(self.float_format.width, self.int_format.width)
+        assert self.regfile.width == self.int_format.width
         assert self.fetch_lag in (1, 2), self.fetch_lag
         # Cross-block instance reuse on a DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
         # header, the Ret), which carries no per-instance busy residue -- needs the instance provably idle by the
@@ -734,16 +739,16 @@ class Lir:
         return ports
 
     @property
-    def float_inputs(self) -> list[FloatInputLoad]:
-        return [load for load in self.inputs if isinstance(load, FloatInputLoad)]
+    def wide_inputs(self) -> list[WideInputLoad]:
+        return [load for load in self.inputs if isinstance(load, WideInputLoad)]
 
     @property
     def bool_inputs(self) -> list[BoolInputLoad]:
         return [load for load in self.inputs if isinstance(load, BoolInputLoad)]
 
     @property
-    def float_outputs(self) -> list[FloatOutputWire]:
-        return [wire for wire in self.outputs if isinstance(wire, FloatOutputWire)]
+    def wide_outputs(self) -> list[WideOutputWire]:
+        return [wire for wire in self.outputs if isinstance(wire, WideOutputWire)]
 
     @property
     def bool_outputs(self) -> list[BoolOutputWire]:
@@ -814,7 +819,7 @@ class Lir:
         by_index = {b.index: b for b in self.blocks}
         return _trace_landing(by_index, self.block_base, block, local_landing)
 
-    def state_copy_step(self, slot: FloatStateSlot) -> int:
+    def state_copy_step(self, slot: WideStateSlot) -> int:
         """
         The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
         fires and reads its source. For a boundary install this is ``initiation_interval`` (LASTPC), where it reduces to
@@ -824,9 +829,9 @@ class Lir:
         """
         return inline_fire_cycle(slot.install_cycle, self.fetch_lag)
 
-    def float_state_install_is_boundary(self, slot: FloatStateSlot) -> bool:
+    def wide_state_install_is_boundary(self, slot: WideStateSlot) -> bool:
         """
-        Whether a non-coalesced float slot installs read-first at the accepted-output boundary (its ``state_copy_step``
+        Whether a non-coalesced wide slot installs read-first at the accepted-output boundary (its ``state_copy_step``
         reaches LASTPC) rather than early via a pc-gated copy. The single early-vs-boundary test shared by the numerical
         model (which routes the install to the boundary edge vs a pc-gated step), the HTML report (which lands it
         read-first at LASTPC vs one PC later), and ``reg_liveness`` (which makes a boundary install read-first while an
@@ -878,8 +883,8 @@ class Lir:
         """
         wide: dict[int, int] = {}
         boolc: dict[int, int] = {}
-        for fload in self.float_inputs:
-            wide[fload.dst.index] = wide.get(fload.dst.index, 0) + 1
+        for load in self.wide_inputs:
+            wide[load.dst.index] = wide.get(load.dst.index, 0) + 1
         for bload in self.bool_inputs:
             boolc[bload.dst.index] = boolc.get(bload.dst.index, 0) + 1
         for reg, lanes in self._write_sets(RegRef).items():
@@ -890,11 +895,11 @@ class Lir:
             for inline_op in block.inline_ops:
                 target = wide if isinstance(inline_op.write.dst, RegRef) else boolc
                 target[inline_op.write.dst.index] = target.get(inline_op.write.dst.index, 0) + 1
-            for copy in block.copies:
+            for copy in block.wide_copies:
                 wide[copy.dst.index] = wide.get(copy.dst.index, 0) + 1
             for bwrite in block.bool_writes:
                 boolc[bwrite.dst.index] = boolc.get(bwrite.dst.index, 0) + 1
-        for slot in self.float_state_slots:
+        for slot in self.wide_state_slots:
             if slot.needs_copy:
                 wide[slot.reg.index] = wide.get(slot.reg.index, 0) + 1
         for bslot in self.bool_state_slots:
@@ -1054,15 +1059,15 @@ class Lir:
         defs: dict[RegRef, list[int]] = {}
         uses: dict[RegRef, list[int]] = {}
         read_first: dict[RegRef, set[int]] = {}
-        for load in self.float_inputs:
+        for load in self.wide_inputs:
             defs.setdefault(load.dst, []).append(1)
-        for slot in self.float_state_slots:
+        for slot in self.wide_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
             if not slot.needs_copy:
                 # A coalesced live-out is an ordinary result already in the slot register; it must reside through the
                 # boundary to carry into the next initiation, even when nothing reads it again this frame.
                 uses.setdefault(slot.reg, []).append(present)
-            elif not self.float_state_install_is_boundary(slot):
+            elif not self.wide_state_install_is_boundary(slot):
                 # An early pc-gated install lands its destination one PC after its fire step and must reside through the
                 # boundary to carry; installing the new value early is not the slot's death.
                 step = self.state_copy_step(slot)
@@ -1076,15 +1081,15 @@ class Lir:
                 step = self.state_copy_step(slot)
                 defs.setdefault(slot.reg, []).append(step)
                 read_first.setdefault(slot.reg, set()).add(step)
-        for wire in self.float_outputs:
+        for wire in self.wide_outputs:
             if isinstance(wire.tap.source, RegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
-        for slot in self.float_state_slots:  # the live-out tap is read on the install step to persist the slot
+        for slot in self.wide_state_slots:  # the live-out tap is read on the install step to persist the slot
             if isinstance(slot.tap.source, RegRef):
                 uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
         for block in self.blocks:
             base_pc = self.block_base[block.index]
-            for copy in block.copies:  # phi copy fires here and samples its source; destination lands one PC later
+            for copy in block.wide_copies:  # phi copy fires here and samples its source; destination lands one PC later
                 step = base_pc + copy.fire_step(self.fetch_lag)
                 defs.setdefault(copy.dst, []).append(install_landing(step))
                 if isinstance(copy.source.source, RegRef):

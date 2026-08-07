@@ -63,7 +63,12 @@ def capture(out_path: str) -> None:
         }
         try:
             lir = build(
-                lower_to_mir(optimize(lower(target.kernel()).hir), build_ops(target.ops), target.ops.ffmt),
+                lower_to_mir(
+                    optimize(lower(target.kernel()).hir, target.ops.ifconv_max_ops),
+                    build_ops(target.ops),
+                    target.ops.ffmt,
+                    target.ops.ifmt,
+                ),
                 target.name,
                 target.ops.ucode_fetch_stages,
                 RegallocTuning(

@@ -44,6 +44,7 @@ from .._hir import (
     FloatNeg,
     FloatNotEqual,
     FloatRound,
+    FloatSelect,
     FloatSin,
     FloatSqrt,
     FloatToBool,
@@ -58,7 +59,6 @@ from .._hir import (
     Operator,
     Phi,
     Ret,
-    Select,
     StateRead,
     StateSlot,
     Terminator,
@@ -69,7 +69,6 @@ from .._operators import (
     BoolAndOperator,
     BoolInversion,
     BoolOrOperator,
-    BoolSelectOperator,
     BoolToFloatOperator,
     BoolXorOperator,
     FloatClassificationOperator,
@@ -77,17 +76,26 @@ from .._operators import (
     FloatIsFiniteOperator,
     FloatIsNegInfOperator,
     FloatIsPosInfOperator,
+    FMulILog2OperatorFamily,
+    ParameterizedHardwareOperator,
     FloatSignControl,
     FloatToBoolOperator,
-    FRoundOperator,
     HardwareOperator,
     OpConfig,
     PortConditioner,
     PooledHardwareOperator,
     Relation,
+    RoundMode,
     SelectOperator,
 )
-from .._type import BoolType as ScalarBoolType, FloatFormat, FloatType as ScalarFloatType, ScalarType
+from .._type import (
+    BoolType as ScalarBoolType,
+    FloatFormat,
+    FloatType as ScalarFloatType,
+    IntFormat,
+    IntType as ScalarIntType,
+    ScalarType,
+)
 from ._ir import Mir, MirBuilder
 
 # The seam between the semantic relation and the comparator flag it taps; the two vocabularies meet only here.
@@ -379,15 +387,41 @@ def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     return plans
 
 
+def _operator_formats_match(
+    operator: HardwareOperator | ParameterizedHardwareOperator | None,
+    float_format: FloatFormat,
+    int_format: IntFormat,
+) -> bool:
+    """
+    Every port of a configured operator must carry the machine's format for its own family. Read off the signature
+    rather than off the operator's ``fmt``, because a conversion operator carries one format per side and asking a
+    format which family it belongs to can only confirm that it matches its own kind.
+    """
+    if operator is None:
+        return True
+    if isinstance(operator, HardwareOperator):
+        signature = operator.signature
+        return all(
+            (ty.fmt == float_format if isinstance(ty, ScalarFloatType) else True)
+            and (ty.fmt == int_format if isinstance(ty, ScalarIntType) else True)
+            for ty in signature.operand_types + signature.result_types
+        )
+    # A parameterized family has no signature until it instantiates; it bakes one format into everything it makes.
+    assert isinstance(operator, FMulILog2OperatorFamily), "the only family today; a second one needs its own arm"
+    return operator.fmt == float_format
+
+
 class _LoweringContext:
-    def __init__(self, hir: Hir, ops: OpConfig, float_format: FloatFormat) -> None:
+    def __init__(self, hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat) -> None:
         self.hir = hir
         self.ops = ops
         self.float_format = float_format
-        assert all(
-            getattr(ops, field.name) is None or getattr(ops, field.name).fmt == float_format for field in fields(ops)
-        ), "every configured operator must be built for the machine's float format"
-        self.builder = MirBuilder(float_format)
+        assert int_format.width >= float_format.width, "one wide register holds either family whole"
+        for field in fields(ops):
+            assert _operator_formats_match(
+                getattr(ops, field.name), float_format, int_format
+            ), f"the configured {field.name!r} is not built for the machine's format of every family its ports name"
+        self.builder = MirBuilder(float_format, int_format)
         self.remap: dict[ValueId, ValueId] = {}
         self.fma_plans = _plan_fma_fusions(hir, ops)
         self.fused_muls = {plan.mul for plan in self.fma_plans.values()}
@@ -537,8 +571,10 @@ class _LoweringContext:
                 return True
             case Operation(operator=BoolSelect() as semantic, operands=(cond, a, b)):
                 # The boolean if-conversion mux: a NOT chain on the condition or either arm folds into that operand's
-                # inversion conditioner, exactly like float Select's sign folding -- so ``a if not c else b`` is free.
-                self._lower_bool_logic(old_id, _select_hardware(semantic, BoolSelectOperator()), [cond, a, b])
+                # inversion conditioner, exactly like FloatSelect's sign folding -- so ``a if not c else b`` is free.
+                self._lower_bool_logic(
+                    old_id, _select_hardware(semantic, SelectOperator(ScalarBoolType())), [cond, a, b]
+                )
                 return True
             case Operation(operator=BoolNot(), operands=(_,)):
                 # A NOT never materializes hardware: every consumer position collapses the chain into its own
@@ -696,14 +732,14 @@ class _FloatLowerer:
                     [self.context.remap[base]],
                     [inversion],
                 )
-            case Operation(operator=Select() as semantic, operands=(cond, a, b)):
+            case Operation(operator=FloatSelect() as semantic, operands=(cond, a, b)):
                 # The if-conversion mux: arm signs and a condition NOT chain fold into the operand conditioners
                 # (``x if c else -x`` and ``a if not c else b`` cost no hardware beyond the mux itself).
                 base_c, inv_c = _collapse_bool_inversions(self.context.hir.nodes, cond)
                 base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
                 base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
                 return self.context.builder.operation(
-                    _select_hardware(semantic, SelectOperator(self.context.float_format)),
+                    _select_hardware(semantic, SelectOperator(ScalarFloatType(self.context.float_format))),
                     [self.context.remap[base_c], self.context.remap[base_a], self.context.remap[base_b]],
                     [inv_c, sign_a, sign_b],
                 )
@@ -746,10 +782,10 @@ class _FloatLowerer:
 
     def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
         mode = {
-            FloatRound: FRoundOperator.Mode.ROUND,
-            FloatFloor: FRoundOperator.Mode.FLOOR,
-            FloatCeil: FRoundOperator.Mode.CEIL,
-            FloatTrunc: FRoundOperator.Mode.TRUNC,
+            FloatRound: RoundMode.NEAREST_EVEN,
+            FloatFloor: RoundMode.FLOOR,
+            FloatCeil: RoundMode.CEIL,
+            FloatTrunc: RoundMode.TRUNC,
         }[type(semantic)]
         return self._lower_unary_pooled(semantic, self.context.ops.require("fround"), a, immediates=(int(mode),))
 
@@ -905,7 +941,7 @@ class _FloatLowerer:
         sign_b: FloatSignControl = FloatSignControl(),
     ) -> ValueId:
         return self.context.builder.operation(
-            _select_hardware(Select(), SelectOperator(self.context.float_format)),
+            _select_hardware(FloatSelect(), SelectOperator(ScalarFloatType(self.context.float_format))),
             [cond, a, b],
             [BoolInversion(), sign_a, sign_b],
         )
@@ -949,7 +985,7 @@ class _FloatLowerer:
         return True
 
 
-def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat) -> Mir:
+def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat) -> Mir:
     """
     Select hardware operators from the configuration and fold semantic signs onto MIR sign controls.
 
@@ -957,4 +993,4 @@ def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat) -> Mir:
     ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
     _reject_integers(hir)
-    return _LoweringContext(hir, ops, float_format).run()
+    return _LoweringContext(hir, ops, float_format, int_format).run()

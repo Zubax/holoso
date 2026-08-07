@@ -31,7 +31,7 @@ class OperationProducer:
 class StateProducer:
     """A state register's live-in: the value it carries over from the previous initiation (or the reset snapshot)."""
 
-    index: int  # index into Lir.float_state_slots
+    index: int  # index into Lir.wide_state_slots
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,11 +56,11 @@ def build_write_timeline(lir: Lir) -> dict[RegRef, list[tuple[int, Producer]]]:
     """
     assert len(lir.blocks) == 1, "the flat write timeline is path-exact only on a single-block kernel"
     writes: dict[RegRef, list[tuple[int, Producer]]] = {}
-    for i, load in enumerate(lir.float_inputs):
+    for i, load in enumerate(lir.wide_inputs):
         writes.setdefault(load.dst, []).append((1, InputProducer(i)))
     # A slot register starts each initiation holding its live-in; a coalesced operator may then overwrite it later in
     # the same initiation via its own OperationProducer entry.
-    for s, slot in enumerate(lir.float_state_slots):
+    for s, slot in enumerate(lir.wide_state_slots):
         writes.setdefault(slot.reg, []).append((1, StateProducer(s)))
     # ``Lir.ops`` is the per-block ``ops`` flattened in block order, so this index matches OperationProducer. Inline
     # firings write the wide bank too (the bool->float cast); without them a cast-fed operand resolves to no producer.

@@ -30,7 +30,7 @@ from holoso._eel import lower as lower_frontend
 from holoso._hir import Hir, Operation, Operator, optimize
 from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
-from holoso._type import FloatFormat
+from holoso._type import FloatFormat, IntFormat
 from holoso._value import FloatValue
 from holoso._eel._names import port_name as port_name
 
@@ -38,6 +38,21 @@ type Path = tuple[int | str, ...]
 """A leaf path into a returned value: indices for sequence elements, names for dataclass fields."""
 
 type Vector = list[FloatValue | bool]
+
+# What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
+_DEFAULTS = Options(OperatorOptions())
+DEFAULT_IFCONV_MAX_OPS: int = _DEFAULTS.ifconv_max_ops
+
+
+def default_ifmt(ffmt: FloatFormat) -> IntFormat:
+    return Options(OperatorOptions(), ffmt=ffmt).ifmt
+
+
+DEFAULT_TUNING = RegallocTuning(
+    effort=_DEFAULTS.regalloc_effort,
+    reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,
+    register_price=_DEFAULTS.regalloc_register_price,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +67,11 @@ def build_model(lir: Lir) -> NumericalSimulator:
 
 
 def build_model_and_interpreter(
-    kernel: Callable[..., object], ops: OpConfig, name: str, fmt: FloatFormat
+    kernel: Callable[..., object],
+    ops: OpConfig,
+    name: str,
+    fmt: FloatFormat,
+    ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
@@ -60,7 +79,7 @@ def build_model_and_interpreter(
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt)
+    mir = lower_to_mir(optimize(lower_frontend(kernel).hir, ifconv_max_ops), ops, fmt, default_ifmt(fmt))
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 
@@ -213,15 +232,6 @@ DEFAULT_FETCH_STAGES = 3
 
 # Restated as literals so the frozen metric baselines cannot move with the environment overrides below.
 SHIPPED_TUNING = RegallocTuning(effort=5000, reuse_write_cap=2, register_price=2.0)
-
-
-# What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
-_DEFAULTS = Options(OperatorOptions())
-DEFAULT_TUNING = RegallocTuning(
-    effort=_DEFAULTS.regalloc_effort,
-    reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,
-    register_price=_DEFAULTS.regalloc_register_price,
-)
 
 
 def build_lir(mir: Mir, name: str, tuning: RegallocTuning = DEFAULT_TUNING) -> Lir:
@@ -505,7 +515,7 @@ def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
     """
     The boolean-bank twin of :func:`phi_swap_computed_loop`: the same cross-referencing loop-header phis with one
     computed back-edge arm, carried in the 1-bit bank so the latch installs are ``BoolWrite``s rather than
-    ``FloatCopy``s. The two banks derive install placement through the same helpers but emit through separate paths,
+    ``WideCopy``s. The two banks derive install placement through the same helpers but emit through separate paths,
     so each needs its own pin.
     """
     a = False

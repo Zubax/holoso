@@ -23,16 +23,16 @@ from ._operators import (
     FloatMulPow2,
     FloatNeg,
     FloatRound,
+    FloatSelect,
     FloatToInt,
     FloatTrunc,
     IntSelect,
     IntToFloat,
     NoNumber,
     Operator,
-    Select,
 )
 
-_MUX = (Select, BoolSelect, IntSelect)  # the three scalar families share both universal mux identities
+_MUX = (FloatSelect, BoolSelect, IntSelect)  # the three scalar families share both universal mux identities
 
 
 def _sole_operand(node: Node) -> ValueId:
@@ -163,9 +163,9 @@ def run(hir: Hir) -> Hir:
         const = known.get(vid)
         return const.value if isinstance(const, BoolConst) else None
 
-    def reduce_bool_select(builder: HirBuilder, cond: ValueId, a: ValueId, b: ValueId) -> ValueId:
+    def reduce_bselect(builder: HirBuilder, cond: ValueId, a: ValueId, b: ValueId) -> ValueId:
         """
-        Reduce ``bool_select(cond, a, b)`` using its constant arms, which the universal mux identity in ``build_value``
+        Reduce ``bselect(cond, a, b)`` using its constant arms, which the universal mux identity in ``build_value``
         has already made distinct; the NOTs fold consumer-side at MIR lowering. Every connective minted here goes
         through the declared algebra, because a constant arm often makes the gate it becomes a constant in turn -- a
         one-shot latch reduces to ``first and False``, which is the latch's live-out written the long way.
@@ -236,7 +236,7 @@ def run(hir: Hir) -> Hir:
             case Operation(operator=IntToFloat(), operands=(a,)):
                 return emit_integral(builder, IntToFloat(), remap[a])
             case Operation(operator=BoolSelect(), operands=(cond, a, b)):
-                return reduce_bool_select(builder, remap[cond], remap[a], remap[b])
+                return reduce_bselect(builder, remap[cond], remap[a], remap[b])
             case Operation(operator=operator, operands=operands):
                 return reduce_algebra(builder, operator, [remap[o] for o in operands])
             case _:

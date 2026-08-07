@@ -20,8 +20,7 @@ from ._type import (
     BoolType as BoolType,
     FloatFormat as FloatFormat,
     FloatType as FloatType,
-    LogicalPort as LogicalPort,
-    ScalarType as ScalarType,
+    IntFormat as IntFormat,
 )
 from ._value import FloatValue as FloatValue
 from ._errors import (
@@ -45,12 +44,15 @@ FCmpOptions = _operators.FCmpOperator.Options
 FDivOptions = _operators.FDivOperator.Options
 FExp2Options = _operators.FExp2Operator.Options
 FFmaOptions = _operators.FFmaOperator.Options
+FFromIntOptions = _operators.FFromIntOperator.Options
 FLog2Options = _operators.FLog2Operator.Options
 FMulILog2Options = _operators.FMulILog2Operator.Options
+FMulILog2VarOptions = _operators.FMulILog2VarOperator.Options
 FMulOptions = _operators.FMulOperator.Options
 FRoundOptions = _operators.FRoundOperator.Options
 FSincosOptions = _operators.FSincosOperator.Options
 FSortOptions = _operators.FSortOperator.Options
+FToIntOptions = _operators.FToIntOperator.Options
 IMulOptions = _operators.IMulOperator.Options
 
 __version__ = "0.2.0"

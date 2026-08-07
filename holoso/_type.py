@@ -19,21 +19,6 @@ class ScalarType(ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class ScalarSignature:
-    """
-    Operand- and result-port types for a concrete hardware operator. An operator may produce several results (e.g. a
-    comparator's three one-hot order flags, a sorter's min and max), one per output port, each independently typed.
-    """
-
-    operand_types: tuple[ScalarType, ...]
-    result_types: tuple[ScalarType, ...]
-
-    @property
-    def arity(self) -> int:
-        return len(self.operand_types)
-
-
-@dataclass(frozen=True, slots=True)
 class FloatFormat:
     """
     A Zubax Kulibin float (ZKF) format: ``wexp`` exponent bits and ``wman`` significand bits.
@@ -89,6 +74,51 @@ class FloatFormat:
 
 
 @dataclass(frozen=True, slots=True)
+class IntFormat:
+    """
+    The native signed integer format: ``width`` bits in two's complement. Arithmetic saturates at the extremes
+    rather than wrapping, so the representable range is exactly ``[min, max]``.
+    """
+
+    width: int
+
+    def __post_init__(self) -> None:
+        if self.width < 2:
+            raise ValueError(f"width must be >= 2, got {self.width}")
+
+    @property
+    def min(self) -> int:
+        return -(1 << (self.width - 1))
+
+    @property
+    def max(self) -> int:
+        return (1 << (self.width - 1)) - 1
+
+    def encode(self, value: int) -> int:
+        """An out-of-range value is rejected; pass it through :meth:`saturate` first if clamping is the intent."""
+        if not self.fits(value):
+            raise ValueError(f"{value} is out of range for {self}: [{self.min}, {self.max}]")
+        bits = value & ((1 << self.width) - 1)
+        assert self.decode(bits) == value
+        return bits
+
+    def decode(self, bits: int) -> int:
+        assert 0 <= bits < (1 << self.width)
+        value = bits - (1 << self.width) if bits > self.max else bits
+        assert self.fits(value)
+        return value
+
+    def saturate(self, value: int) -> int:
+        return min(max(value, self.min), self.max)
+
+    def fits(self, value: int) -> bool:
+        return self.min <= value <= self.max
+
+    def __str__(self) -> str:
+        return f"int{self.width}"
+
+
+@dataclass(frozen=True, slots=True)
 class FloatType(ScalarType):
     fmt: FloatFormat
 
@@ -98,6 +128,18 @@ class FloatType(ScalarType):
 
     def __str__(self) -> str:
         return f"float{self.fmt.width}"
+
+
+@dataclass(frozen=True, slots=True)
+class IntType(ScalarType):
+    fmt: IntFormat
+
+    @property
+    def width(self) -> int:
+        return self.fmt.width
+
+    def __str__(self) -> str:
+        return str(self.fmt)
 
 
 @dataclass(frozen=True, slots=True)

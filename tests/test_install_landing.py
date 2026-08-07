@@ -9,18 +9,21 @@ output-redundant on the vectors. Only a structural invariant catches it. The che
 of any input vector, so it holds for the data-dependent branch/loop kernels (uart_rx error frames included) too.
 """
 
+import dataclasses
+
 import pytest
 
 import holoso
 from holoso import FloatFormat, FloatValue
 from holoso._eel import lower as lower_frontend
-from holoso._hir import _if_convert as if_convert_pass
 from holoso._hir import optimize
-from holoso._lir import BoolWrite, FloatCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp
+from holoso._lir import BoolWrite, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, WideCopy
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS, ExampleSpec
 from ._modelref import (
+    DEFAULT_IFCONV_MAX_OPS,
+    default_ifmt,
     Vector,
     assert_model_equals_interpreter,
     build_lir,
@@ -33,13 +36,18 @@ from ._modelref import (
 
 def _build(spec: ExampleSpec) -> Lir:
     return build_lir(
-        lower_to_mir(optimize(lower_frontend(spec.make_kernel()).hir), default_ops(spec.formats[0]), spec.formats[0]),
+        lower_to_mir(
+            optimize(lower_frontend(spec.make_kernel()).hir, DEFAULT_IFCONV_MAX_OPS),
+            default_ops(spec.formats[0]),
+            spec.formats[0],
+            default_ifmt(spec.formats[0]),
+        ),
         spec.name,
     )
 
 
-def _phi_arm_installs(block: LirBlock) -> list[FloatCopy | BoolWrite]:
-    return [*block.copies, *block.bool_writes]
+def _phi_arm_installs(block: LirBlock) -> list[WideCopy | BoolWrite]:
+    return [*block.wide_copies, *block.bool_writes]
 
 
 def _block_ops(block: LirBlock) -> list[PooledScheduledOp | InlineScheduledOp]:
@@ -103,7 +111,7 @@ def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:
     in-block +1 still triggers for a copy whose source IS the last work -- a shape this kernel does not exercise.)
     """
     lir = _build(next(s for s in SPECS if s.name == "recip_newton"))
-    bodies = [b for b in lir.blocks if any(not c.resident_source for c in b.copies)]
+    bodies = [b for b in lir.blocks if any(not c.resident_source for c in b.wide_copies)]
     assert bodies, "recip_newton no longer has a computed-source phi-arm copy; the kernel shape changed"
     for b in bodies:
         work = max((op.commit_cycle for op in _block_ops(b)), default=0)
@@ -111,40 +119,44 @@ def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:
             f"recip_newton block {b.index}: a computed copy still pushes the makespan ({b.block_makespan} > work "
             f"{work}) -- the loop-carried install pin regressed to the conservative +1"
         )
-        assert all(c.landing(lir.fetch_lag) <= b.term_offset for c in b.copies)
+        assert all(c.landing(lir.fetch_lag) <= b.term_offset for c in b.wide_copies)
 
 
 class _HoldOrUpdateBool:
     """
     A boolean state held on one arm and updated on the other: ``out`` takes the STATE READ ``self.s`` when ``c`` is
-    false and the input ``a`` when true. No bundled example installs a state read as a phi arm, so this pins the third
+    false and ``a and b`` when true. No bundled example installs a state read as a phi arm, so this pins the third
     entry-resident source kind (after constants and inputs).
     """
 
     def __init__(self) -> None:
         self.s = False
 
-    def __call__(self, a: bool, c: bool) -> tuple[bool, bool]:
+    def __call__(self, a: bool, b: bool, c: bool) -> tuple[bool, bool]:
         out = self.s
         if c:
-            out = a
+            out = a and b
         self.s = a
         return out, self.s
 
 
-def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_state_read_sourced_install_is_inline_class() -> None:
     """
     A phi arm that is a STATE READ is resident at block entry (the slot register holds it from the start), so its tail
-    install is inline-class -- the generalization's third source kind. Disable if-conversion so the diamond stays a real
-    branch and the hold arm installs ``self.s`` by a pc-gated bool write rather than collapsing to a select. Pin both
-    that the install is so classified (a non-const resident-source bool write) and -- the black-box teeth -- that the
-    held value is the OLD state across a hold/update sweep, which an early-read or clobbered state-read install would
-    corrupt (the model vs a fresh Python reference, schedule-independent).
+    install is inline-class -- the generalization's third source kind. A zero if-conversion budget keeps the diamond a
+    real branch, so the hold arm installs ``self.s`` by a pc-gated bool write rather than collapsing to a select.
+    Pin both that the install is so classified (a non-const resident-source bool write) and -- the black-box teeth --
+    that the held value is the OLD state across a hold/update sweep, which an early-read or clobbered state-read
+    install would corrupt (the model vs a fresh Python reference, schedule-independent).
     """
-    monkeypatch.setattr(if_convert_pass, "_IFCONV_MAX_OPS", 0)
-    options = default_options(FloatFormat(6, 18))
+    options = dataclasses.replace(default_options(FloatFormat(6, 18)), ifconv_max_ops=0)
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir), build_ops(options), options.ffmt),
+        lower_to_mir(
+            optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir, options.ifconv_max_ops),
+            build_ops(options),
+            options.ffmt,
+            options.ifmt,
+        ),
         "hold_or_update_bool",
     )
     resident_non_const = [x for b in lir.blocks for x in b.bool_writes if x.resident_source and not x.is_const]
@@ -154,8 +166,8 @@ def test_state_read_sourced_install_is_inline_class(monkeypatch: pytest.MonkeyPa
         _HoldOrUpdateBool().__call__, options, name="hold_or_update_bool"
     ).numerical_model.elaborate()
     reference = _HoldOrUpdateBool()
-    for a, c in [(True, False), (False, False), (True, True), (False, False), (True, False), (False, True)]:
-        assert tuple(bool(v) for v in model.run(a, c)) == reference(a, c)
+    for a, b, c in [(True, True, False), (False, True, False), (True, True, True), (False, False, False)]:
+        assert tuple(bool(v) for v in model.run(a, b, c)) == reference(a, b, c)
 
 
 class _LiveThroughArm:
@@ -192,12 +204,13 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     ops = default_ops(fmt)
     kernel = _LiveThroughArm().__call__
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt), "live_through_arm"
+        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt)),
+        "live_through_arm",
     )  # raises on the off-frame drift
-    cross = [c for blk in lir.blocks for c in blk.copies if not c.resident_source]
+    cross = [c for blk in lir.blocks for c in blk.wide_copies if not c.resident_source]
     assert cross, "the kernel no longer exercises a non-coalesced cross-block-source install; the shape changed"
     for blk in lir.blocks:
-        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
+        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.wide_copies)
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm", fmt)
@@ -241,16 +254,19 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     fmt = FloatFormat(8, 36)
     ops = default_ops(fmt)
     kernel = _LastWorkArmSource().__call__
-    lir = build_lir(lower_to_mir(optimize(lower_frontend(kernel).hir), ops, fmt), "last_work_arm")
+    lir = build_lir(
+        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt)),
+        "last_work_arm",
+    )
     pushed = [
         blk
         for blk in lir.blocks
-        if any(not c.resident_source for c in blk.copies)
+        if any(not c.resident_source for c in blk.wide_copies)
         and blk.block_makespan == max((op.commit_cycle for op in _block_ops(blk)), default=0) + 1
     ]
     assert pushed, "no block takes the in-block +1 for a last-work copy source; the kernel shape changed"
     for blk in lir.blocks:
-        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
+        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.wide_copies)
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm", fmt)

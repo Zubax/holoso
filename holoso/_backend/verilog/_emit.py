@@ -78,14 +78,16 @@ def _wire(width: int) -> str:
     return f"wire [{width - 1:2}:0] " if width > 1 else "wire        "
 
 
-def _source_net(source: RegRef | FloatConstRef) -> str:
-    return f"const_{source.index}" if isinstance(source, FloatConstRef) else f"regs[{source.index}]"
+def _source_net(source: RegRef | WideConstRef) -> str:
+    return f"const_{source.index}" if isinstance(source, WideConstRef) else f"regs[{source.index}]"
 
 
-def _signed_source_net(source: RegRef | FloatConstRef, sign: FloatSignControl) -> str:
-    """A source net with its folded sign applied inline via ``holoso_fsgnop``, or bare when the sign is identity."""
+def _wide_source_net(source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
+    """A source net with its folded conditioner applied inline; only a float one has hardware, and it is fsgnop."""
+    # Ahead of the identity shortcut, which would otherwise absorb every non-float conditioner before the check.
+    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
     raw = _source_net(source)
-    return raw if sign == FloatSignControl() else f"holoso_fsgnop({raw}, 2'd{sign.encoded})"
+    return raw if conditioner.is_identity else f"holoso_fsgnop({raw}, 2'd{conditioner.encoded})"
 
 
 def _bool_operand_rhs(operand: BoolOperand) -> str:
@@ -96,10 +98,10 @@ def _bool_operand_rhs(operand: BoolOperand) -> str:
     return f"~{net}" if operand.inversion.invert else net
 
 
-def _operand_rhs(operand: FloatOperand | BoolOperand) -> str:
+def _operand_rhs(operand: WideOperand | BoolOperand) -> str:
     match operand:
-        case FloatOperand():
-            return _signed_source_net(operand.source, operand.sign)
+        case WideOperand():
+            return _wide_source_net(operand.source, operand.conditioner)
         case BoolOperand():
             return _bool_operand_rhs(operand)
         case _:
@@ -107,18 +109,19 @@ def _operand_rhs(operand: FloatOperand | BoolOperand) -> str:
 
 
 def _render_inline(
-    operator: InlineHardwareOperator, operands: tuple[FloatOperand | BoolOperand, ...], conditioner: PortConditioner
+    operator: InlineHardwareOperator, operands: tuple[WideOperand | BoolOperand, ...], conditioner: PortConditioner
 ) -> str:
     """
     An inline firing's combinational RHS: the operator's own expression over its operand nets (a float operand's folded
     sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds into the
-    expression; sign-conditioned wide inline results have no producer yet.
+    expression; conditioned wide inline results have no producer yet.
     """
     nets = [_operand_rhs(operand) for operand in operands]
     expr = operator.verilog_expr(*nets)
     if isinstance(conditioner, BoolInversion):
         return conditioner.decorate(f"({expr})") if conditioner.invert else expr
-    assert conditioner == FloatSignControl(), "no pass produces sign-conditioned wide inline results yet"
+    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
+    assert conditioner.is_identity, "no pass produces conditioned wide inline results yet"
     return expr
 
 
@@ -221,23 +224,24 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
-    fmt = lir.float_format
+    fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.regfile.width
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     fetch_lag = lir.fetch_lag
     fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
-    # An unused bank emits no localparam and no register array (a zero-length reg array is illegal Verilog).
-    nreg_line = f"\nlocalparam           NREG      ={nreg:4};" if nreg else ""
-    nbreg_line = f"\nlocalparam           NBREG     ={nbreg:4};" if nbreg else ""
     w(f"""
-localparam           WEXP      ={fmt.wexp:4};  // Float exponent bits fixed by the static schedule
-localparam           WMAN      ={fmt.wman:4};  // Float mantissa bits fixed by the static schedule
-localparam           W         = WEXP + WMAN;{nreg_line}
+localparam           WEXP      ={fmt.wexp:4};  // float exponent bits fixed by the static schedule
+localparam           WMAN      ={fmt.wman:4};  // float mantissa bits fixed by the static schedule
+localparam           WFLT      = WEXP + WMAN;
+localparam           WINT      ={ifmt.width:4};  // native integer width
+localparam           WREG      ={wreg:4};  // wide register width
+localparam           NREG      ={nreg:4};  // wide register count
 localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
 localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
 localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
 localparam [PCW-1:0] PRESENT   ={lir.present_step:4};  // executing step on which the outputs are valid in the array
 localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // = PRESENT + FETCH_LAG; out_valid asserts here
-localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields{nbreg_line}
+localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
+localparam           NBREG     ={nbreg:4};  // boolean register count
 // pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
 """)
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
@@ -267,27 +271,27 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
 """)
     w("")
     if lir.regfile.nreg:
-        w("reg  [W-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
+        w("reg  [WREG-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
     if lir.bool_regfile.nreg:
-        w("reg          bregs [0:NBREG-1];")
+        w("reg             bregs [0:NBREG-1];")
     w("")
     for inst in lir.instances:
         sig = _sig(inst)
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
             assert operand_type.is_wide, "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
-            w(f"reg  [W-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
-        # One net per TAPPED output port -- the raw operator output (wide W-bit or boolean 1-bit). The in_valid and
+            w(f"reg  [WFLT-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
+        # One net per TAPPED output port -- the raw operator output (wide WFLT-bit or boolean 1-bit). The in_valid and
         # sign-control ports bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in tapped:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
             if result_type.is_wide:
-                w(f"wire [W-1:0] {sig}_y{q};")
+                w(f"wire [WFLT-1:0] {sig}_y{q};")
             else:
-                w(f"wire         {sig}_y{q};")
+                w(f"wire            {sig}_y{q};")
         for port in inst.operator.error_ports:
-            w(f"wire         {sig}_{port};")
+            w(f"wire            {sig}_{port};")
     w("")
 
 
@@ -295,9 +299,9 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
     fmt = lir.float_format
     width = fmt.width
     digits = (width + 3) // 4
-    for index, value in enumerate(lir.float_consts):
-        w(f"wire [W-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
-    if lir.float_consts:
+    for index, value in enumerate(lir.wide_consts):
+        w(f"wire [WREG-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
+    if lir.wide_consts:
         w("")
 
 
@@ -305,23 +309,25 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
     for inst in lir.instances:
         sig, base = _sig(inst), base_name(inst)
         operator = inst.operator
-        letters = PORT_LETTERS[: operator.arity]
+        letters = PORT_LETTERS[: operator.signature.arity]
+        # The module names its own operand ports; the nets and microcode fields they connect to stay positional.
+        operand_ports = operator.operand_hdl_ports
         params = ", ".join(f".{name}({value})" for name, value in operator.params.items())
         w(f"{operator.module_name} #(", f"    {params}", f") u_{base} (")
         w.push()
         w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")
         for imm in operator.immediate_ports:
             w(f".{imm.name}({f_imm(base, imm.name)}),")
-        for letter in letters:
-            w(f".{letter}_sgnop({f_osgn(base, letter)}),")
+        for port, letter in zip(operand_ports, letters, strict=True):
+            w(f".{port}_sgnop({f_osgn(base, letter)}),")
         # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
         # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
         for q, result_type in enumerate(operator.signature.result_types):
             if result_type.is_wide:
                 conditioner = f_ysgn(base, q) if (inst, q) in tapped else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
-        for letter in letters:
-            w(f".{letter}({sig}_{letter}),")
+        for port, letter in zip(operand_ports, letters, strict=True):
+            w(f".{port}({sig}_{letter}),")
         # out_valid is left unconnected: the static schedule already knows when each result is ready.
         w(".out_valid(),")
         outputs = [
@@ -521,7 +527,7 @@ def _emit_read_muxes(
     for inst in lir.instances:
         sig = _sig(inst)
         base = base_name(inst)
-        for pos in range(inst.operator.arity):
+        for pos in range(inst.operator.signature.arity):
             _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", f_rd(base, PORT_LETTERS[pos]), read_books[(inst, pos)])
     w.pop()
     w("end")
@@ -564,12 +570,12 @@ def _emit_reg_write(
 def _emit_clocked(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, WriteCodebook]) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, register writes, and control state."""
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
-    float_slots = {slot.reg.index: slot for slot in lir.float_state_slots}
+    wide_slots = {slot.reg.index: slot for slot in lir.wide_state_slots}
     bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
-    float_loads = {load.dst.index: load for load in lir.float_inputs}
+    wide_loads = {load.dst.index: load for load in lir.wide_inputs}
     bool_loads = {load.dst.index: load for load in lir.bool_inputs}
 
-    def load_arm(loads: Mapping[int, FloatInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
+    def load_arm(loads: Mapping[int, WideInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
         load = loads.get(reg)
         return [("in_ready && in_valid", f"in_{load.name}")] if load else []
 
@@ -589,7 +595,7 @@ always @(posedge clk) begin
     # high-fanout reset net off the wide cone (only control/valid state is reset); contents are don't-care until a
     # valid write lands. A register with neither an input load nor any opcode source is simply omitted.
     nonslot_wide = [
-        reg for reg in range(nreg) if reg not in float_slots and (RegRef(reg) in write_books or reg in float_loads)
+        reg for reg in range(nreg) if reg not in wide_slots and (RegRef(reg) in write_books or reg in wide_loads)
     ]
     nonslot_bool = [
         reg for reg in range(nbreg) if reg not in bool_slots and (BoolRegRef(reg) in write_books or reg in bool_loads)
@@ -597,7 +603,7 @@ always @(posedge clk) begin
     if nonslot_wide or nonslot_bool:
         w("// Register writes (reset-unconditional): one opcode-selected statement per register.")
         for reg in nonslot_wide:
-            _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(float_loads, reg))
+            _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(wide_loads, reg))
         for reg in nonslot_bool:
             _emit_reg_write(
                 w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), load_arm(bool_loads, reg)
@@ -615,7 +621,7 @@ always @(posedge clk) begin
     w("pc            <= 0;")
     w("err_pc_q      <= 0;")
     w("transacting_q <= 0;")
-    for slot in lir.float_state_slots:
+    for slot in lir.wide_state_slots:
         bits = f"{fmt.width}'h{fmt.encode(slot.reset_value):0{digits}x}"
         w(f"regs[{slot.reg.index}] <= {bits};  // {slot.name} reset snapshot")
     for bslot in lir.bool_state_slots:
@@ -630,9 +636,9 @@ always @(posedge clk) begin
     # A non-coalesced slot installs its live-out read-first at the accepted-output boundary (out_valid && out_ready, so
     # a held boundary copies exactly once), a lower-priority arm of the same statement; an early install is an ordinary
     # opcode source (see write_events). Boolean state installs are boundary-only.
-    for reg, slot in sorted(float_slots.items()):
-        arms = load_arm(float_loads, reg)
-        if slot.needs_copy and lir.float_state_install_is_boundary(slot):
+    for reg, slot in sorted(wide_slots.items()):
+        arms = load_arm(wide_loads, reg)
+        if slot.needs_copy and lir.wide_state_install_is_boundary(slot):
             # This arm outranks the opcode case below it and must not shadow it, here or in the boolean bank below.
             # It cannot: the install executes at ``present_step``, and ``build_microcode`` -- already run, over every
             # write event -- asserts each rides a strictly earlier step, so the word presented alongside the install

@@ -2,16 +2,15 @@
 //
 // Every operator has a mandatory input and output latches, exposing no combinational circuits outside.
 //
-//  Module          | Operation                                     |Latency| Inputs    | Outputs
-//  ----------------|-----------------------------------------------|-------|-----------|---------------------------
-//  holoso_iadds    | Signed addition, saturated                    | 2     | a, b      | y, saturated
-//  holoso_isubs    | Signed subtraction, saturated                 | 2     | a, b      | y, saturated
-//  holoso_imuls    | Signed multiplication, saturated              | 2..6  | a, b      | y, saturated
-//  holoso_idivs    | Signed division and modulo, saturated         | 2+W/2 | num, den  | quo, rem, saturated, div0
-//  holoso_iabss    | Absolute value, saturated                     | 2     | x         | y, saturated
-//  holoso_ashift   | Arith. shift by runtime amount left+/right-   | 2     | x, shamt  | y
-//  holoso_ashiftc  | Like holoso_ashift but by a constant          | 0     | x, shamt  | (inline comb function)
-//  holoso_icmp     | Signed comparison                             | 2     | a, b      | a_gt_b, a_eq_b, a_lt_b
+//  Module          | Operation                             |Latency| Inputs    | Outputs
+//  ----------------|---------------------------------------|-------|-----------|---------------------------
+//  holoso_iadds    | Signed addition, saturated            | 2     | a, b      | y, saturated
+//  holoso_isubs    | Signed subtraction, saturated         | 2     | a, b      | y, saturated
+//  holoso_imuls    | Signed multiplication, saturated      | 2..6  | a, b      | y, saturated
+//  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den  | quo, rem, saturated, div0
+//  holoso_iabss    | Absolute value, saturated             | 2     | x         | y, saturated
+//  holoso_ishift   | Arith. shift, left+/right-            | 2     | x, shamt  | shft, prod, saturated
+//  holoso_icmp     | Signed comparison                     | 2     | a, b      | a_gt_b, a_eq_b, a_lt_b
 
 `timescale 1ns/1ps
 
@@ -377,7 +376,7 @@ endmodule
 // Signed saturating division with Python floor or truncation-toward-zero quotient semantics.
 // Division by zero returns MIN for a negative numerator and MAX otherwise, preserves the numerator as remainder,
 // and asserts outputs div0 and saturated.
-// LATENCY = 2 + ceil(W/2)
+// LATENCY = 3 + ceil(W/2)
 module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
@@ -393,7 +392,7 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
     localparam integer NSTEPS = (W + 1) / 2;
     localparam integer WPAD = 2 * NSTEPS;
     localparam integer WDIV = W + WPAD;
-    localparam integer LATENCY_REF = 2 + NSTEPS;
+    localparam integer LATENCY_REF = 3 + NSTEPS;
     localparam signed [W-1:0] MIN = {1'b1, {(W-1){1'b0}}};
     localparam signed [W-1:0] MAX = {1'b0, {(W-1){1'b1}}};
 
@@ -403,13 +402,15 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
         end
     endgenerate
 
-    wire [W-1:0] num_magnitude = num[W-1] ? -num : num;
-    wire [W-1:0] den_magnitude = den[W-1] ? -den : den;
+    reg signed [W-1:0] input_num;
+    reg signed [W-1:0] input_den;
+    wire [W-1:0] num_magnitude = input_num[W-1] ? -input_num : input_num;
+    wire [W-1:0] den_magnitude = input_den[W-1] ? -input_den : input_den;
     wire [W+1:0] den_magnitude3 = {1'b0, den_magnitude, 1'b0} + {2'b00, den_magnitude};
-    wire input_div0 = den == {W{1'b0}};
-    wire input_overflow = (num == MIN) && (den == {W{1'b1}});
+    wire input_div0 = input_den == {W{1'b0}};
+    wire input_overflow = (input_num == MIN) && (input_den == {W{1'b1}});
 
-    reg [NSTEPS:0] valid_q;
+    reg [NSTEPS+1:0] valid_q;
     reg [WDIV-1:0] work_q [0:NSTEPS];
     reg [W-1:0] den_q [0:NSTEPS];
     reg [W+1:0] den3_q [0:NSTEPS];
@@ -473,11 +474,13 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
 
     integer i;
     always @(posedge clk) begin
+        input_num <= num;
+        input_den <= den;
         work_q[0] <= {{WPAD{1'b0}}, num_magnitude};
         den_q[0] <= den_magnitude;
         den3_q[0] <= den_magnitude3;
-        num_negative_q[0] <= num[W-1];
-        den_negative_q[0] <= den[W-1];
+        num_negative_q[0] <= input_num[W-1];
+        den_negative_q[0] <= input_den[W-1];
         div0_q[0] <= input_div0;
         overflow_q[0] <= input_overflow;
         for (i = 1; i <= NSTEPS; i = i + 1) begin
@@ -502,11 +505,11 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
         saturated <= div0_q[NSTEPS] | overflow_q[NSTEPS];
         div0 <= div0_q[NSTEPS];
         if (rst) begin
-            valid_q <= {(NSTEPS+1){1'b0}};
+            valid_q <= {(NSTEPS+2){1'b0}};
             out_valid <= 1'b0;
         end else begin
-            valid_q <= {valid_q[NSTEPS-1:0], in_valid};
-            out_valid <= valid_q[NSTEPS];
+            valid_q <= {valid_q[NSTEPS:0], in_valid};
+            out_valid <= valid_q[NSTEPS+1];
         end
     end
 endmodule
@@ -593,20 +596,32 @@ module holoso_iabss#(parameter W = 44, parameter integer LATENCY = 0) (
 endmodule
 
 // Signed integer barrel shifter: shift left if shamt>0, shift right if shamt<0.
-// For constant shamt use ordinary inline combinational shift expression instead.
-module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
+// A left shift can overflow, and both readings of that event are emitted at once: `shft` is the raw bit shift that
+// lets the high bits fall off the word, while `prod` is the saturating multiplication by a power of two that clamps
+// to the representable range and reports the clamp on `saturated`.
+// Right shifts cannot overflow, so there the two results agree and the flag stays low.
+module holoso_ishift#(parameter W = 44, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
     input  wire signed [W-1:0] x,
     input  wire signed [W-1:0] shamt,
     output reg out_valid,
-    output reg signed [W-1:0] y
+    output reg signed [W-1:0] shft,
+    output reg signed [W-1:0] prod,
+    output reg saturated
 );
     localparam integer LATENCY_REF = 2;
     localparam integer SW = $clog2(W);
     localparam integer PW = $clog2(SW);
+    localparam integer GROUP_BITS = 2;
+    localparam integer GROUP = 1 << GROUP_BITS;
+    // Sized by the index range rather than by the data, so no shift amount can walk the group select off the end;
+    // the groups past the magnitude are constant zero and fold away.
+    localparam integer NGROUPS = ((1 << SW) + GROUP - 1) / GROUP;
     localparam [SW:0] W_AMOUNT = W;
+    localparam signed [W-1:0] MIN = {1'b1, {(W-1){1'b0}}};
+    localparam signed [W-1:0] MAX = {1'b0, {(W-1){1'b1}}};
     generate
         if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _holoso_invalid_integer_latency u_invalid();
@@ -619,8 +634,8 @@ module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
     wire [SW-1:0] shamt_narrow = shamt_q[SW-1:0];
     wire [SW-1:0] right_prefix [0:PW];
     assign right_prefix[0] = shamt_narrow;
+    genvar i;
     generate
-        genvar i;
         for (i = 0; i < PW; i = i + 1) begin : g_right_prefix
             assign right_prefix[i+1] = right_prefix[i] | (right_prefix[i] << (1 << i));
         end
@@ -633,16 +648,57 @@ module holoso_ashift#(parameter W = 44, parameter integer LATENCY = 0) (
     wire signed [W-1:0] shifted_left = x_q << shamt_narrow;
     wire signed [W-1:0] shifted_right = x_q >>> right_amount;
 
+    // A left shift by s is exact iff the top s+1 bits of x already equal its sign, so overflow is the question of
+    // whether any of the s bits the shift pushes out differs from the sign. Reversing the magnitude turns "the top s
+    // bits" into "the low s bits", and splitting s into a group index and an offset inside the group lets the two
+    // halves of the test resolve in parallel: whole groups below the boundary are reduced without consulting s at
+    // all, and only the straddled group needs a bit-level mask. Masking the whole word instead, which reads more
+    // directly, stacks a decode and a word-wide reduction behind the shift amount and fails the timing closure.
+    // A shift past the word is exact only for zero, which the magnitude alone cannot tell from -1, hence the branch.
+    wire [W-2:0] magnitude = x_q[W-2:0] ^ {(W-1){x_q[W-1]}};
+    wire [NGROUPS*GROUP-1:0] lost_order;
+    wire [NGROUPS-1:0] group_any;
+    generate
+        for (i = 0; i < NGROUPS * GROUP; i = i + 1) begin : g_lost_order
+            if (i < W - 1) begin : g_bit
+                assign lost_order[i] = magnitude[W-2-i];
+            end else begin : g_pad
+                assign lost_order[i] = 1'b0;
+            end
+        end
+        for (i = 0; i < NGROUPS; i = i + 1) begin : g_group_any
+            assign group_any[i] = |lost_order[i*GROUP +: GROUP];
+        end
+    endgenerate
+    wire [SW-1:0] group_index = shamt_narrow >> GROUP_BITS;
+    wire [GROUP_BITS-1:0] group_offset = shamt_narrow;  // truncation is the intent; a slice would not fit W = 2
+    wire [NGROUPS-1:0] whole_groups = ~({NGROUPS{1'b1}} << group_index);
+    wire [GROUP-1:0] straddled_group = lost_order[group_index*GROUP +: GROUP];
+    wire [GROUP-1:0] straddled_mask = ~({GROUP{1'b1}} << group_offset);
+    wire left_overflow = left_large ? (|x_q) : (|(group_any & whole_groups) | |(straddled_group & straddled_mask));
+    wire clamp = ~shamt_q[W-1] & left_overflow;
+
+    // Zero fill and sign fill are the same uniform word once the direction is known, so folding the two range flags
+    // into one select leaves every `prod` bit a six-input function of three selects, the operand sign and the two
+    // shifter bits: one slice rank on a 4-LUT fabric.
+    wire unshifted = shamt_q[W-1] ? right_large : left_large;
+    wire fill = shamt_q[W-1] & x_q[W-1];
+
     always @(posedge clk) begin
         x_q <= x;
         shamt_q <= shamt;
-        casez ({shamt_q[W-1], right_large, left_large})
-            3'b0?1: y <= {W{1'b0}};
-            3'b0?0: y <= shifted_left;
-            3'b11?: y <= {W{x_q[W-1]}};
-            3'b10?: y <= shifted_right;
-            default: y <= {W{1'bx}};
+        casez ({unshifted, shamt_q[W-1]})
+            2'b1?: shft <= {W{fill}};
+            2'b00: shft <= shifted_left;
+            2'b01: shft <= shifted_right;
         endcase
+        casez ({clamp, unshifted, shamt_q[W-1]})
+            3'b1??: prod <= x_q[W-1] ? MIN : MAX;
+            3'b01?: prod <= {W{fill}};
+            3'b000: prod <= shifted_left;
+            3'b001: prod <= shifted_right;
+        endcase
+        saturated <= clamp;
         if (rst) begin
             input_valid_q <= 1'b0;
             out_valid <= 1'b0;

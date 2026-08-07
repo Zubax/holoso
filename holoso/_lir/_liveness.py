@@ -24,7 +24,7 @@ read-first rule ``R(a) < W(b)``. Values that live entirely within mutually-exclu
 ``if``) share no block, so they never interfere -- path-awareness falls out of the per-block quantification with no
 explicit reasoning about which arms are exclusive.
 
-This module is bank-agnostic: the caller supplies a :class:`BankLiveness` describing one register family (the wide float
+This module is bank-agnostic: the caller supplies a :class:`BankLiveness` describing one register family (the wide
 bank or the 1-bit boolean bank) and receives the symmetric interference adjacency over that bank's values.
 """
 

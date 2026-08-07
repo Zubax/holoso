@@ -153,6 +153,19 @@ Runtime values are only:
 - `int` -- a semantic integer, width-less through the front-end and HIR; its hardware width binds at MIR and below
   (the LIR wide data register file is already neutral storage). Mixed int/float expressions promote to float, C-style.
 
+The two hardware formats are carried side by side from `Options` through MIR into LIR, so every layer below the
+front-end knows both without rediscovering either. Only the float format and a lower bound on the integer width are
+configured; the integer format itself is derived, never narrower than the float. Integers are signed two's
+complement and saturate at the extremes rather than wrapping. Saturation is defined behaviour, the dual of a float
+overflowing to infinity, so it is not an error flag -- were it one, an if-converted arm that saturated would raise an
+error the untaken path never earned. What is pending is the integer backend: the hardware operators exist but no
+lowering selects one.
+
+One wide register holds either family whole: it is as wide as the integer format, which is never narrower than the
+float, so an integer fills it exactly and a float occupies its low bits. The inline integer operators are then native
+Verilog over the whole register. Floats pay in unused flip-flops and slightly wider read muxes whenever the
+integer is the wider format; one representation with no edge cases is worth more than the bits it wastes.
+
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
 reach HIR, and remain unlowerable past MIR until the integer backend lands (see DEFERRED).
 
@@ -160,13 +173,16 @@ reach HIR, and remain unlowerable past MIR until the integer backend lands (see 
 
 HIR carries pure semantic operations from a HIR-local operator hierarchy; an operation is one operator applied to
 operand value IDs. Concrete hardware operators are frozen dataclasses whose fields are Holoso-exposed parameters;
-float ones delegate to the external ZKF library. Each hardware operator owns its signature and a compact HDL-safe
-identity stem, so the fully specified operator instance is itself the resource-sharing key and equal operators
-time-share one module. Per-node-parameterized operators are factories that instantiate a concrete operator.
+float ones delegate their timing and their reference arithmetic to the external ZKF library, while integer ones carry
+a closed-form latency and their own saturating arithmetic. Every hardware operator owns its signature, and a pooled
+one also owns the port names of the module it stands for and a compact HDL-safe identity stem, so the fully specified
+operator instance is itself the resource-sharing key and equal operators time-share one module.
+Per-node-parameterized operators are factories that instantiate a concrete operator.
 
-Every operator is optional, so presence is a semantic choice as well as an area one
+Every float operator is optional, so presence is a semantic choice as well as an area one
 (`ffma` enables FMA contraction, `fsort` enables min/max); what a kernel cannot reach through the operators
-it was given is refused at MIR lowering.
+it was given is refused at MIR lowering. An integer operator is never optional, only tuned: the vocabulary is small
+enough that a kernel using integers needs essentially all of it, so only the knobs are configurable.
 An operator may declare per-firing microcode-driven immediate inputs, and declares a per-instance
 initiation interval (most are II=1, fully pipelined).
 
@@ -189,10 +205,10 @@ Partial evaluation is the sole semantic owner -- binding time, types, shapes, re
 state. A specializing interpreter producing residual Eel, it is a pure function over an immutable tree re-run from
 its inputs rather than patched in place: accumulated marks and mutable side tables are how fixpoint analyses go
 quietly wrong. Static structure folds here while value arithmetic stays the graph's business per the fastmath
-charter, so one expression cannot answer two ways -- excepting two folds taken in host arithmetic, the
-static-exponent power chain and the call whose every argument is a static integer, which answer as Python does so
-an integer stays an integer. The residual program is scalar and typed; early returns and loop exits lower to real
-control edges rather than predication, leaving emission mechanical.
+charter, so one expression cannot answer two ways: every fold runs the very lowering the hardware runs, the host is
+never consulted for a value, and a lowering that exists only for compile-time operands says so in its own signature
+rather than being taken as a shortcut. The residual program is scalar and typed; early returns and loop exits lower
+to real control edges rather than predication, leaving emission mechanical.
 
 Three policies bound that evaluation. The compiler never predicts host failures it is not itself forced to evaluate:
 what a kernel does at run time on the host is the user's responsibility, inputs are trusted, and guards against
@@ -201,11 +217,12 @@ value. Every structure-producing expansion draws on one graph-size budget, so an
 rejection rather than a hang.
 
 Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below. Four deviations from Python are
-deliberate: mixed int/float expressions promote to float C-style, a power yields float unless it is fully folded over
-a nonnegative integer base, booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both
-operands as combinational logic does, while other conditional positions still branch. One join rule governs every
-meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only with identical
-kind and shape.
+deliberate: mixed int/float expressions promote to float C-style, a power yields float unless its base is an int
+and its exponent a compile-time nonnegative int (only a known exponent expands into multiplications, so anything
+else promotes), booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both operands as
+combinational logic does, while other conditional positions still branch. One join rule governs every meeting
+point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only with identical kind
+and shape.
 
 Aggregates are one container of two kinds fixed by provenance, not shape: a sequence is immutable structure, an
 array the numerical kind carrying elementwise arithmetic and all mutation, so a rectangular homogeneous list is still
@@ -220,9 +237,19 @@ scanning: the evaluator assumes every written attribute is state and re-runs wit
 turns out dead. Only the entry method owns that analysis -- an inlined method may read `self` but not write it.
 
 Calls dispatch on the object identity the callee resolves to, not its spelled name, and inlining everything is a
-lowering policy, not a representational fact. The math library keeps its one boundary: an intrinsic maps to a single
-semantic HIR operator, while a composite (linear algebra included) is ordinary Python in the supported subset,
-inlined like user code, so each is its own numerical reference.
+lowering policy, not a representational fact. A subset operator is a registry key like any callee object, so `**` and
+every spelling of it, or `@` and `np.matmul`, resolve one entry and cannot drift apart. The math library keeps its one
+boundary, in two kinds. A scalar callee carries a group of typed lowerings, each either a single semantic HIR operator
+or an inlined composite; each declares a domain PER OPERAND POSITION, read off the stub's own annotations, so a symbol
+whose Python answer differs by operand type -- `min` is sort hardware over floats and a compare-and-select over
+integers, which have none -- says so once, with neither type privileged and no operand types quietly promoted into a
+domain nothing serves. A position may also carry a refinement -- `StaticNonNegative[T]` or `StaticNegative[T]` --
+demanding a compile-time value of that sign, which is what lets `**` name an exact integer power, a multiply chain,
+its reciprocal, and a transcendental composite in one table. Selection takes the most refined lowering every one
+of whose positions accepts the operand; registration rejects any two lowerings that are neither ordered by that
+specificity nor separated by accepting nothing in common, so the choice is unique. An array composite declares no
+scalar domain, rank and shape deciding its meaning. Every stub is ordinary Python in the supported subset, so each
+is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
@@ -282,9 +309,15 @@ than lowered to a counted back-edge loop, which needs a runtime integer counter;
 MIR, the counted back-edge loop becomes the natural follow-on.
 
 Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
-integer node reaching MIR is rejected as not-yet-lowerable; the integer backend, sharing the wide register bank,
-is future work. A kernel whose integers stay compile-time is unaffected by the gap: a static integer has
-already folded away before MIR ever sees it.
+integer node reaching MIR is rejected as not-yet-lowerable. The integer hardware exists and answers for its own timing
+and arithmetic -- the pooled operators, the inline bitwise gates, casts and constant shift, and the two conversions
+that join the int and float halves -- so what remains is the transport: selecting those operators at MIR, and giving
+the wide register bank, its constants, its state and its port codecs a scalar family rather than assuming float.
+A static integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
+runtime integer: every symbol answering what Python answers -- the roundings over a float, and `abs`/`min`/`max`/
+`np.sign` over an integer however it arose, including an integer state slot -- now keeps it, where a float-only
+lowering would have computed over its float image instead. Which such kernels still build is decided by the
+reductions that sink an integer back into the float datapath rather than by any rule worth stating.
 
 ## MIR
 
@@ -305,17 +338,26 @@ error-bearing primitive.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is
-carried through as typed per-resource-family views (float and boolean sharing the block skeleton), then scheduled per
-block and register-allocated over the whole CFG.
+carried through as per-bank views sharing the block skeleton -- the wide data bank and the boolean bank -- then
+scheduled per block and register-allocated over the whole CFG. The wide view selects operations and phis
+structurally, on scalar width, so it is neutral storage rather than a float family; its leaves are still selected
+nominally, and nothing but floats can reach it until the integer backend lands.
 
 ## LIR
 
 LIR is the scheduled, bound, register-allocated microprogram. Its resources are the bound operator instances, the
 float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a pool of nonnegative
-float constants (the sign rides the consumer's sideband), and the typed input loads and output wires. Each scheduled
-firing carries its operands and conditioners, its register writes, and an issue cycle; the makespan is the last
-commit cycle. LIR exposes a minimal API plus shared analysis helpers (per-cycle grouping, liveness, read/writer sets)
-so backends do not each re-derive them.
+wide constants (float-encoded today, the sign riding the consumer's sideband), and the typed input loads and output
+wires. LIR names its carriers after the bank that holds them rather than after the scalar family -- `WideOperand`,
+`WideCopy`, `WideStateSlot` against their `Bool*` duals -- because it is the physical binding layer. A carrier's
+folded conditioner follows the same rule: it is typed as whatever the bank may hold rather than as a sign control,
+because what a port can fold is a property of its scalar family. A float port folds a sign into the free `fsgnop`
+sideband and a boolean port an inversion, but an integer port folds nothing, since two's-complement negation is not
+free in fabric. Consequently nothing compares a conditioner against a bank-wide identity constant; each conditioner
+answers for its own identity. MIR names its banks the same way but keeps the opposite convention for its leaves, one
+nominal type per scalar family. Each scheduled firing carries its operands and conditioners, its register writes, and
+an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API plus shared analysis helpers
+(per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach

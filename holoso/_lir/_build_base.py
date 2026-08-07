@@ -7,7 +7,7 @@ here) to keep those stage modules acyclic.
 
 from dataclasses import dataclass
 
-from .._operators import BoolInversion, FloatSignControl
+from .._operators import BoolInversion, FloatSignControl, WideConditioner
 from .._util import ValueId
 from ._ir import ReadPort
 from ._schedule import Schedule
@@ -16,19 +16,23 @@ from ._regalloc import Producer, RegallocTuning
 
 @dataclass(frozen=True, slots=True)
 class PooledConst:
-    """A constant's place in the magnitude pool: its index, plus the sign that recovers the original signed value."""
+    """
+    A constant's place in the pool. The conditioner stays a float sign control rather than widening with the other
+    wide-bank carriers because the pool folds sign into a free ``holoso_fsgnop`` sideband, which two's complement
+    cannot do; an integer pool needs a different scheme, not a wider field.
+    """
 
     index: int
-    sign: FloatSignControl
+    conditioner: FloatSignControl
 
 
 @dataclass(frozen=True, slots=True)
-class FloatArmInstall:
-    """A wide phi-arm install at a predecessor's tail: destination register, source value, and the arm's folded sign."""
+class WideArmInstall:
+    """A wide phi-arm install at a predecessor's tail: destination register, source value, folded conditioner."""
 
     dst: int
     source: ValueId
-    sign: FloatSignControl
+    conditioner: WideConditioner
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,14 +46,14 @@ class BoolArmInstall:
 
 @dataclass(frozen=True, slots=True)
 class Allocation:
-    float_reg: dict[ValueId, int]
-    float_slot_reg: dict[str, int]
-    float_install: dict[str, int]  # slot name -> Ret-block-relative scheduler-frame install cycle of its live-out
+    wide_reg: dict[ValueId, int]
+    wide_slot_reg: dict[str, int]
+    wide_install: dict[str, int]  # slot name -> Ret-block-relative scheduler-frame install cycle of its live-out
     nreg: int
     bool_reg: dict[ValueId, int]
     bool_slot_reg: dict[str, int]
     nbreg: int
-    copies: dict[int, list[FloatArmInstall]]  # block -> wide phi-arm installs at its tail
+    wide_copies: dict[int, list[WideArmInstall]]  # block -> wide phi-arm installs at its tail
     bool_writes: dict[int, list[BoolArmInstall]]  # block -> boolean phi-arm installs at its tail
 
 

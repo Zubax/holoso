@@ -8,11 +8,10 @@ expression or comparison chain) assigns its result temp in both arms.
 
 The tree is pure syntax: no numpy, no function objects, and no HIR beyond one opacity -- a residual
 ``IntrinsicCall`` carries the operator the partial evaluator selected, typed ``object`` here and downcast only by
-emit, so the boundary is an IMPORT boundary rather than a representational one. The partial
-evaluator keeps the pairing between
-an EelFunction and its FunctionType on the side. Every node carries an Origin — a source location plus the
-inline frame chain, which is empty at desugar and grows as the partial evaluator inlines calls — so any
-rejection raised inside library-stub code is re-attributed to the user's call site.
+emit, so the boundary is an IMPORT boundary rather than a representational one.
+The partial evaluator keeps the pairing between an EelFunction and its FunctionType on the side. Every node carries
+an Origin — a source location plus the inline frame chain, which is empty at desugar and grows as the partial
+evaluator inlines calls — so any rejection raised inside library-stub code is re-attributed to the user's call site.
 
 Store targets stay syntactic (a root name plus a selector chain, with only index expressions hoisted to atoms):
 the ownership model exempts store-target-prefix reads from sharing, which requires the prefix to remain a path
@@ -229,8 +228,8 @@ class SliceRead:
 class SliceSel:
     """One sliced axis of a multi-dimensional subscript; bounds are hoisted atoms or open."""
 
-    lo: "Atom | None"
-    hi: "Atom | None"
+    lo: Atom | None
+    hi: Atom | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,7 +242,7 @@ class MultiIndexRead:
 
     origin: Origin
     base: Atom
-    axes: tuple["Atom | SliceSel", ...]
+    axes: tuple[Atom | SliceSel, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,13 +250,13 @@ class TupleExpr:
     """A starred item splices an aggregate in place; the partial evaluator expands it once shapes are known."""
 
     origin: Origin
-    items: tuple["Atom | StarArg", ...]
+    items: tuple[Atom | StarArg, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ListExpr:
     origin: Origin
-    items: tuple["Atom | StarArg", ...]
+    items: tuple[Atom | StarArg, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +281,7 @@ class Comp:
     origin: Origin
     target: str
     iterable: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
     element: Atom
 
 
@@ -379,8 +378,8 @@ class AugAssign:
 class If:
     origin: Origin
     cond: Atom
-    then: tuple["Stmt", ...]
-    orelse: tuple["Stmt", ...]
+    then: tuple[Stmt, ...]
+    orelse: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,9 +387,9 @@ class While:
     """The header re-executes before every test: the condition's temps live there."""
 
     origin: Origin
-    header: tuple["Stmt", ...]
+    header: tuple[Stmt, ...]
     cond: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,7 +397,7 @@ class For:
     origin: Origin
     target: LocalBind
     iterable: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,9 +420,9 @@ class ResidualWhile:
 
     origin: Origin
     phis: tuple[LoopPhi, ...]
-    header: tuple["Stmt", ...]
+    header: tuple[Stmt, ...]
     cond: Atom
-    body: tuple["Stmt", ...]
+    body: tuple[Stmt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,7 +494,7 @@ class ResidualFrame:
 
     origin: Origin
     rows: tuple[FrameRow, ...]
-    body: "Block"
+    body: Block
 
 
 @dataclass(frozen=True, slots=True)

@@ -19,15 +19,15 @@ from string import ascii_letters
 from ..._lir import (
     BoolOperand,
     BoolRegRef,
-    FloatConstRef,
-    FloatOperand,
     Lir,
     OperatorInstance,
     PooledScheduledOp,
     RegRef,
+    WideConstRef,
+    WideOperand,
     pooled_write_word,
 )
-from ..._operators import BoolInversion, InlineHardwareOperator, PortConditioner
+from ..._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -72,14 +72,15 @@ def code_width(count: int) -> int:
 # Source descriptors: value-equal keys the codebooks dedup on, and which the emitter renders to an RHS net/expression.
 # A read source reuses the LIR refs directly (``regs[i]`` / ``const_i``); the write sources below discriminate
 # the three ways a register takes a value.
-type ReadSource = RegRef | FloatConstRef  # a constant key is its nonnegative-pool magnitude; the sign rides uc_*sgn
+type ReadSource = RegRef | WideConstRef
 
 
 @dataclass(frozen=True, slots=True)
 class OpWriteSource:
     """
-    A pooled operator output lane. A boolean lane folds its fabric inversion into ``invert``; a wide lane's sign rides
-    the wrapper (the ``y*sgn`` field), so its ``invert`` is always False and equal signs never split the opcode.
+    A pooled operator output lane. A boolean lane folds its fabric inversion into ``invert``; a wide lane conditions on
+    the wrapper instead (a float's sign on the ``y*sgn`` field, nothing at all for any other family), so its ``invert``
+    is always False and equal conditioners never split the opcode.
     """
 
     inst: OperatorInstance
@@ -92,7 +93,7 @@ class InlineWriteSource:
     """An inline-operator combinational result; structurally identical results dedup to one opcode (loop bodies)."""
 
     operator: InlineHardwareOperator
-    operands: tuple[FloatOperand | BoolOperand, ...]
+    operands: tuple[WideOperand | BoolOperand, ...]
     conditioner: PortConditioner
 
 
@@ -100,7 +101,7 @@ class InlineWriteSource:
 class MoveWriteSource:
     """A move of one operand into a register: a phi-arm copy/write, a constant install, or an early state writeback."""
 
-    operand: FloatOperand | BoolOperand
+    operand: WideOperand | BoolOperand
 
 
 type WriteSource = OpWriteSource | InlineWriteSource | MoveWriteSource
@@ -115,9 +116,8 @@ class WriteEvent:
     step: int
 
     def __post_init__(self) -> None:
-        # A wide lane's sign rides the ysgn wrapper; only a boolean lane folds an inversion into OpWriteSource.invert.
         if isinstance(self.source, OpWriteSource) and self.source.invert:
-            assert isinstance(self.dst, BoolRegRef)
+            assert isinstance(self.dst, BoolRegRef), "a wide lane conditions on the wrapper, so it never inverts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,13 +197,13 @@ def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
     the position over ``code_width`` bits; a single-source port keeps its lone source and needs no opcode field.
     """
     sources: dict[tuple[OperatorInstance, int], list[ReadSource]] = {
-        (inst, pos): [] for inst in lir.instances for pos in range(inst.operator.arity)
+        (inst, pos): [] for inst in lir.instances for pos in range(inst.operator.signature.arity)
     }
     for key, regs in lir.read_set_per_port.items():
         sources[key] = [RegRef(reg) for reg in regs]
     for op in lir.ops:
         for pos, operand in enumerate(op.operands):
-            if isinstance(operand, FloatOperand) and isinstance(operand.source, FloatConstRef):
+            if isinstance(operand, WideOperand) and isinstance(operand.source, WideConstRef):
                 book = sources[(op.inst, pos)]
                 if operand.source not in book:
                     book.append(operand.source)
@@ -223,7 +223,7 @@ def write_events(lir: Lir) -> list[WriteEvent]:
     for op in lir.ops:
         for write in op.writes:
             if isinstance(write.dst, RegRef):
-                invert = False  # a wide lane's sign rides the wrapper, not the opcode
+                invert = False  # a wide lane conditions on the wrapper, not on the opcode
             else:
                 assert isinstance(write.conditioner, BoolInversion)
                 invert = write.conditioner.invert
@@ -235,12 +235,12 @@ def write_events(lir: Lir) -> list[WriteEvent]:
         for inline_op in block.inline_ops:
             source = InlineWriteSource(inline_op.operator, tuple(inline_op.operands), inline_op.write.conditioner)
             events.append(WriteEvent(inline_op.write.dst, source, base + inline_op.commit_cycle))
-        for copy in block.copies:
+        for copy in block.wide_copies:
             events.append(WriteEvent(copy.dst, MoveWriteSource(copy.source), base + copy.issue_cycle))
         for bwrite in block.bool_writes:
             events.append(WriteEvent(bwrite.dst, MoveWriteSource(bwrite.source), base + bwrite.issue_cycle))
-    for slot in lir.float_state_slots:
-        if slot.needs_copy and not lir.float_state_install_is_boundary(slot):
+    for slot in lir.wide_state_slots:
+        if slot.needs_copy and not lir.wide_state_install_is_boundary(slot):
             events.append(WriteEvent(slot.reg, MoveWriteSource(slot.tap), lir.state_copy_step(slot) - lir.fetch_lag))
     return events
 
@@ -295,7 +295,7 @@ def build_microcode(
         add(f_issue(base), 1, gated=True)
         for imm in inst.operator.immediate_ports:
             add(f_imm(base, imm.name), imm.width)
-        for pos in range(inst.operator.arity):
+        for pos in range(inst.operator.signature.arity):
             add(f_osgn(base, PORT_LETTERS[pos]), 2)
             read_book = read_books[(inst, pos)]
             if len(read_book.sources) > 1:
@@ -314,14 +314,16 @@ def build_microcode(
         for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
             put(f_imm(base, imm.name), ci, value)
         for pos, operand in enumerate(op.operands):
-            assert isinstance(operand, FloatOperand), "pooled operators read only wide operands today (no read lane)"
-            put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.sign.encoded)
+            assert isinstance(operand, WideOperand), "pooled operators read only wide operands today (no read lane)"
+            assert isinstance(operand.conditioner, FloatSignControl), "only a float has a sign field to ride"
+            put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
             field = f_rd(base, PORT_LETTERS[pos])
             if field in fields:
                 put(field, ci, read_books[(op.inst, pos)].code(operand.source))
         for write in op.writes:
             if isinstance(write.dst, RegRef):
-                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)  # wide result sign rides the wrapper
+                assert isinstance(write.conditioner, FloatSignControl), "only a float has a sign field to ride"
+                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)
 
     for event in events:
         assert (

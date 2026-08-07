@@ -179,7 +179,7 @@ def _expr(expr: Expr) -> str:
 
 def _operator(operator: object) -> str:
     """
-    The mnemonic plus any operator parameters (``mul_pow2<3>``), duck-typed so the printer stays HIR-free;
+    The mnemonic plus any operator parameters (``fmul_pow2<3>``), duck-typed so the printer stays HIR-free;
     stable across operator-class internals, unlike the dataclass repr.
     """
     mnemonic = getattr(operator, "mnemonic", None)
@@ -197,7 +197,7 @@ def _item(item: Atom | StarArg) -> str:
     return _atom(item)
 
 
-def _axis(axis: "Atom | SliceSel") -> str:
+def _axis(axis: Atom | SliceSel) -> str:
     if isinstance(axis, SliceSel):
         return f"{'' if axis.lo is None else _atom(axis.lo)}:{'' if axis.hi is None else _atom(axis.hi)}"
     return _atom(axis)

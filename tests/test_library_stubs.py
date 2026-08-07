@@ -10,135 +10,167 @@ import math
 import numpy as np
 import pytest
 
-from holoso._eel._lib import Intrinsic, Library, resolve
-from holoso._eel._lib._linalg import matmul_, outer_, trace_, transpose_
+from holoso._eel._lib import Array, ScalarFunction, resolve
+from holoso._eel._ir import BinaryOp, ScalarType
+from holoso._eel._lib._linalg import matmul, outer, trace, transpose
 from holoso._eel._lib._intrinsics import (
-    abs_,
-    atan2_,
-    ceil_,
-    cos_,
-    exp2_,
-    floor_,
-    fma_,
-    hypot_,
-    isfinite_,
-    isinf_,
-    isneginf_,
-    isposinf_,
-    log2_,
-    max_,
-    min_,
+    abs_float,
+    atan2,
+    ceil,
+    cos,
+    exp2,
+    floor,
+    fma,
+    hypot,
+    isfinite,
+    isinf,
+    isneginf,
+    isposinf,
+    log2,
+    max_float,
+    min_float,
     round_,
-    sin_,
-    sqrt_,
-    trunc_,
+    sin,
+    sqrt,
+    trunc,
 )
+from holoso._eel._lib._pow import pow_, pow_chain_float, pow_chain_int, pow_reciprocal
 from holoso._eel._lib._numpy import (
-    acos_,
-    acosh_,
-    asin_,
-    asinh_,
-    atan_,
-    atanh_,
-    cbrt_,
-    cosh_,
-    degrees_,
-    exp_,
-    expm1_,
-    log10_,
-    log1p_,
-    log_,
-    pow_,
-    radians_,
-    sign_,
-    sinh_,
-    tan_,
-    tanh_,
+    acos,
+    acosh,
+    asin,
+    asinh,
+    atan,
+    atanh,
+    cbrt,
+    cosh,
+    degrees,
+    exp,
+    expm1,
+    log10,
+    log1p,
+    log,
+    radians,
+    sign_float,
+    sinh,
+    tan,
+    tanh,
 )
 
 _INF = float("inf")
 
 
 def test_registry_resolves_the_expected_externals() -> None:
-    intrinsic_externals: list[object] = [math.sqrt, np.sqrt, math.sin, np.cos, math.atan2, np.arctan2]
-    intrinsic_externals += [abs, min, max, round, math.fma, np.fmin, np.fmax, np.fix, np.rint, np.around]
-    for external in intrinsic_externals:
-        assert isinstance(resolve(external), Intrinsic), external
-    library_externals: list[object] = [math.cbrt, np.cbrt, math.tan, np.sign, math.exp, np.log10]
-    library_externals += [pow, math.pow, np.power, np.float_power]
-    library_externals += [math.sinh, np.cosh, math.tanh, math.asinh, np.arcsinh, math.acosh, math.atanh]
-    library_externals += [math.expm1, np.log1p, math.degrees, np.rad2deg, math.radians, np.deg2rad]
-    library_externals += [np.matmul, np.dot, np.transpose, np.trace, np.outer]
-    for external in library_externals:
-        assert isinstance(resolve(external), Library), external
-    # ``@`` and ``.T`` are lowered by resolving these two, so the frontend holds no matrix expansion of its own.
+    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer):
+        assert isinstance(resolve(external), Array), external
+    # An operator is a key like any callee object, so ``**`` and its every spelling are ONE four-lowering entry.
+    power_entry = resolve(BinaryOp.POW)
+    assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 4
+    for power in (pow, math.pow, np.power, np.pow, np.float_power):
+        assert resolve(power) == power_entry, power
+    assert resolve(np.matmul) == Array(matmul) == resolve(BinaryOp.MATMUL)  # type: ignore[arg-type]
     # A transpose is a non-copying derivation on the host, so its match carries the storage-equivalence flag.
-    assert resolve(np.matmul) == Library(matmul_) and resolve(np.transpose) == Library(transpose_, derives=True)  # type: ignore[arg-type]
-    assert resolve(np.dot) == resolve(np.matmul)  # identical on the supported 1-D/2-D non-scalar domain
+    assert resolve(np.transpose) == Array(transpose, derives=True)  # type: ignore[arg-type]
+    assert resolve(np.dot) == Array(matmul)  # type: ignore[arg-type]
     # An unregistered callable resolves to nothing; an unhashable shadow does not crash the lookup.
     assert resolve(math.erf) is None and resolve(np.zeros(3)) is None
     assert resolve(np.linalg.inv) is None and resolve(np.inner) is None  # deliberately not implemented yet
 
 
+# Enumerated, so dropping a spelling or a domain fails here rather than going unnoticed.
+_FLOAT_ONLY: list[object] = [
+    math.sqrt, np.sqrt, math.sin, np.sin, math.cos, np.cos, math.tan, np.tan,
+    math.asin, np.arcsin, math.acos, np.arccos, math.atan, np.arctan, math.atan2, np.arctan2,
+    math.sinh, np.sinh, math.cosh, np.cosh, math.tanh, np.tanh,
+    math.asinh, np.arcsinh, math.acosh, np.arccosh, math.atanh, np.arctanh,
+    math.exp, np.exp, math.exp2, np.exp2, math.expm1, np.expm1,
+    math.log, np.log, math.log2, np.log2, math.log10, np.log10, math.log1p, np.log1p,
+    math.degrees, np.degrees, np.rad2deg, math.radians, np.radians, np.deg2rad,
+    math.cbrt, np.cbrt, math.fabs, np.fabs, math.fma, math.hypot, np.hypot,
+    math.isfinite, np.isfinite, math.isinf, np.isinf, np.isneginf, np.isposinf,
+    np.rint,  # the one rounding spelling whose own answer on an integer is a float
+]  # fmt: skip
+_INT_AND_FLOAT: list[object] = [
+    abs, np.abs, np.absolute, min, np.minimum, np.fmin, max, np.maximum, np.fmax, np.sign,
+    round, np.round, np.around, math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix,
+    pow, math.pow, np.power, np.float_power, BinaryOp.POW,
+]  # fmt: skip
+
+
+def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
+    for external, served in ((e, [ScalarType.FLOAT]) for e in _FLOAT_ONLY):
+        match = resolve(external)
+        assert isinstance(match, ScalarFunction), external
+        assert match.domains == served, external
+    for external in _INT_AND_FLOAT:
+        match = resolve(external)
+        assert isinstance(match, ScalarFunction), external
+        assert match.domains == [ScalarType.INT, ScalarType.FLOAT], external
+    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.matmul, BinaryOp.MATMUL):
+        assert isinstance(resolve(external), Array), external
+    for member in (np.ndarray.T, np.ndarray.dot, np.ndarray.flatten, np.ndarray.ravel, np.ndarray.transpose):
+        assert isinstance(resolve(member), Array), member
+
+
 def test_intrinsic_stubs_match_their_references() -> None:
     for x in (0.0, -0.0, 0.75, -2.5, 3.0, 100.0, -1e-30):
-        assert exp2_(x) == math.exp2(x)
-        assert sin_(x) == math.sin(x)
-        assert cos_(x) == math.cos(x)
-        assert floor_(x) == np.floor(x) and ceil_(x) == np.ceil(x) and trunc_(x) == np.trunc(x)
-        assert abs_(x) == abs(x)
+        assert exp2(x) == math.exp2(x)
+        assert sin(x) == math.sin(x)
+        assert cos(x) == math.cos(x)
+        assert floor(x) == np.floor(x) and ceil(x) == np.ceil(x) and trunc(x) == np.trunc(x)
+        assert abs_float(x) == abs(x)
         assert round_(x) == np.round(x)
-        assert isfinite_(x) and not isinf_(x) and not isposinf_(x) and not isneginf_(x)
+        assert isfinite(x) and not isinf(x) and not isposinf(x) and not isneginf(x)
     for x in (0.25, 1.0, 4.0, 1e30):
-        assert log2_(x) == math.log2(x)
-        assert sqrt_(x) == math.sqrt(x)
-    assert atan2_(3.0, -4.0) == math.atan2(3.0, -4.0)
-    assert hypot_(3.0, 4.0) == 5.0
-    assert min_(1.5, -2.0) == -2.0 and max_(1.5, -2.0) == 1.5
-    assert fma_(3.0, 4.0, 5.0) == math.fma(3.0, 4.0, 5.0)
-    assert floor_(_INF) == _INF and ceil_(-_INF) == -_INF
+        assert log2(x) == math.log2(x)
+        assert sqrt(x) == math.sqrt(x)
+    assert atan2(3.0, -4.0) == math.atan2(3.0, -4.0)
+    assert hypot(3.0, 4.0) == 5.0
+    assert min_float(1.5, -2.0) == -2.0 and max_float(1.5, -2.0) == 1.5
+    assert fma(3.0, 4.0, 5.0) == math.fma(3.0, 4.0, 5.0)
+    assert floor(_INF) == _INF and ceil(-_INF) == -_INF
     assert round_(2.5) == 2.0 and round_(3.5) == 4.0 and round_(-_INF) == -_INF
-    assert isposinf_(_INF) and not isneginf_(_INF) and isinf_(-_INF) and not isfinite_(_INF)
-    assert exp2_(1e30) == _INF  # saturates like the hardware instead of raising like math.exp2
+    assert isposinf(_INF) and not isneginf(_INF) and isinf(-_INF) and not isfinite(_INF)
+    assert exp2(1e30) == _INF  # saturates like the hardware instead of raising like math.exp2
 
 
 def test_sign() -> None:
     for x in (1e-300, 0.5, 7.0, _INF):
-        assert sign_(x) == 1.0 and sign_(-x) == -1.0
-    assert sign_(0.0) == 0.0 and sign_(-0.0) == 0.0
-    assert math.isnan(sign_(math.nan))  # r = x in the zero branch reproduces np.sign(nan) = nan exactly
+        assert sign_float(x) == 1.0 and sign_float(-x) == -1.0
+    assert sign_float(0.0) == 0.0 and sign_float(-0.0) == 0.0
+    assert math.isnan(sign_float(math.nan))  # r = x in the zero branch reproduces np.sign(nan) = nan exactly
 
 
 def test_cbrt() -> None:
     for x in (8.0, -27.0, 0.5, -1e-6, 1e18, 3.7):
-        assert cbrt_(x) == pytest.approx(math.cbrt(x), rel=1e-12), x
-    assert cbrt_(0.0) == 0.0 and cbrt_(-0.0) == 0.0
+        assert cbrt(x) == pytest.approx(math.cbrt(x), rel=1e-12), x
+    assert cbrt(0.0) == 0.0 and cbrt(-0.0) == 0.0
 
 
 def test_tan() -> None:
     for x in (0.0, 0.3, -1.2, 2.0, 100.0, math.pi / 2):  # pi/2 is not exact in binary64, so tan() is finite there
-        assert tan_(x) == pytest.approx(math.tan(x), rel=1e-12), x
+        assert tan(x) == pytest.approx(math.tan(x), rel=1e-12), x
 
 
 def test_atan() -> None:
     for x in (0.0, 1.0, -1.0, 0.001, -1e6, _INF):
-        assert atan_(x) == pytest.approx(math.atan(x), rel=1e-12), x
+        assert atan(x) == pytest.approx(math.atan(x), rel=1e-12), x
 
 
 def test_asin_acos() -> None:
     for x in (0.0, 0.5, -0.5, 0.9, -0.999, 1.0, -1.0):
-        assert asin_(x) == pytest.approx(math.asin(x), rel=1e-7, abs=1e-9), x
-        assert acos_(x) == pytest.approx(math.acos(x), rel=1e-7, abs=1e-9), x
+        assert asin(x) == pytest.approx(math.asin(x), rel=1e-7, abs=1e-9), x
+        assert acos(x) == pytest.approx(math.acos(x), rel=1e-7, abs=1e-9), x
     with pytest.raises(ValueError):
-        asin_(1.5)  # domain violation raises in plain Python (math.sqrt of a negative), like math.asin
+        asin(1.5)  # domain violation raises in plain Python (math.sqrt of a negative), like math.asin
 
 
 def test_exp_log() -> None:
     for x in (0.0, 1.0, -1.0, 10.0, -30.0, 0.001):
-        assert exp_(x) == pytest.approx(math.exp(x), rel=1e-12), x
+        assert exp(x) == pytest.approx(math.exp(x), rel=1e-12), x
     for x in (0.001, 0.5, 1.0, math.e, 100.0, 1e30):
-        assert log_(x) == pytest.approx(math.log(x), rel=1e-12, abs=1e-15), x
-        assert log10_(x) == pytest.approx(math.log10(x), rel=1e-12, abs=1e-15), x
+        assert log(x) == pytest.approx(math.log(x), rel=1e-12, abs=1e-15), x
+        assert log10(x) == pytest.approx(math.log10(x), rel=1e-12, abs=1e-15), x
 
 
 def test_pow_recovers_the_sign_of_a_negative_base() -> None:
@@ -160,6 +192,30 @@ def test_pow_general_path() -> None:
     assert pow_(-1.0, _INF) == 1.0 and pow_(-1.0, -_INF) == 1.0 and pow_(1.0, _INF) == 1.0
 
 
+def test_pow_chain_matches_the_host_where_the_chain_is_exact() -> None:
+    # Exact wherever every partial product is representable; the reciprocal is the one rounding it adds.
+    for b in (2.0, -2.0, 0.5, -0.5, 1.0, 3.0):
+        for n in (0, 1, 2, 3, 5, 8):
+            assert pow_chain_float(b, n) == b**n, (b, n)
+        for n in (-1, -2, -3):
+            assert pow_reciprocal(b, n) == b**n, (b, n)
+    assert pow_chain_float(0.0, 0) == 1.0 and pow_chain_float(-7.5, 0) == 1.0
+    assert pow_chain_float(0.0, 3) == 0.0
+    with pytest.raises(ZeroDivisionError):
+        pow_reciprocal(0.0, -1)  # the reciprocal raises exactly as ``0.0 ** -1`` does
+    for b, n in ((7.0, 5), (1.0000001, 4), (-3.25, 7)):
+        assert pow_chain_float(b, n) == pytest.approx(b**n, rel=1e-13), (b, n)
+
+
+def test_pow_int_is_the_exact_integer_power() -> None:
+    # Square-and-multiply over exact host integers, so the answer is exact where the float chain would saturate.
+    for b in (0, 1, 2, -2, 3, -7, 10):
+        for e in (0, 1, 2, 3, 5, 8, 13):
+            assert pow_chain_int(b, e) == b**e, (b, e)
+    assert pow_chain_int(2, 200) == 2**200  # exact at arbitrary precision, where the float chain would saturate
+    assert pow_chain_int(0, 0) == 1
+
+
 def test_pow_zero_base() -> None:
     # A zero base needs no rung of its own: the general path is exp2(e * log2(0)), and log2(0) is -inf, so a positive
     # exponent gives exp2(-inf) == 0.0 and a negative one exp2(+inf) == inf -- exactly what math.pow answers.
@@ -176,35 +232,35 @@ def test_pow_unit_base() -> None:
 
 def test_hyperbolic() -> None:
     for x in (-4.0, -1.0, -0.1, 0.0, 0.1, 1.0, 4.0):
-        assert sinh_(x) == pytest.approx(math.sinh(x), rel=1e-12, abs=1e-15), x
-        assert cosh_(x) == pytest.approx(math.cosh(x), rel=1e-12), x
+        assert sinh(x) == pytest.approx(math.sinh(x), rel=1e-12, abs=1e-15), x
+        assert cosh(x) == pytest.approx(math.cosh(x), rel=1e-12), x
     for x in (-30.0, -2.0, 0.0, 2.0, 30.0):  # the stable sigmoid form holds tanh in [-1,1] without exp overflow
-        assert tanh_(x) == pytest.approx(math.tanh(x), rel=1e-12, abs=1e-15), x
+        assert tanh(x) == pytest.approx(math.tanh(x), rel=1e-12, abs=1e-15), x
 
 
 def test_inverse_hyperbolic() -> None:
     # 1e200/1e300 exceed float64's own x*x overflow (~1.3e154), exercising the large-|x| branch that returns ln(2|x|).
     for x in (-1e6, -2.0, 0.0, 2.0, 1e6, 1e200, -1e200, 1e300):  # the sign/abs form also keeps large-negative asinh
-        assert asinh_(x) == pytest.approx(math.asinh(x), rel=1e-12, abs=1e-15), x
+        assert asinh(x) == pytest.approx(math.asinh(x), rel=1e-12, abs=1e-15), x
     for x in (1.0, 1.5, 4.0, 100.0, 1e200, 1e300):
-        assert acosh_(x) == pytest.approx(math.acosh(x), rel=1e-12, abs=1e-15), x
+        assert acosh(x) == pytest.approx(math.acosh(x), rel=1e-12, abs=1e-15), x
     for x in (-0.99, -0.5, 0.0, 0.5, 0.99):
-        assert atanh_(x) == pytest.approx(math.atanh(x), rel=1e-12, abs=1e-15), x
+        assert atanh(x) == pytest.approx(math.atanh(x), rel=1e-12, abs=1e-15), x
     with pytest.raises(ValueError):
-        acosh_(0.5)  # domain violation (sqrt of a negative), like math.acosh
+        acosh(0.5)  # domain violation (sqrt of a negative), like math.acosh
 
 
 def test_expm1_log1p() -> None:
     for x in (-1.0, -0.1, 0.1, 1.0, 10.0):
-        assert expm1_(x) == pytest.approx(math.expm1(x), rel=1e-12, abs=1e-15), x
+        assert expm1(x) == pytest.approx(math.expm1(x), rel=1e-12, abs=1e-15), x
     for x in (-0.5, 0.0, 0.5, 10.0, 100.0):
-        assert log1p_(x) == pytest.approx(math.log1p(x), rel=1e-12, abs=1e-15), x
+        assert log1p(x) == pytest.approx(math.log1p(x), rel=1e-12, abs=1e-15), x
 
 
 def test_degrees_radians() -> None:
     for x in (-3.14, -1.0, 0.0, 1.0, 90.0):
-        assert degrees_(x) == pytest.approx(math.degrees(x), rel=1e-12, abs=1e-15), x
-        assert radians_(x) == pytest.approx(math.radians(x), rel=1e-12, abs=1e-15), x
+        assert degrees(x) == pytest.approx(math.degrees(x), rel=1e-12, abs=1e-15), x
+        assert radians(x) == pytest.approx(math.radians(x), rel=1e-12, abs=1e-15), x
 
 
 def test_matmul_matches_numpy_in_every_rank_combination() -> None:
@@ -212,25 +268,25 @@ def test_matmul_matches_numpy_in_every_rank_combination() -> None:
     a, b = rng.normal(size=(3, 4)), rng.normal(size=(4, 2))
     u, w = rng.normal(size=4), rng.normal(size=3)
     # The left fold is not BLAS's summation order, so the agreement is up to rounding, not bit-exact.
-    assert np.allclose(matmul_(a, b), a @ b)
-    assert np.allclose(matmul_(a, u), a @ u)  # a 1-D right operand is a column whose axis is dropped
-    assert np.allclose(matmul_(w, a), w @ a)  # a 1-D left operand is a row whose axis is dropped
-    assert np.allclose(matmul_(u, u), u @ u)  # both promoted and both dropped: a scalar dot product
-    assert np.ndim(matmul_(u, u)) == 0
+    assert np.allclose(matmul(a, b), a @ b)
+    assert np.allclose(matmul(a, u), a @ u)  # a 1-D right operand is a column whose axis is dropped
+    assert np.allclose(matmul(w, a), w @ a)  # a 1-D left operand is a row whose axis is dropped
+    assert np.allclose(matmul(u, u), u @ u)  # both promoted and both dropped: a scalar dot product
+    assert np.ndim(matmul(u, u)) == 0
 
 
 def test_transpose_matches_numpy() -> None:
     rng = np.random.default_rng(20260711)
     m, v = rng.normal(size=(2, 5)), rng.normal(size=3)
-    assert np.allclose(transpose_(m), m.T)
-    assert np.allclose(transpose_(v), v.T)  # numpy leaves a vector alone
+    assert np.allclose(transpose(m), m.T)
+    assert np.allclose(transpose(v), v.T)  # numpy leaves a vector alone
 
 
 def test_trace_and_outer_match_numpy() -> None:
     rng = np.random.default_rng(20260712)
     s, u, v = rng.normal(size=(4, 4)), rng.normal(size=3), rng.normal(size=5)
-    assert trace_(s) == pytest.approx(np.trace(s))
-    assert np.allclose(outer_(u, v), np.outer(u, v))
+    assert trace(s) == pytest.approx(np.trace(s))
+    assert np.allclose(outer(u, v), np.outer(u, v))
 
 
 def test_linalg_stubs_reject_the_shapes_they_do_not_support() -> None:
@@ -238,19 +294,19 @@ def test_linalg_stubs_reject_the_shapes_they_do_not_support() -> None:
     # frontend surfaces at the user's call site, so they are asserted here rather than only through the compiler.
     scalar, vector, matrix, cube = np.float64(2.0), np.arange(3.0), np.ones((2, 3)), np.ones((2, 2, 2))
     with pytest.raises(ValueError, match="scalar"):
-        matmul_(scalar, vector)  # type: ignore[arg-type]
+        matmul(scalar, vector)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="1-D or 2-D"):
-        matmul_(cube, vector)
-    assert np.allclose(matmul_(matrix, vector), matrix @ vector)  # 2×3 @ 3 agrees, so the mismatch below is genuine
+        matmul(cube, vector)
+    assert np.allclose(matmul(matrix, vector), matrix @ vector)  # 2×3 @ 3 agrees, so the mismatch below is genuine
     with pytest.raises(ValueError, match="mismatch"):
-        matmul_(matrix, np.arange(2.0))
+        matmul(matrix, np.arange(2.0))
     with pytest.raises(ValueError, match="transpose a scalar"):
-        transpose_(scalar)  # type: ignore[arg-type]
+        transpose(scalar)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="1-D or 2-D|not supported"):
-        transpose_(cube)
+        transpose(cube)
     with pytest.raises(ValueError, match="square"):
-        trace_(matrix)
+        trace(matrix)
     with pytest.raises(ValueError, match="matrix"):
-        trace_(vector)
+        trace(vector)
     with pytest.raises(ValueError, match="1-D"):
-        outer_(matrix, vector)
+        outer(matrix, vector)

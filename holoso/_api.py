@@ -25,17 +25,20 @@ from ._operators import (
     FDivOperator,
     FExp2Operator,
     FFmaOperator,
+    FFromIntOperator,
     FLog2Operator,
     FMulILog2Operator,
     FMulILog2OperatorFamily,
+    FMulILog2VarOperator,
     FMulOperator,
     FRoundOperator,
     FSincosOperator,
     FSortOperator,
+    FToIntOperator,
     IMulOperator,
     OpConfig,
 )
-from ._type import FloatFormat
+from ._type import FloatFormat, IntFormat
 
 type Target = Callable[..., Any]
 """
@@ -106,6 +109,7 @@ class OperatorOptions:
     fmul: FMulOperator.Options | None = None
     fdiv: FDivOperator.Options | None = None
     fmul_ilog2: FMulILog2Operator.Options | None = None
+    fmul_ilog2_var: FMulILog2VarOperator.Options | None = None
     fcmp: FCmpOperator.Options | None = None
     fround: FRoundOperator.Options | None = None
     ffma: FFmaOperator.Options | None = None
@@ -114,6 +118,8 @@ class OperatorOptions:
     flog2: FLog2Operator.Options | None = None
     fsincos: FSincosOperator.Options | None = None
     fatan2: FAtan2Operator.Options | None = None
+    ffromint: FFromIntOperator.Options | None = None
+    ftoint: FToIntOperator.Options | None = None
 
     imul: IMulOperator.Options = IMulOperator.Options()
 
@@ -127,17 +133,17 @@ class Options:
     ffmt: FloatFormat = FloatFormat(6, 18)
     """wexp is usually 6..11 bits; wman is usually a multiple of the DSP tile operand width, 18 bits on most FPGAs."""
 
-    wint: int = 33
-    """
-    The native integer width. Integers are signed and saturating: the range is `[-(2**(wint-1)), 2**(wint-1)-1]`.
-    The wide regfile is shared for integers and floats, and the register width is therefore `max(wint, ffmt.width)`.
-    """
+    wint_min: int = 16
+    """Lower bound on the native integer bit width; see :attr:`ifmt`. Integers are signed and saturating."""
 
     wmultiplier: int | None = None
     """
     The native DSP slice width, if known: lets the RTL split wide products along it rather than into equal halves,
     usually saving DSP tiles and timing margin.
     """
+
+    ifconv_max_ops: int = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
+    """Per-arm operation budget for diamond if-conversion; 0 converts only the operation-free diamonds."""
 
     ucode_fetch_stages: int = 3
     """Controller fmax/latency trade-off: a deeper fetch raises fmax but costs idle refills on a mispredicted branch."""
@@ -154,11 +160,18 @@ class Options:
     regalloc_register_price: float = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
     """What one register is worth in steering mux arms. Greater values buy fewer registers with heavier steering."""
 
+    @property
+    def ifmt(self) -> IntFormat:
+        """The effective native integer format; always at least wint_min bits wide."""
+        return IntFormat(max(self.wint_min, self.ffmt.width))
+
     def __post_init__(self) -> None:
-        if self.wint < 2:
-            raise ValueError(f"wint must be >= 2, got {self.wint}")
+        if self.wint_min < 2:
+            raise ValueError(f"wint_min must be >= 2, got {self.wint_min}")
         if self.wmultiplier is not None and self.wmultiplier < 2:
             raise ValueError(f"wmultiplier must be >= 2 when set, got {self.wmultiplier}")
+        if self.ifconv_max_ops < 0:
+            raise ValueError(f"ifconv_max_ops must be >= 0, got {self.ifconv_max_ops}")
         if self.ucode_fetch_stages < 1:
             raise ValueError(f"ucode_fetch_stages must be >= 1, got {self.ucode_fetch_stages}")
         if self.regalloc_effort < 0:
@@ -171,12 +184,13 @@ class Options:
 
 def _build_op_config(options: Options) -> OpConfig:
     """The one place the user's configuration becomes hardware."""
-    fmt, wmul, op = options.ffmt, options.wmultiplier or 0, options.operator
+    fmt, ifmt, wmul, op = options.ffmt, options.ifmt, options.wmultiplier or 0, options.operator
     return OpConfig(
         fadd=FAddOperator(fmt, op.fadd) if op.fadd is not None else None,
         fmul=FMulOperator(fmt, op.fmul, wmul) if op.fmul is not None else None,
         fdiv=FDivOperator(fmt, op.fdiv) if op.fdiv is not None else None,
         fmul_ilog2=FMulILog2OperatorFamily(fmt, op.fmul_ilog2) if op.fmul_ilog2 is not None else None,
+        fmul_ilog2_var=FMulILog2VarOperator(fmt, ifmt, op.fmul_ilog2_var) if op.fmul_ilog2_var is not None else None,
         fcmp=FCmpOperator(fmt, op.fcmp) if op.fcmp is not None else None,
         fround=FRoundOperator(fmt, op.fround) if op.fround is not None else None,
         ffma=FFmaOperator(fmt, op.ffma, wmul) if op.ffma is not None else None,
@@ -185,6 +199,9 @@ def _build_op_config(options: Options) -> OpConfig:
         flog2=FLog2Operator(fmt, op.flog2, wmul) if op.flog2 is not None else None,
         fsincos=FSincosOperator(fmt, op.fsincos, wmul) if op.fsincos is not None else None,
         fatan2=FAtan2Operator(fmt, op.fatan2, wmul) if op.fatan2 is not None else None,
+        ffromint=FFromIntOperator(fmt, ifmt, op.ffromint) if op.ffromint is not None else None,
+        ftoint=FToIntOperator(fmt, ifmt, op.ftoint) if op.ftoint is not None else None,
+        imul=IMulOperator(ifmt, op.imul),
     )
 
 
@@ -206,12 +223,13 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
                     _logger.info("\toperator.%s: %s", op_field.name, configured)
         else:
             _logger.info("\t%s: %s", field.name, value)
+    _logger.info("\tifmt: %s (derived)", options.ifmt)
 
     frontend = lower_frontend(target)
-    hir = optimize(frontend.hir)
+    hir = optimize(frontend.hir, options.ifconv_max_ops)
     _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
 
-    mir = lower_to_mir(hir, _build_op_config(options), options.ffmt)
+    mir = lower_to_mir(hir, _build_op_config(options), options.ffmt, options.ifmt)
     lir = build(
         mir,
         module_name,

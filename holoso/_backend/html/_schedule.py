@@ -28,7 +28,7 @@ _ARROW_KEY_MARKER = (
 
 
 def render_schedule(lir: Lir) -> str:
-    nreg, nbreg, nconst = lir.regfile.nreg, lir.bool_regfile.nreg, len(lir.float_consts)
+    nreg, nbreg, nconst = lir.regfile.nreg, lir.bool_regfile.nreg, len(lir.wide_consts)
     bool_consts = _bool_consts(lir)
     nbbool = len(bool_consts)
     columns = _columns_of(lir)
@@ -55,7 +55,7 @@ def render_schedule(lir: Lir) -> str:
 
     # Column seams: a 2px black seam marks every register-bank boundary (wide|bool, bool|constants) and the two block
     # boundaries (the last data column | pipeline, and pipeline | OPERATIONS); a 1px seam marks the legacy wide|const
-    # seam of a kernel without a boolean bank, the float|bool divide within the constants block, and the seams between
+    # seam of a kernel without a boolean bank, the wide|bool divide within the constants block, and the seams between
     # operator groups.
     data_thin, data_thick = _data_seams(nreg, nbreg, nconst, nbbool)
     if columns:
@@ -151,7 +151,7 @@ def render_schedule(lir: Lir) -> str:
     # Inline firings (boolean logic and the float<->bool casts): single PC-gated statements with no pooled instance,
     # so no pipeline-stage trail. Each renders a colored result cell on its bank's landing cycle, a write marker,
     # dataflow edges from its operands (all read on the op's single fire step per operand_read_cycle; a constant operand
-    # -- float or boolean -- anchors its const-pool column), and an ops chip, all in one hover group.
+    # -- wide or boolean -- anchors its const-pool column), and an ops chip, all in one hover group.
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for bop in block.inline_ops:
@@ -185,10 +185,8 @@ def render_schedule(lir: Lir) -> str:
     # model's decode does, so the marker row matches the residence tint and the model commit. Render each like a state
     # commit -- a filled cell, a write marker, and a chip at the landing row, plus a dataflow edge from the landing to
     # the source's const-pool/register cell on the fire row, so the one-cycle-early write span is visible (a boolean
-    # constant source now anchors a ``T``/``F`` column, exactly as a float constant does).
-    def install_event(
-        dst: ColKey, label: str, source: FloatOperand | BoolOperand, fire_step: int, landing: int
-    ) -> None:
+    # constant source now anchors a ``T``/``F`` column, exactly as a wide constant does).
+    def install_event(dst: ColKey, label: str, source: WideOperand | BoolOperand, fire_step: int, landing: int) -> None:
         nonlocal group
         dord = col_ord[dst]
         tip = _esc(f"{label} 🠄 {_operand_label(source)}")
@@ -203,20 +201,20 @@ def render_schedule(lir: Lir) -> str:
         group += 1
 
     # The landing per install kind mirrors the model's decode: a pc-gated install (a phi copy, a boolean write) always
-    # lands at ``install_landing`` (fire + 1); a float slot lands there only if it fires before the boundary, else it is
+    # lands at ``install_landing`` (fire + 1); a wide slot lands there only if it fires before the boundary, else it is
     # a read-first boundary install at ``last_pc``; a boolean slot always installs read-first at ``last_pc``.
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
-        for copy in block.copies:  # a non-coalesced wide phi-arm merge copy
+        for copy in block.wide_copies:  # a non-coalesced wide phi-arm merge copy
             fire = base_pc + copy.fire_step(lir.fetch_lag)
             install_event(copy.dst, copy.dst.stable_label, copy.source, fire, install_landing(fire))
         for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
             fire = base_pc + bwrite.fire_step(lir.fetch_lag)
             install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
-    for slot in lir.float_state_slots:  # a non-coalesced float slot latches its tap (early, or read-first at boundary)
+    for slot in lir.wide_state_slots:  # a non-coalesced wide slot latches its tap (early, or read-first at boundary)
         if slot.needs_copy:
             fire = lir.state_copy_step(slot)
-            landing = fire if lir.float_state_install_is_boundary(slot) else install_landing(fire)
+            landing = fire if lir.wide_state_install_is_boundary(slot) else install_landing(fire)
             install_event(slot.reg, slot.name, slot.tap, fire, landing)
     for bslot in lir.bool_state_slots:  # a non-coalesced boolean slot installs its live-out read-first at the boundary
         if bslot.needs_copy:
@@ -233,7 +231,7 @@ def render_schedule(lir: Lir) -> str:
     out = [
         _schedule_key(
             operator_colors,
-            bool(lir.float_state_slots or lir.bool_state_slots),
+            bool(lir.wide_state_slots or lir.bool_state_slots),
             bool(arrows),
             bool(boundary_rows),
             lir.fetch_lag,
@@ -310,7 +308,7 @@ def render_schedule(lir: Lir) -> str:
     # compute, latch, and fetch-staging cycles 1..II. The row axis is the fetch PC, so out_valid (pc == LASTPC == II)
     # rises on the last row; the executing PRESENT step shown there lags the fetch by the fetch lag (present==II-lag).
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
-    for slot in lir.float_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
+    for slot in lir.wide_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
     for bslot in lir.bool_state_slots:  # boolean persistent slots likewise show their reset snapshot in their bX column
         in_cells[bslot.reg] = _state_chip(f"{bslot.name} = {bslot.reset_value!r}")
@@ -336,7 +334,7 @@ def render_schedule(lir: Lir) -> str:
     return "".join(out)
 
 
-type ColKey = RegRef | BoolRegRef | FloatConstRef | BoolConstRef
+type ColKey = RegRef | BoolRegRef | WideConstRef | BoolConstRef
 
 
 def _esc(text: str) -> str:
@@ -346,7 +344,7 @@ def _esc(text: str) -> str:
 def _col_label(col: ColKey) -> str:
     """
     The report's display label for a grid column: ``rX`` for a wide register, ``bX`` for a boolean register, ``cX`` for
-    a float constant, and ``T``/``F`` for a boolean constant (which carries no pool index). This is the single labeling
+    a wide constant, and ``T``/``F`` for a boolean constant (which carries no pool index). This is the single labeling
     authority for the schedule: the headers, tooltips, dataflow operand expressions, arrow conditions, and the JS
     payload all route through it.
     """
@@ -381,7 +379,7 @@ class _Dividers:
     cell wins an equal-width conflict, so a left border on the right column would not show). A ``thick`` 2px seam marks
     every register-bank boundary (wide|bool, bool|constants) and the two block boundaries (the data block |
     operator-pipeline and operator-pipeline | OPERATIONS); a ``thin`` 1px seam marks the legacy wide|constants seam of a
-    boolean-free kernel, the float|bool divide within the constants block, and the seams between operator groups. Data
+    boolean-free kernel, the wide|bool divide within the constants block, and the seams between operator groups. Data
     and stage columns index separately.
     """
 
@@ -394,11 +392,11 @@ class _Dividers:
 def _data_seams(nreg: int, nbreg: int, nconst: int, nbbool: int) -> tuple[set[int], set[int]]:
     """
     Right-border seams within the register/constant block, as ``(thin, thick)`` left-cell column-index sets. The
-    constant block is the float constants followed by the boolean constants.
+    constant block is the wide constants followed by the boolean constants.
 
     A thick 2px black seam marks each register-bank boundary: wide|bool and bool|constants. With no boolean bank the
-    wide bank abuts the constants directly; that legacy seam stays the lighter 1px so a float-only kernel renders
-    exactly as before. A thin 1px seam separates the float constants from the boolean constants within the constant
+    wide bank abuts the constants directly; that legacy seam stays the lighter 1px so a wide-only kernel renders
+    exactly as before. A thin 1px seam separates the wide constants from the boolean constants within the constant
     block. Empty banks contribute no seam. The constants|pipeline block boundary is added by the caller.
     """
     thin: set[int] = set()
@@ -411,7 +409,7 @@ def _data_seams(nreg: int, nbreg: int, nconst: int, nbbool: int) -> tuple[set[in
     elif nreg and (nconst or nbbool):
         thin.add(nreg - 1)  # legacy wide | constants (no boolean bank)
     if nconst and nbbool:
-        thin.add(nreg + nbreg + nconst - 1)  # float constants | boolean constants
+        thin.add(nreg + nbreg + nconst - 1)  # wide constants | boolean constants
     return thin, thick
 
 
@@ -431,9 +429,9 @@ def _oc_class(sidx: int, dv: _Dividers) -> str:
     return "oc" + _border_suffix(sidx, dv.stage_thin, dv.stage_thick)
 
 
-def _operand_label(operand: FloatOperand | BoolOperand) -> str:
-    if isinstance(operand, FloatOperand):
-        return operand.sign.decorate(_col_label(operand.source))
+def _operand_label(operand: WideOperand | BoolOperand) -> str:
+    if isinstance(operand, WideOperand):
+        return operand.conditioner.decorate(_col_label(operand.source))
     source = operand.source
     if isinstance(source, BoolRegRef):
         return operand.inversion.decorate(_col_label(source))
@@ -661,7 +659,7 @@ def _sched_script(
     data = {
         "edges": edges,
         "columns": cols,
-        "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.float_consts)}
+        "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.wide_consts)}
         | {_col_label(BoolConstRef(value)): repr(value) for value in _bool_consts(lir)},
         "liveness": {_col_label(col): _live_intervals(rows) for col, rows in live.items()},
         "arrows": [
@@ -680,13 +678,13 @@ def _sched_script(
 
 def _columns_of(lir: Lir) -> list[ColKey]:
     """
-    The grid columns in bank order: wide registers (``rX``), then boolean registers (``bX``), then float constants
+    The grid columns in bank order: wide registers (``rX``), then boolean registers (``bX``), then wide constants
     (``cX``), then the boolean constants used (``T``/``F``). This is exactly the order the table renders, so a column
     ordinal indexes straight into this list.
     """
     cols: list[ColKey] = [RegRef(i) for i in range(lir.regfile.nreg)]
     cols += [BoolRegRef(i) for i in range(lir.bool_regfile.nreg)]
-    cols += [FloatConstRef(i) for i in range(len(lir.float_consts))]
+    cols += [WideConstRef(i) for i in range(len(lir.wide_consts))]
     cols += [BoolConstRef(value) for value in _bool_consts(lir)]
     return cols
 
@@ -695,7 +693,7 @@ def _bool_consts(lir: Lir) -> list[bool]:
     """
     The boolean constant values that appear as an operand or install source, rendered as const-pool columns (``False``
     before ``True``). Booleans have no interned pool (only two values), so the columns are presentation-only -- their
-    purpose is to anchor an install edge from the constant into its landing, exactly as the float const pool does, so a
+    purpose is to anchor an install edge from the constant into its landing, exactly as the wide const pool does, so a
     boolean constant install reads as the one-cycle-early write it is rather than appearing to land late.
     """
     used: set[bool] = set()
@@ -728,17 +726,17 @@ def _state_chip(tip: str) -> str:
 def _register_names(lir: Lir) -> dict[tuple[str, int], tuple[str, str]]:
     """
     Map each register that has a stable role to ``(label, kind)``, keyed by ``(bank, index)`` where bank is ``"r"`` for
-    a wide register or ``"b"`` for a boolean one: the float input lanes to the port they latch at accept, the float
+    a wide register or ``"b"`` for a boolean one: the wide input lanes to the port they latch at accept, the wide
     state slots to the attribute they retain, and the boolean state slots to the boolean attribute they retain. Other
     registers are anonymous scratch; both kinds may still be reused later, but their cycle-0 role is what the label
     names.
     """
     names: dict[tuple[str, int], tuple[str, str]] = {}
-    for fload in lir.float_inputs:
-        names[("r", fload.dst.index)] = (f"in_{fload.name}", "input")
+    for load in lir.wide_inputs:
+        names[("r", load.dst.index)] = (f"in_{load.name}", "input")
     for bload in lir.bool_inputs:
         names[("b", bload.dst.index)] = (f"in_{bload.name}", "input")
-    for slot in lir.float_state_slots:
+    for slot in lir.wide_state_slots:
         names[("r", slot.reg.index)] = (slot.name, "state")
     for bslot in lir.bool_state_slots:
         names[("b", bslot.reg.index)] = (bslot.name, "state")

@@ -96,10 +96,6 @@ def result_stype(operator: Operator) -> ScalarType:
     return _stype_of(operator.signature.result_type)
 
 
-def operand_stypes(operator: Operator) -> list[ScalarType]:
-    return [_stype_of(ty) for ty in operator.signature.operand_types]
-
-
 INT_BINARY: dict[BinaryOp, Operator] = {
     BinaryOp.ADD: IntAdd(),
     BinaryOp.SUB: IntSub(),

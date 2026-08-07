@@ -10,13 +10,9 @@ names and desugars no callees; captures are judged at use, never at capture.
 A name bound on only one side of a residual branch drops (CPython would raise UnboundLocalError); divergent
 unmergeable values stay bound to a marker so the read, in any spelling, rejects truthfully. ``raise`` is
 judged within its own function: unconditional there is a compile-time diagnostic even under a caller's
-residual arm. Library stubs bind positionally only. All pow spellings share the ``**`` lowering: a fully
-static integer-exponent power folds exactly with host arithmetic, a fully static non-integer power folds
-THROUGH the pow_ stub so the answer cannot depend on binding time, a static int exponent over a residual
-base expands a float multiply chain, and everything else promotes to float through the pow_ stub. Exact
-int results exist only for a nonnegative-int-base fold -- every non-folded power is float. A static power
-that raises on the host surfaces as a compile-time diagnostic, never masked into a runtime value; the
-raise is certain wherever the expression is evaluated, under the subset's own eager-gate semantics.
+residual arm. Library stubs bind positionally only. An operator whose lowering the registry holds -- ``**`` and
+``@`` -- reaches it exactly as a spelled call does, so the two cannot drift; which lowering serves is the
+registry's per-position domain rule, not a decision taken here, and the host is never consulted for a value.
 
 Ownership events ride value flow: a desugared temp is a linear conduit, so the first read of an aggregate
 temp MOVES it and any re-read is the second handle, judged at the read itself regardless of where the value
@@ -55,6 +51,7 @@ import typing
 from dataclasses import dataclass
 
 from ..._errors import HolosoError, SynthesisError
+from .._annotations import accepted_stypes, annotation_stype
 from .._desugar import desugar
 from .._ir import *
 from .._names import indexed_names, public_slot, state_port_name
@@ -417,7 +414,7 @@ class Interpreter:
         annotation = frame.annotations.get(param.name, _MISSING)
         if annotation is _MISSING:
             reject(param.origin, f"the parameter {param.name!r} requires a type annotation")
-        stype = _express.annotation_stype(annotation)
+        stype = annotation_stype(annotation)
         if stype is not None:
             frame.env[param.name] = ResidualScalar(stype, LocalRef(param.origin, param.name))
             return [Param(param.origin, param.name, param.kind, stype)]
@@ -1219,7 +1216,7 @@ class Interpreter:
         recognized annotation, while an inlined frame skips unrecognized ones (library stubs annotate with
         shapeless types the subset cannot check).
         """
-        stype = _express.annotation_stype(annotation)
+        stype = annotation_stype(annotation)
         if stype is not None:
             return self.conform(value, stype, origin, sink, what)
         shaped = typing.get_origin(annotation)
@@ -1268,11 +1265,9 @@ class Interpreter:
             reject(origin, _describe_opaque(value))
         if not isinstance(value, (StaticScalar, ResidualScalar)):
             reject(origin, f"{what} is not a {declared.value} scalar")
-        if value.stype is declared:
-            return value
-        if value.stype is ScalarType.INT and declared is ScalarType.FLOAT:
-            return self.as_float(value, origin, sink)
-        reject(origin, f"{what} has type {value.stype.value} where the annotation declares {declared.value}")
+        if value.stype not in accepted_stypes(declared):
+            reject(origin, f"{what} has type {value.stype.value} where the annotation declares {declared.value}")
+        return value if value.stype is declared else self.as_float(value, origin, sink)
 
     # ------------------------------------------------------------------ expressions
 
