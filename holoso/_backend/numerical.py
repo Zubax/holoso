@@ -38,7 +38,6 @@ from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
 from .._lir import install_landing, landing_cycle, operand_read_cycle
-from .._lir import scalar_type_of
 from .._operators import *
 from .._type import FloatFormat, LogicalPort
 
@@ -120,13 +119,11 @@ class _Kernel:
 
     @property
     def inputs(self) -> list[LogicalPort]:
-        fmt = self._lir.float_format
-        return [LogicalPort(load.name, scalar_type_of(load, fmt)) for load in self._lir.inputs]
+        return [LogicalPort(load.name, load.scalar_type) for load in self._lir.inputs]
 
     @property
     def outputs(self) -> list[LogicalPort]:
-        fmt = self._lir.float_format
-        return [LogicalPort(wire.name, scalar_type_of(wire, fmt)) for wire in self._lir.outputs]
+        return [LogicalPort(wire.name, wire.scalar_type) for wire in self._lir.outputs]
 
     def __str__(self) -> str:
         return (

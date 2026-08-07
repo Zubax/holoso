@@ -17,7 +17,7 @@ from .._operators import (
     PortConditioner,
     WideConditioner,
 )
-from .._type import BoolType, FloatFormat, FloatType, IntFormat, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType, ScalarType
 from .._value import WideValue
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
@@ -314,11 +314,13 @@ class InputLoad:
 
     name: str
     dst: RegRef | BoolRegRef
+    scalar_type: ScalarType
 
 
 @dataclass(frozen=True, slots=True)
 class WideInputLoad(InputLoad):
     dst: RegRef
+    scalar_type: FloatType | IntType
 
 
 def wide_liveout_coalesced(tap: WideOperand, reg: RegRef) -> bool:
@@ -346,9 +348,10 @@ class WideStateSlot:
 
     name: str
     reg: RegRef
-    reset_value: float
+    reset_value: float | int
     tap: WideOperand
     install_cycle: int  # scheduler-frame install cycle; hardware fire = inline_fire_cycle(it); makespan+1 = boundary
+    scalar_type: FloatType | IntType
 
     @property
     def needs_copy(self) -> bool:
@@ -358,6 +361,7 @@ class WideStateSlot:
 @dataclass(frozen=True, slots=True)
 class BoolInputLoad(InputLoad):
     dst: BoolRegRef
+    scalar_type: BoolType = BoolType()
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,35 +475,19 @@ class OutputWire:
 
     name: str
     tap: WideOperand | BoolOperand
+    scalar_type: ScalarType
 
 
 @dataclass(frozen=True, slots=True)
 class WideOutputWire(OutputWire):
     tap: WideOperand
+    scalar_type: FloatType | IntType
 
 
 @dataclass(frozen=True, slots=True)
 class BoolOutputWire(OutputWire):
     tap: BoolOperand
-
-
-def scalar_type_of(
-    node: WideInputLoad | BoolInputLoad | WideOutputWire | BoolOutputWire, fmt: FloatFormat
-) -> ScalarType:
-    """
-    The scalar type carried by an input load or output wire: a wide port carries the module float format ``fmt``,
-    a boolean port is a single bit. The one dispatch the advertised port metadata routes through, RTL and numerical
-    model alike, so the wide/boolean choice cannot drift between the two port lists. The model's input coercion still
-    decides separately (``TODO.md`` records converging it). The wide arm hardcodes ``FloatType`` because the carrier
-    class no longer names a scalar family; integer ports will need a per-node discriminator here.
-    """
-    match node:
-        case WideInputLoad() | WideOutputWire():
-            return FloatType(fmt)
-        case BoolInputLoad() | BoolOutputWire():
-            return BoolType()
-        case _:
-            assert_never(node)
+    scalar_type: BoolType = BoolType()
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,7 +713,6 @@ class Lir:
 
     @property
     def ports(self) -> list[Port]:
-        fmt = self.float_format
         ports: list[Port] = [
             ControlInputPort("clk", 1),
             ControlInputPort("rst", 1),
@@ -734,8 +721,8 @@ class Lir:
             ControlOutputPort("out_valid", 1),
             ControlInputPort("out_ready", 1),
         ]
-        ports += [DataInputPort(f"in_{load.name}", scalar_type_of(load, fmt)) for load in self.inputs]
-        ports += [DataOutputPort(wire.name, scalar_type_of(wire, fmt)) for wire in self.outputs]
+        ports += [DataInputPort(f"in_{load.name}", load.scalar_type) for load in self.inputs]
+        ports += [DataOutputPort(wire.name, wire.scalar_type) for wire in self.outputs]
         ports.append(ControlOutputPort("err_pc", self.cyc_width))
         return ports
 

@@ -66,6 +66,7 @@ from ._operators import (
     IntBwNot as IntBwNot,
     IntBwOr as IntBwOr,
     IntBwXor as IntBwXor,
+    IntComparison as IntComparison,
     IntDivFloor as IntDivFloor,
     IntEqual as IntEqual,
     IntGreater as IntGreater,

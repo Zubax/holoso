@@ -1,9 +1,12 @@
 """
-The corpus differential: every integer kernel is oracle-verified against CPython -- exact ints,
-multi-transaction, state included -- proving integers flow through Eel into HIR, and each one's MIR
-refusal is recorded (``_reject_integers`` runs until the integer backend lands). The float kernels ride
-the same oracle and lower all the way: the two residual-loop exit shapes, plus the FIR and biquad examples,
-whose exactness against CPython this suite adds on top of the tolerance-based example matrix.
+The corpus differential: every kernel is oracle-verified against CPython -- exact ints, multi-transaction,
+state included -- and then lowered. The float kernels are the two residual-loop exit shapes plus the FIR and
+biquad examples, whose exactness against CPython this suite adds on top of the tolerance-based example matrix.
+
+The integer kernels go one layer further: each is re-run through :class:`MirInterpreter` and compared against the
+HIR evaluator transaction by transaction, so selection is judged against the same graph CPython already vouched
+for. The two agree only while nothing reaches a rail -- HIR is unbounded, the machine saturates -- which is what
+the generous word width below buys.
 """
 
 import sys
@@ -14,10 +17,11 @@ import pytest
 
 import holoso
 from holoso._eel import lower
-from holoso._operators import OpConfig
-from holoso._mir import lower as lower_to_mir
+from holoso._hir import HirEvaluator, optimize
+from holoso._mir import MirInterpreter, lower as lower_to_mir
+from holoso._value import FloatValue, IntValue, ScalarValue
 
-from ._modelref import build_ops
+from ._modelref import build_lir, build_ops
 from ._eel_corpus import Crc8, Debouncer, IntUartRx, IntUartTx, Lfsr16, NcoPhase, PriorityEncoder, Pwm
 from ._eel_corpus import band_scan, convergence_steps
 from ._eeloracle import InputRow, assert_hir_matches_reference
@@ -113,3 +117,51 @@ def test_float_corpus_lowers_through_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
     lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt, _ops().ifmt)
+
+
+def _int_ops() -> holoso.Options:
+    """
+    ``NcoPhase`` masks with ``0xFFFFFFFF`` and adds a ``2**30`` increment to a value already that wide, so the word
+    must hold ``2**33`` for the sum to stay exact -- anything narrower saturates and the comparison below is no
+    longer against CPython's arithmetic but against the rails.
+    """
+    return holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+            ffromint=holoso.FFromIntOptions(),
+            ftoint=holoso.FToIntOptions(),
+        ),
+        ffmt=holoso.FloatFormat(wexp=8, wman=23),
+        wint_min=34,
+    )
+
+
+def _plain(value: ScalarValue) -> float | bool | int:
+    match value:
+        case bool():
+            return value
+        case IntValue():
+            return int(value)
+        case FloatValue():
+            return float(value)
+
+
+@pytest.mark.parametrize("name,make,vectors", _INT_CASES, ids=[name for name, _, _ in _INT_CASES])
+def test_int_corpus_selects_and_agrees_with_the_hir_oracle(
+    name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
+) -> None:
+    options = _int_ops()
+    hir = lower(make()).hir
+    mir = lower_to_mir(optimize(hir, options.ifconv_max_ops), build_ops(options), options.ffmt, options.ifmt)
+    build_lir(mir, name)  # the carriage half: everything selection emits must reach LIR intact
+    evaluator, interpreter = HirEvaluator(hir), MirInterpreter(mir)
+    names = hir.input_names()
+    assert [out.name for out in mir.outputs] == [out.name for out in hir.outputs]
+    for index, row in enumerate(vectors):
+        arguments = [row[port] for port in names]
+        expected = evaluator.run(*arguments)
+        assert [_plain(value) for value in interpreter.run(*arguments)] == expected, f"{name}[{index}]"

@@ -1,16 +1,35 @@
 """
-MIR's integer half, driven through :class:`MirInterpreter` on graphs built directly with :class:`MirBuilder`,
-because ``_reject_integers`` still refuses every integer before ``synthesize`` can reach one -- hence the
-``whitebox`` marker on the whole module.
+The integer half below HIR, in two halves of its own. The first drives :class:`MirInterpreter` over graphs built
+directly with :class:`MirBuilder`, pinning what MIR carries; the second drives real kernels through selection and
+LIR construction, pinning what the lowering chooses and what the transport keeps.
+
+Both stay white-box because the refusal has only MOVED: it now sits on the built LIR, so ``synthesize`` still
+declines every integer and no backend can render one.
 
 No expectation here calls back into ``IntValue``: the rails, the division degeneracies and the two shift readings
 are literals or CPython's own operators, so a defect in the value layer cannot vouch for itself.
 """
 
+import math
 from collections.abc import Callable
 
 import pytest
 
+import holoso
+from holoso import (
+    FAddOptions,
+    FCmpOptions,
+    FFromIntOptions,
+    FMulOptions,
+    FRoundOptions,
+    FToIntOptions,
+    OperatorOptions,
+    Options,
+    UnsupportedConstruct,
+)
+from holoso._eel import lower as lower_frontend
+from holoso._hir import optimize
+from holoso._lir import Lir, PooledScheduledOp, RegRef, WideOutputWire
 from holoso._mir import (
     Mir,
     MirBoolView,
@@ -27,6 +46,7 @@ from holoso._mir import (
     MirIntStateSlot,
     MirOperation,
     MirWideView,
+    lower as lower_to_mir,
 )
 from holoso._operators import (
     BoolInversion,
@@ -56,7 +76,10 @@ from holoso._operators import (
     SelectOperator,
 )
 from holoso._type import BoolType, FloatFormat, FloatType, IntFormat, IntType
-from holoso._value import FloatValue, IntValue
+from holoso._value import FloatValue, IntValue, ScalarValue
+
+from ._modelref import build_lir, build_ops
+from ._writetimeline import OperationProducer, build_write_timeline, latest_producer_before
 
 pytestmark = pytest.mark.whitebox
 
@@ -450,3 +473,353 @@ def test_wide_view_refuses_an_integer_of_a_foreign_format(build: Callable[[], Mi
     """Anchored because ``int24`` is the configured format: unanchored would pass on a message listing both."""
     with pytest.raises(ValueError, match=r"got int16$"):
         MirWideView.from_mir(build())
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Selection and LIR carriage, driven by real kernels rather than hand-built graphs.
+#
+# ``FMT`` is 16 bits wide and ``wint_min`` defaults to 16, so these kernels run on exactly the ``IFMT`` machine the
+# hand-built graphs above use.
+
+
+KERNEL_OPTIONS = Options(
+    OperatorOptions(
+        fadd=FAddOptions(),
+        fmul=FMulOptions(),
+        fcmp=FCmpOptions(),
+        fround=FRoundOptions(),
+        ffromint=FFromIntOptions(),
+        ftoint=FToIntOptions(),
+    ),
+    ffmt=FMT,
+)
+
+
+def _select(target: Callable[..., object]) -> Mir:
+    """Front end through selection, exactly the chain ``synthesize`` runs before it builds the LIR."""
+    hir = optimize(lower_frontend(target).hir, KERNEL_OPTIONS.ifconv_max_ops)
+    return lower_to_mir(hir, build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+
+
+def _plain(value: ScalarValue) -> int | float | bool:
+    match value:
+        case bool():
+            return value
+        case IntValue():
+            return int(value)
+        case _:
+            return float(value)
+
+
+def _run(interpreter: MirInterpreter, *args: int | float | bool) -> list[int | float | bool]:
+    return [_plain(value) for value in interpreter.run(*args)]
+
+
+def _expected(target: Callable[..., object], *args: int | float | bool) -> list[object]:
+    result = target(*args)
+    return list(result) if isinstance(result, tuple) else [result]
+
+
+def _mnemonics(mir: Mir) -> list[str]:
+    return sorted(node.operator.mnemonic for node in mir.nodes.values() if isinstance(node, MirOperation))
+
+
+def _wide_firings(lir: Lir) -> list[PooledScheduledOp]:
+    return [op for block in lir.blocks for op in block.ops]
+
+
+def divmod_pair(a: int, b: int) -> tuple[int, int]:
+    return a // b, a % b
+
+
+def three_relations(a: int, b: int) -> tuple[bool, bool, bool]:
+    return a < b, a == b, a > b
+
+
+def four_relations(a: int, b: int) -> tuple[bool, bool, bool, bool]:
+    return a <= b, a != b, a >= b, a > b
+
+
+def sign_ops(a: int, b: int) -> tuple[int, int]:
+    return -a, abs(b)
+
+
+def bitwise_ops(a: int, b: int) -> tuple[int, int, int, int]:
+    return a & b, a | b, a ^ b, ~a
+
+
+def mux_and_casts(a: int, b: int, c: bool) -> tuple[int, bool, int]:
+    return (a if c else b), bool(a), int(c) + a
+
+
+def family_crossings(x: float, n: int) -> tuple[int, float]:
+    return int(x), float(n)
+
+
+def negated_crossing(x: float) -> int:
+    return int(-x)
+
+
+def shift_pair(x: int, n: int) -> tuple[int, int]:
+    return x << n, x >> n
+
+
+def boundary_outputs(a: int, b: int) -> tuple[int, int, int]:
+    """Three integer outputs, one of them computed first and then left idle while a long chain runs."""
+    return a + b, a - b, ((a * b) * (a - b)) * (a + 2) * (b + 3)
+
+
+def mixed_constants(x: float, n: int) -> tuple[float, int, int]:
+    """``1`` beside ``1.0`` is the pool collision; ``7`` lands at an index that is not its own value."""
+    return x + 1.0, n + 1, n + 7
+
+
+def rounded_to_float(x: float) -> float:
+    return float(math.floor(x)) + 1.0
+
+
+def countdown(n: int) -> int:
+    steps = 0
+    while n > 0:
+        n = n - 3
+        steps = steps + 1
+    return steps
+
+
+class MixedState:
+    def __init__(self) -> None:
+        self.count = 0
+        self.level = 0.0
+
+    def step(self, n: int, x: float) -> tuple[int, float]:
+        self.count = self.count + n
+        self.level = self.level + x
+        return self.count, self.level
+
+
+class Accumulator:
+    def __init__(self) -> None:
+        self.total = 0
+
+    def step(self, x: int) -> int:
+        self.total = self.total + x
+        return self.total
+
+
+class InputLatch:
+    def __init__(self) -> None:
+        self.prev = 0
+
+    def step(self, x: int, y: int) -> int:
+        """The slot live-out is the integer INPUT itself, which is what lets the install run ahead of the boundary."""
+        out = self.prev * y + x * 3 - y * y
+        self.prev = x
+        return out
+
+
+@pytest.mark.parametrize(
+    "target,args,selected",
+    [
+        (divmod_pair, (17, 5), ["idivs", "idivs"]),
+        (three_relations, (3, 9), ["icmp", "icmp", "icmp"]),
+        (sign_ops, (7, -9), ["iabss", "isubs"]),
+        (bitwise_ops, (0x0F0F, 0x00FF), ["ibwand", "ibwnot", "ibwor", "ibwxor"]),
+        (mux_and_casts, (5, 6, True), ["iadds", "ifrombool", "itobool", "select"]),
+        (family_crossings, (3.75, -4), ["ffromint", "ftoint"]),
+        (shift_pair, (5, 2), ["ishift", "ishift", "isubs"]),
+        (countdown, (10,), ["iadds", "icmp", "isubs"]),
+    ],
+)
+def test_a_kernel_selects_its_integer_modules_and_answers_as_cpython_does(
+    target: Callable[..., object], args: tuple[int | float | bool, ...], selected: list[str]
+) -> None:
+    """
+    Every integer operator the lowering can choose, named in one place: ``ineg`` selects ``isubs`` because there is no
+    negation module, and a right shift selects ``isubs`` too, to negate its count for the left-positive shifter.
+    """
+    mir = _select(target)
+    assert _mnemonics(mir) == selected
+    assert _run(MirInterpreter(mir), *args) == _expected(target, *args)
+
+
+def test_a_negated_operand_folds_onto_the_conversion() -> None:
+    """``int(-x)`` conditions the ``ftoint`` float port rather than emitting a sign operator of its own."""
+    mir = _select(negated_crossing)
+    assert _mnemonics(mir) == ["ftoint"]
+    for x in (3.75, -3.75, 0.0):
+        assert _run(MirInterpreter(mir), x) == _expected(negated_crossing, x)
+
+
+def test_the_quotient_and_the_remainder_share_one_divider_firing() -> None:
+    """``a // b`` beside ``a % b`` is one activation with two taps -- counted, because fusion is not automatic."""
+    lir = build_lir(_select(divmod_pair), "divmod_pair")
+    (firing,) = _wide_firings(lir)
+    assert [instance.operator.mnemonic for instance in lir.instances] == ["idivs"]
+    assert sorted(write.port for write in firing.writes) == [0, 1]
+
+
+def test_relations_over_one_operand_pair_fuse_into_one_comparator_firing() -> None:
+    """Three relations, three flags, one activation -- counted, because fusion is not automatic."""
+    lir = build_lir(_select(three_relations), "three_relations")
+    (firing,) = _wide_firings(lir)
+    assert [instance.operator.mnemonic for instance in lir.instances] == ["icmp"]
+    assert len(firing.writes) == 3
+
+
+def test_two_relations_reading_one_flag_still_share_the_comparator() -> None:
+    """
+    A firing taps each port at most once, so ``a <= b`` and ``a > b`` -- the same flag under opposite inversions --
+    need an activation each. They still bind to the one pooled comparator: the cost is a cycle, never a module.
+    """
+    lir = build_lir(_select(four_relations), "four_relations")
+    assert [instance.operator.mnemonic for instance in lir.instances] == ["icmp"]
+    assert len(_wide_firings(lir)) == 2
+
+
+def test_each_integer_output_still_holds_its_own_value_at_the_boundary() -> None:
+    """
+    The register an output taps must not be recycled before the boundary reads it. This is the one wide-bank
+    predicate an integer output reaches on its own, and getting it wrong is silent: the allocator simply frees the
+    register early and a later firing lands in it, so the port reads a stranger's value with no exception anywhere.
+    """
+    lir = build_lir(_select(boundary_outputs), "boundary_outputs")
+    timeline = build_write_timeline(lir)
+    resolved: dict[str, str] = {}
+    for wire in lir.outputs:
+        assert isinstance(wire, WideOutputWire) and isinstance(wire.tap.source, RegRef)
+        producer = latest_producer_before(timeline, wire.tap.source, lir.initiation_interval)
+        assert isinstance(producer, OperationProducer)
+        resolved[wire.name] = lir.ops[producer.index].inst.operator.mnemonic
+    assert resolved == {"out_0": "iadds", "out_1": "isubs", "out_2": "imuls"}
+
+
+def test_a_slot_fed_by_an_integer_input_installs_ahead_of_the_boundary() -> None:
+    """
+    A live-out that is an input is available immediately, so the slot installs at once and frees nothing else to wait
+    on; the boundary install a narrower predicate would force is correct but costs the register for the whole run.
+    """
+    lir = build_lir(_select(InputLatch().step), "input_latch")
+    (slot,) = lir.wide_state_slots
+    assert slot.install_cycle == 1 < lir.initiation_interval
+
+
+def test_the_lir_carries_the_scalar_family_of_every_wide_port() -> None:
+    """A wide carrier no longer names its family, so the port metadata the RTL and the model share must."""
+    lir = build_lir(_select(family_crossings), "family_crossings")
+    assert [(port.name, port.scalar_type) for port in lir.input_ports] == [("in_x", FTYPE), ("in_n", ITYPE)]
+    assert [(port.name, port.scalar_type) for port in lir.output_ports] == [("out_0", ITYPE), ("out_1", FTYPE)]
+
+
+def test_a_state_slot_carries_its_scalar_family_too() -> None:
+    """The third wide carrier: a slot's family comes from its live-out, not from what its reset literal happens
+    to be, so a float slot reset to a whole number is still a float slot."""
+    lir = build_lir(_select(MixedState().step), "mixed_state")
+    assert {slot.name: slot.scalar_type for slot in lir.wide_state_slots} == {"count": ITYPE, "level": FTYPE}
+
+
+def test_a_kernel_mixing_integer_and_float_state_keeps_them_apart() -> None:
+    interpreter = MirInterpreter(_select(MixedState().step))
+    reference = MixedState()
+    for n, x in ((3, 0.5), (-10, 0.25), (4, -1.0)):
+        assert _run(interpreter, n, x) == _expected(reference.step, n, x)
+
+
+def test_the_two_families_keep_separate_entries_in_one_constant_pool() -> None:
+    """``1`` and ``1.0`` hash and compare equal in Python while naming different words, so the keying must differ."""
+    lir = build_lir(_select(mixed_constants), "mixed_constants")
+    assert lir.wide_consts == [FloatValue.from_float(FMT, 1.0), _int(1), _int(7)]
+
+
+def test_an_integer_slot_carries_its_value_across_transactions() -> None:
+    interpreter = MirInterpreter(_select(Accumulator().step))
+    reference = Accumulator()
+    for x in (3, 4, -10, 9000, -12):  # short of the rails, where CPython's unbounded sum is still the machine's
+        assert _run(interpreter, x) == _expected(reference.step, x)
+
+
+def test_a_data_dependent_loop_merges_integers_at_its_header() -> None:
+    """A residual loop the front end cannot unroll: the trip count and the counter both merge at an integer phi."""
+    interpreter = MirInterpreter(_select(countdown))
+    for n in (0, 1, 10, -5, 100):
+        assert _run(interpreter, n) == _expected(countdown, n)
+
+
+def _wrap(value: int) -> int:
+    """Into the word, spelled out rather than borrowed from ``IntFormat``."""
+    return ((value + 32768) % 65536) - 32768
+
+
+@pytest.mark.parametrize("x", [0, 1, -1, 5, -5, 12345, MIN, MAX])
+@pytest.mark.parametrize("n", [0, 1, 3, 14, 15, 16, 17, 40])
+def test_a_shift_answers_as_python_does_once_the_word_truncates_it(x: int, n: int) -> None:
+    """
+    The shifter clamps its count at the word, which is exactly where an unbounded shift stops saying anything new:
+    a right shift past the word is the sign fill CPython also gives, and a left shift past it drops every bit either
+    way. So CPython is the reference for every non-negative count, with only the left shift's wrap applied.
+    """
+    interpreter = MirInterpreter(_select(shift_pair))
+    assert _run(interpreter, x, n) == [_wrap(x << n), x >> n]
+
+
+@pytest.mark.parametrize("x,n,expected", [(1, -2, 0), (-8, -2, -2), (12345, -20, 0)])
+def test_a_negative_runtime_shift_count_reverses_the_direction(x: int, n: int, expected: int) -> None:
+    """
+    CPython refuses a negative count; the shifter is total over every representable one and reads it as the opposite
+    direction. A kernel reaches this only through a value it did not constrain, so the hardware's answer is the
+    definition -- there is no other.
+    """
+    assert _run(MirInterpreter(_select(shift_pair)), x, n)[0] == expected
+
+
+def shift_left_by_a_negative_constant(x: int) -> int:
+    return x << -1
+
+
+def shift_right_by_a_negative_constant(x: int) -> int:
+    return x >> -1
+
+
+@pytest.mark.parametrize("target", [shift_left_by_a_negative_constant, shift_right_by_a_negative_constant])
+def test_a_constant_negative_shift_count_is_refused_rather_than_reversed(target: Callable[..., object]) -> None:
+    """
+    CPython raises on a negative count, and the left-positive shifter would read one as the OPPOSITE direction --
+    a wrong answer, not a rail. HIR cannot fold it away here because the shifted value is a runtime input.
+    """
+    with pytest.raises(UnsupportedConstruct, match=r"shift count -1 is negative; Python has no such shift"):
+        _select(target)
+
+
+def test_the_backends_still_refuse_an_integer_and_name_where_it_survived() -> None:
+    """The refusal moved below LIR rather than disappearing, and it names every surviving site, not just the first."""
+    with pytest.raises(UnsupportedConstruct) as raised:
+        holoso.synthesize(mixed_constants, KERNEL_OPTIONS, name="MixedConstants")
+    assert str(raised.value) == (
+        "integers do not reach the backends yet: port 'in_n'; port 'out_1'; port 'out_2'; "
+        "constant 1; constant 7; operator 'iadds'"
+    )
+
+
+def integer_passthrough(n: int) -> int:
+    return n
+
+
+def test_the_refusal_fires_on_a_kernel_whose_only_integer_is_a_port() -> None:
+    """The gate's port arm alone: no integer operator fires and no integer constant is pooled to trip on."""
+    with pytest.raises(UnsupportedConstruct) as raised:
+        holoso.synthesize(integer_passthrough, KERNEL_OPTIONS, name="IntegerPassthrough")
+    assert str(raised.value) == "integers do not reach the backends yet: port 'in_n'; port 'out_0'"
+
+
+def test_the_refusal_names_an_integer_state_slot_as_its_own_site() -> None:
+    """A slot is named in its own right, not left to be inferred from the port that happens to observe it."""
+    with pytest.raises(UnsupportedConstruct) as raised:
+        holoso.synthesize(Accumulator().step, KERNEL_OPTIONS, name="AccumulatorProbe")
+    assert str(raised.value) == (
+        "integers do not reach the backends yet: port 'in_x'; port 'state_total'; "
+        "state slot 'total'; operator 'iadds'"
+    )
+
+
+def test_a_float_only_kernel_reaching_an_integer_operator_still_synthesizes() -> None:
+    """``float(math.floor(x))`` folds the conversion pair away, so no integer survives to be refused."""
+    holoso.synthesize(rounded_to_float, KERNEL_OPTIONS, name="RoundedToFloat")

@@ -1288,67 +1288,16 @@ def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
     ), "both operands must be constant, or the sweep would decline to convict it wherever it sat"
 
 
-def _int_in_port(builder: HirBuilder) -> None:
-    builder.output("y", builder.operation(IntToFloat(), [builder.input("n", IntType())]))
-
-
-def _int_const(builder: HirBuilder) -> None:
-    # A runtime selector between two integer constants: the constants survive folding and reach MIR as themselves.
-    selected = builder.operation(
-        IntSelect(), [builder.input("c", BoolType()), builder.int_const(3), builder.int_const(4)]
-    )
-    builder.output("y", builder.operation(IntToFloat(), [selected]))
-
-
-def _int_operation(builder: HirBuilder) -> None:
-    # Rooted at FLOAT inputs, so no integer constant, port, or state read precedes the operation in lowering order.
-    a, b = builder.input("a", HirFloatType()), builder.input("b", HirFloatType())
-    total = builder.operation(IntAdd(), [builder.operation(FloatToInt(), [a]), builder.operation(FloatToInt(), [b])])
-    builder.output("y", builder.operation(IntToFloat(), [total]))
-
-
-def _int_state_read(builder: HirBuilder) -> None:
-    value = builder.state_read("s", IntType())
-    builder.state_slot("s", IntConst(0), value)
-    builder.output("y", builder.operation(IntToFloat(), [value]))
-
-
-def _int_phi(builder: HirBuilder) -> None:
-    # A merge of two integer values: the sweep sees it directly, ahead of any lowering-order effect.
-    entry = builder.current_block
-    then_block, else_block, merge = builder.block(), builder.block(), builder.block()
-    builder.branch(builder.input("c", BoolType()), then_block, else_block)
-    builder.position_at(then_block)
-    builder.jump(merge)
-    builder.position_at(else_block)
-    builder.jump(merge)
-    builder.position_at(merge)
-    phi = builder.phi(IntType(), [(then_block, builder.int_const(1)), (else_block, builder.int_const(2))])
-    builder.output("y", builder.operation(IntToFloat(), [phi]))
-    assert entry == 0
-
-
-def _int_state_reset(builder: HirBuilder) -> None:
-    # An integer reset carried by an otherwise float slot: only a sweep over the slots themselves sees this one.
+def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
+    # The slot's live-out is a float while its reset snapshot is an integer: a slot register holds one family, and
+    # only a sweep over the slots themselves sees the mismatch, since no node in the graph carries it.
+    builder = HirBuilder()
+    builder.block()
     x = builder.input("x", HirFloatType())
     builder.state_slot("s", IntConst(0), x)
     builder.output("y", x)
-
-
-@pytest.mark.parametrize(
-    "make",
-    [_int_in_port, _int_const, _int_operation, _int_state_read, _int_state_reset, _int_phi],
-    ids=["in_port", "const", "operation", "state_read", "state_reset", "phi"],
-)
-def test_integer_nodes_are_refused_by_mir_lowering(make: Callable[[HirBuilder], None]) -> None:
-    # Integers are contained at the HIR/MIR seam until the integer backend lands. Each node kind takes a different
-    # lowering path, and a conversion operator is integer-OPERANDED while being float- or bool-RESULTED, so the
-    # refusal cannot key on the result type alone.
-    builder = HirBuilder()
-    builder.block()
-    make(builder)
     builder.ret()
-    with pytest.raises(UnsupportedConstruct, match="not yet lowerable to hardware"):
+    with pytest.raises(UnsupportedConstruct, match="must have a float reset value"):
         lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT))
 
 

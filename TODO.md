@@ -2,52 +2,51 @@
 
 ## Integer support adjacent
 
-The front end carries integers end to end -- Eel has a width-less int type with C promotion, HIR has the int
-vocabulary -- and everything below HIR refuses them at `_reject_integers` (`_mir/_lower.py`). Lifting that gate is
-what this section is about.
+An integer now travels from the front end to LIR: Eel has a width-less int type with C promotion, HIR has the int
+vocabulary and folds it exactly, MIR selects hardware for it, and LIR schedules, binds and allocates it. What is
+left is the backends. `synthesize` refuses a built LIR that still names an integer (`_refuse_integer_lir`,
+`_api.py`), listing every surviving port, constant, state slot and operator; lifting THAT gate is what this section
+is about.
 
-The pooled integer operators exist (`iadds`, `isubs`, `imuls`, `idivs`, `iabss`, `ishift`, `icmp`), each owning its
-closed-form latency, its RTL parameters and its port names. Nothing selects them: MIR still refuses every integer
-node. Two carry more than a lowering needs, so the lowering chooses: `ishift` emits both the raw shift and its
-saturating reading, `idivs` the quotient and the remainder together. There is no negation module -- `ineg` is
-`isubs(0, x)`, which saturates `-MIN` correctly. The saturation sideband every module raises is left unconnected,
-because HIR marks the saturating operations speculatable and an if-converted arm must not raise the error flag; were
-a kernel ever to want the flag it belongs on the operator as an ordinary boolean result lane, never in `error_ports`.
+The lowering taps the two multi-output integer operators where a shift and a division mean it: `ishift` port 0, the
+raw reading that lets a left shift drop what leaves the word, and `idivs` ports 0 and 1, whose quotient and
+remainder fuse into one firing. There is no negation module -- `ineg` is `isubs(0, x)`, which saturates `-MIN`
+correctly -- and a right shift borrows the same subtractor to negate its count for the left-positive shifter, at
+runtime, even where the count is constant. The constant-shift fold will remove that subtractor along with the
+`ishift` itself; until then a constant count too wide for the machine format is refused not as a shift but by the
+generic literal range check every integer constant meets, so `x << 100000` and `x + 100000` fail alike. A constant
+NEGATIVE count is refused in the lowering instead, because CPython has no such shift and the left-positive shifter
+would otherwise read it as the opposite direction; a runtime negative count remains the hardware's total answer.
+The saturation sideband every module raises is left unconnected, because HIR marks the
+saturating operations speculatable and an if-converted arm must not raise the error flag; were a kernel ever to want
+the flag it belongs on the operator as an ordinary boolean result lane, never in `error_ports`.
 
-Two obligations those operators decline. HIR shift counts are width-less while the constant shift serves only counts
-that are shifts at all -- one reaching the word answers a constant or a sign fill, and zero the identity -- so folding
-and clamping are the lowering's job. And `FloatToInt` over a `FloatRound` is NOT unconditionally the one `ftoint`
-carrying that mode: where the float rounding itself overflows, the rounded value is an infinity that saturates to a
-rail while the direct conversion answers the integer. In `ZkfFormat(2, 4)`, `3.5` rounds to `+inf` and thence to
-`INT_MAX` where a direct nearest-even conversion gives `4`. It needs a format whose largest finite value is
-non-integral, so most never show it, and `TRUNC` never mismatches because truncation cannot increase magnitude.
-The fastmath charter applies here.
+One obligation the operators decline is still open. `FloatToInt` over a `FloatRound` is NOT unconditionally the one
+`ftoint` carrying that mode: where the float rounding itself overflows, the rounded value is an infinity that
+saturates to a rail while the direct conversion answers the integer. In `ZkfFormat(2, 4)`, `3.5` rounds to `+inf`
+and thence to `INT_MAX` where a direct nearest-even conversion gives `4`. It needs a format whose largest finite
+value is non-integral, so most never show it, and `TRUNC` never mismatches because truncation cannot increase
+magnitude. The fastmath charter applies here, so the fusion is owed regardless.
 
-The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.py`); they need a
-`FloatValue | IntValue` union and one shared scalar port codec (cocotb and the model duplicate it). The
-`lir.wide_consts` pool already carries that union, though it still dedups on the source float rather than on the
-encoding, so two literals that encode identically get two `const_N` wires.
+The numerical model stores every wide value as a float and says so with asserts in `_read` and `_write`, while the
+slot reset snapshot leans on `FloatValue.from_float`'s own type check; the cocotb codec duplicates the assumption.
+Both need a `FloatValue | IntValue` union and one shared scalar port codec. The model's `_coerce_inputs` and its
+slot reset decide the family independently of the port metadata rather than routing through it, which the typed
+`scalar_type` every wide carrier now names makes possible; converge them onto that one dispatch first, or an integer
+input port fails loudly in one place and an integer slot is encoded as a float without a word in the other.
+The `lir.wide_consts` pool carries both families, though its float half still dedups on the source Python float
+rather than on the encoding, so two float literals that encode identically get two `const_N` wires.
 
-The conditioner mapping is already in place -- an integer port carries `IntIdentity` and nothing else, because
-integer sign conditioning cannot ride a port sideband the way `holoso_fsgnop` does (`holoso_iabss` is a pooled module
-with a latency and a saturation output). What that did NOT reach is the wide datapath below MIR, which assumes float
-wherever it keys on `is_wide` or on nothing at all, where it must key on `FloatType`. None of it is reachable until a
-lowering selects an integer operator, so it is left alone rather than fixed blind, but the sites do not fail alike and
-the order of the eventual fix matters. Three refuse loudly: `_wide_source_net` and `_render_inline` assert a wide
-conditioner is a `FloatSignControl`, where an integer carries `IntIdentity`; the operator instantiation binds a
-`_sgnop` per operand and per wide result unconditionally, which `ffromint`'s integer operand and `ftoint`'s integer
-result do not have; and the microcode packer allocates and asserts the matching sign fields on both sides. One would
-MISCOMPILE in silence, and is today masked only by the loud ones: `_emit_declarations` sizes every pooled operand
-read-mux register and every wide result wire at `WFLT` rather than at the port's own width, so an integer port wider
-than the float silently loses its top bits. Fix that one first, or fixing the loud ones uncovers it.
-
-`scalar_type_of` (`_lir/_ir.py`) recovers the scalar family from the LIR node class, so it still answers
-`FloatType(fmt)` for the bank-named `WideInputLoad`/`WideOutputWire` carriers. When integer ports land the
-discriminator must be re-established by giving those nodes a `scalar_type` field, not by reintroducing nominal
-`Float*`/`Int*` sibling classes. Fixing `scalar_type_of` alone is not enough, because `_coerce_inputs` and the slot
-reset snapshot in `_backend/numerical.py` decide the same thing independently rather than routing through it. Input
-ports would at least fail loudly there (`_coerce_input` rejects a non-float), but wide state would be encoded as a
-float without a word. They must be converged onto the one dispatch first.
+What the conditioner mapping did NOT reach is the wide datapath in the Verilog backend, which assumes float wherever
+it keys on `is_wide` or on nothing at all, where it must key on `FloatType`. None of it is reachable while the LIR
+refusal stands, so it is left alone rather than fixed blind, but the sites do not fail alike and the order of the
+eventual fix matters. Three refuse loudly: `_wide_source_net` and `_render_inline` assert a wide conditioner is a
+`FloatSignControl`, where an integer carries `IntIdentity`; the operator instantiation binds a `_sgnop` per operand
+and per wide result unconditionally, which `ffromint`'s integer operand and `ftoint`'s integer result do not have;
+and the microcode packer allocates and asserts the matching sign fields on both sides. One would MISCOMPILE in
+silence, and is today masked only by the loud ones: `_emit_declarations` sizes every pooled operand read-mux
+register and every wide result wire at `WFLT` rather than at the port's own width, so an integer port wider than the
+float silently loses its top bits. Fix that one first, or fixing the loud ones uncovers it.
 
 Strength reduction folds integer constants and applies the algebra each operator declares, so `x*0`, `x*1`, `x+0`,
 `x&0`, `x|-1`, `x&-1`, `x|0` and `x^0` reduce, and the mux identities cover `iselect` beside its float and bool
@@ -55,22 +54,19 @@ siblings. Deferred is everything past that. The non-commutative integer operator
 because the shared algebra drops an identity operand wherever it sits and so would rewrite `0 - x` to `x`; `x-0`,
 `x//1`, `x%1`, `x<<0` and `x>>0` therefore survive and need rules of their own. So do the integer counterparts of the
 float-specific rewrites -- `x*-1` to `ineg`, multiplication and floor division by a power of two to a shift, and the
-value-equality folds `x-x`, `x^x` and `x&x`. Each of those must answer for saturation at the format extremes, a
-question the float rules never faced.
+value-equality folds `x-x`, `x^x` and `x&x`. That power-of-two rewrite must tap `ishift`'s saturating `prod` reading
+rather than the raw `shft` one the `<<` lowering takes, or it changes the answer at the rails. Each of those must
+answer for saturation at the format extremes, a question the float rules never faced. Below MIR, a constant shift
+count still selects the runtime `ishift` and a runtime negation of the count, where `IntShiftConstOperator` would
+cost no module at all.
 
-A kernel that never names an integer can still raise one and hit the gate: the roundings answer an integer over a
-float, and `abs`/`min`/`max`/`np.sign` keep one they are handed. Only the adjacent `IntToFloat(FloatToInt(x))`
-reduces today, so `float(math.floor(x))` and `abs(float(int(x)))` build while `math.floor(x) > 3`,
-`float(math.floor(x) + 1)`, `float(abs(int(x)))`, `float(max(int(x), 0))`, an integer phi merging `floor` with
-`ceil`, and any integer state slot do not. These lowerings are right -- the alternative silently computes over a
-float image, and retyped an integer slot to a float register that stops counting at the mantissa width. Sinking
-`IntToFloat` through a select and through the exactly-representable int arithmetic would recover most of them;
-lifting the gate recovers all of them and is the real fix.
-
-A speculated shift can carry an out-of-domain count, where the HIR fold names no number but the RTL defines a result;
-the same is already true of float `fmul`/`fadd` and the casts. The hardware side has since picked its answer -- the
-shift operator is total over every representable count, saturating the amount at the word, as its module does -- so
-what remains is reconciling the fold with the model and the RTL, which now agree.
+A kernel that never names an integer can still raise one and reach the LIR refusal: the roundings answer an integer
+over a float, and `abs`/`min`/`max`/`np.sign` keep one they are handed. Only the adjacent `IntToFloat(FloatToInt(x))`
+reduces before that, so `float(math.floor(x))` and `abs(float(int(x)))` still synthesize whole while
+`math.floor(x) > 3`, `float(math.floor(x) + 1)`, `float(abs(int(x)))`, `float(max(int(x), 0))`, an integer phi
+merging `floor` with `ceil`, and any integer state slot now build to LIR and stop there. Sinking `IntToFloat`
+through a select and through the exactly-representable int arithmetic would let more of them synthesize sooner;
+carrying integers through the backends recovers all of them and is the real fix.
 
 The emitted RTL requires an empirical study of the optimal way to bit-extend float results into the register file
 when WREG>WFLT. The default treatment of `x <= y` where x is wider than y is to zero-fill the higher bits,
@@ -80,14 +76,14 @@ e.g., `x <= {{X{1'bx}}, result8}` for X extra bits, or a similar solution.
 The winner will be chosen based on the synthesis metrics across Diamond, Vivado, and Yosys.
 
 The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the
-acceptance set: each is oracle-verified against CPython through HIR, so lifting the gate extends that to end-to-end
-coverage by adding them to the MIR-lowering parametrization. `examples/uart.py` carries its counters as floats
-until then.
+acceptance set. Each is oracle-verified against CPython through HIR and then re-run through the MIR interpreter and
+built to LIR, so selection and carriage are covered end to end; what the gate still withholds is the cosimulation
+against the emitted RTL. `examples/uart.py` carries its counters as floats until then.
 
 ## White-box test promotion
 
 The `whitebox` marker is a promotion queue, not a category: it marks a test that reaches past the public API only
-because a gate blocks the path. The integer MIR tests carry it because `_reject_integers` still refuses every
+because a gate blocks the path. The integer tests carry it because `synthesize` still refuses a built LIR naming an
 integer; when the gate lifts, each should become an ordinary kernel and the marker should go.
 
 Predating the marker is a large body of tests that reach into `lower_to_mir`, `build` and the allocation tables

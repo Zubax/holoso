@@ -374,6 +374,12 @@ class MirWideView(_MirBankView):
             vid: node for vid, node in self.nodes.items() if isinstance(node, MirOperation) and node.scalar_type.is_wide
         }
 
+    def scalar_type_of(self, vid: ValueId) -> FloatType | IntType:
+        """Which family a wide value belongs to: the bank is physical, so only the value itself names its type."""
+        scalar_type = self.nodes[vid].scalar_type
+        assert isinstance(scalar_type, (FloatType, IntType))
+        return scalar_type
+
     @classmethod
     def from_mir(cls, mir: Mir) -> MirWideView:
         nodes: dict[ValueId, MirWideNode] = {}

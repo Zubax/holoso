@@ -158,8 +158,11 @@ front-end knows both without rediscovering either. Only the float format and a l
 configured; the integer format itself is derived, never narrower than the float. Integers are signed two's
 complement and saturate at the extremes rather than wrapping. Saturation is defined behaviour, the dual of a float
 overflowing to infinity, so it is not an error flag -- were it one, an if-converted arm that saturated would raise an
-error the untaken path never earned. What is pending is the integer backend: the hardware operators exist but no
-lowering selects one.
+error the untaken path never earned. The shift is the deliberate exception: `<<` is the raw bit shift and drops
+whatever leaves the word, so `5000 << 3` wraps where `5000 * 8` rails. Truncation is what `<<` means over a machine
+word, and the shift module offers both readings, so a rewrite of a power-of-two multiply into a shift must tap the
+saturating one rather than this. What is pending is the integer backend: selection and the transport reach LIR,
+but nothing below renders an integer yet.
 
 One wide register holds either family whole: it is as wide as the integer format, which is never narrower than the
 float, so an integer fills it exactly and a float occupies its low bits. The inline integer operators are then native
@@ -167,7 +170,7 @@ Verilog over the whole register. Floats pay in unused flip-flops and slightly wi
 integer is the wider format; one representation with no edge cases is worth more than the bits it wastes.
 
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
-reach HIR, and remain unlowerable past MIR until the integer backend lands (see DEFERRED).
+reach HIR, and now reach LIR, where a located refusal holds them until the backends carry them (see DEFERRED).
 
 ## Operators
 
@@ -308,21 +311,21 @@ A `for` that cannot unroll -- a dynamic trip count, or a static one above the un
 than lowered to a counted back-edge loop, which needs a runtime integer counter; once runtime integers lower past
 MIR, the counted back-edge loop becomes the natural follow-on.
 
-Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
-integer node reaching MIR is rejected as not-yet-lowerable. The integer hardware exists and answers for its own timing
-and arithmetic -- the pooled operators, the inline bitwise gates, casts and constant shift, and the three operators
-that span the int and float halves -- and MIR's own vocabulary, wide view and interpreter carry integers whole, so
-what remains is the transport: selecting those operators during HIR-to-MIR lowering, and giving the wide register
-bank below MIR, its constants, its state and its port codecs a scalar family rather than assuming float.
+Integers. An integer now travels the whole compiler: the front-end emits it, HIR folds it exactly, MIR selects
+hardware for it, and LIR schedules, binds and allocates it beside the floats. What is deferred is everything below --
+the numerical model, the cocotb codec and the HTML report each read a wide carrier as a float -- so `synthesize`
+refuses a built LIR that still names an integer, listing every surviving port, constant, state slot and operator
+rather than whichever one a backend would have tripped over first. That single refusal covers all four backends.
 A static integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
 runtime integer: every symbol answering what Python answers -- the roundings over a float, and `abs`/`min`/`max`/
 `np.sign` over an integer however it arose, including an integer state slot -- now keeps it, where a float-only
-lowering would have computed over its float image instead. Which such kernels still build is decided by the
-reductions that sink an integer back into the float datapath rather than by any rule worth stating.
+lowering would have computed over its float image instead.
 
 ## MIR
 
-HIR-to-MIR lowering selects concrete hardware. The float lowerer maps each semantic float operator to its configured
+HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
+RESULT is its own; the bool-result operations over wide operands (the comparators and the casts into the boolean bank)
+sit with the dispatch that chains them. The float lowerer maps each semantic float operator to its configured
 hardware operator and collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands,
 results, or output wires. Multiply-by-power-of-two selects the constant-shift operator when the float format supports
 that exponent (an out-of-range exponent is rejected -- the equivalent constant would overflow or underflow the format
@@ -347,10 +350,15 @@ nominally, one class per wide family, so a float and an integer share the bank w
 ## LIR
 
 LIR is the scheduled, bound, register-allocated microprogram. Its resources are the bound operator instances, the
-float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a pool of nonnegative
-wide constants (float-encoded today, the sign riding the consumer's sideband), and the typed input loads and output
-wires. LIR names its carriers after the bank that holds them rather than after the scalar family -- `WideOperand`,
-`WideCopy`, `WideStateSlot` against their `Bool*` duals -- because it is the physical binding layer. A carrier's
+float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a wide constant pool
+shared by both families, and the typed input loads and output wires. The pool keys a float by MAGNITUDE, with the sign
+riding the consumer's free sideband, and an integer by its own whole value, since two's complement has no such
+sideband; the two keyings index one list of entries but cannot share a dictionary, because `1` and `1.0` compare and
+hash equal in Python while naming different words. Each wide carrier -- an input load, an output wire, a state slot --
+names its own scalar type, so the advertised port metadata the RTL and the numerical model share reads the family off
+the carrier rather than assuming one. LIR names its carriers after the bank that holds them rather than after the
+scalar family -- `WideOperand`, `WideCopy`, `WideStateSlot` against their `Bool*` duals -- because it is the
+physical binding layer. A carrier's
 folded conditioner follows the same rule: it is typed as whatever the bank may hold rather than as a sign control,
 because what a port can fold is a property of its scalar family. A float port folds a sign into the free `fsgnop`
 sideband and a boolean port an inversion, but an integer port folds nothing, since two's-complement negation is not

@@ -34,7 +34,6 @@ from ._ir import (
     landing_cycle as landing_cycle,
     operand_read_cycle as operand_read_cycle,
     pooled_write_word as pooled_write_word,
-    scalar_type_of as scalar_type_of,
 )
 from ._ports import (
     ControlInputPort as ControlInputPort,

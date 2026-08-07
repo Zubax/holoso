@@ -70,7 +70,7 @@ def _drop_redundant_state_slots(mir: Mir) -> Mir:
     """
     read_names = {node.name for node in mir.nodes.values() if isinstance(node, MirStateRead)}
 
-    classes: dict[tuple[float | bool, ValueId, PortConditioner], list[MirStateSlot]] = {}
+    classes: dict[tuple[float | int | bool, ValueId, PortConditioner], list[MirStateSlot]] = {}
     for slot in mir.state_slots:
         classes.setdefault((slot.reset_value, slot.live_out, slot.conditioner), []).append(slot)
 
@@ -346,6 +346,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             slot.reset_value,
             wide_operand(wide_mir, slot.live_out, slot.conditioner, alloc, const_pool),
             block_base[ret_block] + alloc.wide_install[slot.name],
+            wide_mir.scalar_type_of(slot.live_out),
         )
         for slot in wide_mir.state_slots
     ]

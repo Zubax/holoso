@@ -11,6 +11,7 @@ from .._hir import (
     BoolOr,
     BoolSelect,
     BoolToFloat,
+    BoolToInt,
     BoolType as HirBoolType,
     BoolXor,
     Branch,
@@ -48,10 +49,35 @@ from .._hir import (
     FloatSin,
     FloatSqrt,
     FloatToBool,
+    FloatToInt,
     FloatTrunc,
     FloatType as HirFloatType,
     Hir,
     InPort,
+    IntAbs,
+    IntAdd,
+    IntBwAnd,
+    IntBwNot,
+    IntBwOr,
+    IntBwXor,
+    IntComparison,
+    IntConst,
+    IntDivFloor,
+    IntEqual,
+    IntGreater,
+    IntGreaterOrEqual,
+    IntLess,
+    IntLessOrEqual,
+    IntMod,
+    IntMul,
+    IntNeg,
+    IntNotEqual,
+    IntSelect,
+    IntShiftLeft,
+    IntShiftRight,
+    IntSub,
+    IntToBool,
+    IntToFloat,
     IntType as HirIntType,
     Jump,
     Node,
@@ -70,6 +96,7 @@ from .._operators import (
     BoolInversion,
     BoolOrOperator,
     BoolToFloatOperator,
+    BoolToIntOperator,
     BoolXorOperator,
     FloatClassificationOperator,
     FloatHardwareOperator,
@@ -77,6 +104,18 @@ from .._operators import (
     FloatIsNegInfOperator,
     FloatIsPosInfOperator,
     FMulILog2OperatorFamily,
+    IAbsOperator,
+    IAddOperator,
+    ICmpOperator,
+    IDivOperator,
+    IShiftOperator,
+    ISubOperator,
+    IntBwAndOperator,
+    IntBwNotOperator,
+    IntBwOrOperator,
+    IntBwXorOperator,
+    IntIdentity,
+    IntToBoolOperator,
     ParameterizedHardwareOperator,
     FloatSignControl,
     FloatToBoolOperator,
@@ -99,13 +138,20 @@ from .._type import (
 from ._ir import Mir, MirBuilder
 
 # The seam between the semantic relation and the comparator flag it taps; the two vocabularies meet only here.
-_FCMP_RELATION: dict[type[FloatComparison], Relation] = {
+# Both comparator families share it: an integer comparison taps ``icmp`` exactly as a float one taps ``fcmp``.
+_RELATION_OF: dict[type[Operator], Relation] = {
     FloatLess: Relation.LT,
     FloatLessOrEqual: Relation.LE,
     FloatEqual: Relation.EQ,
     FloatNotEqual: Relation.NE,
     FloatGreaterOrEqual: Relation.GE,
     FloatGreater: Relation.GT,
+    IntLess: Relation.LT,
+    IntLessOrEqual: Relation.LE,
+    IntEqual: Relation.EQ,
+    IntNotEqual: Relation.NE,
+    IntGreaterOrEqual: Relation.GE,
+    IntGreater: Relation.GT,
 }
 
 
@@ -121,28 +167,6 @@ def _select_hardware(semantic: Operator, hardware: HardwareOperator) -> Hardware
         semantic.speculatable and error_ports
     ), f"{semantic.mnemonic} is speculatable but lowers to error-bearing {hardware.mnemonic}"
     return hardware
-
-
-def _reject_integers(hir: Hir) -> None:
-    """
-    HIR carries a complete integer vocabulary, but no hardware selects it yet. The whole graph is swept before any
-    lowering runs, so the refusal does not depend on which node kind the lowering order happens to reach first, and a
-    conversion operator -- integer-operanded but float- or bool-RESULTED -- is refused as the integer operation it is
-    rather than as an unrecognized float one. Sorted, so simultaneous offenders yield one reproducible diagnostic.
-    TODO FIXME REMOVE THIS ONCE INTEGERS ARE SUPPORTED.
-    """
-    for vid in sorted(hir.nodes):
-        node = hir.nodes[vid]
-        if isinstance(node, Operation):
-            signature = node.operator.signature
-            if any(isinstance(ty, HirIntType) for ty in (*signature.operand_types, signature.result_type)):
-                mnemonic = node.operator.mnemonic
-                raise UnsupportedConstruct(f"integer operator {mnemonic!r} is not yet lowerable to hardware")
-        elif isinstance(node.type, HirIntType):
-            raise UnsupportedConstruct("integer values are not yet lowerable to hardware")
-    for slot in hir.state_slots:
-        if isinstance(slot.reset_value.type, HirIntType):
-            raise UnsupportedConstruct(f"integer state slot {slot.name!r} is not yet lowerable to hardware")
 
 
 def _sign_of(node: Operation) -> FloatSignControl | None:
@@ -172,13 +196,18 @@ def _collapse_bool_inversions(nodes: dict[ValueId, Node], vid: ValueId) -> tuple
 
 
 def _collapse_conditioner(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, PortConditioner]:
-    """Collapse the type's own sideband chain: sign operations over a float value, NOTs over a boolean one."""
+    """
+    Collapse the type's own sideband chain: sign operations over a float value, NOTs over a boolean one. An integer
+    has no free sideband, so ``ineg``/``iabs`` are hardware and nothing collapses.
+    """
     ty = nodes[vid].type
     match ty:
         case HirBoolType():
             return _collapse_bool_inversions(nodes, vid)
         case HirFloatType():
             return _collapse_signs(nodes, vid)
+        case HirIntType():
+            return vid, IntIdentity()
         case _:
             raise UnsupportedConstruct(f"no conditioner-collapse rule for HIR type {ty!r}")
 
@@ -416,6 +445,7 @@ class _LoweringContext:
         self.hir = hir
         self.ops = ops
         self.float_format = float_format
+        self.int_format = int_format
         assert int_format.width >= float_format.width, "one wide register holds either family whole"
         for field in fields(ops):
             assert _operator_formats_match(
@@ -431,6 +461,7 @@ class _LoweringContext:
         }
         self.fused_hypots = _plan_hypot_fusions(hir, ops)
         self.float_lowerer = _FloatLowerer(self)
+        self.int_lowerer = _IntLowerer(self)
 
     def run(self) -> Mir:
         for _ in self.hir.blocks:
@@ -504,6 +535,8 @@ class _LoweringContext:
         match node.type:
             case HirFloatType():
                 return ScalarFloatType(self.float_format)
+            case HirIntType():
+                return ScalarIntType(self.int_format)
             case HirBoolType():
                 return ScalarBoolType()
             case _:
@@ -511,6 +544,8 @@ class _LoweringContext:
 
     def _lower_node(self, old_id: ValueId, node: Node) -> None:
         if self.float_lowerer.lower_node(old_id, node):
+            return
+        if self.int_lowerer.lower_node(old_id, node):
             return
         if self._lower_bool_node(old_id, node):
             return
@@ -545,13 +580,30 @@ class _LoweringContext:
                 # into the same pooled fcmp operator and can fuse into one firing.
                 base_a, sign_a = _collapse_signs(self.hir.nodes, a)
                 base_b, sign_b = _collapse_signs(self.hir.nodes, b)
-                port, inversion = self.ops.require("fcmp").tap_of(_FCMP_RELATION[type(semantic)])
+                port, inversion = self.ops.require("fcmp").tap_of(_RELATION_OF[type(semantic)])
                 self.remap[old_id] = self.builder.operation(
                     _select_hardware(semantic, self.ops.require("fcmp")),
                     [self.remap[base_a], self.remap[base_b]],
                     [sign_a, sign_b],
                     output_port=port,
                     output_conditioner=inversion,
+                )
+                return True
+            case Operation(operator=IntComparison() as semantic, operands=(a, b)):
+                # Two's complement is totally ordered, so the integer comparator taps exactly as the float one does.
+                icmp = ICmpOperator(self.int_format)
+                port, inversion = icmp.tap_of(_RELATION_OF[type(semantic)])
+                self.remap[old_id] = self.builder.operation(
+                    _select_hardware(semantic, icmp),
+                    [self.remap[a], self.remap[b]],
+                    [IntIdentity(), IntIdentity()],
+                    output_port=port,
+                    output_conditioner=inversion,
+                )
+                return True
+            case Operation(operator=IntToBool() as semantic, operands=(a,)):
+                self.remap[old_id] = self.builder.operation(
+                    _select_hardware(semantic, IntToBoolOperator(self.int_format)), [self.remap[a]], [IntIdentity()]
                 )
                 return True
             case Operation(
@@ -611,6 +663,8 @@ class _LoweringContext:
     def _lower_output(self, name: str, value: ValueId) -> None:
         if self.float_lowerer.lower_output(name, value):
             return
+        if self.int_lowerer.lower_output(name, value):
+            return
         if self._lower_bool_output(name, value):
             return
         raise UnsupportedConstruct(f"no MIR lowering rule for HIR output type {self.hir.nodes[value].type!r}")
@@ -624,6 +678,8 @@ class _LoweringContext:
 
     def _lower_state_slot(self, slot: StateSlot) -> None:
         if self.float_lowerer.lower_state_slot(slot):
+            return
+        if self.int_lowerer.lower_state_slot(slot):
             return
         if self._lower_bool_state_slot(slot):
             return
@@ -731,6 +787,12 @@ class _FloatLowerer:
                     _select_hardware(semantic, BoolToFloatOperator(self.context.float_format)),
                     [self.context.remap[base]],
                     [inversion],
+                )
+            case Operation(operator=IntToFloat() as semantic, operands=(a,)):
+                return self.context.builder.operation(
+                    _select_hardware(semantic, self.context.ops.require("ffromint")),
+                    [self.context.remap[a]],
+                    [IntIdentity()],
                 )
             case Operation(operator=FloatSelect() as semantic, operands=(cond, a, b)):
                 # The if-conversion mux: arm signs and a condition NOT chain fold into the operand conditioners
@@ -910,7 +972,7 @@ class _FloatLowerer:
 
     def _float_eq_zero(self, operand: ValueId, conditioner: FloatSignControl) -> ValueId:
         fcmp = self.context.ops.require("fcmp")
-        port, inversion = fcmp.tap_of(_FCMP_RELATION[FloatEqual])
+        port, inversion = fcmp.tap_of(_RELATION_OF[FloatEqual])
         return self.context.builder.operation(
             _select_hardware(FloatEqual(), fcmp),
             [operand, self._lower_float_const(0.0)],
@@ -985,6 +1047,150 @@ class _FloatLowerer:
         return True
 
 
+class _IntLowerer:
+    """
+    The integer dual of :class:`_FloatLowerer`, owning every operation whose RESULT is an integer. Its operands never
+    carry a folded sideband: an integer port conditions with the identity alone, so ``ineg`` and ``iabs`` are hardware
+    where their float counterparts are free. Integer operators are never optional, so only the two conversions that
+    cross into the float half go through :meth:`OpConfig.require`.
+    """
+
+    def __init__(self, context: _LoweringContext) -> None:
+        self.context = context
+        self.int_type = ScalarIntType(context.int_format)
+
+    def lower_node(self, old_id: ValueId, node: Node) -> bool:
+        match node:
+            case InPort(name=name, type=HirIntType()):
+                self.context.remap[old_id] = self.context.builder.int_input(name, self.int_type)
+                return True
+            case StateRead(slot=slot, type=HirIntType()):
+                self.context.remap[old_id] = self.context.builder.int_state_read(slot, self.int_type)
+                return True
+            case IntConst(value=value):
+                self.context.remap[old_id] = self._const(value)
+                return True
+            case Operation() as operation:
+                lowered = self._lower_operation(operation)
+                if lowered is None:
+                    return False
+                self.context.remap[old_id] = lowered
+                return True
+            case _:
+                return False
+
+    def _lower_operation(self, node: Operation) -> ValueId | None:
+        fmt = self.context.int_format
+        match node:
+            case Operation(operator=IntAdd() as semantic, operands=(a, b)):
+                return self._emit(semantic, IAddOperator(fmt), a, b)
+            case Operation(operator=IntSub() as semantic, operands=(a, b)):
+                return self._emit(semantic, ISubOperator(fmt), a, b)
+            case Operation(operator=IntMul() as semantic, operands=(a, b)):
+                return self._emit(semantic, self.context.ops.imul, a, b)
+            case Operation(operator=IntNeg() as semantic, operands=(a,)):
+                return self._negate(semantic, self.context.remap[a])
+            case Operation(operator=IntAbs() as semantic, operands=(a,)):
+                return self._emit(semantic, IAbsOperator(fmt), a)
+            # The quotient and the remainder are two taps of one divider: written from the same operands with the same
+            # conditioners, they share a MIR intern key up to the port and fuse into a single firing at LIR build.
+            case Operation(operator=IntDivFloor() as semantic, operands=(a, b)):
+                return self._emit(semantic, IDivOperator(fmt), a, b, output_port=0)
+            case Operation(operator=IntMod() as semantic, operands=(a, b)):
+                return self._emit(semantic, IDivOperator(fmt), a, b, output_port=1)
+            case Operation(operator=(IntShiftLeft() | IntShiftRight()) as semantic, operands=(a, b)):
+                return self._lower_shift(semantic, a, b)
+            case Operation(operator=IntBwAnd() as semantic, operands=(a, b)):
+                return self._emit(semantic, IntBwAndOperator(fmt), a, b)
+            case Operation(operator=IntBwOr() as semantic, operands=(a, b)):
+                return self._emit(semantic, IntBwOrOperator(fmt), a, b)
+            case Operation(operator=IntBwXor() as semantic, operands=(a, b)):
+                return self._emit(semantic, IntBwXorOperator(fmt), a, b)
+            case Operation(operator=IntBwNot() as semantic, operands=(a,)):
+                return self._emit(semantic, IntBwNotOperator(fmt), a)
+            case Operation(operator=IntSelect() as semantic, operands=(cond, a, b)):
+                # The integer if-conversion mux: only the condition folds (``a if not c else b`` costs no extra gate).
+                base_c, inv_c = _collapse_bool_inversions(self.context.hir.nodes, cond)
+                return self.context.builder.operation(
+                    _select_hardware(semantic, SelectOperator(self.int_type)),
+                    [self.context.remap[base_c], self.context.remap[a], self.context.remap[b]],
+                    [inv_c, IntIdentity(), IntIdentity()],
+                )
+            case Operation(operator=BoolToInt() as semantic, operands=(a,)):
+                base, inversion = _collapse_bool_inversions(self.context.hir.nodes, a)
+                return self.context.builder.operation(
+                    _select_hardware(semantic, BoolToIntOperator(fmt)), [self.context.remap[base]], [inversion]
+                )
+            case Operation(operator=FloatToInt() as semantic, operands=(a,)):
+                # ``int(x)`` truncates toward zero; the operand's sign chain folds onto the conversion's float port.
+                base, sign = _collapse_signs(self.context.hir.nodes, a)
+                return self.context.builder.operation(
+                    _select_hardware(semantic, self.context.ops.require("ftoint")),
+                    [self.context.remap[base]],
+                    [sign],
+                    immediates=(int(RoundMode.TRUNC),),
+                )
+            case _:
+                return None
+
+    def _lower_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
+        """
+        ``ishift`` shifts left by a positive count and right by a negative one, so a right shift negates its count.
+        Port 0 is the raw reading: a left shift drops what leaves the word rather than saturating, which is what ``<<``
+        means. The module clamps the amount at the word, which is where the two readings of an unbounded count meet --
+        a left shift past the word answers zero and a right shift past it answers the sign fill, as Python's own
+        unbounded shift does once the word truncates it.
+        """
+        # CPython refuses a negative count outright, and the shifter would silently read one as the other direction.
+        # HIR cannot catch it: its fold runs only when BOTH operands are constant, and the shifted value is runtime.
+        count_node = self.context.hir.nodes[count]
+        if isinstance(count_node, IntConst) and count_node.value < 0:
+            raise UnsupportedConstruct(f"shift count {count_node.value} is negative; Python has no such shift")
+        shamt = self.context.remap[count]
+        if isinstance(semantic, IntShiftRight):
+            shamt = self._negate(semantic, shamt)
+        return self.context.builder.operation(
+            _select_hardware(semantic, IShiftOperator(self.context.int_format)),
+            [self.context.remap[a], shamt],
+            [IntIdentity(), IntIdentity()],
+        )
+
+    def _negate(self, semantic: Operator, value: ValueId) -> ValueId:
+        """``0 - x``: there is no negation module, and the subtractor saturates ``-MIN`` correctly."""
+        return self.context.builder.operation(
+            _select_hardware(semantic, ISubOperator(self.context.int_format)),
+            [self._const(0), value],
+            [IntIdentity(), IntIdentity()],
+        )
+
+    def _const(self, value: int) -> ValueId:
+        return self.context.builder.int_const(value, self.int_type)
+
+    def _emit(
+        self, semantic: Operator, hardware: HardwareOperator, *operands: ValueId, output_port: int = 0
+    ) -> ValueId:
+        return self.context.builder.operation(
+            _select_hardware(semantic, hardware),
+            [self.context.remap[operand] for operand in operands],
+            [IntIdentity()] * len(operands),
+            output_port=output_port,
+        )
+
+    def lower_output(self, name: str, value: ValueId) -> bool:
+        if not isinstance(self.context.hir.nodes[value].type, HirIntType):
+            return False
+        self.context.builder.int_output(name, self.context.remap[value])
+        return True
+
+    def lower_state_slot(self, slot: StateSlot) -> bool:
+        if not isinstance(self.context.hir.nodes[slot.live_out].type, HirIntType):
+            return False
+        if not isinstance(slot.reset_value, IntConst):
+            raise UnsupportedConstruct(f"integer state slot {slot.name!r} must have an integer reset value")
+        self.context.builder.int_state_slot(slot.name, slot.reset_value.value, self.context.remap[slot.live_out])
+        return True
+
+
 def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat) -> Mir:
     """
     Select hardware operators from the configuration and fold semantic signs onto MIR sign controls.
@@ -992,5 +1198,4 @@ def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFor
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
     ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
-    _reject_integers(hir)
     return _LoweringContext(hir, ops, float_format, int_format).run()

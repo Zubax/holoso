@@ -15,8 +15,9 @@ from ._backend.numerical import generate as generate_model, NumericalModel
 from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
 from ._eel import lower as lower_frontend
+from ._errors import UnsupportedConstruct
 from ._hir import optimize
-from ._lir import ControlPort, DataInputPort, DataOutputPort, Port, RegallocTuning, build
+from ._lir import ControlPort, DataInputPort, DataOutputPort, Lir, Port, RegallocTuning, build
 from ._mir import lower as lower_to_mir
 from ._operators import (
     FAddOperator,
@@ -35,10 +36,12 @@ from ._operators import (
     FSincosOperator,
     FSortOperator,
     FToIntOperator,
+    HardwareOperator,
     IMulOperator,
     OpConfig,
 )
-from ._type import FloatFormat, IntFormat
+from ._type import FloatFormat, IntFormat, IntType
+from ._value import IntValue
 
 type Target = Callable[..., Any]
 """
@@ -205,6 +208,31 @@ def _build_op_config(options: Options) -> OpConfig:
     )
 
 
+def _refuse_integer_lir(lir: Lir) -> None:
+    """
+    Selection and the whole transport carry integers to LIR, but nothing below renders one: the numerical model, the
+    cocotb codec and the report all read a wide carrier as a float. One choke point in front of all four, naming every
+    site that survived rather than whichever one a backend happens to trip over first.
+    TODO FIXME REMOVE THIS ONCE THE BACKENDS CARRY INTEGERS.
+    """
+    fired: list[HardwareOperator] = [inst.operator for inst in lir.instances]
+    fired += [op.operator for block in lir.blocks for op in block.inline_ops]
+    sites = [
+        f"port {port.name!r}" for port in lir.input_ports + lir.output_ports if isinstance(port.scalar_type, IntType)
+    ]
+    sites += [f"state slot {slot.name!r}" for slot in lir.wide_state_slots if isinstance(slot.scalar_type, IntType)]
+    sites += [f"constant {value}" for value in lir.wide_consts if isinstance(value, IntValue)]
+    sites += sorted(
+        {
+            f"operator {operator.mnemonic!r}"
+            for operator in fired
+            if any(isinstance(ty, IntType) for ty in operator.signature.operand_types + operator.signature.result_types)
+        }
+    )
+    if sites:
+        raise UnsupportedConstruct(f"integers do not reach the backends yet: {'; '.join(sites)}")
+
+
 def synthesize(target: Target, /, options: Options, *, name: str | None = None) -> SynthesisResult:
     """
     Synthesize ``target`` (a plain function or a bound method of a constructed instance) into RTL.
@@ -241,6 +269,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
         ),
     )
     _logger.info("LIR ports:\n\t%s", "\n\t".join(f"{port}" for port in lir.ports))
+    _refuse_integer_lir(lir)
 
     verilog_output = generate_verilog(lir)
     html_output = generate_html(lir, verilog_output)
