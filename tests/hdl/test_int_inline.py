@@ -97,18 +97,29 @@ def _port(index: int, case: _Case) -> str:
     return f"y{index}_{case.operator.mnemonic}"  # the index disambiguates the several shift counts and both polarities
 
 
+def _nested_port(index: int, case: _Case) -> str:
+    return f"n{index}_{case.operator.mnemonic}"
+
+
 def _harness(width: int, cases: Sequence[_Case]) -> str:
     ports = [
         f"    input  wire [{width - 1}:0] a,",
         f"    input  wire [{width - 1}:0] b,",
         "    input  wire  c,",
+        "    input  wire  sel,",
     ]
     assigns = []
     for index, case in enumerate(cases):
         (result,) = case.operator.signature.result_types
         declaration = f"[{width - 1}:0] " if result.is_wide else " "
+        expression = case.operator.verilog_expr(*case.nets)
         ports.append(f"    output wire {declaration}{_port(index, case)},")
-        assigns.append(f"    assign {_port(index, case)} = {case.operator.verilog_expr(*case.nets)};")
+        ports.append(f"    output wire {declaration}{_nested_port(index, case)},")
+        assigns.append(f"    assign {_port(index, case)} = {expression};")
+        # Substituted beside an UNSIGNED sibling, which is what nesting will do: the ternary is then unsigned, and an
+        # expression that leaks its signedness to the context degrades to a logical shift.
+        sibling = "c" if not result.is_wide else "a"
+        assigns.append(f"    assign {_nested_port(index, case)} = sel ? {expression} : {sibling};")
     ports[-1] = ports[-1].rstrip(",")
     return "\n".join(
         [
@@ -148,6 +159,7 @@ async def holoso_int_inline_cocotb(dut: Any) -> None:
                 dut.a.value = fmt.encode(a)
                 dut.b.value = fmt.encode(b)
                 dut.c.value = int(c)
+                dut.sel.value = 1
                 await Timer(1, unit="ns")
                 for index, case in enumerate(cases):
                     payload: dict[str, ScalarValue] = {
@@ -158,8 +170,9 @@ async def holoso_int_inline_cocotb(dut: Any) -> None:
                     (expected,) = case.operator.evaluate(*(payload[slot] for slot in _operand_slots(case.operator)))
                     assert isinstance(expected, IntValue | bool)
                     want = int(expected) if isinstance(expected, bool) else expected.bits
-                    actual = int(getattr(dut, _port(index, case)).value)
-                    assert actual == want, f"{case!r} {fmt} a={a} b={b} c={c}: got {actual:#x}, want {want:#x}"
+                    for port in (_port(index, case), _nested_port(index, case)):
+                        actual = int(getattr(dut, port).value)
+                        assert actual == want, f"{port} {fmt} a={a} b={b} c={c}: got {actual:#x}, want {want:#x}"
 
 
 @pytest.mark.parametrize("width", _WIDTHS, ids=lambda width: f"w{width}")

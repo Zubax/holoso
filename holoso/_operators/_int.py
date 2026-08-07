@@ -339,7 +339,7 @@ class IntShiftConstOperator(IntInlineOperator):
     def verilog_expr(self, *operand_nets: str) -> str:
         (a,) = operand_nets
         if self.shamt < 0:
-            return f"$signed({a}) >>> {-self.shamt}"
+            return f"{{$signed({a}) >>> {-self.shamt}}}"
         return f"({a}) << {self.shamt}"
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
