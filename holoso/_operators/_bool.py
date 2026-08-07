@@ -34,7 +34,7 @@ class BoolAndOperator(BoolLogicOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
-        return f"{a} & {b}"
+        return f"({a}) & ({b})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands)
@@ -47,7 +47,7 @@ class BoolOrOperator(BoolLogicOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
-        return f"{a} | {b}"
+        return f"({a}) | ({b})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands)
@@ -60,7 +60,7 @@ class BoolXorOperator(BoolLogicOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
-        return f"{a} ^ {b}"
+        return f"({a}) ^ ({b})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands)

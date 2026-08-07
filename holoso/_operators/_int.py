@@ -262,7 +262,7 @@ class IntBwAndOperator(IntBitwiseOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
-        return f"{a} & {b}"
+        return f"({a}) & ({b})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
@@ -275,7 +275,7 @@ class IntBwOrOperator(IntBitwiseOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
-        return f"{a} | {b}"
+        return f"({a}) | ({b})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
@@ -288,7 +288,7 @@ class IntBwXorOperator(IntBitwiseOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
-        return f"{a} ^ {b}"
+        return f"({a}) ^ ({b})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
@@ -305,7 +305,7 @@ class IntBwNotOperator(IntInlineOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         (a,) = operand_nets
-        return f"~{a}"
+        return f"~({a})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
@@ -340,7 +340,7 @@ class IntShiftConstOperator(IntInlineOperator):
         (a,) = operand_nets
         if self.shamt < 0:
             return f"$signed({a}) >>> {-self.shamt}"
-        return f"{a} << {self.shamt}"
+        return f"({a}) << {self.shamt}"
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
@@ -366,7 +366,7 @@ class IntToBoolOperator(InlineHardwareOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         (a,) = operand_nets
-        return f"|{a}"
+        return f"|({a})"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         (a,) = self._validated_operands(operands)

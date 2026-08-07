@@ -20,6 +20,7 @@ class OpConfig:
     fmul: FMulOperator | None
     fdiv: FDivOperator | None
     fmul_ilog2: FMulILog2OperatorFamily | None
+    fmul_ilog2_var: FMulILog2VarOperator | None
     fcmp: FCmpOperator | None
     fround: FRoundOperator | None
     ffma: FFmaOperator | None

@@ -16,6 +16,7 @@ from holoso import (
     FDivOptions,
     FFromIntOptions,
     FMulILog2Options,
+    FMulILog2VarOptions,
     FMulOptions,
     FSortOptions,
     FToIntOptions,
@@ -28,6 +29,7 @@ from holoso import (
 )
 from holoso._operators import (
     FFromIntOperator,
+    FMulILog2VarOperator,
     FSortOperator,
     FToIntOperator,
     IAbsOperator,
@@ -168,12 +170,14 @@ def _integer_operators(ifmt: IntFormat) -> list[PooledHardwareOperator]:
     ]
 
 
-def _conversion_operators(ffmt: FloatFormat, ifmt: IntFormat) -> list[PooledHardwareOperator]:
+def _mixed_format_operators(ffmt: FloatFormat, ifmt: IntFormat) -> list[PooledHardwareOperator]:
     return [
         FFromIntOperator(ffmt, ifmt, FFromIntOptions()),
         FFromIntOperator(ffmt, ifmt, FFromIntOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1)),
         FToIntOperator(ffmt, ifmt, FToIntOptions()),
         FToIntOperator(ffmt, ifmt, FToIntOptions(stage_input=2)),
+        FMulILog2VarOperator(ffmt, ifmt, FMulILog2VarOptions()),
+        FMulILog2VarOperator(ffmt, ifmt, FMulILog2VarOptions(stage_input=1, stage_decode=1)),
     ]
 
 
@@ -228,12 +232,12 @@ def test_integer_operators_elaborate_as_they_declare_themselves(width: int, tmp_
 
 @requires_iverilog
 @pytest.mark.parametrize("wexp,wman,wint", ((6, 18, 44), (8, 36, 24), (3, 4, 12), (6, 18, 17)))
-def test_conversion_operators_elaborate_as_they_declare_themselves(
+def test_mixed_format_operators_elaborate_as_they_declare_themselves(
     wexp: int, wman: int, wint: int, tmp_path: Path
 ) -> None:
     # Several triples because the integer side is sized independently of the float one.
-    name = f"conv_probe_e{wexp}m{wman}i{wint}"
-    operators = _conversion_operators(FloatFormat(wexp, wman), IntFormat(wint))
+    name = f"mixed_probe_e{wexp}m{wman}i{wint}"
+    operators = _mixed_format_operators(FloatFormat(wexp, wman), IntFormat(wint))
     _elaborate(name, _pooled_probe(name, operators), tmp_path)
 
 
@@ -255,12 +259,13 @@ def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     (
         FFromIntOperator(FloatFormat(6, 18), IntFormat(44), FFromIntOptions()),
         FToIntOperator(FloatFormat(6, 18), IntFormat(44), FToIntOptions()),
+        FMulILog2VarOperator(FloatFormat(6, 18), IntFormat(44), FMulILog2VarOptions()),
     ),
     ids=lambda operator: operator.mnemonic,
 )
-def test_conversion_wrapper_rejects_wrong_latency(operator: PooledHardwareOperator, tmp_path: Path) -> None:
+def test_mixed_format_wrapper_rejects_wrong_latency(operator: PooledHardwareOperator, tmp_path: Path) -> None:
     # The negative twin on the conversion side, so the probe's silence means something.
-    name = f"wrong_conv_latency_{operator.mnemonic}"
+    name = f"wrong_mixed_latency_{operator.mnemonic}"
     verilog = _pooled_probe(name, [operator]).replace(
         f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
     )

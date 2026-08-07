@@ -47,6 +47,7 @@ FFmaOptions = _operators.FFmaOperator.Options
 FFromIntOptions = _operators.FFromIntOperator.Options
 FLog2Options = _operators.FLog2Operator.Options
 FMulILog2Options = _operators.FMulILog2Operator.Options
+FMulILog2VarOptions = _operators.FMulILog2VarOperator.Options
 FMulOptions = _operators.FMulOperator.Options
 FRoundOptions = _operators.FRoundOperator.Options
 FSincosOptions = _operators.FSincosOperator.Options

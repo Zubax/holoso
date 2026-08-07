@@ -378,7 +378,7 @@ class SelectOperator(InlineHardwareOperator):
 
     def verilog_expr(self, *operand_nets: str) -> str:
         cond, a, b = operand_nets
-        return f"({cond} ? {a} : {b})"
+        return f"(({cond}) ? ({a}) : ({b}))"
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[ScalarValue, ...]:
         cond, a, b = self._validated_operands(operands)

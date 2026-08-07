@@ -76,7 +76,8 @@ from .._operators import (
     FloatIsFiniteOperator,
     FloatIsNegInfOperator,
     FloatIsPosInfOperator,
-    FloatParameterizedHardwareOperator,
+    FMulILog2OperatorFamily,
+    ParameterizedHardwareOperator,
     FloatSignControl,
     FloatToBoolOperator,
     HardwareOperator,
@@ -387,7 +388,7 @@ def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
 
 
 def _operator_formats_match(
-    operator: HardwareOperator | FloatParameterizedHardwareOperator | None,
+    operator: HardwareOperator | ParameterizedHardwareOperator | None,
     float_format: FloatFormat,
     int_format: IntFormat,
 ) -> bool:
@@ -406,6 +407,7 @@ def _operator_formats_match(
             for ty in signature.operand_types + signature.result_types
         )
     # A parameterized family has no signature until it instantiates; it bakes one format into everything it makes.
+    assert isinstance(operator, FMulILog2OperatorFamily), "the only family today; a second one needs its own arm"
     return operator.fmt == float_format
 
 

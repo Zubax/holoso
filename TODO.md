@@ -14,10 +14,6 @@ saturating reading, `idivs` the quotient and the remainder together. There is no
 because HIR marks the saturating operations speculatable and an if-converted arm must not raise the error flag; were
 a kernel ever to want the flag it belongs on the operator as an ordinary boolean result lane, never in `error_ports`.
 
-`holoso_fmul_ilog2`, the power-of-two scale by a RUNTIME exponent, is the one module still unmodelled. Its exponent
-is a signed `WINT`-wide operand, so it can have no caller until integers lower; whether it earns its keep or is dead
-RTL is part of lifting the gate.
-
 Two obligations those operators decline. HIR shift counts are width-less while the constant shift serves only counts
 that are shifts at all -- one reaching the word answers a constant or a sign fill, and zero the identity -- so folding
 and clamping are the lowering's job. And `FloatToInt` over a `FloatRound` is NOT unconditionally the one `ftoint`
@@ -44,9 +40,10 @@ MISCOMPILE in silence, and are today masked only by the loud ones: `_emit_declar
 read-mux register and every wide result wire at `WFLT` rather than at the port's own width, so an integer port wider
 than the float silently loses its top bits, and `_emit_consts` encodes every wide constant through the float codec
 (unreachable while `wide_consts` is typed `list[float]`, which is what stops an integer reaching it). Fix the silent
-pair first, or fixing the loud ones uncovers them. `_Bank` in `_lir/_bankalloc.py` is generic over a CONSTRAINED type variable,
-which cannot express `MirFloatStateSlot | MirIntStateSlot` for one wide bank; lifting it
-means giving `MirFloatStateSlot.sign` and `MirBoolStateSlot.inversion` a common `conditioner` field.
+pair first, or fixing the loud ones uncovers them.
+`_Bank` in `_lir/_bankalloc.py` is generic over a CONSTRAINED type variable, which cannot express
+`MirFloatStateSlot | MirIntStateSlot` for one wide bank; lifting it means giving `MirFloatStateSlot.sign` and
+`MirBoolStateSlot.inversion` a common `conditioner` field.
 
 `scalar_type_of` (`_lir/_ir.py`) recovers the scalar family from the LIR node class, so it still answers
 `FloatType(fmt)` for the bank-named `WideInputLoad`/`WideOutputWire` carriers. When integer ports land the

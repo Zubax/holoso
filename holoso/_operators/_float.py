@@ -71,11 +71,6 @@ class FloatHardwareOperator(ZkfBackedOperator, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatParameterizedHardwareOperator(ParameterizedHardwareOperator, ABC):
-    fmt: FloatFormat
-
-
-@dataclass(frozen=True, slots=True)
 class FAddOperator(FloatHardwareOperator):
     @dataclass(frozen=True, slots=True)
     class Options:
@@ -231,9 +226,10 @@ class FMulILog2Operator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2OperatorFamily(FloatParameterizedHardwareOperator):
+class FMulILog2OperatorFamily(ParameterizedHardwareOperator):
     """The ilog2 family: a factory whose stage knobs are baked into every concrete operator it instantiates."""
 
+    fmt: FloatFormat
     opt: FMulILog2Operator.Options
 
     def instantiate(self, *params: int) -> FMulILog2Operator:
@@ -501,20 +497,9 @@ class FLog2Operator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class _FCordicOperator(FloatHardwareOperator, ABC):
-    """
-    These are NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring.
-    """
+class FSincosOperator(FloatHardwareOperator):
+    """NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring."""
 
-    def render_output(
-        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
-    ) -> str:
-        assert isinstance(conditioner, FloatSignControl)
-        return conditioner.decorate(f"{self.output_hdl_ports[port]}({', '.join(operands)})")
-
-
-@dataclass(frozen=True, slots=True)
-class FSincosOperator(_FCordicOperator):
     @dataclass(frozen=True, slots=True)
     class Options:
         unroll100: int = 100
@@ -555,9 +540,17 @@ class FSincosOperator(_FCordicOperator):
         (a,) = operands
         return f"sincos({a})"
 
+    def render_output(
+        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
+    ) -> str:
+        assert isinstance(conditioner, FloatSignControl)
+        return conditioner.decorate(f"{self.output_hdl_ports[port]}({', '.join(operands)})")
+
 
 @dataclass(frozen=True, slots=True)
-class FAtan2Operator(_FCordicOperator):
+class FAtan2Operator(FloatHardwareOperator):
+    """NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring."""
+
     @dataclass(frozen=True, slots=True)
     class Options:
         """A nearby hypot over the same operands folds into the magnitude port for free."""
@@ -599,6 +592,12 @@ class FAtan2Operator(_FCordicOperator):
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         y, x = operands
         return f"atan2({y},{x})"
+
+    def render_output(
+        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
+    ) -> str:
+        assert isinstance(conditioner, FloatSignControl)
+        return conditioner.decorate(f"{self.output_hdl_ports[port]}({', '.join(operands)})")
 
 
 @dataclass(frozen=True, slots=True)
@@ -711,18 +710,10 @@ class BoolToFloatOperator(InlineHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatIntConversionOperator(ZkfBackedOperator, ABC):
-    """
-    A conversion belongs to neither family, so it declares no scalar family and its signature names both formats.
-    The RTL's own ``WEXP`` guards are not mirrored in the ZKF Python models; they fail loudly at elaboration.
-    """
+class FFromIntOperator(ZkfBackedOperator):
+    """Signed integer to float, nearest with ties to even; a magnitude past the finite range becomes an infinity."""
 
     ifmt: IntFormat
-
-
-@dataclass(frozen=True, slots=True)
-class FFromIntOperator(FloatIntConversionOperator):
-    """Signed integer to float, nearest with ties to even; a magnitude past the finite range becomes an infinity."""
 
     @dataclass(frozen=True, slots=True)
     class Options:
@@ -762,11 +753,13 @@ class FFromIntOperator(FloatIntConversionOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class FToIntOperator(FloatIntConversionOperator):
+class FToIntOperator(ZkfBackedOperator):
     """
     Float to signed integer, saturating at the rails, an infinity reaching one of them. One pooled instance serves
     all four modes through the ``round_mode`` immediate, as ``fround`` does.
     """
+
+    ifmt: IntFormat
 
     @dataclass(frozen=True, slots=True)
     class Options:
@@ -798,3 +791,47 @@ class FToIntOperator(FloatIntConversionOperator):
         (a,) = operands
         (mode,) = immediates
         return f"i{_ROUND_LABEL[RoundMode(mode)]}({a})"
+
+
+@dataclass(frozen=True, slots=True)
+class FMulILog2VarOperator(ZkfBackedOperator):
+    """Exact scaling by a power of two: ``a * 2**k``; every ``k`` is legal."""
+
+    ifmt: IntFormat
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_decode: int = 0
+
+    mnemonic: ClassVar[str] = "fmul_ilog2"
+    operand_hdl_ports: ClassVar[list[str]] = ["a", "k"]
+    output_hdl_ports: ClassVar[list[str]] = ["y"]
+    opt: Options
+
+    def __post_init__(self) -> None:
+        model = zkf.MulIlog2Model(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            wk=self.ifmt.width,
+            stage_input=self.opt.stage_input,
+            stage_decode=self.opt.stage_decode,
+        )
+        object.__setattr__(self, "_model", model)
+
+    @property
+    def params(self) -> dict[str, int]:
+        # The wrapper sizes the exponent port by the machine's integer format, so it spells the core's WK as WINT.
+        return {("WINT" if name == "WK" else name): value for name, value in self._model.params.items()}
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((FloatType(self.fmt), IntType(self.ifmt)), (FloatType(self.fmt),))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        a, k = self._validated_operands(operands)
+        assert isinstance(a, FloatValue) and isinstance(k, IntValue)
+        return (a.scale_pow2(k.value),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        a, k = operands
+        return f"{a}×2^{k}"

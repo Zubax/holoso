@@ -123,10 +123,12 @@ def _add(a: float, b: float) -> float:
 
 
 def test_default_options_carry_the_documented_int_format() -> None:
-    assert Options(OperatorOptions()).ifmt == IntFormat(33)
+    # The floor is low enough that a float-only build at a practical format pays nothing for the integer half.
+    assert Options(OperatorOptions()).ifmt == IntFormat(24)
+    assert Options(OperatorOptions(), ffmt=FloatFormat(4, 8)).ifmt == IntFormat(16)
 
 
-@pytest.mark.parametrize("wint_min,width", ((2, 24), (17, 24), (33, 33), (44, 44)))
+@pytest.mark.parametrize("wint_min,width", ((2, 24), (16, 24), (33, 33), (44, 44)))
 def test_the_int_format_is_never_narrower_than_the_float(wint_min: int, width: int) -> None:
     options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
     assert options.ifmt == IntFormat(width)
@@ -137,7 +139,7 @@ def test_the_int_format_is_never_narrower_than_the_float(wint_min: int, width: i
     assert build_lir(mir, "int_format_probe").int_format == options.ifmt
 
 
-@pytest.mark.parametrize("wint_min,width", ((2, 24), (17, 24), (33, 33), (44, 44)))
+@pytest.mark.parametrize("wint_min,width", ((2, 24), (16, 24), (33, 33), (44, 44)))
 def test_the_int_format_sizes_the_wide_register_bank_in_the_rtl(wint_min: int, width: int) -> None:
     # The end-to-end pin: driven through the public entry point, so a build that dropped the derivation anywhere
     # between here and the Verilog backend -- or substituted a plausible-but-wrong width -- fails right here.
