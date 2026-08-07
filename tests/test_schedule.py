@@ -77,6 +77,7 @@ from holoso._operators import (
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_model
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType, ScalarType
+from holoso._value import FloatValue
 
 from ._modelref import (
     COMPARATOR_OP_CASES,
@@ -1785,7 +1786,7 @@ def test_build_lir_ekf1_stateless() -> None:
     assert lir.regfile.nwr == 4
     assert lir.regfile.nrd == 7
     # The 1/x21 numerator survives as a constant immediate.
-    assert any(abs(c - 1.0) < 1e-12 for c in lir.wide_consts)
+    assert any(c == FloatValue.from_float(FMT, 1.0) for c in lir.wide_consts)
 
 
 def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
@@ -1794,7 +1795,9 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
         return a * 1000.0 + a * (-1000.0)
 
     lir = build_lir(_run(f), "f")
-    assert [c for c in lir.wide_consts if abs(c) == 1000.0] == [1000.0]
+    assert [c for c in lir.wide_consts if c == FloatValue.from_float(FMT, 1000.0)] == [
+        FloatValue.from_float(FMT, 1000.0)
+    ]
     operands = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
     assert len({opnd.source.index for opnd in operands}) == 1
     assert {opnd.conditioner for opnd in operands} == {FloatSignControl(), FloatSignControl(negate=True)}
@@ -1805,9 +1808,9 @@ def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
         return a + (-1000.0)
 
     lir = build_lir(_run(f), "f")
-    assert all(c >= 0.0 for c in lir.wide_consts)
+    assert all(isinstance(c, FloatValue) and not c.negative for c in lir.wide_consts)
     (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
-    assert lir.wide_consts[operand.source.index] == 1000.0
+    assert lir.wide_consts[operand.source.index] == FloatValue.from_float(FMT, 1000.0)
     assert operand.conditioner == FloatSignControl(negate=True)
 
 
@@ -1823,7 +1826,7 @@ def test_constant_pool_is_canonically_nonnegative() -> None:
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
     lir = build_lir(_run(filt.update), "ekf1_stateful")
-    assert all(c >= 0.0 for c in lir.wide_consts)
+    assert all(isinstance(c, FloatValue) and not c.negative for c in lir.wide_consts)
     assert len(lir.wide_consts) == 6  # the +1000.0 / -1000.0 pair collapsed (was 7)
 
 
@@ -1835,7 +1838,7 @@ def test_underflowing_negative_constant_is_not_sign_folded() -> None:
 
     lir = build_lir(_run(f), "f")
     (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
-    assert FMT.encode(lir.wide_consts[operand.source.index]) == 0
+    assert lir.wide_consts[operand.source.index].bits == 0
     assert operand.conditioner == FloatSignControl()
 
 
@@ -1845,7 +1848,7 @@ def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
 
     lir = build_lir(_run(f), "f")
     (wire,) = [w for w in lir.wide_outputs if isinstance(w.tap.source, WideConstRef)]
-    assert FMT.encode(lir.wide_consts[wire.tap.source.index]) == 0
+    assert lir.wide_consts[wire.tap.source.index].bits == 0
     assert wire.tap.conditioner == FloatSignControl()
 
 
@@ -1974,8 +1977,8 @@ def test_mir_operation_validates_invariants() -> None:
             FloatSignControl(),
             (),
         )
-    with pytest.raises(TypeError, match="sign"):
-        MirFloatOutput("out_0", 0, object())  # type: ignore[arg-type]  # deliberately wrong sign control type
+    with pytest.raises(TypeError, match="conditioner"):
+        MirFloatOutput("out_0", 0, object())  # type: ignore[arg-type]  # deliberately wrong conditioner type
 
 
 def test_wide_view_rejects_non_float_mir_before_scheduling() -> None:
@@ -2050,8 +2053,6 @@ def test_marked_commutative_operators_are_bit_exact_commutative() -> None:
     # exactly symmetric. Guard the FAddOperator/FMulOperator markings against a future non-commutative slip-up.
     import operator
     import random
-
-    from holoso._value import FloatValue
 
     rng = random.Random(0)
     assert FAddOperator(FMT, FAddOptions()).is_commutative and FMulOperator(FMT, FMulOptions(), 0).is_commutative

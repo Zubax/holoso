@@ -1,5 +1,6 @@
 """Runtime values and exact arithmetic for Zubax Kulibin float and for the native saturating integer."""
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NamedTuple, Self
@@ -25,7 +26,7 @@ class Atan2Result(NamedTuple):
     magnitude: FloatValue
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, repr=False)
 class FloatValue:
     """A concrete ZKF value. Results match the ``zkf_*`` RTL bit-for-bit."""
 
@@ -58,6 +59,13 @@ class FloatValue:
 
     def __float__(self) -> float:
         return self.fmt.decode(self.bits)
+
+    def __repr__(self) -> str:
+        """If the value is too large to fit in the native double, it is rendered as a fraction instead."""
+        number = float(self)
+        if math.isinf(number) and self.fmt.is_finite(self.bits):
+            return str(self._zval.to_fraction())
+        return repr(number)
 
     @property
     def negative(self) -> bool:
@@ -167,7 +175,7 @@ class ShiftResult(NamedTuple):
     prod: IntValue  # the same shift as a multiplication by a power of two, saturating instead
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, repr=False)
 class IntValue:
     """
     A concrete native integer, signed and saturating. Results match the ``holoso_i*`` RTL bit-for-bit, edge cases
@@ -221,6 +229,9 @@ class IntValue:
 
     def __int__(self) -> int:
         return self.value
+
+    def __repr__(self) -> str:
+        return repr(self.value)
 
     def __add__(self, other: IntValue) -> IntValue:
         _matching_int_format(self, other)
@@ -291,6 +302,10 @@ class IntValue:
 
 # The value dual of ScalarType: what a port of any scalar family may carry at run time.
 type ScalarValue = FloatValue | IntValue | bool
+
+# What the shared wide bank may hold: the two families that occupy a whole wide register, never the single-bit one.
+type WideValue = FloatValue | IntValue
+
 
 _TO_INT: dict[RoundMode, Callable[[zkf.Zkf, int], int]] = {
     RoundMode.NEAREST_EVEN: zkf.Zkf.round_int,

@@ -780,3 +780,17 @@ def test_a_power_of_two_scale_past_the_carrier_folds_to_an_infinity() -> None:
     sim = holoso.synthesize(_scale_past_the_carrier, ops, name="pow2_carrier_overflow").numerical_model.elaborate()
     for c in (False, True):
         assert math.isinf(float(sim.run(c)[0])), f"c={c}"
+
+
+def _scale_by_a_constant_past_the_double_range(a: float) -> float:
+    return a * 1.7976931348623157e308
+
+
+def test_a_constant_past_the_double_range_renders_exactly() -> None:
+    # A format with wexp >= 12 holds finite values no Python double can represent. Rendering one must neither let an
+    # OverflowError escape and abort a kernel that synthesizes fine, nor report the finite constant as an infinity --
+    # 2**1024 is exactly what this literal encodes to at 18 mantissa bits, and the report must say so.
+    ops = Options(OperatorOptions(fmul=FMulOptions()), ffmt=FloatFormat(12, 18))
+    result = holoso.synthesize(_scale_by_a_constant_past_the_double_range, ops, name="past_double")
+    assert f"wire [WREG-1:0] const_0 = 30'h17fe0000;  // {2**1024}" in result.verilog_output.verilog
+    assert str(2**1024) in result.html_output.html

@@ -21,6 +21,7 @@ from .._mir import (
     MirWideView,
 )
 from .._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner, WideConditioner
+from .._value import FloatValue, WideValue
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
@@ -162,16 +163,9 @@ def build_outputs(
     outputs: list[WideOutputWire | BoolOutputWire] = []
     for out in mir.outputs:
         if isinstance(out, MirFloatOutput):
-            node = wide_mir.nodes[out.value]
-            if isinstance(node, MirFloatConst):
-                entry = pool[out.value]
-                outputs.append(
-                    WideOutputWire(out.name, WideOperand(WideConstRef(entry.index), entry.conditioner.then(out.sign)))
-                )
-            else:
-                outputs.append(WideOutputWire(out.name, WideOperand(RegRef(alloc.wide_reg[out.value]), out.sign)))
+            outputs.append(WideOutputWire(out.name, wide_operand(wide_mir, out.value, out.conditioner, alloc, pool)))
         elif isinstance(out, MirBoolOutput):
-            outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.inversion)))
+            outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.conditioner)))
         else:
             assert False, f"unhandled MIR output {out!r}"
     return outputs
@@ -202,7 +196,7 @@ def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
 
 def build_const_pool(
     mir: MirWideView, bool_operations: dict[ValueId, MirOperation] | None = None
-) -> tuple[list[float], dict[ValueId, PooledConst]]:
+) -> tuple[list[WideValue], dict[ValueId, PooledConst]]:
     """
     Build the immediate/ROM pool keyed by magnitude: every constant is stored as a nonnegative value, and its sign is
     folded into the consumer's (free) sign-control sideband, so a value and its negation collapse to a single entry.
@@ -236,7 +230,7 @@ def build_const_pool(
         note(out.value)
     for slot in mir.state_slots:
         note(slot.live_out)
-    values: list[float] = []
+    values: list[WideValue] = []
     magnitude_index: dict[float, int] = {}
     pool: dict[ValueId, PooledConst] = {}
     for vid in ids:
@@ -248,8 +242,8 @@ def build_const_pool(
         if index is None:
             index = len(values)
             magnitude_index[magnitude] = index
-            values.append(magnitude)
-        negate = math.copysign(1.0, value) < 0.0 and mir.fmt.encode(magnitude) != 0
+            values.append(FloatValue.from_float(mir.fmt, magnitude))
+        negate = math.copysign(1.0, value) < 0.0 and values[index].bits != 0
         pool[vid] = PooledConst(index, FloatSignControl(negate=negate))
     return values, pool
 

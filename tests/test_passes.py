@@ -356,7 +356,7 @@ def test_pure_sign_output_adds_no_operation() -> None:
     mir = _run(f)
     assert _ops(mir) == []
     assert isinstance(mir.outputs[0], MirFloatOutput)
-    assert mir.outputs[0].sign == FloatSignControl(absolute=True).then(FloatSignControl(negate=True))
+    assert mir.outputs[0].conditioner == FloatSignControl(absolute=True).then(FloatSignControl(negate=True))
 
 
 def test_selected_mir_has_only_input_const_operation_nodes() -> None:

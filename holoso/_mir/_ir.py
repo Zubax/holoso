@@ -100,6 +100,7 @@ class MirOperation:
 class MirOutput:
     name: str
     value: ValueId
+    conditioner: PortConditioner
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +110,7 @@ class MirStateSlot:
     name: str
     reset_value: float
     live_out: ValueId
+    conditioner: PortConditioner
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,40 +193,40 @@ type MirBoolNode = MirBoolInput | MirBoolStateRead | MirBoolConst | MirPhi | Mir
 
 @dataclass(frozen=True, slots=True)
 class MirFloatOutput(MirOutput):
-    sign: FloatSignControl = FloatSignControl()
+    conditioner: FloatSignControl = FloatSignControl()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.sign, FloatSignControl):
-            raise TypeError(f"MirFloatOutput sign must be FloatSignControl, got {self.sign!r}")
+        if not isinstance(self.conditioner, FloatSignControl):
+            raise TypeError(f"MirFloatOutput conditioner must be FloatSignControl, got {self.conditioner!r}")
 
 
 @dataclass(frozen=True, slots=True)
 class MirBoolOutput(MirOutput):
-    inversion: BoolInversion = BoolInversion()
+    conditioner: BoolInversion = BoolInversion()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.inversion, BoolInversion):
-            raise TypeError(f"MirBoolOutput inversion must be BoolInversion, got {self.inversion!r}")
+        if not isinstance(self.conditioner, BoolInversion):
+            raise TypeError(f"MirBoolOutput conditioner must be BoolInversion, got {self.conditioner!r}")
 
 
 @dataclass(frozen=True, slots=True)
 class MirFloatStateSlot(MirStateSlot):
-    sign: FloatSignControl = FloatSignControl()
+    conditioner: FloatSignControl = FloatSignControl()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.sign, FloatSignControl):
-            raise TypeError(f"MirFloatStateSlot sign must be FloatSignControl, got {self.sign!r}")
+        if not isinstance(self.conditioner, FloatSignControl):
+            raise TypeError(f"MirFloatStateSlot conditioner must be FloatSignControl, got {self.conditioner!r}")
 
 
 @dataclass(frozen=True, slots=True)
 class MirBoolStateSlot(MirStateSlot):
-    inversion: BoolInversion = BoolInversion()
+    conditioner: BoolInversion = BoolInversion()
 
     def __post_init__(self) -> None:
         if not isinstance(self.reset_value, bool):
             raise TypeError(f"MirBoolStateSlot reset_value must be bool, got {self.reset_value!r}")
-        if not isinstance(self.inversion, BoolInversion):
-            raise TypeError(f"MirBoolStateSlot inversion must be BoolInversion, got {self.inversion!r}")
+        if not isinstance(self.conditioner, BoolInversion):
+            raise TypeError(f"MirBoolStateSlot conditioner must be BoolInversion, got {self.conditioner!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,33 +639,33 @@ class MirBuilder:
             raise ValueError(f"value {phi} is not a phi")
         self._nodes[phi] = MirPhi(scalar_type=node.scalar_type, arms=tuple(arms))
 
-    def float_output(self, name: str, value: ValueId, sign: FloatSignControl = FloatSignControl()) -> None:
+    def float_output(self, name: str, value: ValueId, conditioner: FloatSignControl = FloatSignControl()) -> None:
         if not isinstance(self._type_of(value), FloatType):
             raise ValueError(f"float output {name!r} must be driven by a floating-point value")
-        self._outputs.append(MirFloatOutput(name, value, sign))
+        self._outputs.append(MirFloatOutput(name, value, conditioner))
 
-    def bool_output(self, name: str, value: ValueId, inversion: BoolInversion = BoolInversion()) -> None:
+    def bool_output(self, name: str, value: ValueId, conditioner: BoolInversion = BoolInversion()) -> None:
         if not isinstance(self._type_of(value), BoolType):
             raise ValueError(f"bool output {name!r} must be driven by a boolean value")
-        self._outputs.append(MirBoolOutput(name, value, inversion))
+        self._outputs.append(MirBoolOutput(name, value, conditioner))
 
     def float_state_slot(
         self,
         name: str,
         reset_value: float,
         live_out: ValueId,
-        sign: FloatSignControl = FloatSignControl(),
+        conditioner: FloatSignControl = FloatSignControl(),
     ) -> None:
         if not isinstance(self._type_of(live_out), FloatType):
             raise ValueError(f"float state slot {name!r} must hold a floating-point value")
-        self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, sign))
+        self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, conditioner))
 
     def bool_state_slot(
-        self, name: str, reset_value: bool, live_out: ValueId, inversion: BoolInversion = BoolInversion()
+        self, name: str, reset_value: bool, live_out: ValueId, conditioner: BoolInversion = BoolInversion()
     ) -> None:
         if not isinstance(self._type_of(live_out), BoolType):
             raise ValueError(f"bool state slot {name!r} must hold a boolean value")
-        self._state_slots.append(MirBoolStateSlot(name, bool(reset_value), live_out, inversion))
+        self._state_slots.append(MirBoolStateSlot(name, bool(reset_value), live_out, conditioner))
 
     def finish(self) -> Mir:
         if not self._blocks:

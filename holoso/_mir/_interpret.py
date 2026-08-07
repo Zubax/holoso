@@ -207,10 +207,10 @@ class MirInterpreter:
         match out:
             case MirFloatOutput():
                 assert isinstance(value, FloatValue)
-                return out.sign.apply_value(value)
+                return out.conditioner.apply_value(value)
             case MirBoolOutput():
                 assert isinstance(value, bool)
-                return out.inversion.apply(value)
+                return out.conditioner.apply(value)
             case _:
                 assert False, f"unhandled output {type(out).__name__}"
 
@@ -226,9 +226,9 @@ class MirInterpreter:
         match slot:
             case MirFloatStateSlot():
                 assert isinstance(value, FloatValue)
-                return slot.sign.apply_value(value)
+                return slot.conditioner.apply_value(value)
             case MirBoolStateSlot():
                 assert isinstance(value, bool)
-                return slot.inversion.apply(value)
+                return slot.conditioner.apply(value)
             case _:
                 assert False, f"unhandled state slot {type(slot).__name__}"

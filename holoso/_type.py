@@ -1,5 +1,6 @@
 """Scalar data types."""
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -53,12 +54,17 @@ class FloatFormat:
         The value as the nearest Python double, correctly rounded in a single step. Formats wider than IEEE double
         (``wman > 53``, reaching the double-subnormal range) round up to 1 ULP tighter than a naive ``ldexp`` decode
         that double-rounds; no float32/float64-class ZKF format reaches that regime, so this is invisible in practice.
+        A finite value past the double range saturates to an infinity, which is what correct rounding means there.
         """
-        return float(self._zfmt.wrap(bits))
+        value = self._zfmt.wrap(bits)
+        try:
+            return float(value)
+        except OverflowError:
+            return -math.inf if value.negative else math.inf
 
     def round(self, value: float) -> float:
         """Rounds exactly as the hardware packer does after each operator. NaN is rejected (ZKF has no NaN)."""
-        return float(self._zfmt.encode(value))
+        return self.decode(self.encode(value))
 
     def is_legal(self, bits: int) -> bool:
         """Rejects subnormals and negative zero."""

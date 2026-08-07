@@ -24,8 +24,9 @@ non-integral, so most never show it, and `TRUNC` never mismatches because trunca
 The fastmath charter applies here.
 
 The oracles store wide values as `FloatValue` (`numerical.py`, `_mir/_interpret.py`); they need a
-`FloatValue | IntValue` union, a typed payload for the `lir.wide_consts` pool (constants are float-encoded across
-microcode/emit/html/model today), and one shared scalar port codec (cocotb and the model duplicate it).
+`FloatValue | IntValue` union and one shared scalar port codec (cocotb and the model duplicate it). The
+`lir.wide_consts` pool already carries that union, though it still dedups on the source float rather than on the
+encoding, so two literals that encode identically get two `const_N` wires.
 
 The conditioner mapping is already in place -- an integer port carries `IntIdentity` and nothing else, because
 integer sign conditioning cannot ride a port sideband the way `holoso_fsgnop` does (`holoso_iabss` is a pooled module
@@ -35,24 +36,18 @@ lowering selects an integer operator, so it is left alone rather than fixed blin
 the order of the eventual fix matters. Three refuse loudly: `_wide_source_net` and `_render_inline` assert a wide
 conditioner is a `FloatSignControl`, where an integer carries `IntIdentity`; the operator instantiation binds a
 `_sgnop` per operand and per wide result unconditionally, which `ffromint`'s integer operand and `ftoint`'s integer
-result do not have; and the microcode packer allocates and asserts the matching sign fields on both sides. Two would
-MISCOMPILE in silence, and are today masked only by the loud ones: `_emit_declarations` sizes every pooled operand
+result do not have; and the microcode packer allocates and asserts the matching sign fields on both sides. One would
+MISCOMPILE in silence, and is today masked only by the loud ones: `_emit_declarations` sizes every pooled operand
 read-mux register and every wide result wire at `WFLT` rather than at the port's own width, so an integer port wider
-than the float silently loses its top bits, and `_emit_consts` encodes every wide constant through the float codec
-(unreachable while `wide_consts` is typed `list[float]`, which is what stops an integer reaching it). Fix the silent
-pair first, or fixing the loud ones uncovers them.
-`_Bank` in `_lir/_bankalloc.py` is generic over a CONSTRAINED type variable, which cannot express
-`MirFloatStateSlot | MirIntStateSlot` for one wide bank; lifting it means giving `MirFloatStateSlot.sign` and
-`MirBoolStateSlot.inversion` a common `conditioner` field.
+than the float silently loses its top bits. Fix that one first, or fixing the loud ones uncovers it.
 
 `scalar_type_of` (`_lir/_ir.py`) recovers the scalar family from the LIR node class, so it still answers
 `FloatType(fmt)` for the bank-named `WideInputLoad`/`WideOutputWire` carriers. When integer ports land the
 discriminator must be re-established by giving those nodes a `scalar_type` field, not by reintroducing nominal
-`Float*`/`Int*` sibling classes. Fixing `scalar_type_of` alone is not enough, because several consumers decide the
-same thing independently rather than routing through it: `_coerce_inputs` and `NumericalSimulator.__init__` in
-`_backend/numerical.py` and `_emit_consts` in the Verilog backend all read a wide carrier as float directly. Input
-ports would at least fail loudly there (`_coerce_input` rejects a non-float), but wide constants and state would be
-encoded as floats without a word. They must be converged onto the one dispatch first.
+`Float*`/`Int*` sibling classes. Fixing `scalar_type_of` alone is not enough, because `_coerce_inputs` and the slot
+reset snapshot in `_backend/numerical.py` decide the same thing independently rather than routing through it. Input
+ports would at least fail loudly there (`_coerce_input` rejects a non-float), but wide state would be encoded as a
+float without a word. They must be converged onto the one dispatch first.
 
 Strength reduction folds integer constants and applies the algebra each operator declares, so `x*0`, `x*1`, `x+0`,
 `x&0`, `x|-1`, `x&-1`, `x|0` and `x^0` reduce, and the mux identities cover `iselect` beside its float and bool

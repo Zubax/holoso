@@ -3,17 +3,15 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Generic, TypeVar
+from typing import ClassVar
 
 from .._mir import (
     Mir,
     MirBoolOutput,
-    MirBoolStateSlot,
     MirBoolView,
     MirBranch,
     MirFloatInput,
     MirFloatOutput,
-    MirFloatStateSlot,
     MirNode,
     MirOperation,
     MirPhi,
@@ -22,6 +20,7 @@ from .._mir import (
     MirWideView,
 )
 from .._operators import BoolInversion, HardwareOperator, PooledHardwareOperator
+from .._value import WideValue
 from .._util import ValueId
 from ._ir import *
 from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map, value_resident_at_entry
@@ -53,7 +52,7 @@ class _LayoutAllocation:
     overlap: OverlapLayout
     inst_of: dict[ValueId, OperatorInstance]
     instances: list[OperatorInstance]
-    consts: list[float]
+    consts: list[WideValue]
     const_pool: dict[ValueId, PooledConst]
     alloc: Allocation
 
@@ -201,8 +200,6 @@ def _movable_order(
 
 type _BankView = MirWideView | MirBoolView
 
-_SlotT = TypeVar("_SlotT", MirFloatStateSlot, MirBoolStateSlot)  # one bank's concrete state-slot type
-
 
 @dataclass(frozen=True, slots=True)
 class _ObjectiveContext:
@@ -243,7 +240,7 @@ class _InstallContext:
     fetch_lag: int
 
 
-class _Bank(ABC, Generic[_SlotT]):
+class _Bank(ABC):
     """
     The policy surface for one physical register bank. The liveness/coalescing/coloring skeleton in
     :func:`_allocate_bank` is shared; each subclass supplies the wide/boolean specifics --
@@ -253,12 +250,8 @@ class _Bank(ABC, Generic[_SlotT]):
     label: ClassVar[str]
 
     @abstractmethod
-    def state_slots(self, view: _BankView) -> list[_SlotT]:
+    def state_slots(self, view: _BankView) -> Sequence[MirStateSlot]:
         """This bank's state slots, narrowed from the MIR view -- the one place the concrete bank type is asserted."""
-
-    @abstractmethod
-    def slot_identity(self, slot: _SlotT) -> bool:
-        """Whether the slot folds the identity sideband, so its live-out may commit into the slot register in place."""
 
     @abstractmethod
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
@@ -278,15 +271,12 @@ class _Bank(ABC, Generic[_SlotT]):
         """
 
 
-class _WideBank(_Bank[MirFloatStateSlot]):
+class _WideBank(_Bank):
     label = "wide"
 
-    def state_slots(self, view: _BankView) -> list[MirFloatStateSlot]:
+    def state_slots(self, view: _BankView) -> Sequence[MirStateSlot]:
         assert isinstance(view, MirWideView)
         return view.state_slots
-
-    def slot_identity(self, slot: MirFloatStateSlot) -> bool:
-        return slot.sign.is_identity
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
@@ -340,15 +330,12 @@ class _WideBank(_Bank[MirFloatStateSlot]):
         return install
 
 
-class _BoolBank(_Bank[MirBoolStateSlot]):
+class _BoolBank(_Bank):
     label = "bool"
 
-    def state_slots(self, view: _BankView) -> list[MirBoolStateSlot]:
+    def state_slots(self, view: _BankView) -> Sequence[MirStateSlot]:
         assert isinstance(view, MirBoolView)
         return view.state_slots
-
-    def slot_identity(self, slot: MirBoolStateSlot) -> bool:
-        return slot.inversion.is_identity
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
@@ -439,7 +426,7 @@ class _InterferenceBuilder:
 
 
 def _allocate_bank(
-    bank: _Bank[_SlotT],
+    bank: _Bank,
     mir: Mir,
     view: _BankView,
     block_sched: dict[int, Schedule],
@@ -451,17 +438,16 @@ def _allocate_bank(
     tuning: RegallocTuning,
 ) -> _BankAlloc:
     """
-    Color one physical register bank across the CFG. The bank descriptor supplies the conditioner,
-    boundary, objective, and install policies; the liveness/coalescing/coloring skeleton is shared.
+    Color one physical register bank across the CFG. The bank descriptor supplies the boundary, objective, and
+    install policies; the liveness/coalescing/coloring skeleton is shared.
     """
     nload = len(view.input_ids)
     slots = bank.state_slots(view)
     slot_reg = {slot.name: nload + i for i, slot in enumerate(slots)}
     fresh_start = nload + len(slots)
-    # Explicit bindings: the union-view property types are undecidable under the constrained-TypeVar reanalysis.
-    op_nodes: dict[ValueId, MirOperation] = view.operation_nodes
-    phi_nodes: dict[ValueId, MirPhi] = view.phi_nodes
-    state_read_nodes: Mapping[ValueId, MirStateRead] = view.state_read_nodes
+    op_nodes = view.operation_nodes
+    phi_nodes = view.phi_nodes
+    state_read_nodes = view.state_read_nodes
     state_read_of = {node.name: vid for vid, node in state_read_nodes.items()}
     values = {*view.input_ids, *state_read_nodes, *op_nodes, *phi_nodes}
     facts = _bank_liveness_facts(mir, block_sched, op_nodes, phi_nodes, values, fetch_lag)
@@ -536,7 +522,7 @@ def _allocate_bank(
             live_out = slot.live_out
             r_in = livein_of[slot.name]
             producible = live_out in op_nodes or live_out in phi_nodes
-            if not bank.slot_identity(slot) or not producible or slot.name in tapped_by_other:
+            if not slot.conditioner.is_identity or not producible or slot.name in tapped_by_other:
                 continue  # a folded sideband, a non-producible live-out, or a chained copy cannot be written in-place
             if slot.name in forced_copy:
                 continue  # demoted to copy-back by a prior retry round (its in-place commit was unsound)

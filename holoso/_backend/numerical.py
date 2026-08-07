@@ -138,15 +138,14 @@ class _Kernel:
 class NumericalSimulator(_Kernel):
     """
     The runnable cycle-accurate, bit-exact model of a generated module (see the module docstring). ``regs``/``bregs``
-    are the live register files, ``consts`` the wide constant pool, ``pc`` the fetch program counter; :meth:`tick`
-    advances one clock and :attr:`output_values` reads the result while :attr:`out_valid`. The persistent state is just
+    are the live register files and ``pc`` the fetch program counter; :meth:`tick` advances one clock and
+    :attr:`output_values` reads the result while :attr:`out_valid`. The persistent state is just
     the slot registers within ``regs``/``bregs``, carried across transactions.
     Construct one from a :class:`NumericalModel` via :meth:`NumericalModel.elaborate`.
     """
 
     def __init__(self, lir: Lir) -> None:
         self._lir = lir
-        self.consts: list[FloatValue] = [FloatValue.from_float(lir.float_format, value) for value in lir.wide_consts]
         self.regs: dict[int, FloatValue] = {}  # wide register file (Verilog ``regs``)
         self.bregs: dict[int, bool] = {}  # boolean register file (Verilog ``bregs``)
         self.pc = 0
@@ -328,11 +327,13 @@ class NumericalSimulator(_Kernel):
         if isinstance(operand, WideOperand):
             wide_source = operand.source
             base = (
-                self.consts[wide_source.index]
+                self._lir.wide_consts[wide_source.index]
                 if isinstance(wide_source, WideConstRef)
                 else self.regs[wide_source.index]
             )
-            assert isinstance(operand.conditioner, FloatSignControl), "the model stores every wide value as a float"
+            assert isinstance(operand.conditioner, FloatSignControl) and isinstance(
+                base, FloatValue
+            ), "the model stores every wide value as a float"
             return operand.conditioner.apply_value(base)
         bool_source = operand.source
         if isinstance(bool_source, BoolConstRef):

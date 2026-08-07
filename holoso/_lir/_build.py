@@ -9,10 +9,8 @@ from dataclasses import replace
 from .._errors import UnsupportedConstruct
 from .._mir import (
     Mir,
-    MirBoolStateSlot,
     MirBoolView,
     MirBranch,
-    MirFloatStateSlot,
     MirPhi,
     MirStateRead,
     MirStateSlot,
@@ -72,15 +70,9 @@ def _drop_redundant_state_slots(mir: Mir) -> Mir:
     """
     read_names = {node.name for node in mir.nodes.values() if isinstance(node, MirStateRead)}
 
-    def conditioner(slot: MirStateSlot) -> PortConditioner:
-        if isinstance(slot, MirFloatStateSlot):
-            return slot.sign
-        assert isinstance(slot, MirBoolStateSlot)
-        return slot.inversion
-
     classes: dict[tuple[float | bool, ValueId, PortConditioner], list[MirStateSlot]] = {}
     for slot in mir.state_slots:
-        classes.setdefault((slot.reset_value, slot.live_out, conditioner(slot)), []).append(slot)
+        classes.setdefault((slot.reset_value, slot.live_out, slot.conditioner), []).append(slot)
 
     dropped: set[str] = set()
     for members in classes.values():
@@ -113,13 +105,14 @@ def _has_state_copy(
     """
     return any(
         not wide_liveout_coalesced(
-            wide_operand(wide_mir, slot.live_out, slot.sign, alloc, const_pool),
+            wide_operand(wide_mir, slot.live_out, slot.conditioner, alloc, const_pool),
             RegRef(alloc.wide_slot_reg[slot.name]),
         )
         for slot in wide_mir.state_slots
     ) or any(
         not bool_liveout_coalesced(
-            bool_operand(bool_mir, bslot.live_out, alloc, bslot.inversion), BoolRegRef(alloc.bool_slot_reg[bslot.name])
+            bool_operand(bool_mir, bslot.live_out, alloc, bslot.conditioner),
+            BoolRegRef(alloc.bool_slot_reg[bslot.name]),
         )
         for bslot in bool_mir.state_slots
     )
@@ -351,7 +344,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             slot.name,
             RegRef(alloc.wide_slot_reg[slot.name]),
             slot.reset_value,
-            wide_operand(wide_mir, slot.live_out, slot.sign, alloc, const_pool),
+            wide_operand(wide_mir, slot.live_out, slot.conditioner, alloc, const_pool),
             block_base[ret_block] + alloc.wide_install[slot.name],
         )
         for slot in wide_mir.state_slots
@@ -361,7 +354,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             bslot.name,
             BoolRegRef(alloc.bool_slot_reg[bslot.name]),
             bool(bslot.reset_value),
-            bool_operand(bool_mir, bslot.live_out, alloc, bslot.inversion),
+            bool_operand(bool_mir, bslot.live_out, alloc, bslot.conditioner),
         )
         for bslot in bool_mir.state_slots
     ]

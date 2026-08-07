@@ -296,11 +296,10 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
 
 
 def _emit_consts(w: _Writer, lir: Lir) -> None:
-    fmt = lir.float_format
-    width = fmt.width
-    digits = (width + 3) // 4
     for index, value in enumerate(lir.wide_consts):
-        w(f"wire [WREG-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
+        width = value.fmt.width
+        digits = (width + 3) // 4
+        w(f"wire [WREG-1:0] const_{index} = {width}'h{value.bits:0{digits}x};  // {value!r}")
     if lir.wide_consts:
         w("")
 

@@ -18,6 +18,7 @@ from .._operators import (
     WideConditioner,
 )
 from .._type import BoolType, FloatFormat, FloatType, IntFormat, ScalarType
+from .._value import WideValue
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
 # The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the numerical
@@ -680,7 +681,7 @@ type ScheduledOp = PooledScheduledOp | InlineScheduledOp
 class Lir:
     module_name: str
     instances: list[OperatorInstance]
-    wide_consts: list[float]  # constant pool: index -> value
+    wide_consts: list[WideValue]  # constant pool: index -> value
     float_format: FloatFormat
     int_format: IntFormat
     regfile: RegFileLayout
