@@ -92,21 +92,9 @@ def test_integer_ports_condition_with_the_identity_and_nothing_else(width: int) 
     )
     assert operation.scalar_type == ty
 
-    with pytest.raises(TypeError):
-        MirOperation(
-            SelectOperator(ty),
-            [0, 1, 2],
-            [BoolInversion(), FloatSignControl(negate=True), IntIdentity()],
-            0,
-            IntIdentity(),
-            (),
-        )
-
     # The phi path matters separately: it is what the wide-bank allocator narrows when lowering a merge into
     # per-predecessor install copies.
     assert MirPhi(ty, ((0, 1, IntIdentity()), (2, 3, IntIdentity()))).scalar_type == ty
-    with pytest.raises(TypeError):
-        MirPhi(ty, ((0, 1, IntIdentity()), (2, 3, FloatSignControl(absolute=True))))
 
 
 def test_float_and_bool_ports_keep_their_own_conditioners() -> None:

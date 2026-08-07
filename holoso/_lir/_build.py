@@ -363,10 +363,10 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         module_name=module_name,
         instances=instances,
         wide_consts=consts,
-        float_format=wide_mir.fmt,
-        int_format=mir.int_format,
+        float_format=wide_mir.float_format,
+        int_format=wide_mir.int_format,
         regfile=RegFileLayout(
-            width=max(wide_mir.fmt.width, mir.int_format.width),
+            width=max(wide_mir.float_format.width, wide_mir.int_format.width),
             nreg=alloc.nreg,
             nrd=sum(inst.operator.signature.arity for inst in instances),
             nwr=len(tapped_wide_lanes(blocks)),

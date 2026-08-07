@@ -16,45 +16,53 @@ It is a first-class verification peer of the numerical model, not a test helper,
 
 from typing import assert_never
 
-from .._operators import BoolInversion, FloatSignControl, PortConditioner
+from .._operators import BoolInversion, FloatSignControl, IntIdentity, PortConditioner
 from .._util import ValueId
-from .._type import FloatFormat, LogicalPort
-from .._value import FloatValue
+from .._type import FloatFormat, IntFormat, LogicalPort
+from .._value import FloatValue, IntValue, ScalarValue
 from ._ir import (
     Mir,
     MirBlock,
     MirBoolConst,
     MirBoolInput,
-    MirBoolOutput,
     MirBoolStateRead,
     MirBoolStateSlot,
     MirBranch,
     MirFloatConst,
     MirFloatInput,
-    MirFloatOutput,
     MirFloatStateRead,
     MirFloatStateSlot,
+    MirIntConst,
+    MirIntInput,
+    MirIntStateRead,
+    MirIntStateSlot,
     MirJump,
     MirOperation,
-    MirOutput,
     MirPhi,
     MirRet,
-    MirStateSlot,
+    MirWideInput,
 )
 
-type InterpreterInput = FloatValue | float | bool
-type InterpreterOutput = FloatValue | bool
-type _Value = FloatValue | bool
+type InterpreterInput = ScalarValue | float | int
 
 
-def _apply_conditioner(conditioner: PortConditioner, value: _Value) -> _Value:
-    """Apply a port's folded sideband: a sign control on a float value, an inversion on a boolean one."""
-    if isinstance(conditioner, FloatSignControl):
-        assert isinstance(value, FloatValue), "a float sign control applies only to a FloatValue"
-        return conditioner.apply_value(value)
-    assert isinstance(conditioner, BoolInversion), "the interpreter carries no value a wide non-float port could hold"
-    assert isinstance(value, bool), "a boolean inversion applies only to a bool"
-    return conditioner.apply(value)
+def _apply_conditioner(conditioner: PortConditioner, value: ScalarValue) -> ScalarValue:
+    """
+    Apply a port's folded sideband: a sign control on a float value, an inversion on a boolean one. An integer port
+    folds nothing, so its conditioner is the identity and the value passes through.
+    """
+    match conditioner:
+        case FloatSignControl():
+            assert isinstance(value, FloatValue), "a float sign control applies only to a FloatValue"
+            return conditioner.apply_value(value)
+        case IntIdentity():
+            assert isinstance(value, IntValue), "an integer identity applies only to an IntValue"
+            return value
+        case BoolInversion():
+            assert isinstance(value, bool), "a boolean inversion applies only to a bool"
+            return conditioner.apply(value)
+        case _:
+            assert_never(conditioner)
 
 
 def _coerce_float(value: InterpreterInput, fmt: FloatFormat, index: int) -> FloatValue:
@@ -65,6 +73,16 @@ def _coerce_float(value: InterpreterInput, fmt: FloatFormat, index: int) -> Floa
     if type(value) is float:
         return FloatValue.from_float(fmt, value)
     raise TypeError(f"input {index} must be FloatValue or float, got {type(value).__name__}")
+
+
+def _coerce_int(value: InterpreterInput, fmt: IntFormat, index: int) -> IntValue:
+    if isinstance(value, IntValue):
+        if value.fmt != fmt:
+            raise ValueError(f"input {index} has {value.fmt}, expected {fmt}")
+        return value
+    if type(value) is int:
+        return IntValue.from_int(fmt, value)
+    raise TypeError(f"input {index} must be IntValue or int, got {type(value).__name__}")
 
 
 def _coerce_bool(value: InterpreterInput, index: int) -> bool:
@@ -83,7 +101,7 @@ class MirInterpreter:
     def __init__(self, mir: Mir) -> None:
         self._mir = mir
         self._blocks: dict[int, MirBlock] = {block.id: block for block in mir.blocks}
-        self._state: dict[str, _Value] = {}
+        self._state: dict[str, ScalarValue] = {}
         self.reset()
 
     @property
@@ -96,19 +114,20 @@ class MirInterpreter:
 
     def reset(self) -> None:
         """Reload every slot with its reset snapshot: the live-in of the next transaction."""
-        fmt = self._mir.float_format
-        state: dict[str, _Value] = {}
+        state: dict[str, ScalarValue] = {}
         for slot in self._mir.state_slots:
             match slot:
                 case MirFloatStateSlot():
-                    state[slot.name] = FloatValue.from_float(fmt, float(slot.reset_value))
+                    state[slot.name] = FloatValue.from_float(self._mir.float_format, slot.reset_value)
+                case MirIntStateSlot():
+                    state[slot.name] = IntValue.from_int(self._mir.int_format, slot.reset_value)
                 case MirBoolStateSlot():
-                    state[slot.name] = bool(slot.reset_value)
+                    state[slot.name] = slot.reset_value
                 case _:
                     assert False, f"unhandled state slot {type(slot).__name__}"
         self._state = state
 
-    def run(self, *inputs: InterpreterInput, max_blocks: int = 10_000_000) -> list[InterpreterOutput]:
+    def run(self, *inputs: InterpreterInput, max_blocks: int = 10_000_000) -> list[ScalarValue]:
         """
         Evaluate one whole transaction: bind the inputs and the entry-global leaves, walk the CFG to the ``Ret``,
         read the outputs, then advance the persistent state (read-first). ``max_blocks`` bounds a non-terminating loop.
@@ -128,9 +147,7 @@ class MirInterpreter:
                     for operand, conditioner in zip(operation.operands, operation.operand_conditioners, strict=True)
                 ]
                 results = operation.operator.evaluate(*operands, immediates=operation.immediates)
-                result = results[operation.output_port]
-                assert isinstance(result, FloatValue | bool), "no lowering selects an integer operator yet"
-                env[op_id] = _apply_conditioner(operation.output_conditioner, result)
+                env[op_id] = _apply_conditioner(operation.output_conditioner, results[operation.output_port])
             terminator = block.terminator
             match terminator:
                 case MirRet():
@@ -147,28 +164,30 @@ class MirInterpreter:
             if steps > max_blocks:
                 raise RuntimeError(f"MIR interpretation did not reach Ret within {max_blocks} steps")
 
-        outputs = [self._read_output(out, env) for out in self._mir.outputs]
+        outputs = [_apply_conditioner(out.conditioner, env[out.value]) for out in self._mir.outputs]
         self._writeback_state(env)
         return outputs
 
-    def _input_nodes(self) -> list[MirFloatInput | MirBoolInput]:
-        nodes: list[MirFloatInput | MirBoolInput] = []
+    def _input_nodes(self) -> list[MirWideInput | MirBoolInput]:
+        nodes: list[MirWideInput | MirBoolInput] = []
         for vid in self._mir.input_ids:
             node = self._mir.nodes[vid]
-            assert isinstance(node, (MirFloatInput, MirBoolInput)), f"input {vid} is not an input node"
+            assert isinstance(node, (MirFloatInput, MirIntInput, MirBoolInput)), f"input {vid} is not an input node"
             nodes.append(node)
         return nodes
 
-    def _initial_env(self, inputs: tuple[InterpreterInput, ...]) -> dict[ValueId, _Value]:
+    def _initial_env(self, inputs: tuple[InterpreterInput, ...]) -> dict[ValueId, ScalarValue]:
         input_nodes = self._input_nodes()
         if len(inputs) != len(input_nodes):
             raise ValueError(f"expected {len(input_nodes)} inputs, got {len(inputs)}")
-        fmt = self._mir.float_format
-        env: dict[ValueId, _Value] = {}
+        ffmt, ifmt = self._mir.float_format, self._mir.int_format
+        env: dict[ValueId, ScalarValue] = {}
         for index, (vid, input_node, raw) in enumerate(zip(self._mir.input_ids, input_nodes, inputs, strict=True)):
             match input_node:
                 case MirFloatInput():
-                    env[vid] = _coerce_float(raw, fmt, index)
+                    env[vid] = _coerce_float(raw, ffmt, index)
+                case MirIntInput():
+                    env[vid] = _coerce_int(raw, ifmt, index)
                 case MirBoolInput():
                     env[vid] = _coerce_bool(raw, index)
                 case _:
@@ -176,23 +195,25 @@ class MirInterpreter:
         for vid, node in self._mir.nodes.items():
             match node:
                 case MirFloatConst(value=value):
-                    env[vid] = FloatValue.from_float(fmt, float(value))
-                case MirBoolConst(value=value):
-                    env[vid] = bool(value)
-                case MirFloatStateRead(name=name) | MirBoolStateRead(name=name):
+                    env[vid] = FloatValue.from_float(ffmt, value)
+                case MirIntConst(value=int_value):
+                    env[vid] = IntValue.from_int(ifmt, int_value)
+                case MirBoolConst(value=bool_value):
+                    env[vid] = bool_value
+                case MirFloatStateRead(name=name) | MirIntStateRead(name=name) | MirBoolStateRead(name=name):
                     env[vid] = self._state[name]
                 case _:
                     pass  # inputs (bound above), operations and phis (bound during the walk)
         return env
 
-    def _resolve_phis(self, block: MirBlock, previous: int | None, env: dict[ValueId, _Value]) -> None:
+    def _resolve_phis(self, block: MirBlock, previous: int | None, env: dict[ValueId, ScalarValue]) -> None:
         """
         Bind every phi in ``block`` as a parallel snapshot of the arm taken from ``previous`` (loop swaps need this).
         """
         if not block.phis:
             return
         assert previous is not None, f"block {block.id} reached with phis but no predecessor (entry phi?)"
-        snapshot: dict[ValueId, _Value] = {}
+        snapshot: dict[ValueId, ScalarValue] = {}
         for phi_id in block.phis:
             phi = self._mir.nodes[phi_id]
             assert isinstance(phi, MirPhi), f"node {phi_id} in phis is not a phi"
@@ -202,33 +223,9 @@ class MirInterpreter:
             snapshot[phi_id] = _apply_conditioner(conditioner, env[value])
         env.update(snapshot)
 
-    def _read_output(self, out: MirOutput, env: dict[ValueId, _Value]) -> InterpreterOutput:
-        value = env[out.value]
-        match out:
-            case MirFloatOutput():
-                assert isinstance(value, FloatValue)
-                return out.conditioner.apply_value(value)
-            case MirBoolOutput():
-                assert isinstance(value, bool)
-                return out.conditioner.apply(value)
-            case _:
-                assert False, f"unhandled output {type(out).__name__}"
-
-    def _writeback_state(self, env: dict[ValueId, _Value]) -> None:
+    def _writeback_state(self, env: dict[ValueId, ScalarValue]) -> None:
         """Read every slot's conditioned live-out, then commit all at once -- the read-first parallel slot semantics."""
-        new_state: dict[str, _Value] = {}
-        for slot in self._mir.state_slots:
-            new_state[slot.name] = self._read_slot(slot, env)
+        new_state = {
+            slot.name: _apply_conditioner(slot.conditioner, env[slot.live_out]) for slot in self._mir.state_slots
+        }
         self._state.update(new_state)
-
-    def _read_slot(self, slot: MirStateSlot, env: dict[ValueId, _Value]) -> _Value:
-        value = env[slot.live_out]
-        match slot:
-            case MirFloatStateSlot():
-                assert isinstance(value, FloatValue)
-                return slot.conditioner.apply_value(value)
-            case MirBoolStateSlot():
-                assert isinstance(value, bool)
-                return slot.conditioner.apply(value)
-            case _:
-                assert False, f"unhandled state slot {type(slot).__name__}"

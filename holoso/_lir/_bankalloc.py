@@ -12,6 +12,8 @@ from .._mir import (
     MirBranch,
     MirFloatInput,
     MirFloatOutput,
+    MirIntInput,
+    MirIntOutput,
     MirNode,
     MirOperation,
     MirPhi,
@@ -281,7 +283,7 @@ class _WideBank(_Bank):
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
         for out in mir.outputs:
-            if isinstance(out, MirFloatOutput) and out.value in values:
+            if isinstance(out, (MirFloatOutput, MirIntOutput)) and out.value in values:
                 boundary[ret_block].add(out.value)
         return boundary
 
@@ -311,7 +313,7 @@ class _WideBank(_Bank):
         for slot in ctx.slots:
             name, live_out, r_in = slot.name, slot.live_out, ctx.livein_of[slot.name]
             node = ctx.nodes[live_out]
-            defined_in_ret = isinstance(node, MirFloatInput) or (
+            defined_in_ret = isinstance(node, (MirFloatInput, MirIntInput)) or (
                 live_out in ctx.op_nodes and ctx.op_block.get(live_out) == ctx.ret_block
             )
             early = (

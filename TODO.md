@@ -84,6 +84,16 @@ acceptance set: each is oracle-verified against CPython through HIR, so lifting 
 coverage by adding them to the MIR-lowering parametrization. `examples/uart.py` carries its counters as floats
 until then.
 
+## White-box test promotion
+
+The `whitebox` marker is a promotion queue, not a category: it marks a test that reaches past the public API only
+because a gate blocks the path. The integer MIR tests carry it because `_reject_integers` still refuses every
+integer; when the gate lifts, each should become an ordinary kernel and the marker should go.
+
+Predating the marker is a large body of tests that reach into `lower_to_mir`, `build` and the allocation tables
+directly -- the schedule, install-landing, const-install, overlap and microcode suites among them. Sweep them the
+same way and promote whatever the public API can now express. That sweep is its own piece of work.
+
 ## Frontend limitations
 
 Valid kernels that are conservatively rejected. None is a wrong answer; each is a located refusal with a rewrite.

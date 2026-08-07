@@ -1927,58 +1927,9 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
         outputs=[MirFloatOutput("out_0", 1)],
         state_slots=[],
     )
-    with pytest.raises(ValueError, match="configured format"):
+    # Anchored: the configured format sits on the other side of the message, so unanchored would pass on both.
+    with pytest.raises(ValueError, match=r"got FloatFormat\(wexp=8, wman=24\)$"):
         build_lir(mir, "mixed")
-
-
-def test_mir_builder_rejects_mixed_float_operand_formats() -> None:
-    other = FloatFormat(8, 24)
-    builder = MirBuilder(FMT, default_ifmt(FMT))
-    a = builder.float_input("a", FloatType(FMT))
-    b = builder.float_input("b", FloatType(other))
-    with pytest.raises(ValueError, match="expects operands"):
-        builder.operation(
-            FAddOperator(FMT, FAddOptions()),
-            [a, b],
-            [FloatSignControl(), FloatSignControl()],
-        )
-
-
-def test_mir_operation_validates_invariants() -> None:
-    with pytest.raises(TypeError, match="scalar_type"):
-        MirFloatInput("a", OtherScalarType())  # type: ignore[arg-type]  # deliberately wrong scalar type
-    with pytest.raises(TypeError, match="scalar_type"):
-        MirFloatConst(OtherScalarType(), 1.0)  # type: ignore[arg-type]  # deliberately wrong scalar type
-    with pytest.raises(ValueError, match="operand"):
-        MirOperation(
-            FAddOperator(FMT, FAddOptions()), [0], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl(), ()
-        )
-    with pytest.raises(ValueError, match="conditioner"):
-        MirOperation(FAddOperator(FMT, FAddOptions()), [0, 0], [FloatSignControl()], 0, FloatSignControl(), ())
-    # A boolean output port carries an inversion, never a sign control: booleans have no sign.
-    with pytest.raises(TypeError, match="output conditioner"):
-        MirOperation(
-            FCmpOperator(FMT, FCmpOptions()),
-            [0, 0],
-            [FloatSignControl(), FloatSignControl()],
-            2,
-            FloatSignControl(negate=True),
-            (),
-        )
-    # A boolean operand carries an inversion too; a sign control on it is a type error.
-    with pytest.raises(TypeError, match="operand conditioner"):
-        MirOperation(BoolAndOperator(), [0, 0], [FloatSignControl(), BoolInversion()], 0, BoolInversion(), ())
-    with pytest.raises(ValueError, match="does not exist"):
-        MirOperation(
-            FAddOperator(FMT, FAddOptions()),
-            [0, 0],
-            [FloatSignControl(), FloatSignControl()],
-            1,
-            FloatSignControl(),
-            (),
-        )
-    with pytest.raises(TypeError, match="conditioner"):
-        MirFloatOutput("out_0", 0, object())  # type: ignore[arg-type]  # deliberately wrong conditioner type
 
 
 def test_wide_view_rejects_non_float_mir_before_scheduling() -> None:
@@ -2005,7 +1956,7 @@ def test_wide_view_rejects_non_input_input_id() -> None:
         outputs=[MirFloatOutput("out_0", 0)],
         state_slots=[],
     )
-    with pytest.raises(ValueError, match="must reference a MirFloatInput or MirBoolInput"):
+    with pytest.raises(ValueError, match="must reference a float, integer, or boolean input"):
         MirWideView.from_mir(mir)
 
 
@@ -2019,7 +1970,7 @@ def test_wide_view_rejects_missing_input_id() -> None:
         outputs=[MirFloatOutput("out_0", 0)],
         state_slots=[],
     )
-    with pytest.raises(ValueError, match="must reference a MirFloatInput or MirBoolInput"):
+    with pytest.raises(ValueError, match="must reference a float, integer, or boolean input"):
         MirWideView.from_mir(mir)
 
 

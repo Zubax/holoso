@@ -31,7 +31,7 @@ from holoso._hir import Hir, Operation, Operator, optimize
 from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat, IntFormat
-from holoso._value import FloatValue
+from holoso._value import FloatValue, ScalarValue
 from holoso._eel._names import port_name as port_name
 
 type Path = tuple[int | str, ...]
@@ -88,8 +88,14 @@ def arith_count(hir: Hir, op_type: type[Operator]) -> int:
     return sum(1 for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is op_type)
 
 
-def show_value(value: FloatValue | bool) -> str:
+def show_value(value: ScalarValue) -> str:
     return f"{float(value):.6g}" if isinstance(value, FloatValue) else str(value)
+
+
+def as_float(value: ScalarValue) -> float:
+    """A float-only kernel's interpreter output, narrowed out of the union for comparison against a Python reference."""
+    assert isinstance(value, FloatValue)
+    return float(value)
 
 
 def assert_model_equals_interpreter(

@@ -234,7 +234,9 @@ def build_const_pool(
     magnitude_index: dict[float, int] = {}
     pool: dict[ValueId, PooledConst] = {}
     for vid in ids:
-        value = mir.const_nodes[vid].value
+        const = mir.const_nodes[vid]
+        assert isinstance(const, MirFloatConst)  # only float constants are noted above; the integer pool is not built
+        value = const.value
         if math.isnan(value):
             raise UnsupportedConstruct(f"Cannot represent a NaN constant. Only [in]finite numbers are supported.")
         magnitude = abs(value)
@@ -242,7 +244,7 @@ def build_const_pool(
         if index is None:
             index = len(values)
             magnitude_index[magnitude] = index
-            values.append(FloatValue.from_float(mir.fmt, magnitude))
+            values.append(FloatValue.from_float(mir.float_format, magnitude))
         negate = math.copysign(1.0, value) < 0.0 and values[index].bits != 0
         pool[vid] = PooledConst(index, FloatSignControl(negate=negate))
     return values, pool

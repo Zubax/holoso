@@ -30,6 +30,7 @@ from ._modelref import (
     SelectHold,
     SlotSwap,
     Vector,
+    as_float,
     assert_model_equals_interpreter,
     bool_phi_swap_computed_loop,
     branch_boundary_kernel,
@@ -159,8 +160,8 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
             interp_out = interpreter.run(*vector)
             reference = phi_swap_computed_loop(x, n)
             assert (
-                float(interp_out[0]) == reference
-            ), f"interp != python at x={x} n={n}: {float(interp_out[0])} vs {reference}"
+                as_float(interp_out[0]) == reference
+            ), f"interp != python at x={x} n={n}: {as_float(interp_out[0])} vs {reference}"
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
@@ -199,7 +200,7 @@ def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
             model_out = model.run(*vector)
             interp_out = interpreter.run(*vector)
             reference = branchy_swap_mixed_arm_loop(x, 4.0, n)
-            assert (float(interp_out[0]), float(interp_out[1])) == reference, f"interp != python at x={x} n={n}"
+            assert (as_float(interp_out[0]), as_float(interp_out[1])) == reference, f"interp != python at x={x} n={n}"
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 

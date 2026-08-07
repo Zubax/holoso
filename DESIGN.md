@@ -310,9 +310,10 @@ MIR, the counted back-edge loop becomes the natural follow-on.
 
 Integers. HIR carries a complete typed integer vocabulary and folds it exactly, and the front-end emits it; any
 integer node reaching MIR is rejected as not-yet-lowerable. The integer hardware exists and answers for its own timing
-and arithmetic -- the pooled operators, the inline bitwise gates, casts and constant shift, and the two conversions
-that join the int and float halves -- so what remains is the transport: selecting those operators at MIR, and giving
-the wide register bank, its constants, its state and its port codecs a scalar family rather than assuming float.
+and arithmetic -- the pooled operators, the inline bitwise gates, casts and constant shift, and the three operators
+that span the int and float halves -- and MIR's own vocabulary, wide view and interpreter carry integers whole, so
+what remains is the transport: selecting those operators during HIR-to-MIR lowering, and giving the wide register
+bank below MIR, its constants, its state and its port codecs a scalar family rather than assuming float.
 A static integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
 runtime integer: every symbol answering what Python answers -- the roundings over a float, and `abs`/`min`/`max`/
 `np.sign` over an integer however it arose, including an integer state slot -- now keeps it, where a float-only
@@ -337,11 +338,11 @@ valid edge cases do not raise avoidable primitive-side errors, while invalid sou
 error-bearing primitive.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
-configured float format explicitly so float-less modules still elaborate with a known scalar width. The CFG is
-carried through as per-bank views sharing the block skeleton -- the wide data bank and the boolean bank -- then
-scheduled per block and register-allocated over the whole CFG. The wide view selects operations and phis
+configured float and integer formats explicitly so a module using neither still elaborates with known scalar widths.
+The CFG is carried through as per-bank views sharing the block skeleton -- the wide data bank and the boolean bank --
+then scheduled per block and register-allocated over the whole CFG. The wide view selects operations and phis
 structurally, on scalar width, so it is neutral storage rather than a float family; its leaves are still selected
-nominally, and nothing but floats can reach it until the integer backend lands.
+nominally, one class per wide family, so a float and an integer share the bank with neither privileged.
 
 ## LIR
 
