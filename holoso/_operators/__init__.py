@@ -54,6 +54,7 @@ from ._int import (
     IDivOperator as IDivOperator,
     IMulOperator as IMulOperator,
     IShlOperator as IShlOperator,
+    IShrOperator as IShrOperator,
     ISubOperator as ISubOperator,
     IntBwAndOperator as IntBwAndOperator,
     IntBwNotOperator as IntBwNotOperator,

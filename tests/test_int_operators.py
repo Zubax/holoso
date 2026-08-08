@@ -42,6 +42,7 @@ from holoso._operators import (
     IDivOperator,
     IMulOperator,
     IShlOperator,
+    IShrOperator,
     ISubOperator,
     IntBwAndOperator,
     IntBwNotOperator,
@@ -95,7 +96,7 @@ def _oracle(expected: dict[str, int], operator: IntHardwareOperator) -> dict[str
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: int) -> None:
     fmt = IntFormat(width)
-    binary = [IAddOperator(fmt), ISubOperator(fmt), ICmpOperator(fmt), IShlOperator(fmt)]
+    binary = [IAddOperator(fmt), ISubOperator(fmt), ICmpOperator(fmt), IShlOperator(fmt), IShrOperator(fmt)]
     idiv, iabs = IDivOperator(fmt), IAbsOperator(fmt)
     # Staging is a timing knob, so every multiplier configuration must answer the one product.
     multipliers = [IMulOperator(fmt, IMulOptions(stage_product=stage)) for stage in range(5)]
@@ -172,12 +173,44 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
     assert _evaluate(shift, fmt.min, fmt.min) == [-1, -1], "a count past the word saturates to the word itself"
     assert _evaluate(shift, fmt.max, 1) == [-2, fmt.max], "the raw shift drops the bit the saturating one clamps on"
 
+    right = IShrOperator(fmt)
+    for count in (0, 1, width - 1, width, width + 1, fmt.max):
+        assert _evaluate(right, 0, count) == [0]
+        assert _evaluate(right, -1, count) == [-1], "sign fill makes -1 a fixed point of every right shift"
+    # A negative count shifts left, and that shift is raw: the bit walks up into the sign and then off the word.
+    assert _evaluate(right, 1, 2 - width) == [1 << (width - 2)]
+    assert _evaluate(right, 1, 1 - width) == [fmt.min]
+    assert _evaluate(right, 1, -width) == [0]
+    assert _evaluate(right, fmt.min, fmt.min) == [0], "|MIN| is past the word, so the left it asks for empties it"
+    assert _evaluate(right, fmt.max, -1) == [-2], "the left shift drops what leaves the word rather than clamping"
+
+
+@pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
+def test_the_two_shifters_mirror_each_other_over_every_operand_pair(width: int) -> None:
+    # Each must be the other read backwards, or the pair is not worth two modules. MIN has no negation in the
+    # format, so it is the one count they legitimately part on.
+    fmt = IntFormat(width)
+    left, right = IShlOperator(fmt), IShrOperator(fmt)
+    for a in range(1 << width):
+        for b in range(fmt.min + 1, fmt.max + 1):
+            (mirrored,) = right.evaluate(IntValue.from_bits(fmt, a), IntValue.from_int(fmt, -b))
+            assert _bits(left, a, fmt.encode(b))["shft"] == mirrored.bits, (a, b)
+    for a in range(1 << width):
+        assert _bits(right, a, fmt.encode(fmt.min))["shft"] == 0, "a left shift past the word empties the word"
+
 
 @pytest.mark.parametrize("width", (2, 3, 24, 33, 44))
 def test_closed_form_latencies(width: int) -> None:
     fmt = IntFormat(width)
     assert IDivOperator(fmt).latency == 3 + -(-width // 2), "one radix-4 step per two quotient bits, rounded up"
-    for operator in (IAddOperator(fmt), ISubOperator(fmt), IAbsOperator(fmt), IShlOperator(fmt), ICmpOperator(fmt)):
+    for operator in (
+        IAddOperator(fmt),
+        ISubOperator(fmt),
+        IAbsOperator(fmt),
+        IShlOperator(fmt),
+        IShrOperator(fmt),
+        ICmpOperator(fmt),
+    ):
         assert operator.latency == 2
         assert operator.initiation_interval == 1
 
@@ -200,6 +233,7 @@ def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None
         IMulOperator(fmt, IMulOptions()),
         IAbsOperator(fmt),
         IShlOperator(fmt),
+        IShrOperator(fmt),
         ICmpOperator(fmt),
     ):
         assert operator.error_ports == [], operator.mnemonic

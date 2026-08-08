@@ -10,6 +10,7 @@
 //  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den  | quo, rem, saturated, div0
 //  holoso_iabss    | Absolute value, saturated             | 2     | x         | y, saturated
 //  holoso_ishl     | Arith. shift, left+/right-            | 2     | x, shamt  | shft, prod, saturated
+//  holoso_ishr     | Arith. shift, right+/left-            | 2     | x, shamt  | shft
 //  holoso_icmp     | Signed comparison                     | 2     | a, b      | a_gt_b, a_eq_b, a_lt_b
 
 `timescale 1ns/1ps
@@ -699,6 +700,68 @@ module holoso_ishl#(parameter W = 44, parameter integer LATENCY = 0) (
             3'b001: prod <= shifted_right;
         endcase
         saturated <= clamp;
+        if (rst) begin
+            input_valid_q <= 1'b0;
+            out_valid <= 1'b0;
+        end else begin
+            input_valid_q <= in_valid;
+            out_valid <= input_valid_q;
+        end
+    end
+endmodule
+
+// Signed integer barrel shifter, the mirror of holoso_ishl: shift right if shamt>0, shift left if shamt<0.
+// Neither direction can rail here -- a right shift cannot overflow and the left one is the raw bit shift.
+module holoso_ishr#(parameter W = 44, parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire in_valid,
+    input  wire signed [W-1:0] x,
+    input  wire signed [W-1:0] shamt,
+    output reg out_valid,
+    output reg signed [W-1:0] shft
+);
+    localparam integer LATENCY_REF = 2;
+    localparam integer SW = $clog2(W);
+    localparam integer PW = $clog2(SW);
+    localparam [SW:0] W_AMOUNT = W;
+    generate
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
+            _holoso_invalid_integer_latency u_invalid();
+        end
+    endgenerate
+
+    reg signed [W-1:0] x_q;
+    reg signed [W-1:0] shamt_q;
+    reg input_valid_q;
+    wire [SW-1:0] shamt_narrow = shamt_q[SW-1:0];
+    wire [SW-1:0] left_prefix [0:PW];
+    assign left_prefix[0] = shamt_narrow;
+    genvar i;
+    generate
+        for (i = 0; i < PW; i = i + 1) begin : g_left_prefix
+            assign left_prefix[i+1] = left_prefix[i] | (left_prefix[i] << (1 << i));
+        end
+    endgenerate
+    wire [SW-1:0] left_amount = ~shamt_narrow ^ ~(left_prefix[PW] << 1);
+    wire [SW:0] right_amount_ext = {1'b0, shamt_narrow};
+    wire [SW:0] left_amount_ext = {1'b0, left_amount};
+    wire right_large = (|shamt_q[W-1:SW]) | (right_amount_ext >= W_AMOUNT);
+    wire left_large = (~&shamt_q[W-1:SW]) | (~|shamt_narrow) | (left_amount_ext >= W_AMOUNT);
+    wire signed [W-1:0] shifted_right = x_q >>> shamt_narrow;
+    wire signed [W-1:0] shifted_left = x_q << left_amount;
+
+    wire unshifted = shamt_q[W-1] ? left_large : right_large;
+    wire fill = ~shamt_q[W-1] & x_q[W-1];
+
+    always @(posedge clk) begin
+        x_q <= x;
+        shamt_q <= shamt;
+        casez ({unshifted, shamt_q[W-1]})
+            2'b1?: shft <= {W{fill}};
+            2'b00: shft <= shifted_right;
+            2'b01: shft <= shifted_left;
+        endcase
         if (rst) begin
             input_valid_q <= 1'b0;
             out_valid <= 1'b0;

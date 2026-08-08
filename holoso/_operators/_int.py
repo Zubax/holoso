@@ -206,7 +206,7 @@ class IShlOperator(IntHardwareOperator):
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
-        return a.shift(b)
+        return a.shift_left(b)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b = operands
@@ -217,6 +217,30 @@ class IShlOperator(IntHardwareOperator):
     ) -> str:
         assert isinstance(conditioner, IntIdentity)
         return f"{self.output_hdl_ports[port]}({', '.join(operands)})"
+
+
+@dataclass(frozen=True, slots=True)
+class IShrOperator(IntHardwareOperator):
+    """
+    The mirror of :class:`IShlOperator`, right when positive.
+    Neither direction can rail, so it emits one raw reading and no saturation.
+    """
+
+    mnemonic: ClassVar[str] = "ishr"
+    operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
+    output_hdl_ports: ClassVar[list[str]] = ["shft"]
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        a, b = self._validated_operands(operands)
+        return (a.shift_right(b),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        a, b = operands
+        return f"{a}>>{b}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +372,7 @@ class IntShiftConstOperator(IntInlineOperator):
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
-        return (a.shift(IntValue.from_int(self.fmt, self.shamt)).shft,)
+        return (a.shift_left(IntValue.from_int(self.fmt, self.shamt)).shft,)
 
 
 @dataclass(frozen=True, slots=True)

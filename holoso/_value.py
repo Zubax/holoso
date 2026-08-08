@@ -259,7 +259,7 @@ class IntValue:
         assert fmt.fits(quotient) and fmt.fits(remainder)
         return DivResult(self._wrap(fmt, quotient), self._wrap(fmt, remainder))
 
-    def shift(self, count: IntValue) -> ShiftResult:
+    def shift_left(self, count: IntValue) -> ShiftResult:
         """Arithmetic shift, left for a positive count and right for a negative one, as ``holoso_ishl``."""
         fmt = _matching_int_format(self, count)
         if count.value < 0:  # Any amount past the word is indistinguishable from the word itself.
@@ -268,6 +268,14 @@ class IntValue:
         exact = self.value << min(count.value, fmt.width)
         truncated = fmt.decode(exact & ((1 << fmt.width) - 1))
         return ShiftResult(self._wrap(fmt, truncated), self._wrap(fmt, fmt.saturate(exact)))
+
+    def shift_right(self, count: IntValue) -> IntValue:
+        """The mirror of :meth:`shift_left`, as ``holoso_ishr``: right for a positive count, left for a negative one."""
+        fmt = _matching_int_format(self, count)
+        magnitude = min(abs(count.value), fmt.width)  # any amount past the word is the word itself
+        if count.value >= 0:
+            return self._wrap(fmt, self.value >> magnitude)
+        return self._wrap(fmt, fmt.decode((self.value << magnitude) & ((1 << fmt.width) - 1)))
 
     # Bitwise combination cannot leave the range a two's-complement word already spans (``~min == max``), so these
     # wrap where the arithmetic operators saturate; ``_wrap``'s assertion is what makes that a checked claim.

@@ -47,6 +47,17 @@ def ishl(a_bits: int, b_bits: int, width: int) -> ShiftResult:
     return ShiftResult((a_bits << shift) & mask, clamped & mask, clamped != exact)
 
 
+def ishr(a_bits: int, b_bits: int, width: int) -> int:
+    """The mirror of `ishl`: right for a positive count, left for a negative one, raw either way."""
+    assert width >= 2
+    mask = (1 << width) - 1
+    assert 0 <= a_bits <= mask and 0 <= b_bits <= mask
+    a = signed(a_bits, width)
+    b = signed(b_bits, width)
+    shift = min(abs(b), width)  # any larger amount is indistinguishable from width inside a width-bit word
+    return ((a >> shift) if b >= 0 else (a_bits << shift)) & mask
+
+
 def expected_simple(module: str, a_bits: int, b_bits: int, width: int) -> dict[str, int]:
     """
     What one of the modules taking no parameter beyond the width answers, keyed by its own output port names.
@@ -63,6 +74,8 @@ def expected_simple(module: str, a_bits: int, b_bits: int, width: int) -> dict[s
     if module == "holoso_ishl":
         shifted = ishl(a_bits, b_bits, width)
         return {"shft": shifted.shft, "prod": shifted.prod, "saturated": int(shifted.saturated)}
+    if module == "holoso_ishr":
+        return {"shft": ishr(a_bits, b_bits, width)}
     exact = {
         "holoso_iadds": a + b,
         "holoso_isubs": a - b,

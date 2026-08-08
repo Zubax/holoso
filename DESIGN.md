@@ -160,9 +160,8 @@ complement and saturate at the extremes rather than wrapping. Saturation is defi
 overflowing to infinity, so it is not an error flag -- were it one, an if-converted arm that saturated would raise an
 error the untaken path never earned. The shift is the deliberate exception: `<<` is the raw bit shift and drops
 whatever leaves the word, so `5000 << 3` wraps where `5000 * 8` rails. Truncation is what `<<` means over a machine
-word, and the shift module offers both readings, so a rewrite of a power-of-two multiply into a shift must tap the
-saturating one rather than this. What is pending is the rest of the integer backend: the RTL renders one, but the
-model, the testbench and the report do not.
+word, and the left shifter offers both readings, so a rewrite of a power-of-two multiply into a shift must tap the
+saturating one rather than this.
 
 One wide register holds either family whole: it is as wide as the integer format, which is never narrower than the
 float, so an integer fills it exactly and a float occupies its low bits. The inline integer operators are then native
