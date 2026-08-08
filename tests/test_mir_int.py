@@ -73,7 +73,7 @@ from holoso._operators import (
     ICmpOperator,
     IDivOperator,
     IMulOperator,
-    IShiftOperator,
+    IShlOperator,
     ISubOperator,
     IntBwAndOperator,
     IntBwNotOperator,
@@ -272,7 +272,7 @@ def test_integer_division_taps_quotient_and_remainder_from_one_operation() -> No
     ],
 )
 def test_integer_shift_emits_both_readings_past_the_word(value: int, count: int, shft: int, prod: int) -> None:
-    interpreter = MirInterpreter(_binary_graph(IShiftOperator(IFMT), 0, 1))
+    interpreter = MirInterpreter(_binary_graph(IShlOperator(IFMT), 0, 1))
     assert interpreter.run(value, count) == [_int(shft), _int(prod)]
 
 
@@ -647,7 +647,7 @@ class InputLatch:
         (bitwise_ops, (0x0F0F, 0x00FF), ["ibwand", "ibwnot", "ibwor", "ibwxor"]),
         (mux_and_casts, (5, 6, True), ["iadds", "ifrombool", "itobool", "select"]),
         (family_crossings, (3.75, -4), ["ffromint", "ftoint"]),
-        (shift_pair, (5, 2), ["ishift", "ishift", "isubs"]),
+        (shift_pair, (5, 2), ["ishl", "ishl", "isubs"]),
         (countdown, (10,), ["iadds", "icmp", "isubs"]),
     ],
 )

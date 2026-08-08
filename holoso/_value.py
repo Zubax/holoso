@@ -260,7 +260,7 @@ class IntValue:
         return DivResult(self._wrap(fmt, quotient), self._wrap(fmt, remainder))
 
     def shift(self, count: IntValue) -> ShiftResult:
-        """Arithmetic shift, left for a positive count and right for a negative one, as ``holoso_ishift``."""
+        """Arithmetic shift, left for a positive count and right for a negative one, as ``holoso_ishl``."""
         fmt = _matching_int_format(self, count)
         if count.value < 0:  # Any amount past the word is indistinguishable from the word itself.
             shifted = self._wrap(fmt, self.value >> min(-count.value, fmt.width))

@@ -17,7 +17,7 @@ Integer strength reduction is deferred past the constant folds and the declared 
 operators declare no identity deliberately, because the shared algebra drops an identity operand wherever it sits
 and so would rewrite `0 - x` to `x`; `x-0`, `x//1` and `x%1` therefore need rules of their own. So do the integer
 counterparts of the float-specific rewrites -- `x*-1` to `ineg`, multiplication and floor division by a power of two
-to a shift, and the value-equality folds `x-x`, `x^x` and `x&x`. That power-of-two rewrite must tap `ishift`'s
+to a shift, and the value-equality folds `x-x`, `x^x` and `x&x`. That power-of-two rewrite must tap `ishl`'s
 saturating `prod` reading rather than the raw `shft` one the `<<` lowering takes, or it changes the answer at the
 rails. Each must answer for saturation at the format extremes, a question the float rules never faced.
 

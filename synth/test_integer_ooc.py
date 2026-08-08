@@ -66,7 +66,7 @@ class _DividerTarget:
 
 _TARGETS = tuple(
     _Target(operator, width, flow, frequency)
-    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishift")
+    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishl")
     for width in (24, 44)
     for flow, frequency in (
         (FlowId.YOSYS_ECP5, 100.0),
@@ -257,7 +257,7 @@ def _build_ooc_design(operator: str, width: int) -> OocDesign:
     top = f"{operator}_w{width}_ooc"
     if operator == "holoso_icmp":
         wrapper = _render_cmp_wrapper(top, width)
-    elif operator == "holoso_ishift":
+    elif operator == "holoso_ishl":
         wrapper = _render_shift_wrapper(top, width)
     else:
         wrapper = _render_saturating_wrapper(top, operator, width)
@@ -697,7 +697,7 @@ module {top} (
         endcase
     end
 
-    holoso_ishift#(.W({width}), .LATENCY(2)) dut (
+    holoso_ishl#(.W({width}), .LATENCY(2)) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
         .out_valid(dut_out_valid), .shft(dut_shft), .prod(dut_prod), .saturated(dut_saturated)
     );

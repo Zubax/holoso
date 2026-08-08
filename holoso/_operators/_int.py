@@ -189,14 +189,14 @@ class IAbsOperator(IntHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class IShiftOperator(IntHardwareOperator):
+class IShlOperator(IntHardwareOperator):
     """
     An arithmetic shift by a signed amount, left when positive. It emits both readings of a left shift at once:
     ``shft`` lets the high bits fall off the word, while ``prod`` is the multiplication by a power of two, saturating
     instead. Which one a shift wants is a lowering decision, so the operator commits to neither.
     """
 
-    mnemonic: ClassVar[str] = "ishift"
+    mnemonic: ClassVar[str] = "ishl"
     operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
     output_hdl_ports: ClassVar[list[str]] = ["shft", "prod"]
 
@@ -316,7 +316,7 @@ class IntBwNotOperator(IntInlineOperator):
 class IntShiftConstOperator(IntInlineOperator):
     """
     An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
-    drops what leaves the word rather than saturating as the pooled ``holoso_ishift`` also offers.
+    drops what leaves the word rather than saturating as the pooled ``holoso_ishl`` also offers.
     Shift by 0 or by an amount exceeding the operand width is a compile-time error (must fold/reject before LIR).
     """
 

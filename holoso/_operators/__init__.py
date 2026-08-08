@@ -53,7 +53,7 @@ from ._int import (
     ICmpOperator as ICmpOperator,
     IDivOperator as IDivOperator,
     IMulOperator as IMulOperator,
-    IShiftOperator as IShiftOperator,
+    IShlOperator as IShlOperator,
     ISubOperator as ISubOperator,
     IntBwAndOperator as IntBwAndOperator,
     IntBwNotOperator as IntBwNotOperator,

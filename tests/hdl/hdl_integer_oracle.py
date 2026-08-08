@@ -26,7 +26,7 @@ class ShiftResult:
     saturated: bool
 
 
-def ishift(a_bits: int, b_bits: int, width: int) -> ShiftResult:
+def ishl(a_bits: int, b_bits: int, width: int) -> ShiftResult:
     """
     A left shift is a multiplication by a power of two, so it can overflow: `shft` lets the high bits fall off the
     word while `prod` clamps to the representable range. Right shifts cannot overflow and the two agree there.
@@ -60,8 +60,8 @@ def expected_simple(module: str, a_bits: int, b_bits: int, width: int) -> dict[s
     b = signed(b_bits, width)
     if module == "holoso_icmp":
         return {"a_gt_b": int(a > b), "a_eq_b": int(a == b), "a_lt_b": int(a < b)}
-    if module == "holoso_ishift":
-        shifted = ishift(a_bits, b_bits, width)
+    if module == "holoso_ishl":
+        shifted = ishl(a_bits, b_bits, width)
         return {"shft": shifted.shft, "prod": shifted.prod, "saturated": int(shifted.saturated)}
     exact = {
         "holoso_iadds": a + b,

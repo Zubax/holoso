@@ -41,7 +41,7 @@ from holoso._operators import (
     ICmpOperator,
     IDivOperator,
     IMulOperator,
-    IShiftOperator,
+    IShlOperator,
     ISubOperator,
     IntBwAndOperator,
     IntBwNotOperator,
@@ -58,7 +58,7 @@ from holoso._type import IntType
 from holoso._value import IntValue
 
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_ops
-from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishift, signed
+from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishl, signed
 
 EXHAUSTIVE_WIDTHS = (2, 3, 4, 5, 6)
 PRODUCTION_WIDTHS = (24, 33, 44)
@@ -95,7 +95,7 @@ def _oracle(expected: dict[str, int], operator: IntHardwareOperator) -> dict[str
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: int) -> None:
     fmt = IntFormat(width)
-    binary = [IAddOperator(fmt), ISubOperator(fmt), ICmpOperator(fmt), IShiftOperator(fmt)]
+    binary = [IAddOperator(fmt), ISubOperator(fmt), ICmpOperator(fmt), IShlOperator(fmt)]
     idiv, iabs = IDivOperator(fmt), IAbsOperator(fmt)
     # Staging is a timing knob, so every multiplier configuration must answer the one product.
     multipliers = [IMulOperator(fmt, IMulOptions(stage_product=stage)) for stage in range(5)]
@@ -164,7 +164,7 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
     for numerator in _corners(fmt):
         assert _evaluate(IDivOperator(fmt), numerator, 0) == [fmt.min if numerator < 0 else fmt.max, numerator]
 
-    shift = IShiftOperator(fmt)
+    shift = IShlOperator(fmt)
     for count in (0, 1, width - 1, width, width + 1, fmt.max):
         assert _evaluate(shift, 0, count) == [0, 0]
         assert _evaluate(shift, -1, -count) == [-1, -1], "sign fill makes -1 a fixed point of every right shift"
@@ -177,7 +177,7 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
 def test_closed_form_latencies(width: int) -> None:
     fmt = IntFormat(width)
     assert IDivOperator(fmt).latency == 3 + -(-width // 2), "one radix-4 step per two quotient bits, rounded up"
-    for operator in (IAddOperator(fmt), ISubOperator(fmt), IAbsOperator(fmt), IShiftOperator(fmt), ICmpOperator(fmt)):
+    for operator in (IAddOperator(fmt), ISubOperator(fmt), IAbsOperator(fmt), IShlOperator(fmt), ICmpOperator(fmt)):
         assert operator.latency == 2
         assert operator.initiation_interval == 1
 
@@ -199,7 +199,7 @@ def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None
         ISubOperator(fmt),
         IMulOperator(fmt, IMulOptions()),
         IAbsOperator(fmt),
-        IShiftOperator(fmt),
+        IShlOperator(fmt),
         ICmpOperator(fmt),
     ):
         assert operator.error_ports == [], operator.mnemonic
@@ -252,7 +252,7 @@ def test_constant_shift_over_every_count_and_operand(width: int) -> None:
     for count in (count for count in range(1 - width, width) if count != 0):
         operator = IntShiftConstOperator(fmt, count)
         for a in range(1 << width):
-            want = ishift(a, fmt.encode(count), width).shft
+            want = ishl(a, fmt.encode(count), width).shft
             assert operator.evaluate(IntValue.from_bits(fmt, a)) == (IntValue.from_bits(fmt, want),), (count, a)
 
     assert IntShiftConstOperator(fmt, 1).render("r0") == "r0<<1"
@@ -271,10 +271,10 @@ def test_the_constant_shift_serves_only_the_counts_that_are_shifts() -> None:
 
 
 def test_the_constant_shift_is_the_raw_shift_and_not_the_saturating_one() -> None:
-    # The inline shift drops what leaves the word; the saturating reading needs the pooled ``holoso_ishift``.
+    # The inline shift drops what leaves the word; the saturating reading needs the pooled ``holoso_ishl``.
     fmt = IntFormat(33)
     assert _evaluate(IntShiftConstOperator(fmt, 1), fmt.max) == [-2]
-    assert _evaluate(IShiftOperator(fmt), fmt.max, 1) == [-2, fmt.max]
+    assert _evaluate(IShlOperator(fmt), fmt.max, 1) == [-2, fmt.max]
 
 
 @pytest.mark.parametrize("wint", (4, 17, 44))

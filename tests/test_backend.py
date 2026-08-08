@@ -38,7 +38,7 @@ from holoso._operators import (
     ICmpOperator,
     IDivOperator,
     IMulOperator,
-    IShiftOperator,
+    IShlOperator,
     ISubOperator,
     OpConfig,
     PooledHardwareOperator,
@@ -166,7 +166,7 @@ def _integer_operators(ifmt: IntFormat) -> list[PooledHardwareOperator]:
         ISubOperator(ifmt),
         IDivOperator(ifmt),
         IAbsOperator(ifmt),
-        IShiftOperator(ifmt),
+        IShlOperator(ifmt),
         ICmpOperator(ifmt),
         *(IMulOperator(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
     ]
