@@ -335,9 +335,10 @@ that exponent (an out-of-range exponent is rejected -- the equivalent constant w
 anyway); the four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate, and a
 float-to-integer conversion reading one of them carries it as its own mode instead of waiting on its result -- the
 rounding survives only if something else observes it, and then each rounds the value independently.
-The integer lowerer likewise answers a constant shift count from the count itself: a shift by nothing is the
-operand, a shift past the word is zero or the sign fill, and every count between is one inline shift. A count no
-other use reads is never lowered, which is what lets one too wide for the machine format compile at all.
+The integer lowerer likewise answers a constant shift count from the count itself: a shift past the word is zero
+or the sign fill, and every count within it is one inline shift. A count no other use reads is never lowered, which
+is what lets one too wide for the machine format compile at all. A shift by nothing reduces earlier, in HIR, where
+the if-conversion budget counts it.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter
 transaction, sin/cos computed simultaneously by the sincos operator, FMA contraction of a single-use `a*b+c`, a

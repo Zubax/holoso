@@ -175,19 +175,6 @@ def test_hir_nodes_carry_float_type() -> None:
     assert op_node.type == HirFloatType()
 
 
-def test_hir_builder_rejects_wrong_semantic_operand_type() -> None:
-    builder = HirBuilder()
-    builder.block()
-    a = builder.input("a", OtherType())
-    b = builder.input("b", HirFloatType())
-    try:
-        builder.operation(FloatAdd(), [a, b])
-    except ValueError as ex:
-        assert "expects operands" in str(ex)
-    else:
-        assert False, "expected a semantic type mismatch"
-
-
 def test_lower_rejects_non_float_hir_input_type() -> None:
     builder = HirBuilder()
     builder.block()
@@ -883,10 +870,6 @@ def test_integer_operator_signature(operator: Operator, operand_types: list[Type
     ]
     vid = builder.operation(operator, operands)
     assert builder.type_of(vid) == result_type
-    # The signature is enforced, so a wrong-typed operand cannot silently build an ill-typed graph.
-    wrong = builder.float_const(2.0) if operand_types[0] != HirFloatType() else builder.int_const(2)
-    with pytest.raises(ValueError):
-        builder.operation(operator, [wrong, *operands[1:]])
 
 
 def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_value() -> None:

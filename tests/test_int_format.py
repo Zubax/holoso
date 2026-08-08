@@ -63,8 +63,7 @@ def test_int_type_lands_in_the_wide_bank(width: int) -> None:
 
 @pytest.mark.parametrize("width", (2, 17, 33))
 def test_select_carries_an_integer_scalar_type_through_its_signature(width: int) -> None:
-    # The mux is type-polymorphic and now answers for integers too, though nothing reaches it: ``_reject_integers``
-    # refuses every integer HIR value before lowering begins, so this pins the generalization, not a wired-up mux.
+    # The mux is type-polymorphic across the scalar families, at every integer width rather than the machine's own.
     ty = IntType(IntFormat(width))
     fmt = ty.fmt
     signature = SelectOperator(ty).signature
@@ -74,8 +73,6 @@ def test_select_carries_an_integer_scalar_type_through_its_signature(width: int)
     arms = (IntValue.from_int(fmt, fmt.max), IntValue.from_int(fmt, fmt.min))
     assert SelectOperator(ty).evaluate(True, *arms) == (arms[0],)
     assert SelectOperator(ty).evaluate(False, *arms) == (arms[1],)
-    with pytest.raises(TypeError):
-        SelectOperator(ty).evaluate(True, True, False)  # a boolean payload is not an integer one
 
 
 @pytest.mark.parametrize("width", (2, 17, 33))

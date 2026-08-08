@@ -409,12 +409,6 @@ class MirWideView(_MirBankView):
                         int_formats.add(scalar_type.fmt)
                 case MirBoolInput() | MirBoolStateRead() | MirBoolConst() | MirPhi() | MirOperation():
                     pass  # the bool resource family (bool state/const/phi and bool-result ops), handled by MirBoolView
-                case MirInput():
-                    raise UnsupportedConstruct(f"LIR construction does not support MIR input {vid} of this type")
-                case MirStateRead():
-                    raise UnsupportedConstruct(f"LIR construction does not support MIR state read {vid} of this type")
-                case MirConst():
-                    raise UnsupportedConstruct(f"LIR construction does not support MIR constant {vid} of this type")
         outputs = [out for out in mir.outputs if isinstance(out, (MirFloatOutput, MirIntOutput))]
         state_slots = [slot for slot in mir.state_slots if isinstance(slot, (MirFloatStateSlot, MirIntStateSlot))]
         for vid in mir.input_ids:

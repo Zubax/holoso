@@ -4,7 +4,7 @@ import math
 import sys
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -59,7 +59,6 @@ from holoso._mir import (
     MirFloatConst,
     MirFloatInput,
     MirFloatOutput,
-    MirInput,
     MirNode,
     MirOperation,
     MirRet,
@@ -76,7 +75,7 @@ from holoso._operators import (
 )
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_model
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
-from holoso._type import BoolType, FloatType, ScalarType
+from holoso._type import BoolType, FloatType
 from holoso._value import FloatValue
 
 from ._modelref import (
@@ -113,18 +112,6 @@ OPS = build_ops(
     )
 )
 _FETCH_LAG = 2  # the datapath lag the tests schedule against: one less than the 3-stage control fetch they build
-
-
-@dataclass(frozen=True, slots=True)
-class OtherScalarType(ScalarType):
-    @property
-    def width(self) -> int:
-        return 1
-
-
-@dataclass(frozen=True, slots=True)
-class OtherMirInput(MirInput):
-    pass
 
 
 def _run(
@@ -1930,20 +1917,6 @@ def test_build_rejects_mir_with_mixed_float_formats() -> None:
     # Anchored: the configured format sits on the other side of the message, so unanchored would pass on both.
     with pytest.raises(ValueError, match=r"got FloatFormat\(wexp=8, wman=24\)$"):
         build_lir(mir, "mixed")
-
-
-def test_wide_view_rejects_non_float_mir_before_scheduling() -> None:
-    mir = Mir(
-        FMT,
-        default_ifmt(FMT),
-        nodes={0: OtherMirInput("a", OtherScalarType())},
-        blocks=[MirBlock(0, (), (), MirRet())],
-        input_ids=[0],
-        outputs=[MirFloatOutput("out_0", 0)],
-        state_slots=[],
-    )
-    with pytest.raises(UnsupportedConstruct, match="MIR input"):
-        MirWideView.from_mir(mir)
 
 
 def test_wide_view_rejects_non_input_input_id() -> None:
