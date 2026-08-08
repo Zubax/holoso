@@ -110,6 +110,7 @@ from .._operators import (
     ICmpOperator,
     IDivOperator,
     IShlOperator,
+    IShrOperator,
     ISubOperator,
     IntBwAndOperator,
     IntBwNotOperator,
@@ -1216,20 +1217,15 @@ class _IntLowerer:
 
     def _runtime_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
         """
-        ``ishl`` shifts left by a positive count and right by a negative one, so a right shift negates its count.
-        Port 0 is the raw reading: a left shift drops what leaves the word rather than saturating, which is what ``<<``
-        means. The module clamps the amount at the word, which is where the two readings of an unbounded count meet --
-        a left shift past the word answers zero and a right shift past it answers the sign fill, as Python's own
-        unbounded shift does once the word truncates it.
+        Each direction has the module that names it, so neither negates its count to reach the other's. The left
+        shifter is tapped on its raw reading, because ``<<`` drops what leaves the word rather than saturating. Both
+        modules clamp the amount at the word, which is where the two readings of an unbounded count meet -- a left
+        shift past the word answers zero and a right shift past it answers the sign fill, as Python's own unbounded
+        shift does once the word truncates it.
         """
-        shamt = self.context.remap[count]
-        if isinstance(semantic, IntShiftRight):
-            shamt = self._negate(semantic, shamt)
-        return self.context.builder.operation(
-            _select_hardware(semantic, IShlOperator(self.context.int_format)),
-            [self.context.remap[a], shamt],
-            [IntIdentity(), IntIdentity()],
-        )
+        fmt = self.context.int_format
+        hardware = IShrOperator(fmt) if isinstance(semantic, IntShiftRight) else IShlOperator(fmt)
+        return self._emit(semantic, hardware, a, count)
 
     def _constant_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: int) -> ValueId:
         """

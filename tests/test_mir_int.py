@@ -647,7 +647,7 @@ class InputLatch:
         (bitwise_ops, (0x0F0F, 0x00FF), ["ibwand", "ibwnot", "ibwor", "ibwxor"]),
         (mux_and_casts, (5, 6, True), ["iadds", "ifrombool", "itobool", "select"]),
         (family_crossings, (3.75, -4), ["ffromint", "ftoint"]),
-        (shift_pair, (5, 2), ["ishl", "ishl", "isubs"]),
+        (shift_pair, (5, 2), ["ishl", "ishr"]),
         (countdown, (10,), ["iadds", "icmp", "isubs"]),
     ],
 )
@@ -655,8 +655,8 @@ def test_a_kernel_selects_its_integer_modules_and_answers_as_cpython_does(
     target: Callable[..., object], args: tuple[int | float | bool, ...], selected: list[str]
 ) -> None:
     """
-    Every integer operator the lowering can choose, named in one place: ``ineg`` selects ``isubs`` because there is no
-    negation module, and a right shift selects ``isubs`` too, to negate its count for the left-positive shifter.
+    Every integer operator the lowering can choose, named in one place: ``ineg`` selects ``isubs`` because there is
+    no negation module, while each shift direction selects the module that names it.
     """
     mir = _select(target)
     assert _mnemonics(mir) == selected
@@ -782,14 +782,35 @@ def test_a_shift_answers_as_python_does_once_the_word_truncates_it(x: int, n: in
     assert _run(interpreter, x, n) == [_wrap(x << n), x >> n]
 
 
-@pytest.mark.parametrize("x,n,expected", [(1, -2, 0), (-8, -2, -2), (12345, -20, 0)])
-def test_a_negative_runtime_shift_count_reverses_the_direction(x: int, n: int, expected: int) -> None:
+@pytest.mark.parametrize("x,n,expected", [(1, -2, [0, 4]), (-8, -2, [-2, -32]), (12345, -20, [0, 0])])
+def test_a_negative_runtime_shift_count_reverses_the_direction(x: int, n: int, expected: list[int]) -> None:
     """
-    CPython refuses a negative count; the shifter is total over every representable one and reads it as the opposite
+    CPython refuses a negative count; each shifter is total over every representable one and reads it as its other
     direction. A kernel reaches this only through a value it did not constrain, so the hardware's answer is the
     definition -- there is no other.
     """
-    assert _run(MirInterpreter(_select(shift_pair)), x, n)[0] == expected
+    assert _run(MirInterpreter(_select(shift_pair)), x, n) == expected
+
+
+def test_a_right_shift_costs_exactly_what_a_left_shift_costs() -> None:
+    """
+    The point of a second shifter: a right shift no longer negates its count, so it pays neither the subtractor nor
+    the cycles that dependency cost. Matching schedules alone would pass if both regressed, so the module each
+    kernel builds is pinned too.
+    """
+    left, right = (build_lir(_select(target), "shift") for target in (shift_left_only, shift_right_only))
+    assert [inst.operator.mnemonic for inst in left.instances] == ["ishl"]
+    assert [inst.operator.mnemonic for inst in right.instances] == ["ishr"]
+    assert left.last_pc == right.last_pc
+    assert left.min_initiation_interval == right.min_initiation_interval
+
+
+def shift_left_only(x: int, n: int) -> int:
+    return x << n
+
+
+def shift_right_only(x: int, n: int) -> int:
+    return x >> n
 
 
 def shift_left_by_a_negative_constant(x: int) -> int:
@@ -803,7 +824,7 @@ def shift_right_by_a_negative_constant(x: int) -> int:
 @pytest.mark.parametrize("target", [shift_left_by_a_negative_constant, shift_right_by_a_negative_constant])
 def test_a_constant_negative_shift_count_is_refused_rather_than_reversed(target: Callable[..., object]) -> None:
     """
-    CPython raises on a negative count, and the left-positive shifter would read one as the OPPOSITE direction --
+    CPython raises on a negative count, and the shifter would read one as its OPPOSITE direction --
     a wrong answer, not a rail. HIR cannot fold it away here because the shifted value is a runtime input.
     """
     with pytest.raises(UnsupportedConstruct, match=r"shift count -1 is negative; Python has no such shift"):
