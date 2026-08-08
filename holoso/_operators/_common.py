@@ -142,6 +142,11 @@ def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
     raise TypeError(f"no conditioner is defined for ports of {scalar_type!r}")
 
 
+def has_sign_control(scalar_type: ScalarType) -> bool:
+    """Whether a port carries a sign sideband, which only a float does; read off the conditioner so the two agree."""
+    return isinstance(identity_conditioner(scalar_type), FloatSignControl)
+
+
 @dataclass(frozen=True, slots=True)
 class ScalarSignature:
     """

@@ -1,5 +1,6 @@
 """Elaboration tests for the generated Verilog backend (structural correctness under Icarus)."""
 
+import math
 import re
 import shutil
 import subprocess
@@ -44,9 +45,10 @@ from holoso._operators import (
 )
 from holoso._type import FloatType, IntType, ScalarType
 from holoso._backend.verilog import generate
+from holoso._backend.verilog._microcode import PORT_LETTERS, base_name, tapped_lanes
 from holoso._eel import lower
 from holoso._hir import optimize
-from holoso._lir import BoolRegRef, RegRef, pooled_write_word
+from holoso._lir import BoolRegRef, Lir, RegRef, pooled_write_word
 from holoso._mir import Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
@@ -632,3 +634,126 @@ def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(tmp_path: P
     for slot in coexisting:
         assert max(steps[slot.reg]) < lir.present_step, f"{slot.name!r}: {sorted(steps[slot.reg])} vs present_step"
     _elaborate("shared_live_out", generate(lir).verilog, tmp_path)
+
+
+_INT_OPTIONS = Options(
+    OperatorOptions(
+        fadd=FAddOptions(),
+        fcmp=FCmpOptions(),
+        fsort=FSortOptions(),  # a min alone leaves the max lane untapped
+        imul=IMulOptions(),
+        ffromint=FFromIntOptions(),
+        ftoint=FToIntOptions(),
+    ),
+    ffmt=FloatFormat(6, 18),
+    wint_min=34,  # wider than the float, so a port sized at WFLT would silently lose its top bits
+)
+
+
+class _IntegerKernel:
+    """One instance of every wide site an integer reaches: both conversions, both slot installs, a negative reset."""
+
+    def __init__(self) -> None:
+        self._n = -3  # negative, so the reset literal exercises two's complement and not only the width
+        self._prev = 0
+
+    def step(self, a: int, b: int, n: int, x: float) -> tuple[int, int, int, int, int, bool, float, int]:
+        # Exporting the slot's OLD value keeps it live to the boundary, which is what makes the install a
+        # boundary copy -- the one arm that taps a slot through a conditioner rather than an opcode write.
+        previous = self._prev
+        self._n = self._n + a
+        self._prev = b
+        return (
+            self._n,
+            previous,
+            abs(a - b) * (a & b) ^ ~a,
+            (a << 3) // 7,
+            a >> n,
+            a > b,
+            float(a) + min(x, float(b)),
+            int(math.floor(x)),
+        )
+
+
+def _instantiation(verilog: str, mnemonic: str) -> str:
+    found = re.search(rf"holoso_{mnemonic}\b.*?\n\);", verilog, re.S)
+    assert found is not None, f"holoso_{mnemonic} is not instantiated"
+    return found.group()
+
+
+def _integer_lir() -> Lir:
+    hir = optimize(lower(_IntegerKernel().step).hir, DEFAULT_IFCONV_MAX_OPS)
+    ops = build_ops(_INT_OPTIONS)
+    return build_lir(lower_to_mir(hir, ops, _INT_OPTIONS.ffmt, _INT_OPTIONS.ifmt), "int_kernel")
+
+
+@pytest.mark.whitebox
+def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width() -> None:
+    """
+    The sideband exists only on a float port, and the read mux feeding an integer one must be as wide as the
+    register rather than as the float -- the silent half, which elaborates either way and drops the top bits.
+    """
+    verilog = generate(_integer_lir()).verilog
+    ffromint, ftoint, iadds = (_instantiation(verilog, name) for name in ("ffromint", "ftoint", "iadds"))
+    assert ".a_sgnop(" not in ffromint and ".y_sgnop(" in ffromint  # integer operand, float result
+    assert ".a_sgnop(" in ftoint and ".y_sgnop(" not in ftoint  # float operand, integer result
+    assert "_sgnop(" not in iadds
+    assert re.search(r"reg  \[WINT-1:0\] s_iadds_\w+_a;", verilog)
+    assert re.search(r"wire \[WINT-1:0\] s_ftoint_\w+_y0;", verilog)
+    assert re.search(r"reg  \[WFLT-1:0\] s_ftoint_\w+_a;", verilog)
+
+
+@pytest.mark.whitebox
+def test_only_a_float_port_is_allocated_a_microcode_sign_field() -> None:
+    """Expected from each instance's own signature, so a mixed-family operator cannot slip through by its name."""
+    lir = _integer_lir()
+    verilog = generate(lir).verilog
+    tapped = tapped_lanes(lir)
+    expected = set()
+    for inst in lir.instances:
+        base = base_name(inst)
+        signature = inst.operator.signature
+        expected |= {
+            f"uc_{base}_{PORT_LETTERS[pos]}sgn"
+            for pos, ty in enumerate(signature.operand_types)
+            if isinstance(ty, FloatType)
+        }
+        expected |= {  # an untapped result drives nothing, so it is not allocated a field either
+            f"uc_{base}_y{q}sgn"
+            for q, ty in enumerate(signature.result_types)
+            if isinstance(ty, FloatType) and (inst, q) in tapped
+        }
+    assert set(re.findall(r"\buc_\w+?sgn\b", verilog)) == expected
+    assert any("ffromint" in name for name in expected), "the mixed-family conversions must be in this module"
+
+
+@pytest.mark.whitebox
+def test_an_integer_state_slot_resets_to_its_own_word() -> None:
+    """
+    Silent otherwise: the float codec answers a legal-looking literal for every integer, so the slot comes up
+    holding the encoding of a float rather than its own reset, at the float's width rather than the register's.
+    """
+    lir = _integer_lir()
+    verilog = generate(lir).verilog
+    snapshots = [text.strip() for text in verilog.splitlines() if "reset snapshot" in text]
+    assert any("<= 34'h3fffffffd;" in text for text in snapshots), snapshots  # -3 in two's complement at WREG
+    # The boundary install taps the slot through its conditioner, the one place an integer tap meets that arm.
+    (slot,) = [s for s in lir.wide_state_slots if s.needs_copy and lir.wide_state_install_is_boundary(s)]
+    assert isinstance(slot.tap.source, RegRef)
+    assert f"if (out_valid && out_ready) regs[{slot.reg.index}] <= regs[{slot.tap.source.index}];" in verilog
+
+
+@pytest.mark.whitebox
+def test_an_integer_port_declares_itself_signed() -> None:
+    """A wider signed consumer zero-fills an unsigned port, so a negative integer arrives as a large positive one."""
+    verilog = generate(_integer_lir()).verilog
+    declared = {name: qualifiers for qualifiers, name in re.findall(r"wire (.*?)(\w+),$", verilog, re.M)}
+    assert declared["in_a"] == "signed [33:0] " and declared["out_0"] == "signed [33:0] "
+    assert declared["in_x"] == "[23:0] ", "a float is a bit pattern, not a signed number"
+
+
+@pytest.mark.whitebox
+@requires_iverilog
+def test_an_integer_kernel_emits_rtl_that_elaborates(tmp_path: Path) -> None:
+    """Every wide site keyed on float rather than on the port's own family, so none of this could be rendered."""
+    _elaborate("int_kernel", generate(_integer_lir()).verilog, tmp_path)

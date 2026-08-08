@@ -11,6 +11,7 @@ are literals or CPython's own operators, so a defect in the value layer cannot v
 """
 
 import math
+from dataclasses import replace
 from collections.abc import Callable
 
 import pytest
@@ -28,7 +29,17 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower as lower_frontend
-from holoso._hir import optimize
+from holoso._hir import (
+    FloatFloor,
+    FloatNeg,
+    FloatToInt,
+    FloatType as HirFloatType,
+    HirBuilder,
+    IntShiftLeft,
+    IntShiftRight,
+    IntType as HirIntType,
+    optimize,
+)
 from holoso._lir import Lir, PooledScheduledOp, RegRef, WideOutputWire
 from holoso._mir import (
     Mir,
@@ -495,10 +506,14 @@ KERNEL_OPTIONS = Options(
 )
 
 
-def _select(target: Callable[..., object]) -> Mir:
+def _select_with_budget(target: Callable[..., object], ifconv_max_ops: int) -> Mir:
     """Front end through selection, exactly the chain ``synthesize`` runs before it builds the LIR."""
-    hir = optimize(lower_frontend(target).hir, KERNEL_OPTIONS.ifconv_max_ops)
+    hir = optimize(lower_frontend(target).hir, ifconv_max_ops)
     return lower_to_mir(hir, build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+
+
+def _select(target: Callable[..., object]) -> Mir:
+    return _select_with_budget(target, KERNEL_OPTIONS.ifconv_max_ops)
 
 
 def _plain(value: ScalarValue) -> int | float | bool:
@@ -518,6 +533,12 @@ def _run(interpreter: MirInterpreter, *args: int | float | bool) -> list[int | f
 def _expected(target: Callable[..., object], *args: int | float | bool) -> list[object]:
     result = target(*args)
     return list(result) if isinstance(result, tuple) else [result]
+
+
+def _operations(mir: Mir, mnemonic: str) -> list[MirOperation]:
+    return [
+        node for node in mir.nodes.values() if isinstance(node, MirOperation) and node.operator.mnemonic == mnemonic
+    ]
 
 
 def _mnemonics(mir: Mir) -> list[str]:
@@ -789,6 +810,130 @@ def test_a_constant_negative_shift_count_is_refused_rather_than_reversed(target:
         _select(target)
 
 
+def shift_by_nothing(x: int) -> tuple[int, int]:
+    return x << 0, x >> 0
+
+
+def shift_by_one(x: int) -> tuple[int, int]:
+    return x << 1, x >> 1
+
+
+def shift_by_the_top_bit(x: int) -> tuple[int, int]:
+    return x << 15, x >> 15
+
+
+def shift_by_the_whole_word(x: int) -> tuple[int, int]:
+    return x << 16, x >> 16
+
+
+def shift_past_every_word(x: int) -> tuple[int, int]:
+    """A count no machine word can hold: legal Python, and only the fold can carry it to an answer."""
+    return x << 100000, x >> 100000
+
+
+def shift_by_a_count_used_as_a_value(x: int) -> tuple[int, int]:
+    return x << 3, x + 3
+
+
+@pytest.mark.parametrize(
+    "target,count",
+    [(shift_by_nothing, 0), (shift_by_one, 1), (shift_by_the_top_bit, 15), (shift_by_the_whole_word, 16)],
+)
+@pytest.mark.parametrize("x", [0, 1, -1, 5, -5, 12345, MIN, MAX])
+def test_a_folded_shift_answers_exactly_as_the_runtime_shifter_does(
+    target: Callable[..., object], count: int, x: int
+) -> None:
+    """Folding removes hardware without changing the answer: it agrees with the module driven by the same count."""
+    assert _run(MirInterpreter(_select(target)), x) == _run(MirInterpreter(_select(shift_pair)), x, count)
+
+
+@pytest.mark.parametrize("x", [0, 1, -1, 5, -5, 12345, MIN, MAX])
+def test_a_shift_past_every_word_answers_where_it_used_to_be_refused(x: int) -> None:
+    """The shifter cannot be handed this count -- it is not a representable operand -- so only the fold answers it."""
+    assert _run(MirInterpreter(_select(shift_past_every_word)), x) == [_wrap(x << 100000), x >> 100000]
+
+
+@pytest.mark.parametrize(
+    "target,selected,constants",
+    [
+        (shift_by_nothing, [], []),
+        (shift_by_one, ["ishiftc", "ishiftc"], []),
+        (shift_by_the_top_bit, ["ishiftc", "ishiftc"], []),
+        (shift_by_the_whole_word, ["ishiftc"], [0]),
+        (shift_past_every_word, ["ishiftc"], [0]),
+        (shift_by_a_count_used_as_a_value, ["iadds", "ishiftc"], [3]),
+    ],
+)
+def test_a_constant_shift_count_costs_neither_a_module_nor_a_pooled_constant(
+    target: Callable[..., object], selected: list[str], constants: list[int]
+) -> None:
+    """
+    What each fold costs. The count itself must not reach MIR either -- past the format it is not representable --
+    unless something else reads it, which the last row keeps honest.
+    """
+    mir = _select(target)
+    assert _mnemonics(mir) == selected
+    assert sorted(node.value for node in mir.nodes.values() if isinstance(node, MirIntConst)) == constants
+
+
+def a_shift_and_a_sum_over_one_huge_literal(x: int) -> tuple[int, int]:
+    return x << 100000, x + 100000
+
+
+def test_a_literal_too_wide_for_the_machine_is_still_refused_where_it_is_read_as_a_value() -> None:
+    """The fold carries an over-wide count because nothing reads it; one the kernel also adds is an ordinary value."""
+    with pytest.raises(UnsupportedConstruct, match=r"100000 does not fit"):
+        _select(a_shift_and_a_sum_over_one_huge_literal)
+
+
+def diamond_over_zero_shifts(x: int, y: int, c: bool) -> int:
+    if c:
+        r = ((x << 0) >> 0) << 0
+    else:
+        r = ((y << 0) >> 0) << 0
+    return r
+
+
+def diamond_over_bare_operands(x: int, y: int, c: bool) -> int:
+    if c:
+        r = x
+    else:
+        r = y
+    return r
+
+
+@pytest.mark.parametrize("budget", [0, 2, 8])
+def test_a_shift_by_nothing_is_not_charged_against_the_if_conversion_budget(budget: int) -> None:
+    """An arm of zero-count shifts must if-convert wherever the same arm written without them does."""
+    assert _mnemonics(_select_with_budget(diamond_over_zero_shifts, budget)) == _mnemonics(
+        _select_with_budget(diamond_over_bare_operands, budget)
+    )
+
+
+def _shift_both_ways(width: int, count: int) -> Mir:
+    """Both directions by one constant count on a machine of the given integer width, built without the front end."""
+    options = Options(OperatorOptions(), ffmt=FMT, wint_min=width)
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirIntType())
+    shamt = builder.int_const(count)
+    builder.output("l", builder.operation(IntShiftLeft(), [x, shamt]))
+    builder.output("r", builder.operation(IntShiftRight(), [x, shamt]))
+    builder.ret()
+    return lower_to_mir(builder.finish(), build_ops(options), options.ffmt, options.ifmt)
+
+
+@pytest.mark.parametrize("width", [16, 24, 33])
+def test_the_word_the_fold_clamps_to_is_the_machine_word_and_not_a_fixed_one(width: int) -> None:
+    """A machine other than this module's 16-bit one is what keeps the two width-stated bounds off a constant."""
+    limit = 1 << (width - 1)
+    for count in (1, width - 1, width, width + 1, 100000):
+        interpreter = MirInterpreter(_shift_both_ways(width, count))
+        for x in (0, 1, -1, 12345, -limit, limit - 1):
+            left = ((x << count) + limit) % (2 * limit) - limit
+            assert _run(interpreter, x) == [left, x >> count], (width, count, x)
+
+
 def test_the_backends_still_refuse_an_integer_and_name_where_it_survived() -> None:
     """The refusal moved below LIR rather than disappearing, and it names every surviving site, not just the first."""
     with pytest.raises(UnsupportedConstruct) as raised:
@@ -823,3 +968,156 @@ def test_the_refusal_names_an_integer_state_slot_as_its_own_site() -> None:
 def test_a_float_only_kernel_reaching_an_integer_operator_still_synthesizes() -> None:
     """``float(math.floor(x))`` folds the conversion pair away, so no integer survives to be refused."""
     holoso.synthesize(rounded_to_float, KERNEL_OPTIONS, name="RoundedToFloat")
+
+
+def rounded_to_int(x: float) -> int:
+    return int(round(x))
+
+
+def floored_to_int(x: float) -> int:
+    return int(math.floor(x))
+
+
+def ceiled_to_int(x: float) -> int:
+    return int(math.ceil(x))
+
+
+def truncated_to_int(x: float) -> int:
+    """``math.trunc`` already answers an integer, so the float-valued truncation comes from a conversion round trip."""
+    return int(float(int(x)))
+
+
+def negated_then_floored_to_int(x: float) -> int:
+    return int(math.floor(-x))
+
+
+def floored_for_two_readers(x: float) -> tuple[int, float]:
+    return int(math.floor(x)), math.floor(x) + 1.0
+
+
+_ROUNDINGS = [0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.25, -100.25]
+
+
+@pytest.mark.parametrize(
+    "target,mode",
+    [
+        (rounded_to_int, RoundMode.NEAREST_EVEN),
+        (floored_to_int, RoundMode.FLOOR),
+        (ceiled_to_int, RoundMode.CEIL),
+        (truncated_to_int, RoundMode.TRUNC),
+        (negated_then_floored_to_int, RoundMode.FLOOR),
+    ],
+)
+def test_a_conversion_carries_its_rounding_as_a_mode_rather_than_a_second_module(
+    target: Callable[..., object], mode: RoundMode
+) -> None:
+    """A rounding feeding a conversion is a field on it, not a module before it; the last row folds a sign inside."""
+    mir = _select(target)
+    assert _mnemonics(mir) == ["ftoint"]
+    (operation,) = [node for node in mir.nodes.values() if isinstance(node, MirOperation)]
+    assert operation.immediates == (int(mode),)
+    for x in _ROUNDINGS:
+        assert _run(MirInterpreter(mir), x) == _expected(target, x)
+
+
+def test_a_rounding_another_reader_observes_is_still_emitted_beside_the_conversion() -> None:
+    """
+    A second reader adds the standalone rounding rather than cancelling the absorption. Asserting on the conversion's
+    OPERAND is what tells that apart from a conversion gated on exclusivity, whose values agree in this format.
+    """
+    mir = _select(floored_for_two_readers)
+    assert _mnemonics(mir) == ["fadd", "fround", "ftoint"]
+    (conversion,) = _operations(mir, "ftoint")
+    (rounding,) = _operations(mir, "fround")
+    assert conversion.operands == rounding.operands, "the conversion reads the value, not the rounding's result"
+    assert conversion.immediates == rounding.immediates
+    for x in _ROUNDINGS:
+        assert _run(MirInterpreter(mir), x) == _expected(floored_for_two_readers, x)
+
+
+def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
+    """
+    The conversion's operand conditioner applies before it rounds, so a negation applied after the rounding cannot
+    move there -- ``-floor(x)`` is not ``floor(-x)``. Strength reduction sinks such a negation to the integer side,
+    which is why the shape is built directly rather than written in Python.
+    """
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirFloatType())
+    floored = builder.operation(FloatFloor(), [x])
+    builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [floored])]))
+    builder.ret()
+    mir = lower_to_mir(builder.finish(), build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+    assert _mnemonics(mir) == ["fround", "ftoint"]
+    for value in _ROUNDINGS:
+        assert _run(MirInterpreter(mir), value) == [int(-math.floor(value))]
+
+
+def test_a_rounding_reached_through_a_sign_chain_that_cancels_is_not_absorbed() -> None:
+    """Peeling a sign chain to find the rounding would strand the intermediate signs that still have readers."""
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirFloatType())
+    floored = builder.operation(FloatFloor(), [x])
+    negated = builder.operation(FloatNeg(), [floored])
+    builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [negated])]))
+    builder.output("n", negated)
+    builder.ret()
+    mir = lower_to_mir(builder.finish(), build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+    assert _mnemonics(mir) == ["fround", "ftoint"]
+    for value in _ROUNDINGS:
+        assert _run(MirInterpreter(mir), value) == [int(math.floor(value)), -math.floor(value)]
+
+
+def truncated_and_floored(x: float) -> tuple[int, int]:
+    return int(x), int(math.floor(x))
+
+
+def test_two_conversions_over_one_value_stay_apart_on_their_modes_alone() -> None:
+    """One operator, operand, conditioner and port, differing only in an immediate: they must not fuse."""
+    mir = _select(truncated_and_floored)
+    conversions = _operations(mir, "ftoint")
+    assert [c.immediates for c in conversions] == [(int(RoundMode.TRUNC),), (int(RoundMode.FLOOR),)]
+    assert len({c.operands[0] for c in conversions}) == 1
+    lir = build_lir(mir, "truncated_and_floored")
+    assert [inst.operator.mnemonic for inst in lir.instances] == ["ftoint"]
+    assert len(_wide_firings(lir)) == 2
+    for x in _ROUNDINGS:
+        assert _run(MirInterpreter(mir), x) == _expected(truncated_and_floored, x)
+
+
+def test_a_rounding_that_only_a_conversion_reads_needs_no_rounding_operator_configured() -> None:
+    """Absorbed, the rounding is never selected, so a kernel that only converts one no longer demands ``fround``."""
+    without_fround = replace(KERNEL_OPTIONS, operator=replace(KERNEL_OPTIONS.operator, fround=None))
+    hir = optimize(lower_frontend(floored_to_int).hir, without_fround.ifconv_max_ops)
+    mir = lower_to_mir(hir, build_ops(without_fround), without_fround.ffmt, without_fround.ifmt)
+    assert _mnemonics(mir) == ["ftoint"]
+    with pytest.raises(UnsupportedConstruct, match=r"'fround'"):
+        lower_to_mir(
+            optimize(lower_frontend(floored_for_two_readers).hir, without_fround.ifconv_max_ops),
+            build_ops(without_fround),
+            without_fround.ffmt,
+            without_fround.ifmt,
+        )
+
+
+def shifted_to_zero_then_added(x: int, y: int) -> int:
+    return y + (x << 100000)
+
+
+def shifted_to_zero_then_multiplied(x: int, y: int) -> int:
+    return y * (x << 100000)
+
+
+@pytest.mark.parametrize(
+    "target,expected,pool",
+    [(shifted_to_zero_then_added, 7, []), (shifted_to_zero_then_multiplied, 0, [_int(0)])],
+)
+def test_the_zero_a_shift_folds_to_is_absorbed_by_what_reads_it(
+    target: Callable[..., object], expected: int, pool: list[IntValue]
+) -> None:
+    """HIR cannot state this rule, being blind to the word; the layer that mints the zero applies the same algebra."""
+    mir = _select(target)
+    assert _mnemonics(mir) == []
+    assert build_lir(mir, target.__name__).wide_consts == pool  # the product IS the zero; the sum drops it entirely
+    assert _run(MirInterpreter(mir), 3, 7) == [expected]

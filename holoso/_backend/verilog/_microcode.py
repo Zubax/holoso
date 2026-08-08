@@ -27,7 +27,14 @@ from ..._lir import (
     WideOperand,
     pooled_write_word,
 )
-from ..._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner
+from ..._operators import (
+    BoolInversion,
+    FloatSignControl,
+    InlineHardwareOperator,
+    IntIdentity,
+    PortConditioner,
+    has_sign_control,
+)
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -295,13 +302,15 @@ def build_microcode(
         add(f_issue(base), 1, gated=True)
         for imm in inst.operator.immediate_ports:
             add(f_imm(base, imm.name), imm.width)
-        for pos in range(inst.operator.signature.arity):
-            add(f_osgn(base, PORT_LETTERS[pos]), 2)
+        # A sign field exists for a FLOAT port alone, on either side: it drives a sideband only a float module has.
+        for pos, operand_type in enumerate(inst.operator.signature.operand_types):
+            if has_sign_control(operand_type):
+                add(f_osgn(base, PORT_LETTERS[pos]), 2)
             read_book = read_books[(inst, pos)]
             if len(read_book.sources) > 1:
                 add(f_rd(base, PORT_LETTERS[pos]), read_book.opcode_width)
         for q, result_type in enumerate(inst.operator.signature.result_types):
-            if result_type.is_wide and (inst, q) in tapped:
+            if has_sign_control(result_type) and (inst, q) in tapped:
                 add(f_ysgn(base, q), 2)
     for dst, book in write_books.items():
         add(f_op(dst), book.opcode_width, gated=True)
@@ -313,17 +322,25 @@ def build_microcode(
         put(f_issue(base), ci, 1)
         for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
             put(f_imm(base, imm.name), ci, value)
+        signature = op.operator.signature
         for pos, operand in enumerate(op.operands):
             assert isinstance(operand, WideOperand), "pooled operators read only wide operands today (no read lane)"
-            assert isinstance(operand.conditioner, FloatSignControl), "only a float has a sign field to ride"
-            put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
+            if has_sign_control(signature.operand_types[pos]):
+                assert isinstance(operand.conditioner, FloatSignControl)
+                put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
+            else:
+                assert isinstance(operand.conditioner, IntIdentity)
             field = f_rd(base, PORT_LETTERS[pos])
             if field in fields:
                 put(field, ci, read_books[(op.inst, pos)].code(operand.source))
         for write in op.writes:
-            if isinstance(write.dst, RegRef):
-                assert isinstance(write.conditioner, FloatSignControl), "only a float has a sign field to ride"
+            if not isinstance(write.dst, RegRef):
+                continue
+            if has_sign_control(signature.result_types[write.port]):
+                assert isinstance(write.conditioner, FloatSignControl)
                 put(f_ysgn(base, write.port), ci, write.conditioner.encoded)
+            else:
+                assert isinstance(write.conditioner, IntIdentity)
 
     for event in events:
         assert (

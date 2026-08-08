@@ -20,6 +20,7 @@ from typing import assert_never
 
 from ..._lir import *
 from ..._operators import *
+from ..._type import FloatType, IntType, ScalarType
 from ..._legal import output_header
 from ._microcode import *
 from ._support import inline_support, support_files
@@ -78,16 +79,44 @@ def _wire(width: int) -> str:
     return f"wire [{width - 1:2}:0] " if width > 1 else "wire        "
 
 
+def _wide_width(scalar_type: ScalarType) -> str:
+    """The localparam naming a wide port's own width; the register holding either is WREG."""
+    match scalar_type:
+        case FloatType():
+            return "WFLT"
+        case IntType():
+            return "WINT"
+        case _:
+            raise AssertionError(f"{scalar_type} is not a wide port type")
+
+
+def _reset_literal(slot: WideStateSlot) -> str:
+    """The reset snapshot encoded in the slot's OWN family: an integer reset is a word, not a float image."""
+    match slot.scalar_type:
+        case FloatType(fmt=fmt):
+            bits = fmt.encode(float(slot.reset_value))
+        case IntType(fmt=fmt):
+            assert isinstance(slot.reset_value, int)
+            bits = fmt.encode(slot.reset_value)
+        case _:
+            assert_never(slot.scalar_type)
+    return f"{fmt.width}'h{bits:0{(fmt.width + 3) // 4}x}"
+
+
 def _source_net(source: RegRef | WideConstRef) -> str:
     return f"const_{source.index}" if isinstance(source, WideConstRef) else f"regs[{source.index}]"
 
 
 def _wide_source_net(source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
-    """A source net with its folded conditioner applied inline; only a float one has hardware, and it is fsgnop."""
-    # Ahead of the identity shortcut, which would otherwise absorb every non-float conditioner before the check.
-    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
+    """A source net with its folded conditioner applied inline; only a float sign is hardware, and it is fsgnop."""
     raw = _source_net(source)
-    return raw if conditioner.is_identity else f"holoso_fsgnop({raw}, 2'd{conditioner.encoded})"
+    match conditioner:
+        case FloatSignControl():
+            return raw if conditioner.is_identity else f"holoso_fsgnop({raw}, 2'd{conditioner.encoded})"
+        case IntIdentity():
+            return raw  # an integer port folds nothing, so there is nothing to apply
+        case _:
+            assert_never(conditioner)
 
 
 def _bool_operand_rhs(operand: BoolOperand) -> str:
@@ -118,11 +147,16 @@ def _render_inline(
     """
     nets = [_operand_rhs(operand) for operand in operands]
     expr = operator.verilog_expr(*nets)
-    if isinstance(conditioner, BoolInversion):
-        return conditioner.decorate(f"({expr})") if conditioner.invert else expr
-    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
-    assert conditioner.is_identity, "no pass produces conditioned wide inline results yet"
-    return expr
+    match conditioner:
+        case BoolInversion():
+            return conditioner.decorate(f"({expr})") if conditioner.invert else expr
+        case FloatSignControl():
+            assert conditioner.is_identity, "no pass produces conditioned wide inline results yet"
+            return expr
+        case IntIdentity():
+            return expr
+        case _:
+            assert_never(conditioner)
 
 
 def _write_source_rhs(source: WriteSource) -> str:
@@ -214,9 +248,12 @@ module {lir.module_name} (
 
 def _emit_port(w: _Writer, port: Port, comma: bool) -> None:
     direction = "input " if port.direction == Direction.IN else "output"
+    # An integer port carries a signed two's-complement word, and saying so is what makes a wider signed consumer
+    # sign-extend it rather than zero-fill. A float port is a bit pattern, so it stays unsigned.
+    signed = "signed " if isinstance(port, DataPort) and isinstance(port.scalar_type, IntType) else ""
     port_range = "" if port.width == 1 else f"[{port.width - 1}:0] "
     suffix = "," if comma else ""
-    w(f"{direction} wire {port_range}{port.name}{suffix}")
+    w(f"{direction} wire {signed}{port_range}{port.name}{suffix}")
 
 
 def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
@@ -280,14 +317,14 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
             assert operand_type.is_wide, "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
-            w(f"reg  [WFLT-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
-        # One net per TAPPED output port -- the raw operator output (wide WFLT-bit or boolean 1-bit). The in_valid and
+            w(f"reg  [{_wide_width(operand_type)}-1:0] {sig}_{letter};")  # read-mux output, driven in its always @*
+        # One net per TAPPED output port, as wide as its own family or 1 bit for a boolean. The in_valid and
         # sign-control ports bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in tapped:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
             if result_type.is_wide:
-                w(f"wire [WFLT-1:0] {sig}_y{q};")
+                w(f"wire [{_wide_width(result_type)}-1:0] {sig}_y{q};")
             else:
                 w(f"wire            {sig}_y{q};")
         for port in inst.operator.error_ports:
@@ -317,12 +354,13 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
         w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")
         for imm in operator.immediate_ports:
             w(f".{imm.name}({f_imm(base, imm.name)}),")
-        for port, letter in zip(operand_ports, letters, strict=True):
-            w(f".{port}_sgnop({f_osgn(base, letter)}),")
-        # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
-        # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
+        # Only a FLOAT port has a sign sideband to bind, on either side; a boolean output's inversion is fabric-side
+        # at the write, and an integer port folds nothing. An untapped float output is tied to the identity.
+        for port, letter, operand_type in zip(operand_ports, letters, operator.signature.operand_types, strict=True):
+            if has_sign_control(operand_type):
+                w(f".{port}_sgnop({f_osgn(base, letter)}),")
         for q, result_type in enumerate(operator.signature.result_types):
-            if result_type.is_wide:
+            if has_sign_control(result_type):
                 conditioner = f_ysgn(base, q) if (inst, q) in tapped else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
         for port, letter in zip(operand_ports, letters, strict=True):
@@ -612,8 +650,6 @@ always @(posedge clk) begin
     # Control and persistent state are the reset-gated registers: the slot snapshot (under rst) and the slot's update
     # statement (its opcode-selected writes plus a boundary install arm, under the else) are the two arms of one rst
     # condition, segregating those assignments for the synthesizer.
-    fmt = lir.float_format
-    digits = (fmt.width + 3) // 4
     w("// Control and persistent state: the reset-gated registers.")
     w("if (rst) begin")
     w.push()
@@ -621,8 +657,7 @@ always @(posedge clk) begin
     w("err_pc_q      <= 0;")
     w("transacting_q <= 0;")
     for slot in lir.wide_state_slots:
-        bits = f"{fmt.width}'h{fmt.encode(slot.reset_value):0{digits}x}"
-        w(f"regs[{slot.reg.index}] <= {bits};  // {slot.name} reset snapshot")
+        w(f"regs[{slot.reg.index}] <= {_reset_literal(slot)};  // {slot.name} reset snapshot")
     for bslot in lir.bool_state_slots:
         w(f"bregs[{bslot.reg.index}] <= 1'b{int(bslot.reset_value)};  // {bslot.name} reset snapshot")
     w.pop()

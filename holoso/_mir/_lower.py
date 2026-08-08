@@ -1,6 +1,7 @@
 """Lower optimized HIR to selected MIR."""
 
 import math
+from collections import Counter
 from dataclasses import dataclass, fields
 
 from .._errors import UnsupportedConstruct
@@ -115,6 +116,7 @@ from .._operators import (
     IntBwOrOperator,
     IntBwXorOperator,
     IntIdentity,
+    IntShiftConstOperator,
     IntToBoolOperator,
     ParameterizedHardwareOperator,
     FloatSignControl,
@@ -152,6 +154,15 @@ _RELATION_OF: dict[type[Operator], Relation] = {
     IntNotEqual: Relation.NE,
     IntGreaterOrEqual: Relation.GE,
     IntGreater: Relation.GT,
+}
+
+
+# Shared by the standalone ``fround`` and the ``ftoint`` that absorbs one: the same field on both.
+_ROUND_MODE_OF: dict[type[Operator], RoundMode] = {
+    FloatRound: RoundMode.NEAREST_EVEN,
+    FloatFloor: RoundMode.FLOOR,
+    FloatCeil: RoundMode.CEIL,
+    FloatTrunc: RoundMode.TRUNC,
 }
 
 
@@ -313,8 +324,7 @@ def _directional_inf_plan(hir: Hir, isinf_id: ValueId, relation_id: ValueId) -> 
     return _DirectionalInfPlan(operand, sign, semantic, frozenset((isinf_id, relation_id)))
 
 
-def _plan_directional_inf_fusions(hir: Hir) -> dict[ValueId, _DirectionalInfPlan]:
-    use_counts = _compute_use_counts(hir)
+def _plan_directional_inf_fusions(hir: Hir, use_counts: dict[ValueId, int]) -> dict[ValueId, _DirectionalInfPlan]:
     candidates: dict[ValueId, _DirectionalInfPlan] = {}
     consumers_by_member: dict[ValueId, set[ValueId]] = {}
     for vid, node in hir.nodes.items():
@@ -360,15 +370,13 @@ def _exclusive_mul(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tu
     return vid, product_sign
 
 
-def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
+def _plan_fma_fusions(hir: Hir, ops: OpConfig, use_counts: dict[ValueId, int]) -> dict[ValueId, _FmaPlan]:
     """
-    Map each FloatAdd that will contract into an ``ffma`` to its plan (only when ``ffma`` is configured; else no
-    contraction, and the whole-DAG use-count is skipped). When both addends are exclusive products only the first
-    contracts -- one fma carries one product.
+    Map each FloatAdd that will contract into an ``ffma`` to its plan (only when ``ffma`` is configured). When both
+    addends are exclusive products only the first contracts -- one fma carries one product.
     """
     if ops.ffma is None:
         return {}
-    use_counts = _compute_use_counts(hir)
     plans: dict[ValueId, _FmaPlan] = {}
     for vid, node in hir.nodes.items():
         if not (isinstance(node, Operation) and isinstance(node.operator, FloatAdd)):
@@ -416,6 +424,59 @@ def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     return plans
 
 
+def _wholly_taken(sites: Counter[ValueId], use_counts: dict[ValueId, int]) -> set[ValueId]:
+    """Values the counted sites consume entirely, leaving no reader; a lowering may then emit nothing for them."""
+    return {vid for vid, taken in sites.items() if taken == use_counts[vid]}
+
+
+def _constant_shift_count(hir: Hir, count: ValueId) -> int | None:
+    """A shift count the lowering can answer from, rather than reading it out of a register."""
+    node = hir.nodes[count]
+    return node.value if isinstance(node, IntConst) else None
+
+
+def _plan_folded_shift_counts(hir: Hir, use_counts: dict[ValueId, int]) -> set[ValueId]:
+    """
+    Decided before any block, because constants are lowered entry-globally: a count exceeding the machine format is
+    legal Python that only the fold carries, and lowering it would refuse the program over a value nothing reads.
+    """
+    folds: Counter[ValueId] = Counter()
+    for node in hir.nodes.values():
+        if isinstance(node, Operation) and isinstance(node.operator, (IntShiftLeft, IntShiftRight)):
+            _, count = node.operands
+            if _constant_shift_count(hir, count) is not None:
+                folds[count] += 1
+    return _wholly_taken(folds, use_counts)
+
+
+def _absorbed_rounding(hir: Hir, operand: ValueId) -> tuple[RoundMode, ValueId] | None:
+    """
+    The mode a ``FloatToInt`` carries instead of reading a rounding's result, with the value it rounds. Only a
+    rounding read DIRECTLY: anything between conditions the ROUNDED value, and ``-floor(x)`` is not ``floor(-x)``.
+    """
+    node = hir.nodes[operand]
+    if not isinstance(node, Operation) or type(node.operator) not in _ROUND_MODE_OF:
+        return None
+    (rounded,) = node.operands
+    return _ROUND_MODE_OF[type(node.operator)], rounded
+
+
+def _plan_absorbed_roundings(hir: Hir, use_counts: dict[ValueId, int]) -> set[ValueId]:
+    """
+    Roundings with no reader left once the conversions absorb them. The absorption itself is unconditional: it
+    shortens the dependency either way. Where a reader survives, both operators are emitted and each rounds the same
+    value -- the fastmath charter licenses that, where the ffma contraction declines it only because contracting a
+    shared product buys nothing to pay the divergence with.
+    """
+    absorptions: Counter[ValueId] = Counter()
+    for vid, node in hir.nodes.items():
+        if isinstance(node, Operation) and isinstance(node.operator, FloatToInt):
+            (operand,) = node.operands
+            if _absorbed_rounding(hir, operand) is not None:
+                absorptions[operand] += 1
+    return _wholly_taken(absorptions, use_counts)
+
+
 def _operator_formats_match(
     operator: HardwareOperator | ParameterizedHardwareOperator | None,
     float_format: FloatFormat,
@@ -453,13 +514,17 @@ class _LoweringContext:
             ), f"the configured {field.name!r} is not built for the machine's format of every family its ports name"
         self.builder = MirBuilder(float_format, int_format)
         self.remap: dict[ValueId, ValueId] = {}
-        self.fma_plans = _plan_fma_fusions(hir, ops)
+        # Every plan below reads the same whole-DAG reference count.
+        use_counts = _compute_use_counts(hir)
+        self.fma_plans = _plan_fma_fusions(hir, ops, use_counts)
         self.fused_muls = {plan.mul for plan in self.fma_plans.values()}
-        self.directional_inf_plans = _plan_directional_inf_fusions(hir)
+        self.directional_inf_plans = _plan_directional_inf_fusions(hir, use_counts)
         self.fused_directional_inf_members = {
             member for plan in self.directional_inf_plans.values() for member in plan.members
         }
         self.fused_hypots = _plan_hypot_fusions(hir, ops)
+        self.folded_shift_counts = _plan_folded_shift_counts(hir, use_counts)
+        self.absorbed_roundings = _plan_absorbed_roundings(hir, use_counts)
         self.float_lowerer = _FloatLowerer(self)
         self.int_lowerer = _IntLowerer(self)
 
@@ -716,6 +781,8 @@ class _FloatLowerer:
             case Operation() as operation:
                 if old_id in self.context.fused_muls:
                     return True  # this product is contracted into an adjacent fma; it has no standalone MIR op
+                if old_id in self.context.absorbed_roundings:
+                    return True  # absorbed into an adjacent conversion's mode immediate
                 plan = self.context.fma_plans.get(old_id)
                 if plan is not None:
                     assert isinstance(operation.operator, FloatAdd)
@@ -843,12 +910,7 @@ class _FloatLowerer:
         )
 
     def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
-        mode = {
-            FloatRound: RoundMode.NEAREST_EVEN,
-            FloatFloor: RoundMode.FLOOR,
-            FloatCeil: RoundMode.CEIL,
-            FloatTrunc: RoundMode.TRUNC,
-        }[type(semantic)]
+        mode = _ROUND_MODE_OF[type(semantic)]
         return self._lower_unary_pooled(semantic, self.context.ops.require("fround"), a, immediates=(int(mode),))
 
     def _lower_unary_pooled(
@@ -1058,6 +1120,7 @@ class _IntLowerer:
     def __init__(self, context: _LoweringContext) -> None:
         self.context = context
         self.int_type = ScalarIntType(context.int_format)
+        self.constants: dict[ValueId, int] = {}  # MIR value -> its integer value, for the algebra below
 
     def lower_node(self, old_id: ValueId, node: Node) -> bool:
         match node:
@@ -1068,7 +1131,8 @@ class _IntLowerer:
                 self.context.remap[old_id] = self.context.builder.int_state_read(slot, self.int_type)
                 return True
             case IntConst(value=value):
-                self.context.remap[old_id] = self._const(value)
+                if old_id not in self.context.folded_shift_counts:
+                    self.context.remap[old_id] = self._const(value)
                 return True
             case Operation() as operation:
                 lowered = self._lower_operation(operation)
@@ -1122,18 +1186,35 @@ class _IntLowerer:
                     _select_hardware(semantic, BoolToIntOperator(fmt)), [self.context.remap[base]], [inversion]
                 )
             case Operation(operator=FloatToInt() as semantic, operands=(a,)):
-                # ``int(x)`` truncates toward zero; the operand's sign chain folds onto the conversion's float port.
-                base, sign = _collapse_signs(self.context.hir.nodes, a)
-                return self.context.builder.operation(
-                    _select_hardware(semantic, self.context.ops.require("ftoint")),
-                    [self.context.remap[base]],
-                    [sign],
-                    immediates=(int(RoundMode.TRUNC),),
-                )
+                return self._lower_to_int(semantic, a)
             case _:
                 return None
 
+    def _lower_to_int(self, semantic: FloatToInt, a: ValueId) -> ValueId:
+        """
+        ``int(x)`` truncates toward zero, and a rounding it reads becomes its mode instead of a module of its own.
+        The surviving operand's sign chain folds onto the float port, applied before the rounding as the source has it.
+        """
+        mode, operand = _absorbed_rounding(self.context.hir, a) or (RoundMode.TRUNC, a)
+        base, sign = _collapse_signs(self.context.hir.nodes, operand)
+        return self.context.builder.operation(
+            _select_hardware(semantic, self.context.ops.require("ftoint")),
+            [self.context.remap[base]],
+            [sign],
+            immediates=(int(mode),),
+        )
+
     def _lower_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
+        constant = _constant_shift_count(self.context.hir, count)
+        if constant is None:
+            return self._runtime_shift(semantic, a, count)
+        # CPython refuses a negative count outright, and the shifter would silently read one as the other direction.
+        # HIR cannot catch it: its fold runs only when BOTH operands are constant, and the shifted value is runtime.
+        if constant < 0:
+            raise UnsupportedConstruct(f"shift count {constant} is negative; Python has no such shift")
+        return self._constant_shift(semantic, a, constant)
+
+    def _runtime_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
         """
         ``ishift`` shifts left by a positive count and right by a negative one, so a right shift negates its count.
         Port 0 is the raw reading: a left shift drops what leaves the word rather than saturating, which is what ``<<``
@@ -1141,11 +1222,6 @@ class _IntLowerer:
         a left shift past the word answers zero and a right shift past it answers the sign fill, as Python's own
         unbounded shift does once the word truncates it.
         """
-        # CPython refuses a negative count outright, and the shifter would silently read one as the other direction.
-        # HIR cannot catch it: its fold runs only when BOTH operands are constant, and the shifted value is runtime.
-        count_node = self.context.hir.nodes[count]
-        if isinstance(count_node, IntConst) and count_node.value < 0:
-            raise UnsupportedConstruct(f"shift count {count_node.value} is negative; Python has no such shift")
         shamt = self.context.remap[count]
         if isinstance(semantic, IntShiftRight):
             shamt = self._negate(semantic, shamt)
@@ -1153,6 +1229,26 @@ class _IntLowerer:
             _select_hardware(semantic, IShiftOperator(self.context.int_format)),
             [self.context.remap[a], shamt],
             [IntIdentity(), IntIdentity()],
+        )
+
+    def _constant_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: int) -> ValueId:
+        """
+        The same raw reading as the runtime shifter, without either module. The count is unbounded where the word is
+        not, so its far end is a constant: nothing survives a left shift by the width, and a right shift by it is the
+        sign fill every wider one repeats.
+        """
+        width = self.context.int_format.width
+        assert count > 0, "strength reduction elides a zero-count shift"
+        if isinstance(semantic, IntShiftLeft):
+            if count >= width:
+                return self._const(0)
+            shamt = count
+        else:
+            shamt = -min(count, width - 1)
+        return self.context.builder.operation(
+            _select_hardware(semantic, IntShiftConstOperator(self.context.int_format, shamt)),
+            [self.context.remap[a]],
+            [IntIdentity()],
         )
 
     def _negate(self, semantic: Operator, value: ValueId) -> ValueId:
@@ -1164,14 +1260,33 @@ class _IntLowerer:
         )
 
     def _const(self, value: int) -> ValueId:
-        return self.context.builder.int_const(value, self.int_type)
+        vid = self.context.builder.int_const(value, self.int_type)
+        self.constants[vid] = value
+        return vid
+
+    def _fold_algebra(self, semantic: Operator, operands: list[ValueId]) -> ValueId | None:
+        """The algebra the operator declares, over a constant only this layer knows."""
+        values = [self.constants.get(operand) for operand in operands]
+        absorbing, identity = semantic.absorbing(), semantic.identity()
+        if isinstance(absorbing, IntConst) and absorbing.value in values:
+            return self._const(absorbing.value)
+        if isinstance(identity, IntConst):
+            survivors = [vid for vid, value in zip(operands, values, strict=True) if value != identity.value]
+            if len(survivors) == 1:
+                return survivors[0]
+        return None
 
     def _emit(
         self, semantic: Operator, hardware: HardwareOperator, *operands: ValueId, output_port: int = 0
     ) -> ValueId:
+        mir_operands = [self.context.remap[operand] for operand in operands]
+        folded = self._fold_algebra(semantic, mir_operands)
+        if folded is not None:
+            assert output_port == 0, "an operator with a second result declares no algebra to fold"
+            return folded
         return self.context.builder.operation(
             _select_hardware(semantic, hardware),
-            [self.context.remap[operand] for operand in operands],
+            mir_operands,
             [IntIdentity()] * len(operands),
             output_port=output_port,
         )

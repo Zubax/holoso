@@ -6,7 +6,7 @@ or decline because the datapath would answer differently.
 
 import math
 
-from ._const import BoolConst, Const, FloatConst
+from ._const import BoolConst, Const, FloatConst, IntConst
 from ._copy import copy_node, rebuild
 from .._util import BlockId, ValueId
 from ._ir import Hir, HirBuilder, Node, Operation, Phi
@@ -27,6 +27,8 @@ from ._operators import (
     FloatToInt,
     FloatTrunc,
     IntSelect,
+    IntShiftLeft,
+    IntShiftRight,
     IntToFloat,
     NoNumber,
     Operator,
@@ -68,6 +70,10 @@ def run(hir: Hir) -> Hir:
     def float_of(vid: ValueId) -> float | None:
         const = known.get(vid)
         return const.value if isinstance(const, FloatConst) else None
+
+    def int_of(vid: ValueId) -> int | None:
+        const = known.get(vid)
+        return const.value if isinstance(const, IntConst) else None
 
     def is_one(vid: ValueId) -> bool:
         return float_of(vid) == 1.0
@@ -220,6 +226,10 @@ def run(hir: Hir) -> Hir:
                 # The selector cannot matter once both arms name one value -- the shape an if-converted diamond leaves
                 # once its spliced arms are interned into one block. Reducing it here is also what keeps the
                 # constant-arm rules below reachable only for arms that DIFFER.
+                return remap[a]
+            case Operation(operator=IntShiftLeft() | IntShiftRight(), operands=(a, count)) if int_of(remap[count]) == 0:
+                # Stated here, not at selection, because this is where the if-conversion budget counts the op --
+                # and the shared algebra cannot state it, dropping an identity operand wherever it sits.
                 return remap[a]
             case Operation(operator=IntToFloat(), operands=(a,)) if isinstance(inner_operator(a), FloatToInt):
                 return reduce_rounding(builder, FloatTrunc(), remap[_sole_operand(hir.nodes[a])])  # float(int(x))

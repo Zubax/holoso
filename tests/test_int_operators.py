@@ -305,9 +305,9 @@ def test_the_conversions_saturate_at_the_rails_and_round_trip_the_extremes(wint:
 
 
 def test_rounding_before_converting_is_not_the_same_as_converting_with_that_mode() -> None:
-    # The intended MIR fusion of FloatToInt(FloatRound(x)) into one ftoint(x, ROUND) is therefore conditional, not an
-    # identity: it holds only where the float rounding cannot itself overflow the float format (see TODO.md). Here
-    # 3.5 rounds to +inf, which saturates, while a direct nearest-even conversion answers 4.
+    # The MIR fusion of FloatToInt(FloatRound(x)) into one ftoint(x, ROUND) is therefore a rewrite that can change
+    # the answer, and the fastmath charter licenses it anyway (see TODO.md). Here 3.5 rounds to +inf, which
+    # saturates, while a direct nearest-even conversion answers 4.
     ffmt, ifmt = FloatFormat(2, 4), IntFormat(33)
     fround = FRoundOperator(ffmt, FRoundOptions())
     ftoint = FToIntOperator(ffmt, ifmt, FToIntOptions())

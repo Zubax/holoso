@@ -13,6 +13,7 @@ from ._common import (
     Relation as Relation,
     SelectOperator as SelectOperator,
     WideConditioner as WideConditioner,
+    has_sign_control as has_sign_control,
     identity_conditioner as identity_conditioner,
 )
 from ._bool import (

@@ -161,8 +161,8 @@ overflowing to infinity, so it is not an error flag -- were it one, an if-conver
 error the untaken path never earned. The shift is the deliberate exception: `<<` is the raw bit shift and drops
 whatever leaves the word, so `5000 << 3` wraps where `5000 * 8` rails. Truncation is what `<<` means over a machine
 word, and the shift module offers both readings, so a rewrite of a power-of-two multiply into a shift must tap the
-saturating one rather than this. What is pending is the integer backend: selection and the transport reach LIR,
-but nothing below renders an integer yet.
+saturating one rather than this. What is pending is the rest of the integer backend: the RTL renders one, but the
+model, the testbench and the report do not.
 
 One wide register holds either family whole: it is as wide as the integer format, which is never narrower than the
 float, so an integer fills it exactly and a float occupies its low bits. The inline integer operators are then native
@@ -285,7 +285,10 @@ spurious error. `select` (a mux, both inputs live) is reserved for the small, pu
 collapses into straight-line code so the region pipelines and reuses registers; conversion is gated on every arm
 operation being speculatable, since both arms will execute and an untaken arm must not fire an error sideband.
 Running both arms can RAISE the static lower-bound II while LOWERING the realized per-transaction latency, which is
-the goal -- the regression guard is realized latency, not the static bound.
+the goal -- the regression guard is realized latency, not the static bound. The budget counts HIR operations, so an
+arm is charged for whatever selection later collapses -- today the int-returning roundings and the constant shifts,
+tomorrow whatever else MIR folds. Overcharging costs an arm its conversion and never a wrong answer, so the budget
+stays a count of what the kernel wrote rather than a prediction of what the machine will hold.
 
 Loops with a static trip count unroll fully, below the unroll threshold; a `while` becomes a genuine back-edge loop
 that fully drains before iterating, so no overlap ever crosses a back-edge. Its static II deliberately counts the
@@ -329,7 +332,12 @@ sit with the dispatch that chains them. The float lowerer maps each semantic flo
 hardware operator and collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands,
 results, or output wires. Multiply-by-power-of-two selects the constant-shift operator when the float format supports
 that exponent (an out-of-range exponent is rejected -- the equivalent constant would overflow or underflow the format
-anyway); the four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate.
+anyway); the four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate, and a
+float-to-integer conversion reading one of them carries it as its own mode instead of waiting on its result -- the
+rounding survives only if something else observes it, and then each rounds the value independently.
+The integer lowerer likewise answers a constant shift count from the count itself: a shift by nothing is the
+operand, a shift past the word is zero or the sign fill, and every count between is one inline shift. A count no
+other use reads is never lowered, which is what lets one too wide for the machine format compile at all.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter
 transaction, sin/cos computed simultaneously by the sincos operator, FMA contraction of a single-use `a*b+c`, a
