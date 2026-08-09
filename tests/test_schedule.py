@@ -611,22 +611,54 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
     assert sf == 0, "an entry inline op producing a persistent-state live-out issues on cycle 0, reclaiming ucode[0]"
 
 
+def _const_branch_mir(ops: OpConfig) -> Mir:
+    """
+    A block that branches on a literal, nested under a runtime diamond, computing ``x + 1.0 if x > y else x``. HIR
+    never hands selection this shape -- pruning settles a decided branch -- so it is built directly, the LIR behavior
+    below being worth covering regardless.
+    """
+    fcmp, fadd = ops.require("fcmp"), ops.require("fadd")
+    port, inversion = fcmp.tap_of(Relation.GT)
+    builder = MirBuilder(FMT, default_ifmt(FMT))
+    entry, decided, taken, untaken, merge, bypass, join = (builder.block() for _ in range(7))
+    builder.position_at(entry)
+    x = builder.float_input("x", FloatType(FMT))
+    y = builder.float_input("y", FloatType(FMT))
+    greater = builder.operation(
+        fcmp, [x, y], [FloatSignControl(), FloatSignControl()], output_port=port, output_conditioner=inversion
+    )
+    builder.branch(greater, decided, bypass)
+    builder.position_at(decided)
+    builder.branch(builder.bool_const(True, BoolType()), taken, untaken)
+    summed = {}
+    for arm, addend in ((taken, 1.0), (untaken, 2.0)):
+        builder.position_at(arm)
+        summed[arm] = builder.operation(
+            fadd, [x, builder.float_const(addend, FloatType(FMT))], [FloatSignControl(), FloatSignControl()]
+        )
+        builder.jump(merge)
+    builder.position_at(merge)
+    merged = builder.phi(FloatType(FMT), [(arm, summed[arm], FloatSignControl()) for arm in (taken, untaken)])
+    builder.jump(join)
+    builder.position_at(bypass)
+    builder.jump(join)
+    builder.position_at(join)
+    builder.float_output(
+        "out_0", builder.phi(FloatType(FMT), [(merge, merged, FloatSignControl()), (bypass, x, FloatSignControl())])
+    )
+    builder.ret()
+    return builder.finish()
+
+
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_const_branch_install_block_drains_to_its_inline_landing(config: OperatorCase) -> None:
-    # Regression (fuzz-found B1 miscompile): a branch condition that is constant only under the graph's ``x*0 == 0``
-    # VALUE identity survives partial evaluation (which folds by evaluating, never by algebra over a residual operand),
-    # so HIR strength reduction folds it to a BoolConst that if-conversion refuses -- leaving an EMPTY const-branch
-    # block (the condition install + a branch, no float content). The condition is a literal -- an entry-resident
-    # source -- so its tail bool write is
-    # inline-class: it fires at the combinational step and lands one read-first edge later, at the combinational landing
-    # within the work makespan -- and the block must drain to exactly that landing, where the terminator then reads the
-    # condition the following step. The drain must neither shrink below it (terminator reads a stale condition -- the
-    # original B1 bug) nor pay the wider computed-source-copy boundary. Crash-before: KeyError (model) / stale branch
-    # read (RTL); pass-after: bit-exact vs the reference.
-    lir = build_lir(_run(const_branch_kernel, config.make_ops(FMT)), f"const_branch_{config.label}")
-    # Structural teeth: the surviving const-branch block branches on a constant materialized by an entry-resident tail
-    # bool write, so it drains to that install's inline-class landing. Pins the drain itself, not only the output, so a
-    # future drain regression here is localized rather than silently model-correct.
+    # Regression (fuzz-found B1 miscompile): a block whose branch condition is a literal installs that constant with a
+    # tail bool write. The source is entry-resident, so the write is inline-class: it fires at the combinational step
+    # and lands one read-first edge later, at the combinational landing within the work makespan -- and the block must
+    # drain to exactly that landing, where the terminator then reads the condition the following step. The drain must
+    # neither shrink below it (terminator reads a stale condition -- the original B1 bug) nor pay the wider
+    # computed-source-copy boundary. Crash-before: KeyError (model) / stale branch read (RTL).
+    lir = build_lir(_const_branch_mir(config.make_ops(FMT)), f"const_branch_{config.label}")
     const_blocks = [
         b
         for b in lir.blocks
@@ -641,7 +673,7 @@ def test_const_branch_install_block_drains_to_its_inline_landing(config: Operato
     model = build_model(lir)
     for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
         (got,) = model.run(x, y)
-        assert math.isclose(float(got), const_branch_kernel(x, y), rel_tol=1e-6)
+        assert math.isclose(float(got), x + 1.0 if x > y else x, rel_tol=1e-6)
 
 
 def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:

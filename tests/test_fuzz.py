@@ -127,7 +127,13 @@ def test_branch_claiming_inner_shapes_survive_compilation() -> None:
     assert (
         _surviving_forward_branches_for_probe("nested_probe", lambda em: fuzz_impl._emit_diamond(em, nested=True)) >= 2
     )
-    assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) >= 2
+
+
+def test_a_const_branch_shape_keeps_only_the_branch_that_is_not_decided() -> None:
+    # The dual pin: this shape's inner condition is constant under the graph's own ``x*0 == 0`` identity, so pruning
+    # must delete it and leave ONLY the outer runtime diamond. Two surviving branches would mean the decided one
+    # reached hardware after all -- the very thing the shape is generated to catch.
+    assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) == 1
 
 
 @pytest.mark.fuzz

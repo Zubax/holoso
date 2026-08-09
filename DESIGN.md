@@ -278,11 +278,17 @@ never materialized where a shared firing or a sideband suffices: every relation 
 relations over one operand pair share a firing), min and max over one pair share one sorter firing, and
 negation/inversion chains fold into consumer sidebands instead of gates.
 
-Branch vs. select is the core control-flow decision. Real branches are the default: only the taken side executes, the
-merge is resolved at register allocation with no runtime mux, and an untaken arm can neither burn cycles nor record a
-spurious error. `select` (a mux, both inputs live) is reserved for the small, pure, cheap diamonds that if-conversion
-collapses into straight-line code so the region pipelines and reuses registers; conversion is gated on every arm
-operation being speculatable, since both arms will execute and an untaken arm must not fire an error sideband.
+A branch the graph itself decides is neither: it is pruned, along with everything only its untaken edge reached, so a
+guard the optimizer can settle costs no hardware. The exception is a branch whose taken edge would orphan the sole
+exit: a kernel that provably never returns keeps the shape it was written with rather than becoming a module that can
+never raise `out_valid`.
+
+Branch vs. select is the core control-flow decision for the branches that remain. Real branches are the default: only
+the taken side executes, the merge is resolved at register allocation with no runtime mux, and an untaken arm can
+neither burn cycles nor record a spurious error. `select` (a mux, both inputs live) is reserved for the small, pure,
+cheap diamonds that if-conversion collapses into straight-line code so the region pipelines and reuses registers;
+conversion is gated on every arm operation being speculatable, since both arms will execute and an untaken arm must
+not fire an error sideband.
 Running both arms can RAISE the static lower-bound II while LOWERING the realized per-transaction latency, which is
 the goal -- the regression guard is realized latency, not the static bound. The budget counts HIR operations, so an
 arm is charged for whatever selection later collapses -- today the int-returning roundings and the constant shifts,
@@ -299,13 +305,15 @@ ever take.
 
 ### HIR optimization
 
-Optimization is intentionally very liberal, hardware-agnostic, and bound by the fastmath charter in Direction. Each
-pass runs where its inputs are final, and the survivor refusal sweep runs strictly last, after everything erasable
-has been erased -- reordering it ahead of any reduction would convict expressions a rewrite would have absolved. The
-sweep is the sole point of refusal: it re-asks the same fold on the fully reduced graph and follows only provable
-control paths, so every identity and every guard gets its chance to erase an expression before it is judged, exactly
-as the survivor-based charter requires. A conviction reached through an inlined library composite may name an
-expression the kernel never spelled; an accepted limitation of the composites, not of the rule.
+Optimization is intentionally very liberal, hardware-agnostic, and bound by the fastmath charter in Direction. Most
+passes run where their inputs are final; strength reduction and constant-branch pruning instead run as a mutual
+fixpoint, since each one's output is the other's input, so a cascade of guards collapses rather than only its first
+link. The survivor refusal sweep runs strictly last, after everything erasable has been erased -- reordering it ahead
+of any reduction would convict expressions a rewrite would have absolved. The sweep is the sole point of refusal: it
+re-asks the same fold on the fully reduced graph and follows only provable control paths -- which after pruning
+matters for the never-returning loop alone -- so every identity and every guard gets its chance to erase an expression
+before it is judged, exactly as the survivor-based charter requires. A conviction reached through an inlined library
+composite may name an expression the kernel never spelled; an accepted limitation of the composites, not of the rule.
 
 ### DEFERRED
 

@@ -44,7 +44,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, Ret, FloatSelect
+from holoso._hir import Branch, BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, Ret, FloatSelect, StateRead
 from holoso._hir import (
     FloatAbs,
     FloatAtan2,
@@ -1247,31 +1247,184 @@ def test_a_pole_the_operator_reference_answers_folds_to_that_value(
 
 
 def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
-    # Nothing rewrites a proven branch into a jump, so a proven-dead arm survives into the survivor sweep, and in a
-    # never-returning loop it is still CFG-reachable -- the shape where post-DCE block liveness and enterability
-    # disagree. The guard proves its own arm dead, so the sweep must not convict what that arm holds.
-    # Every constant here is opaque to the front end (an operation over a parameter) and constant to HIR (``x*0 == 0``):
-    # the loop condition, so the loop residualizes rather than unrolling and only HIR sees that it never exits; the
-    # guard, so its arm is proven dead; and both operands of the quotient, because a fold names a quotient only where
-    # it knows BOTH of them, so an unknown numerator would go unconvicted wherever it sat and would witness nothing.
+    # Pruning declines the one branch that would orphan the exit, leaving the sole shape where CFG reachability and
+    # enterability disagree: the exit below is reachable and unenterable, and the sweep must not convict what it holds.
+    # Every constant here is opaque to the front end and constant to HIR (``x*0 == 0``) -- including both quotient
+    # operands, since a fold names a quotient only where it knows both, so an unknown one would witness nothing.
     def never_returns(x: float) -> float:
         y = x
         while (x * 0.0) <= 0.0:
-            gate = y * 0.0
-            if gate > 0.0:
-                y = (y * 0.0) / (y * 0.0)
             y = y + 1.0
-        return y
+        return (y * 0.0) / (y * 0.0)
 
     hir = optimize(lower(never_returns).hir, DEFAULT_IFCONV_MAX_OPS)
     assert any(isinstance(block.terminator, Ret) for block in hir.blocks)
     quotients = [
         node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)
     ]
-    assert quotients, "the excluded arm's quotient must still be present -- otherwise the skip rule is untested"
+    assert quotients, "the unenterable exit's quotient must still be present -- otherwise the skip rule is untested"
     assert all(
         all(isinstance(hir.nodes[operand], FloatConst) for operand in node.operands) for node in quotients
     ), "both operands must be constant, or the sweep would decline to convict it wherever it sat"
+
+
+def test_an_arm_a_proven_guard_excludes_is_deleted_rather_than_merely_unconvicted() -> None:
+    # The dual of the above, and why the skip rule has only one shape left: where the exit survives, the quotient is
+    # not spared a conviction -- it is not there. A division is unspeculatable, so nothing but pruning can remove it.
+    def excluded_by_a_guard(x: float) -> float:
+        r = x
+        if (x * 0.0) > 1.0:
+            r = 1.0 / (x * 0.0)
+        return r
+
+    hir = optimize(lower(excluded_by_a_guard).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert not [
+        node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)
+    ], "the excluded arm's quotient survived the pruning that proves its guard"
+    assert not [block for block in hir.blocks if isinstance(block.terminator, Branch)], "the guard itself survived"
+    assert hir.nodes[hir.outputs[0].value] == hir.nodes[hir.input_ids[0]], "the surviving path must return x itself"
+
+
+def test_a_loop_whose_test_is_proven_false_dissolves_entirely() -> None:
+    # The back-edge shape: only the graph's ``x*0 == 0`` identity decides this test, so the front end residualizes a
+    # real loop. Taking the exit edge orphans the body, so header, body and back edge all go.
+    def never_enters(x: float) -> float:
+        y = x
+        while (y * 0.0) > 1.0:
+            y = y + 1.0
+        return y
+
+    hir = optimize(lower(never_enters).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert not [block for block in hir.blocks if isinstance(block.terminator, Branch)], "the loop test survived"
+    assert not [
+        node for node in hir.nodes.values() if isinstance(node, Operation)
+    ], "the body's addition survived a loop that is never entered"
+    assert hir.nodes[hir.outputs[0].value] == hir.nodes[hir.input_ids[0]]
+
+
+def test_pruning_one_guard_settles_the_next() -> None:
+    # Why reduction and pruning are a mutual fixpoint and not a sequence: the second guard is undecidable until the
+    # first arm is gone, so one pass of each leaves it standing.
+    def cascade(x: float) -> float:
+        r = 1.0
+        if (x * 0.0) > 1.0:
+            r = 2.0
+        if r > 1.5:
+            return 3.0
+        return 4.0
+
+    hir = optimize(lower(cascade).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert not [
+        block for block in hir.blocks if isinstance(block.terminator, Branch)
+    ], "both guards must be gone, not merely the first"
+    assert hir.nodes[hir.outputs[0].value] == FloatConst(4.0)
+
+
+def test_a_state_slot_live_out_follows_a_merge_pruning_collapses() -> None:
+    # A slot's live-out is the one reference that lives outside the value DAG entirely, so a collapse must be carried
+    # into it by hand. Here the write happens only in the arm a proven guard excludes, so the slot ends up holding
+    # what it held on entry, and the kernel is stateless in effect.
+    class HeldByADeadGuard:
+        def __init__(self) -> None:
+            self.s = 0.0
+
+        def __call__(self, x: float) -> float:
+            if (x * 0.0) > 1.0:
+                self.s = x
+            return self.s
+
+    hir = optimize(lower(HeldByADeadGuard().__call__).hir, DEFAULT_IFCONV_MAX_OPS)
+    (slot,) = hir.state_slots
+    assert hir.nodes[slot.live_out] == StateRead("s", HirFloatType()), "the slot must carry its own live-in forward"
+    assert not [block for block in hir.blocks if isinstance(block.terminator, Branch)]
+
+
+def test_a_proven_break_kills_the_back_edge_and_collapses_the_carried_merges() -> None:
+    # A break the graph proves runs on the first trip, so the latch is unreachable and the loop degenerates into a
+    # diamond: the header's loop-carried phis lose their latch arm and collapse to what they held on entry. Distinct
+    # from a loop deleted whole, where no merge has to be repaired at all.
+    def breaks_on_the_first_trip(x: float, n: float) -> float:
+        y = x
+        t = n
+        while t > 0.0:
+            y = y + 1.0
+            if (x * 0.0) <= 1.0:
+                break
+            t = t - 1.0
+        return y
+
+    hir = optimize(lower(breaks_on_the_first_trip).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert (
+        len([block for block in hir.blocks if isinstance(block.terminator, Branch)]) == 1
+    ), "only the loop's own runtime test may survive; the break's guard is decided"
+    (phi,) = [node for node in hir.nodes.values() if isinstance(node, Phi)]
+    arms = sorted((hir.nodes[arm] for _pred, arm in phi.arms), key=lambda node: isinstance(node, Operation))
+    assert [type(arm) for arm in arms] == [InPort, Operation], "the merge must be the untaken test against one trip"
+
+
+def test_a_decided_branch_whose_arms_share_a_target_repairs_by_dropping_an_arm() -> None:
+    # The successor of the untaken edge survives via another edge, so nothing is deleted and the repair is the arm
+    # filter alone -- the path a whole-block deletion would never reach. Built directly: the front end always gives a
+    # merge exactly two predecessors, and three is what leaves a real phi behind after one arm goes.
+    builder = HirBuilder()
+    entry, dead, live, other, merge = (builder.block() for _ in range(5))
+    builder.position_at(entry)
+    x = builder.input("x", HirFloatType())
+    flag = builder.input("flag", BoolType())
+    builder.branch(builder.bool_const(False), dead, live)
+    builder.position_at(dead)
+    builder.jump(merge)
+    builder.position_at(live)
+    builder.branch(flag, other, merge)
+    builder.position_at(other)
+    builder.jump(merge)
+    builder.position_at(merge)
+    builder.output(
+        "y",
+        builder.phi(HirFloatType(), [(dead, builder.float_const(1.0)), (live, x), (other, builder.float_const(3.0))]),
+    )
+    builder.ret()
+
+    hir = optimize(builder.finish(), 0)  # a zero budget keeps the surviving diamond a real branch, so a phi remains
+    (phi,) = [node for node in hir.nodes.values() if isinstance(node, Phi)]
+    assert [hir.nodes[arm] for _pred, arm in phi.arms] == [
+        InPort("x", HirFloatType()),
+        FloatConst(3.0),
+    ], "the dead predecessor's arm must go and the other two must stay"
+
+
+def test_a_collapsed_merge_is_substituted_into_a_later_merge() -> None:
+    # The phi-repair edge: a phi left with one arm is that arm's value, and every later reference must follow --
+    # including an arm of a DIFFERENT block's phi, the one reference kind that is neither operand nor terminator.
+    # Built directly because the front end routes each arm through its own jump block.
+    builder = HirBuilder()
+    entry, dead, live, first, left, right, second = (builder.block() for _ in range(7))
+    builder.position_at(entry)
+    x = builder.input("x", HirFloatType())
+    flag = builder.input("flag", BoolType())
+    builder.branch(builder.bool_const(False), dead, live)
+    for arm in (dead, live):
+        builder.position_at(arm)
+        builder.jump(first)
+    builder.position_at(first)
+    merged = builder.phi(HirFloatType(), [(dead, builder.float_const(1.0)), (live, x)])
+    builder.branch(flag, left, right)
+    for arm in (left, right):
+        builder.position_at(arm)
+        builder.jump(second)
+    builder.position_at(second)
+    builder.output("y", builder.phi(HirFloatType(), [(left, merged), (right, builder.float_const(2.0))]))
+    builder.ret()
+
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    out = hir.nodes[hir.outputs[0].value]
+    assert isinstance(out, Operation) and isinstance(out.operator, FloatSelect)
+    condition, chosen, other = out.operands
+    assert [hir.nodes[condition], hir.nodes[chosen], hir.nodes[other]] == [
+        InPort("flag", BoolType()),
+        InPort("x", HirFloatType()),
+        FloatConst(2.0),
+    ], "the collapsed merge must reach the later merge as the value it stood for, not as a dangling reference"
 
 
 def test_a_float_slot_with_an_integer_reset_is_refused() -> None:

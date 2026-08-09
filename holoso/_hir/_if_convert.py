@@ -52,11 +52,6 @@ def _find_diamond(
             continue
         if block.terminator.if_true == block.terminator.if_false:
             continue
-        if isinstance(hir.nodes[block.terminator.cond], BoolConst):
-            # The frontend folds a condition by EVALUATING it, so one constant only under a value identity this
-            # pass's own strength reduction applies (``x*0 == 0``) still arrives here constant. Converting it would
-            # pin the untaken arm live through the select forever.
-            continue
         arm_t, arm_f = blocks_by_id[block.terminator.if_true], blocks_by_id[block.terminator.if_false]
         if not (
             _arm_convertible(hir, preds, arm_t, block.id, max_ops)
@@ -71,6 +66,11 @@ def _find_diamond(
             continue
         if not all(isinstance(hir.nodes[vid].type, (FloatType, IntType, BoolType)) for vid in merge.phis):
             continue
+        # Converting a decided diamond would pin the untaken arm live through the select forever. Pruning always gets
+        # there first: taking either edge of one loses only the untaken arm, which is jump-terminated and so never the
+        # exit, so pruning cannot be the branch it declines. The decided branch that DOES survive pruning -- the one
+        # whose taken edge orphans the exit -- is a loop header, and no loop header forms a diamond.
+        assert not isinstance(hir.nodes[block.terminator.cond], BoolConst), "pruning owns a decided diamond"
         return block, arm_t, arm_f, merge
     return None
 

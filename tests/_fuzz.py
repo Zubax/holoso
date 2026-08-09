@@ -90,7 +90,7 @@ class Shape(Enum):
     DEAD_ARM_SPILL = auto()  # the dead-arm-spill soundness family (a value live in one arm, a wide chain spilling both)
     WIDE_CHAIN = auto()  # a long register-pressure multiply-add chain
     NESTED_IF = auto()  # a branch nested inside a branch
-    CONST_BRANCH = auto()  # a constant-true inner condition formed by division (an empty const-branch block)
+    CONST_BRANCH = auto()  # a constant-true inner condition the graph's own identity settles, for pruning to delete
     LOOP = auto()  # a bounded back-edge ``while`` loop
     DIAMOND_THEN_LOOP = auto()  # a real diamond whose merge feeds a loop header (a three-arm header phi)
     SELECT = auto()  # a ternary ``a if c else b`` select
@@ -539,8 +539,9 @@ def _emit_const_branch(em: _Emitter) -> _Fragment:
     """
     A const-branch shape: an outer runtime diamond whose then arm holds an inner condition that is constant only
     under the graph's ``x*0 == 0`` identity -- so it survives partial evaluation and reaches HIR as a constant branch,
-    leaving an empty const-branch block. The inner false arm is over-budget so the :data:`Shape.CONST_BRANCH` and
-    :data:`Shape.NESTED_IF` tags denote a surviving inner branch.
+    where pruning proves it and deletes the arm it excludes. The inner false arm is over-budget, so what pruning
+    deletes is real work rather than an empty block: the tag denotes a branch that must NOT survive, which is why it
+    carries no :data:`Shape.NESTED_IF` -- only the outer diamond is still a branch by the time MIR sees it.
     """
     cond = _emit_condition(em, balanced=True)
     r = em.fresh("r")
@@ -559,7 +560,7 @@ def _emit_const_branch(em: _Emitter) -> _Fragment:
     return _merge_fragment(
         r,
         [cond, inner_then, inner_else_fragment, else_fragment],
-        frozenset({Shape.BRANCH, Shape.CONST_BRANCH, Shape.NESTED_IF}),
+        frozenset({Shape.BRANCH, Shape.CONST_BRANCH}),
     )
 
 
@@ -1169,7 +1170,7 @@ def surviving_forward_branches(mir: Mir) -> int:
 def _required_forward_branches(shapes: frozenset[Shape]) -> int:
     if Shape.BRANCH not in shapes:
         return 0
-    if Shape.NESTED_IF in shapes or Shape.CONST_BRANCH in shapes:
+    if Shape.NESTED_IF in shapes:
         return 2
     return 1
 
