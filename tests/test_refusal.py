@@ -74,6 +74,17 @@ def _surviving_indeterminate_form(x: float) -> float:
     return (1e300 * 1e300) * 0.0 + x  # an infinity times zero is an indeterminate form, not a zero
 
 
+def _erased_indeterminate(x: float) -> float:
+    huge = 1e300 * 1e300
+    return x + (huge - huge) * 0.0  # inf - inf names no number, and the absorbing zero erases it
+
+
+def test_the_judgement_follows_optimization_and_never_precedes_it() -> None:
+    # Judging first would convict what optimization then erases. The order used to be structural -- the sweep was the
+    # last statement of optimize -- and is now the boundary's to keep, so it needs a witness of its own.
+    assert float(_sim(_erased_indeterminate, "erased_indeterminate").run(3.0)[0]) == 3.0
+
+
 @pytest.mark.parametrize(
     "kernel", [_surviving_domain_fault, _surviving_indeterminate_form], ids=lambda fn: fn.__name__[1:]
 )

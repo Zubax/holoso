@@ -15,7 +15,6 @@ from holoso import FloatFormat
 from holoso._backend.html import generate as generate_report
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import RegRef
 from holoso._mir import lower as lower_to_mir
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops, overlap_spill_kernel
@@ -56,9 +55,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 
 def _report(name: str) -> str:
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
+        lower_to_mir(lower(_EXAMPLES[name]()).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     return generate_report(lir, generate_verilog(lir)).html
@@ -67,9 +64,7 @@ def _report(name: str) -> str:
 @pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_report_renders_for_each_example(name: str) -> None:
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
+        lower_to_mir(lower(_EXAMPLES[name]()).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     html = generate_report(lir, generate_verilog(lir)).html
@@ -117,10 +112,7 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
 
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(overlap_spill_kernel).hir, DEFAULT_IFCONV_MAX_OPS),
-            default_ops(_FMT),
-            _FMT,
-            default_ifmt(_FMT),
+            lower(overlap_spill_kernel).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS
         ),
         "overlap_spill",
     )

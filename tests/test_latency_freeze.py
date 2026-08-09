@@ -24,7 +24,6 @@ import pytest
 import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
-from holoso._hir import optimize
 from holoso._lir import WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
@@ -74,10 +73,11 @@ def test_schedule_length_is_frozen(name: str) -> None:
     spec = _SPEC_BY_NAME[name]
     lir = build_lir(
         lower_to_mir(
-            optimize(lower_frontend(spec.make_kernel()).hir, DEFAULT_IFCONV_MAX_OPS),
+            lower_frontend(spec.make_kernel()).hir,
             default_ops(spec.formats[0]),
             spec.formats[0],
             default_ifmt(spec.formats[0]),
+            DEFAULT_IFCONV_MAX_OPS,
         ),
         name,
     )
@@ -131,10 +131,11 @@ def test_chained_copy_schedule_is_frozen(
 ) -> None:
     lir = build_lir(
         lower_to_mir(
-            optimize(lower_frontend(kernel_cls().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
+            lower_frontend(kernel_cls().__call__).hir,
             default_ops(_FMT),
             _FMT,
             default_ifmt(_FMT),
+            DEFAULT_IFCONV_MAX_OPS,
         ),
         name,
     )

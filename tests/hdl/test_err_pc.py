@@ -30,7 +30,6 @@ from holoso import (
 from holoso._operators import FDivOperator, OpConfig
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
@@ -97,7 +96,7 @@ async def err_pc_latches_div0(dut: Any) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_pc(sim: str, stage_output: int) -> None:
     lir = build_lir(
-        lower_to_mir(optimize(lower(_divide).hir, DEFAULT_IFCONV_MAX_OPS), _ops(stage_output), FMT, default_ifmt(FMT)),
+        lower_to_mir(lower(_divide).hir, _ops(stage_output), FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS),
         "divide",
     )
     # The fdiv asserts div0 at its commit; err_pc latches the write word -- the

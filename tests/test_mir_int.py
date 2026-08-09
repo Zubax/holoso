@@ -39,7 +39,6 @@ from holoso._hir import (
     IntShiftLeft,
     IntShiftRight,
     IntType as HirIntType,
-    optimize,
 )
 from holoso._lir import Lir, PooledScheduledOp, RegRef, WideOutputWire
 from holoso._mir import (
@@ -509,8 +508,13 @@ KERNEL_OPTIONS = Options(
 
 def _select_with_budget(target: Callable[..., object], ifconv_max_ops: int) -> Mir:
     """Front end through selection, exactly the chain ``synthesize`` runs before it builds the LIR."""
-    hir = optimize(lower_frontend(target).hir, ifconv_max_ops)
-    return lower_to_mir(hir, build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+    return lower_to_mir(
+        lower_frontend(target).hir,
+        build_ops(KERNEL_OPTIONS),
+        KERNEL_OPTIONS.ffmt,
+        KERNEL_OPTIONS.ifmt,
+        ifconv_max_ops,
+    )
 
 
 def _select(target: Callable[..., object]) -> Mir:
@@ -812,7 +816,13 @@ def _scaled_by_a_power_of_two(k: int) -> Mir:
     builder.block()
     builder.output("y", builder.operation(IntMulPow2(k), [builder.input("x", HirIntType())]))
     builder.ret()
-    return lower_to_mir(builder.finish(), build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+    return lower_to_mir(
+        builder.finish(),
+        build_ops(KERNEL_OPTIONS),
+        KERNEL_OPTIONS.ffmt,
+        KERNEL_OPTIONS.ifmt,
+        KERNEL_OPTIONS.ifconv_max_ops,
+    )
 
 
 @pytest.mark.parametrize("x", [0, 1, -1, 3, -3, 1000, -1000, MIN, MAX])
@@ -972,7 +982,7 @@ def _shift_both_ways(width: int, count: int) -> Mir:
     builder.output("l", builder.operation(IntShiftLeft(), [x, shamt]))
     builder.output("r", builder.operation(IntShiftRight(), [x, shamt]))
     builder.ret()
-    return lower_to_mir(builder.finish(), build_ops(options), options.ffmt, options.ifmt)
+    return lower_to_mir(builder.finish(), build_ops(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
 
 
 @pytest.mark.parametrize("width", [16, 24, 33])
@@ -1090,8 +1100,8 @@ def test_a_rounding_another_reader_observes_is_still_emitted_beside_the_conversi
 def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     """
     The conversion's operand conditioner applies before it rounds, so a negation applied after the rounding cannot
-    move there -- ``-floor(x)`` is not ``floor(-x)``. Strength reduction sinks such a negation to the integer side,
-    which is why the shape is built directly rather than written in Python.
+    move there -- ``-floor(x)`` is not ``floor(-x)``. The front end sinks such a negation to the integer side, which
+    is why the shape is built directly rather than written in Python.
     """
     builder = HirBuilder()
     builder.block()
@@ -1099,14 +1109,23 @@ def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     floored = builder.operation(FloatFloor(), [x])
     builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [floored])]))
     builder.ret()
-    mir = lower_to_mir(builder.finish(), build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+    mir = lower_to_mir(
+        builder.finish(),
+        build_ops(KERNEL_OPTIONS),
+        KERNEL_OPTIONS.ffmt,
+        KERNEL_OPTIONS.ifmt,
+        KERNEL_OPTIONS.ifconv_max_ops,
+    )
     assert _mnemonics(mir) == ["fround", "ftoint"]
     for value in _ROUNDINGS:
         assert _run(MirInterpreter(mir), value) == [int(-math.floor(value))]
 
 
-def test_a_rounding_reached_through_a_sign_chain_that_cancels_is_not_absorbed() -> None:
-    """Peeling a sign chain to find the rounding would strand the intermediate signs that still have readers."""
+def test_an_absorbed_rounding_is_still_emitted_for_the_reader_that_survives_it() -> None:
+    """
+    A cancelling sign chain is gone before selection sees it, so the conversion absorbs the rounding after all -- and
+    the rounding is nonetheless emitted, because a second output observes it. Each then rounds the value on its own.
+    """
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", HirFloatType())
@@ -1115,8 +1134,18 @@ def test_a_rounding_reached_through_a_sign_chain_that_cancels_is_not_absorbed() 
     builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [negated])]))
     builder.output("n", negated)
     builder.ret()
-    mir = lower_to_mir(builder.finish(), build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+    mir = lower_to_mir(
+        builder.finish(),
+        build_ops(KERNEL_OPTIONS),
+        KERNEL_OPTIONS.ffmt,
+        KERNEL_OPTIONS.ifmt,
+        KERNEL_OPTIONS.ifconv_max_ops,
+    )
     assert _mnemonics(mir) == ["fround", "ftoint"]
+    (conversion,) = [n for n in mir.nodes.values() if isinstance(n, MirOperation) and n.operator.mnemonic == "ftoint"]
+    (rounding,) = [n for n in mir.nodes.values() if isinstance(n, MirOperation) and n.operator.mnemonic == "fround"]
+    assert conversion.immediates == (int(RoundMode.FLOOR),), "the conversion must carry the mode, not read the result"
+    assert conversion.operands == rounding.operands, "both must round the same value independently"
     for value in _ROUNDINGS:
         assert _run(MirInterpreter(mir), value) == [int(math.floor(value)), -math.floor(value)]
 
@@ -1141,15 +1170,21 @@ def test_two_conversions_over_one_value_stay_apart_on_their_modes_alone() -> Non
 def test_a_rounding_that_only_a_conversion_reads_needs_no_rounding_operator_configured() -> None:
     """Absorbed, the rounding is never selected, so a kernel that only converts one no longer demands ``fround``."""
     without_fround = replace(KERNEL_OPTIONS, operator=replace(KERNEL_OPTIONS.operator, fround=None))
-    hir = optimize(lower_frontend(floored_to_int).hir, without_fround.ifconv_max_ops)
-    mir = lower_to_mir(hir, build_ops(without_fround), without_fround.ffmt, without_fround.ifmt)
+    mir = lower_to_mir(
+        lower_frontend(floored_to_int).hir,
+        build_ops(without_fround),
+        without_fround.ffmt,
+        without_fround.ifmt,
+        without_fround.ifconv_max_ops,
+    )
     assert _mnemonics(mir) == ["ftoint"]
     with pytest.raises(UnsupportedConstruct, match=r"'fround'"):
         lower_to_mir(
-            optimize(lower_frontend(floored_for_two_readers).hir, without_fround.ifconv_max_ops),
+            lower_frontend(floored_for_two_readers).hir,
             build_ops(without_fround),
             without_fround.ffmt,
             without_fround.ifmt,
+            without_fround.ifconv_max_ops,
         )
 
 

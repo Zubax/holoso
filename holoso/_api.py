@@ -16,7 +16,6 @@ from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
 from ._eel import lower as lower_frontend
 from ._errors import UnsupportedConstruct
-from ._hir import optimize
 from ._lir import ControlPort, DataInputPort, DataOutputPort, Lir, Port, RegallocTuning, build
 from ._mir import lower as lower_to_mir
 from ._operators import (
@@ -254,10 +253,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     _logger.info("\tifmt: %s (derived)", options.ifmt)
 
     frontend = lower_frontend(target)
-    hir = optimize(frontend.hir, options.ifconv_max_ops)
-    _logger.info("HIR:\n\tinputs=%s\n\toutputs=%s\n\thir_nodes=%d", hir.input_ids, hir.outputs, len(hir.nodes))
-
-    mir = lower_to_mir(hir, _build_op_config(options), options.ffmt, options.ifmt)
+    mir = lower_to_mir(frontend.hir, _build_op_config(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
     lir = build(
         mir,
         module_name,

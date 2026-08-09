@@ -41,7 +41,6 @@ import numpy as np
 
 from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
-from holoso._hir import optimize
 from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
 from holoso._lir import operand_read_cycle
 from holoso._mir import Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
@@ -1042,7 +1041,7 @@ def _build_with_lir(
     or touching simulator internals. Shared by the campaign runner and the regression replayer, so both drive the
     identical build path.
     """
-    mir = lower_to_mir(optimize(lower_frontend(fn).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt))
+    mir = lower_to_mir(lower_frontend(fn).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS)
     lir = build_lir(mir, name)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)

@@ -19,6 +19,7 @@ from holoso._eel._pe import partial_evaluate
 from holoso._eel._print import print_eel
 from holoso._errors import SynthesisError, UnsupportedConstruct
 from holoso._hir import Branch, HirEvaluator, NoNumber, optimize
+from holoso._mir._refuse import refuse
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_IFCONV_MAX_OPS
@@ -398,7 +399,7 @@ def test_a_static_power_the_host_refuses_saturates_like_the_datapath() -> None:
     for fn in (_overflowing_static_power, _overflowing_static_float_power, _zero_to_negative_float_power):
         assert "inf" in _residual_text(fn), fn
     with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_zero_to_negative_power).hir, DEFAULT_IFCONV_MAX_OPS)
+        refuse(optimize(lower(_zero_to_negative_power).hir, DEFAULT_IFCONV_MAX_OPS))
 
 
 def _dead_pole(x: float) -> float:
@@ -409,7 +410,7 @@ def _dead_pole(x: float) -> float:
 def test_a_dead_static_pole_is_not_convicted() -> None:
     """Unlike the old host-raise oracle, an unused pole is no longer a diagnostic: only a survivor is judged."""
     assert "fdiv" not in _residual_text(_dead_pole)
-    optimize(lower(_dead_pole).hir, DEFAULT_IFCONV_MAX_OPS)
+    refuse(optimize(lower(_dead_pole).hir, DEFAULT_IFCONV_MAX_OPS))
 
 
 def _nonnegative_int_fold_stays_int(x: float) -> float:

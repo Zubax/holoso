@@ -26,7 +26,6 @@ from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOper
 from holoso._errors import UnsupportedConstruct
 from holoso._operators import Relation
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import (
     BoolOperand,
     BoolRegRef,
@@ -120,7 +119,7 @@ def _run(
     fmt: FloatFormat = FMT,
     ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, ifconv_max_ops), ops, fmt, default_ifmt(fmt))
+    return lower_to_mir(lower(target).hir, ops, fmt, default_ifmt(fmt), ifconv_max_ops)
 
 
 def _view(mir: Mir) -> MirWideView:

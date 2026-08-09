@@ -1,5 +1,6 @@
 """Lower optimized HIR to selected MIR."""
 
+import logging
 import math
 from collections import Counter
 from dataclasses import dataclass, fields
@@ -90,8 +91,10 @@ from .._hir import (
     StateRead,
     StateSlot,
     Terminator,
+    optimize,
     reverse_postorder,
 )
+from ._refuse import refuse
 from .._util import ValueId
 from .._operators import (
     BoolAndOperator,
@@ -140,6 +143,8 @@ from .._type import (
     ScalarType,
 )
 from ._ir import Mir, MirBuilder
+
+_logger = logging.getLogger(__name__)
 
 # The seam between the semantic relation and the comparator flag it taps; the two vocabularies meet only here.
 # Both comparator families share it: an integer comparison taps ``icmp`` exactly as a float one taps ``fcmp``.
@@ -1319,11 +1324,24 @@ class _IntLowerer:
         return True
 
 
-def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat) -> Mir:
+def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat, ifconv_max_ops: int) -> Mir:
     """
-    Select hardware operators from the configuration and fold semantic signs onto MIR sign controls.
+    Optimize the front end's HIR, judge what survives, then select hardware operators for it and fold semantic signs
+    onto MIR sign controls.
+
+    Optimization is not the caller's to run: a caller who optimized first would also have judged first, convicting
+    whatever a later round erases.
 
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
     ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
+    hir = optimize(hir, ifconv_max_ops)
+    _logger.info(
+        "Optimized HIR:\n\tinputs=%s\n\toutputs=%s\n\tnodes=%d\n\tblocks=%d",
+        hir.input_ids,
+        hir.outputs,
+        len(hir.nodes),
+        len(hir.blocks),
+    )
+    refuse(hir)
     return _LoweringContext(hir, ops, float_format, int_format).run()

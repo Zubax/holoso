@@ -19,6 +19,7 @@ from holoso._eel._pe import partial_evaluate
 from holoso._eel._print import print_eel
 from holoso._errors import SynthesisError, UnsupportedConstruct
 from holoso._hir import IntSelect, Operation, optimize
+from holoso._mir._refuse import refuse
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_IFCONV_MAX_OPS
@@ -309,7 +310,7 @@ def test_static_negative_base_powers_fold_through_the_stub_parity_lane() -> None
     assert "-128.0" in _residual_text(_neg_base_odd_exponent)
     _oracle(_dead_static_pow_fault, [{"x": 3.5}])
     with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_neg_base_fractional_exponent).hir, DEFAULT_IFCONV_MAX_OPS)
+        refuse(optimize(lower(_neg_base_fractional_exponent).hir, DEFAULT_IFCONV_MAX_OPS))
 
 
 def _pow_static_int_pair(n: int) -> int:

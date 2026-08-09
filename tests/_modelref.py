@@ -27,7 +27,7 @@ from holoso._lir import build
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
-from holoso._hir import Hir, Operation, Operator, optimize
+from holoso._hir import Hir, Operation, Operator
 from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat, IntFormat
@@ -79,7 +79,7 @@ def build_model_and_interpreter(
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(optimize(lower_frontend(kernel).hir, ifconv_max_ops), ops, fmt, default_ifmt(fmt))
+    mir = lower_to_mir(lower_frontend(kernel).hir, ops, fmt, default_ifmt(fmt), ifconv_max_ops)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 

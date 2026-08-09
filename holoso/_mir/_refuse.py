@@ -1,35 +1,23 @@
-"""HIR survivor refusal: the operations that outlived optimization and still name no number."""
+"""The final gate over HIR, immediately before hardware is selected for it."""
 
 import logging
 
 from .._errors import SynthesisError
+from .._hir import BoolConst, Branch, Const, Hir, NoNumber, Operation, reverse_postorder, successors
 from .._util import BlockId, ValueId
-from ._const import BoolConst, Const
-from ._copy import reverse_postorder
-from ._ir import Branch, Hir, Operation, successors
-from ._operators import NoNumber
 
 _logger = logging.getLogger(__name__)
 
 
-def run(hir: Hir) -> None:
+def refuse(hir: Hir) -> None:
     """
     Refuse the build for an operation that survived every pass and still names no number: a quotient by zero, a
-    logarithm of a non-positive, an indeterminate form. It runs last because SURVIVING is the criterion -- unrolling
-    and inlining substitute values, so the compiler manufactures such expressions itself, and every one it deletes was
-    never part of the program. What is left after the deletions is what the kernel asked for.
+    logarithm of a non-positive, an indeterminate form. SURVIVING is the criterion -- unrolling and inlining
+    substitute values, so the compiler manufactures such expressions itself, and every one it deletes was never part
+    of the program. Running it ahead of a reduction would silently stop convicting things.
 
-    The same question the passes ask, asked once more over the same knowledge, so nothing is proven here that was not
-    provable there. That the sweep knows no more than the passes is what keeps it from convicting an expression a
-    further round would have erased.
-    That it knows ENOUGH is a property of WHERE it runs: on the already-reduced graph every constant an identity
-    established is a ``Const`` node, so a single forward walk sees what the fixpoint took several rounds to establish.
-    Moving this ahead of a reduction would silently stop convicting things.
-
-    Only the blocks the sequencer can ENTER are asked. A guard that proved its own arm dead must not convict what it
-    excluded, and post-DCE block liveness cannot say that: every block left is CFG-reachable, and nothing rewrites a
-    proven branch into a jump, so a constant condition can still guard a block liveness calls live. So the walk carries
-    its own constants and takes only the successor a proven condition selects.
+    Only the blocks the sequencer can ENTER are asked. Pruning leaves exactly one shape where that differs from CFG
+    reachability: the never-returning loop, whose exit it declines to orphan.
     """
     known: dict[ValueId, Const] = {vid: node for vid, node in hir.nodes.items() if isinstance(node, Const)}
     blocks = {block.id: block for block in hir.blocks}

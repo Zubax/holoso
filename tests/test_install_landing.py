@@ -16,7 +16,6 @@ import pytest
 import holoso
 from holoso import FloatFormat, FloatValue
 from holoso._eel import lower as lower_frontend
-from holoso._hir import optimize
 from holoso._lir import BoolWrite, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, WideCopy
 from holoso._mir import lower as lower_to_mir
 
@@ -37,10 +36,11 @@ from ._modelref import (
 def _build(spec: ExampleSpec) -> Lir:
     return build_lir(
         lower_to_mir(
-            optimize(lower_frontend(spec.make_kernel()).hir, DEFAULT_IFCONV_MAX_OPS),
+            lower_frontend(spec.make_kernel()).hir,
             default_ops(spec.formats[0]),
             spec.formats[0],
             default_ifmt(spec.formats[0]),
+            DEFAULT_IFCONV_MAX_OPS,
         ),
         spec.name,
     )
@@ -152,10 +152,11 @@ def test_state_read_sourced_install_is_inline_class() -> None:
     options = dataclasses.replace(default_options(FloatFormat(6, 18)), ifconv_max_ops=0)
     lir = build_lir(
         lower_to_mir(
-            optimize(lower_frontend(_HoldOrUpdateBool().__call__).hir, options.ifconv_max_ops),
+            lower_frontend(_HoldOrUpdateBool().__call__).hir,
             build_ops(options),
             options.ffmt,
             options.ifmt,
+            options.ifconv_max_ops,
         ),
         "hold_or_update_bool",
     )
@@ -204,7 +205,7 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     ops = default_ops(fmt)
     kernel = _LiveThroughArm().__call__
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt)),
+        lower_to_mir(lower_frontend(kernel).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS),
         "live_through_arm",
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.wide_copies if not c.resident_source]
@@ -255,7 +256,7 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     ops = default_ops(fmt)
     kernel = _LastWorkArmSource().__call__
     lir = build_lir(
-        lower_to_mir(optimize(lower_frontend(kernel).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt)),
+        lower_to_mir(lower_frontend(kernel).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS),
         "last_work_arm",
     )
     pushed = [

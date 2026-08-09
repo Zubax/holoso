@@ -1,10 +1,7 @@
 """
-Constant-branch pruning: a branch whose condition the graph already names takes one edge, so the other edge and
-everything only it reaches are not part of the program.
-
-Nothing else deletes a control edge -- if-conversion refuses a decided diamond, DCE preserves the CFG -- so without
-this a proven-dead arm reached hardware: selected, materialized, and refused upon, for code no input can reach.
-Pruning and strength reduction feed each other, so they run as a pair to a fixpoint; see :mod:`._optimize`.
+Constant-branch pruning. Nothing else deletes a control edge -- if-conversion refuses a decided diamond, DCE
+preserves the CFG -- so without this a proven-dead arm reached hardware: selected, materialized, and refused
+upon, for code no input can reach.
 """
 
 import logging
@@ -41,10 +38,9 @@ def _taking(blocks: list[Block], decided: BlockId, target: BlockId) -> list[Bloc
 
 def _proven_branch(hir: Hir) -> tuple[Block, BlockId] | None:
     """
-    The first block whose branch the graph decides, paired with the target it takes -- but only where taking it leaves
-    the sole exit reachable. Orphaning the exit would rewrite a kernel that provably never returns into a module that
-    can never raise ``out_valid``, so that one branch is left as written, and is then the only decided branch the
-    survivor sweep's enterability walk has to step around.
+    Orphaning the exit would rewrite a kernel that provably never returns into a module that can never raise
+    ``out_valid``, so that one branch is left as written -- and is then the only decided branch the refusal gate's
+    enterability walk has to step around.
     """
     exits = [block.id for block in hir.blocks if isinstance(block.terminator, Ret)]
     assert len(exits) == 1, "the frontend emits exactly one function exit, and no pass creates or deletes one"
@@ -72,7 +68,6 @@ def _reachable(blocks: list[Block], entry: BlockId) -> set[BlockId]:
 
 
 def _resolve(substitution: dict[ValueId, ValueId], value: ValueId) -> ValueId:
-    """Follow a chain of collapsed phis: one may stand for another, and the chain stands for what is at its end."""
     seen: set[ValueId] = set()
     while (target := substitution.get(value)) is not None:
         assert value not in seen, "a phi standing for itself is a block whose only predecessor is itself"
@@ -82,7 +77,6 @@ def _resolve(substitution: dict[ValueId, ValueId], value: ValueId) -> ValueId:
 
 
 def _take(hir: Hir, decided: Block, target: BlockId) -> Hir:
-    """Take the proven edge out of ``decided``, then delete whatever that leaves unreachable and repair the merges."""
     blocks = _taking(hir.blocks, decided.id, target)
     live = _reachable(blocks, hir.entry)
     blocks = [block for block in blocks if block.id in live]
@@ -145,7 +139,6 @@ def _take(hir: Hir, decided: Block, target: BlockId) -> Hir:
 
 
 def _references(hir: Hir) -> list[ValueId]:
-    """Every value the graph names, from inside the DAG and from outside it -- the complete use set."""
     refs = list(hir.external_value_references())
     for node in hir.nodes.values():
         match node:
@@ -160,9 +153,8 @@ def _references(hir: Hir) -> list[ValueId]:
 
 def run(hir: Hir) -> Hir | None:
     """
-    Prune every branch the graph decides, repeating because taking one edge can settle the next condition. ``None``
-    means none was decided, which is the only thing that ends the reduce/prune fixpoint in :mod:`._optimize`. Each
-    pruning replaces a branch with a jump and never mints one, so the repetition is bounded by the branch count.
+    Repeats because taking one edge can settle the next condition; bounded, since each pruning replaces a branch
+    with a jump and never mints one. ``None`` is what ends the reduce/prune fixpoint in :mod:`._optimize`.
     """
     pruned = 0
     while (decided := _proven_branch(hir)) is not None:

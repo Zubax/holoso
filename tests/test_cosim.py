@@ -22,7 +22,6 @@ from holoso import (
 )
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import Lir, pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
@@ -414,7 +413,7 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
     name = f"kdiv_{config.label}"
     lir = build_lir(
-        lower_to_mir(optimize(lower(kdiv).hir, DEFAULT_IFCONV_MAX_OPS), config.make_ops(fmt), fmt, default_ifmt(fmt)),
+        lower_to_mir(lower(kdiv).hir, config.make_ops(fmt), fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
@@ -480,7 +479,7 @@ def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
     name = f"klog2_{config.label}"
     lir = build_lir(
-        lower_to_mir(optimize(lower(klog2).hir, DEFAULT_IFCONV_MAX_OPS), config.make_ops(fmt), fmt, default_ifmt(fmt)),
+        lower_to_mir(lower(klog2).hir, config.make_ops(fmt), fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
@@ -550,10 +549,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     name = f"overlap_div_err_{config.label}"
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(overlap_div_err_kernel).hir, DEFAULT_IFCONV_MAX_OPS),
-            config.make_ops(fmt),
-            fmt,
-            default_ifmt(fmt),
+            lower(overlap_div_err_kernel).hir, config.make_ops(fmt), fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS
         ),
         name,
     )

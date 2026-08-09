@@ -48,7 +48,6 @@ from holoso._type import FloatType, IntType, ScalarType
 from holoso._backend.verilog import generate
 from holoso._backend.verilog._microcode import PORT_LETTERS, base_name, tapped_lanes
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import BoolRegRef, Lir, RegRef, pooled_write_word
 from holoso._mir import Mir, lower as lower_to_mir
 
@@ -74,7 +73,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig, fmt: FloatFormat) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt))
+    return lower_to_mir(lower(target).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
@@ -684,9 +683,9 @@ def _instantiation(verilog: str, mnemonic: str) -> str:
 
 
 def _integer_lir() -> Lir:
-    hir = optimize(lower(_IntegerKernel().step).hir, DEFAULT_IFCONV_MAX_OPS)
+    hir = lower(_IntegerKernel().step).hir
     ops = build_ops(_INT_OPTIONS)
-    return build_lir(lower_to_mir(hir, ops, _INT_OPTIONS.ffmt, _INT_OPTIONS.ifmt), "int_kernel")
+    return build_lir(lower_to_mir(hir, ops, _INT_OPTIONS.ffmt, _INT_OPTIONS.ifmt, DEFAULT_IFCONV_MAX_OPS), "int_kernel")
 
 
 @pytest.mark.whitebox

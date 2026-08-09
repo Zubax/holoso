@@ -30,7 +30,6 @@ sys.path.insert(0, str(REPO))
 
 import holoso  # noqa: E402
 from holoso._eel import lower  # noqa: E402
-from holoso._hir import optimize  # noqa: E402
 from holoso._lir import RegallocTuning, build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
 from synth import build_compiler_ooc_design  # noqa: E402
@@ -64,10 +63,11 @@ def capture(out_path: str) -> None:
         try:
             lir = build(
                 lower_to_mir(
-                    optimize(lower(target.kernel()).hir, target.ops.ifconv_max_ops),
+                    lower(target.kernel()).hir,
                     build_ops(target.ops),
                     target.ops.ffmt,
                     target.ops.ifmt,
+                    target.ops.ifconv_max_ops,
                 ),
                 target.name,
                 target.ops.ucode_fetch_stages,

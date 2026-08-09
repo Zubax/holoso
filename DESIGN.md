@@ -61,7 +61,7 @@ refused -- but only the kernel's own expressions are. Unrolling and inlining SUB
 manufactures such expressions itself (`for w in [1.0, 0.0]: if w > 0.0: x / w` becomes `x / 0.0`), and convicting one
 of those would be the compiler answering for its own transformation. Refusal is therefore SURVIVOR-BASED: `NoNumber`
 is an internal signal rather than an error, every speculative fold catches it and leaves the operation as written,
-and a single sweep at the end of HIR optimization refuses whatever is still there -- an expression no identity
+and a single sweep at the HIR-to-MIR boundary refuses whatever is still there -- an expression no identity
 erased, no guard excluded, and nothing left dead is the program's own. An operation naming no number is one the
 compiler cannot NAME, so every identity treats it as any unknown: `x/x` is 1 even when `x` is `inf - inf`.
 
@@ -75,8 +75,7 @@ never a defect; a WRONG answer always is.
 ```mermaid
 flowchart LR
     Python[Python] -->|front-end| HIR[HIR]
-    HIR -->|optimize| HIRO["HIR (optimized)"]
-    HIRO -->|lower| MIR[MIR]
+    HIR -->|optimize / judge / lower| MIR[MIR]
     MIR -->|schedule / bind / regalloc| LIR[LIR]
 
     LIR -->|backend| Verilog[Verilog]
@@ -308,12 +307,13 @@ ever take.
 Optimization is intentionally very liberal, hardware-agnostic, and bound by the fastmath charter in Direction. Most
 passes run where their inputs are final; strength reduction and constant-branch pruning instead run as a mutual
 fixpoint, since each one's output is the other's input, so a cascade of guards collapses rather than only its first
-link. The survivor refusal sweep runs strictly last, after everything erasable has been erased -- reordering it ahead
-of any reduction would convict expressions a rewrite would have absolved. The sweep is the sole point of refusal: it
-re-asks the same fold on the fully reduced graph and follows only provable control paths -- which after pruning
-matters for the never-returning loop alone -- so every identity and every guard gets its chance to erase an expression
-before it is judged, exactly as the survivor-based charter requires. A conviction reached through an inlined library
-composite may name an expression the kernel never spelled; an accepted limitation of the composites, not of the rule.
+link. Optimization itself never refuses: it reduces, and what survives is judged once at the HIR-to-MIR boundary,
+which is where the graph stops changing. Reordering that judgement ahead of any reduction would convict expressions a
+rewrite would have absolved. It re-asks the same fold on the fully reduced graph and follows only provable control
+paths -- which after pruning matters for the never-returning loop alone -- so every identity and every guard gets its
+chance to erase an expression before it is judged, exactly as the survivor-based charter requires. A conviction
+reached through an inlined library composite may name an expression the kernel never spelled; an accepted limitation
+of the composites, not of the rule.
 
 ### DEFERRED
 
@@ -332,6 +332,10 @@ runtime integer: every symbol answering what Python answers -- the roundings ove
 lowering would have computed over its float image instead.
 
 ## MIR
+
+MIR owns the whole boundary: it optimizes the front end's HIR, judges what survives, and only then selects hardware.
+Optimization is not the caller's to run, because the judgement must see the last graph and no earlier one, and this
+is the layer that knows when that is.
 
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
 RESULT is its own; the bool-result operations over wide operands (the comparators and the casts into the boolean bank)

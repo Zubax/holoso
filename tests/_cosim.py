@@ -8,7 +8,6 @@ from holoso._backend.cocotb import generate as generate_testbench
 from holoso._backend.numerical import generate
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from holoso._hir import optimize
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, build_ops, default_options
 from holoso._operators import OpConfig
 from holoso._mir import lower as lower_to_mir
@@ -33,7 +32,7 @@ def run_cosim(
     options = default_options(fmt) if wint_min is None else replace(default_options(fmt), wint_min=wint_min)
     ops = build_ops(options) if ops is None else ops
     ifmt = options.ifmt
-    lir = build_lir(lower_to_mir(optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, ifmt), name)
+    lir = build_lir(lower_to_mir(lower(fn).hir, ops, fmt, ifmt, DEFAULT_IFCONV_MAX_OPS), name)
     model = generate(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}_r{ifmt.width}"

@@ -13,7 +13,6 @@ import pytest
 import holoso
 from holoso import FloatFormat, IntFormat, OperatorOptions, Options
 from holoso._eel import lower as lower_frontend
-from holoso._hir import optimize
 from holoso._mir import MirOperation, MirPhi, lower as lower_to_mir
 from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, SelectOperator, identity_conditioner
 from holoso._type import BoolType, IntType
@@ -117,9 +116,7 @@ def test_default_options_carry_the_documented_int_format() -> None:
 def test_the_int_format_is_never_narrower_than_the_float(wint_min: int, width: int) -> None:
     options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
     assert options.ifmt == IntFormat(width)
-    mir = lower_to_mir(
-        optimize(lower_frontend(_add).hir, options.ifconv_max_ops), build_ops(options), options.ffmt, options.ifmt
-    )
+    mir = lower_to_mir(lower_frontend(_add).hir, build_ops(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
     assert mir.int_format == options.ifmt
     assert build_lir(mir, "int_format_probe").int_format == options.ifmt
 

@@ -13,7 +13,6 @@ import pytest
 from holoso import FloatFormat
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from holoso._hir import optimize
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir
 from holoso._mir import lower as lower_to_mir
 
@@ -38,10 +37,7 @@ def test_multi_distinct_const_install_selects_among_constants() -> None:
     """A register must select among >=2 distinct constants; otherwise the cosim below would not exercise that mux."""
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(_multi_const_install).hir, DEFAULT_IFCONV_MAX_OPS),
-            default_ops(_FMT),
-            _FMT,
-            default_ifmt(_FMT),
+            lower(_multi_const_install).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS
         ),
         "multi_const",
     )

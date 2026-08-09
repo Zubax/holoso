@@ -20,7 +20,7 @@ import holoso
 from holoso._operators import FFmaOperator
 from holoso import FFmaOptions, FloatFormat, UnsupportedConstruct
 from holoso._eel import lower
-from holoso._hir import FloatAdd, FloatMul, optimize
+from holoso._hir import FloatAdd, FloatMul
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, arith_count as _arith_count, default_ops, default_options
@@ -176,7 +176,7 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
         ops = default_ops(_FMT)
         if with_fma:
             ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT, FFmaOptions(), 0))
-        mir = lower_to_mir(optimize(lower(dot).hir, DEFAULT_IFCONV_MAX_OPS), ops, _FMT, default_ifmt(_FMT))
+        mir = lower_to_mir(lower(dot).hir, ops, _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS)
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
             operator = getattr(node, "operator", None)

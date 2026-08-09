@@ -29,7 +29,6 @@ from holoso import (
     Options,
 )
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._mir import lower as lower_to_mir
 from holoso._operators import (
     BoolToIntOperator,
@@ -387,10 +386,11 @@ def test_the_lowering_checks_every_port_format_and_not_just_the_operator_kind() 
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33)
     ops = build_ops(options)
     mismatched = replace(ops, ftoint=FToIntOperator(options.ffmt, IntFormat(17), FToIntOptions()))
-    hir = optimize(lower(_add).hir, DEFAULT_IFCONV_MAX_OPS)
-    lower_to_mir(hir, ops, options.ffmt, options.ifmt)  # the premise: the matching configuration lowers cleanly
+    hir = lower(_add).hir
+    budget = DEFAULT_IFCONV_MAX_OPS
+    lower_to_mir(hir, ops, options.ffmt, options.ifmt, budget)  # the premise: a matching configuration lowers
     with pytest.raises(AssertionError, match="ftoint"):
-        lower_to_mir(hir, mismatched, options.ffmt, options.ifmt)
+        lower_to_mir(hir, mismatched, options.ffmt, options.ifmt, budget)
 
 
 def _add(a: float, b: float) -> float:

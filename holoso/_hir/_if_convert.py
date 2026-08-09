@@ -66,10 +66,8 @@ def _find_diamond(
             continue
         if not all(isinstance(hir.nodes[vid].type, (FloatType, IntType, BoolType)) for vid in merge.phis):
             continue
-        # Converting a decided diamond would pin the untaken arm live through the select forever. Pruning always gets
-        # there first: taking either edge of one loses only the untaken arm, which is jump-terminated and so never the
-        # exit, so pruning cannot be the branch it declines. The decided branch that DOES survive pruning -- the one
-        # whose taken edge orphans the exit -- is a loop header, and no loop header forms a diamond.
+        # Taking either edge of a diamond loses only the untaken arm, which is jump-terminated and so never the exit,
+        # so pruning never declines one and always gets here first.
         assert not isinstance(hir.nodes[block.terminator.cond], BoolConst), "pruning owns a decided diamond"
         return block, arm_t, arm_f, merge
     return None

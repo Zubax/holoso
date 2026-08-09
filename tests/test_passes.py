@@ -94,7 +94,15 @@ from holoso._hir import (
     IntType,
 )
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir
-from holoso._mir import lower as lower_to_mir, Mir, MirFloatConst, MirFloatInput, MirFloatOutput, MirOperation
+from holoso._mir._refuse import refuse
+from holoso._mir import (
+    lower as lower_to_mir,
+    Mir,
+    MirFloatConst,
+    MirFloatInput,
+    MirFloatOutput,
+    MirOperation,
+)
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
 from ._modelref import build_model, build_ops
@@ -143,7 +151,7 @@ class OtherFold(Operator):
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, fmt, default_ifmt(fmt))
+    return lower_to_mir(lower(target).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS)
 
 
 def _op_count(mir: Mir, cls: type) -> int:
@@ -185,7 +193,7 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
     hir = builder.finish()
 
     try:
-        lower_to_mir(hir, OPS, FMT, default_ifmt(FMT))
+        lower_to_mir(hir, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
     except UnsupportedConstruct as ex:
         assert "no MIR lowering rule" in str(ex)
     else:
@@ -674,7 +682,9 @@ def test_bselect_reductions_are_truth_table_correct() -> None:
         hir = _hir_of(fn)
         has_select = any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
         assert has_select == keeps_select, f"{fn.__name__}: bselect presence {has_select} != expected {keeps_select}"
-        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, default_ifmt(FMT)), fn.__name__))
+        model = build_model(
+            build_lir(lower_to_mir(lower(fn).hir, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS), fn.__name__)
+        )
         for combo in itertools.product([False, True], repeat=arity):
             got = bool(model.run(*combo)[0])
             assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"
@@ -708,7 +718,11 @@ def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
         assert not any(
             isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
         ), f"{kernel.__name__}: a mux over identical arms survived"
-        model = build_model(build_lir(lower_to_mir(hir, OPS, FMT, default_ifmt(FMT)), kernel.__name__))
+        model = build_model(
+            build_lir(
+                lower_to_mir(lower(kernel).hir, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS), kernel.__name__
+            )
+        )
         for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
             got, want = read(model.run(x)[0]), read(kernel(x))
             assert got == want, f"{kernel.__name__}({x}): got {got}, want {want}"
@@ -910,11 +924,12 @@ def test_a_constant_integer_expression_folds_away_entirely() -> None:
     builder.output("y", builder.operation(IntToFloat(), [value]))
     builder.ret()
 
-    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    raw = builder.finish()
+    hir = optimize(raw, DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     (out,) = hir.outputs
     assert hir.nodes[out.value] == FloatConst(float(5 * 2**200))
-    lower_to_mir(hir, OPS, FMT, default_ifmt(FMT))  # nothing integer is left, so MIR accepts it
+    lower_to_mir(raw, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)  # nothing integer is left
 
 
 def test_integer_folding_is_exact_across_the_vocabulary() -> None:
@@ -963,10 +978,11 @@ def test_integer_folding_has_no_size_limit() -> None:
     )
     builder.ret()
 
-    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    raw = builder.finish()
+    hir = optimize(raw, DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
-    lower_to_mir(hir, OPS, FMT, default_ifmt(FMT))  # nothing integer survives, however wide the intermediate was
+    lower_to_mir(raw, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)  # nothing integer survives
 
 
 @pytest.mark.parametrize(
@@ -1002,7 +1018,9 @@ def _wrapped_infinity_times_zero(wrapper: Operator) -> Hir:
     wrapped = builder.operation(wrapper, [builder.float_const(math.inf)])
     builder.output("y", builder.operation(FloatMul(), [wrapped, builder.float_const(0.0)]))
     builder.ret()
-    return optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    refuse(hir)
+    return hir
 
 
 def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression() -> None:
@@ -1066,7 +1084,7 @@ def test_an_operand_known_only_through_a_merge_still_blocks_the_identity(operato
     builder.output("y", builder.operation(operator, [infinite, builder.float_const(other)]))
     builder.ret()
     with pytest.raises(SynthesisError, match="names no number"):
-        optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+        refuse(optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS))
 
 
 @pytest.mark.parametrize(
@@ -1177,7 +1195,20 @@ def _optimized_constant_operation(operator: Operator, *operands: float | int) ->
         result = builder.operation(IntToFloat(), [result])
     builder.output("y", result)
     builder.ret()
-    return optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    refuse(hir)  # the gate is the boundary's, so a refusal expectation must reach past optimization for it
+    return hir
+
+
+def test_selection_cannot_be_reached_without_passing_the_gate() -> None:
+    # Were selection callable on its own, a caller could optimize, judge, substitute, and lower -- convicting what
+    # its own later round would have erased.
+    builder = HirBuilder()
+    builder.block()
+    builder.output("y", builder.operation(HirFloatDiv(), [builder.float_const(1.0), builder.float_const(0.0)]))
+    builder.ret()
+    with pytest.raises(SynthesisError, match="names no number"):
+        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
 
 
 @pytest.mark.parametrize(
@@ -1247,10 +1278,9 @@ def test_a_pole_the_operator_reference_answers_folds_to_that_value(
 
 
 def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
-    # Pruning declines the one branch that would orphan the exit, leaving the sole shape where CFG reachability and
-    # enterability disagree: the exit below is reachable and unenterable, and the sweep must not convict what it holds.
-    # Every constant here is opaque to the front end and constant to HIR (``x*0 == 0``) -- including both quotient
-    # operands, since a fold names a quotient only where it knows both, so an unknown one would witness nothing.
+    # Pruning declines the branch that would orphan the exit, so the exit below is reachable and unenterable. Every
+    # constant is opaque to the front end and constant to HIR (``x*0 == 0``) -- including both quotient operands,
+    # since a fold names a quotient only where it knows both, so an unknown one would witness nothing.
     def never_returns(x: float) -> float:
         y = x
         while (x * 0.0) <= 0.0:
@@ -1258,6 +1288,7 @@ def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
         return (y * 0.0) / (y * 0.0)
 
     hir = optimize(lower(never_returns).hir, DEFAULT_IFCONV_MAX_OPS)
+    refuse(hir)  # the skip rule is the gate's, so optimization alone would exercise nothing
     assert any(isinstance(block.terminator, Ret) for block in hir.blocks)
     quotients = [
         node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)
@@ -1269,8 +1300,8 @@ def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
 
 
 def test_an_arm_a_proven_guard_excludes_is_deleted_rather_than_merely_unconvicted() -> None:
-    # The dual of the above, and why the skip rule has only one shape left: where the exit survives, the quotient is
-    # not spared a conviction -- it is not there. A division is unspeculatable, so nothing but pruning can remove it.
+    # The dual of the above: the quotient is not spared a conviction, it is not there. A division is unspeculatable,
+    # so nothing but pruning can remove it.
     def excluded_by_a_guard(x: float) -> float:
         r = x
         if (x * 0.0) > 1.0:
@@ -1286,8 +1317,7 @@ def test_an_arm_a_proven_guard_excludes_is_deleted_rather_than_merely_unconvicte
 
 
 def test_a_loop_whose_test_is_proven_false_dissolves_entirely() -> None:
-    # The back-edge shape: only the graph's ``x*0 == 0`` identity decides this test, so the front end residualizes a
-    # real loop. Taking the exit edge orphans the body, so header, body and back edge all go.
+    # Only the graph's ``x*0 == 0`` identity decides this test, so the front end residualizes a real loop.
     def never_enters(x: float) -> float:
         y = x
         while (y * 0.0) > 1.0:
@@ -1321,9 +1351,7 @@ def test_pruning_one_guard_settles_the_next() -> None:
 
 
 def test_a_state_slot_live_out_follows_a_merge_pruning_collapses() -> None:
-    # A slot's live-out is the one reference that lives outside the value DAG entirely, so a collapse must be carried
-    # into it by hand. Here the write happens only in the arm a proven guard excludes, so the slot ends up holding
-    # what it held on entry, and the kernel is stateless in effect.
+    # A slot's live-out is the one reference outside the value DAG entirely, so a collapse reaches it only by hand.
     class HeldByADeadGuard:
         def __init__(self) -> None:
             self.s = 0.0
@@ -1340,8 +1368,7 @@ def test_a_state_slot_live_out_follows_a_merge_pruning_collapses() -> None:
 
 
 def test_a_proven_break_kills_the_back_edge_and_collapses_the_carried_merges() -> None:
-    # A break the graph proves runs on the first trip, so the latch is unreachable and the loop degenerates into a
-    # diamond: the header's loop-carried phis lose their latch arm and collapse to what they held on entry. Distinct
+    # The latch becomes unreachable, so the header's loop-carried phis lose their latch arm and collapse. Distinct
     # from a loop deleted whole, where no merge has to be repaired at all.
     def breaks_on_the_first_trip(x: float, n: float) -> float:
         y = x
@@ -1363,9 +1390,8 @@ def test_a_proven_break_kills_the_back_edge_and_collapses_the_carried_merges() -
 
 
 def test_a_decided_branch_whose_arms_share_a_target_repairs_by_dropping_an_arm() -> None:
-    # The successor of the untaken edge survives via another edge, so nothing is deleted and the repair is the arm
-    # filter alone -- the path a whole-block deletion would never reach. Built directly: the front end always gives a
-    # merge exactly two predecessors, and three is what leaves a real phi behind after one arm goes.
+    # The untaken edge's successor survives via another edge, so nothing is deleted and the repair is the arm filter
+    # alone. Built directly: the front end gives a merge two predecessors, and three is what leaves a phi behind.
     builder = HirBuilder()
     entry, dead, live, other, merge = (builder.block() for _ in range(5))
     builder.position_at(entry)
@@ -1394,9 +1420,8 @@ def test_a_decided_branch_whose_arms_share_a_target_repairs_by_dropping_an_arm()
 
 
 def test_a_collapsed_merge_is_substituted_into_a_later_merge() -> None:
-    # The phi-repair edge: a phi left with one arm is that arm's value, and every later reference must follow --
-    # including an arm of a DIFFERENT block's phi, the one reference kind that is neither operand nor terminator.
-    # Built directly because the front end routes each arm through its own jump block.
+    # Every later reference to a collapsed phi must follow, including an arm of a DIFFERENT block's phi -- the one
+    # reference kind that is neither operand nor terminator. Built directly: the front end never emits this shape.
     builder = HirBuilder()
     entry, dead, live, first, left, right, second = (builder.block() for _ in range(7))
     builder.position_at(entry)
@@ -1437,7 +1462,7 @@ def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
     builder.output("y", x)
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="must have a float reset value"):
-        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT))
+        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
 
 
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:

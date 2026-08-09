@@ -17,7 +17,7 @@ import pytest
 
 import holoso
 from holoso._eel import lower
-from holoso._hir import HirEvaluator, optimize
+from holoso._hir import HirEvaluator
 from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._value import FloatValue, IntValue, ScalarValue
 
@@ -116,7 +116,7 @@ def _ops() -> holoso.Options:
 def test_float_corpus_lowers_through_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
-    lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt, _ops().ifmt)
+    lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt, _ops().ifmt, _ops().ifconv_max_ops)
 
 
 def _int_ops() -> holoso.Options:
@@ -156,7 +156,7 @@ def test_int_corpus_selects_and_agrees_with_the_hir_oracle(
 ) -> None:
     options = _int_ops()
     hir = lower(make()).hir
-    mir = lower_to_mir(optimize(hir, options.ifconv_max_ops), build_ops(options), options.ffmt, options.ifmt)
+    mir = lower_to_mir(hir, build_ops(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
     build_lir(mir, name)  # the carriage half: everything selection emits must reach LIR intact
     evaluator, interpreter = HirEvaluator(hir), MirInterpreter(mir)
     names = hir.input_names()

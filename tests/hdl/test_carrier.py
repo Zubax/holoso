@@ -15,7 +15,6 @@ from cocotb_tools.runner import get_runner
 from holoso import FAddOptions, FCmpOptions, FMulILog2Options, FMulOptions, FloatFormat, OperatorOptions, Options
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, drive_reset, sources, start_clock
@@ -85,10 +84,7 @@ def test_float_leaves_the_upper_carrier_bits_clear(sim: str) -> None:
     options = _options()
     lir = build_lir(
         lower_to_mir(
-            optimize(lower(_Accumulate().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
-            build_ops(options),
-            options.ffmt,
-            options.ifmt,
+            lower(_Accumulate().__call__).hir, build_ops(options), options.ffmt, options.ifmt, DEFAULT_IFCONV_MAX_OPS
         ),
         "carrier",
     )

@@ -17,6 +17,7 @@ from ._ir import (
     StateRead as StateRead,
     StateSlot as StateSlot,
     Terminator as Terminator,
+    successors as successors,
 )
 from ._operators import (
     BoolAnd as BoolAnd,
