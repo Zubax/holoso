@@ -95,6 +95,7 @@ from .._hir import (
     reverse_postorder,
 )
 from ._refuse import refuse
+from ._specialize import constant_shift_count, left_shifts, specialize
 from .._util import ValueId
 from .._operators import (
     BoolAndOperator,
@@ -436,12 +437,6 @@ def _wholly_taken(sites: Counter[ValueId], use_counts: dict[ValueId, int]) -> se
     return {vid for vid, taken in sites.items() if taken == use_counts[vid]}
 
 
-def _constant_shift_count(hir: Hir, count: ValueId) -> int | None:
-    """A shift count the lowering can answer from, rather than reading it out of a register."""
-    node = hir.nodes[count]
-    return node.value if isinstance(node, IntConst) else None
-
-
 def _plan_folded_shift_counts(hir: Hir, use_counts: dict[ValueId, int]) -> set[ValueId]:
     """
     Decided before any block, because constants are lowered entry-globally: a count exceeding the machine format is
@@ -451,7 +446,7 @@ def _plan_folded_shift_counts(hir: Hir, use_counts: dict[ValueId, int]) -> set[V
     for node in hir.nodes.values():
         if isinstance(node, Operation) and isinstance(node.operator, (IntShiftLeft, IntShiftRight)):
             _, count = node.operands
-            if _constant_shift_count(hir, count) is not None:
+            if constant_shift_count(hir, count) is not None:
                 folds[count] += 1
     return _wholly_taken(folds, use_counts)
 
@@ -1214,7 +1209,7 @@ class _IntLowerer:
         )
 
     def _lower_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
-        constant = _constant_shift_count(self.context.hir, count)
+        constant = constant_shift_count(self.context.hir, count)
         if constant is None:
             return self._runtime_shift(semantic, a, count)
         # CPython refuses a negative count outright, and the shifter would silently read one as the other direction.
@@ -1236,18 +1231,15 @@ class _IntLowerer:
         return self._emit(semantic, hardware, a, count)
 
     def _constant_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: int) -> ValueId:
-        """
-        The same raw reading as the runtime shifter, without either module. The count is unbounded where the word is
-        not, so its far end is a constant: nothing survives a left shift by the width, and a right shift by it is the
-        sign fill every wider one repeats.
-        """
+        """The same raw reading as the runtime shifter, without either module."""
         width = self.context.int_format.width
         assert count > 0, "strength reduction elides a zero-count shift"
         if isinstance(semantic, IntShiftLeft):
-            if count >= width:
-                return self._const(0)
+            assert count < width, "specialization owns a left shift past the word, whose answer is zero regardless"
             shamt = count
         else:
+            # Clamped here and not in HIR: past the top bit a right shift repeats the sign fill only for a value the
+            # word already holds, and this operand is one where an HIR constant need not have been.
             shamt = -min(count, width - 1)
         return self.context.builder.operation(
             _select_hardware(semantic, IntShiftConstOperator(self.context.int_format, shamt)),
@@ -1326,16 +1318,22 @@ class _IntLowerer:
 
 def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat, ifconv_max_ops: int) -> Mir:
     """
-    Optimize the front end's HIR, judge what survives, then select hardware operators for it and fold semantic signs
-    onto MIR sign controls.
+    Optimize the front end's HIR against this machine, judge what survives, then select hardware operators for it and
+    fold semantic signs onto MIR sign controls.
 
-    Optimization is not the caller's to run: a caller who optimized first would also have judged first, convicting
-    whatever a later round erases.
+    Optimization is not the caller's to run. A substituted constant cascades, and can leave another count constant for
+    the next round, so the passes run again after every substitution and the judgement waits for the last graph: a
+    caller who optimized first would also have judged first, convicting whatever a later round erases.
 
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
     ``fmul_ilog2_const`` when supported by the configured float format; unsupported exponents are rejected.
     """
     hir = optimize(hir, ifconv_max_ops)
+    rounds = left_shifts(hir) + 1  # every substitution deletes one, and no pass mints one
+    while (substituted := specialize(hir, int_format)) is not None:
+        rounds -= 1
+        assert rounds > 0, "specialization unsettled what an earlier round settled"
+        hir = optimize(substituted, ifconv_max_ops)
     _logger.info(
         "Optimized HIR:\n\tinputs=%s\n\toutputs=%s\n\tnodes=%d\n\tblocks=%d",
         hir.input_ids,

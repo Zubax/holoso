@@ -36,7 +36,9 @@ The optimizer does not model the hardware -- the easiest rule here to break, and
 Constant folding and constant evaluation run in the compiler's own arithmetic (integers of unbounded range, floats at
 host precision), never in the target format, so a folded result MAY differ from what the hardware datapath computes
 for the same expression; that is designed, not broken. Never add a guard that declines a rewrite because the hardware
-would answer differently, and never consult a numeric format to decide whether a rewrite is legal.
+would answer differently, and never consult a numeric format to decide whether a rewrite is legal. That binds the
+optimizer's own passes. The layer that knows the machine may substitute a fact back into the graph and hand it to the
+optimizer again -- telling, never being asked -- which is how a shift past the word is settled (see MIR).
 
 Optimization identities are provided for what the compiler cannot see. Over an operand of unknown value they hold
 whatever that value turns out to be; the absence of NaN is a significant enabler: commutativity and associativity;
@@ -291,8 +293,9 @@ not fire an error sideband.
 Running both arms can RAISE the static lower-bound II while LOWERING the realized per-transaction latency, which is
 the goal -- the regression guard is realized latency, not the static bound. The budget counts HIR operations, so an
 arm is charged for whatever selection later collapses -- today the int-returning roundings and the constant shifts,
-tomorrow whatever else MIR folds. Overcharging costs an arm its conversion and never a wrong answer, so the budget
-stays a count of what the kernel wrote rather than a prediction of what the machine will hold.
+tomorrow whatever else MIR folds; what a substitution round erases is charged only until that round runs. Overcharging
+costs an arm its conversion and never a wrong answer, so the budget stays a count of what the kernel wrote rather than
+a prediction of what the machine will hold.
 
 Loops with a static trip count unroll fully, below the unroll threshold; a `while` becomes a genuine back-edge loop
 that fully drains before iterating, so no overlap ever crosses a back-edge. Its static II deliberately counts the
@@ -334,8 +337,18 @@ lowering would have computed over its float image instead.
 ## MIR
 
 MIR owns the whole boundary: it optimizes the front end's HIR, judges what survives, and only then selects hardware.
-Optimization is not the caller's to run, because the judgement must see the last graph and no earlier one, and this
-is the layer that knows when that is.
+Optimization is not the caller's to run, because the judgement must see the last graph and no earlier one.
+
+It is also where the machine word is written back INTO HIR -- the direction the layering permits: nothing in HIR may
+ASK a format, but the format may TELL HIR. Answering a left shift past the word at selection would strand the
+constant there, where a second, poorer copy of the optimizer would have to chase what it enables, so the fact is
+substituted into the graph and the optimizer runs again, to a fixpoint: one substituted constant can leave another
+count constant for the next round.
+
+What may be told is bounded by the same unboundedness that motivates it. A rule qualifies only if its answer is
+independent of every operand, since a later round can reveal one as a constant no word holds. A left shift past the
+word is zero whatever it shifts; a right shift past it repeats the sign fill only for a value the word already holds,
+so that clamp stays at lowering, where every operand is a machine value by construction.
 
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
 RESULT is its own; the bool-result operations over wide operands (the comparators and the casts into the boolean bank)
@@ -346,8 +359,9 @@ that exponent (an out-of-range exponent is rejected -- the equivalent constant w
 anyway); the four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate, and a
 float-to-integer conversion reading one of them carries it as its own mode instead of waiting on its result -- the
 rounding survives only if something else observes it, and then each rounds the value independently.
-The integer lowerer likewise answers a constant shift count from the count itself: a shift past the word is zero
-or the sign fill, and every count within it is one inline shift. A count no other use reads is never lowered, which
+The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign
+fill, every count within it is one inline shift, and a negative one -- which no word settles -- is refused here. A
+count no other use reads is never lowered, which
 is what lets one too wide for the machine format compile at all. A shift by nothing reduces earlier, in HIR, where
 the if-conversion budget counts it.
 

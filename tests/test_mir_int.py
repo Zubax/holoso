@@ -897,6 +897,126 @@ def shift_by_a_count_used_as_a_value(x: int) -> tuple[int, int]:
     return x << 3, x + 3
 
 
+def a_count_two_rounds_make_constant(x: int, y: int) -> int:
+    """The count is a select until the guard above it is settled, which only the first substitution round does."""
+    guard = x << 100000
+    n = 100000 if guard == 0 else 1
+    return y << n
+
+
+def a_count_a_runtime_select_keeps(y: int, c: bool) -> int:
+    return y << (100000 if c else 3)
+
+
+def an_oversize_shift_multiplying_a_cone(x: int, y: int) -> int:
+    return (x << 100000) * (y * y * y + 5)
+
+
+def an_oversize_shift_proving_a_guard(x: int, y: int) -> int:
+    return y * y if (x << 100000) != 0 else y + 1
+
+
+def test_a_count_no_single_round_settles_needs_the_fixpoint() -> None:
+    # One substitution round leaves the outer count standing: the select is undecidable until the inner shift is
+    # settled, so only a second round reaches it.
+    mir = _select(a_count_two_rounds_make_constant)
+    assert _mnemonics(mir) == [], "no operator may survive: both shifts are settled and the rest is dead"
+    assert _run(MirInterpreter(mir), 3, 5) == [0]
+
+
+def test_a_count_a_runtime_select_keeps_is_still_a_value_the_machine_must_hold() -> None:
+    # The negative pin: a genuinely runtime count is settled by nothing, so the literal really is a value the
+    # machine must hold.
+    with pytest.raises(UnsupportedConstruct, match="100000 does not fit"):
+        _select(a_count_a_runtime_select_keeps)
+
+
+def test_an_oversize_shift_takes_the_cone_it_multiplies_with_it() -> None:
+    # MIR has no DCE of its own, so before the substitution moved into HIR the absorbed cone was still emitted.
+    mir = _select(an_oversize_shift_multiplying_a_cone)
+    assert _mnemonics(mir) == []
+    assert build_lir(mir, "cone").instances == []
+    assert _run(MirInterpreter(mir), 3, 5) == [0]
+
+
+def test_an_oversize_shift_proves_the_guard_that_reads_it() -> None:
+    mir = _select(an_oversize_shift_proving_a_guard)
+    assert _mnemonics(mir) == ["iadds"], "only the taken arm may survive"
+    for y in (0, 1, -7, 12345):
+        assert _run(MirInterpreter(mir), 3, y) == [y + 1]
+
+
+def a_nameless_quotient_the_word_erases(x: int) -> int:
+    return (x << 100000) * (5 // 0)
+
+
+def a_nameless_quotient_a_settled_guard_excludes(x: int, y: int) -> int:
+    r = y
+    if (x << 100000) != 0:
+        r = 5 // 0
+    return r
+
+
+def a_negative_count_the_word_erases(x: int, y: int) -> int:
+    return (x << 100000) * (y << -1)
+
+
+def a_quotient_only_the_word_names(x: int) -> int:
+    return 7 // (x << 100000)
+
+
+@pytest.mark.parametrize(
+    "target,args,expected",
+    [
+        (a_nameless_quotient_the_word_erases, (3,), 0),
+        (a_nameless_quotient_a_settled_guard_excludes, (3, 5), 5),
+        (a_negative_count_the_word_erases, (3, 5), 0),
+    ],
+    ids=lambda value: getattr(value, "__name__", str(value)),
+)
+def test_what_the_word_erases_is_no_longer_judged(
+    target: Callable[..., object], args: tuple[int, ...], expected: int
+) -> None:
+    # Each was refused before the word could speak. Judging before the substitution rounds convicts the compiler of
+    # expressions its own machine erases.
+    assert _run(MirInterpreter(_select(target)), *args) == [expected]
+
+
+def test_what_only_the_word_names_is_judged_after_all() -> None:
+    # Why the judgement cannot stay in HIR: nothing names this quotient until the word settles its divisor.
+    with pytest.raises(holoso.SynthesisError, match="names no number"):
+        _select(a_quotient_only_the_word_names)
+
+
+def a_right_shift_over_a_value_no_word_holds(x: int) -> int:
+    """The shifted value is a select until the word settles the guard, and what it settles to is out of range."""
+    payload = MAX + 1
+    return (payload if (x << 100000) == 0 else x) >> 100000
+
+
+def test_a_right_shift_is_clamped_where_its_operand_is_a_machine_value() -> None:
+    # Clamped in HIR the round after this select folds, the shift answered ``(MAX + 1) >> 15 == 1`` against the 0
+    # both the machine and CPython give: the clamp holds only for a value the word already holds.
+    assert _run(MirInterpreter(_select(a_right_shift_over_a_value_no_word_holds)), 0) == [0]
+
+
+def a_shift_past_the_word_on_a_latch_arm(x: int, n: int) -> int:
+    acc = x
+    t = n
+    while t > 0:
+        acc = (acc << 100000) + 1
+        t = t - 1
+    return acc
+
+
+def test_the_word_reaches_a_value_carried_across_a_back_edge() -> None:
+    # A loop-header phi is opened early and closed after every block, so it is the one rebuild path the ordinary
+    # walk never takes.
+    interpreter = MirInterpreter(_select(a_shift_past_the_word_on_a_latch_arm))
+    for x, n in ((7, 0), (7, 1), (7, 3), (-9, 2)):
+        assert _run(interpreter, x, n) == [1 if n > 0 else x]
+
+
 @pytest.mark.parametrize(
     "target,count",
     [(shift_by_nothing, 0), (shift_by_one, 1), (shift_by_the_top_bit, 15), (shift_by_the_whole_word, 16)],
