@@ -35,6 +35,7 @@ from holoso._hir import (
     FloatToInt,
     FloatType as HirFloatType,
     HirBuilder,
+    IntMulPow2,
     IntShiftLeft,
     IntShiftRight,
     IntType as HirIntType,
@@ -803,6 +804,36 @@ def test_a_right_shift_costs_exactly_what_a_left_shift_costs() -> None:
     assert [inst.operator.mnemonic for inst in right.instances] == ["ishr"]
     assert left.last_pc == right.last_pc
     assert left.min_initiation_interval == right.min_initiation_interval
+
+
+def _scaled_by_a_power_of_two(k: int) -> Mir:
+    """``x * 2**k`` built directly, no pass minting it yet."""
+    builder = HirBuilder()
+    builder.block()
+    builder.output("y", builder.operation(IntMulPow2(k), [builder.input("x", HirIntType())]))
+    builder.ret()
+    return lower_to_mir(builder.finish(), build_ops(KERNEL_OPTIONS), KERNEL_OPTIONS.ffmt, KERNEL_OPTIONS.ifmt)
+
+
+@pytest.mark.parametrize("x", [0, 1, -1, 3, -3, 1000, -1000, MIN, MAX])
+@pytest.mark.parametrize("k", [1, 2, 14, 15, 16, 40])
+def test_a_power_of_two_scaling_reads_the_shifter_where_it_saturates(k: int, x: int) -> None:
+    """
+    The one thing separating this operator from ``x << k``: a multiplication rails where the raw shift drops what
+    leaves the word, and the shifter emits both readings, so the tap is the whole decision. The count is unbounded
+    where the word is not, so every one past the width rails the same operand the same way.
+    """
+    mir = _scaled_by_a_power_of_two(k)
+    assert _mnemonics(mir) == ["ishl"]
+    assert _run(MirInterpreter(mir), x) == [_clamp(x * 2**k)]
+
+
+def test_a_power_of_two_scaling_and_the_raw_shift_share_one_module() -> None:
+    """Both readings come off one firing, so a kernel wanting each pays for a single shifter."""
+    scaled, shifted = _scaled_by_a_power_of_two(1), _select(shift_left_only)
+    assert _mnemonics(scaled) == _mnemonics(shifted) == ["ishl"]
+    assert _run(MirInterpreter(scaled), MAX) == [MAX], "the product rails"
+    assert _run(MirInterpreter(shifted), MAX, 1) == [_wrap(MAX << 1)], "the raw shift does not"
 
 
 def shift_left_only(x: int, n: int) -> int:

@@ -766,6 +766,30 @@ class IntMul(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class IntMulPow2(Operator):
+    """
+    The integer dual of :class:`FloatMulPow2`: exact scaling by a power of two. It is a MULTIPLICATION and not the
+    ``<<`` that shares its arithmetic -- what leaves the word rails here where the shift drops it -- which is why the
+    two cannot be one operator however alike their folding looks.
+    """
+
+    mnemonic: ClassVar[str] = "imul_pow2"
+    speculatable: ClassVar[bool] = True
+    k: int
+
+    def __post_init__(self) -> None:
+        if self.k < 1:
+            raise ValueError(f"scaling by 2**{self.k} is no multiplication for a shift to serve")
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the scaling", lambda a: a << self.k)
+
+
+@dataclass(frozen=True, slots=True)
 class IntNeg(Operator):
     mnemonic: ClassVar[str] = "ineg"
     speculatable: ClassVar[bool] = True

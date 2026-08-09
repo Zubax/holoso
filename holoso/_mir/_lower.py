@@ -71,6 +71,7 @@ from .._hir import (
     IntLessOrEqual,
     IntMod,
     IntMul,
+    IntMulPow2,
     IntNeg,
     IntNotEqual,
     IntSelect,
@@ -1153,6 +1154,8 @@ class _IntLowerer:
                 return self._emit(semantic, ISubOperator(fmt), a, b)
             case Operation(operator=IntMul() as semantic, operands=(a, b)):
                 return self._emit(semantic, self.context.ops.imul, a, b)
+            case Operation(operator=IntMulPow2() as semantic, operands=(a,)):
+                return self._scale_by_pow2(semantic, a)
             case Operation(operator=IntNeg() as semantic, operands=(a,)):
                 return self._negate(semantic, self.context.remap[a])
             case Operation(operator=IntAbs() as semantic, operands=(a,)):
@@ -1245,6 +1248,20 @@ class _IntLowerer:
             _select_hardware(semantic, IntShiftConstOperator(self.context.int_format, shamt)),
             [self.context.remap[a]],
             [IntIdentity()],
+        )
+
+    def _scale_by_pow2(self, semantic: IntMulPow2, a: ValueId) -> ValueId:
+        """
+        The left shifter's OTHER reading: ``prod`` saturates where ``shft`` lets the high bits fall off the word, and
+        saturating is what a multiplication does. The count is unbounded where the word is not, so it clamps at the
+        width -- past that every count rails the same operand the same way, and only zero survives either.
+        """
+        fmt = self.context.int_format
+        return self.context.builder.operation(
+            _select_hardware(semantic, IShlOperator(fmt)),
+            [self.context.remap[a], self._const(min(semantic.k, fmt.width))],
+            [IntIdentity(), IntIdentity()],
+            output_port=1,
         )
 
     def _negate(self, semantic: Operator, value: ValueId) -> ValueId:

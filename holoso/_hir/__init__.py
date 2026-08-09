@@ -75,6 +75,7 @@ from ._operators import (
     IntLessOrEqual as IntLessOrEqual,
     IntMod as IntMod,
     IntMul as IntMul,
+    IntMulPow2 as IntMulPow2,
     IntNeg as IntNeg,
     IntNotEqual as IntNotEqual,
     IntSelect as IntSelect,
