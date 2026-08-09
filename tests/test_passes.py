@@ -1533,6 +1533,18 @@ def test_a_literal_the_format_cannot_hold_is_refused_rather_than_silently_degrad
         lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
 
 
+def test_a_divisor_whose_reciprocal_degrades_is_never_silently_applied() -> None:
+    # 3e9 is representable but its reciprocal is not, and the reciprocal is what HIR's ``x/c -> x*(1/c)`` hands the
+    # machine, which would multiply by zero and answer zero for every input.
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirFloatType())
+    builder.output("y", builder.operation(HirFloatDiv(), [x, builder.float_const(3e9)]))
+    builder.ret()
+    with pytest.raises(UnsupportedConstruct, match="degrades"):
+        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+
+
 def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -> None:
     # A reset snapshot never becomes a pooled constant, so the node-level rule never sees it.
     builder = HirBuilder()

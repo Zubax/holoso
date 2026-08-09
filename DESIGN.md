@@ -60,8 +60,8 @@ crosses between finite-nonzero and zero or infinity is refused at selection rath
 encodes to, integers and floats alike. Only a constant that materializes is asked -- one an operator absorbs, such
 as a power-of-two scale, never becomes a word and is never refused.
 
-The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware
-answers 1 even when `x` is zero at run time, while `0.0/0.0` written out is refused at compile time.
+The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware answers 1 even when `x` is zero at run
+time, while `0.0/0.0` written out is refused at compile time.
 
 The error sidebands report INPUT-DEPENDENT failures; an expression that denotes no number is a program defect and is
 refused -- but only the kernel's own expressions are. Unrolling and inlining SUBSTITUTE values, so the compiler
@@ -322,6 +322,10 @@ conviction reached through an inlined library composite may name an expression t
 limitation of the composites, not of the rule.
 
 ### DEFERRED
+
+Dividing by a representable constant whose reciprocal is not (`x / 3e9` at e6m18) is refused over the reciprocal
+`x/c` mints rather than over anything the kernel wrote, since keeping `fdiv` there needs a format-aware choice HIR
+is forbidden to make.
 
 A `for` that cannot unroll -- a dynamic trip count, or a static one above the unroll threshold -- is rejected rather
 than lowered to a counted back-edge loop, which needs a runtime integer counter; once runtime integers lower past
