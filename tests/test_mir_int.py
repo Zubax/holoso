@@ -862,7 +862,20 @@ def shift_right_by_a_negative_constant(x: int) -> int:
     return x >> -1
 
 
-@pytest.mark.parametrize("target", [shift_left_by_a_negative_constant, shift_right_by_a_negative_constant])
+def shift_by_a_count_a_loop_phi_carries(x: int, n: int) -> int:
+    # An optimizer that stops before the phi folds leaves a runtime count, and the shifter reverses it into ``x >> 1``.
+    count = (x * 0) - 1
+    t = n
+    while t > 0:
+        count = (x * 0) - 1
+        t = t - 1
+    return x << count
+
+
+@pytest.mark.parametrize(
+    "target",
+    [shift_left_by_a_negative_constant, shift_right_by_a_negative_constant, shift_by_a_count_a_loop_phi_carries],
+)
 def test_a_constant_negative_shift_count_is_refused_rather_than_reversed(target: Callable[..., object]) -> None:
     """
     CPython raises on a negative count, and the shifter would read one as its OPPOSITE direction --
@@ -986,6 +999,16 @@ def test_what_only_the_word_names_is_judged_after_all() -> None:
     # Why the judgement cannot stay in HIR: nothing names this quotient until the word settles its divisor.
     with pytest.raises(holoso.SynthesisError, match="names no number"):
         _select(a_quotient_only_the_word_names)
+
+
+def a_count_past_every_carrier(x: int) -> int:
+    return (1 << 2**63) + x
+
+
+def test_a_count_no_host_can_shift_by_is_settled_all_the_same() -> None:
+    # CPython raises on this shift, so the fold names no number and only the word can answer it. The rule answers
+    # zero for every operand, the count included, and zero is what the machine computes.
+    assert _run(MirInterpreter(_select(a_count_past_every_carrier)), 7) == [7]
 
 
 def a_right_shift_over_a_value_no_word_holds(x: int) -> int:
@@ -1323,7 +1346,7 @@ def shifted_to_zero_then_multiplied(x: int, y: int) -> int:
 def test_the_zero_a_shift_folds_to_is_absorbed_by_what_reads_it(
     target: Callable[..., object], expected: int, pool: list[IntValue]
 ) -> None:
-    """HIR cannot state this rule, being blind to the word; the layer that mints the zero applies the same algebra."""
+    """The word writes the zero into HIR, where the declared algebra that absorbs it already lives."""
     mir = _select(target)
     assert _mnemonics(mir) == []
     assert build_lir(mir, target.__name__).wide_consts == pool  # the product IS the zero; the sum drops it entirely

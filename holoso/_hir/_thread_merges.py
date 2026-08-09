@@ -117,14 +117,15 @@ def _thread(hir: Hir, merge: Block, successor: BlockId) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
-def run(hir: Hir) -> Hir:
+def run(hir: Hir) -> Hir | None:
     threaded = 0
     while (candidate := _find_empty_merge(hir)) is not None:
         merge, successor = candidate
         hir = _thread(hir, merge, successor)
         threaded += 1
-    if threaded:
-        _logger.info("Merge threading: %d empty merge block(s) eliminated; %d blocks remain", threaded, len(hir.blocks))
-        hir = renumber(hir)
-        validate_phi_predecessors(hir)
+    if not threaded:
+        return None
+    _logger.info("Merge threading: %d empty merge block(s) eliminated; %d blocks remain", threaded, len(hir.blocks))
+    hir = renumber(hir)
+    validate_phi_predecessors(hir)
     return hir

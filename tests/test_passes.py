@@ -105,7 +105,16 @@ from holoso._mir import (
 )
 from holoso._operators import FMulILog2Operator, FloatSignControl
 from ._importguard import forbidden_imports
-from ._modelref import build_model, build_ops
+from ._modelref import (
+    branch_boundary_kernel,
+    build_model,
+    build_ops,
+    const_branch_kernel,
+    diamond_then_loop_kernel,
+    overlap_spill_kernel,
+    phi_swap_loop,
+)
+from ._examples import equal_temperament
 
 FMT = FloatFormat(6, 18)
 OPS = build_ops(
@@ -920,7 +929,7 @@ def test_a_constant_integer_expression_folds_away_entirely() -> None:
     builder = HirBuilder()
     builder.block()
     value = builder.operation(IntAdd(), [builder.int_const(2), builder.int_const(3)])
-    value = builder.operation(IntMul(), [value, builder.int_const(2**200)])
+    value = builder.operation(IntMul(), [value, builder.int_const(2**24)])  # past the machine word, within the float
     builder.output("y", builder.operation(IntToFloat(), [value]))
     builder.ret()
 
@@ -928,7 +937,7 @@ def test_a_constant_integer_expression_folds_away_entirely() -> None:
     hir = optimize(raw, DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     (out,) = hir.outputs
-    assert hir.nodes[out.value] == FloatConst(float(5 * 2**200))
+    assert hir.nodes[out.value] == FloatConst(float(5 * 2**24))
     lower_to_mir(raw, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)  # nothing integer is left
 
 
@@ -1277,26 +1286,25 @@ def test_a_pole_the_operator_reference_answers_folds_to_that_value(
     assert hir.nodes[hir.outputs[0].value] == FloatConst(expected)
 
 
-def test_a_block_the_sequencer_cannot_enter_is_never_convicted() -> None:
-    # Pruning declines the branch that would orphan the exit, so the exit below is reachable and unenterable. Every
-    # constant is opaque to the front end and constant to HIR (``x*0 == 0``) -- including both quotient operands,
-    # since a fold names a quotient only where it knows both, so an unknown one would witness nothing.
-    def never_returns(x: float) -> float:
-        y = x
-        while (x * 0.0) <= 0.0:
-            y = y + 1.0
-        return (y * 0.0) / (y * 0.0)
+def _never_returns(x: float) -> float:
+    y = x
+    while (x * 0.0) <= 0.0:
+        y = y + 1.0
+    return y
 
-    hir = optimize(lower(never_returns).hir, DEFAULT_IFCONV_MAX_OPS)
-    refuse(hir)  # the skip rule is the gate's, so optimization alone would exercise nothing
-    assert any(isinstance(block.terminator, Ret) for block in hir.blocks)
-    quotients = [
-        node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)
-    ]
-    assert quotients, "the unenterable exit's quotient must still be present -- otherwise the skip rule is untested"
-    assert all(
-        all(isinstance(hir.nodes[operand], FloatConst) for operand in node.operands) for node in quotients
-    ), "both operands must be constant, or the sweep would decline to convict it wherever it sat"
+
+def _never_returns_through_a_loop_phi(x: float) -> float:
+    # The guard reads a loop-header phi, so only the round after the latch arm is rebuilt can decide it.
+    y = x * 0.0
+    while y == 0.0:
+        y = x * 0.0
+    return x
+
+
+@pytest.mark.parametrize("kernel", [_never_returns, _never_returns_through_a_loop_phi], ids=lambda fn: fn.__name__[1:])
+def test_a_kernel_that_provably_never_returns_is_refused(kernel: Callable[..., float]) -> None:
+    with pytest.raises(UnsupportedConstruct, match="never returns"):
+        optimize(lower(kernel).hir, DEFAULT_IFCONV_MAX_OPS)
 
 
 def test_an_arm_a_proven_guard_excludes_is_deleted_rather_than_merely_unconvicted() -> None:
@@ -1419,6 +1427,45 @@ def test_a_decided_branch_whose_arms_share_a_target_repairs_by_dropping_an_arm()
     ], "the dead predecessor's arm must go and the other two must stay"
 
 
+def never_uniform_until_the_latch_arm_is_rebuilt(x: float, n: float) -> float:
+    step = x * 0.0 + 1.0
+    t = n
+    while t > 0.0:
+        step = x * 0.0 + 1.0
+        t = t - 1.0
+    return x + step
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        branch_boundary_kernel,
+        const_branch_kernel,
+        diamond_then_loop_kernel,
+        overlap_spill_kernel,
+        phi_swap_loop,
+        equal_temperament,  # pruning leaves a merge only threading normalizes into a diamond, so one round misses it
+        never_uniform_until_the_latch_arm_is_rebuilt,
+    ],
+    ids=lambda fn: fn.__name__,
+)
+def test_optimization_reaches_a_fixpoint_in_one_call(kernel: Callable[..., object]) -> None:
+    # Compared whole, value ids included, since those drive the tie-breaks downstream.
+    once = optimize(lower(kernel).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert optimize(once, DEFAULT_IFCONV_MAX_OPS) == once
+
+
+def test_a_loop_phi_is_folded_once_its_latch_arm_has_been_rebuilt() -> None:
+    # A phi is opened before its latch arm exists, so the round that emits it cannot see that every arm is one value.
+    hir = optimize(lower(never_uniform_until_the_latch_arm_is_rebuilt).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert [node.type for node in hir.nodes.values() if isinstance(node, Phi)] == [HirFloatType()]  # the counter's
+    out = hir.nodes[hir.outputs[0].value]
+    assert isinstance(out, Operation) and [hir.nodes[o] for o in out.operands] == [
+        InPort("x", HirFloatType()),
+        FloatConst(1.0),
+    ]
+
+
 def test_a_collapsed_merge_is_substituted_into_a_later_merge() -> None:
     # Every later reference to a collapsed phi must follow, including an arm of a DIFFERENT block's phi -- the one
     # reference kind that is neither operand nor terminator. Built directly: the front end never emits this shape.
@@ -1452,6 +1499,52 @@ def test_a_collapsed_merge_is_substituted_into_a_later_merge() -> None:
     ], "the collapsed merge must reach the later merge as the value it stood for, not as a dangling reference"
 
 
+@pytest.mark.parametrize(
+    "value,degrades",
+    [
+        (1e-12, True),
+        (-1e-12, True),
+        (1e30, True),
+        (-1e30, True),
+        (0.0, False),
+        (math.inf, False),
+        (-math.inf, False),
+        (1.0, False),
+        (9.313225746154785e-10, False),  # the smallest normal
+        (4.656612873077393e-10, False),  # half of it, which ties upward to the smallest normal
+        (math.nextafter(4.656612873077393e-10, 0.0), True),  # one ulp below that tie, which encodes to nothing
+    ],
+    ids=lambda value: repr(value),
+)
+def test_a_literal_the_format_cannot_hold_is_refused_rather_than_silently_degraded(
+    value: float, degrades: bool
+) -> None:
+    # The float dual of the integer range refusal. An infinity is representable and so is accepted, where a finite
+    # value that encodes to one -- or to zero -- is a literal the machine cannot hold, and substituting what it
+    # encodes to would answer for a number the kernel did not write.
+    builder = HirBuilder()
+    builder.block()
+    builder.output("y", builder.operation(FloatAdd(), [builder.input("x", HirFloatType()), builder.float_const(value)]))
+    builder.ret()
+    if degrades:
+        with pytest.raises(UnsupportedConstruct, match="degrades"):
+            lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+    else:
+        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+
+
+def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -> None:
+    # A reset snapshot never becomes a pooled constant, so the node-level rule never sees it.
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirFloatType())
+    builder.state_slot("s", FloatConst(1e-12), x)
+    builder.output("y", x)
+    builder.ret()
+    with pytest.raises(UnsupportedConstruct, match="degrades"):
+        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+
+
 def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
     # The slot's live-out is a float while its reset snapshot is an integer: a slot register holds one family, and
     # only a sweep over the slots themselves sees the mismatch, since no node in the graph carries it.
@@ -1461,7 +1554,7 @@ def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
     builder.state_slot("s", IntConst(0), x)
     builder.output("y", x)
     builder.ret()
-    with pytest.raises(UnsupportedConstruct, match="must have a float reset value"):
+    with pytest.raises(UnsupportedConstruct, match="holds FloatType.. but resets to IntType"):
         lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
 
 

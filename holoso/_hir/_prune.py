@@ -1,12 +1,12 @@
 """
-Constant-branch pruning. Nothing else deletes a control edge -- if-conversion refuses a decided diamond, DCE
-preserves the CFG -- so without this a proven-dead arm reached hardware: selected, materialized, and refused
-upon, for code no input can reach.
+Constant-branch pruning, the only pass that deletes a control edge. Without it a proven-dead arm reaches hardware --
+selected, materialized, and refused upon -- for code no input can reach.
 """
 
 import logging
 from typing import assert_never
 
+from .._errors import UnsupportedConstruct
 from .._util import BlockId, ValueId
 from ._const import BoolConst
 from ._ir import (
@@ -37,21 +37,10 @@ def _taking(blocks: list[Block], decided: BlockId, target: BlockId) -> list[Bloc
 
 
 def _proven_branch(hir: Hir) -> tuple[Block, BlockId] | None:
-    """
-    Orphaning the exit would rewrite a kernel that provably never returns into a module that can never raise
-    ``out_valid``, so that one branch is left as written -- and is then the only decided branch the refusal gate's
-    enterability walk has to step around.
-    """
-    exits = [block.id for block in hir.blocks if isinstance(block.terminator, Ret)]
-    assert len(exits) == 1, "the frontend emits exactly one function exit, and no pass creates or deletes one"
-    (exit_block,) = exits
     for block in hir.blocks:
         terminator = block.terminator
-        if not (isinstance(terminator, Branch) and isinstance(cond := hir.nodes[terminator.cond], BoolConst)):
-            continue
-        target = terminator.if_true if cond.value else terminator.if_false
-        if exit_block in _reachable(_taking(hir.blocks, block.id, target), hir.entry):
-            return block, target
+        if isinstance(terminator, Branch) and isinstance(cond := hir.nodes[terminator.cond], BoolConst):
+            return block, (terminator.if_true if cond.value else terminator.if_false)
     return None
 
 
@@ -79,6 +68,8 @@ def _resolve(substitution: dict[ValueId, ValueId], value: ValueId) -> ValueId:
 def _take(hir: Hir, decided: Block, target: BlockId) -> Hir:
     blocks = _taking(hir.blocks, decided.id, target)
     live = _reachable(blocks, hir.entry)
+    if not any(isinstance(block.terminator, Ret) for block in blocks if block.id in live):
+        raise UnsupportedConstruct("the kernel provably never returns, so no output of it is ever raised")
     blocks = [block for block in blocks if block.id in live]
     preds = predecessors(blocks)
     nodes = dict(hir.nodes)
@@ -154,7 +145,7 @@ def _references(hir: Hir) -> list[ValueId]:
 def run(hir: Hir) -> Hir | None:
     """
     Repeats because taking one edge can settle the next condition; bounded, since each pruning replaces a branch
-    with a jump and never mints one. ``None`` is what ends the reduce/prune fixpoint in :mod:`._optimize`.
+    with a jump and never mints one. ``None`` reports that nothing was pruned.
     """
     pruned = 0
     while (decided := _proven_branch(hir)) is not None:

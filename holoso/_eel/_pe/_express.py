@@ -114,7 +114,7 @@ def apply(interp: Interpreter, operator: _ops.Operator, operands: list[Scalar], 
         try:
             return StaticScalar(operator.evaluate(consts))
         except _ops.NoNumber:
-            pass  # the graph re-derives the fault and the survivor sweep judges it; never convict here
+            pass  # the graph re-derives the fault and the refusal gate judges it; never convict here
     stype = _ops.result_stype(operator)
     atoms = tuple(materialize(operand, origin) for operand in operands)
     index = interp.fresh()

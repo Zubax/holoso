@@ -332,17 +332,14 @@ def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
 
 def const_branch_kernel(x: float, y: float) -> float:
     """
-    Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition
-    ``(x * 0.0) > -1.0`` is constant-true, but only under the VALUE identity ``x*0 == 0`` that the graph owns and the
-    partial evaluator deliberately does not apply to a residual operand -- so it survives partial evaluation, and HIR
-    strength reduction then folds it to a BoolConst that if-conversion refuses, leaving an EMPTY const-branch block
-    (the condition install + a branch, no float content). That const materialization is a pc-gated install read AT the
-    terminator and lands at the drained boundary, so the drain must keep that boundary for it; shrinking below it made
-    the branch read the condition one PC before it landed.
+    A guard the partial evaluator cannot decide and the graph can: ``(x * 0.0) > -1.0`` is constant only under the
+    VALUE identity ``x*0 == 0``, which partial evaluation deliberately withholds from a residual operand. Pruning
+    settles it and deletes the arm it excludes, so what the cosim checks is that the surviving path is the one the
+    source names.
     """
     r = x
     if x > y:
-        if (x * 0.0) > -1.0:  # constant-true under the graph's x*0 identity: an empty const-branch block
+        if (x * 0.0) > -1.0:  # constant-true under the graph's x*0 identity alone
             r = x + 1.0
         else:
             r = x + 2.0

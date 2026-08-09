@@ -1848,28 +1848,6 @@ def test_constant_pool_is_canonically_nonnegative() -> None:
     assert len(lir.wide_consts) == 6  # the +1000.0 / -1000.0 pair collapsed (was 7)
 
 
-def test_underflowing_negative_constant_is_not_sign_folded() -> None:
-    # A negative value that rounds to +0 in ZKF (which has no -0) must NOT carry a folded negate: the magnitude already
-    # encodes to the canonical +0, so a negate over it would emit an illegal -0 rather than the +0 the value encodes to.
-    def f(a: float) -> float:
-        return a + (-1e-12)  # -1e-12 underflows to +0 in FloatFormat(6, 18)
-
-    lir = build_lir(_run(f), "f")
-    (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
-    assert lir.wide_consts[operand.source.index].bits == 0
-    assert operand.conditioner == FloatSignControl()
-
-
-def test_underflowing_negative_constant_output_stays_canonical_zero() -> None:
-    def f(a: float) -> tuple[float, float]:
-        return a + a, -1e-12  # the -1e-12 output underflows to +0; it must stay canonical, not fold to illegal -0
-
-    lir = build_lir(_run(f), "f")
-    (wire,) = [w for w in lir.wide_outputs if isinstance(w.tap.source, WideConstRef)]
-    assert lir.wide_consts[wire.tap.source.index].bits == 0
-    assert wire.tap.conditioner == FloatSignControl()
-
-
 def test_stateful_slot_register_gaps_are_reused() -> None:
     # A coalesced state slot's register, dead through the middle of the frame, is reused for temporaries instead of
     # being reserved, shedding registers (the stateful EKF dropped from 45 to ~39).

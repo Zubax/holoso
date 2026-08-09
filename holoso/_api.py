@@ -16,7 +16,7 @@ from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
 from ._eel import lower as lower_frontend
 from ._errors import UnsupportedConstruct
-from ._lir import ControlPort, DataInputPort, DataOutputPort, Lir, Port, RegallocTuning, build
+from ._lir import Branch, ControlPort, DataInputPort, DataOutputPort, Lir, Port, RegallocTuning, build
 from ._mir import lower as lower_to_mir
 from ._operators import (
     FAddOperator,
@@ -272,7 +272,9 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     model = generate_model(lir)
     cocotb_output = generate_testbench(model)
 
-    latency_is_exact = len(lir.blocks) == 1  # a straight-line kernel has one fixed path; branches/loops vary by data
+    # Only a branch makes the path data-dependent. Counting blocks instead would call a pruned kernel inexact for
+    # the jump chain pruning leaves behind, which every transaction walks identically.
+    latency_is_exact = not any(isinstance(block.terminator, Branch) for block in lir.blocks)
     ii = (lir.min_initiation_interval, lir.min_initiation_interval if latency_is_exact else None)
     _logger.info("Generated Verilog: %s; II [min,max]: %s cycles", verilog_output, ii)
     return SynthesisResult(

@@ -921,7 +921,7 @@ def test_a_circular_function_of_a_constant_infinity_is_refused() -> None:
         holoso.synthesize(sin_of_a_constant_infinity, _ops(), name="sin_of_const_inf")
 
     def circular_of_a_runtime_value(x: float) -> tuple[float, float]:
-        scaled = x * 1e300
+        scaled = x * 1e30  # a magnitude the format holds, unlike the constant infinity above
         return math.sin(scaled), math.cos(scaled)
 
     holoso.synthesize(circular_of_a_runtime_value, _ops(), name="sin_of_runtime").numerical_model.elaborate()

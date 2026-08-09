@@ -66,8 +66,6 @@ def _find_diamond(
             continue
         if not all(isinstance(hir.nodes[vid].type, (FloatType, IntType, BoolType)) for vid in merge.phis):
             continue
-        # Taking either edge of a diamond loses only the untaken arm, which is jump-terminated and so never the exit,
-        # so pruning never declines one and always gets here first.
         assert not isinstance(hir.nodes[block.terminator.cond], BoolConst), "pruning owns a decided diamond"
         return block, arm_t, arm_f, merge
     return None
@@ -112,13 +110,13 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
-def run(hir: Hir, max_ops: int) -> Hir:
+def run(hir: Hir, max_ops: int) -> Hir | None:
     assert max_ops >= 0
     converted = 0
     while (diamond := _find_diamond(hir, predecessors(hir.blocks), max_ops)) is not None:
         hir = _splice(hir, diamond)
         converted += 1
-    if converted:
-        _logger.info("If-conversion: %d diamond(s) collapsed to selects; %d blocks remain", converted, len(hir.blocks))
-        hir = renumber(hir)
-    return hir
+    if not converted:
+        return None
+    _logger.info("If-conversion: %d diamond(s) collapsed to selects; %d blocks remain", converted, len(hir.blocks))
+    return renumber(hir)

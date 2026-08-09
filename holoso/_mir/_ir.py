@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+import math
 from dataclasses import dataclass
 
 from .._operators import (
@@ -35,6 +36,22 @@ class MirStateRead:
 @dataclass(frozen=True, slots=True)
 class MirConst:
     scalar_type: ScalarType
+
+
+def _refuse_degrading(value: float, fmt: FloatFormat, what: str) -> None:
+    """
+    A literal that encodes to zero or infinity is not the number it was written as, so it is refused rather than
+    silently becoming what it encodes to -- the float dual of the integer range refusal. Ordinary rounding is not
+    degradation: an infinity is representable, and zero is what zero already encodes to.
+
+    Asked of the ENCODED bits rather than the decoded value: a coarse mantissa can round a magnitude UP past the
+    double range, so ``decode`` saturates to an infinity for a target value that is perfectly finite.
+    """
+    if not math.isfinite(value) or value == 0.0:
+        return
+    bits = fmt.encode(value)
+    if bits == 0 or not fmt.is_finite(bits):
+        raise UnsupportedConstruct(f"{what} {value!r} degrades to {fmt.decode(bits)!r} in {fmt}; widen wexp or rescale")
 
 
 def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType) -> None:
@@ -126,6 +143,9 @@ class MirFloatConst(MirConst):
     def __post_init__(self) -> None:
         assert isinstance(self.scalar_type, FloatType)
         assert isinstance(self.value, float)
+        _refuse_degrading(self.value, self.scalar_type.fmt, "constant")
+        # ZKF has no negative zero, and neither does HIR; normalizing here keeps the pool from ever holding one.
+        object.__setattr__(self, "value", self.value + 0.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,15 +436,11 @@ class MirWideView(_MirBankView):
                 raise ValueError(f"MIR input ID {vid} must reference a float, integer, or boolean input")
         input_ids = [vid for vid in mir.input_ids if isinstance(nodes.get(vid), (MirFloatInput, MirIntInput))]
         if stray_floats := float_formats - {mir.float_format}:
-            ordered = ", ".join(str(fmt) for fmt in sorted(stray_floats, key=lambda fmt: (fmt.wexp, fmt.wman)))
-            raise ValueError(
-                f"LIR requires MIR float values to use configured format {mir.float_format}; got {ordered}"
-            )
+            stray = ", ".join(str(fmt) for fmt in stray_floats)
+            raise ValueError(f"LIR requires MIR float values to use configured format {mir.float_format}; got {stray}")
         if stray_ints := int_formats - {mir.int_format}:
-            ordered = ", ".join(str(fmt) for fmt in sorted(stray_ints, key=lambda fmt: fmt.width))
-            raise ValueError(
-                f"LIR requires MIR integer values to use configured format {mir.int_format}; got {ordered}"
-            )
+            stray = ", ".join(str(fmt) for fmt in stray_ints)
+            raise ValueError(f"LIR requires MIR integer values to use configured format {mir.int_format}; got {stray}")
         return cls(
             nodes=nodes,
             blocks=mir.blocks,
@@ -708,6 +724,7 @@ class MirBuilder:
         conditioner: FloatSignControl = FloatSignControl(),
     ) -> None:
         assert isinstance(self._type_of(live_out), FloatType)
+        _refuse_degrading(float(reset_value), self._float_format, f"state slot {name!r} reset")
         self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, conditioner))
 
     def int_state_slot(

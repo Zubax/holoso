@@ -19,7 +19,8 @@ and so would rewrite `0 - x` to `x`; `x-0`, `x//1` and `x%1` therefore need rule
 counterparts of the float-specific rewrites -- `x*-1` to `ineg`, multiplication and floor division by a power of two
 to a shift, and the value-equality folds `x-x`, `x^x` and `x&x`. `IntMulPow2` already serves that power-of-two rewrite,
 lowering to `ishl`'s saturating `prod` reading rather than the raw `shft` one the `<<` lowering takes; nothing mints
-it yet. Each must answer for saturation at the format extremes, a question the float rules never faced.
+it yet. Each must answer for saturation at the format extremes, a question the float rules never faced. One further
+constraint: no HIR pass may mint a shift, or the machine-word substitution fixpoint below MIR loses its bound.
 
 A kernel that never names an integer can still raise one and reach the LIR refusal: the roundings answer an integer
 over a float, and `abs`/`min`/`max`/`np.sign` keep one they are handed. Only the adjacent `IntToFloat(FloatToInt(x))`

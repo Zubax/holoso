@@ -439,8 +439,9 @@ def _wholly_taken(sites: Counter[ValueId], use_counts: dict[ValueId, int]) -> se
 
 def _plan_folded_shift_counts(hir: Hir, use_counts: dict[ValueId, int]) -> set[ValueId]:
     """
-    Decided before any block, because constants are lowered entry-globally: a count exceeding the machine format is
-    legal Python that only the fold carries, and lowering it would refuse the program over a value nothing reads.
+    Decided before any block, because constants are lowered entry-globally. A count the shift below answers from is
+    consumed as an immediate, not held as a value, exactly as an absorbed rounding is -- and a count something ELSE
+    reads is an ordinary value, which is where one too wide for the machine is still refused.
     """
     folds: Counter[ValueId] = Counter()
     for node in hir.nodes.values():
@@ -756,8 +757,7 @@ class _LoweringContext:
         if not isinstance(self.hir.nodes[slot.live_out].type, HirBoolType):
             return False
         base, inversion = _collapse_bool_inversions(self.hir.nodes, slot.live_out)
-        if not isinstance(slot.reset_value, BoolConst):
-            raise UnsupportedConstruct(f"boolean state slot {slot.name!r} must have a boolean reset value")
+        assert isinstance(slot.reset_value, BoolConst), "the gate owns a slot whose reset is of the wrong family"
         self.builder.bool_state_slot(slot.name, slot.reset_value.value, self.remap[base], inversion)
         return True
 
@@ -1105,8 +1105,7 @@ class _FloatLowerer:
         base, sign = _collapse_signs(self.context.hir.nodes, slot.live_out)
         if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
             return False
-        if not isinstance(slot.reset_value, FloatConst):
-            raise UnsupportedConstruct(f"floating-point state slot {slot.name!r} must have a float reset value")
+        assert isinstance(slot.reset_value, FloatConst), "the gate owns a slot whose reset is of the wrong family"
         self.context.builder.float_state_slot(slot.name, slot.reset_value.value, self.context.remap[base], sign)
         return True
 
@@ -1122,7 +1121,6 @@ class _IntLowerer:
     def __init__(self, context: _LoweringContext) -> None:
         self.context = context
         self.int_type = ScalarIntType(context.int_format)
-        self.constants: dict[ValueId, int] = {}  # MIR value -> its integer value, for the algebra below
 
     def lower_node(self, old_id: ValueId, node: Node) -> bool:
         match node:
@@ -1212,10 +1210,7 @@ class _IntLowerer:
         constant = constant_shift_count(self.context.hir, count)
         if constant is None:
             return self._runtime_shift(semantic, a, count)
-        # CPython refuses a negative count outright, and the shifter would silently read one as the other direction.
-        # HIR cannot catch it: its fold runs only when BOTH operands are constant, and the shifted value is runtime.
-        if constant < 0:
-            raise UnsupportedConstruct(f"shift count {constant} is negative; Python has no such shift")
+        assert constant >= 0, "the gate owns a negative count, which no machine word settles"
         return self._constant_shift(semantic, a, constant)
 
     def _runtime_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
@@ -1270,33 +1265,14 @@ class _IntLowerer:
         )
 
     def _const(self, value: int) -> ValueId:
-        vid = self.context.builder.int_const(value, self.int_type)
-        self.constants[vid] = value
-        return vid
-
-    def _fold_algebra(self, semantic: Operator, operands: list[ValueId]) -> ValueId | None:
-        """The algebra the operator declares, over a constant only this layer knows."""
-        values = [self.constants.get(operand) for operand in operands]
-        absorbing, identity = semantic.absorbing(), semantic.identity()
-        if isinstance(absorbing, IntConst) and absorbing.value in values:
-            return self._const(absorbing.value)
-        if isinstance(identity, IntConst):
-            survivors = [vid for vid, value in zip(operands, values, strict=True) if value != identity.value]
-            if len(survivors) == 1:
-                return survivors[0]
-        return None
+        return self.context.builder.int_const(value, self.int_type)
 
     def _emit(
         self, semantic: Operator, hardware: HardwareOperator, *operands: ValueId, output_port: int = 0
     ) -> ValueId:
-        mir_operands = [self.context.remap[operand] for operand in operands]
-        folded = self._fold_algebra(semantic, mir_operands)
-        if folded is not None:
-            assert output_port == 0, "an operator with a second result declares no algebra to fold"
-            return folded
         return self.context.builder.operation(
             _select_hardware(semantic, hardware),
-            mir_operands,
+            [self.context.remap[operand] for operand in operands],
             [IntIdentity()] * len(operands),
             output_port=output_port,
         )
@@ -1310,8 +1286,7 @@ class _IntLowerer:
     def lower_state_slot(self, slot: StateSlot) -> bool:
         if not isinstance(self.context.hir.nodes[slot.live_out].type, HirIntType):
             return False
-        if not isinstance(slot.reset_value, IntConst):
-            raise UnsupportedConstruct(f"integer state slot {slot.name!r} must have an integer reset value")
+        assert isinstance(slot.reset_value, IntConst), "the gate owns a slot whose reset is of the wrong family"
         self.context.builder.int_state_slot(slot.name, slot.reset_value.value, self.context.remap[slot.live_out])
         return True
 

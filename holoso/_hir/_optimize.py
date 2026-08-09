@@ -4,31 +4,23 @@ from . import _dce, _if_convert, _prune, _strength_reduce, _thread_merges
 from ._ir import Hir
 
 
-def _reduce_and_prune(hir: Hir) -> Hir:
-    """
-    A mutual fixpoint rather than a sequence: reduction materializes the constants pruning decides on, and a pruned
-    edge leaves merges the next reduction folds. Bounded by the branch count, since neither mints a branch. On exit
-    the only branch the graph can still decide is one whose taken edge would orphan the exit.
-    """
-    while True:
-        hir = _strength_reduce.run(hir)
-        pruned = _prune.run(hir)
-        if pruned is None:
-            return hir
-        hir = pruned
-
-
 def optimize(hir: Hir, ifconv_max_ops: int) -> Hir:
     """
-    Run all hardware-agnostic HIR optimizations. If-conversion sits between the two fixpoints, where no diamond it
-    could see is still decidable and arm costs are final; the second fixpoint then reduces the muxes it created and
-    re-interns the nodes the splice wrote directly into the graph. Merge threading eliminates the empty pass-through
-    merge blocks a non-convertible diamond leaves when its merge feeds a following control structure.
+    Run all hardware-agnostic HIR optimizations to a fixpoint. Every pass is another's input, so no fixed ordering is
+    right and the round simply repeats until it leaves the graph untouched. The budget makes a pair of rewrites that
+    oscillate a crash rather than a hang.
 
-    This reduces and never refuses; what survives is judged at the HIR-to-MIR boundary.
+    This reduces, and the only build it declines is one that pruning proves never returns.
     """
-    hir = _reduce_and_prune(hir)
-    hir = _if_convert.run(hir, ifconv_max_ops)
-    hir = _reduce_and_prune(hir)
-    hir = _thread_merges.run(hir)
-    return _dce.run(hir)
+    rounds = 2 * (len(hir.blocks) + len(hir.nodes)) + 2
+    while True:
+        rounds -= 1
+        assert rounds > 0, "the optimization round is oscillating rather than converging"
+        previous = hir
+        hir = _strength_reduce.run(hir)
+        hir = _prune.run(hir) or hir
+        hir = _if_convert.run(hir, ifconv_max_ops) or hir
+        hir = _thread_merges.run(hir) or hir
+        hir = _dce.run(hir)
+        if hir == previous:
+            return hir

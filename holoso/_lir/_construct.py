@@ -221,9 +221,9 @@ def build_const_pool(
     Build the immediate/ROM pool shared by both wide families. A FLOAT constant is keyed by magnitude: it is stored as
     a nonnegative value and its sign folded into the consumer's (free) sign-control sideband, so a value and its
     negation collapse to a single entry. This is value-preserving because ``encode(|c|)`` with the sign bit set equals
-    ``encode(c)`` bit-for-bit -- except for a magnitude that encodes to zero, where the sign must NOT be folded: ZKF
-    has no negative zero, so a folded negate over a zero-encoding magnitude would emit an illegal ``-0`` instead of the
-    canonical ``+0`` that the signed value itself encodes to. Such constants therefore keep an identity sign control.
+    ``encode(c)`` bit-for-bit. No constant can encode to zero with a negative sign -- MIR normalizes ``-0.0`` and refuses
+    any other magnitude that degrades to zero -- so a folded negate can never emit the illegal ``-0`` that ZKF has no
+    room for.
     An INTEGER constant has no such sideband, so it is stored whole and keyed by its own value. The two keyings index
     one shared list of entries but must stay separate dictionaries: ``1`` and ``1.0`` compare and hash equal in Python
     while naming different words. ``bool_operations`` (the bool-result combinational ops -- comparisons, boolean logic,
@@ -276,7 +276,7 @@ def build_const_pool(
         index = magnitude_index.get(magnitude)
         if index is None:
             magnitude_index[magnitude] = index = intern(FloatValue.from_float(mir.float_format, magnitude))
-        negate = math.copysign(1.0, value) < 0.0 and values[index].bits != 0
+        negate = math.copysign(1.0, value) < 0.0
         pool[vid] = PooledConst(index, FloatSignControl(negate=negate))
     return values, pool
 

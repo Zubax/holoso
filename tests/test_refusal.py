@@ -66,6 +66,49 @@ def test_an_arm_only_hir_proves_dead_is_not_refused() -> None:
     )
 
 
+def _a_constant_a_further_round_deletes(c: bool, x: float) -> float:
+    if c:
+        flag = False
+        if (x * 0.0) > 1.0:
+            flag = True
+    else:
+        flag = c
+        if (x * 0.0) > 1.0:
+            flag = True
+    bias = 1e-40 if flag else 1.0  # degrades in this format, and no path selects it
+    return x + bias
+
+
+def test_a_constant_a_further_round_deletes_is_not_judged() -> None:
+    # The guards are all decidable, so ``flag`` is always false and the degrading constant is dead -- but only after
+    # the round that threading and pruning open up. Judging a graph the optimizer has not finished with refuses a
+    # kernel over a value its own next round erases.
+    sim = _sim(_a_constant_a_further_round_deletes, "further_round")
+    for c in (False, True):
+        assert float(sim.run(c, 2.0)[0]) == 3.0
+
+
+def _a_constant_only_dead_code_removal_uncovers(c: bool, x: float) -> float:
+    if c:
+        flag = False
+        if (x * 0.0) > 1.0:
+            flag = True
+        dead = x + 7.0
+        zero = dead * 0.0  # nothing reads ``dead`` once this absorbs it, and until it goes the merges cannot thread
+    else:
+        flag = c
+        zero = 0.0
+    bias = 1e-40 if flag else 1.0
+    return x + bias + zero
+
+
+def test_a_constant_only_dead_code_removal_uncovers_is_not_judged() -> None:
+    # Dead-code removal is what opens the round that erases the degrading constant, so it cannot be the last pass.
+    sim = _sim(_a_constant_only_dead_code_removal_uncovers, "dce_uncovered")
+    for c in (False, True):
+        assert float(sim.run(c, 2.0)[0]) == 3.0
+
+
 def _surviving_domain_fault(x: float) -> float:
     return math.sqrt(-1.0) + x
 

@@ -50,8 +50,8 @@ class NoNumber(HolosoError):
     It is a signal and not a refusal. Every pass that folds speculatively catches it and leaves the operation exactly
     as it stands, because unrolling and inlining SUBSTITUTE values and so manufacture expressions the kernel never
     wrote -- ``for w in [1.0, 0.0]: if w > 0.0: x / w`` becomes ``x / 0.0`` -- and convicting one of those is the
-    compiler answering for its own transformation. What refuses is the survivor sweep at the end of optimization
-    (``_refuse_nameless``), over what is left once every deletion has run. See the fastmath charter in DESIGN.md.
+    compiler answering for its own transformation. What refuses is the gate at the HIR-to-MIR boundary, over what is
+    left once every deletion and substitution has run. See the fastmath charter in DESIGN.md.
 
     ``what`` names the expression for that diagnostic; the signal carries no message of its own because where it is
     raised is not where it is reported.
@@ -60,10 +60,6 @@ class NoNumber(HolosoError):
     def __init__(self, what: str) -> None:
         super().__init__(what)
         self.what = what
-
-
-def _scalars(operands: list[Const]) -> str:
-    return ", ".join(str(o.value) for o in operands if isinstance(o, (FloatConst, BoolConst, IntConst)))
 
 
 def _fold_float(operands: list[Const], name: str, evaluate: Callable[..., float]) -> Const:
@@ -82,7 +78,7 @@ def _fold_float(operands: list[Const], name: str, evaluate: Callable[..., float]
     except (ValueError, OverflowError, ZeroDivisionError):
         value = math.nan
     if math.isnan(value):
-        raise NoNumber(f"{name} of {_scalars(operands)}")
+        raise NoNumber(f"{name} of {operands}")
     return FloatConst(value)
 
 
@@ -95,7 +91,7 @@ def _fold_int(operands: list[Const], name: str, evaluate: Callable[..., int]) ->
     try:
         return IntConst(evaluate(*[_int_const(operand).value for operand in operands]))
     except (ZeroDivisionError, ValueError, OverflowError):
-        raise NoNumber(f"{name} of {_scalars(operands)}") from None
+        raise NoNumber(f"{name} of {operands}") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1048,7 +1044,7 @@ class FloatToInt(Operator):
         try:
             return IntConst(int(a.value))
         except OverflowError:
-            raise NoNumber(f"the integer part of {_scalars(operands)}") from None
+            raise NoNumber(f"the integer part of {operands}") from None
 
 
 @dataclass(frozen=True, slots=True)

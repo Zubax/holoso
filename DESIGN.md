@@ -54,8 +54,13 @@ variant where the math module disagrees, so `log2(0.0)` folds to the `-inf` the 
 passes an infinity through where `math.floor` raises. Where the reference raises, or would answer NaN, there is no
 value and the build is refused (`math.sqrt(-1.0)`, `inf - inf`, `1 << -1`); where it returns a value the fold takes
 it, infinities included -- Python is not consistent about which is which, and neither are we, since chasing a
-consistency the language does not have would mean inventing an answer. Nothing else stops a fold: not size, not
-representability in the target format. The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware
+consistency the language does not have would mean inventing an answer. Nothing else stops a FOLD: not size, not
+representability in the target format. A constant the machine must HOLD is another matter: one whose encoding
+crosses between finite-nonzero and zero or infinity is refused at selection rather than silently becoming what it
+encodes to, integers and floats alike. Only a constant that materializes is asked -- one an operator absorbs, such
+as a power-of-two scale, never becomes a word and is never refused.
+
+The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware
 answers 1 even when `x` is zero at run time, while `0.0/0.0` written out is refused at compile time.
 
 The error sidebands report INPUT-DEPENDENT failures; an expression that denotes no number is a program defect and is
@@ -280,9 +285,8 @@ relations over one operand pair share a firing), min and max over one pair share
 negation/inversion chains fold into consumer sidebands instead of gates.
 
 A branch the graph itself decides is neither: it is pruned, along with everything only its untaken edge reached, so a
-guard the optimizer can settle costs no hardware. The exception is a branch whose taken edge would orphan the sole
-exit: a kernel that provably never returns keeps the shape it was written with rather than becoming a module that can
-never raise `out_valid`.
+guard the optimizer can settle costs no hardware. Where that leaves the sole exit unreachable the kernel provably
+never returns, and is refused rather than built into a module that can never raise `out_valid`.
 
 Branch vs. select is the core control-flow decision for the branches that remain. Real branches are the default: only
 the taken side executes, the merge is resolved at register allocation with no runtime mux, and an untaken arm can
@@ -307,16 +311,15 @@ ever take.
 
 ### HIR optimization
 
-Optimization is intentionally very liberal, hardware-agnostic, and bound by the fastmath charter in Direction. Most
-passes run where their inputs are final; strength reduction and constant-branch pruning instead run as a mutual
-fixpoint, since each one's output is the other's input, so a cascade of guards collapses rather than only its first
-link. Optimization itself never refuses: it reduces, and what survives is judged once at the HIR-to-MIR boundary,
-which is where the graph stops changing. Reordering that judgement ahead of any reduction would convict expressions a
-rewrite would have absolved. It re-asks the same fold on the fully reduced graph and follows only provable control
-paths -- which after pruning matters for the never-returning loop alone -- so every identity and every guard gets its
-chance to erase an expression before it is judged, exactly as the survivor-based charter requires. A conviction
-reached through an inlined library composite may name an expression the kernel never spelled; an accepted limitation
-of the composites, not of the rule.
+Optimization is intentionally very liberal, hardware-agnostic, and bound by the fastmath charter in Direction. The
+whole pass sequence runs as one fixpoint rather than as a pipeline, because every pass is another's input, so a
+cascade of guards collapses rather than only its first link and no fixed ordering has to be right.
+What survives is judged at the HIR-to-MIR boundary, which is where the graph stops changing. Reordering the
+judgement ahead of any reduction would convict expressions a rewrite would have absolved. It re-asks the same fold on
+the fully reduced graph, where pruning has already deleted whatever no path reaches, so every identity and every guard
+gets its chance to erase an expression before it is judged, exactly as the survivor-based charter requires. A
+conviction reached through an inlined library composite may name an expression the kernel never spelled; an accepted
+limitation of the composites, not of the rule.
 
 ### DEFERRED
 
@@ -360,10 +363,9 @@ anyway); the four rounding operators map to one shared `fround` distinguished by
 float-to-integer conversion reading one of them carries it as its own mode instead of waiting on its result -- the
 rounding survives only if something else observes it, and then each rounds the value independently.
 The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign
-fill, every count within it is one inline shift, and a negative one -- which no word settles -- is refused here. A
-count no other use reads is never lowered, which
-is what lets one too wide for the machine format compile at all. A shift by nothing reduces earlier, in HIR, where
-the if-conversion budget counts it.
+fill, and every count within it is one inline shift; a negative one, which no word settles, the gate refuses. A count
+no other use reads is never lowered, which is what lets one too wide for the machine format compile at all. A shift
+by nothing reduces earlier, in HIR, where the if-conversion budget counts it.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter
 transaction, sin/cos computed simultaneously by the sincos operator, FMA contraction of a single-use `a*b+c`, a
@@ -480,8 +482,7 @@ back-edge.
 Compile-time-known branch conditions fold to a single arm so the other is never lowered. The front end decides a
 condition by evaluating it, never by algebra over a residual operand, so a condition that is constant only under a
 value identity the graph owns (`x*0 == 0`) survives partial evaluation and reaches the graph as a branch on a
-constant. If-conversion refuses such a branch rather than pinning the untaken arm live through a select, so it
-survives as a block that installs a constant and branches on it: at worst unreachable microcode, never a miscompile.
+constant; pruning settles it there and deletes the arm it excludes.
 
 ### DEFERRED
 

@@ -207,7 +207,7 @@ def run(hir: Hir) -> Hir:
                 except NoNumber:
                     # The operation names no number, so it is copied verbatim and no rewrite below is offered it: with
                     # every operand in view there is nothing left for an identity to speak for, and ``inf*0`` is not
-                    # the absorbing zero. Whether this costs the build is settled by the survivor sweep, once every
+                    # the absorbing zero. Whether this costs the build is settled by the refusal gate, once every
                     # deletion has had its turn.
                     return copy_node(builder, node, remap)
                 return emit_const(builder, folded)
