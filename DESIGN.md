@@ -321,6 +321,20 @@ gets its chance to erase an expression before it is judged, exactly as the survi
 conviction reached through an inlined library composite may name an expression the kernel never spelled; an accepted
 limitation of the composites, not of the rule.
 
+Strength reduction speaks all three scalar families with one grammar. Beyond the identity and absorbing elements the
+operators declare, it states the rules the shared algebra cannot: the one-sided constant rules of the non-commutative
+operators (`x-0` and `x//1` pass the operand through, `x%1` is zero), the value-equality and complement folds
+(`x-x`, `x^x`, `x&~x`, the reflexive integer comparisons, and `x//x`/`x%x` under the same license as `x/x`),
+negation and complement tracked as involutions so every spelling of the negation -- the written `-x`, `x*-1`,
+`x//-1`, `0-x` -- names one node and `-(-x)` costs nothing, and the constant power-of-two rewrites: the product is
+absorbed into the semantic `imul_pow2`, which saturates where the raw shift drops bits, the quotient becomes the
+right shift outright (`x >> k` is exactly the floor division, negative dividends included), and the remainder
+becomes the two's-complement mask. No rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR)
+is bounded by the count of left shifts in the graph, which is the other reason the product cannot become one --
+while a minted right shift is off that ledger, since nothing substitutes it. The absorbed exponent also decides
+what materializes -- a scale no machine word holds never becomes a constant, so `x * 2**40` builds at any width
+while the equivalent spelled-out product is refused at selection.
+
 ### DEFERRED
 
 Dividing by a representable constant whose reciprocal is not (`x / 3e9` at e6m18) is refused over the reciprocal
@@ -355,7 +369,8 @@ rounding survives only if something else observes it, and then each rounds the v
 The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign
 fill, and every count within it is one inline shift; a negative one, which no word settles, the gate refuses. A count
 no other use reads is never lowered, which is what lets one too wide for the machine format compile at all. A shift
-by nothing reduces earlier, in HIR, where the if-conversion budget counts it.
+by nothing reduces earlier, in HIR, where the if-conversion budget counts it. `imul_pow2` rides the same shifter,
+reading its saturating product tap; the power-of-two quotient arrives here already spelled as a constant `>>`.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter
 transaction, sin/cos computed simultaneously by the sincos operator, FMA contraction of a single-use `a*b+c`, a

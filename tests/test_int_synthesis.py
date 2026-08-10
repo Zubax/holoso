@@ -67,6 +67,29 @@ def test_a_mixed_family_kernel_synthesizes_end_to_end() -> None:
         )
 
 
+class PhaseDecimator:
+    def __init__(self) -> None:
+        self.acc = 0
+
+    def step(self, x: int) -> tuple[int, int]:
+        self.acc = (self.acc + x * 4) % 4096
+        return self.acc // 16, self.acc * -1
+
+
+def test_power_of_two_strength_reduction_survives_synthesis_and_matches_python() -> None:
+    """
+    Every constant power-of-two rewrite in one stateful kernel -- the saturating scaling, the mask, the inline
+    shift and the negation -- driven through ``synthesize`` against the same class running in CPython. The vectors
+    stay short of the rails, where the machine's answer and CPython's coincide exactly.
+    """
+    result = holoso.synthesize(PhaseDecimator().step, _OPTIONS, name="PhaseDecimator")
+    sim = result.numerical_model.elaborate()
+    reference = PhaseDecimator()
+    for x in [5, -12, 4095, -4096, 100_000, -100_000, 0, 77, -1]:
+        expected = list(reference.step(x))
+        assert [_as_int(value) for value in sim.run(x)] == expected + [reference.acc], x
+
+
 def divmod_pair(a: int, b: int) -> tuple[int, int]:
     return a // b, a % b
 

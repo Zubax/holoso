@@ -15,6 +15,7 @@ from ._operators import (
     BoolNot,
     BoolOr,
     BoolSelect,
+    BoolXor,
     FloatAdd,
     FloatCeil,
     FloatDiv,
@@ -26,9 +27,21 @@ from ._operators import (
     FloatSelect,
     FloatToInt,
     FloatTrunc,
+    IntAdd,
+    IntBwAnd,
+    IntBwNot,
+    IntBwOr,
+    IntBwXor,
+    IntComparison,
+    IntDivFloor,
+    IntMod,
+    IntMul,
+    IntMulPow2,
+    IntNeg,
     IntSelect,
     IntShiftLeft,
     IntShiftRight,
+    IntSub,
     IntToFloat,
     NoNumber,
     Operator,
@@ -50,13 +63,20 @@ def _ilog2_exact(c: float) -> int | None:
     return exponent - 1 if mantissa == 0.5 else None
 
 
+def _int_pow2_exponent(c: int) -> int | None:
+    """Return ``k`` if ``c == 2**k`` for a positive ``c``, else ``None``."""
+    return c.bit_length() - 1 if c > 0 and c & (c - 1) == 0 else None
+
+
 def run(hir: Hir) -> Hir:
     """
-    Fold every constant expression, rewrite the fast-math float identities, exact power-of-two scaling, constant
-    division and the conversion round trips, and reduce the if-conversion muxes. All before hardware selection.
+    Fold every constant expression, rewrite the fast-math float and integer identities, exact power-of-two scaling,
+    constant division and the conversion round trips, and reduce the if-conversion muxes. All before hardware
+    selection, and none of it minting a LEFT shift, whose count the machine-word substitution below MIR settles.
     """
     known: dict[ValueId, Const] = {}  # constants this pass established, keyed by the id it built them under
-    neg_of: dict[ValueId, ValueId] = {}
+    neg_of: dict[ValueId, ValueId] = {}  # both numeric families share it: an id names one node of one family
+    bwnot_of: dict[ValueId, ValueId] = {}
     integral: set[ValueId] = set()  # integer-valued floats a rounding is the identity over (a constant one folds)
 
     def emit_const(builder: HirBuilder, const: Const) -> ValueId:
@@ -66,6 +86,9 @@ def run(hir: Hir) -> Hir:
 
     def emit_float_const(builder: HirBuilder, value: float) -> ValueId:
         return emit_const(builder, FloatConst(value))
+
+    def emit_int_const(builder: HirBuilder, value: int) -> ValueId:
+        return emit_const(builder, IntConst(value))
 
     def float_of(vid: ValueId) -> float | None:
         const = known.get(vid)
@@ -81,16 +104,29 @@ def run(hir: Hir) -> Hir:
     def is_neg_one(vid: ValueId) -> bool:
         return float_of(vid) == -1.0
 
-    def make_neg(builder: HirBuilder, value: ValueId) -> ValueId:
-        base = neg_of.get(value)
+    def involution(builder: HirBuilder, memo: dict[ValueId, ValueId], operator: Operator, value: ValueId) -> ValueId:
+        """Apply a self-inverse operator: over one this pass already minted, the base answers instead of a new node."""
+        base = memo.get(value)
         if base is not None:
             return base
-        new_id = builder.operation(FloatNeg(), [value])
-        neg_of[new_id] = value
+        new_id = builder.operation(operator, [value])
+        memo[new_id] = value
         return new_id
+
+    def make_neg(builder: HirBuilder, value: ValueId) -> ValueId:
+        return involution(builder, neg_of, FloatNeg(), value)
+
+    def make_ineg(builder: HirBuilder, value: ValueId) -> ValueId:
+        return involution(builder, neg_of, IntNeg(), value)
+
+    def make_ibwnot(builder: HirBuilder, value: ValueId) -> ValueId:
+        return involution(builder, bwnot_of, IntBwNot(), value)
 
     def opposites(a: ValueId, b: ValueId) -> bool:
         return neg_of.get(a) == b or neg_of.get(b) == a
+
+    def complements(a: ValueId, b: ValueId) -> bool:
+        return bwnot_of.get(a) == b or bwnot_of.get(b) == a
 
     def uniform_const_arm(arms: tuple[tuple[BlockId, ValueId], ...], remap: dict[ValueId, ValueId]) -> Const | None:
         values = [known.get(remap[arm]) for _, arm in arms]
@@ -151,6 +187,98 @@ def run(hir: Hir) -> Hir:
                 return builder.operation(FloatMulPow2(-k), [a])
             return builder.operation(FloatMul(), [a, emit_float_const(builder, 1.0 / divisor)])
         return reduce_algebra(builder, FloatDiv(), [a, b])
+
+    def reduce_iadd(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if opposites(a, b):
+            return emit_int_const(builder, 0)
+        return reduce_algebra(builder, IntAdd(), [a, b])
+
+    def reduce_isub(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b:
+            return emit_int_const(builder, 0)
+        if int_of(b) == 0:
+            return a  # stated here, not as a declared identity, which the shared algebra would drop from either side
+        if int_of(a) == 0:
+            return make_ineg(builder, b)
+        return reduce_algebra(builder, IntSub(), [a, b])
+
+    def reduce_imul(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if int_of(a) == -1:
+            return make_ineg(builder, b)
+        if int_of(b) == -1:
+            return make_ineg(builder, a)
+        for const_side, other in ((b, a), (a, b)):
+            scale = int_of(const_side)
+            if scale is not None:
+                k = _int_pow2_exponent(scale)
+                if k:  # a zero exponent is ``x*1``, left to the declared identity rather than minted as a scaling
+                    return builder.operation(IntMulPow2(k), [other])
+        return reduce_algebra(builder, IntMul(), [a, b])
+
+    def reduce_idiv(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b:
+            return emit_int_const(builder, 1)
+        if int_of(a) == 0:
+            return emit_int_const(builder, 0)
+        divisor = int_of(b)
+        if divisor == 1:
+            return a
+        if divisor == -1:
+            return make_ineg(builder, a)
+        if divisor is not None:
+            k = _int_pow2_exponent(divisor)
+            if k is not None:
+                # The arithmetic right shift IS the floor division, exactly, negative dividends included.
+                return builder.operation(IntShiftRight(), [a, emit_int_const(builder, k)])
+        return reduce_algebra(builder, IntDivFloor(), [a, b])
+
+    def reduce_imod(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b or int_of(a) == 0:
+            return emit_int_const(builder, 0)
+        divisor = int_of(b)
+        if divisor is not None:
+            if abs(divisor) == 1:
+                return emit_int_const(builder, 0)
+            k = _int_pow2_exponent(divisor)
+            if k is not None:
+                # The floor remainder over a positive power of two IS the infinite two's-complement mask, negative
+                # operands included, which is why the sign of the dividend never has to be asked.
+                return builder.operation(IntBwAnd(), [a, emit_int_const(builder, divisor - 1)])
+        return reduce_algebra(builder, IntMod(), [a, b])
+
+    def reduce_ixor(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b:
+            return emit_int_const(builder, 0)
+        if complements(a, b):
+            return emit_int_const(builder, -1)
+        if int_of(a) == -1:
+            return make_ibwnot(builder, b)
+        if int_of(b) == -1:
+            return make_ibwnot(builder, a)  # ``x ^ -1`` is the complement at every width
+        return reduce_algebra(builder, IntBwXor(), [a, b])
+
+    def reduce_iand(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b:
+            return a
+        if complements(a, b):
+            return emit_int_const(builder, 0)
+        return reduce_algebra(builder, IntBwAnd(), [a, b])
+
+    def reduce_ior(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b:
+            return a
+        if complements(a, b):
+            return emit_int_const(builder, -1)
+        return reduce_algebra(builder, IntBwOr(), [a, b])
+
+    def reduce_bxor(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+        if a == b:
+            return emit_const(builder, BoolConst(False))
+        if bool_of(a) is True:
+            return builder.operation(BoolNot(), [b])
+        if bool_of(b) is True:
+            return builder.operation(BoolNot(), [a])  # the 1-bit complement; MIR folds it into its consumer
+        return reduce_algebra(builder, BoolXor(), [a, b])
 
     def emit_integral(builder: HirBuilder, operator: Operator, value: ValueId) -> ValueId:
         """Emit an operation whose result is an integer-valued float, so a rounding of it is later recognized free."""
@@ -245,6 +373,34 @@ def run(hir: Hir) -> Hir:
                 return reduce_rounding(builder, op, remap[a])
             case Operation(operator=IntToFloat(), operands=(a,)):
                 return emit_integral(builder, IntToFloat(), remap[a])
+            case Operation(operator=IntNeg(), operands=(a,)):
+                return make_ineg(builder, remap[a])
+            case Operation(operator=IntBwNot(), operands=(a,)):
+                return make_ibwnot(builder, remap[a])
+            case Operation(operator=IntAdd(), operands=(a, b)):
+                return reduce_iadd(builder, remap[a], remap[b])
+            case Operation(operator=IntSub(), operands=(a, b)):
+                return reduce_isub(builder, remap[a], remap[b])
+            case Operation(operator=IntMul(), operands=(a, b)):
+                return reduce_imul(builder, remap[a], remap[b])
+            case Operation(operator=IntDivFloor(), operands=(a, b)):
+                return reduce_idiv(builder, remap[a], remap[b])
+            case Operation(operator=IntMod(), operands=(a, b)):
+                return reduce_imod(builder, remap[a], remap[b])
+            case Operation(operator=IntBwXor(), operands=(a, b)):
+                return reduce_ixor(builder, remap[a], remap[b])
+            case Operation(operator=IntBwAnd(), operands=(a, b)):
+                return reduce_iand(builder, remap[a], remap[b])
+            case Operation(operator=IntBwOr(), operands=(a, b)):
+                return reduce_ior(builder, remap[a], remap[b])
+            case Operation(operator=BoolXor(), operands=(a, b)):
+                return reduce_bxor(builder, remap[a], remap[b])
+            case Operation(operator=BoolAnd() | BoolOr(), operands=(a, b)) if remap[a] == remap[b]:
+                return remap[a]  # the idempotent connectives: both operands one value, so the gate names it too
+            case Operation(operator=IntComparison() as relation, operands=(a, b)) if remap[a] == remap[b]:
+                # Reflexive over every integer -- no NaN to except -- so the relation's answer over one value is
+                # its answer over any.
+                return emit_const(builder, relation.evaluate([IntConst(0), IntConst(0)]))
             case Operation(operator=BoolSelect(), operands=(cond, a, b)):
                 return reduce_bselect(builder, remap[cond], remap[a], remap[b])
             case Operation(operator=operator, operands=operands):

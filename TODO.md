@@ -2,15 +2,6 @@
 
 ## Integer support adjacent
 
-Integer strength reduction is deferred past the constant folds and the declared algebra. The non-commutative
-operators declare no identity deliberately, because the shared algebra drops an identity operand wherever it sits
-and so would rewrite `0 - x` to `x`; `x-0`, `x//1` and `x%1` therefore need rules of their own. So do the integer
-counterparts of the float-specific rewrites -- `x*-1` to `ineg`, multiplication and floor division by a power of two
-to a shift, and the value-equality folds `x-x`, `x^x` and `x&x`. `IntMulPow2` already serves that power-of-two rewrite,
-lowering to `ishl`'s saturating `prod` reading rather than the raw `shft` one the `<<` lowering takes; nothing mints
-it yet. Each must answer for saturation at the format extremes, a question the float rules never faced. One further
-constraint: no HIR pass may mint a shift, or the machine-word substitution fixpoint below MIR loses its bound.
-
 The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the
 acceptance set, covered through the MIR interpreter and the numerical model, with an RTL cosimulation subset in
 `tests/test_cosim_int.py`; porting `examples/uart.py` off its float-carried counters remains open.

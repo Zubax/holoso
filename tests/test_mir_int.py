@@ -850,6 +850,101 @@ def test_a_power_of_two_scaling_and_the_raw_shift_share_one_module() -> None:
     assert _run(MirInterpreter(shifted), MAX, 1) == [_wrap(MAX << 1)], "the raw shift does not"
 
 
+def times_eight(x: int) -> int:
+    return x * 8
+
+
+def eighth(x: int) -> int:
+    return x // 8
+
+
+def eighth_remainder(x: int) -> int:
+    return x % 8
+
+
+def past_the_word_quotient(x: int) -> int:
+    return x // 2**40
+
+
+def negated_by_product(x: int) -> int:
+    return x * -1
+
+
+def third(x: int) -> int:
+    return x // 3
+
+
+@pytest.mark.parametrize("x", [0, 1, -1, 5, -5, -8, 12345, -12345, MIN, MAX])
+def test_a_minted_power_of_two_product_saturates_like_the_multiplication(x: int) -> None:
+    """Strength reduction hands ``x * 8`` to the shifter's saturating tap, so the rails answer as the product."""
+    mir = _select(times_eight)
+    assert _mnemonics(mir) == ["ishl"]
+    assert _run(MirInterpreter(mir), x) == [_clamp(x * 8)]
+
+
+@pytest.mark.parametrize("x", [0, 1, -1, 5, -5, -8, 12345, -12345, MIN, MAX])
+def test_a_minted_power_of_two_quotient_is_one_inline_shift(x: int) -> None:
+    """``x // 8`` pays neither the divider nor any module: the arithmetic shift IS the floor division."""
+    mir = _select(eighth)
+    assert _mnemonics(mir) == ["ishiftc"]
+    assert _run(MirInterpreter(mir), x) == [x // 8]
+
+
+@pytest.mark.parametrize("x", [MAX, 1, 0, -1, MIN])
+def test_a_minted_quotient_past_the_word_is_the_sign_fill(x: int) -> None:
+    """The clamp at the top bit answers exactly the floor of an in-word operand over so large a divisor."""
+    assert _run(MirInterpreter(_select(past_the_word_quotient)), x) == [x // 2**40]
+
+
+def past_the_word_product(x: int) -> int:
+    return x * 2**40
+
+
+@pytest.mark.parametrize("x", [MAX, 1, 0, -1, MIN])
+def test_a_minted_product_past_the_word_rails_by_sign(x: int) -> None:
+    """A count past the width rails every nonzero operand, exactly as the multiplication it stands for would."""
+    mir = _select(past_the_word_product)
+    assert _mnemonics(mir) == ["ishl"]
+    assert _run(MirInterpreter(mir), x) == [_clamp(x * 2**40)]
+
+
+def boundary_remainder(x: int) -> int:
+    return x % 2**15
+
+
+def boundary_quotient(x: int) -> int:
+    return x // 2**15
+
+
+@pytest.mark.parametrize("x", [0, 1, -1, 5, -5, 12345, -12345, MIN, MAX])
+def test_the_boundary_exponent_builds_where_its_divisor_constant_could_not(x: int) -> None:
+    """
+    ``2**15`` fits no int16 word, so the spelled-out divisor is refused at selection; the mask and the shift the
+    rewrites leave are in-word and exact, so the boundary exponent builds and answers as CPython does.
+    """
+    assert _run(MirInterpreter(_select(boundary_remainder)), x) == [x % 2**15]
+    assert _run(MirInterpreter(_select(boundary_quotient)), x) == [x // 2**15]
+
+
+@pytest.mark.parametrize("x", [0, 1, -1, 5, -5, -8, 12345, -12345, MIN, MAX])
+def test_a_minted_power_of_two_remainder_is_the_mask(x: int) -> None:
+    """``x % 8`` is the two's-complement mask, negative dividends included, with no divider error sideband."""
+    mir = _select(eighth_remainder)
+    assert _mnemonics(mir) == ["ibwand"]
+    assert _run(MirInterpreter(mir), x) == [x % 8]
+
+
+def test_a_product_with_minus_one_negates_on_the_subtractor() -> None:
+    mir = _select(negated_by_product)
+    assert _mnemonics(mir) == ["isubs"]
+    assert _run(MirInterpreter(mir), MIN) == [MAX], "the negation saturates at the rail"
+    assert _run(MirInterpreter(mir), MAX) == [MIN + 1]
+
+
+def test_a_quotient_by_a_non_power_of_two_still_pays_the_divider() -> None:
+    assert _mnemonics(_select(third)) == ["idivs"]
+
+
 def shift_left_only(x: int, n: int) -> int:
     return x << n
 

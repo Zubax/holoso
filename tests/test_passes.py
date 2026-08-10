@@ -28,6 +28,7 @@ from holoso._eel import lower
 from holoso._hir import (
     BoolAnd,
     BoolConst,
+    BoolNot,
     BoolOr,
     BoolType,
     Const,
@@ -66,6 +67,7 @@ from holoso._hir import (
 )
 from holoso._hir import (
     BoolToInt,
+    BoolXor,
     FloatToInt,
     IntAbs,
     IntAdd,
@@ -992,6 +994,153 @@ def test_integer_folding_has_no_size_limit() -> None:
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
     lower_to_mir(raw, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)  # nothing integer survives
+
+
+def _reduced_int_outputs(populate: Callable[[HirBuilder, ValueId], None]) -> dict[str, object]:
+    """One integer input ``n`` through ``optimize``; each named output resolved to its surviving node."""
+    builder = HirBuilder()
+    builder.block()
+    populate(builder, builder.input("n", IntType()))
+    builder.ret()
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    return {out.name: hir.nodes[out.value] for out in hir.outputs}
+
+
+def test_the_integer_subtraction_rules_the_shared_algebra_cannot_state() -> None:
+    # The declared algebra drops an identity operand from either side, which for subtraction is only true of the
+    # right one: ``x - 0`` is ``x`` while ``0 - x`` is the negation, so each direction is its own rule.
+    def populate(builder: HirBuilder, n: ValueId) -> None:
+        zero = builder.int_const(0)
+        builder.output("dropped", builder.operation(IntSub(), [n, zero]))
+        builder.output("negated", builder.operation(IntSub(), [zero, n]))
+        builder.output("cancelled", builder.operation(IntSub(), [n, n]))
+
+    outputs = _reduced_int_outputs(populate)
+    assert isinstance(outputs["dropped"], InPort)
+    assert isinstance(outputs["negated"], Operation) and outputs["negated"].operator == IntNeg()
+    assert outputs["cancelled"] == IntConst(0)
+
+
+def test_a_power_of_two_integer_product_mints_the_saturating_scaling() -> None:
+    # The exponent is absorbed into the operator from either side, and the constant -- even one no machine word
+    # holds -- goes dead with it, so it is never asked to materialize.
+    def populate(builder: HirBuilder, n: ValueId) -> None:
+        builder.output("right", builder.operation(IntMul(), [n, builder.int_const(8)]))
+        builder.output("left", builder.operation(IntMul(), [builder.int_const(2**40), n]))
+
+    outputs = _reduced_int_outputs(populate)
+    assert isinstance(outputs["right"], Operation) and outputs["right"].operator == IntMulPow2(3)
+    assert isinstance(outputs["left"], Operation) and outputs["left"].operator == IntMulPow2(40)
+
+
+def test_integer_negations_share_one_tracking_across_their_spellings() -> None:
+    # ``x * -1``, ``x // -1`` and the written negation all name one node, ``-(-x)`` returns the base, and a sum
+    # of a value with its own negation is zero without anything firing.
+    def populate(builder: HirBuilder, n: ValueId) -> None:
+        neg = builder.operation(IntNeg(), [n])
+        builder.output("restored", builder.operation(IntNeg(), [neg]))
+        builder.output("cancelled", builder.operation(IntAdd(), [n, neg]))
+        builder.output("by_product", builder.operation(IntMul(), [n, builder.int_const(-1)]))
+        builder.output("by_quotient", builder.operation(IntDivFloor(), [n, builder.int_const(-1)]))
+
+    outputs = _reduced_int_outputs(populate)
+    assert isinstance(outputs["restored"], InPort)
+    assert outputs["cancelled"] == IntConst(0)
+    assert outputs["by_product"] == outputs["by_quotient"]
+    assert isinstance(outputs["by_product"], Operation) and outputs["by_product"].operator == IntNeg()
+
+
+def test_integer_division_and_remainder_reduce_against_their_constants() -> None:
+    def populate(builder: HirBuilder, n: ValueId) -> None:
+        builder.output("q_one", builder.operation(IntDivFloor(), [n, builder.int_const(1)]))
+        builder.output("q_pow2", builder.operation(IntDivFloor(), [n, builder.int_const(8)]))
+        builder.output("q_self", builder.operation(IntDivFloor(), [n, n]))
+        builder.output("q_zero", builder.operation(IntDivFloor(), [builder.int_const(0), n]))
+        builder.output("r_one", builder.operation(IntMod(), [n, builder.int_const(1)]))
+        builder.output("r_neg_one", builder.operation(IntMod(), [n, builder.int_const(-1)]))
+        builder.output("r_pow2", builder.operation(IntMod(), [n, builder.int_const(8)]))
+        builder.output("r_self", builder.operation(IntMod(), [n, n]))
+        builder.output("r_zero", builder.operation(IntMod(), [builder.int_const(0), n]))
+
+    outputs = _reduced_int_outputs(populate)
+    assert isinstance(outputs["q_one"], InPort)
+    assert isinstance(outputs["q_pow2"], Operation) and outputs["q_pow2"].operator == IntShiftRight()
+    assert outputs["q_self"] == IntConst(1)
+    assert outputs["q_zero"] == outputs["r_one"] == outputs["r_neg_one"] == IntConst(0)
+    assert outputs["r_self"] == outputs["r_zero"] == IntConst(0)
+    mask = outputs["r_pow2"]
+    assert isinstance(mask, Operation) and mask.operator == IntBwAnd()
+
+
+def test_bitwise_value_equality_and_complement_rules() -> None:
+    def populate(builder: HirBuilder, n: ValueId) -> None:
+        inverted = builder.operation(IntBwNot(), [n])
+        builder.output("xor_self", builder.operation(IntBwXor(), [n, n]))
+        builder.output("and_self", builder.operation(IntBwAnd(), [n, n]))
+        builder.output("or_self", builder.operation(IntBwOr(), [n, n]))
+        builder.output("complement", builder.operation(IntBwXor(), [n, builder.int_const(-1)]))
+        builder.output("restored", builder.operation(IntBwNot(), [inverted]))
+        builder.output("annihilated", builder.operation(IntBwAnd(), [n, inverted]))
+        builder.output("saturated", builder.operation(IntBwOr(), [n, inverted]))
+        builder.output("disagreed", builder.operation(IntBwXor(), [n, inverted]))
+
+    outputs = _reduced_int_outputs(populate)
+    assert outputs["xor_self"] == outputs["annihilated"] == IntConst(0)
+    assert isinstance(outputs["and_self"], InPort) and isinstance(outputs["or_self"], InPort)
+    assert isinstance(outputs["complement"], Operation) and outputs["complement"].operator == IntBwNot()
+    assert isinstance(outputs["restored"], InPort)
+    assert outputs["saturated"] == outputs["disagreed"] == IntConst(-1)
+
+
+@pytest.mark.parametrize(
+    "relation, expected",
+    [
+        (IntEqual(), True),
+        (IntLessOrEqual(), True),
+        (IntGreaterOrEqual(), True),
+        (IntNotEqual(), False),
+        (IntLess(), False),
+        (IntGreater(), False),
+    ],
+)
+def test_a_reflexive_integer_comparison_folds_to_its_truth(relation: Operator, expected: bool) -> None:
+    # No integer is a NaN, so every relation is decided over equal operands without seeing their value.
+    def populate(builder: HirBuilder, n: ValueId) -> None:
+        builder.output("y", builder.operation(relation, [n, n]))
+
+    assert _reduced_int_outputs(populate)["y"] == BoolConst(expected)
+
+
+def test_the_boolean_connectives_fold_over_equal_operands() -> None:
+    builder = HirBuilder()
+    builder.block()
+    b = builder.input("b", BoolType())
+    builder.output("and_self", builder.operation(BoolAnd(), [b, b]))
+    builder.output("or_self", builder.operation(BoolOr(), [b, b]))
+    builder.output("xor_self", builder.operation(BoolXor(), [b, b]))
+    builder.output("inverted", builder.operation(BoolXor(), [b, builder.bool_const(True)]))
+    builder.ret()
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    outputs = {out.name: hir.nodes[out.value] for out in hir.outputs}
+    assert isinstance(outputs["and_self"], InPort) and isinstance(outputs["or_self"], InPort)
+    assert outputs["xor_self"] == BoolConst(False)
+    assert isinstance(outputs["inverted"], Operation) and outputs["inverted"].operator == BoolNot()
+
+
+def test_an_integer_self_division_erases_an_operand_that_names_no_number() -> None:
+    # The integer dual of the float rule above: ``5 // 0`` has no value for the fold, so it is an operand the
+    # compiler cannot see, and ``q // q`` and ``q % q`` speak for it whatever it turns out to be -- the division
+    # reduces, its operand goes dead, and nothing is left for the survivor sweep to convict.
+    builder = HirBuilder()
+    builder.block()
+    q = builder.operation(IntDivFloor(), [builder.int_const(5), builder.int_const(0)])
+    builder.output("quotient", builder.operation(IntDivFloor(), [q, q]))
+    builder.output("remainder", builder.operation(IntMod(), [q, q]))
+    builder.ret()
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    assert hir.nodes[hir.outputs[0].value] == IntConst(1)
+    assert hir.nodes[hir.outputs[1].value] == IntConst(0)
+    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
 
 
 @pytest.mark.parametrize(

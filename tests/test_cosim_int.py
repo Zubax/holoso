@@ -99,6 +99,22 @@ def test_int_random_sweep_cosim(sim: str) -> None:
     run_cosim(sim, sat_mix, _OPTIONS, "sat_mix_int")
 
 
+def pow2_strength(x: int) -> tuple[int, int, int, int, int]:
+    return x * 4, x // 8, x % 32, x * -1, x // 2**40
+
+
+@pytest.mark.cosim
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_int_pow2_strength_reduction_cosim(sim: str) -> None:
+    """
+    The minted power-of-two forms in RTL: the shifter's saturating product tap (its first end-to-end reader),
+    the inline right shift both in-word and clamped past the word, the mask, and negation on the subtractor,
+    driven through the rails and the negative dividends whose floor/mask behavior the rewrites must preserve.
+    """
+    values = [0, 1, -1, 7, -7, 8, -8, 31, -33, 4095, -4096, _IFMT.max, _IFMT.min, _IFMT.max // 4 + 1]
+    run_cosim(sim, pow2_strength, _OPTIONS, "pow2_strength_int", vectors=_rows("x", values))
+
+
 def countdown(n: int) -> int:
     steps = 0
     while n > 0:
