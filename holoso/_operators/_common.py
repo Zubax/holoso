@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import blake2s
-from typing import ClassVar
+from typing import ClassVar, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
 from .._type import BoolType, FloatType, IntType, ScalarType
@@ -104,6 +104,22 @@ class BoolInversion:
 # The wide bank is shared across scalar families, so what a wide port may fold depends on the family it holds.
 type WideConditioner = FloatSignControl | IntIdentity
 type PortConditioner = WideConditioner | BoolInversion
+
+
+def apply_conditioner(conditioner: PortConditioner, value: ScalarValue) -> ScalarValue:
+    """Apply a port's folded sideband: a sign control on a float value, an inversion on a boolean one."""
+    match conditioner:
+        case FloatSignControl():
+            assert isinstance(value, FloatValue), "a float sign control applies only to a FloatValue"
+            return conditioner.apply_value(value)
+        case IntIdentity():
+            assert isinstance(value, IntValue), "an integer identity applies only to an IntValue"
+            return value
+        case BoolInversion():
+            assert isinstance(value, bool), "a boolean inversion applies only to a bool"
+            return conditioner.apply(value)
+        case _:
+            assert_never(conditioner)
 
 
 class Relation(Enum):

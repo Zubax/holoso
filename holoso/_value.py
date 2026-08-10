@@ -8,7 +8,7 @@ from typing import NamedTuple, Self
 import zkf
 from zkf import RoundMode as RoundMode
 
-from ._type import FloatFormat, IntFormat
+from ._type import BoolType, FloatFormat, FloatType, IntFormat, IntType, ScalarType
 
 
 class SortResult(NamedTuple):
@@ -230,6 +230,9 @@ class IntValue:
     def __int__(self) -> int:
         return self.value
 
+    def __float__(self) -> float:
+        return float(self.value)
+
     def __repr__(self) -> str:
         return repr(self.value)
 
@@ -313,6 +316,45 @@ type ScalarValue = FloatValue | IntValue | bool
 
 # What the shared wide bank may hold: the two families that occupy a whole wide register, never the single-bit one.
 type WideValue = FloatValue | IntValue
+
+# What coerce_scalar admits: a typed scalar, or the plain Python value the port's family encodes.
+type ScalarLike = ScalarValue | float | int
+
+
+def coerce_scalar(scalar_type: ScalarType, value: object, what: str) -> ScalarValue:
+    """
+    The one scalar port codec: admit a value onto a port of the given family, accepting the family's own value type
+    (format-checked) or the plain Python type it encodes. Exact-type checks keep a bool off an integer port.
+    """
+    match scalar_type:
+        case FloatType(fmt=ffmt):
+            if isinstance(value, FloatValue):
+                if value.fmt != ffmt:
+                    raise ValueError(f"{what} has {value.fmt}, expected {ffmt}")
+                return value
+            if type(value) is float:
+                try:
+                    return FloatValue.from_float(ffmt, value)
+                except ValueError as error:
+                    raise ValueError(f"{what}: {error}") from None
+            raise TypeError(f"{what} must be FloatValue or float, got {type(value).__name__}")
+        case IntType(fmt=ifmt):
+            if isinstance(value, IntValue):
+                if value.fmt != ifmt:
+                    raise ValueError(f"{what} has {value.fmt}, expected {ifmt}")
+                return value
+            if type(value) is int:
+                try:
+                    return IntValue.from_int(ifmt, value)
+                except ValueError as error:
+                    raise ValueError(f"{what}: {error}") from None
+            raise TypeError(f"{what} must be IntValue or int, got {type(value).__name__}")
+        case BoolType():
+            if type(value) is bool:
+                return value
+            raise TypeError(f"{what} must be bool, got {type(value).__name__}")
+        case _:
+            raise TypeError(f"no scalar family for {scalar_type!r}")
 
 
 _TO_INT: dict[RoundMode, Callable[[zkf.Zkf, int], int]] = {

@@ -3,8 +3,9 @@ The integer half below HIR, in two halves of its own. The first drives :class:`M
 directly with :class:`MirBuilder`, pinning what MIR carries; the second drives real kernels through selection and
 LIR construction, pinning what the lowering chooses and what the transport keeps.
 
-Both stay white-box because the refusal has only MOVED: it now sits on the built LIR, so ``synthesize`` still
-declines every integer and no backend can render one.
+Both stay white-box to pin selection internals directly (mnemonics, immediates, conditioners, the carriage into
+LIR); the black-box end-to-end coverage lives in ``test_int_synthesis`` and ``test_eel_int_corpus``, which drive
+``synthesize`` and the numerical model.
 
 No expectation here calls back into ``IntValue``: the rails, the division degeneracies and the two shift readings
 are literals or CPython's own operators, so a defect in the value layer cannot vouch for itself.
@@ -740,7 +741,10 @@ def test_a_state_slot_carries_its_scalar_family_too() -> None:
     """The third wide carrier: a slot's family comes from its live-out, not from what its reset literal happens
     to be, so a float slot reset to a whole number is still a float slot."""
     lir = build_lir(_select(MixedState().step), "mixed_state")
-    assert {slot.name: slot.scalar_type for slot in lir.wide_state_slots} == {"count": ITYPE, "level": FTYPE}
+    assert {slot.name: slot.reset_value for slot in lir.wide_state_slots} == {
+        "count": IntValue.from_int(IFMT, 0),
+        "level": FloatValue.from_float(FMT, 0.0),
+    }
 
 
 def test_a_kernel_mixing_integer_and_float_state_keeps_them_apart() -> None:
@@ -1139,39 +1143,8 @@ def test_the_word_the_fold_clamps_to_is_the_machine_word_and_not_a_fixed_one(wid
             assert _run(interpreter, x) == [left, x >> count], (width, count, x)
 
 
-def test_the_backends_still_refuse_an_integer_and_name_where_it_survived() -> None:
-    """The refusal moved below LIR rather than disappearing, and it names every surviving site, not just the first."""
-    with pytest.raises(UnsupportedConstruct) as raised:
-        holoso.synthesize(mixed_constants, KERNEL_OPTIONS, name="MixedConstants")
-    assert str(raised.value) == (
-        "integers do not reach the backends yet: port 'in_n'; port 'out_1'; port 'out_2'; "
-        "constant 1; constant 7; operator 'iadds'"
-    )
-
-
-def integer_passthrough(n: int) -> int:
-    return n
-
-
-def test_the_refusal_fires_on_a_kernel_whose_only_integer_is_a_port() -> None:
-    """The gate's port arm alone: no integer operator fires and no integer constant is pooled to trip on."""
-    with pytest.raises(UnsupportedConstruct) as raised:
-        holoso.synthesize(integer_passthrough, KERNEL_OPTIONS, name="IntegerPassthrough")
-    assert str(raised.value) == "integers do not reach the backends yet: port 'in_n'; port 'out_0'"
-
-
-def test_the_refusal_names_an_integer_state_slot_as_its_own_site() -> None:
-    """A slot is named in its own right, not left to be inferred from the port that happens to observe it."""
-    with pytest.raises(UnsupportedConstruct) as raised:
-        holoso.synthesize(Accumulator().step, KERNEL_OPTIONS, name="AccumulatorProbe")
-    assert str(raised.value) == (
-        "integers do not reach the backends yet: port 'in_x'; port 'state_total'; "
-        "state slot 'total'; operator 'iadds'"
-    )
-
-
 def test_a_float_only_kernel_reaching_an_integer_operator_still_synthesizes() -> None:
-    """``float(math.floor(x))`` folds the conversion pair away, so no integer survives to be refused."""
+    """``float(math.floor(x))`` folds the conversion pair away, so the built machine is float-only throughout."""
     holoso.synthesize(rounded_to_float, KERNEL_OPTIONS, name="RoundedToFloat")
 
 

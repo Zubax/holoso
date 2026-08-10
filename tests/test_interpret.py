@@ -21,7 +21,7 @@ from holoso._backend.numerical import NumericalSimulator
 from holoso._mir import MirInterpreter
 from holoso._operators import OpConfig
 from holoso._type import BoolType, FloatFormat
-from holoso._value import FloatValue
+from holoso._value import FloatValue, coerce_scalar
 
 from ._examples import SPECS, ExampleSpec
 from ._importguard import forbidden_imports
@@ -51,12 +51,8 @@ from ._modelref import (
 )
 
 
-def _decode_spec_vector(model: NumericalSimulator, fmt: FloatFormat, row: dict[str, int]) -> Vector:
-    vector: Vector = []
-    for port in model.inputs:
-        bits = row[port.name]
-        vector.append(bool(bits) if isinstance(port.scalar_type, BoolType) else FloatValue.from_bits(fmt, bits))
-    return vector
+def _spec_vector(model: NumericalSimulator, row: dict[str, float | bool]) -> Vector:
+    return [coerce_scalar(port.scalar_type, row[port.name], port.name) for port in model.inputs]
 
 
 _EXAMPLE_CASES = [
@@ -67,7 +63,7 @@ _EXAMPLE_CASES = [
 @pytest.mark.parametrize("spec,fmt", _EXAMPLE_CASES)
 def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatFormat) -> None:
     model, interpreter = build_model_and_interpreter(spec.make_kernel(), default_ops(fmt), spec.name, fmt)
-    vectors = [_decode_spec_vector(model, fmt, row) for row in spec.vectors(fmt)]
+    vectors = [_spec_vector(model, row) for row in spec.raw_vectors()]
     assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
 
 

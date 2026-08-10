@@ -27,6 +27,7 @@ from holoso import (
     OperatorOptions,
     Options,
     UnsupportedConstruct,
+    synthesize,
 )
 from holoso._operators import (
     FFromIntOperator,
@@ -535,7 +536,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         float_format=fmt,
         int_format=default_ifmt(fmt),
         fetch_lag=_FETCH_LAG,
-        regfile=RegFileLayout(width=default_ifmt(fmt).width, nreg=4, nrd=2, nwr=2, nload=2),
+        regfile=RegFileLayout(nreg=4, nrd=2, nwr=2, nload=2),
         inputs=[WideInputLoad("a", RegRef(0), FloatType(fmt)), WideInputLoad("b", RegRef(1), FloatType(fmt))],
         ops=[op],
         outputs=[
@@ -758,3 +759,17 @@ def test_an_integer_port_declares_itself_signed() -> None:
 def test_an_integer_kernel_emits_rtl_that_elaborates(tmp_path: Path) -> None:
     """Every wide site keyed on float rather than on the port's own family, so none of this could be rendered."""
     _elaborate("int_kernel", generate(_integer_lir()).verilog, tmp_path)
+
+
+def offset_by_one(x: float) -> float:
+    return x + 1.0
+
+
+def test_a_float_write_fills_the_wide_high_bits_with_dont_care() -> None:
+    """The adopted bit-fill policy: don't-care high bits when WREG > WFLT, no fill machinery at all at gap 0."""
+    gapped = synthesize(
+        offset_by_one, Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33), name="Gap9"
+    )
+    assert "{{(WREG-WFLT){1'bx}}, s_fadd" in gapped.verilog_output.verilog
+    flat = synthesize(offset_by_one, Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(6, 18)), name="Gap0")
+    assert "1'bx" not in flat.verilog_output.verilog

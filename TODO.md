@@ -2,17 +2,6 @@
 
 ## Integer support adjacent
 
-An integer travels from the front end through the Verilog backend, but `synthesize` still refuses a built LIR that
-names one (`_refuse_integer_lir`, `_api.py`). Lifting that gate needs the other three backends.
-
-The numerical model stores every wide value as a float and says so with asserts in `_read` and `_write`, while the
-slot reset snapshot leans on `FloatValue.from_float`'s own type check; the cocotb codec duplicates the assumption,
-and the HTML report reads a wide carrier as a float too. Both the model and the codec need a `FloatValue | IntValue`
-union and one shared scalar port codec. The model's `_coerce_inputs` and its slot reset decide the family
-independently of the port metadata rather than routing through it, which the typed `scalar_type` every wide carrier
-now names makes possible; converge them onto that one dispatch first, or an integer input port fails loudly in one
-place and an integer slot is encoded as a float without a word in the other.
-
 Integer strength reduction is deferred past the constant folds and the declared algebra. The non-commutative
 operators declare no identity deliberately, because the shared algebra drops an identity operand wherever it sits
 and so would rewrite `0 - x` to `x`; `x-0`, `x//1` and `x%1` therefore need rules of their own. So do the integer
@@ -22,32 +11,24 @@ lowering to `ishl`'s saturating `prod` reading rather than the raw `shft` one th
 it yet. Each must answer for saturation at the format extremes, a question the float rules never faced. One further
 constraint: no HIR pass may mint a shift, or the machine-word substitution fixpoint below MIR loses its bound.
 
-A kernel that never names an integer can still raise one and reach the LIR refusal: the roundings answer an integer
-over a float, and `abs`/`min`/`max`/`np.sign` keep one they are handed. Only the adjacent `IntToFloat(FloatToInt(x))`
-reduces before that, so `math.floor(x) > 3`, `float(math.floor(x) + 1)`, `float(abs(int(x)))`, `float(max(int(x),
-0))`, an integer phi merging `floor` with `ceil`, and any integer state slot build to LIR and stop there. Sinking
-`IntToFloat` through a select and through the exactly-representable int arithmetic would let more of them
-synthesize sooner; carrying integers through the backends recovers all of them and is the real fix.
-
-The `lir.wide_consts` pool dedups its float half on the source Python float rather than on the encoding, so two
-float literals that encode identically get two `const_N` wires.
-
-The emitted RTL requires an empirical study of the optimal way to bit-extend float results into the register file
-when WREG>WFLT. The default treatment of `x <= y` where x is wider than y is to zero-fill the higher bits,
-which may potentially require a wider mux and extra wires while we don't care about the value of those bits.
-We must explore the possible alternatives, such as marking them explicitly as don't-care,
-e.g., `x <= {{X{1'bx}}, result8}` for X extra bits, or a similar solution.
-The winner will be chosen based on the synthesis metrics across Diamond, Vivado, and Yosys.
-
 The integer kernels in `tests/_eel_corpus.py` (UART, CRC/LFSR, NCO, PWM, debouncer, priority encoder) are the
-acceptance set, covered end to end through the MIR interpreter and LIR; what the gate still withholds is the
-cosimulation against the emitted RTL. `examples/uart.py` carries its counters as floats until then.
+acceptance set, covered through the MIR interpreter and the numerical model, with an RTL cosimulation subset in
+`tests/test_cosim_int.py`; porting `examples/uart.py` off its float-carried counters remains open.
+
+The generated bench asserts `err_pc == 0` on every vector, so a transaction whose defined answer includes an
+asserted error sideband -- an input-fed `x // 0`, a float division by zero -- cannot be cosimulated end to end;
+that behavior is covered at the operator-bench and model levels instead. Letting an explicit vector declare its
+expected `err_pc` would close this for both families.
+
+A `for` that cannot unroll -- a dynamic trip count, or a static one above the unroll threshold -- is rejected rather
+than lowered to a counted back-edge loop, which needs a runtime integer counter; with runtime integers now carried
+through the whole pipeline, the counted back-edge loop is the natural follow-on.
 
 ## White-box test promotion
 
-The `whitebox` marker is a promotion queue, not a category: it marks a test that reaches past the public API only
-because a gate blocks the path. The integer tests carry it because `synthesize` still refuses a built LIR naming an
-integer; when the gate lifts, each should become an ordinary kernel and the marker should go.
+The `whitebox` marker is a promotion queue, not a category: it marks a test that reaches past the public API where a
+black-box spelling is now possible. The integer selection and RTL-shape suites carry it; each should become an
+ordinary kernel driven through `synthesize`, and the marker should go with the rewrite.
 
 Predating the marker is a large body of tests that reach into `lower_to_mir`, `build` and the allocation tables
 directly -- the schedule, install-landing, const-install, overlap and microcode suites among them. Sweep them the

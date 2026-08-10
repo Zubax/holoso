@@ -182,10 +182,11 @@ def _drain_to_output(
     while not simulator.out_valid:
         simulator.tick(in_valid=False, out_ready=False)
     held = simulator.output_values[0]
+    assert isinstance(held, (holoso.FloatValue, bool))
     for _ in range(stall):  # back-pressure: the output must not move and no new input may be accepted
         simulator.tick(in_valid=False, out_ready=False)
         assert simulator.out_valid and not simulator.in_ready
-        assert simulator.output_values[0].bits == held.bits
+        assert simulator.output_values[0] == held
     simulator.tick(in_valid=False, out_ready=True)  # release, advancing the persistent state once
     return held
 

@@ -10,10 +10,10 @@ pure data and lets the simulator be an ordinary (non-pickled) object.
 :class:`NumericalSimulator` mirrors the generated ZISC RTL: it holds the same fetch PC and register files
 (``regs``/``bregs``) and advances exactly one ``posedge clk`` per :meth:`NumericalSimulator.tick`, driving ``next_pc``
 with the same sequencer the Verilog emits (reset / out_valid / in_ready / terminator redirect, back-pressure included).
-Every operator evaluates the same ZKF bits as the hardware, so it reproduces a transaction bit-for-bit AND
-cycle-for-cycle: the same inputs reach ``out_valid`` on the same cycle and present the same output bits. The persistent
-slot registers simply live in ``regs``/``bregs`` and carry across transactions; :meth:`NumericalSimulator.reset`
-reloads the reset snapshot.
+Every operator evaluates the exact bits the hardware computes (ZKF floats, saturating two's-complement integers), so it
+reproduces a transaction bit-for-bit AND cycle-for-cycle: the same inputs reach ``out_valid`` on the same cycle and
+present the same output bits. The persistent slot registers simply live in ``regs``/``bregs`` and carry across
+transactions; :meth:`NumericalSimulator.reset` reloads the reset snapshot.
 
 The timing is read off the shared LIR cycle helpers, which are in the fetch-PC frame: ``operand_read_cycle(S)`` and
 ``landing_cycle(commit)`` are the literal ``pc`` values at which an operand is sampled and a result becomes readable in
@@ -30,10 +30,9 @@ DUT.
 """
 
 from dataclasses import dataclass
-from typing import assert_never
 
-from .._value import FloatValue
-from .._lir import BoolInputLoad, WideConstRef, WideInputLoad, WideOperand
+from .._value import FloatValue, IntValue, ScalarLike, ScalarValue, WideValue, coerce_scalar
+from .._lir import WideConstRef, WideOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
@@ -41,44 +40,7 @@ from .._lir import install_landing, landing_cycle, operand_read_cycle
 from .._operators import *
 from .._type import FloatFormat, LogicalPort
 
-type ModelInput = FloatValue | float | bool
-type ModelOutput = FloatValue | bool
 type _Dst = RegRef | BoolRegRef
-type _Value = FloatValue | bool
-
-
-def _coerce_input(value: ModelInput, fmt: FloatFormat, index: int) -> FloatValue:
-    if isinstance(value, FloatValue):
-        if value.fmt != fmt:
-            raise ValueError(f"input {index} has {value.fmt}, expected {fmt}")
-        return value
-    if type(value) is float:
-        return FloatValue.from_float(fmt, value)
-    raise TypeError(f"input {index} must be FloatValue or float, got {type(value).__name__}")
-
-
-def _coerce_bool_input(value: ModelInput, index: int) -> bool:
-    if type(value) is bool:
-        return value
-    raise TypeError(f"input {index} must be bool, got {type(value).__name__}")
-
-
-def _coerce_inputs(lir: Lir, inputs: tuple[ModelInput, ...]) -> tuple[list[FloatValue], list[bool]]:
-    """Split the flat positional inputs into the wide and boolean banks, in port order, coercing/validating each."""
-    if len(inputs) != len(lir.inputs):
-        raise ValueError(f"expected {len(lir.inputs)} inputs, got {len(inputs)}")
-    fmt = lir.float_format
-    float_values: list[FloatValue] = []
-    bool_values: list[bool] = []
-    for index, (load, raw_input) in enumerate(zip(lir.inputs, inputs, strict=True)):
-        match load:
-            case WideInputLoad():
-                float_values.append(_coerce_input(raw_input, fmt, index))
-            case BoolInputLoad():
-                bool_values.append(_coerce_bool_input(raw_input, index))
-            case _:
-                assert_never(load)
-    return float_values, bool_values
 
 
 def _signature(ports: list[LogicalPort]) -> str:
@@ -143,10 +105,10 @@ class NumericalSimulator(_Kernel):
 
     def __init__(self, lir: Lir) -> None:
         self._lir = lir
-        self.regs: dict[int, FloatValue] = {}  # wide register file (Verilog ``regs``)
+        self.regs: dict[int, WideValue] = {}  # wide register file (Verilog ``regs``)
         self.bregs: dict[int, bool] = {}  # boolean register file (Verilog ``bregs``)
         self.pc = 0
-        self._pending: dict[int, list[tuple[_Dst, _Value]]] = {}  # landing PC -> in-flight (dest, value) writes
+        self._pending: dict[int, list[tuple[_Dst, ScalarValue]]] = {}  # landing PC -> in-flight (dest, value) writes
         self._op_events: dict[int, list[_OpEvent]] = {}  # read PC -> firings sampling their operands there
         self._installs: dict[int, list[_Install]] = {}  # fire PC -> pc-gated installs (readable one PC later)
         self._boundary: list[_Install] = []  # state writebacks gated to the accepted-output boundary edge
@@ -156,25 +118,25 @@ class NumericalSimulator(_Kernel):
 
     def reset(self) -> None:
         """Reload every persistent slot register with its reset snapshot and clear the in-flight state, as at rst."""
-        fmt = self._lir.float_format
         self.pc = 0
-        self.regs = {
-            slot.reg.index: FloatValue.from_float(fmt, slot.reset_value) for slot in self._lir.wide_state_slots
-        }
+        self.regs = {slot.reg.index: slot.reset_value for slot in self._lir.wide_state_slots}
         self.bregs = {slot.reg.index: slot.reset_value for slot in self._lir.bool_state_slots}
         self._pending = {}
 
-    def set_inputs(self, *inputs: ModelInput) -> None:
+    def set_inputs(self, *inputs: ScalarLike) -> None:
         """
         Present the input values (in module-port order) on the input lanes. Inputs carry no latency, so they are
         written into their register lanes directly (the hardware latches them at the accept edge; nothing reads them
         before the first executing step, so writing them when presented is observationally identical).
         """
-        float_values, bool_values = _coerce_inputs(self._lir, inputs)
-        for wide_load, float_value in zip(self._lir.wide_inputs, float_values):
-            self.regs[wide_load.dst.index] = float_value
-        for bool_load, bool_value in zip(self._lir.bool_inputs, bool_values):
-            self.bregs[bool_load.dst.index] = bool_value
+        if len(inputs) != len(self._lir.inputs):
+            raise ValueError(f"expected {len(self._lir.inputs)} inputs, got {len(inputs)}")
+        values = [  # coerce everything first, so a bad input leaves no lane partially written
+            coerce_scalar(load.scalar_type, raw, f"input {index}")
+            for index, (load, raw) in enumerate(zip(self._lir.inputs, inputs, strict=True))
+        ]
+        for load, value in zip(self._lir.inputs, values, strict=True):
+            self._write(load.dst, value)
 
     def tick(self, in_valid: bool, out_ready: bool) -> None:
         """
@@ -206,7 +168,7 @@ class NumericalSimulator(_Kernel):
         self.pc = next_pc
         self._apply(next_pc)
 
-    def run(self, *inputs: ModelInput, max_cycles: int = 1_000_000_000) -> list[ModelOutput]:
+    def run(self, *inputs: ScalarLike, max_cycles: int = 1_000_000_000) -> list[ScalarValue]:
         """
         Run one whole transaction by driving :meth:`tick`: present ``inputs``, advance to ``out_valid``, read the
         outputs, and accept them (advancing the persistent state). ``max_cycles`` bounds a non-terminating kernel; a
@@ -242,7 +204,7 @@ class NumericalSimulator(_Kernel):
         return self.pc == self._lir.last_pc
 
     @property
-    def output_values(self) -> list[ModelOutput]:
+    def output_values(self) -> list[ScalarValue]:
         """The output values in port order, combinational from the register files (meaningful while ``out_valid``)."""
         return [self._read(wire.tap) for wire in self._lir.outputs]
 
@@ -306,13 +268,8 @@ class NumericalSimulator(_Kernel):
             # every result of this firing lands at the one bank-independent cycle
             landing = landing_cycle(event.commit_pc, self._lir.fetch_lag)
             for write in event.op.writes:
-                result = results[write.port]
-                if isinstance(write.dst, RegRef):
-                    assert isinstance(result, FloatValue) and isinstance(write.conditioner, FloatSignControl)
-                    self._pending.setdefault(landing, []).append((write.dst, write.conditioner.apply_value(result)))
-                else:
-                    assert isinstance(result, bool) and isinstance(write.conditioner, BoolInversion)
-                    self._pending.setdefault(landing, []).append((write.dst, write.conditioner.apply(result)))
+                value = apply_conditioner(write.conditioner, results[write.port])
+                self._pending.setdefault(landing, []).append((write.dst, value))
         # Installs are a parallel bundle (read every source before enqueueing any destination, so an in-place
         # self-conditioned install ``b <= ~b`` and a swap are read-then-write correct) and land one PC later -- the
         # pc-gated write ``regs[dst] <= src`` at this PC is readable on the next.
@@ -320,7 +277,7 @@ class NumericalSimulator(_Kernel):
         for dst, value in resolved:
             self._pending.setdefault(install_landing(pc), []).append((dst, value))
 
-    def _read(self, operand: WideOperand | BoolOperand) -> _Value:
+    def _read(self, operand: WideOperand | BoolOperand) -> ScalarValue:
         if isinstance(operand, WideOperand):
             wide_source = operand.source
             base = (
@@ -328,18 +285,14 @@ class NumericalSimulator(_Kernel):
                 if isinstance(wide_source, WideConstRef)
                 else self.regs[wide_source.index]
             )
-            assert isinstance(operand.conditioner, FloatSignControl) and isinstance(
-                base, FloatValue
-            ), "the model stores every wide value as a float"
-            return operand.conditioner.apply_value(base)
+            return apply_conditioner(operand.conditioner, base)
         bool_source = operand.source
-        if isinstance(bool_source, BoolConstRef):
-            return operand.inversion.apply(bool_source.value)
-        return operand.inversion.apply(self.bregs[bool_source.index])
+        value = bool_source.value if isinstance(bool_source, BoolConstRef) else self.bregs[bool_source.index]
+        return apply_conditioner(operand.inversion, value)
 
-    def _write(self, dst: _Dst, value: _Value) -> None:
+    def _write(self, dst: _Dst, value: ScalarValue) -> None:
         if isinstance(dst, RegRef):
-            assert isinstance(value, FloatValue)
+            assert isinstance(value, (FloatValue, IntValue))
             self.regs[dst.index] = value
         else:
             assert isinstance(value, bool)

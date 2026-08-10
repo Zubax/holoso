@@ -3,10 +3,13 @@ Cosim of the two inlined-``holoso_fsgnop`` sites the bundled examples miss: a fo
 output taps. The ``remainder``/``pid`` specs already cover the inline-firing and phi-arm-install sites.
 """
 
+import dataclasses
+
 import pytest
 
 from holoso import FloatFormat
 from ._cosim import run_cosim
+from ._modelref import default_options
 from .hdl.hdl_float_oracle import SIMULATORS
 
 
@@ -26,5 +29,7 @@ class SignHold:
 @pytest.mark.parametrize("wint_min", (None, 33))
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_sign_conditioning_cosim(sim: str, wint_min: int | None) -> None:
-    fmt = FloatFormat(wexp=6, wman=18)
-    run_cosim(sim, SignHold().__call__, fmt, "sign_hold", wint_min=wint_min)
+    options = default_options(FloatFormat(wexp=6, wman=18))
+    if wint_min is not None:
+        options = dataclasses.replace(options, wint_min=wint_min)
+    run_cosim(sim, SignHold().__call__, options, "sign_hold")

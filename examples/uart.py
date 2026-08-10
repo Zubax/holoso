@@ -6,9 +6,9 @@ period) and the class drives the bit-level state machine internally: the transmi
 start / data / parity / stop frame, and the receiver detects the start edge, samples each bit at its midpoint, recovers
 the byte, and flags framing/parity errors.
 
-TODO(integers): There is no integer type yet, so the byte and the counters are carried as floats.
+TODO(integers): this example predates runtime integer support, so the byte and the counters are carried as floats.
 FIXME: Every bit-level operation here is a stand-in for an integer bitwise/shift op and collapses to a few lines once
-an integer type is available.
+the example is ported to integers (see TODO.md).
 """
 
 from pathlib import Path

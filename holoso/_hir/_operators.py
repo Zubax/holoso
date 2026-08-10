@@ -703,8 +703,8 @@ class BoolToFloat(Operator):
 
 
 # Signed integers before hardware width selection. Folding is exact at arbitrary precision -- no width, no saturation
-# -- so a fully static integer expression disappears before MIR, whose integer refusal therefore only ever sees a
-# runtime one. Add/sub/mul/neg/abs and the bitwise and shift operators are speculatable; floor-division and modulo
+# -- so a fully static integer expression disappears before MIR ever has to hold it in a machine word.
+# Add/sub/mul/neg/abs and the bitwise and shift operators are speculatable; floor-division and modulo
 # assert the div-by-zero error flag, so they are not.
 
 

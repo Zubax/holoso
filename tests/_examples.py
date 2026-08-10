@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from holoso import FloatFormat
-from ._modelref import bounded, encode_inputs, format_edge_bits, log_uniform_positive, spd_matrix
+from ._modelref import bounded, format_edge_bits, log_uniform_positive, spd_matrix
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
@@ -117,10 +117,6 @@ class ExampleSpec:
         for row in self.manual:
             assert set(row) == inputs, f"{self.name}: manual row keys {set(row)} != inputs {inputs}"
         assert set(self.edge_overrides) <= inputs, f"{self.name}: edge_overrides keys outside inputs {inputs}"
-
-    def vectors(self, fmt: FloatFormat) -> list[dict[str, int]]:
-        """The full reproducible input sequence as input-name -> ZKF-bits rows: manual, then random, then edges."""
-        return [encode_inputs(fmt, row) for row in self.raw_vectors()]
 
     def reference_vectors(self) -> list[InputVector]:
         """

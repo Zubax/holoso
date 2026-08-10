@@ -154,6 +154,6 @@ def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) 
     env = {
         "HOLOSO_DWELL_K": k,
         "HOLOSO_SLOT_IDX": slot.reg.index,
-        "HOLOSO_SLOT_RESET_BITS": _FMT.encode(slot.reset_value),
+        "HOLOSO_SLOT_RESET_BITS": slot.reset_value.bits,
     }
     _run_bench(name, lir, "state_inert_during_dwell", env, monkeypatch)

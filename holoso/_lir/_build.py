@@ -7,17 +7,11 @@ import logging
 from dataclasses import replace
 
 from .._errors import UnsupportedConstruct
-from .._mir import (
-    Mir,
-    MirBoolView,
-    MirBranch,
-    MirPhi,
-    MirStateRead,
-    MirStateSlot,
-    MirWideView,
-)
+from .._mir import Mir, MirBoolView, MirBranch, MirPhi, MirStateRead, MirStateSlot, MirWideView
 from .._operators import PortConditioner
+from .._type import FloatType, IntType
 from .._util import ValueId
+from .._value import FloatValue, IntValue, WideValue, coerce_scalar
 from ._ir import *
 from ._mir_facts import block_has_install, pred_count
 from ._portassign import assign_commutative_ports
@@ -339,14 +333,18 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     # A coalesced slot's live-out tap resolves to the slot register itself (its operator wrote it directly, no copy); a
     # non-coalesced slot taps the live-out's own register, installed at ``install_cycle`` -- absolutized here by adding
     # the Ret block's base, since the install fires inside the (last-laid-out) Ret block (``ret_block`` above).
+    def encoded_reset(slot_name: str, scalar_type: FloatType | IntType, raw: float | int | bool) -> WideValue:
+        value = coerce_scalar(scalar_type, raw, f"state slot {slot_name!r} reset")
+        assert isinstance(value, (FloatValue, IntValue))
+        return value
+
     wide_state_slots = [
         WideStateSlot(
             slot.name,
             RegRef(alloc.wide_slot_reg[slot.name]),
-            slot.reset_value,
+            encoded_reset(slot.name, wide_mir.scalar_type_of(slot.live_out), slot.reset_value),
             wide_operand(wide_mir, slot.live_out, slot.conditioner, alloc, const_pool),
             block_base[ret_block] + alloc.wide_install[slot.name],
-            wide_mir.scalar_type_of(slot.live_out),
         )
         for slot in wide_mir.state_slots
     ]
@@ -367,7 +365,6 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         float_format=wide_mir.float_format,
         int_format=wide_mir.int_format,
         regfile=RegFileLayout(
-            width=max(wide_mir.float_format.width, wide_mir.int_format.width),
             nreg=alloc.nreg,
             nrd=sum(inst.operator.signature.arity for inst in instances),
             nwr=len(tapped_wide_lanes(blocks)),

@@ -383,7 +383,7 @@ def _op_expr(op: PooledScheduledOp) -> str:
 
 
 def _landing_label(dst: RegRef | BoolRegRef, source: WriteSource) -> str:
-    """A non-pooled write rendered ``dst=source`` for the ROM-step comment -- the dual of ``_write_source_rhs``."""
+    """A non-pooled write rendered ``dst=source`` for the ROM-step comment -- the dual of the emitter's write RHS."""
     match source:
         case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
             rendered = operator.render(*[operand.stable_label for operand in operands])

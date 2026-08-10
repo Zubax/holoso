@@ -1,7 +1,7 @@
 """
 The integer corpus: the kernels the float examples stand in for (``examples/uart.py``'s TODO(integers) notes),
-plus the residual-loop exit kernels. These lower through the Eel frontend and verify against CPython exactly,
-while MIR still refuses the integer ones until the integer backend lands.
+plus the residual-loop exit kernels. Each verifies against CPython exactly and runs through the MIR interpreter
+and the numerical model; a subset also cosimulates against the emitted RTL.
 """
 
 OVERSAMPLE = 16

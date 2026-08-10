@@ -75,7 +75,7 @@ from holoso._operators import (
 from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_model
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType
-from holoso._value import FloatValue
+from holoso._value import FloatValue, ScalarValue
 
 from ._modelref import (
     COMPARATOR_OP_CASES,
@@ -412,7 +412,9 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
             self.writes: dict[tuple[str, int], set[int]] = {}
 
         def _write(self, dst: object, value: object) -> None:
-            self.writes.setdefault((type(dst).__name__, dst.index), set()).add(self.pc)  # type: ignore[attr-defined]
+            if not self.in_ready:  # the accept dwell writes only the input lanes, which are not landings
+                key = (type(dst).__name__, dst.index)  # type: ignore[attr-defined]
+                self.writes.setdefault(key, set()).add(self.pc)
             super()._write(dst, value)  # type: ignore[arg-type]
 
     vectors = [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5), (1.0, 1.0, 1.0), (0.5, 0.0, 1.5), (3.0, 1.0, 2.0), (1.0, 3.0, 0.0)]
@@ -917,7 +919,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             self.branch_read = (self.pc, terminator.cond.index) if isinstance(terminator, Branch) else None
             super().tick(in_valid, out_ready)
 
-        def _read(self, operand: WideOperand | BoolOperand) -> FloatValue | bool:
+        def _read(self, operand: WideOperand | BoolOperand) -> ScalarValue:
             if isinstance(operand, WideOperand):
                 if isinstance(operand.source, RegRef):
                     self.reads.add(operand.source.index)
@@ -1096,7 +1098,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             self.branch = (self.pc, term.cond.index) if isinstance(term, Branch) else None
             super().tick(in_valid, out_ready)
 
-        def _read(self, operand: WideOperand | BoolOperand) -> FloatValue | bool:
+        def _read(self, operand: WideOperand | BoolOperand) -> ScalarValue:
             source = operand.source
             if isinstance(operand, WideOperand):
                 if isinstance(source, RegRef):
@@ -1404,7 +1406,7 @@ def test_build_lir_small_kernel() -> None:
     lir = build_lir(_run(f), "kernel")
     assert lir.module_name == "kernel"
     assert lir.float_format == FMT
-    assert lir.regfile.width == lir.int_format.width >= lir.float_format.width
+    assert lir.int_format.width >= lir.float_format.width
     assert lir.regfile.nreg >= 1
     assert {i.name for i in lir.wide_inputs} == {"a", "b"}
     assert lir.regfile.nload == 2  # both inputs are preloaded via the regfile load port (registers 0..1)
@@ -2036,7 +2038,7 @@ def test_optional_stages_raise_latency_without_changing_numerics() -> None:
     lirs = {name: build_lir(_run(kernel, ops, fmt), f"stages_{name}") for name, ops in configs.items()}
     assert lirs["default"].initiation_interval < lirs["staged"].initiation_interval
 
-    def bits(outputs: list[FloatValue | bool]) -> list[int]:  # the kernel is all-float, so every output is a FloatValue
+    def bits(outputs: list[ScalarValue]) -> list[int]:  # the kernel is all-float, so every output is a FloatValue
         result = []
         for v in outputs:
             assert isinstance(v, FloatValue)

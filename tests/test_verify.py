@@ -28,13 +28,12 @@ from holoso._lir import Lir, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import Mir, lower as lower_to_mir
 from ._modelref import (
+    Vector,
     build_ops,
     assert_model_equals_interpreter,
     bounded,
     build_model_and_interpreter,
-    default_ops,
     default_tolerance,
-    encode_inputs,
     evaluate_reference,
     log_uniform_positive,
     random_legal_bits,
@@ -546,8 +545,6 @@ def test_sampling_legal_and_spd() -> None:
         assert FMT.is_legal(bits) and FMT.is_finite(bits)
     cov = spd_matrix(rng, 3)
     assert np.all(np.linalg.eigvalsh(cov) > 0.0)
-    encoded = encode_inputs(FMT, {"a": 1.0, "b": 2.0})
-    assert set(encoded) == {"a", "b"} and encoded["a"] == FMT.encode(1.0)
 
 
 def test_model_executes_first_sample_branch() -> None:
@@ -1617,7 +1614,7 @@ def test_merged_state_slots_preserve_behaviour() -> None:
     # The slot drop must not change behaviour: drive PFD across many transactions and confirm the model still agrees
     # with the schedule-independent MIR interpreter (blind to LIR faults), so the merged state persists correctly.
     model, interpreter = build_model_and_interpreter(PhaseFrequencyDetector().__call__, OPS, "pfd_merge", FMT)
-    vectors: list[list[FloatValue | bool]] = [
+    vectors: list[Vector] = [
         [True, False, False],  # reference leads -> up
         [False, False, False],  # hold up
         [False, True, False],  # feedback arrives -> reset
@@ -1682,7 +1679,7 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
             self._alias = self.x
             return old, self.x, w
 
-    vectors: list[list[FloatValue | bool]] = [
+    vectors: list[Vector] = [
         [cond, FloatValue.from_float(FMT, k)]
         for cond, k in [(True, 1.0), (False, 1.0), (True, 3.0), (True, -2.0), (False, 0.5), (False, 4.0), (True, 0.0)]
     ]

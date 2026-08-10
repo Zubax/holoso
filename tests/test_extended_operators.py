@@ -31,6 +31,7 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
+from holoso._value import ScalarValue
 
 # Bare-name imports so a ``from math import floor`` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -78,7 +79,7 @@ def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
     return holoso.synthesize(fn, _ops(), name=name).numerical_model.elaborate()
 
 
-def _bits(value: FloatValue | bool) -> int:
+def _bits(value: ScalarValue) -> int:
     assert isinstance(value, FloatValue)
     return value.bits
 

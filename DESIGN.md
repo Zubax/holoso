@@ -174,8 +174,8 @@ float, so an integer fills it exactly and a float occupies its low bits. The inl
 Verilog over the whole register. Floats pay in unused flip-flops and slightly wider read muxes whenever the
 integer is the wider format; one representation with no edge cases is worth more than the bits it wastes.
 
-Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers do
-reach HIR, and now reach LIR, where a located refusal holds them until the backends carry them (see DEFERRED).
+Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers
+travel the whole pipeline into every backend. A static integer folds away before MIR ever sees it.
 
 ## Operators
 
@@ -274,9 +274,9 @@ HIR is a real CFG of basic blocks carrying an SSA value DAG: pure semantic opera
 integers, phis at merges, and jump/branch/ret terminators. It is target-independent and hardware-unaware, operating
 at the level of basic math principles under the fastmath charter. The node vocabulary is explicitly typed per scalar
 kind rather than overloading one spelling, which is what let the integer kind arrive alongside the float and boolean
-ones without disturbing them (only its backend is still deferred, see DEFERRED); the same discipline extends to the
-next kind. Value sharing respects control flow: an expression is interned only where one value can
-legally serve every consumer, so identical expressions in mutually exclusive arms stay distinct.
+ones without disturbing them; the same discipline extends to the next kind. Value sharing respects control flow: an
+expression is interned only where one value can legally serve every consumer, so identical expressions in mutually
+exclusive arms stay distinct.
 
 Operators split structurally into POOLED -- physical streaming modules the scheduler contends for -- and INLINE --
 pure expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is
@@ -326,20 +326,6 @@ limitation of the composites, not of the rule.
 Dividing by a representable constant whose reciprocal is not (`x / 3e9` at e6m18) is refused over the reciprocal
 `x/c` mints rather than over anything the kernel wrote, since keeping `fdiv` there needs a format-aware choice HIR
 is forbidden to make.
-
-A `for` that cannot unroll -- a dynamic trip count, or a static one above the unroll threshold -- is rejected rather
-than lowered to a counted back-edge loop, which needs a runtime integer counter; once runtime integers lower past
-MIR, the counted back-edge loop becomes the natural follow-on.
-
-Integers. An integer now travels the whole compiler: the front-end emits it, HIR folds it exactly, MIR selects
-hardware for it, and LIR schedules, binds and allocates it beside the floats. What is deferred is everything below --
-the numerical model, the cocotb codec and the HTML report each read a wide carrier as a float -- so `synthesize`
-refuses a built LIR that still names an integer, listing every surviving port, constant, state slot and operator
-rather than whichever one a backend would have tripped over first. That single refusal covers all four backends.
-A static integer folds away before MIR ever sees it, but a kernel need not look integral to raise a
-runtime integer: every symbol answering what Python answers -- the roundings over a float, and `abs`/`min`/`max`/
-`np.sign` over an integer however it arose, including an integer state slot -- now keeps it, where a float-only
-lowering would have computed over its float image instead.
 
 ## MIR
 
@@ -391,12 +377,13 @@ nominally, one class per wide family, so a float and an integer share the bank w
 
 LIR is the scheduled, bound, register-allocated microprogram. Its resources are the bound operator instances, the
 float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a wide constant pool
-shared by both families, and the typed input loads and output wires. The pool keys a float by MAGNITUDE, with the sign
-riding the consumer's free sideband, and an integer by its own whole value, since two's complement has no such
-sideband; the two keyings index one list of entries but cannot share a dictionary, because `1` and `1.0` compare and
-hash equal in Python while naming different words. Each wide carrier -- an input load, an output wire, a state slot --
-names its own scalar type, so the advertised port metadata the RTL and the numerical model share reads the family off
-the carrier rather than assuming one. LIR names its carriers after the bank that holds them rather than after the
+shared by both families, and the typed input loads and output wires. The pool interns constants by their typed
+encoded machine value in one dictionary -- a float by its encoded MAGNITUDE, with the sign riding the consumer's
+free sideband, and an integer by its own whole word, since two's complement has no such sideband -- so encoding-equal
+float literals share one word and the two families cannot collide. Each wide carrier reads its family off itself: an
+input load and an output wire name their scalar type, and a state slot carries its reset snapshot as the encoded
+value whose type IS the slot's family, so the advertised port metadata the RTL and the numerical model share never
+assumes a family. LIR names its carriers after the bank that holds them rather than after the
 scalar family -- `WideOperand`, `WideCopy`, `WideStateSlot` against their `Bool*` duals -- because it is the
 physical binding layer. A carrier's
 folded conditioner follows the same rule: it is typed as whatever the bank may hold rather than as a sign control,
@@ -559,7 +546,8 @@ controller-agnostic.
 
 The numerical model gives bit-exact, cycle-exact emulation of the emitted HDL without HDL emission or simulation, so
 the synthesis logic can be verified through LIR during heavy refactors: bit-exact because it replaces native float
-operators with the ZKF package's bit-exact software implementation, cycle-exact because it mirrors the RTL's fetch
+operators with bit-exact software implementations (the ZKF package for floats, the integer operators' own saturating
+arithmetic), cycle-exact because it mirrors the RTL's fetch
 PC, register files, and sequencer. It splits into a serializable handle carrying only the LIR (kept private, so the
 LIR never enters the public API) -- the artifact a generated testbench embeds -- and a runtime machine elaborated
 from it. Both expose the kernel's logical signature as read-only metadata (each port a logical name paired with a
@@ -605,6 +593,11 @@ Adopted (lossless, f_max-neutral):
   at zero hardware or latency cost. Based on Chen & Cong.
 - A per-register write opcode and a grouped input load: read/write symmetry that folds every write-enable,
   write-address, const-pool selector, and boolean inversion into one tiny opcode, at modest ROM cost.
+- Explicit don't-care fill of a float write's WREG-WFLT high bits (`{{(WREG-WFLT){1'bx}}, value}`, float views
+  narrowed to WFLT), keyed on the write arm's scalar family and engaged only when the integer format widens the
+  register file past the float. Only Diamond LSE rewards it, but decisively (about -3% LUT flow-total and f_max up
+  on every gapped row, growing with the gap); Vivado and Yosys sweep the dead bits under either spelling. X-filling
+  the constant pool was measured null (a constant's high bits are dead at every use) and skipped.
 
 Explored and rejected for register-pressure-bound kernels:
 

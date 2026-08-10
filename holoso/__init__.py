@@ -21,8 +21,9 @@ from ._type import (
     FloatFormat as FloatFormat,
     FloatType as FloatType,
     IntFormat as IntFormat,
+    IntType as IntType,
 )
-from ._value import FloatValue as FloatValue
+from ._value import FloatValue as FloatValue, IntValue as IntValue
 from ._errors import (
     HolosoError as HolosoError,
     SourceUnavailable as SourceUnavailable,

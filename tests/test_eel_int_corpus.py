@@ -3,10 +3,9 @@ The corpus differential: every kernel is oracle-verified against CPython -- exac
 state included -- and then lowered. The float kernels are the two residual-loop exit shapes plus the FIR and
 biquad examples, whose exactness against CPython this suite adds on top of the tolerance-based example matrix.
 
-The integer kernels go one layer further: each is re-run through :class:`MirInterpreter` and compared against the
-HIR evaluator transaction by transaction, so selection is judged against the same graph CPython already vouched
-for. The two agree only while nothing reaches a rail -- HIR is unbounded, the machine saturates -- which is what
-the generous word width below buys.
+The integer kernels additionally run through :class:`MirInterpreter` and the numerical model built from the LIR,
+both compared against the HIR evaluator per transaction. They agree only while nothing reaches a rail -- HIR is
+unbounded, the machine saturates -- which the generous word width below buys.
 """
 
 import sys
@@ -21,7 +20,7 @@ from holoso._hir import HirEvaluator
 from holoso._mir import MirInterpreter, lower as lower_to_mir
 from holoso._value import FloatValue, IntValue, ScalarValue
 
-from ._modelref import build_lir, build_ops
+from ._modelref import build_lir, build_model, build_ops
 from ._eel_corpus import Crc8, Debouncer, IntUartRx, IntUartTx, Lfsr16, NcoPhase, PriorityEncoder, Pwm
 from ._eel_corpus import band_scan, convergence_steps
 from ._eeloracle import InputRow, assert_hir_matches_reference
@@ -140,28 +139,33 @@ def _int_ops() -> holoso.Options:
     )
 
 
-def _plain(value: ScalarValue) -> float | bool | int:
+def _typed(value: ScalarValue | float | bool | int) -> tuple[type, float | bool | int]:
+    """Python's ``==`` conflates ``True``, ``1`` and ``1.0``, blinding a bare comparison to family substitution."""
     match value:
         case bool():
-            return value
+            return bool, value
         case IntValue():
-            return int(value)
+            return int, int(value)
         case FloatValue():
-            return float(value)
+            return float, float(value)
+        case _:
+            return type(value), value
 
 
 @pytest.mark.parametrize("name,make,vectors", _INT_CASES, ids=[name for name, _, _ in _INT_CASES])
-def test_int_corpus_selects_and_agrees_with_the_hir_oracle(
+def test_int_corpus_agrees_across_hir_interpreter_and_model(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
     options = _int_ops()
     hir = lower(make()).hir
     mir = lower_to_mir(hir, build_ops(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
-    build_lir(mir, name)  # the carriage half: everything selection emits must reach LIR intact
+    model = build_model(build_lir(mir, name))  # the scheduled machine over the same selection
     evaluator, interpreter = HirEvaluator(hir), MirInterpreter(mir)
     names = hir.input_names()
     assert [out.name for out in mir.outputs] == [out.name for out in hir.outputs]
+    assert model.inputs == interpreter.inputs and model.outputs == interpreter.outputs
     for index, row in enumerate(vectors):
         arguments = [row[port] for port in names]
-        expected = evaluator.run(*arguments)
-        assert [_plain(value) for value in interpreter.run(*arguments)] == expected, f"{name}[{index}]"
+        expected = [_typed(value) for value in evaluator.run(*arguments)]
+        assert [_typed(value) for value in interpreter.run(*arguments)] == expected, f"{name}[{index}]"
+        assert [_typed(value) for value in model.run(*arguments)] == expected, f"{name}[{index}]"

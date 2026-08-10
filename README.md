@@ -230,6 +230,10 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
   The width of the float type in the type annotation is ignored.
   See below for more info about floats.
 
+- Runtime integers are signed two's complement at a fixed native width and saturate at the extremes instead of wrapping
+  or growing like Python's unbounded ints; the raw left shift `<<` is the one deliberate exception -- it truncates
+  past the word. Mixed int/float expressions promote to float, C-style.
+
 - Dynamically-sized tensors are not supported. Dimensions must be annotated using jaxtyping
   (e.g., `Float64[np.ndarray, "3 3"]`).
 

@@ -47,7 +47,7 @@ from holoso._mir import Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
 from holoso._mir import lower as lower_to_mir
 from holoso._operators import OpConfig
 from holoso._type import BoolType, FloatFormat
-from holoso._value import FloatValue
+from holoso._value import FloatValue, IntValue, ScalarValue
 
 from ._modelref import (
     DEFAULT_IFCONV_MAX_OPS,
@@ -1305,7 +1305,7 @@ class _SecondaryResult(Enum):
 
 def _secondary_ok(
     mode: Mode,
-    model_out: list[FloatValue | bool],
+    model_out: list[ScalarValue],
     reference: list[float | bool],
     fmt: FloatFormat,
     op_count: int,
@@ -1332,10 +1332,10 @@ def _secondary_ok(
     tolerance_fail: str | None = None  # remembered, not returned early, so a later STRUCTURAL failure takes precedence
     exact_nonfinite_fail: str | None = None
     for lane, (m, r) in enumerate(zip(model_out, reference, strict=True)):
-        if isinstance(m, bool) != isinstance(r, bool):
-            # A lane's type must match the source's: a bool output lowered as a float (or vice versa) is a real
-            # miscompile that coercing both sides with ``bool(...)`` would mask (model True vs reference 1.0 compare
-            # ==).
+        if isinstance(m, bool) != isinstance(r, bool) or isinstance(m, IntValue):
+            # A lane's family must match the source's: a bool output lowered as a float (or vice versa), or an
+            # integer where this float64 reference expects none, is a real miscompile that coercing the model value
+            # with ``bool(...)``/``float(...)`` would mask (model True or 1 vs reference 1.0 compare ==).
             return (
                 _SecondaryResult.STRUCTURAL_FAIL,
                 f"lane {lane}: type mismatch -- model {type(m).__name__} vs reference {type(r).__name__}",
@@ -1412,7 +1412,7 @@ class _Differential:
         self._fmt = fmt
         self._op_count = op_count
 
-    def primary(self, vector: Vector) -> tuple[list[FloatValue | bool], str | None]:
+    def primary(self, vector: Vector) -> tuple[list[ScalarValue], str | None]:
         model_out = self.model.run(*vector)
         interp_out = self.interpreter.run(*vector)
         if model_out == interp_out:
@@ -1423,7 +1423,7 @@ class _Differential:
         )
         return model_out, detail
 
-    def secondary(self, vector: Vector, model_out: list[FloatValue | bool]) -> _SecondaryOutcome:
+    def secondary(self, vector: Vector, model_out: list[ScalarValue]) -> _SecondaryOutcome:
         """
         Run the best-effort float64 check for one vector, applying the stateful latch and EXACT-mode failure rule. A
         CONTINUOUS finite out-of-tolerance mismatch is NOT reported as a divergence: ``default_tolerance`` is a linear

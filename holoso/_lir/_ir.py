@@ -348,10 +348,9 @@ class WideStateSlot:
 
     name: str
     reg: RegRef
-    reset_value: float | int
+    reset_value: WideValue  # the encoded machine word, which also names the slot's scalar family
     tap: WideOperand
     install_cycle: int  # scheduler-frame install cycle; hardware fire = inline_fire_cycle(it); makespan+1 = boundary
-    scalar_type: FloatType | IntType
 
     @property
     def needs_copy(self) -> bool:
@@ -647,7 +646,6 @@ class BoolStateSlot:
 
 @dataclass(frozen=True, slots=True)
 class RegFileLayout:
-    width: int
     nreg: int
     nrd: int
     nwr: int
@@ -689,9 +687,7 @@ class Lir:
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
 
     def __post_init__(self) -> None:
-        assert self.int_format.width >= self.float_format.width
-        assert self.regfile.width == max(self.float_format.width, self.int_format.width)
-        assert self.regfile.width == self.int_format.width
+        assert self.int_format.width >= self.float_format.width  # the wide bank is exactly the integer width
         assert self.fetch_lag in (1, 2), self.fetch_lag
         # Cross-block instance reuse on a DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
         # header, the Ret), which carries no per-instance busy residue -- needs the instance provably idle by the

@@ -37,7 +37,7 @@ from holoso._eel._names import port_name as port_name
 type Path = tuple[int | str, ...]
 """A leaf path into a returned value: indices for sequence elements, names for dataclass fields."""
 
-type Vector = list[FloatValue | bool]
+type Vector = list[ScalarValue]
 
 # What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
 _DEFAULTS = Options(OperatorOptions())
@@ -191,10 +191,6 @@ def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: 
         for j in range(i + 1):
             lower[i, j] = rng.uniform(diag_lo, diag_hi) if i == j else rng.uniform(-1.0, 1.0)
     return lower @ lower.T
-
-
-def encode_inputs(fmt: FloatFormat, values: dict[str, float | bool]) -> dict[str, int]:
-    return {name: int(value) if type(value) is bool else fmt.encode(value) for name, value in values.items()}
 
 
 def format_edge_bits(fmt: FloatFormat) -> list[int]:

@@ -24,14 +24,12 @@ Still-excluded examples are frontend feature gaps (not verification scope), conf
   - finite_set_current_controller: ``UnsupportedConstruct`` -- nested/foreign attribute access.
 """
 
-from collections.abc import Mapping
-
 import pytest
 
 from holoso import FloatFormat
 from ._cosim import run_cosim
 from ._examples import SPECS, ExampleSpec
-from ._modelref import PIPELINE_OP_CASES, OperatorCase
+from ._modelref import PIPELINE_OP_CASES, OperatorCase, default_options
 from .hdl.hdl_float_oracle import SIMULATORS
 
 pytestmark = pytest.mark.cosim
@@ -52,5 +50,4 @@ _SPEC_FORMATS = [
 @pytest.mark.parametrize("spec,fmt", _SPEC_FORMATS)
 def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: OperatorCase, sim: str) -> None:
     name = f"{spec.name}_{config.label}_e{fmt.wexp}m{fmt.wman}"
-    vectors: list[Mapping[str, int]] = list(spec.vectors(fmt))
-    run_cosim(sim, spec.make_kernel(), fmt, name, ops=config.make_ops(fmt), vectors=vectors)
+    run_cosim(sim, spec.make_kernel(), default_options(fmt), name, ops=config.make_ops(fmt), vectors=spec.raw_vectors())

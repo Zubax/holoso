@@ -16,7 +16,8 @@ from pathlib import Path
 import pytest
 
 from holoso import FloatFormat
-from holoso._backend.numerical import ModelInput, ModelOutput, NumericalSimulator
+from holoso._backend.numerical import NumericalSimulator
+from holoso._value import ScalarLike, ScalarValue
 from holoso._eel import lower
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
@@ -40,14 +41,14 @@ from schmitt_trigger import SchmittTrigger  # noqa: E402
 _FMT = FloatFormat(8, 36)
 
 
-def _random_inputs(lir: Lir, rng: random.Random) -> list[ModelInput]:
+def _random_inputs(lir: Lir, rng: random.Random) -> list[ScalarLike]:
     return [
         bool(rng.randint(0, 1)) if type(load).__name__ == "BoolInputLoad" else rng.uniform(-3.0, 3.0)
         for load in lir.inputs
     ]
 
 
-def _drive(model: NumericalSimulator, inputs: list[ModelInput]) -> tuple[list[ModelOutput], int]:
+def _drive(model: NumericalSimulator, inputs: list[ScalarLike]) -> tuple[list[ScalarValue], int]:
     model.set_inputs(*inputs)
     while not model.in_ready:
         model.tick(in_valid=False, out_ready=True)
@@ -155,7 +156,7 @@ def _count_down(n: float) -> float:
 # path is unified away, yet every realized transaction is the steady-state 20 cycles, which only this guard pins -- the
 # static metrics gate sees only the raised min_ii).
 _T, _F = True, False
-_WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[ModelInput]], int]] = {
+_WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[ScalarLike]], int]] = {
     "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 5),
     "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 14),
     "quadrature_encoder": (

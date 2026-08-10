@@ -13,7 +13,7 @@ import pytest
 from holoso import FloatFormat
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, default_options, build_lir
 from holoso._mir import lower as lower_to_mir
 
 from ._cosim import run_cosim
@@ -51,4 +51,4 @@ def test_multi_distinct_const_install_selects_among_constants() -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_multi_distinct_const_install_cosim(sim: str) -> None:
     """RTL == model for a register installing two distinct constants: one write-opcode case arm per const."""
-    run_cosim(sim, _multi_const_install, _FMT, "multi_const")
+    run_cosim(sim, _multi_const_install, default_options(_FMT), "multi_const")

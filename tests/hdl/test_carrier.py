@@ -88,7 +88,7 @@ def test_float_leaves_the_upper_carrier_bits_clear(sim: str) -> None:
         ),
         "carrier",
     )
-    assert lir.regfile.width == WINT_MIN > options.ffmt.width
+    assert lir.int_format.width == WINT_MIN > options.ffmt.width
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / "carrier"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "carrier.v"

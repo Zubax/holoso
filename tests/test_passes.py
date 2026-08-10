@@ -44,7 +44,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import Branch, BoolSelect, FloatDiv as HirFloatDiv, NoNumber, Phi, Ret, FloatSelect, StateRead
+from holoso._hir import Branch, BoolSelect, FloatDiv as HirFloatDiv, Phi, FloatSelect, StateRead
 from holoso._hir import (
     FloatAbs,
     FloatAtan2,
@@ -850,8 +850,8 @@ def test_a_reduction_minted_constant_does_not_reach_the_datapath() -> None:
     assert isinstance(hir.nodes[first.live_out], BoolConst)
 
 
-# The integer vocabulary is deliberately unreachable through the frontend, so it is exercised at the builder level:
-# HIR declares the types and operators, and MIR refuses every one of them until the integer backend lands.
+# Exercised at the builder level so every operator/type pair is pinned directly, independent of which spellings the
+# frontend happens to emit for it.
 _INT_OPERATORS: list[tuple[Operator, list[Type], Type]] = [
     (IntAdd(), [IntType(), IntType()], IntType()),
     (IntSub(), [IntType(), IntType()], IntType()),
@@ -925,7 +925,7 @@ def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_valu
 
 def test_a_constant_integer_expression_folds_away_entirely() -> None:
     # Folding is exact at arbitrary precision -- no width, no saturation -- so a fully static integer expression
-    # disappears before MIR, which is what keeps MIR's integer refusal from rejecting programs the design accepts.
+    # disappears before MIR ever has to hold it in a machine word.
     builder = HirBuilder()
     builder.block()
     value = builder.operation(IntAdd(), [builder.int_const(2), builder.int_const(3)])
@@ -978,7 +978,7 @@ def test_integer_folding_is_exact_across_the_vocabulary() -> None:
 def test_integer_folding_has_no_size_limit() -> None:
     # A big shift is computed, not declined: an expression the user wrote is one the user asked for, and folding it
     # is exactly what the same program does in Python. Nothing about the compiler's convenience stops a fold, so an
-    # all-constant integer expression always disappears -- which is what keeps it away from MIR's integer refusal.
+    # all-constant integer expression always disappears -- no machine word ever has to hold it.
     builder = HirBuilder()
     builder.block()
     shifted = builder.operation(IntShiftLeft(), [builder.int_const(1), builder.int_const(20_000)])
