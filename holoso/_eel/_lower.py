@@ -39,12 +39,12 @@ def resolve_target(target: object) -> tuple[types.FunctionType, object | None]:
     return target, None
 
 
-def lower(target: object) -> FrontendOutput:
+def lower(target: object, unroll_max_trips: int) -> FrontendOutput:
     fn, instance = resolve_target(target)
     eel = desugar(fn)
     desugared = print_eel(eel, locations=True)
     _logger.debug("%s: desugared Eel:\n%s", fn.__qualname__, desugared)
-    residual = partial_evaluate(eel, fn, instance)
+    residual = partial_evaluate(eel, fn, instance, unroll_max_trips)
     refined = print_eel(residual, locations=True)
     _logger.debug("%s: residual Eel:\n%s", fn.__qualname__, refined)
     hir = emit(residual)

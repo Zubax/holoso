@@ -17,7 +17,7 @@ from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
 from holoso._lir import RegRef
 from holoso._mir import lower as lower_to_mir
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, default_ops, overlap_spill_kernel
+from ._modelref import build_lir, DEFAULT_IFCONV_MAX_OPS, default_ops, DEFAULT_UNROLL_MAX_TRIPS, overlap_spill_kernel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -55,7 +55,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 
 def _report(name: str) -> str:
     lir = build_lir(
-        lower_to_mir(lower(_EXAMPLES[name]()).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     return generate_report(lir, generate_verilog(lir)).html
@@ -64,7 +64,7 @@ def _report(name: str) -> str:
 @pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_report_renders_for_each_example(name: str) -> None:
     lir = build_lir(
-        lower_to_mir(lower(_EXAMPLES[name]()).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     html = generate_report(lir, generate_verilog(lir)).html
@@ -111,7 +111,9 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
     from holoso._backend.html._schedule import render_schedule
 
     lir = build_lir(
-        lower_to_mir(lower(overlap_spill_kernel).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(
+            lower(overlap_spill_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS
+        ),
         "overlap_spill",
     )
     html = render_schedule(lir)
@@ -143,7 +145,9 @@ def test_control_arrows_anchor_at_the_terminator_pc() -> None:
     from holoso._backend.html._schedule import _control_arrows
 
     lir = build_lir(
-        lower_to_mir(lower(overlap_spill_kernel).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(
+            lower(overlap_spill_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS
+        ),
         "overlap_spill_arrows",
     )
     arrows = _control_arrows(lir)

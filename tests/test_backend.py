@@ -56,7 +56,15 @@ from holoso._lir._ir import BoolStateSlot
 from holoso._mir import Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, SharedLiveOut, SharedLiveOutBool, default_ifmt, build_lir, build_ops
+from ._modelref import (
+    build_lir,
+    build_ops,
+    DEFAULT_IFCONV_MAX_OPS,
+    default_ifmt,
+    DEFAULT_UNROLL_MAX_TRIPS,
+    SharedLiveOut,
+    SharedLiveOutBool,
+)
 
 requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
 
@@ -77,7 +85,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig, fmt: FloatFormat) -> Mir:
-    return lower_to_mir(lower(target).hir, ops, DEFAULT_IFCONV_MAX_OPS)
+    return lower_to_mir(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, DEFAULT_IFCONV_MAX_OPS)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
@@ -724,7 +732,10 @@ def test_the_boundary_installed_integer_slot_taps_its_conditioner() -> None:
     # The boundary install taps the slot through its conditioner -- the only integer tap on that emitter arm, which
     # no public metadata exposes -- and emits the boundary copy from the tap source to the slot register.
     lir = build_lir(
-        lower_to_mir(lower(_IntegerKernel().step).hir, build_ops(_INT_OPTIONS), DEFAULT_IFCONV_MAX_OPS), "int_kernel"
+        lower_to_mir(
+            lower(_IntegerKernel().step, DEFAULT_UNROLL_MAX_TRIPS).hir, build_ops(_INT_OPTIONS), DEFAULT_IFCONV_MAX_OPS
+        ),
+        "int_kernel",
     )
     (slot,) = [s for s in lir.wide_state_slots if s.needs_copy and lir.wide_state_install_is_boundary(s)]
     assert isinstance(slot.tap.source, RegRef)

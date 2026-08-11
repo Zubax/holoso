@@ -17,6 +17,7 @@ from ._snapshot import describe_opaque as _describe_opaque, nan_payload, tensor_
 from ._values import (
     Allocation,
     Opaque,
+    RangeValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
@@ -53,6 +54,8 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
             reject(origin, f"a scalar has no supported attribute {attr!r}")
         case TensorMethod():
             reject(origin, "a bound array method can only be called")
+        case RangeValue():
+            reject(origin, f"a range has no supported attribute {attr!r}")
         case Opaque(name=name, value=value) if isinstance(value, (types.ModuleType, type)):
             # A module/class attribute is a metadata read (class access unwraps staticmethod and
             # plain functions); an instance never runs live descriptors, below.
@@ -94,7 +97,7 @@ def scalar(value: Value, origin: Origin) -> Scalar:
             return value
         case Opaque():
             reject(origin, _describe_opaque(value))
-        case SequenceValue() | TensorValue():
+        case SequenceValue() | TensorValue() | RangeValue():
             reject(origin, f"{_aggregate.a_kind(value)} cannot be used as a scalar here")
         case TensorMethod():
             reject(origin, "a bound array method can only be called")
@@ -372,7 +375,8 @@ def _operand_arguments(interp: Interpreter, node: Call, display: str, frame: Fra
             case PosArg(value=value):
                 values.append(interp.expr(value, frame, sink))
             case StarArg(value=value):
-                values.extend(_aggregate.splice_items(node.origin, interp.expr(value, frame, sink)))
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                values.extend(_aggregate.splice_items(node.origin, spliced))
             case KwArg():
                 reject(node.origin, f"{display}() takes no keyword arguments")
     return values
@@ -385,7 +389,8 @@ def _positional_arguments(interp: Interpreter, node: Call, display: str, frame: 
             case PosArg(value=value):
                 values.append(_argument(interp, value, frame, sink))
             case StarArg(value=value):
-                values.extend(_aggregate.splice_items(node.origin, interp.expr(value, frame, sink)))
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                values.extend(_aggregate.splice_items(node.origin, spliced))
             case KwArg():
                 reject(node.origin, f"{display}() takes no keyword arguments")
     return values
@@ -401,7 +406,8 @@ def _signature_arguments(
             case PosArg(value=value):
                 positional.append(_argument(interp, value, frame, sink))
             case StarArg(value=value):
-                positional.extend(_aggregate.splice_items(node.origin, interp.expr(value, frame, sink)))
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                positional.extend(_aggregate.splice_items(node.origin, spliced))
             case KwArg(name=name, value=value):
                 keywords[name] = _argument(interp, value, frame, sink)
     return positional, keywords
@@ -470,7 +476,7 @@ def _array_call(
     frame: Frame,
     sink: Sink,
 ) -> Value:
-    if any(isinstance(value, SequenceValue) for value in values):
+    if any(isinstance(value, (SequenceValue, RangeValue)) for value in values):
         # Before the stub, so the rejection reads the same however the operation was spelled.
         reject(origin, "an array operation on a Python list/tuple is not supported; build one with np.array([...])")
     result = interp.inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
@@ -524,31 +530,53 @@ def _len(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
             return StaticScalar(_ops.make_const(len(items)))
         case TensorValue(shape=shape):
             return StaticScalar(_ops.make_const(shape[0]))
+        case RangeValue() as found:
+            span = _aggregate.static_range(found)
+            if span is None:
+                reject(node.origin, "len() of a range with a runtime bound is not supported")
+            try:
+                return StaticScalar(_ops.make_const(len(span)))
+            except OverflowError:
+                reject(node.origin, "len() of this range overflows, exactly as it does in CPython")
         case _:
             reject(node.origin, f"len() requires an aggregate, not {_aggregate.a_kind(values[0])}")
 
 
-def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> SequenceValue:
+def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> RangeValue:
     values = _operand_arguments(interp, node, "range", frame, sink)
     if not 1 <= len(values) <= 3:
         reject(node.origin, f"range() takes 1 to 3 arguments, got {len(values)}")
-    bounds = [_aggregate.static_index(node.origin, value, "a range argument") for value in values]
-    try:
-        span = range(*bounds)
-    except ValueError as error:
-        reject(node.origin, f"range() rejects its arguments: {error}")
-    # The length in exact arithmetic: len() of a huge range overflows Py_ssize_t, and the charge must
-    # land as the located budget rejection before any materialization.
-    length = max(0, (span.stop - span.start + span.step - (1 if span.step > 0 else -1)) // span.step)
-    interp.budget.spend(max(length, 1), node.origin, "the range materialization")
-    return SequenceValue(tuple(StaticScalar(_ops.make_const(i)) for i in span), Allocation())
+    bounds: list[Scalar] = []
+    for value in values:
+        match value:
+            case StaticScalar() | ResidualScalar() if value.stype is ScalarType.INT:
+                bounds.append(value)
+            case StaticScalar() | ResidualScalar():
+                reject(node.origin, f"a range argument must be an int, not a {value.stype.value}")
+            case _:
+                reject(node.origin, f"a range argument must be an int, not {_aggregate.a_kind(value)}")
+    start = bounds[0] if len(bounds) >= 2 else StaticScalar(_ops.make_const(0))
+    stop = bounds[1] if len(bounds) >= 2 else bounds[0]
+    match bounds[2] if len(bounds) == 3 else StaticScalar(_ops.make_const(1)):
+        case StaticScalar(const=const):
+            step = _ops.const_value(const)
+            assert isinstance(step, int)
+        case ResidualScalar():
+            reject(
+                node.origin,
+                "the range step must be a compile-time constant int: its sign selects the loop "
+                "direction, and a zero step is a ValueError at range() construction",
+            )
+    if step == 0:
+        reject(node.origin, "range() rejects its arguments: range() arg 3 must not be zero")
+    return RangeValue(start, stop, step)
 
 
 def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> Value:
     values = _operand_arguments(interp, node, display, frame, sink)
     if len(values) != 1:
         reject(node.origin, f"{display}() takes exactly one aggregate argument here")
-    source = values[0]
+    source = _aggregate.decay(interp.budget, values[0], node.origin)
     if not isinstance(source, _AGGREGATE):
         reject(node.origin, f"{display}() requires an aggregate argument")
     children = _aggregate.splice_items(node.origin, source)
@@ -559,6 +587,7 @@ def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Fram
 def _to_tensor(
     interp: Interpreter, origin: Origin, display: str, value: Value, sink: Sink, *, copies: bool
 ) -> TensorValue:
+    value = _aggregate.decay(interp.budget, value, origin)
     match value:
         case TensorValue():
             if copies:
@@ -645,7 +674,9 @@ def bind_signature(
     bound.apply_defaults()
     bindings: dict[str, Value] = {}
     for name, value in bound.arguments.items():
-        if isinstance(value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, TensorMethod)):
+        if isinstance(
+            value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, TensorMethod, RangeValue)
+        ):
             bindings[name] = value
         else:
             bindings[name] = interp.snapshot.admit(name, value, site)  # an injected default: a plain Python object

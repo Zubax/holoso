@@ -29,7 +29,7 @@ from holoso._operators import FMulILog2Operator, FloatSignControl, IntIdentity, 
 from holoso._type import FloatType, IntType
 from holoso._value import FloatValue, IntValue
 
-from ._modelref import build_lir, build_ops
+from ._modelref import build_lir, build_ops, DEFAULT_UNROLL_MAX_TRIPS
 from .test_eel_calls import _min_max_of_ints
 from .test_int_synthesis import (
     cross_boundary,
@@ -60,7 +60,9 @@ OPTIONS = Options(
 
 
 def _select(target: Callable[..., object]) -> Mir:
-    return lower_to_mir(lower_frontend(target).hir, build_ops(OPTIONS), OPTIONS.ifconv_max_ops)
+    return lower_to_mir(
+        lower_frontend(target, DEFAULT_UNROLL_MAX_TRIPS).hir, build_ops(OPTIONS), OPTIONS.ifconv_max_ops
+    )
 
 
 def _mnemonics(mir: Mir) -> list[str]:

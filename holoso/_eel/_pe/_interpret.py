@@ -77,6 +77,7 @@ from ._values import (
     AllocationState,
     ExpansionBudget,
     Opaque,
+    RangeValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
@@ -252,7 +253,9 @@ class Frame:
 _MISSING = object()
 
 
-def partial_evaluate(eel: EelFunction, fn: types.FunctionType, instance: object | None = None) -> EelFunction:
+def partial_evaluate(
+    eel: EelFunction, fn: types.FunctionType, instance: object | None, unroll_max_trips: int
+) -> EelFunction:
     """
     The A2 trim driver: run with the seeded assumed-state set, shrink to the attributes whose write was
     actually reached, promote an INT slot that met a FLOAT live-out, and re-run until stable -- each run a
@@ -260,15 +263,15 @@ def partial_evaluate(eel: EelFunction, fn: types.FunctionType, instance: object 
     annotated with the pinning writes.
     """
     if instance is None:
-        return Interpreter(fn, None, None).run(eel)
+        return Interpreter(fn, None, None, unroll_max_trips).run(eel)
     assert eel.params, "a bound method always has a receiver parameter"
     seed = assigned_names(eel.body, eel.params[0].name)[2]
     if not seed:
-        return Interpreter(fn, instance, None).run(eel)
+        return Interpreter(fn, instance, None, unroll_max_trips).run(eel)
     descriptor_guard(instance, seed)
     model = StateModel(instance, seed, environment_aggregates(fn))
     while True:  # terminates: each pass either finishes, strictly shrinks S, or promotes a fresh leaf
-        interpreter = Interpreter(fn, instance, model)
+        interpreter = Interpreter(fn, instance, model, unroll_max_trips)
         try:
             residual = interpreter.run(eel)
         except _PromoteRun as promotion:
@@ -282,7 +285,7 @@ def partial_evaluate(eel: EelFunction, fn: types.FunctionType, instance: object 
                 "%s: the assumed-state set shrinks to {%s}; re-running", eel.name, ", ".join(sorted(model.assumed))
             )
             if not model.assumed:
-                return Interpreter(fn, instance, None).run(eel)
+                return Interpreter(fn, instance, None, unroll_max_trips).run(eel)
             continue
         return residual
 
@@ -292,10 +295,13 @@ def _key_order(key: _EnvKey) -> tuple[int, str]:
 
 
 class Interpreter:
-    def __init__(self, fn: types.FunctionType, instance: object | None, state: StateModel | None) -> None:
+    def __init__(
+        self, fn: types.FunctionType, instance: object | None, state: StateModel | None, unroll_max_trips: int
+    ) -> None:
         self._fn = fn
         self.instance = instance
         self.state = state
+        self.unroll_max_trips = unroll_max_trips
         self.budget = ExpansionBudget()
         self._next_temp = 0
         self._outputs: tuple[OutputDecl, ...] | None = None
@@ -456,7 +462,7 @@ class Interpreter:
                         updated = _express.binary(self, origin, op, current_value, rhs, frame, piece)
                     frame.env[target.name] = updated
                 case Unpack(origin=origin, targets=targets, value=value):
-                    source = self.expr(value, frame, piece)
+                    source = _aggregate.decay(self.budget, self.expr(value, frame, piece), origin)
                     items = _aggregate.unpack_items(origin, source, len(targets))
                     for target, item in zip(targets, items, strict=True):
                         frame.env[self._binding_key(target)] = item
@@ -739,6 +745,8 @@ class Interpreter:
                 return self._join_scalars(origin, self._describe_key(key), a, b, then_sinks, else_sinks)
             case Opaque(), Opaque():
                 return a if same(a, b) else None
+            case RangeValue(), RangeValue():
+                return a if same(a, b) else None
             case _:
                 return None
 
@@ -795,6 +803,13 @@ class Interpreter:
     def _for(self, stmt: For, frame: Frame, sinks: list[Sink], ctx: Ctx) -> _Flow:
         piece = self._piece(sinks)
         iterable = self.expr(stmt.iterable, frame, piece)
+        if isinstance(iterable, RangeValue):
+            span = _aggregate.static_range(iterable)
+            if span is None or _aggregate.range_length(span) > self.unroll_max_trips:
+                crossed = self._counted(stmt, iterable, span, frame, piece)
+                self._spread(sinks, piece)
+                return _Flow(crossed, sinks)
+            iterable = _aggregate.decay(self.budget, iterable, stmt.origin)
         self._spread(sinks, piece)
         if not isinstance(iterable, _AGGREGATE):
             reject(stmt.origin, f"{_aggregate.a_kind(iterable)} is not iterable")
@@ -814,6 +829,44 @@ class Interpreter:
             release(held)
         current = self._meet_lanes(stmt.origin, frame, breaks, current, sinks if not escaped else None)
         return _Flow(escaped, current)
+
+    def _counted(self, stmt: For, iterable: RangeValue, span: range | None, frame: Frame, sink: Sink) -> list[_Exit]:
+        """
+        The counted back-edge lowering: the hidden counter/stop/test locals capture the range by value, so
+        neither a later rebind of a bound's source local nor a target that shadows one can reach the header.
+        A static range here is nonempty, so Python's first trip always kills the target's entry binding and
+        the replacement seed is exact.
+        """
+        origin = stmt.origin
+        assert span is None or _aggregate.range_length(span) > self.unroll_max_trips >= 0
+        k = self.fresh()
+        counter, stop, test = f"for${k}n", f"for${k}s", f"for${k}t"
+        assert stmt.target.name not in (counter, stop, test), "the hidden names are unspellable in source"
+        frame.env[counter] = iterable.start
+        frame.env[stop] = iterable.stop
+        if span is not None:
+            frame.env[stmt.target.name] = iterable.start
+        header = Assign(
+            origin,
+            LocalBind(origin, test),
+            Compare(
+                origin,
+                CompareOp.LT if iterable.step > 0 else CompareOp.GT,
+                LocalRef(origin, counter),
+                LocalRef(origin, stop),
+            ),
+        )
+        advance = Assign(
+            origin,
+            LocalBind(origin, counter),
+            Binary(origin, BinaryOp.ADD, LocalRef(origin, counter), Const(origin, iterable.step)),
+        )
+        bind_target = Assign(origin, stmt.target, LocalRef(origin, counter))
+        synth = While(origin, (header,), LocalRef(origin, test), (bind_target, advance, *stmt.body))
+        escaped = self._residual_while(synth, frame, sink)
+        for name in (counter, stop, test):
+            del frame.env[name]
+        return escaped
 
     def _trip(
         self,
@@ -1101,7 +1154,7 @@ class Interpreter:
         return leaves
 
     def _comp(self, node: Comp, frame: Frame, sink: Sink) -> SequenceValue:
-        iterable = self.expr(node.iterable, frame, sink)
+        iterable = _aggregate.decay(self.budget, self.expr(node.iterable, frame, sink), node.origin)
         if not isinstance(iterable, _AGGREGATE):
             reject(node.origin, f"{_aggregate.a_kind(iterable)} is not iterable")
         items = _aggregate.splice_items(node.origin, iterable)
@@ -1113,7 +1166,7 @@ class Interpreter:
                 frame.env[node.target] = item
                 body_flow = self._block(node.body, frame, [sink], Ctx(branch=True))
                 assert not body_flow.exits and body_flow.fall is not None, "a comprehension body holds no exit"
-                value = self.expr(node.element, frame, sink)
+                value = _aggregate.decay(self.budget, self.expr(node.element, frame, sink), node.origin)
                 if isinstance(value, _AGGREGATE) and (
                     isinstance(node.element, LocalRef) or self.alias_conduit(frame, node.element)
                 ):
@@ -1134,7 +1187,7 @@ class Interpreter:
                 reject(stmt.origin, "the kernel returns no value but its annotation declares one")
             self._commit_site(stmt.origin, frame, sink, [])
             return
-        value = self.expr(stmt.value, frame, sink)
+        value = _aggregate.decay(self.budget, self.expr(stmt.value, frame, sink), stmt.origin)
         if isinstance(value, Opaque):
             reject(stmt.origin, f"the captured object {value.name!r} cannot be returned")
         conformed = self._conform_value(value, annotation, stmt.origin, sink, "the returned value", root=True)
@@ -1308,16 +1361,16 @@ class Interpreter:
             case AttrRead(origin=origin, base=base, attr=attr):
                 return _express.attr_read(self, origin, self.expr(base, frame, sink), attr, frame, sink)
             case IndexRead(origin=origin, base=base, index=index):
-                base_value = self.expr(base, frame, sink)
+                base_value = _aggregate.decay(self.budget, self.expr(base, frame, sink), origin)
                 index_value = self.expr(index, frame, sink)
                 return _aggregate.index_read(origin, base_value, index_value)
             case SliceRead(origin=origin, base=base, lo=lo, hi=hi):
-                base_value = self.expr(base, frame, sink)
+                base_value = _aggregate.decay(self.budget, self.expr(base, frame, sink), origin)
                 lo_bound = self._slice_bound(lo, frame, sink)
                 hi_bound = self._slice_bound(hi, frame, sink)
                 return _aggregate.slice_read(origin, base_value, lo_bound, hi_bound)
             case MultiIndexRead(origin=origin, base=base, axes=axes):
-                base_value = self.expr(base, frame, sink)
+                base_value = _aggregate.decay(self.budget, self.expr(base, frame, sink), origin)
                 resolved: list[_aggregate.ResolvedAxis] = []
                 for axis in axes:
                     if isinstance(axis, SliceSel):
@@ -1341,10 +1394,10 @@ class Interpreter:
         collected: list[Value] = []
         for item in items:
             if isinstance(item, StarArg):
-                source = self.expr(item.value, frame, sink)
+                source = _aggregate.decay(self.budget, self.expr(item.value, frame, sink), origin)
                 collected.extend(_aggregate.splice_items(origin, source))
             else:
-                value = self.expr(item, frame, sink)
+                value = _aggregate.decay(self.budget, self.expr(item, frame, sink), origin)
                 if isinstance(value, _AGGREGATE) and (isinstance(item, LocalRef) or self.alias_conduit(frame, item)):
                     share(value)
                 collected.append(value)
@@ -1502,6 +1555,8 @@ class Interpreter:
         uniform leaves never leave the value model, and the rebuilt tree keeps the fold's allocations.
         """
         assert folded.result is not None
+        if isinstance(folded.result, RangeValue):
+            reject(site, "a range returned across a data-dependent region is not supported; build it at the use site")
         assert len({id(arm) for arm in folded.sinks}) == len(folded.sinks), "the union holds each lane region once"
         rows: list[FrameRow] = []
         atoms: list[Atom] = []

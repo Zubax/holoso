@@ -22,7 +22,7 @@ from holoso._eel import lower
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import imu_frame_transform
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ops, default_options
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ops, default_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude, strip_locations
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
@@ -174,7 +174,7 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
         ops = default_ops(_FMT)
         if with_fma:
             ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT, FFmaOptions(), 0))
-        mir = lower_to_mir(lower(dot).hir, ops, DEFAULT_IFCONV_MAX_OPS)
+        mir = lower_to_mir(lower(dot, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, DEFAULT_IFCONV_MAX_OPS)
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
             operator = getattr(node, "operator", None)
@@ -409,7 +409,7 @@ def test_ndarray_constant_element_folds_in_static_position() -> None:
     def indexed(v: Float64[np.ndarray, "3"]) -> float:
         return v[_INDEX_CONST[0]]  # type: ignore[no-any-return]  # constant int-array element as a static index
 
-    assert [o.name for o in lower(indexed).hir.outputs] == ["out_0"]
+    assert [o.name for o in lower(indexed, DEFAULT_UNROLL_MAX_TRIPS).hir.outputs] == ["out_0"]
     assert float(_sim(indexed).run(1.0, 2.0, 3.0)[0]) == 3.0  # _INDEX_CONST[0] == 2, so the pick is v[2]
 
     def chained(a: float) -> float:
@@ -434,7 +434,7 @@ def test_readonly_ndarray_attribute_element_folds_a_branch() -> None:
                 out = a * 2.0  # statically dead
             return out
 
-    hir = lower(Filter(np.array([[0.0, 1.0]])).step).hir
+    hir = lower(Filter(np.array([[0.0, 1.0]])).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir.state_slots] == []  # no spurious state from the statically-dead write
     assert [o.name for o in hir.outputs] == ["out_0"]
 
@@ -452,7 +452,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_slice = lower(WithSlice(0.0).step).hir
+    hir_slice = lower(WithSlice(0.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir_slice.state_slots] == []
     assert [o.name for o in hir_slice.outputs] == ["out_0"]
 
@@ -465,7 +465,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
                 self.y = a  # statically dead
             return a
 
-    hir_t = lower(WithTranspose(0.0).step).hir
+    hir_t = lower(WithTranspose(0.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir_t.state_slots] == []
     assert [o.name for o in hir_t.outputs] == ["out_0"]
 
@@ -479,7 +479,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_f = lower(WithFlatten(0.0).step).hir
+    hir_f = lower(WithFlatten(0.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir_f.state_slots] == []
     assert [o.name for o in hir_f.outputs] == ["out_0"]
 

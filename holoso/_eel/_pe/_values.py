@@ -99,7 +99,23 @@ class TensorMethod:
     name: str
 
 
-type Value = StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | TensorMethod
+@dataclass(frozen=True, slots=True)
+class RangeValue:
+    """
+    A lazy arithmetic progression: no storage, no Allocation, no ownership. Static bounds decay to a
+    ``SequenceValue`` wherever an aggregate is demanded; runtime bounds only drive a counted ``for``.
+    """
+
+    start: Scalar
+    stop: Scalar
+    step: int
+
+    def __post_init__(self) -> None:
+        assert self.step != 0
+        assert self.start.stype is ScalarType.INT and self.stop.stype is ScalarType.INT
+
+
+type Value = StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | TensorMethod | RangeValue
 
 
 def same(a: Value, b: Value) -> bool:
@@ -133,6 +149,8 @@ def same(a: Value, b: Value) -> bool:
             )
         case TensorMethod(), TensorMethod():
             return a.name == b.name and same(a.receiver, b.receiver)
+        case RangeValue(), RangeValue():
+            return same(a.start, b.start) and same(a.stop, b.stop) and a.step == b.step
         case _:
             return False
 

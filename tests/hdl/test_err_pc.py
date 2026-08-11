@@ -34,7 +34,7 @@ from holoso._lir import pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
-from .._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, build_ops
+from .._modelref import build_lir, build_ops, DEFAULT_IFCONV_MAX_OPS, DEFAULT_UNROLL_MAX_TRIPS
 
 FMT = FloatFormat(6, 18)
 
@@ -96,7 +96,7 @@ async def err_pc_latches_div0(dut: Any) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_pc(sim: str, stage_output: int) -> None:
     lir = build_lir(
-        lower_to_mir(lower(_divide).hir, _ops(stage_output), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(_divide, DEFAULT_UNROLL_MAX_TRIPS).hir, _ops(stage_output), DEFAULT_IFCONV_MAX_OPS),
         "divide",
     )
     # The fdiv asserts div0 at its commit; err_pc latches the write word -- the

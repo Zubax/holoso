@@ -33,19 +33,20 @@ from holoso._lir import Lir, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import Mir, lower as lower_to_mir
 from ._modelref import (
-    DEFAULT_IFCONV_MAX_OPS,
-    Vector,
     assert_model_equals_interpreter,
     bounded,
     build_lir,
     build_model,
     build_model_and_interpreter,
     build_ops,
+    DEFAULT_IFCONV_MAX_OPS,
     default_options,
     default_tolerance,
+    DEFAULT_UNROLL_MAX_TRIPS,
     evaluate_reference,
     log_uniform_positive,
     spd_matrix,
+    Vector,
     within,
 )
 from ._examples import (
@@ -1222,7 +1223,7 @@ OPS = build_ops(
 
 
 def _run(target: Callable[..., object], ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Mir:
-    return lower_to_mir(lower(target).hir, OPS, ifconv_max_ops)
+    return lower_to_mir(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, OPS, ifconv_max_ops)
 
 
 def test_model_handles_unused_input_ports() -> None:

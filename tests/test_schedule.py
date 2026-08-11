@@ -74,20 +74,21 @@ from holoso._type import BoolType, FloatType
 from holoso._value import FloatValue, ScalarValue
 
 from ._modelref import (
-    COMPARATOR_OP_CASES,
-    ChainedSlots,
-    OperatorCase,
-    PIPELINE_OP_CASES,
-    SelectHold,
     branch_boundary_kernel,
     build_model_and_interpreter,
     build_ops,
+    ChainedSlots,
+    COMPARATOR_OP_CASES,
     default_ops,
     default_options,
+    DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
+    OperatorCase,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
     overlap_spill_kernel,
+    PIPELINE_OP_CASES,
+    SelectHold,
 )
 
 FMT = FloatFormat(6, 18)
@@ -123,7 +124,7 @@ def _run(
     fmt: FloatFormat = FMT,
     ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> Mir:
-    return lower_to_mir(lower(target).hir, ops, ifconv_max_ops)
+    return lower_to_mir(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, ifconv_max_ops)
 
 
 def _view(mir: Mir) -> MirWideView:

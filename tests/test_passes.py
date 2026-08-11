@@ -111,11 +111,12 @@ from holoso._mir._refuse import refuse
 from holoso._mir import lower as lower_to_mir
 from ._importguard import forbidden_imports
 from ._modelref import (
-    DEFAULT_IFCONV_MAX_OPS,
     branch_boundary_kernel,
     build_ops,
     const_branch_kernel,
+    DEFAULT_IFCONV_MAX_OPS,
     default_tolerance,
+    DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
     overlap_spill_kernel,
     phi_swap_loop,
@@ -440,7 +441,7 @@ def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
 
 
 def _hir_of(target: object, ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Hir:
-    return optimize(lower(target).hir, ifconv_max_ops)
+    return optimize(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, ifconv_max_ops)
 
 
 # A converted diamond leaves straight-line code whose latency is exact, so initiation_interval[1] is a number;
@@ -1514,7 +1515,7 @@ def test_a_proven_break_kills_the_back_edge_and_collapses_the_carried_merges() -
             t = t - 1.0
         return y
 
-    hir = optimize(lower(breaks_on_the_first_trip).hir, DEFAULT_IFCONV_MAX_OPS)
+    hir = optimize(lower(breaks_on_the_first_trip, DEFAULT_UNROLL_MAX_TRIPS).hir, DEFAULT_IFCONV_MAX_OPS)
     assert (
         len([block for block in hir.blocks if isinstance(block.terminator, Branch)]) == 1
     ), "only the loop's own runtime test may survive; the break's guard is decided"
@@ -1577,13 +1578,15 @@ def never_uniform_until_the_latch_arm_is_rebuilt(x: float, n: float) -> float:
 )
 def test_optimization_reaches_a_fixpoint_in_one_call(kernel: Callable[..., object]) -> None:
     # Compared whole, value ids included, since those drive the tie-breaks downstream.
-    once = optimize(lower(kernel).hir, DEFAULT_IFCONV_MAX_OPS)
+    once = optimize(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, DEFAULT_IFCONV_MAX_OPS)
     assert optimize(once, DEFAULT_IFCONV_MAX_OPS) == once
 
 
 def test_a_loop_phi_is_folded_once_its_latch_arm_has_been_rebuilt() -> None:
     # A phi is opened before its latch arm exists, so the round that emits it cannot see that every arm is one value.
-    hir = optimize(lower(never_uniform_until_the_latch_arm_is_rebuilt).hir, DEFAULT_IFCONV_MAX_OPS)
+    hir = optimize(
+        lower(never_uniform_until_the_latch_arm_is_rebuilt, DEFAULT_UNROLL_MAX_TRIPS).hir, DEFAULT_IFCONV_MAX_OPS
+    )
     assert [node.type for node in hir.nodes.values() if isinstance(node, Phi)] == [HirFloatType()]  # the counter's
     out = hir.nodes[hir.outputs[0].value]
     assert isinstance(out, Operation) and [hir.nodes[o] for o in out.operands] == [

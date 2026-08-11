@@ -63,7 +63,7 @@ def capture(out_path: str) -> None:
         try:
             lir = build(
                 lower_to_mir(
-                    lower(target.kernel()).hir,
+                    lower(target.kernel(), target.ops.unroll_max_trips).hir,
                     build_ops(target.ops),
                     target.ops.ifconv_max_ops,
                 ),

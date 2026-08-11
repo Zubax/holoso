@@ -30,6 +30,8 @@ from holoso._eel import lower
 from holoso._eel._desugar import desugar
 from holoso._eel._lower import resolve_target
 from holoso._eel._pe import partial_evaluate
+
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from holoso._eel._print import print_eel
 from holoso._hir import HirEvaluator
 
@@ -59,7 +61,7 @@ _XS = (1.0, 2.0)
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
@@ -72,7 +74,7 @@ def _rejects(fn: object, match: str) -> None:
 def _residual_text(fn: Callable[..., object]) -> str:
     """For the kernels public synthesis refuses; everything that synthesizes pins text via :func:`_residual`."""
     assert isinstance(fn, types.FunctionType)
-    return print_eel(partial_evaluate(desugar(fn), fn))
+    return print_eel(partial_evaluate(desugar(fn), fn, None, DEFAULT_UNROLL_MAX_TRIPS))
 
 
 def _residual(fn: Callable[..., object], options: Options) -> str:
@@ -496,7 +498,7 @@ def _returns_bare_none(x: float) -> None:
 def test_none_kernels_have_no_outputs() -> None:
     _oracle(_returns_nothing, [{"x": 1.0}])
     _oracle(_returns_bare_none, [{"x": 1.0}])
-    assert lower(_returns_nothing).hir.outputs == []
+    assert lower(_returns_nothing, DEFAULT_UNROLL_MAX_TRIPS).hir.outputs == []
 
 
 def _mixed_tuple(n: int, x: float) -> tuple[int, float, bool]:
@@ -789,7 +791,9 @@ def test_a_static_integer_folds_in_the_integer_domain() -> None:
         result = holoso.synthesize(kernel, _INT_ONLY, name="k")
         assert result.numerical_model.elaborate().run() == [kernel()], kernel.__name__
     # The min answers an INT past the machine word, so it stays on the evaluator (no public spelling holds it).
-    assert HirEvaluator(lower(_min_of_unholdable_ints).hir).run() == [_min_of_unholdable_ints()]
+    assert HirEvaluator(lower(_min_of_unholdable_ints, DEFAULT_UNROLL_MAX_TRIPS).hir).run() == [
+        _min_of_unholdable_ints()
+    ]
     # The result keeps the integer TYPE too, so it composes with the integer operators rather than poisoning them.
     _oracle(_abs_stays_integer, [{"n": 4}, {"n": -1}])
 
@@ -805,7 +809,7 @@ def _np_abs_at_the_int64_boundary() -> int:
 def test_the_integer_abs_is_exact_at_arbitrary_precision() -> None:
     """Both spellings share the one IntAbs entry, where the host has numpy wrapping under int64 and ``abs`` not."""
     for kernel in (_abs_at_the_int64_boundary, _np_abs_at_the_int64_boundary):
-        assert HirEvaluator(lower(kernel).hir).run() == [2**63], kernel.__name__
+        assert HirEvaluator(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir).run() == [2**63], kernel.__name__
 
 
 def _log2_of_an_integer_zero(x: float) -> float:

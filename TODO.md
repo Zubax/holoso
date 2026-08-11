@@ -9,11 +9,9 @@ acceptance set, covered through the MIR interpreter and the numerical model, wit
 The generated bench asserts `err_pc == 0` on every vector, so a transaction whose defined answer includes an
 asserted error sideband -- an input-fed `x // 0`, a float division by zero -- cannot be cosimulated end to end;
 that behavior is covered at the operator-bench and model levels instead. Letting an explicit vector declare its
-expected `err_pc` would close this for both families.
-
-A `for` that cannot unroll -- a dynamic trip count, or a static one above the unroll threshold -- is rejected rather
-than lowered to a counted back-edge loop, which needs a runtime integer counter; with runtime integers now carried
-through the whole pipeline, the counted back-edge loop is the natural follow-on.
+expected `err_pc` would close this for both families. The bench also caps a transaction at 2^20 cycles, so a valid
+loop that legitimately runs longer -- an input-fed counter, a counted loop over a huge static range -- is reported
+as a runaway; the numerical model carries its own, far higher ceiling.
 
 ## Frontend limitations
 
@@ -23,6 +21,13 @@ An empty array slice (`v[:0]`) is refused where it is taken rather than where it
 an empty sequence slice is fine. An empty array carries no leaves, so the leaf-type and shape checks cannot run --
 which is what must reject `-boolflags[:0]` and `a[:0,:] + b[:0,:]`, both of which CPython rejects too. Accepting the
 valid empty-float case needs an empty-but-typed array in the value model.
+
+A counted `for` above the unroll threshold turns its target into a runtime integer, so a body that indexes an
+aggregate with it (`v[i]`) is refused at the subscript, and one that converts it needs the conversion operator the
+unrolled form folds away; forcing the unroll with `for i in list(range(...))` is the rewrite. Its body is a
+data-dependent region, so installing a whole aggregate into a state attribute there is refused as it is in a
+`while` -- storing elements is the rewrite. A range returned across a helper's own data-dependent region is refused
+at the call, and an unconditional-exit body (`for i in range(n): break`) keeps the existing no-back-edge refusal.
 
 A data-dependent loop carries the syntactic set of names its body assigns, fixed before the body is interpreted
 because the header phis must exist first. A leaked `for` counter assigned only on a statically-dead path

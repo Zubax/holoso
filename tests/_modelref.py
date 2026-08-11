@@ -41,6 +41,7 @@ type Vector = list[ScalarValue]
 # What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
 _DEFAULTS = Options(OperatorOptions())
 DEFAULT_IFCONV_MAX_OPS: int = _DEFAULTS.ifconv_max_ops
+DEFAULT_UNROLL_MAX_TRIPS: int = _DEFAULTS.unroll_max_trips
 
 
 def default_ifmt(ffmt: FloatFormat) -> IntFormat:
@@ -86,7 +87,7 @@ def build_model_and_interpreter(
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(lower_frontend(kernel).hir, ops, ifconv_max_ops)
+    mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, ifconv_max_ops)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 

@@ -17,6 +17,7 @@ from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
 
 from ._eeloracle import assert_hir_matches_reference
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 
 _MIN_OPTIONS = Options(OperatorOptions(fadd=FAddOptions()))
 
@@ -29,13 +30,13 @@ _WITH_NAN = (1.0, float("nan"))
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
 def _rejects(fn: object, match: str) -> None:
     with pytest.raises(UnsupportedConstruct, match=match):
-        lower(fn)
+        lower(fn, DEFAULT_UNROLL_MAX_TRIPS)
 
 
 # ---------------------------------------------------------------------- constant subscripts follow CPython

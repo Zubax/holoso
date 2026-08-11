@@ -15,6 +15,7 @@ import pytest
 from holoso._eel import lower
 
 from ._eeloracle import InputRow, assert_hir_matches_reference
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from ._examples import SPECS, ExampleSpec
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -71,7 +72,7 @@ _VECTOR_KERNELS: list[tuple[str, object, list[InputRow]]] = [
 
 @pytest.mark.parametrize("spec", SPECS, ids=[spec.name for spec in SPECS])
 def test_eel_oracle_on_examples(spec: ExampleSpec) -> None:
-    hir = lower(spec.make_kernel()).hir
+    hir = lower(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir
     vectors = spec.reference_vectors()
     compared = assert_hir_matches_reference(hir, spec.make_kernel(), vectors, label=spec.name)
     assert compared == len(vectors)
@@ -80,5 +81,5 @@ def test_eel_oracle_on_examples(spec: ExampleSpec) -> None:
 @pytest.mark.parametrize("name,kernel,vectors", _VECTOR_KERNELS, ids=[name for name, _, _ in _VECTOR_KERNELS])
 def test_eel_oracle_on_array_kernels(name: str, kernel: object, vectors: list[InputRow]) -> None:
     assert callable(kernel)
-    compared = assert_hir_matches_reference(lower(kernel).hir, kernel, vectors, label=name)
+    compared = assert_hir_matches_reference(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, kernel, vectors, label=name)
     assert compared == len(vectors)

@@ -16,6 +16,7 @@ from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
 
 from ._eeloracle import assert_hir_matches_reference
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_locations
 
 type _Row = Mapping[str, float | bool | int]
@@ -24,8 +25,13 @@ _MIN_OPTIONS = Options(OperatorOptions())
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
+
+
+def _as_int(value: object) -> int:
+    assert isinstance(value, holoso.IntValue)
+    return int(value)
 
 
 def _rejects(fn: object, match: str) -> None:
@@ -178,8 +184,8 @@ def _huge_static_range(x: float) -> float:
     return x
 
 
-def test_a_huge_static_range_is_a_located_budget_rejection() -> None:
-    _rejects(_huge_static_range, "budget is exhausted while expanding the range materialization")
+def test_a_huge_static_range_stop_does_not_fit_the_integer_format() -> None:
+    _rejects(_huge_static_range, "does not fit int24; raise wint_min")
 
 
 # ---------------------------------------------------------------------- the residual while
@@ -400,12 +406,8 @@ def _scalar_iteration(x: float) -> float:
     return x
 
 
-def test_dynamic_trips_reject_located() -> None:
-    for fn, match in [
-        (_dynamic_trip_count, "a range argument must be a compile-time constant int"),
-        (_scalar_iteration, "a scalar is not iterable"),
-    ]:
-        _rejects(fn, match)
+def test_a_scalar_is_not_iterable() -> None:
+    _rejects(_scalar_iteration, "a scalar is not iterable")
 
 
 def test_a_body_leaving_the_loop_on_every_path_cannot_iterate() -> None:
@@ -855,3 +857,432 @@ def test_a_discarded_promote_pass_does_not_charge_the_budget() -> None:
     promotes = holoso.synthesize(_int_carry_promotes_then_fits, options, name="k")
     assert promotes.initiation_interval == fits.initiation_interval
     assert promotes.verilog_output.verilog == fits.verilog_output.verilog
+
+
+# ---------------------------------------------------------------------- the counted for
+
+
+def _counted_sum(n: int) -> int:
+    s = 0
+    for i in range(n):
+        s = s + i
+    return s
+
+
+def _counted_bounds(a: int, b: int) -> int:
+    s = 0
+    for i in range(a, b):
+        s = s + i
+    return s
+
+
+def _counted_down(n: int) -> int:
+    s = 0
+    for i in range(n, 0, -1):
+        s = s + i
+    return s
+
+
+def _counted_step(n: int) -> int:
+    s = 0
+    for i in range(0, n, 3):
+        s = s + i
+    return s
+
+
+def _counted_float_body(n: int) -> float:
+    acc = 0.0
+    for i in range(n):
+        acc = acc + float(i)
+    return acc
+
+
+def _counted_carried_out(n: int) -> int:
+    i = 99
+    for i in range(n):
+        pass
+    return i
+
+
+def _counted_target_rebound(n: int) -> int:
+    s = 0
+    for i in range(n):
+        i = i * 2
+        s = s + i
+    return s
+
+
+def _counted_break(n: int) -> int:
+    s = 0
+    for i in range(n):
+        if i > 3:
+            break
+        s = s + i
+    return s
+
+
+def _counted_continue(n: int) -> int:
+    s = 0
+    for i in range(n):
+        if i == 2:
+            continue
+        s = s + i
+    return s
+
+
+def _counted_nested(n: int) -> int:
+    s = 0
+    for i in range(n):
+        for j in range(i):
+            s = s + 1
+    return s
+
+
+def _counted_eval_once(n: int) -> int:
+    r = range(n)
+    n = 0
+    t = 0
+    for i in r:
+        t = t + 1
+    return t + n
+
+
+def _counted_shadow(n: int) -> int:
+    t = 0
+    for n in range(n):
+        t = t + 1
+    return t
+
+
+def _counted_reused_range(n: int) -> int:
+    r = range(n)
+    s = 0
+    for i in r:
+        s = s + i
+    for j in r:
+        s = s + 1
+    return s
+
+
+def _sum_over(r: range) -> int:
+    s = 0
+    for i in r:
+        s = s + i
+    return s
+
+
+def _counted_helper_transport(n: int) -> int:
+    return _sum_over(range(n))
+
+
+def _counted_prebound_float(n: int) -> float:
+    i = 0.5
+    for i in range(n):
+        pass
+    return float(i)
+
+
+def _first_square_over(n: int) -> int:
+    for i in range(n):
+        if i * i > 5:
+            return i
+    return -1
+
+
+def _counted_return_in_helper(n: int) -> int:
+    return _first_square_over(n) + 100
+
+
+def _counted_rail_overshoot_down() -> tuple[int, int]:
+    trips = 0
+    last = 0
+    for last in range(-8388600, -8388607, -3):
+        trips = trips + 1
+    return trips, last
+
+
+class _CountedFromSlot:
+    def __init__(self) -> None:
+        self.k = 2
+
+    def step(self, n: int) -> int:
+        s = 0
+        for i in range(self.k, n):
+            s = s + i
+        return s
+
+
+def _counted_inside_residual_while(n: int, x: float) -> int:
+    s = 0
+    while x > 0.0:
+        for i in range(n):
+            s = s + i
+        x = x - 1.0
+    return s
+
+
+def _range_from_helper_arms(c: bool) -> int:
+    s = 0
+    for i in _pick_range(c):
+        s = s + i
+    return s
+
+
+def _pick_range(c: bool) -> range:
+    if c:
+        return range(4)
+    return range(4)
+
+
+def _nested_range_display() -> int:
+    s = 0
+    for r in [range(2), range(3)]:
+        for i in r:
+            s = s + i
+    return s
+
+
+_N_ROWS: list[_Row] = [{"n": 0}, {"n": 1}, {"n": 2}, {"n": 7}]
+
+
+def test_counted_loops_match_cpython() -> None:
+    _oracle(_counted_sum, _N_ROWS)
+    _oracle(_counted_bounds, [{"a": 0, "b": 0}, {"a": -2, "b": 3}, {"a": 3, "b": 1}, {"a": 1, "b": 6}])
+    _oracle(_counted_down, _N_ROWS)
+    _oracle(_counted_step, [{"n": 0}, {"n": 1}, {"n": 3}, {"n": 10}])
+    _oracle(_counted_float_body, _N_ROWS)
+    _oracle(_counted_carried_out, _N_ROWS)
+    _oracle(_counted_target_rebound, _N_ROWS)
+    _oracle(_counted_break, [{"n": 0}, {"n": 3}, {"n": 9}])
+    _oracle(_counted_continue, [{"n": 2}, {"n": 6}])
+    _oracle(_counted_nested, [{"n": 0}, {"n": 1}, {"n": 4}])
+    _oracle(_counted_eval_once, [{"n": 0}, {"n": 4}])
+    _oracle(_counted_shadow, [{"n": 0}, {"n": 5}])
+    _oracle(_counted_reused_range, [{"n": 0}, {"n": 4}])
+    _oracle(_counted_helper_transport, _N_ROWS)
+    _oracle(_counted_prebound_float, _N_ROWS)
+    _oracle(_range_from_helper_arms, [{"c": True}, {"c": False}])
+    _oracle(_nested_range_display, [{}])
+    _oracle(_counted_return_in_helper, [{"n": 0}, {"n": 2}, {"n": 5}])
+    _oracle(_CountedFromSlot().step, [{"n": 0}, {"n": 2}, {"n": 6}])
+    _oracle(_counted_inside_residual_while, [{"n": 0, "x": 0.0}, {"n": 3, "x": 2.0}])
+
+
+def _static_counted_sum() -> int:
+    s = 0
+    for i in range(4):
+        s = s + i
+    return s
+
+
+def test_the_unroll_threshold_selects_the_lowering_of_a_pure_kernel() -> None:
+    """
+    The same kernel unrolls at or below the threshold (exact II, no phis) and residualizes above it
+    (open-ended II, loop phis), with identical values either way; the branch-free body keeps the II
+    discriminator sound. Only the lowering is claimed: a counted body is a data-dependent region, so it
+    refuses what any residual loop refuses -- an aggregate state install, a runtime-int subscript.
+    """
+    unrolled = holoso.synthesize(_static_counted_sum, Options(OperatorOptions(), unroll_max_trips=4), name="k")
+    counted = holoso.synthesize(_static_counted_sum, Options(OperatorOptions(), unroll_max_trips=3), name="k")
+    assert unrolled.initiation_interval[1] is not None
+    assert counted.initiation_interval[1] is None
+    assert not any(line.lstrip().startswith("phi %") for line in strip_locations(unrolled.frontend_ir[-1]).splitlines())
+    assert any(line.lstrip().startswith("phi %") for line in strip_locations(counted.frontend_ir[-1]).splitlines())
+    assert [_as_int(v) for v in unrolled.numerical_model.elaborate().run()] == [6]
+    assert [_as_int(v) for v in counted.numerical_model.elaborate().run()] == [6]
+
+
+def _static_counted_target() -> int:
+    for w in range(3):
+        pass
+    return w
+
+
+def test_a_static_counted_loop_defines_its_target_after_the_loop() -> None:
+    forced = holoso.synthesize(_static_counted_target, Options(OperatorOptions(), unroll_max_trips=0), name="k")
+    (out,) = forced.numerical_model.elaborate().run()
+    assert _as_int(out) == 2
+
+
+def _counted_rail_overshoot() -> tuple[int, int]:
+    trips = 0
+    last = 0
+    for last in range(8388600, 8388607, 3):
+        trips = trips + 1
+    return trips, last
+
+
+def test_a_saturating_counter_overshoot_is_unobservable() -> None:
+    """The final advance saturates at the int24 rail, which must only end the loop, never leak into a value."""
+    for kernel, expected in ((_counted_rail_overshoot, [3, 8388606]), (_counted_rail_overshoot_down, [3, -8388606])):
+        forced = holoso.synthesize(kernel, Options(OperatorOptions(), unroll_max_trips=0), name="k")
+        assert [_as_int(v) for v in forced.numerical_model.elaborate().run()] == expected
+
+
+def _unused_huge_range(x: float) -> float:
+    r = range(10**25)
+    return x + 1.0
+
+
+def test_an_unconsumed_huge_range_compiles() -> None:
+    result = holoso.synthesize(_unused_huge_range, Options(OperatorOptions(fadd=FAddOptions())), name="k")
+    (out,) = result.numerical_model.elaborate().run(2.0)
+    assert float(out) == 3.0
+
+
+def _range_join_equal(c: bool) -> int:
+    r = range(3) if c else range(3)
+    s = 0
+    for i in r:
+        s = s + i
+    return s
+
+
+def _static_range_consumers() -> int:
+    v = np.array(range(3))
+    picked = range(5)[3]
+    lo, hi = range(2)
+    return int(v[2]) + picked + lo + hi + len(range(10**6))
+
+
+def _returned_static_range() -> tuple[int, ...]:
+    return range(3)  # type: ignore[return-value]
+
+
+def test_static_ranges_decay_wherever_a_sequence_is_demanded() -> None:
+    _oracle(_range_join_equal, [{"c": True}, {"c": False}])
+    result = holoso.synthesize(_static_range_consumers, _MIN_OPTIONS, name="k")
+    (out,) = result.numerical_model.elaborate().run()
+    assert _as_int(out) == _static_range_consumers()
+    returned = holoso.synthesize(_returned_static_range, _MIN_OPTIONS, name="k")
+    assert [_as_int(v) for v in returned.numerical_model.elaborate().run()] == [0, 1, 2]
+
+
+def _runtime_step(n: int, m: int) -> int:
+    s = 0
+    for i in range(0, n, m):
+        s = s + i
+    return s
+
+
+def _float_range_bound(x: float) -> float:
+    for i in range(x):  # type: ignore[call-overload]
+        x = x + 1.0
+    return x
+
+
+def _zero_static_step(n: int) -> int:
+    s = 0
+    for i in range(0, n, 0):
+        s = s + i
+    return s
+
+
+def _runtime_range_len(n: int) -> int:
+    return len(range(n))
+
+
+def _overflowing_range_len() -> int:
+    return len(range(10**25))
+
+
+def _runtime_range_list(n: int) -> int:
+    v = list(range(n))
+    return v[0]
+
+
+def _range_arithmetic(n: int) -> int:
+    return range(n) + 1  # type: ignore[operator]
+
+
+def _range_condition(n: int) -> int:
+    if range(n):
+        return 1
+    return 0
+
+
+def _range_attr(n: int) -> int:
+    return range(n).start
+
+
+def _returned_runtime_range(n: int) -> tuple[int, ...]:
+    return range(n)  # type: ignore[return-value]
+
+
+def _unconditional_break(n: int) -> int:
+    for i in range(n):
+        break
+    return n
+
+
+def _unbound_target_after_runtime_loop(n: int) -> int:
+    for i in range(n):
+        pass
+    return i
+
+
+def _aggregate_target_runtime_loop(n: int) -> int:
+    i = [0]
+    for i in range(n):  # type: ignore[assignment]
+        pass
+    return n
+
+
+def _range_join_unequal(c: bool, n: int) -> int:
+    r = range(3) if c else range(n)
+    s = 0
+    for i in r:
+        s = s + i
+    return s
+
+
+class _RangeState:
+    def __init__(self) -> None:
+        self.x = (0, 1)
+
+    def step(self, n: int) -> int:
+        self.x = range(n)  # type: ignore[assignment]
+        return n
+
+
+def _range_into_an_array_operation(x: float) -> float:
+    v = np.array([x, 2.0])
+    return float(v @ range(2))
+
+
+def _range_through_a_residual_loop(x: float) -> range:
+    while x > 0.0:
+        if x > 2.0:
+            return range(3)
+        x = x - 1.0
+    return range(3)
+
+
+def _range_crossing_a_residual_frame(x: float) -> int:
+    s = 0
+    for i in _range_through_a_residual_loop(x):
+        s = s + i
+    return s
+
+
+def test_counted_loop_gaps_and_bans() -> None:
+    for fn, match in [
+        (_runtime_step, "the range step must be a compile-time constant int"),
+        (_float_range_bound, "a range argument must be an int, not a float"),
+        (_zero_static_step, r"range\(\) rejects its arguments"),
+        (_runtime_range_len, r"len\(\) of a range with a runtime bound is not supported"),
+        (_overflowing_range_len, r"len\(\) of this range overflows, exactly as it does in CPython"),
+        (_runtime_range_list, "a range with a runtime bound can only drive a for loop"),
+        (_range_arithmetic, "a range cannot be used as a scalar here"),
+        (_range_condition, "a range cannot be used as a scalar here"),
+        (_range_attr, "a range has no supported attribute 'start'"),
+        (_returned_runtime_range, "a range with a runtime bound can only drive a for loop"),
+        (_unconditional_break, "leaves the loop on every path, so the loop cannot iterate"),
+        (_unbound_target_after_runtime_loop, "the local name 'i' is not bound on every path"),
+        (_aggregate_target_runtime_loop, "'i' is a sequence; only bool, int, and float values can be carried"),
+        (_range_join_unequal, "holds branch values the compiler cannot merge"),
+        (_RangeState().step, "a range with a runtime bound can only drive a for loop"),
+        (_range_crossing_a_residual_frame, "a range returned across a data-dependent region is not supported"),
+        (_range_into_an_array_operation, "an array operation on a Python list/tuple is not supported"),
+    ]:
+        _rejects(fn, match)

@@ -48,7 +48,7 @@ def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: Sink,
     entry method's receiver is a state write.
     """
     origin = stmt.origin
-    rhs = interp.expr(stmt.value, frame, sink)
+    rhs = _aggregate.decay(interp.budget, interp.expr(stmt.value, frame, sink), origin)
     match stmt.root:
         case EnvRead(name=name):
             reject(

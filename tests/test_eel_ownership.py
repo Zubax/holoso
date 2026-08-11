@@ -20,6 +20,7 @@ from holoso import UnsupportedConstruct
 from holoso._eel import lower
 
 from ._eeloracle import assert_hir_matches_reference
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -29,7 +30,7 @@ _OPTIONS = holoso.Options(holoso.OperatorOptions())
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 

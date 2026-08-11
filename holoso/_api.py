@@ -62,7 +62,7 @@ class SynthesisResult:
     output_ports: list[DataOutputPort]
     control_ports: list[ControlPort]
 
-    initiation_interval: tuple[int, int | None]  # (min II, max II or None if data-dependent)
+    initiation_interval: tuple[int, int | None]  # (min II, max II or None when not statically determined)
     verilog_output: VerilogOutput
     numerical_model: NumericalModel
     cocotb_output: CocotbOutput
@@ -141,6 +141,12 @@ class Options:
     ifconv_max_ops: int = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
     """Per-arm operation budget for diamond if-conversion; 0 converts only the operation-free diamonds."""
 
+    unroll_max_trips: int = int(os.getenv("HOLOSO_UNROLL_MAX_TRIPS", "1024"))
+    """
+    A counted `for range(...)` loop with more trips than this lowers to a back-edge loop with a runtime
+    counter instead of unrolling; 0 never unrolls. `while` loops and aggregate iteration are budget-bounded.
+    """
+
     ucode_fetch_stages: int = 3
     """Controller fmax/latency trade-off: a deeper fetch raises fmax but costs idle refills on a mispredicted branch."""
 
@@ -168,6 +174,8 @@ class Options:
             raise ValueError(f"wmultiplier must be >= 2 when set, got {self.wmultiplier}")
         if self.ifconv_max_ops < 0:
             raise ValueError(f"ifconv_max_ops must be >= 0, got {self.ifconv_max_ops}")
+        if self.unroll_max_trips < 0:
+            raise ValueError(f"unroll_max_trips must be >= 0, got {self.unroll_max_trips}")
         if self.ucode_fetch_stages < 1:
             raise ValueError(f"ucode_fetch_stages must be >= 1, got {self.ucode_fetch_stages}")
         if self.regalloc_effort < 0:
@@ -222,7 +230,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
             _logger.info("\t%s: %s", field.name, value)
     _logger.info("\tifmt: %s (derived)", options.ifmt)
 
-    frontend = lower_frontend(target)
+    frontend = lower_frontend(target, options.unroll_max_trips)
     mir = lower_to_mir(frontend.hir, _build_op_config(options), options.ifconv_max_ops)
     lir = build(
         mir,

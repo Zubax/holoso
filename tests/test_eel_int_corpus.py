@@ -20,7 +20,7 @@ from holoso import BoolType, FloatType, IntType
 from holoso._eel import lower
 from holoso._value import FloatValue, IntValue
 
-from ._modelref import flatten_value, port_name
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS, flatten_value, port_name
 from ._eel_corpus import INT_CASES, band_scan, convergence_steps, int_corpus_options, rows
 from ._eeloracle import InputRow, assert_hir_matches_reference, instance_leaves
 
@@ -52,7 +52,7 @@ _ORACLE_CASES = _UART_CASES + _FLOAT_CASES
 @pytest.mark.parametrize("name,make,vectors", _ORACLE_CASES, ids=[name for name, _, _ in _ORACLE_CASES])
 def test_corpus_oracle(name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]) -> None:
     target = make()
-    compared = assert_hir_matches_reference(lower(target).hir, target, vectors, label=name)
+    compared = assert_hir_matches_reference(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, target, vectors, label=name)
     assert compared == len(vectors)
 
 

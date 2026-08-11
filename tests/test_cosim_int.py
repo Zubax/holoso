@@ -109,3 +109,34 @@ def test_int_pow2_strength_reduction_cosim(sim: str) -> None:
 def test_int_counting_loop_random_sweep_cosim(sim: str) -> None:
     """An unbounded draw once handed this counting loop a multi-million-cycle transaction (runaway ceiling)."""
     run_cosim(sim, holoso.synthesize(countdown, _OPTIONS, name="countdown_int"))
+
+
+def counted_scan(n: int, seed: int) -> tuple[int, int]:
+    acc = seed
+    last = 0
+    for i in range(n):
+        if i == 2:
+            continue
+        acc = acc + i
+        last = i
+    return acc, last
+
+
+class CountedState:
+    def __init__(self) -> None:
+        self.total = 0
+
+    def step(self, n: int) -> int:
+        for i in range(n):
+            self.total = self.total + i + 1
+        return self.total
+
+
+@pytest.mark.cosim
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_int_counted_for_cosim(sim: str) -> None:
+    """The counted back-edge for: a runtime trip count with a continue lane, and a state carry across trips."""
+    scan = holoso.synthesize(counted_scan, _OPTIONS, name="counted_scan_int")
+    run_cosim(sim, scan, vectors=[{"n": 0, "seed": 5}, {"n": 1, "seed": -3}, {"n": 4, "seed": 0}, {"n": 7, "seed": 9}])
+    state = holoso.synthesize(CountedState().step, _OPTIONS, name="counted_state_int")
+    run_cosim(sim, state, vectors=[{"n": 0}, {"n": 3}, {"n": 1}, {"n": 6}])

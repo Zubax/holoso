@@ -37,6 +37,8 @@ from holoso import (
 from holoso._eel import lower
 from holoso._eel._desugar import desugar
 from holoso._eel._pe import partial_evaluate
+
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from holoso._eel._print import print_eel
 
 from ._eeloracle import assert_hir_matches_reference
@@ -81,7 +83,7 @@ _SANS_FLOG2 = dataclasses.replace(_GENERAL_POW, operator=dataclasses.replace(_GE
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
@@ -93,7 +95,7 @@ def _rejects(fn: object, match: str) -> None:
 
 def _residual_text(fn: Callable[..., object]) -> str:
     assert isinstance(fn, types.FunctionType)
-    return print_eel(partial_evaluate(desugar(fn), fn))
+    return print_eel(partial_evaluate(desugar(fn), fn, None, DEFAULT_UNROLL_MAX_TRIPS))
 
 
 def _residual(fn: Callable[..., object], options: Options) -> str:
@@ -393,7 +395,7 @@ def test_a_boolean_power_rejects_the_same_way_under_the_operator_and_its_spellin
     messages = []
     for fn in (_bool_pow_operator, _bool_pow_spelled):
         with pytest.raises(UnsupportedConstruct) as excinfo:
-            lower(fn)
+            lower(fn, DEFAULT_UNROLL_MAX_TRIPS)
         messages.append(excinfo.value.message.split("() ", 1)[1])
     assert messages[0] == messages[1]
     assert "boolean is not a number" in messages[0]
@@ -614,7 +616,7 @@ def _calls_lying_helper(x: float) -> bool:
 def test_a_return_annotation_mismatch_points_into_the_callee() -> None:
     pattern = r"in _lying_helper\(\): the returned value has type float where the annotation declares bool \(at "
     with pytest.raises(UnsupportedConstruct, match=pattern) as info:
-        lower(_calls_lying_helper)
+        lower(_calls_lying_helper, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_calls_lying_helper, "_lying_helper(x)")
@@ -658,7 +660,7 @@ def test_unregistered_callables_are_uniform_no_library_is_special() -> None:
     """
     _rejects(_unimplemented_library, "calls to 'math.erf' are not supported yet")
     with pytest.raises(UnsupportedConstruct, match=r"in np.identity\(\): ") as info:
-        lower(_unimplemented_python_library)
+        lower(_unimplemented_python_library, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_unimplemented_python_library, "np.identity(2)")
@@ -722,7 +724,7 @@ def _guarded_call_to_raiser(c: bool, x: float) -> float:
 def test_a_callee_raise_is_judged_where_written_not_at_the_guarded_call_site() -> None:
     """DESIGN.md: unconditional within the writing function fires even under the caller's residual arm."""
     with pytest.raises(UnsupportedConstruct, match=r"in _always_raises\(\): ValueError: stub domain") as info:
-        lower(_guarded_call_to_raiser)
+        lower(_guarded_call_to_raiser, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_guarded_call_to_raiser, "_always_raises(x)")
@@ -742,7 +744,7 @@ def _calls_bad_helper(x: float) -> float:
 
 def test_a_callee_desugar_failure_reports_the_user_call_site_with_the_chain() -> None:
     with pytest.raises(UnsupportedConstruct, match=r"in _bad_helper\(\): lambdas are not supported \(at ") as info:
-        lower(_calls_bad_helper)
+        lower(_calls_bad_helper, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_calls_bad_helper, "_bad_helper(x)")
@@ -766,7 +768,7 @@ def test_nested_rejections_report_the_outermost_call_site_with_the_full_chain() 
     with pytest.raises(
         UnsupportedConstruct, match=r"in _middle\(\): in _deep_reject\(\): the body of this data-dependent loop"
     ) as info:
-        lower(_calls_deep)
+        lower(_calls_deep, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_calls_deep, "_middle(x)")

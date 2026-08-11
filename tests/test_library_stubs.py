@@ -22,6 +22,7 @@ from holoso._eel._ir import BinaryOp, ScalarType
 from holoso._eel._lib._linalg import matmul, transpose
 
 from ._eeloracle import assert_hir_matches_reference
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from holoso._eel._lib._intrinsics import (
     abs_float,
     atan2,
@@ -305,4 +306,6 @@ def test_composite_stub_inlining_matches_the_host_at_binary64() -> None:
         return math.tan(x) + math.cbrt(x) + math.sinh(x / 4.0)
 
     vectors = [{"x": 0.5}, {"x": -1.0}, {"x": 8.0}, {"x": 2.0}]
-    assert assert_hir_matches_reference(lower(kernel).hir, kernel, vectors, label="composite_inlining") == len(vectors)
+    assert assert_hir_matches_reference(
+        lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, kernel, vectors, label="composite_inlining"
+    ) == len(vectors)

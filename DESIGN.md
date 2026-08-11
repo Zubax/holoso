@@ -301,13 +301,13 @@ tomorrow whatever else MIR folds; what a substitution round erases is charged on
 costs an arm its conversion and never a wrong answer, so the budget stays a count of what the kernel wrote rather than
 a prediction of what the machine will hold.
 
-Loops with a static trip count unroll fully, below the unroll threshold; a `while` becomes a genuine back-edge loop
-that fully drains before iterating, so no overlap ever crosses a back-edge. Its static II deliberately counts the
-back-edge as not-taken -- a true lower bound; the numerical model is the authority on realized cycle counts. A
-`while` whose first test is decidable at compile time -- the sentinel spelling of a `do`-`while`, which Python has no
-syntax for -- has that trip peeled by the front end and only the remaining trips residualized. The peel costs
-microcode and no datapath, and removes a runtime test from every transaction along with an entry path no input could
-ever take.
+Loops with a static trip count unroll fully, below the unroll threshold (`unroll_max_trips`); above it, or with a
+runtime trip count, a `for` over `range` becomes a counted back-edge loop: a hidden counter phi, bounds captured by
+value, the static step's sign fixing the exit test. Only `for` consults the threshold; a lazy `range` reaching any
+other consumer materializes if static and refuses if runtime. A `while` becomes a genuine back-edge loop that fully
+drains before iterating, so no overlap crosses a back-edge; its static II counts the back-edge as not-taken -- a true
+lower bound, with the numerical model the authority on realized counts. The `do`-`while` spelling -- a statically
+decidable first test -- is peeled: microcode and no datapath, less a runtime test and an entry path no input takes.
 
 ### HIR optimization
 

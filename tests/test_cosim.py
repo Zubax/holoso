@@ -27,23 +27,24 @@ from holoso._mir import lower as lower_to_mir
 from holoso._value import ScalarLike
 from ._cosim import run_cosim
 from ._modelref import (
-    default_options,
-    build_ops,
+    branch_boundary_kernel,
     build_lir,
+    build_ops,
     ChainedSlots,
     COMPARATOR_OPTIONS_CASES,
-    OptionsCase,
-    PIPELINE_OPTIONS_CASES,
-    SelectHold,
-    SharedLiveOut,
-    SharedLiveOutBool,
-    branch_boundary_kernel,
     const_branch_kernel,
+    default_options,
+    DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
+    OptionsCase,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
     overlap_spill_kernel,
     phi_swap_computed_loop,
+    PIPELINE_OPTIONS_CASES,
+    SelectHold,
+    SharedLiveOut,
+    SharedLiveOutBool,
     staged_options,
 )
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
@@ -436,7 +437,9 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OptionsCase) -> None:
     name = f"overlap_div_err_{config.label}"
     options = config.make_options(fmt)
     lir = build_lir(
-        lower_to_mir(lower(overlap_div_err_kernel).hir, build_ops(options), options.ifconv_max_ops),
+        lower_to_mir(
+            lower(overlap_div_err_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, build_ops(options), options.ifconv_max_ops
+        ),
         name,
     )
     entry = next(block for block in lir.blocks if block.index == lir.entry)

@@ -8,13 +8,15 @@ so an empty slice on one axis cannot mask a bounds fault on another.
 """
 
 from .._ir import Origin, ScalarType
-from ._ops import const_value
+from ._ops import const_value, make_const
 from ._ownership import share
 from ._reject import reject
 from ._snapshot import describe_opaque, ndarray_annotation
 from ._values import (
     Allocation,
+    ExpansionBudget,
     Opaque,
+    RangeValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
@@ -44,8 +46,36 @@ def kind_label(value: Value) -> str:
             return "captured object"
         case TensorMethod():
             return "bound array method"
+        case RangeValue():
+            return "range"
         case _:
             return "scalar"
+
+
+def static_range(value: RangeValue) -> range | None:
+    match value.start, value.stop:
+        case StaticScalar(const=start), StaticScalar(const=stop):
+            a, b = const_value(start), const_value(stop)
+            assert isinstance(a, int) and isinstance(b, int)
+            return range(a, b, value.step)
+        case _:
+            return None
+
+
+def range_length(span: range) -> int:
+    """Exact arithmetic: host ``len()`` of a huge range overflows Py_ssize_t."""
+    return max(0, (span.stop - span.start + span.step - (1 if span.step > 0 else -1)) // span.step)
+
+
+def decay(budget: ExpansionBudget, value: Value, origin: Origin) -> Value:
+    """Wherever an aggregate is demanded: a static range materializes, a runtime one drives only a counted for."""
+    if not isinstance(value, RangeValue):
+        return value
+    span = static_range(value)
+    if span is None:
+        reject(origin, "a range with a runtime bound can only drive a for loop")
+    budget.spend(max(range_length(span), 1), origin, "the range materialization")
+    return SequenceValue(tuple(StaticScalar(make_const(i)) for i in span), Allocation())
 
 
 def static_index(origin: Origin, value: Value, what: str) -> int:

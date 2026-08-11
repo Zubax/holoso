@@ -29,10 +29,6 @@ from ._eeloracle import InputRow
 from ._examples import SPECS, ExampleSpec
 from ._importguard import forbidden_imports
 from ._modelref import (
-    ChainedSlots,
-    SelectHold,
-    SlotSwap,
-    Vector,
     as_float,
     assert_model_equals_interpreter,
     bool_phi_swap_computed_loop,
@@ -40,8 +36,10 @@ from ._modelref import (
     branchy_swap_mixed_arm_loop,
     build_model_and_interpreter,
     build_ops,
+    ChainedSlots,
     const_branch_kernel,
     default_ops,
+    DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
@@ -51,7 +49,10 @@ from ._modelref import (
     phi_swap_computed_loop,
     phi_swap_loop,
     random_legal_bits,
+    SelectHold,
+    SlotSwap,
     staged_ops,
+    Vector,
 )
 
 
@@ -247,7 +248,7 @@ def test_the_integer_corpus_reaches_an_integer_phi() -> None:
     ops = build_ops(options)
 
     def has_int_phi(make: Callable[[], Callable[..., object]]) -> bool:
-        mir = lower_to_mir(lower_frontend(make()).hir, ops, options.ifconv_max_ops)
+        mir = lower_to_mir(lower_frontend(make(), DEFAULT_UNROLL_MAX_TRIPS).hir, ops, options.ifconv_max_ops)
         return any(isinstance(node, MirPhi) and isinstance(node.scalar_type, IntType) for node in mir.nodes.values())
 
     assert any(has_int_phi(make) for _, make, _ in INT_CASES)

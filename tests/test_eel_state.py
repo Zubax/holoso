@@ -19,7 +19,7 @@ from holoso import FloatFormat, FloatType, UnsupportedConstruct
 from holoso._eel import lower
 
 from ._eeloracle import InputRow, assert_hir_matches_reference
-from ._modelref import default_options
+from ._modelref import default_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_locations
 
 type _Row = InputRow
@@ -38,7 +38,7 @@ _FFROMINT_OPTIONS = dataclasses.replace(
 
 def _oracle(target: Callable[..., object], vectors: Sequence[_Row]) -> None:
     label = getattr(target, "__qualname__", "kernel")
-    compared = assert_hir_matches_reference(lower(target).hir, target, vectors, label=label)
+    compared = assert_hir_matches_reference(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, target, vectors, label=label)
     assert compared == len(vectors)
 
 
@@ -694,10 +694,8 @@ class _ConservativeFinality:
     def step(self, x: float) -> float:
         if False:
             self.n = 4
-        acc = x
-        for _ in range(self.n):
-            acc = acc * x
-        return acc
+        v = (x, 2.0, 3.0)
+        return v[self.n - 3]
 
 
 def test_a_dead_arm_write_trims_back_to_a_frozen_constant() -> None:
