@@ -11,11 +11,14 @@ import numpy as np
 import pytest
 from jaxtyping import Float32, Float64, Int64
 
+import holoso
+from holoso import FAddOptions, OperatorOptions, Options
 from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
-from holoso._hir import HirEvaluator
 
 from ._eeloracle import assert_hir_matches_reference
+
+_MIN_OPTIONS = Options(OperatorOptions(fadd=FAddOptions()))
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -170,16 +173,13 @@ def test_splatting_a_scalar_rejects() -> None:
 # ---------------------------------------------------------------------- factories and conversions
 
 
-def _factories(x: float) -> tuple[float, float, float, float]:
-    zeros = np.zeros(3)
-    ones = np.ones((2, 2))
-    filled = np.full(2, 1.5)
+def _eye_factory(x: float) -> tuple[float, float]:
     identity = np.eye(2)
-    return zeros[0] + x, ones[1][1], filled[1], identity[0][0] + identity[0][1]
+    return identity[0][0] * x + identity[0][1], identity[1][1]
 
 
-def test_factories_fold_to_fresh_arrays() -> None:
-    _oracle(_factories, [{"x": 2.0}])
+def test_np_eye_folds_to_a_fresh_identity() -> None:
+    _oracle(_eye_factory, [{"x": 2.0}, {"x": -0.5}])
 
 
 def _factory_empty(x: float) -> float:
@@ -198,19 +198,6 @@ def test_factory_rejections() -> None:
     _rejects(_factory_empty, r"np.zeros\(\) must build a non-empty 1-D or 2-D numeric array")
     _rejects(_factory_residual_argument, r"the arguments of np.zeros\(\) must be compile-time constants")
     _rejects(_factory_keyword, r"np.zeros\(\) takes no keyword arguments")
-
-
-def _conversions(x: float) -> tuple[float, float, float, float, int]:
-    promoted = np.array([1, x])
-    from_rows = np.array([_ARRAY[0], _ARRAY[1]])
-    as_list = list(_TABLE)
-    as_tuple = tuple(np.full(2, 1.5))
-    copied = np.asarray(_TABLE)
-    return promoted[0], from_rows[1][0], as_list[2] + as_tuple[1] * x, copied[1], len(as_list)
-
-
-def test_conversions() -> None:
-    _oracle(_conversions, [{"x": 2.5}, {"x": -1.0}])
 
 
 def _convert_scalar(x: float) -> float:
@@ -260,10 +247,10 @@ def _shape_queries(x: float) -> tuple[int, int, int, int, int, float]:
 
 
 def test_shape_queries_and_scalar_rank_zero() -> None:
-    # A plain Python float has no .ndim on the host, so the oracle cannot drive it; pin by evaluation.
-    hir = lower(_shape_queries).hir
-    assert [out.name for out in hir.outputs] == ["out_0", "out_1", "out_2", "out_3", "out_4", "out_5"]
-    assert HirEvaluator(hir).run(1.5) == [4, 2, 2, 0, 0, 1.5 + 4.0]
+    # A plain Python float has no .ndim on the host, so the oracle cannot drive it; pin by public evaluation.
+    result = holoso.synthesize(_shape_queries, _MIN_OPTIONS, name="kernel")
+    assert [p.name for p in result.output_ports] == ["out_0", "out_1", "out_2", "out_3", "out_4", "out_5"]
+    assert [float(v) for v in result.numerical_model.elaborate().run(1.5)] == [4.0, 2.0, 2.0, 0.0, 0.0, 1.5 + 4.0]
 
 
 def _sequence_shape(x: float) -> float:
@@ -292,39 +279,6 @@ def test_attribute_rejections() -> None:
         (_array_unknown_attribute, "an array has no supported attribute 'strides'"),
     ]:
         _rejects(fn, match)
-
-
-def _matmul(x: float) -> float:
-    v = np.array([x, 1.0])
-    return (_ARRAY @ v)[0]  # type: ignore[no-any-return]
-
-
-def _transpose_2d(x: float) -> float:
-    return _ARRAY.T[0][1] * x  # type: ignore[no-any-return]
-
-
-def _matmul_scalar(x: float) -> float:
-    return x @ x  # type: ignore[operator, no-any-return]
-
-
-def _matmul_list(x: float) -> float:
-    return (_GRID @ _GRID)[0][0] * x  # type: ignore[operator, no-any-return]
-
-
-def _trace_and_outer(x: float) -> float:
-    outer = np.outer(np.array([x, 1.0]), np.array([2.0, 3.0]))
-    return float(np.trace(_ARRAY) + np.dot(np.array([x, 1.0]), np.array([2.0, 3.0])) + outer[1][0])
-
-
-def test_linalg_stubs_lower_and_match_the_host() -> None:
-    for fn in (_matmul, _transpose_2d, _trace_and_outer):
-        _oracle(fn, [{"x": 2.0}, {"x": -0.5}])
-
-
-def test_linalg_shape_refusals_re_attribute_through_the_chain() -> None:
-    # ``@`` IS the matmul entry, so the frame names the operator the user wrote rather than a spelling of it.
-    _rejects(_matmul_scalar, r"in @\(\): ValueError: ")
-    _rejects(_matmul_list, "an array operation on a Python list/tuple is not supported; build one with np.array")
 
 
 # ---------------------------------------------------------------------- the bans
@@ -367,21 +321,12 @@ def test_truthiness_and_comparison_bans() -> None:
 # ---------------------------------------------------------------------- elementwise arithmetic and kind mixing
 
 
-def _elementwise(x: float) -> tuple[float, float, float, float]:
-    near_ints = np.array([1, 2.0])
-    floats = np.array([0.5, x])
-    mixed = near_ints + floats
-    scaled = 2.0 * floats - near_ints / 4
-    negated = -floats
-    return mixed[0], scaled[1], negated[0], (floats + 1)[1]
-
-
-def test_elementwise_arithmetic() -> None:
-    _oracle(_elementwise, [{"x": 2.0}, {"x": -0.5}])
-
-
 def _shape_mismatch(x: float) -> float:
     return (np.zeros(2) + np.zeros(3))[0] * x  # type: ignore[no-any-return]
+
+
+def _vector_matrix_mismatch(x: float) -> float:
+    return (np.array([x, x]) + _ARRAY)[0][0]  # type: ignore[no-any-return]
 
 
 def _tensor_pow(x: float) -> float:
@@ -396,9 +341,10 @@ def _sequence_sub(x: float) -> float:
     return ((x, x) - (x, x))[0]  # type: ignore[operator, no-any-return]
 
 
-def _int_only_array(x: float) -> float:
-    a = np.array([1, 2])
-    return float(a[0] + a[1]) * x
+def _list_of_array_demotes(v: Float64[np.ndarray, "2"], s: float) -> float:
+    # list(arr) produces a Python sequence (as in Python), so arithmetic on the result is rejected even though the
+    # argument was an array -- guards against the builtin accidentally keeping array semantics.
+    return (list(v) * s)[0]  # type: ignore[operator, no-any-return]
 
 
 def _bool_tensor_arithmetic(x: float) -> float:
@@ -408,9 +354,11 @@ def _bool_tensor_arithmetic(x: float) -> float:
 def test_elementwise_rejections() -> None:
     for fn, match in [
         (_shape_mismatch, r"array shapes \(2,\) and \(3,\) do not match"),
+        (_vector_matrix_mismatch, r"array shapes \(2,\) and \(2, 2\) do not match"),
         (_tensor_pow, r"the operator `\*\*` is not supported on arrays yet"),
         (_tensor_list_mix, "cannot mix an array with a Python list/tuple"),
         (_sequence_sub, "the operator `-` is not supported on a sequence"),
+        (_list_of_array_demotes, "not supported on a sequence"),
         (_bool_tensor_arithmetic, "an array must hold numbers, not booleans"),
     ]:
         _rejects(fn, match)
@@ -424,8 +372,8 @@ def _matrix_param(m: Float64[np.ndarray, "2 2"]) -> float:
 
 
 def test_matrix_parameter_decomposes_row_major() -> None:
-    hir = lower(_matrix_param).hir
-    assert hir.input_names() == ["m_0_0", "m_0_1", "m_1_0", "m_1_1"]
+    result = holoso.synthesize(_matrix_param, _MIN_OPTIONS, name="kernel")
+    assert [p.name for p in result.input_ports] == ["in_m_0_0", "in_m_0_1", "in_m_1_0", "in_m_1_1"]
     _oracle(_matrix_param, [{"m_0_0": 1.0, "m_0_1": 2.0, "m_1_0": 3.0, "m_1_1": 4.0}])
 
 
@@ -452,9 +400,9 @@ def _tuple_of_tensor(x: float) -> tuple[Float64[np.ndarray, "2"], float]:
 
 
 def test_aggregate_returns_flatten_row_major() -> None:
-    hir = lower(_tuple_of_tensor).hir
-    assert [out.name for out in hir.outputs] == ["out_0_0", "out_0_1", "out_1"]
-    _oracle(_tuple_of_tensor, [{"x": 3.0}])
+    result = holoso.synthesize(_tuple_of_tensor, _MIN_OPTIONS, name="kernel")
+    assert [p.name for p in result.output_ports] == ["out_0_0", "out_0_1", "out_1"]
+    assert [float(v) for v in result.numerical_model.elaborate().run(3.0)] == [3.0, 2.0, 4.0]
 
 
 def _return_shape_mismatch(x: float) -> Float64[np.ndarray, "3"]:
@@ -503,6 +451,7 @@ class _Config:
 
 class _Base:
     gain = 2.0
+    deep = False
 
     @property
     def doubled(self) -> float:
@@ -513,15 +462,15 @@ class _Base:
         return 0.5
 
     @classmethod
-    def named(cls) -> str:
-        return cls.__name__
+    def is_deep(cls) -> bool:
+        return cls.deep
 
     def method(self) -> float:
         return 1.0
 
 
 class _Derived(_Base):
-    pass
+    deep = True
 
 
 _DERIVED = _Derived()
@@ -546,8 +495,10 @@ def _calls_instance_method(x: float) -> float:
 
 
 def _calls_classmethod(x: float) -> float:
-    name_is_short = _DERIVED.named()  # noqa: F841  # type: ignore[unused-ignore]
-    return x
+    # The classmethod reads ``cls.deep``, overridden in ``_Derived``, so a wrong receiver folds the other arm.
+    if _DERIVED.is_deep():
+        return x + 8.0
+    return x - 5.0
 
 
 def _missing_attribute(x: float) -> float:
@@ -577,6 +528,39 @@ def _rectangular_list_is_still_a_sequence(x: float) -> float:
 
 def test_a_rectangular_homogeneous_list_is_a_sequence_not_an_array() -> None:
     _rejects(_rectangular_list_is_still_a_sequence, r"`.ndim` on a Python sequence is not supported; build a numpy")
+
+
+def _sequence_flatten(x: float) -> float:
+    return [1.0, 2.0].flatten()[0] * x  # type: ignore[attr-defined, no-any-return]
+
+
+def test_a_registered_ndarray_method_on_a_sequence_is_rejected() -> None:
+    # `.ndim`/`.shape` above hit the hand-listed arm; a method registered on ndarray hits the resolve() arm.
+    _rejects(_sequence_flatten, r"`.flatten` on a Python sequence is not supported; build a numpy")
+
+
+def _ragged_chained(a: float, b: float) -> float:
+    # Chained m[i][j] on a (even ragged) list stays valid plain list indexing, where multi-axis m[i, j] rejects.
+    m = [[a, b], [a]]
+    return m[0][1]
+
+
+def test_chained_indexing_on_a_ragged_list_stays_valid() -> None:
+    _oracle(_ragged_chained, [{"a": 1.5, "b": -2.0}])
+
+
+def _branch_kind_mismatch(c: bool, a: float, b: float) -> float:
+    # Only bool, int, and float values join branches, so a value that is an array in one arm and a sequence in the
+    # other cannot merge at all.
+    if c:
+        v = np.array([a, b])
+    else:
+        v = [a, b]  # type: ignore[assignment]
+    return v[0]  # type: ignore[no-any-return]
+
+
+def test_a_branch_kind_mismatch_cannot_join() -> None:
+    _rejects(_branch_kind_mismatch, "aggregates join only when every arm agrees")
 
 
 # ---------------------------------------------------------------------- review round-1 regression pins
@@ -665,17 +649,6 @@ def test_splat_doubling_exhausts_the_budget_instead_of_hanging() -> None:
     _rejects(_doubling_splats, "graph expansion budget is exhausted")
 
 
-def _copy_vs_view(x: float) -> tuple[float, float]:
-    a = np.array([x, 2.0])
-    b = np.array(a)
-    c = np.asarray(a)
-    return b[0], c[1]
-
-
-def test_array_copy_and_asarray_view_both_read_correctly() -> None:
-    _oracle(_copy_vs_view, [{"x": 3.0}])
-
-
 # ---------------------------------------------------------------------- dtype widths are not modeled
 
 
@@ -717,16 +690,6 @@ def test_dtype_widths_fold_into_the_width_less_model() -> None:
     _oracle(_int_param, [{"v_0": 3, "v_1": 4}])
     _oracle(_int_filled_factory, [{"x": 2.5}])
     _oracle(_huge_int_construction, [{"x": 1.0}])
-
-
-def _float_store_into_int_construction(x: float) -> float:
-    a = np.array([0])
-    a[0] = x
-    return float(a[0])
-
-
-def test_a_float_store_into_an_integer_array_rejects() -> None:
-    _rejects(_float_store_into_int_construction, "storing a float into an integer array truncates on the host")
 
 
 def _factory_budget(x: float) -> float:

@@ -1,7 +1,8 @@
 """
-End-to-end cosimulation of every compilable example kernel: each is driven with hand-built sensible vectors, a frozen
-random sweep, and format edge cases, then checked bit-for-bit against its embedded model under a lean (no optional
-stages) and a deeply pipelined operator configuration at the wide e8m36 datapath.
+End-to-end cosimulation of every catalogued scalar-drivable example: each is driven with hand-built sensible vectors, a
+frozen random sweep, and format edge cases, then checked bit-for-bit against its embedded model under a lean (no
+optional stages) and a deeply pipelined operator configuration at each spec's datapath formats -- e8m36 for most, the
+UART pair at e4m8, and octave_index additionally at the shallow e6m18.
 
 This proves ``RTL == embedded numerical model``; it does NOT prove ``model == Python semantics`` (both descend from the
 same lowering). ``test_example_reference.py`` covers that second half, driving the same example specs against a fresh
@@ -18,28 +19,30 @@ conditional (ternary) expressions (branch + phi), and both float<->bool casts, i
 comparison -> bool -> float-cast -> float-multiply chain. ``remainder`` is a pure function computing the IEEE 754
 remainder by data-dependent iterative reduction (two magnitude-ratio-bounded back-edge loops, no division).
 
-Still-excluded examples are frontend feature gaps (not verification scope), confirmed by an in-memory compile probe:
-  - iir1_hpf: ``UnsupportedConstruct: call to 'lpf'`` -- a foreign call on an instance-attribute sub-filter (the
-    frontend inlines only global functions, not a nested object); ``float()`` itself is now supported.
-  - finite_set_current_controller: ``UnsupportedConstruct`` -- nested/foreign attribute access.
+Non-catalogue examples are frontend feature gaps or non-scalar interfaces, not verification scope:
+  - iir1_hpf: ``UnsupportedConstruct: cannot call 'self.lpf': it is a separate component instance (IIR1LPF);
+    hierarchical state is not supported yet``.
+  - finite_set_current_controller: ``UnsupportedConstruct: the annotation of parameter 'kin' is not supported yet``
+    (a dataclass-typed parameter).
+  - imu_frame_transform: ndarray-typed inputs, driven by the oracle and metrics layers instead.
 """
 
 import pytest
 
+import holoso
 from holoso import FloatFormat
 from ._cosim import run_cosim
 from ._examples import SPECS, ExampleSpec
-from ._modelref import PIPELINE_OP_CASES, OperatorCase, default_options
+from ._modelref import PIPELINE_OPTIONS_CASES, OptionsCase
 from .hdl.hdl_float_oracle import SIMULATORS
 
 pytestmark = pytest.mark.cosim
 
 # Each example is exercised at the lean default schedule and a deeply pipelined one, to explore the schedule and
 # handshake at two latency points; both are bit-exact against the same model.
-_OP_CONFIGS = PIPELINE_OP_CASES
+_OP_CONFIGS = PIPELINE_OPTIONS_CASES
 
-# One case per (spec, datapath format): every spec runs at e8m36, and a spec that lists a second format (octave_index
-# adds the shallow e6m18) also runs there -- exercising the merge-threaded loop at both pipeline depths.
+# One case per (spec, datapath format), at each spec's declared formats.
 _SPEC_FORMATS = [
     pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}") for spec in SPECS for fmt in spec.formats
 ]
@@ -48,6 +51,7 @@ _SPEC_FORMATS = [
 @pytest.mark.parametrize("sim", SIMULATORS)
 @pytest.mark.parametrize("config", _OP_CONFIGS, ids=lambda c: c.label)
 @pytest.mark.parametrize("spec,fmt", _SPEC_FORMATS)
-def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: OperatorCase, sim: str) -> None:
+def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: OptionsCase, sim: str) -> None:
     name = f"{spec.name}_{config.label}_e{fmt.wexp}m{fmt.wman}"
-    run_cosim(sim, spec.make_kernel(), default_options(fmt), name, ops=config.make_ops(fmt), vectors=spec.raw_vectors())
+    result = holoso.synthesize(spec.make_kernel(), config.make_options(fmt), name=name)
+    run_cosim(sim, result, vectors=spec.raw_vectors())

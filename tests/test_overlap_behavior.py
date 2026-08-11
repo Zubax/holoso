@@ -20,6 +20,8 @@ The genuine gaps these fill (the white-box twins and the stateless overlap kerne
   - multi-output mixed float+bool I/O with the typed-port metadata read from the elaborated simulator.
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -37,7 +39,7 @@ from holoso import (
     Options,
 )
 
-from ._modelref import default_tolerance, within
+from ._modelref import COMPARATOR_OPTIONS_CASES, OptionsCase, default_tolerance, overlap_dead_arm_spill_kernel, within
 
 FMT = FloatFormat(6, 18)
 
@@ -397,7 +399,7 @@ def test_latching_fault_register_streams_and_resets() -> None:
         block's cycle-0-eligible inline ops. The summary ORs the THREE freshly-latched channels in the same block, so
         its value depends on the commit ordering being right: a stale read of any channel would drop a just-latched
         fault. Multi-channel bool state with a same-block summary is a shape no other black-box test exercises
-        (``_BoolStateMachine`` in test_public_api_behavior is single-channel; ``_ChainedSlots`` is float). A local copy
+        (``_BoolStateMachine`` in test_public_api_behavior is single-channel). A local copy
         rather than examples/latching_fault_register, so the pinned same-block-summary shape stays decoupled from it.
         """
 
@@ -436,6 +438,25 @@ def test_latching_fault_register_streams_and_resets() -> None:
     for vector in [(False, False, False), (False, True, False), (False, False, False)]:
         got = tuple(bool(value) for value in simulator.run(*vector))
         assert got == fresh(*vector), f"post-reset {vector}: {got}"
+
+
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
+def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value(config: OptionsCase) -> None:
+    # Regression (review BLOCKER, found independently by the functional reviewer and Codex): under cross-block overlap
+    # a wide result spills into BOTH single-pred arms because its write-enable fires unconditionally before the
+    # redirect. In an arm where that result is DEAD, the allocator must STILL reserve its register; else the spill
+    # clobbers a value the arm actually uses -- a silent miscompile the cosim cannot catch, since the numerical model
+    # shares the same register file (model == RTL, both wrong). Checked against source semantics: the shared kernel's
+    # else arm reads `v` while `w` is dead and spills; crash-before, w (=15 for x=3,y=1,z=2) overwrote v's register and
+    # the else result was grossly wrong (~3.4 instead of 1.2). The structural trigger (a genuine multi-arm spill) is
+    # pinned in test_schedule.py test_spilled_result_landings_match_the_numerical_model.
+    simulator = holoso.synthesize(
+        overlap_dead_arm_spill_kernel, config.make_options(FMT), name=f"dead_arm_spill_{config.label}"
+    ).numerical_model.elaborate()
+    for x, y, z in [(3.0, 1.0, 2.0), (4.0, 2.0, 0.5), (2.5, 0.5, 1.5)]:  # x > y selects the else arm, where w is dead
+        want = overlap_dead_arm_spill_kernel(x, y, z)
+        got = float(simulator.run(x, y, z)[0])
+        assert math.isclose(got, want, rel_tol=1e-2), f"x={x} y={y} z={z}: got {got}, want {want} (dead-arm clobber)"
 
 
 def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None:

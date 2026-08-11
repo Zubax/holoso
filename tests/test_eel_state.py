@@ -14,12 +14,26 @@ import numpy as np
 import pytest
 from jaxtyping import Float64 as Float64
 
+import holoso
+from holoso import FloatFormat, FloatType, UnsupportedConstruct
 from holoso._eel import lower
-from holoso._errors import UnsupportedConstruct
 
 from ._eeloracle import InputRow, assert_hir_matches_reference
+from ._modelref import default_options
+from ._public import strip_locations
 
 type _Row = InputRow
+
+_OPTIONS = holoso.Options(holoso.OperatorOptions())
+# The wide format keeps the derived integer word at the binary64 boundary, so the no-exact-float-image
+# propositions below stay sharp (2**53+1 is the smallest integer without an image) instead of vacuous.
+_WIDE_OPTIONS = holoso.Options(holoso.OperatorOptions(), ffmt=FloatFormat(11, 52))
+
+_FMT = FloatFormat(8, 23)
+_SYNTH_OPTIONS = default_options(_FMT)
+_FFROMINT_OPTIONS = dataclasses.replace(
+    _SYNTH_OPTIONS, operator=dataclasses.replace(_SYNTH_OPTIONS.operator, ffromint=holoso.FFromIntOptions())
+)
 
 
 def _oracle(target: Callable[..., object], vectors: Sequence[_Row]) -> None:
@@ -28,19 +42,18 @@ def _oracle(target: Callable[..., object], vectors: Sequence[_Row]) -> None:
     assert compared == len(vectors)
 
 
-def _rejects(target: object, match: str) -> None:
+def _rejects(target: object, match: str, options: holoso.Options = _OPTIONS) -> None:
+    assert callable(target)
     with pytest.raises(UnsupportedConstruct, match=match):
-        lower(target)
+        holoso.synthesize(target, options, name="k")
 
 
-def _residual_text(target: object) -> str:
-    from holoso._eel._lower import resolve_target
-    from holoso._eel._desugar import desugar
-    from holoso._eel._pe import partial_evaluate
-    from holoso._eel._print import print_eel
+def _synthesized(target: Callable[..., object], options: holoso.Options = _SYNTH_OPTIONS) -> holoso.SynthesisResult:
+    return holoso.synthesize(target, options, name="kernel")
 
-    fn, instance = resolve_target(target)
-    return print_eel(partial_evaluate(desugar(fn), fn, instance))
+
+def _residual(target: Callable[..., object], options: holoso.Options = _SYNTH_OPTIONS) -> str:
+    return strip_locations(_synthesized(target, options).frontend_ir[-1])
 
 
 # ---------------------------------------------------------------------- A5: install rejections
@@ -239,6 +252,34 @@ class _InstallsTensorForSequence:
         return x
 
 
+class _InstallsSequenceForTensor:
+    def __init__(self) -> None:
+        self.v = np.array([1.0, 2.0])
+
+    def step(self, s: float) -> float:
+        w = self.v * s
+        self.v = [w[0], w[1]]  # type: ignore[assignment]
+        return s
+
+
+class _InstallsWrongShape:
+    def __init__(self) -> None:
+        self.P = np.zeros((2, 2))
+
+    def step(self, a: float) -> float:
+        self.P = self.P[0] * a
+        return a
+
+
+class _InstallsBooleanLeaves:
+    def __init__(self) -> None:
+        self.P = np.zeros((2, 2))
+
+    def step(self, flag: bool) -> float:
+        self.P = np.array([[flag, flag], [flag, flag]])
+        return 1.0
+
+
 class _ScalarReplacesAggregate:
     def __init__(self) -> None:
         self.buf = [0.0, 0.0]
@@ -277,6 +318,9 @@ def test_the_a5_install_matrix_rejections() -> None:
         (_InstallsRootLevelJoin().step, "merged across runtime branches"),
         (_InstallsWrongLength().step, "its structure does not match the reset value's"),
         (_InstallsTensorForSequence().step, "its structure does not match the reset value's"),
+        (_InstallsSequenceForTensor().step, "its structure does not match the reset value's"),
+        (_InstallsWrongShape().step, "its structure does not match the reset value's"),
+        (_InstallsBooleanLeaves().step, "an array must hold numbers, not booleans"),
         (_ScalarReplacesAggregate().step, "a scalar cannot replace it"),
         (_AggregateReplacesScalar().step, "its structure does not match the reset value's"),
     ]:
@@ -458,18 +502,6 @@ def test_a_view_derivation_cannot_launder_an_install() -> None:
 # ---------------------------------------------------------------------- receiver discipline
 
 
-class _HelperWrites:
-    def __init__(self) -> None:
-        self.y = 0.0
-
-    def _bump(self, x: float) -> float:
-        self.y = self.y + x
-        return self.y
-
-    def step(self, x: float) -> float:
-        return self._bump(x)
-
-
 class _AliasRootedReceiverStore:
     def __init__(self) -> None:
         self.y = 0.0
@@ -496,23 +528,6 @@ class _NestedAttributeStore:
     def step(self, x: float) -> float:
         self.a.b = x  # type: ignore[attr-defined, unused-ignore]
         return x
-
-
-class _PropertySetterSeeded:
-    def __init__(self) -> None:
-        self._y2 = 0.0
-
-    @property
-    def y(self) -> float:
-        return self._y2
-
-    @y.setter
-    def y(self, v: float) -> None:
-        self._y2 = v * 2.0
-
-    def step(self, x: float) -> float:
-        self.y = x
-        return self._y2
 
 
 class _MissingReset:
@@ -547,6 +562,15 @@ class _BoolSlotTypeChange:
         return x
 
 
+class _FloatSlotGetsBool:
+    def __init__(self) -> None:
+        self.y = 0.0
+
+    def step(self, flag: bool) -> float:
+        self.y = flag
+        return 1.0
+
+
 class _SlotNameCollision:
     def __init__(self) -> None:
         self.x_0 = 0.0
@@ -567,19 +591,28 @@ class _EmptyAggregateState:
         return x
 
 
+class _EmptyTensorState:
+    def __init__(self) -> None:
+        self.v = np.zeros(0)
+
+    def step(self, x: float) -> float:
+        self.v = self.v * x
+        return x
+
+
 def test_receiver_discipline_rejections() -> None:
     for target, match in [
-        (_HelperWrites().step, "a helper method cannot write attributes of the receiver"),
         (_AliasRootedReceiverStore().step, "the receiver may only be written through its parameter name 'self'"),
         (_UnrepresentableStateObject().step, "which the compiler cannot represent as state"),
         (_NestedAttributeStore().step, "an attribute store through a nested object is not supported"),
-        (_PropertySetterSeeded().step, "the attribute 'y' is a property/descriptor"),
         (_MissingReset().step, "has no value on the instance at synthesis time"),
         (_ClassLevelDefaultReset().step, "has no value on the instance at synthesis time"),
         (_NaNReset().step, "the reset value of self.y is NaN"),
         (_BoolSlotTypeChange().step, "bool state joins only with bool"),
+        (_FloatSlotGetsBool().step, "would change type from float to bool"),
         (_SlotNameCollision().step, "decompose to the same slot name 'x_0'"),
         (_EmptyAggregateState().step, "is an empty aggregate"),
+        (_EmptyTensorState().step, "must be a non-empty 1-D or 2-D array"),
     ]:
         _rejects(target, match)
 
@@ -626,7 +659,7 @@ def test_an_unregistered_callable_is_not_mistaken_for_a_component_instance() -> 
     for kernel in (_calls_an_unregistered_numpy_function, _calls_a_partial):
         _rejects(kernel, "are not supported yet")
         with pytest.raises(UnsupportedConstruct) as excinfo:
-            lower(kernel)
+            holoso.synthesize(kernel, _OPTIONS, name="k")
         assert "component instance" not in excinfo.value.message
 
 
@@ -668,21 +701,20 @@ class _ConservativeFinality:
 
 
 def test_a_dead_arm_write_trims_back_to_a_frozen_constant() -> None:
-    text = _residual_text(_DeadArmWrite().step)
-    assert "state" not in text and "slot" not in text
-    assert "2.0" in text
+    result = _synthesized(_DeadArmWrite().step)
+    assert [(p.name, p.scalar_type) for p in result.output_ports] == [("out_0", FloatType(_FMT))]
+    assert "2.0" in strip_locations(result.frontend_ir[-1])
     _oracle(_DeadArmWrite().step, [{"x": 3.0}])
 
 
 def test_an_identity_write_keeps_its_slot() -> None:
-    text = _residual_text(_IdentityWrite().step)
-    assert "state y: float reset 1.5" in text
+    assert "state y: float reset 1.5" in _residual(_IdentityWrite().step)
     _oracle(_IdentityWrite().step, [{"x": 2.0}, {"x": -1.0}])
 
 
 def test_a_conservative_rejection_is_final_and_names_the_pinning_write() -> None:
     with pytest.raises(UnsupportedConstruct) as info:
-        lower(_ConservativeFinality().step)
+        holoso.synthesize(_ConservativeFinality().step, _OPTIONS, name="k")
     message = str(info.value)
     assert "must be a compile-time constant" in message
     assert "self.n is treated as persistent state because of the write at" in message
@@ -725,8 +757,7 @@ class _FloatSlotAcceptsIntWrites:
 
 def test_slot_types_join_by_the_one_rule() -> None:
     _oracle(_IntSlotStaysInt().step, [{"up": True}, {"up": True}, {"up": False}])
-    text = _residual_text(_IntSlotPromotesToFloat().step)
-    assert "state acc: float reset 0.0" in text
+    assert "state acc: float reset 0.0" in _residual(_IntSlotPromotesToFloat().step)
     _oracle(_IntSlotPromotesToFloat().step, [{"x": 1.5}, {"x": 2.0}])
     _oracle(_FloatSlotAcceptsIntWrites().step, [{"reset": False, "x": 2.5}, {"reset": True, "x": 1.0}])
 
@@ -757,44 +788,6 @@ class _MixedReturn:
         return self.peak
 
 
-def _nested_mixed(a: bool, b: bool, /) -> float:
-    if a:
-        if b:
-            return 1.0
-        x = 2.0
-    else:
-        x = 3.0
-    return x
-
-
-def _mixed_in_unrolled_loop(stop: bool, x: float, /) -> float:
-    for _ in range(2):
-        if stop:
-            return x
-        x = x + 1.0
-    return x
-
-
-def _tuple_return_sites(c: bool, x: float, /) -> tuple[float, float]:
-    if c:
-        return x, 0.0
-    return 0.0, x
-
-
-def _clamp_helper(x: float, lo: float, hi: float) -> float:
-    if x < lo:
-        return lo
-    else:
-        if x > hi:
-            return hi
-        else:
-            return x
-
-
-def _calls_clamp(x: float) -> float:
-    return _clamp_helper(x, -1.0, 1.0)
-
-
 def _mixed_in_helper(x: float) -> float:
     if x > 0.0:
         return x
@@ -808,10 +801,6 @@ def _calls_mixed_helper(x: float) -> float:
 def test_early_return_joins() -> None:
     _oracle(_AllArmsReturn().step, [{"x": 2.0}, {"x": -3.0}, {"x": 0.0}])
     _oracle(_MixedReturn().step, [{"x": 1.0}, {"x": 0.5}, {"x": 2.0}, {"x": 1.5}])
-    _oracle(_nested_mixed, [{"a": True, "b": True}, {"a": True, "b": False}, {"a": False, "b": False}])
-    _oracle(_mixed_in_unrolled_loop, [{"stop": True, "x": 5.0}, {"stop": False, "x": 5.0}])
-    _oracle(_tuple_return_sites, [{"c": True, "x": 3.0}, {"c": False, "x": 3.0}])
-    _oracle(_calls_clamp, [{"x": -2.0}, {"x": 0.5}, {"x": 2.0}])
 
 
 def _mixed_chain_helper(x: float) -> float:
@@ -1132,12 +1121,6 @@ class _ContinueThenBreakSlot:
         return self.found
 
 
-def _all_paths_return_in_residual_loop(x: float) -> float:
-    while x > 0.0:
-        return x
-    return x
-
-
 def test_returns_inside_residual_loops_match_cpython() -> None:
     _oracle(_ReturnInResidualLoop().step, [{"x": 12.0}, {"x": 3.5}, {"x": 0.0}, {"x": 20.0}, {"x": -1.0}])
     _oracle(_SlotCommitAtLoopReturn().step, [{"x": 12.0}, {"x": 3.5}, {"x": 15.0}, {"x": 0.0}])
@@ -1146,14 +1129,9 @@ def test_returns_inside_residual_loops_match_cpython() -> None:
     # restore is invariant-protective: annotation conformance makes the discarded and kept passes commit
     # identical tables today, so no kernel can yet distinguish its absence -- this pins the machinery
     # running, not a divergence.
-    assert "return %" not in _residual_text(_PromotedCarryWithLoopReturn().step)
-
-
-def test_a_loop_body_returning_on_every_path_cannot_iterate() -> None:
-    _rejects(
-        _all_paths_return_in_residual_loop,
-        "the body of this data-dependent loop returns on every path, so the loop cannot iterate",
-    )
+    result = _synthesized(_PromotedCarryWithLoopReturn().step)
+    assert "return %" not in strip_locations(result.frontend_ir[-1])
+    assert [p.name for p in result.output_ports] == ["state_y"]
 
 
 # ---------------------------------------------------------------------- slots as residual-loop carries
@@ -1205,10 +1183,13 @@ class _ElisionKilledByDisagreeingSite:
 
 
 def test_a_returned_leaf_matching_a_public_slot_at_every_site_elides_and_only_then() -> None:
-    agreeing = _residual_text(_MixedReturn().step)
-    assert "output" not in agreeing  # every site returns the peak slot's live-out
-    disagreeing = _residual_text(_ElisionKilledByDisagreeingSite().step)
-    assert "output [0]: float" in disagreeing
+    agreeing = _synthesized(_MixedReturn().step)  # every site returns the peak slot's live-out
+    assert [(p.name, p.scalar_type) for p in agreeing.output_ports] == [("state_peak", FloatType(_FMT))]
+    disagreeing = _synthesized(_ElisionKilledByDisagreeingSite().step)
+    assert [(p.name, p.scalar_type) for p in disagreeing.output_ports] == [
+        ("out_0", FloatType(_FMT)),
+        ("state_y", FloatType(_FMT)),
+    ]
 
 
 # ---------------------------------------------------------------------- review-round pins (adopted defects)
@@ -1496,14 +1477,13 @@ class _DeadCodeFrozenAlias:
 
 
 def test_a_promotion_with_an_inexact_reset_image_is_a_located_rejection() -> None:
-    _rejects(_PromotedInexactReset().step, "has no exact float image")
-    _rejects(_PromotedOverflowingReset().step, "has no exact float image")
+    _rejects(_PromotedInexactReset().step, "has no exact float image", _WIDE_OPTIONS)
+    _rejects(_PromotedOverflowingReset().step, "has no exact float image", _WIDE_OPTIONS)
     _oracle(_PromotedExactReset().step, [{"x": 0.5}, {"x": 1.0}])
 
 
 def test_a_trim_retires_promotions_made_under_the_conservative_assumption() -> None:
-    text = _residual_text(_TrimClearsConservativePromotion().step)
-    assert "state _n: int reset 5" in text
+    assert "state _n: int reset 5" in _residual(_TrimClearsConservativePromotion().step, _FFROMINT_OPTIONS)
     _oracle(_TrimClearsConservativePromotion().step, [{"up": True}, {"up": False}, {"up": True}])
 
 
@@ -1524,27 +1504,6 @@ class _TransientLoopFloatRestoredToInt:
         return out
 
 
-class _SetattrOverride:
-    def __init__(self) -> None:
-        self.y = 0.0
-
-    def __setattr__(self, name: str, value: object) -> None:
-        object.__setattr__(self, name, max(float(value), 0.0))  # type: ignore[arg-type]
-
-    def step(self, x: float) -> float:
-        self.y = x
-        return self.y
-
-
-@dataclasses.dataclass(slots=True)
-class _SlotsInstance:
-    y: float = 0.0
-
-    def step(self, x: float) -> float:
-        self.y = self.y + x
-        return self.y
-
-
 def _nested_partial_return_then_raise(c: bool, d: bool, x: float, /) -> float:
     if c:
         if d:
@@ -1557,11 +1516,6 @@ def _nested_partial_return_then_raise(c: bool, d: bool, x: float, /) -> float:
 
 def test_a_transient_loop_float_does_not_promote_a_slot_restored_to_int() -> None:
     _oracle(_TransientLoopFloatRestoredToInt().step, [{"x": 1.0}, {"x": 0.0}])
-
-
-def test_custom_attribute_protocols_and_slots_instances_reject_honestly() -> None:
-    _rejects(_SetattrOverride().step, "overrides __setattr__")
-    _rejects(_SlotsInstance().step, "no instance __dict__ .it uses __slots__.")
 
 
 def test_a_raise_after_a_nested_partial_return_is_judged_data_dependent() -> None:

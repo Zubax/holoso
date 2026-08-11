@@ -65,7 +65,7 @@ from ._modelref import (
 # The directory the generated kernel modules are rendered into. ``build/`` is gitignored, so the fuzz corpus never
 # pollutes the tree; the directory is created on demand.
 _REPO = Path(__file__).resolve().parent.parent
-FUZZ_TMP = _REPO / "build" / "fuzz_tmp"
+_FUZZ_TMP = _REPO / "build" / "fuzz_tmp"
 
 # The operator-config catalogue swept per kernel, keyed by a stable label so a saved reproducer can name its config and
 # the regression replayer can rebuild it. Two points: the minimum-latency default and a deeply-pipelined config (the
@@ -187,8 +187,8 @@ def _render_module(name: str, source: str) -> types.ModuleType:
     The frontend retrieves the kernel's source via ``inspect.getsourcelines``, which a REPL/exec-only function cannot
     satisfy -- hence the real, linecache-backed file rather than a bare ``exec``.
     """
-    FUZZ_TMP.mkdir(parents=True, exist_ok=True)
-    path = str((FUZZ_TMP / f"{name}.py").resolve())
+    _FUZZ_TMP.mkdir(parents=True, exist_ok=True)
+    path = str((_FUZZ_TMP / f"{name}.py").resolve())
     Path(path).write_text(source, encoding="utf-8")
     linecache.cache[path] = (len(source), None, source.splitlines(keepends=True), path)
     module = types.ModuleType(name)
@@ -726,6 +726,9 @@ _DIRECTED_TEMPLATES: list[Callable[[_Emitter], _Fragment]] = [
     _emit_exact_division_wiring,
     _emit_sterbenz_subtract,
     _emit_forced_overbudget_branch,
+    # The nested diamond runs in EVERY campaign (including the smoke, whose random draw need not produce one), so
+    # ``_assert_danger_survived`` enforces the two-forward-branch nested invariant on every run.
+    lambda em: _emit_diamond(em, nested=True),
 ]
 
 
@@ -779,7 +782,7 @@ def _finish_function_kernel(
     )
 
 
-def generate_stateless_kernel(
+def _generate_stateless_kernel(
     name: str, master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT
 ) -> GeneratedKernel:
     rng = _seed_rng(master_seed, index)
@@ -813,7 +816,7 @@ def generate_stateless_kernel(
     )
 
 
-def generate_directed_kernel(
+def _generate_directed_kernel(
     name: str,
     master_seed: int,
     index: int,
@@ -837,7 +840,7 @@ def generate_directed_kernel(
     )
 
 
-def generate_dead_arm_kernel(
+def _generate_dead_arm_kernel(
     name: str, master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT
 ) -> GeneratedKernel:
     """
@@ -890,7 +893,7 @@ def _assemble_function(
     return f"def {name}({sig}) -> {return_annotation}:\n{docstring}\n{body}\n    {return_line}\n"
 
 
-def generate_stateful_kernel(
+def _generate_stateful_kernel(
     name: str, master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT
 ) -> GeneratedKernel:
     """
@@ -972,13 +975,13 @@ def _assemble_class(
     )
 
 
-def generate_kernel(master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT) -> GeneratedKernel:
+def _generate_kernel(master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT) -> GeneratedKernel:
     """Reproducible by ``(seed, index)`` regardless of draw order, so any kernel replays from its provenance alone."""
     name = f"fuzz_k_{master_seed:x}_{index}"
     rng = np.random.default_rng(np.random.SeedSequence([master_seed, index, 0x5A5A]))
     if rng.random() < 0.3:
-        return generate_stateful_kernel(name, master_seed, index, fmt)
-    return generate_stateless_kernel(name, master_seed, index, fmt)
+        return _generate_stateful_kernel(name, master_seed, index, fmt)
+    return _generate_stateless_kernel(name, master_seed, index, fmt)
 
 
 class CheckKind(Enum):
@@ -1000,7 +1003,7 @@ class Divergence:
     detail: str
 
 
-class DangerShapeLost(AssertionError):
+class _DangerShapeLost(AssertionError):
     """A kernel intended to branch compiled to a single block: if-conversion silently degraded a diamond to a select."""
 
 
@@ -1045,22 +1048,6 @@ def _build_with_lir(
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)
     return mir, lir, model, interpreter
-
-
-def _build_all(
-    fn: Callable[..., object], ops: OpConfig, name: str, fmt: FloatFormat
-) -> tuple[Mir, NumericalSimulator, MirInterpreter]:
-    mir, _, model, interpreter = _build_with_lir(fn, ops, name, fmt)
-    return mir, model, interpreter
-
-
-def _has_overlap_spill(lir: Lir) -> bool:
-    """
-    Whether a wide-bank write computed in a branch block spills past that block's overlap-shrunk terminator into its
-    successor arms. For a dead-arm kernel this is the real clobber hazard: the wide chain lands inside both arms, so a
-    dropped inflight reservation could reuse its register before the dead-arm write arrives.
-    """
-    return _overlap_spill_depth(lir) is not None
 
 
 def _has_overlap_spill_at_depth(lir: Lir, min_depth: int) -> bool:
@@ -1186,7 +1173,7 @@ def _assert_danger_survived(kernel: GeneratedKernel, mir: Mir, op_label: str) ->
         return
     survived = surviving_forward_branches(mir)
     if survived < required:
-        raise DangerShapeLost(
+        raise _DangerShapeLost(
             f"{kernel.name} [{op_label}] was generated as branchy (shapes={sorted(s.name for s in kernel.shapes)}) "
             f"but compiled with {survived} forward branch(es), below the required {required}, across "
             f"{len(mir.blocks)} block(s): a generated diamond degraded to a select/straight-line, so it exercises "
@@ -1543,7 +1530,7 @@ def _armed_dead_arm_kernel(master_seed: int, index: int, fmt: FloatFormat) -> Ge
     signal that the generator or the overlap machinery regressed.
     """
     for attempt in range(_ARM_RETRIES):
-        kernel = generate_dead_arm_kernel(f"deadarm_{index}_{attempt}", master_seed, index * 64 + attempt, fmt)
+        kernel = _generate_dead_arm_kernel(f"deadarm_{index}_{attempt}", master_seed, index * 64 + attempt, fmt)
         assert kernel.dead_arm_chain_depth is not None
         # Verify the chain spills under EVERY op-config the forced batch asserts (``expect_armed``), not just the
         # default -- so a future config under which the chain happens not to spill cannot false-fail the campaign.
@@ -1552,7 +1539,7 @@ def _armed_dead_arm_kernel(master_seed: int, index: int, fmt: FloatFormat) -> Ge
         )
         if all(_has_overlap_spill_at_depth(lir, kernel.dead_arm_chain_depth) for lir in lirs):
             return kernel
-    raise DangerShapeLost(f"dead-arm generator failed to arm a spill in {_ARM_RETRIES} tries (index {index})")
+    raise _DangerShapeLost(f"dead-arm generator failed to arm a spill in {_ARM_RETRIES} tries (index {index})")
 
 
 def _run_campaign_kernel(
@@ -1589,16 +1576,18 @@ def run_campaign(
     stats = CampaignStats()
     # A dedicated batch of ARMED dead-arm-only kernels exercises the overlap register-reuse hazard every campaign,
     # independent of the random draw -- each re-rolled until its wide chain actually spills, then run with a hard arming
-    # assert, so a future change that silently stops the chain spilling fails loudly.
+    # assert, so a future change that silently stops the chain spilling fails loudly. The minimum of four is structural
+    # diversity, not retries: each seed draws different live-value pressure, chain depth, operands, and arm polarity,
+    # while the arming predicate proves only minimum spill depth.
     for j in range(max(4, n_kernels // 7)):
         forced = _armed_dead_arm_kernel(master_seed, j, fmt)
         stats.dead_arm_forced += 1
         _run_campaign_kernel(forced, stats, fmt, effort, n_vectors, on_divergence, expect_armed=True)
     for j, template in enumerate(_DIRECTED_TEMPLATES):
-        directed = generate_directed_kernel(f"directed_{j}", master_seed, 0xD1EC7ED + j, template, fmt)
+        directed = _generate_directed_kernel(f"directed_{j}", master_seed, 0xD1EC7ED + j, template, fmt)
         _run_campaign_kernel(directed, stats, fmt, effort, n_vectors, on_divergence)
     for index in range(n_kernels):
-        kernel = generate_kernel(master_seed, index, fmt)
+        kernel = _generate_kernel(master_seed, index, fmt)
         _run_campaign_kernel(kernel, stats, fmt, effort, n_vectors, on_divergence)
     return stats
 
@@ -1711,15 +1700,15 @@ def _vector_to_bits(kernel: GeneratedKernel, vector: Vector) -> dict[str, int]:
 
 def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object]) -> tuple[bool, str]:
     """
-    Replay a saved reproducer: rebuild the model + interpreter at the saved op-config (via the same ``_build_all`` path
-    the campaign uses), drive the saved bit-vectors in order, and re-check the previously-failing differential check
-    through the same ``_Differential`` engine. Returns ``(passes_now, detail)`` -- a fixed bug means ``passes_now is
-    True``. The regression replayer calls this in a subprocess pinned to the saved regalloc effort (which is import
+    Replay a saved reproducer: rebuild the model + interpreter at the saved op-config (via the same ``_build_with_lir``
+    path the campaign uses), drive the saved bit-vectors in order, and re-check the previously-failing differential
+    check through the same ``_Differential`` engine. Returns ``(passes_now, detail)`` -- a fixed bug means ``passes_now
+    is True``. The regression replayer calls this in a subprocess pinned to the saved regalloc effort (which is import
     -frozen), so the caller is responsible for having set the right effort before importing this module.
     """
     repro = ReproMeta.from_dict(meta)
     ops = OP_CONFIGS[repro.op_label](repro.fmt)
-    mir, model, interpreter = _build_all(kernel_callable, ops, f"{repro.kernel_name}__replay", repro.fmt)
+    mir, _, model, interpreter = _build_with_lir(kernel_callable, ops, f"{repro.kernel_name}__replay", repro.fmt)
     if [p.name for p in model.inputs] != list(repro.input_names):  # the reference binds by name in port order; pin it
         return (
             False,

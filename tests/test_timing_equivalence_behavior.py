@@ -9,11 +9,12 @@ from operator latencies -- a mis-timed schedule, overlap, or spill at the LONGER
 one, and the divergence is caught here without any reference model at all.
 
 Every test drives the compiler ONLY through the public API (``holoso.synthesize(fn, ops).numerical_model.elaborate()``
-and the resulting simulator's ``run`` / ``set_inputs`` / ``tick`` / handshake surface) and asserts solely on observable
-output BITS -- never on any internal schedule, register, or cycle structure. The two configurations are the no-optional-
+and the resulting simulator's ``run`` / ``set_inputs`` / ``tick`` / handshake surface) and asserts on observable output
+BITS and on publicly observable timing (``SynthesisResult.initiation_interval`` and handshake cycle counts) -- never on
+any internal schedule, register, or cycle structure. The two configurations are the no-optional-
 stage baseline and a deeply-pipelined fixture (both shared from ``_modelref`` so they track the operator-knob surface):
-``default_ops`` has every ``stage_*`` knob at zero; ``staged_ops`` enables them across fadd / fmul / fdiv / fmul_ilog2 /
-fcmp. The kernels span the four shapes that exercise distinct timing paths:
+``default_options`` has every ``stage_*`` knob at zero; ``staged_options`` enables them across fadd / fmul / fdiv /
+fmul_ilog2 / fcmp. The kernels span the four shapes that exercise distinct timing paths:
 
   - a branchy diamond (a real, division-bearing branch with a long commit chain),
   - a back-edge while loop (a Newton-Raphson reciprocal with a data-dependent trip count, so the back edge is genuine),
@@ -34,7 +35,7 @@ import numpy as np
 import holoso
 from holoso import FloatFormat, FloatValue
 
-from ._modelref import default_ops, default_options, overlap_spill_kernel, staged_ops, staged_options
+from ._modelref import default_options, overlap_spill_kernel, staged_options
 
 FMT = FloatFormat(6, 18)
 
@@ -222,3 +223,36 @@ def test_overlap_spill_timing_invariant() -> None:
     ]
     for x, y, z in samples:
         _assert_bits_equal(short, long, x, y, z)
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# Shape 5: a straight-line kernel touching every default operator kind -- fadd, fmul, fdiv, and the 2^-2 strength-
+# reduced fmul_ilog2 -- proving that optional stages raise the PUBLIC initiation interval without changing the value.
+# The kernel is branch-free, so the public min II is exact (initiation_interval[1] is not None) and the latency growth
+# is directly observable; the vectors are chosen so every intermediate is exactly representable (power-of-two divisors
+# and exact products), making the CPython float64 reference an exact independent oracle for BOTH configurations.
+# --------------------------------------------------------------------------------------------------------------------
+
+
+def _four_operator_kernel(a: float, b: float, c: float) -> float:
+    return (a - b) / c + a * b * 0.25
+
+
+def test_optional_stages_raise_latency_without_changing_numerics() -> None:
+    fmt = FloatFormat(8, 36)
+    short = holoso.synthesize(_four_operator_kernel, default_options(fmt), name="stages_short")
+    long = holoso.synthesize(_four_operator_kernel, staged_options(fmt), name="stages_long")
+    assert short.initiation_interval[1] is not None and long.initiation_interval[1] is not None  # branch-free: exact
+    assert (
+        short.initiation_interval[0] < long.initiation_interval[0]
+    ), f"staged II {long.initiation_interval[0]} not above default {short.initiation_interval[0]}"
+    short_sim = short.numerical_model.elaborate()
+    long_sim = long.numerical_model.elaborate()
+    for values in [(1.5, -0.5, 2.0), (3.25, 1.0, -4.0), (0.0, 2.5, 0.125), (-1.0, -1.0, 1e3)]:
+        want = _four_operator_kernel(*values)
+        (short_value,) = short_sim.run(*values)
+        (long_value,) = long_sim.run(*values)
+        assert isinstance(short_value, FloatValue) and isinstance(long_value, FloatValue)
+        assert float(short_value) == want, f"short {values}: {float(short_value)} vs CPython {want}"
+        assert float(long_value) == want, f"long {values}: {float(long_value)} vs CPython {want}"
+        assert short_value.bits == long_value.bits, f"{values}: staged output bits diverged from default"

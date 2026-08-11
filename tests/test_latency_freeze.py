@@ -70,7 +70,15 @@ _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
 
 @pytest.mark.parametrize("name", sorted(_FROZEN_SCHEDULE))
 def test_schedule_length_is_frozen(name: str) -> None:
+    # The min II column is the public ``SynthesisResult.initiation_interval[0]``; the last PC has no public spelling
+    # (the public tuple reports None past a surviving branch), so it stays pinned on the LIR.
     spec = _SPEC_BY_NAME[name]
+    frozen_ii, frozen_last_pc = _FROZEN_SCHEDULE[name]
+    result = holoso.synthesize(spec.make_kernel(), default_options(spec.formats[0]), name=name)
+    assert result.initiation_interval[0] == frozen_ii, (
+        f"{name}: scheduling efficiency changed -- min II {result.initiation_interval[0]} differs from the frozen "
+        f"{frozen_ii}. If this is a deliberate schedule improvement, update the frozen value."
+    )
     lir = build_lir(
         lower_to_mir(
             lower_frontend(spec.make_kernel()).hir,
@@ -79,9 +87,8 @@ def test_schedule_length_is_frozen(name: str) -> None:
         ),
         name,
     )
-    got = (lir.min_initiation_interval, lir.last_pc)
-    assert got == _FROZEN_SCHEDULE[name], (
-        f"{name}: scheduling efficiency changed -- (min II, last PC) {got} differs from the frozen "
+    assert (lir.min_initiation_interval, lir.last_pc) == (frozen_ii, frozen_last_pc), (
+        f"{name}: scheduling efficiency changed -- (min II, last PC) differs from the frozen "
         f"{_FROZEN_SCHEDULE[name]}. If this is a deliberate schedule improvement, update the frozen value."
     )
 
@@ -127,6 +134,8 @@ _CHAINED_COPY: list[tuple[str, type[_Delay3] | type[_BoolShift3], tuple[int, int
 def test_chained_copy_schedule_is_frozen(
     name: str, kernel_cls: type[_Delay3] | type[_BoolShift3], frozen: tuple[int, int]
 ) -> None:
+    result = holoso.synthesize(kernel_cls().__call__, default_options(_FMT), name=name)
+    assert result.initiation_interval[0] == frozen[0]
     lir = build_lir(
         lower_to_mir(
             lower_frontend(kernel_cls().__call__).hir,

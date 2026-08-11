@@ -34,16 +34,30 @@ from .hdl_float_oracle import (
     get_seed,
     random_zkf_f32,
     sources,
+    stage_tag,
     start_clock,
 )
 
-# (input, product, decode, align, normalize, pack, output): base (latency 5) + each latency-bearing knob + all-on.
-STAGE_COMBOS = (
-    (0, 0, 0, 0, 0, 0, 0),
-    (1, 0, 0, 0, 0, 0, 0),
-    (0, 1, 0, 0, 0, 0, 0),
-    (0, 0, 0, 0, 2, 0, 0),
-    (1, 1, 1, 1, 2, 1, 1),
+# Base (latency 5), representative single knobs including both shipped normalize counts, each split-product topology
+# (stage_product 2/3/4 select different partial-product geometry, so they carry the full numerical battery), all-on.
+STAGE_COMBOS: tuple[dict[str, int], ...] = (
+    {},
+    {"stage_input": 1},
+    {"stage_product": 1},
+    {"stage_product": 2},
+    {"stage_product": 3},
+    {"stage_product": 4},
+    {"stage_normalize": 1},
+    {"stage_normalize": 2},
+    {
+        "stage_input": 1,
+        "stage_product": 1,
+        "stage_decode": 1,
+        "stage_align": 1,
+        "stage_normalize": 2,
+        "stage_pack": 1,
+        "stage_output": 1,
+    },
 )
 
 # A directed corner battery: a small value set cubed (covers 0 / +-1 / +-2 / 0.5 / pi / +-inf in every operand slot)
@@ -114,25 +128,12 @@ async def holoso_ffma_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0
 
 
-@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: "".join(str(v) for v in s))
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_ffma(sim: str, stages: tuple[int, int, int, int, int, int, int]) -> None:
-    si, sp, sd, sa, sn, spk, so = stages
-    operator = FFmaOperator(
-        FloatFormat(8, 24),
-        FFmaOptions(
-            stage_input=si,
-            stage_product=sp,
-            stage_decode=sd,
-            stage_align=sa,
-            stage_normalize=sn,
-            stage_pack=spk,
-            stage_output=so,
-        ),
-        0,
-    )
+def test_holoso_ffma(sim: str, stages: dict[str, int]) -> None:
+    operator = FFmaOperator(FloatFormat(8, 24), FFmaOptions(**stages), 0)
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ffma_{''.join(str(v) for v in stages)}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ffma_{stage_tag(stages)}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

@@ -79,22 +79,43 @@ def test_targets_still_exercise_constant_installs(name: str) -> None:
     assert const_installs, f"{name} no longer emits constant phi-arm installs; the kernel shape changed"
 
 
+class _InputArmSource:
+    """
+    A phi arm that passes an INPUT through: ``b`` is resident at block entry, so the install is inline-class, and
+    ``b`` is read past the merge so the arm cannot coalesce. Dedicated rather than probed off a bundled example,
+    whose shape may drift.
+    """
+
+    def __call__(self, c: bool, a: float, b: float) -> float:
+        if c:
+            y = a / b  # a non-speculatable division keeps this a real branch, not an if-converted select
+        else:
+            y = b
+        return y * b
+
+
 def test_resident_register_source_install_is_inline_class() -> None:
     """
-    The generalization beyond literal constants: uart_rx installs the rx INPUT directly (b2 <- rx, b4 <- ~rx). A
-    register source resident at block entry has nothing to read-first, so the install is classified inline-class
-    (``resident_source``) and fires one cycle earlier than a computed-source copy -- exactly like a constant. Pin that
-    an INPUT-sourced install is present and so classified, matched by its source register against the input loads --
-    phi-sourced installs are also resident, so a resident-and-non-const filter alone could pass through a phi while the
-    input path regressed. The recovered cycles are pinned end-to-end by the uart_rx freeze (127); here we pin that the
-    input path is what is being exercised.
+    The generalization beyond literal constants: a register source resident at block entry has nothing to
+    read-first, so the install is classified inline-class (``resident_source``) and fires one cycle earlier than a
+    computed-source copy -- exactly like a constant. Pin that an INPUT-sourced install is present and so classified,
+    matched by its source register against the input loads -- phi-sourced installs are also resident, so a
+    resident-and-non-const filter alone could pass through a phi while the input path regressed. Constant,
+    input-register, and state-read installs are three distinct mechanisms; the other two have their own pins.
     """
-    lir = _build(next(s for s in SPECS if s.name == "uart_rx"))
+    fmt = FloatFormat(8, 36)
+    lir = build_lir(
+        lower_to_mir(lower_frontend(_InputArmSource().__call__).hir, default_ops(fmt), DEFAULT_IFCONV_MAX_OPS),
+        "input_arm_source",
+    )
     input_regs = {load.dst for load in lir.inputs}
     input_sourced = [
-        x for b in lir.blocks for x in _phi_arm_installs(b) if x.resident_source and x.source.source in input_regs
+        x
+        for b in lir.blocks
+        for x in _phi_arm_installs(b)
+        if x.resident_source and not x.is_const and x.source.source in input_regs
     ]
-    assert input_sourced, "uart_rx lost its input-sourced resident install, or the predicate regressed"
+    assert input_sourced, "the input-sourced resident install is gone, or the predicate regressed"
 
 
 def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:

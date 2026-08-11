@@ -1,14 +1,13 @@
 """Functional cosimulation: drive generated modules and check their outputs bit-for-bit against the model backend."""
 
 import math
-import sys
 from collections.abc import Mapping
-from pathlib import Path
 
 import numpy as np
 import pytest
 from cocotb_tools.runner import get_runner
 
+import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
@@ -22,21 +21,22 @@ from holoso import (
 )
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from holoso._lir import Lir, pooled_write_word
+from holoso._lir import pooled_write_word
 from holoso._mir import lower as lower_to_mir
 
 from holoso._value import ScalarLike
 from ._cosim import run_cosim
 from ._modelref import (
-    DEFAULT_IFCONV_MAX_OPS,
     default_options,
     build_ops,
     build_lir,
     ChainedSlots,
-    COMPARATOR_OP_CASES,
-    OperatorCase,
-    PIPELINE_OP_CASES,
+    COMPARATOR_OPTIONS_CASES,
+    OptionsCase,
+    PIPELINE_OPTIONS_CASES,
     SelectHold,
+    SharedLiveOut,
+    SharedLiveOutBool,
     branch_boundary_kernel,
     const_branch_kernel,
     diamond_then_loop_kernel,
@@ -44,6 +44,7 @@ from ._modelref import (
     overlap_div_err_kernel,
     overlap_spill_kernel,
     phi_swap_computed_loop,
+    staged_options,
 )
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, sources
 
@@ -55,100 +56,23 @@ def test_cosim_small_kernel(sim: str) -> None:
     def kernel(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
-    run_cosim(sim, kernel, default_options(FloatFormat(8, 24)), "kernel")
+    run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="kernel"))
 
 
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_division(sim: str) -> None:
-    def blend(a: float, b: float, c: float) -> float:
-        return a / b + c * 2.0
-
-    run_cosim(sim, blend, default_options(FloatFormat(6, 18)), "blend")
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_ekf1_stateless(sim: str) -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1_stateless
-
-    run_cosim(sim, ekf1_stateless.update_x_P, default_options(FloatFormat(6, 18)), "update_x_P")
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_ekf1_stateful(sim: str) -> None:
-    # The stateful filter inlines the stateless kernel and threads its vector state (x, P_urt) across the random
-    # transaction sequence, bit-for-bit against the model -- exercising the aggregates, inlining, and per-element slots.
-    # Large measurement noise keeps the kernel's 1/x21 divisor dominated by the constant R_ct*R_shunt and the Kalman
-    # gain tiny, so the random 64-step sequence cannot drive that divisor to an exact zero (err_pc) however the state
-    # wanders. The DUT-vs-model bits agree regardless of stability; this config only keeps the err_pc check meaningful.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1_stateful
-
-    filt = ekf1_stateful.Ekf1(
-        x=[0.0, 0.0, 0.0],
-        P_urt=[1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
-        R_diag=[1.0e3, 1.0e3],
-        Q_diag=np.array([1.0e-6, 1.0e-6, 1.0e-6]),
-    )
-    run_cosim(sim, filt.update, default_options(FloatFormat(6, 18)), "ekf1_stateful")
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_staged_kernel(sim: str) -> None:
-    def kernel(a: float, b: float) -> float:
-        return (a - b) * 0.25 + a * b
-
-    fmt = FloatFormat(8, 24)
-    ops = build_ops(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(stage_decode=1),
-                fmul=FMulOptions(stage_product=1),
-                fdiv=FDivOptions(),
-                fmul_ilog2=FMulILog2Options(stage_decode=1),
-                fcmp=FCmpOptions(),
-            ),
-            ffmt=fmt,
-        )
-    )
-    run_cosim(sim, kernel, default_options(fmt), "kernel_staged", ops=ops)
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_staged_division(sim: str) -> None:
-    def blend(a: float, b: float, c: float) -> float:
-        return a / b + (a - c)
-
-    # Exercise the STAGE_ALIGN (fadd) and STAGE_INPUT (fdiv) knobs end-to-end -- the combos the staged-kernel misses.
-    fmt = FloatFormat(6, 18)
-    ops = build_ops(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(stage_decode=1, stage_align=1),
-                fmul=FMulOptions(),
-                fdiv=FDivOptions(stage_input=1),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
-            ),
-            ffmt=fmt,
-        )
-    )
-    run_cosim(sim, blend, default_options(fmt), "blend_staged", ops=ops)
-
-
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_comparison_at_branch_boundary(sim: str, config: OperatorCase) -> None:
+def test_cosim_comparison_at_branch_boundary(sim: str, config: OptionsCase) -> None:
     # The boundary-slack corner kernel (see _modelref.branch_boundary_kernel), exercised at both comparator-only and
     # full-pipeline latency points. The white-box twin in test_schedule.py
     # (test_branch_comparison_commits_at_block_makespan) pins that this kernel actually hits the corner.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, branch_boundary_kernel, default_options(fmt), f"cmp_branch_{config.label}", ops=config.make_ops(fmt))
+    result = holoso.synthesize(branch_boundary_kernel, config.make_options(fmt), name=f"cmp_branch_{config.label}")
+    run_cosim(sim, result)
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_overlap_spill(sim: str, config: OperatorCase) -> None:
+def test_cosim_overlap_spill(sim: str, config: OptionsCase) -> None:
     # Cross-block software pipelining: the entry block shrinks its terminator to a wide chain's write word, and
     # that result spills past the terminator into BOTH single-predecessor arms, which read it. If the arm read did not
     # wait for the in-flight landing in the successor frame -- or the spill mis-aligned by even one frame -- the RTL
@@ -157,14 +81,13 @@ def test_cosim_overlap_spill(sim: str, config: OperatorCase) -> None:
     # See _modelref.overlap_spill_kernel. The staged cases move the early condition's landing relative to the spilling
     # chain, and the full staged case also moves the wide chain itself.
     fmt = FloatFormat(6, 18)
-    run_cosim(
-        sim, overlap_spill_kernel, default_options(fmt), f"overlap_spill_{config.label}", ops=config.make_ops(fmt)
-    )
+    result = holoso.synthesize(overlap_spill_kernel, config.make_options(fmt), name=f"overlap_spill_{config.label}")
+    run_cosim(sim, result)
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_const_branch(sim: str, config: OperatorCase) -> None:
+def test_cosim_const_branch(sim: str, config: OptionsCase) -> None:
     # Drained-boundary (round-5 fix): an empty const-branch block's condition is a pc-gated install read AT the
     # terminator, landing at the drained boundary; the drain must not shrink below it or the branch reads
     # the condition one PC before it lands. The model crashes (KeyError) on the first transaction, but a stale-register
@@ -172,12 +95,13 @@ def test_cosim_const_branch(sim: str, config: OperatorCase) -> None:
     # twin (test_schedule.py test_const_branch_install_block_drains_to_its_inline_landing) pins the block stays at the
     # drained boundary.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, const_branch_kernel, default_options(fmt), f"const_branch_{config.label}", ops=config.make_ops(fmt))
+    result = holoso.synthesize(const_branch_kernel, config.make_options(fmt), name=f"const_branch_{config.label}")
+    run_cosim(sim, result)
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_diamond_then_loop(sim: str, config: OperatorCase) -> None:
+def test_cosim_diamond_then_loop(sim: str, config: OptionsCase) -> None:
     # Empty merge-block elimination (B4): threading the non-convertible diamond's empty merge onto its arms composes
     # its phi arms into the loop header, producing a THREE-arm loop-header phi (two forward init arms from the diamond
     # arms plus the back-edge) -- a phi shape no other kernel pushes through the RTL emitter. The model and RTL are
@@ -185,31 +109,25 @@ def test_cosim_diamond_then_loop(sim: str, config: OperatorCase) -> None:
     # header phi having exactly two arms) from a self-consistent model. The white-box twin
     # (test_schedule.py test_empty_merge_block_is_threaded_into_its_successor) pins that the merge was actually removed.
     fmt = FloatFormat(6, 18)
-    run_cosim(
-        sim,
-        diamond_then_loop_kernel,
-        default_options(fmt),
-        f"diamond_then_loop_{config.label}",
-        ops=config.make_ops(fmt),
+    result = holoso.synthesize(
+        diamond_then_loop_kernel, config.make_options(fmt), name=f"diamond_then_loop_{config.label}"
     )
+    run_cosim(sim, result)
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_overlap_dead_arm_spill(sim: str, config: OperatorCase) -> None:
+def test_cosim_overlap_dead_arm_spill(sim: str, config: OptionsCase) -> None:
     # P3a tightened the cross-block spill carry to the model's true landing PC (land - term_offset - 1), changing the
     # emitted Verilog for this kernel. cosim is the orthogonal gate to the source-semantic dead-arm test: it proves the
     # RTL's register write timing stays lockstep with the model's _pending re-keying under the tighter read-gate (the
     # model and RTL are generated by different paths from one LIR). See _modelref.overlap_dead_arm_spill_kernel; the
     # silent clobber it guards against is caught by test_schedule.py, not here (model and RTL share the register file).
     fmt = FloatFormat(6, 18)
-    run_cosim(
-        sim,
-        overlap_dead_arm_spill_kernel,
-        default_options(fmt),
-        f"overlap_dead_arm_spill_{config.label}",
-        ops=config.make_ops(fmt),
+    result = holoso.synthesize(
+        overlap_dead_arm_spill_kernel, config.make_options(fmt), name=f"overlap_dead_arm_spill_{config.label}"
     )
+    run_cosim(sim, result)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -220,52 +138,18 @@ def test_cosim_min_max(sim: str) -> None:
     def kernel(a: float, b: float) -> tuple[float, ...]:
         return min(a, b), max(a, b), min(abs(a), abs(b))
 
-    fmt = FloatFormat(8, 24)
-    ops = build_ops(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(),
-                fmul=FMulOptions(),
-                fdiv=FDivOptions(),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
-                fsort=FSortOptions(),
-            ),
-            ffmt=fmt,
-        )
+    options = Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+            fsort=FSortOptions(),
+        ),
+        ffmt=FloatFormat(8, 24),
     )
-    run_cosim(sim, kernel, default_options(fmt), "min_max", ops=ops)
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_poly3(sim: str) -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import poly3
-
-    run_cosim(sim, poly3.poly3, default_options(FloatFormat(6, 18)), "poly3")
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_madd(sim: str) -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import madd
-
-    run_cosim(sim, madd.madd, default_options(FloatFormat(6, 18)), "madd")
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_trapezoidal_integrator(sim: str) -> None:
-    # A stateful class: the bound method becomes a streaming module whose persistent state (the leaky accumulator y and
-    # the one-sample delay _x_prev) is exercised across the whole random input sequence, bit-for-bit against the model.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator
-
-    run_cosim(
-        sim,
-        TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-        default_options(FloatFormat(6, 18)),
-        "trapz_integrator",
-    )
+    run_cosim(sim, holoso.synthesize(kernel, options, name="min_max"))
 
 
 class _ShiftRegister2:
@@ -291,32 +175,29 @@ class _UnusedBoolInputAccumulator:
         return self.y
 
 
-@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_shift_register_backpressure(sim: str, config: OperatorCase) -> None:
+def test_cosim_shift_register_backpressure(sim: str, config: OptionsCase) -> None:
     # The returned value taps a copy-slot register and the chain advances every accept, so together with the testbench's
     # random back-pressure this pins down that the boundary copy fires exactly once per accepted transaction -- no
     # mid-handshake output mutation and no state over-advance while out_ready is held low.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, _ShiftRegister2().__call__, default_options(fmt), f"shift2_{config.label}", ops=config.make_ops(fmt))
+    result = holoso.synthesize(_ShiftRegister2().__call__, config.make_options(fmt), name=f"shift2_{config.label}")
+    run_cosim(sim, result)
 
 
-@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str, config: OperatorCase) -> None:
+def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str, config: OptionsCase) -> None:
     fmt = FloatFormat(6, 18)
     vectors: list[Mapping[str, ScalarLike]] = [
         {"flag": False, "x": 2.0},
         {"flag": True, "x": 4.0},
     ]
-    run_cosim(
-        sim,
-        _UnusedBoolInputAccumulator().__call__,
-        default_options(fmt),
-        f"unused_bool_state_{config.label}",
-        ops=config.make_ops(fmt),
-        vectors=vectors,
+    result = holoso.synthesize(
+        _UnusedBoolInputAccumulator().__call__, config.make_options(fmt), name=f"unused_bool_state_{config.label}"
     )
+    run_cosim(sim, result, vectors=vectors)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -326,20 +207,17 @@ def test_cosim_new_operator_stages(sim: str) -> None:
 
     # Exercise the newly-shipped ZKF knobs end-to-end: fadd STAGE_INPUT/STAGE_NORMALIZE/STAGE_PACK, fmul STAGE_PACK,
     # fdiv STAGE_PACK, and fmul_ilog2 STAGE_INPUT -- all folded into the latency model and the latched datapath.
-    fmt = FloatFormat(8, 24)
-    ops = build_ops(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(stage_input=1, stage_normalize=2, stage_pack=1),
-                fmul=FMulOptions(stage_input=1, stage_pack=1),
-                fdiv=FDivOptions(stage_pack=1),
-                fmul_ilog2=FMulILog2Options(stage_input=1),
-                fcmp=FCmpOptions(),
-            ),
-            ffmt=fmt,
-        )
+    options = Options(
+        OperatorOptions(
+            fadd=FAddOptions(stage_input=1, stage_normalize=2, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fdiv=FDivOptions(stage_pack=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=FloatFormat(8, 24),
     )
-    run_cosim(sim, kernel, default_options(fmt), "new_stages", ops=ops)
+    run_cosim(sim, holoso.synthesize(kernel, options, name="new_stages"))
 
 
 # The generated bench only checks err_pc == 0 over a bounded input range, so it never exercises the div0 -> err_pc
@@ -391,12 +269,12 @@ async def div0_errpc(dut):
 """
 
 
-def _run_err_bench(sim: str, name: str, fmt: FloatFormat, lir: Lir, bench_text: str, suffix: str = "err") -> None:
+def _run_err_bench(sim: str, name: str, fmt: FloatFormat, verilog: str, bench_text: str, suffix: str = "err") -> None:
     """Build ``name``'s RTL plus a custom error-checking cocotb bench and run it -- the shared tail of the err tests."""
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_{suffix}_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"{suffix}_{name}_w{fmt.wexp}_{fmt.wman}"
-    (gen_dir / f"{name}.v").write_text(generate_verilog(lir).verilog)
+    (gen_dir / f"{name}.v").write_text(verilog)
     test_module = f"test_{name}_{suffix}"
     (gen_dir / f"{test_module}.py").write_text(bench_text)
     runner = get_runner(sim)
@@ -418,20 +296,17 @@ def _run_err_bench(sim: str, name: str, fmt: FloatFormat, lir: Lir, bench_text: 
     )
 
 
-@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
+def test_cosim_div0_error(sim: str) -> None:
+    # Staged only: this is the one public-entry row where the error rides fdiv's full stage pipeline.
     def kdiv(a: float, b: float) -> float:
         return a / b
 
     fmt = FloatFormat(6, 18)
-    name = f"kdiv_{config.label}"
-    lir = build_lir(
-        lower_to_mir(lower(kdiv).hir, config.make_ops(fmt), DEFAULT_IFCONV_MAX_OPS),
-        name,
-    )
+    name = "kdiv_staged"
+    verilog = holoso.synthesize(kdiv, staged_options(fmt), name=name).verilog_output.verilog
     bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
-    _run_err_bench(sim, name, fmt, lir, bench)
+    _run_err_bench(sim, name, fmt, verilog, bench)
 
 
 # log2 has two error ports (domain_error for x<0, pole for x==0), both ORed into the single err_pc. Like div0, the
@@ -484,20 +359,17 @@ async def log2_errpc(dut):
 """
 
 
-@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
+def test_cosim_log2_error(sim: str, config: OptionsCase) -> None:
     def klog2(x: float) -> float:
         return math.log2(x)
 
     fmt = FloatFormat(6, 18)
     name = f"klog2_{config.label}"
-    lir = build_lir(
-        lower_to_mir(lower(klog2).hir, config.make_ops(fmt), DEFAULT_IFCONV_MAX_OPS),
-        name,
-    )
+    verilog = holoso.synthesize(klog2, config.make_options(fmt), name=name).verilog_output.verilog
     bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
-    _run_err_bench(sim, name, fmt, lir, bench)
+    _run_err_bench(sim, name, fmt, verilog, bench)
 
 
 # A 3-input variant of the err bench for the cross-block-overlap err_pc corner: it asserts the EXACT latched step
@@ -551,18 +423,20 @@ async def overlap_div0_errpc(dut):
 """
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
+def test_cosim_overlap_div0_errpc(sim: str, config: OptionsCase) -> None:
     # Overlap regression: an error-bearing division whose result spills past a SHRUNK
     # terminator must still latch err_pc to its OWN step, not the redirected non-fall-through successor frame. The data
     # is correct regardless (model == RTL), so only this step-exact err_pc cosim catches the regression. White-box
     # twin: test_schedule.py::test_overlap_keeps_error_op_diagnostic_latch_in_frame. See
-    # _modelref.overlap_div_err_kernel.
+    # _modelref.overlap_div_err_kernel. The expected err_pc step has no public spelling, so this test stays on the
+    # private LIR chain and emits the RTL from the same LIR it reads the step from.
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
+    options = config.make_options(fmt)
     lir = build_lir(
-        lower_to_mir(lower(overlap_div_err_kernel).hir, config.make_ops(fmt), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(overlap_div_err_kernel).hir, build_ops(options), options.ifconv_max_ops),
         name,
     )
     entry = next(block for block in lir.blocks if block.index == lir.entry)
@@ -573,38 +447,42 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
         .replace("@@WMAN@@", str(fmt.wman))
         .replace("@@ERRPC@@", str(err_pc))
     )
-    _run_err_bench(sim, name, fmt, lir, bench, suffix="errpc")
+    _run_err_bench(sim, name, fmt, generate_verilog(lir).verilog, bench, suffix="errpc")
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize(
+    "config",
+    [config for config in COMPARATOR_OPTIONS_CASES if config.label != "staged"],
+    ids=lambda config: config.label,
+)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_mirrored_comparisons_swap_orientation(sim: str, config: OperatorCase) -> None:
+def test_cosim_mirrored_comparisons_swap_orientation(sim: str, config: OptionsCase) -> None:
     # RTL twin of test_schedule.test_commutative_comparator_swap_permutes_output_taps: mirrored comparisons over one
     # operand pair make the port assignment orient one comparator firing swapped (its lt tap moving to gt), so the
-    # emitted module must still produce both relations bit-exactly through the permuted lane.
+    # emitted module must still produce both relations bit-exactly through the permuted lane. The default row checks
+    # the port permutation and fcmp_s1 the delayed comparator taps; full staging adds no new mapping here.
     def kernel(a: float, b: float) -> tuple[float, ...]:
         below = a < b
         above = b < a
         return float(below), float(above)
 
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, kernel, default_options(fmt), f"mirrored_cmp_{config.label}", ops=config.make_ops(fmt))
+    run_cosim(sim, holoso.synthesize(kernel, config.make_options(fmt), name=f"mirrored_cmp_{config.label}"))
 
 
-@pytest.mark.parametrize("config", PIPELINE_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_chained_slots_keep_the_old_value_across_the_install(sim: str, config: OperatorCase) -> None:
+def test_cosim_chained_slots_keep_the_old_value_across_the_install(sim: str, config: OptionsCase) -> None:
     # RTL twin of test_schedule.test_chained_slot_live_in_blocks_early_install: before the fix, "_b"'s early install
     # clobbered the value "_a"'s boundary copy reads, so the DUT diverged from the model on the second transaction.
     fmt = FloatFormat(6, 18)
-    run_cosim(
-        sim, ChainedSlots().__call__, default_options(fmt), f"chained_slots_{config.label}", ops=config.make_ops(fmt)
-    )
+    result = holoso.synthesize(ChainedSlots().__call__, config.make_options(fmt), name=f"chained_slots_{config.label}")
+    run_cosim(sim, result)
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_select_kernels(sim: str, config: OperatorCase) -> None:
+def test_cosim_select_kernels(sim: str, config: OptionsCase) -> None:
     # If-converted selects in RTL: both polarities of a max kernel, an arm-sign select (the negation rides the
     # operand conditioner), and a comparison -> select -> arithmetic cross-bank chain, in one kernel.
     def kernel(a: float, b: float) -> float:
@@ -613,21 +491,21 @@ def test_cosim_select_kernels(sim: str, config: OperatorCase) -> None:
         return m * 2.0 + s
 
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, kernel, default_options(fmt), f"select_mix_{config.label}", ops=config.make_ops(fmt))
+    run_cosim(sim, holoso.synthesize(kernel, config.make_options(fmt), name=f"select_mix_{config.label}"))
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_select_reads_state_live_in_before_early_install(sim: str, config: OperatorCase) -> None:
+def test_cosim_select_reads_state_live_in_before_early_install(sim: str, config: OptionsCase) -> None:
     # RTL twin of test_schedule.test_state_early_install_respects_a_select_reader: the slot's early install must not
     # fire before the Ret-block select reads the OLD live-in value.
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, SelectHold().step, default_options(fmt), f"select_hold_{config.label}", ops=config.make_ops(fmt))
+    run_cosim(sim, holoso.synthesize(SelectHold().step, config.make_options(fmt), name=f"select_hold_{config.label}"))
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_not_folding_sinks(sim: str, config: OperatorCase) -> None:
+def test_cosim_not_folding_sinks(sim: str, config: OptionsCase) -> None:
     # NOT-folding in RTL: inverted logic operands, an inverted bool output path (via the casts), both polarities of
     # one comparison, and a self-toggling inverted boolean state slot, across several transactions.
     class Toggle:
@@ -642,12 +520,12 @@ def test_cosim_not_folding_sinks(sim: str, config: OperatorCase) -> None:
             return float(gate) + 2.0 * float(both) + (4.0 if old else 0.0)
 
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, Toggle().step, default_options(fmt), f"not_sinks_{config.label}", ops=config.make_ops(fmt))
+    run_cosim(sim, holoso.synthesize(Toggle().step, config.make_options(fmt), name=f"not_sinks_{config.label}"))
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_inverted_bool_phi_arm(sim: str, config: OperatorCase) -> None:
+def test_cosim_inverted_bool_phi_arm(sim: str, config: OptionsCase) -> None:
     # RTL twin of test_schedule.test_inverted_bool_phi_arm_installs_with_opposite_polarities: the conditional flag
     # negation rides the phi-arm install's inversion.
     def kernel(a: float, b: float, c: float) -> tuple[float, ...]:
@@ -660,12 +538,12 @@ def test_cosim_inverted_bool_phi_arm(sim: str, config: OperatorCase) -> None:
         return float(flag), d
 
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, kernel, default_options(fmt), f"inverted_arm_{config.label}", ops=config.make_ops(fmt))
+    run_cosim(sim, holoso.synthesize(kernel, config.make_options(fmt), name=f"inverted_arm_{config.label}"))
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: OperatorCase) -> None:
+def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: OptionsCase) -> None:
     # RTL twin of test_schedule.test_phi_coalescing_residual_install_conflict_is_resolved: phi ``a`` would coalesce onto
     # input ``x``'s register, but ``x`` is still live as sibling phi ``z``'s identity arm (``z = x``) where ``a``'s
     # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces ``a``. This
@@ -683,12 +561,12 @@ def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: Operat
         return a, z, d
 
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, kernel, default_options(fmt), f"coal_conflict_{config.label}", ops=config.make_ops(fmt))
+    run_cosim(sim, holoso.synthesize(kernel, config.make_options(fmt), name=f"coal_conflict_{config.label}"))
 
 
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str, config: OperatorCase) -> None:
+def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str, config: OptionsCase) -> None:
     # Two NOT-folding corners under RTL: a flag negated per trip of a while loop (the self-arm inversion install
     # fires once per iteration through the back edge), and a PUBLIC boolean state attribute whose live-out is a
     # negation (the state_<attr> port and the install both ride inversions).
@@ -706,17 +584,7 @@ def test_cosim_not_over_loop_phi_and_inverted_public_state(sim: str, config: Ope
             return float(flag)
 
     fmt = FloatFormat(6, 18)
-    run_cosim(sim, LoopToggle().step, default_options(fmt), f"loop_toggle_{config.label}", ops=config.make_ops(fmt))
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_sincos(sim: str) -> None:
-    # RTL must match the model on exactly the out_valid cycle; a late/stale capture of the combinational
-    # (non-held under out_ready) CORDIC output would read wrong.
-    def kernel(x: float) -> tuple[float, float]:
-        return math.sin(x), math.cos(x)
-
-    run_cosim(sim, kernel, default_options(FloatFormat(8, 24)), "cs_sincos")
+    run_cosim(sim, holoso.synthesize(LoopToggle().step, config.make_options(fmt), name=f"loop_toggle_{config.label}"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -726,7 +594,7 @@ def test_cosim_two_sincos_share_ii_instance(sim: str) -> None:
     def kernel(a: float, b: float) -> tuple[float, float, float, float]:
         return math.sin(a), math.cos(a), math.sin(b), math.cos(b)
 
-    run_cosim(sim, kernel, default_options(FloatFormat(8, 24)), "cs_two_sincos")
+    run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="cs_two_sincos"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -736,7 +604,7 @@ def test_cosim_two_atan2_share_ii_instance(sim: str) -> None:
     def kernel(a: float, b: float, c: float, d: float) -> tuple[float, float]:
         return math.atan2(a, b), math.atan2(c, d)
 
-    run_cosim(sim, kernel, default_options(FloatFormat(8, 24)), "cs_two_atan2")
+    run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="cs_two_atan2"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -745,23 +613,7 @@ def test_cosim_atan2_hypot_fused(sim: str) -> None:
     def kernel(y: float, x: float) -> tuple[float, float]:
         return math.hypot(y, x), math.atan2(y, x)
 
-    run_cosim(sim, kernel, default_options(FloatFormat(8, 24)), "cs_atan2_hypot")
-
-
-@pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_sincos_in_back_edge_loop(sim: str) -> None:
-    # An fsincos reused across a data-dependent while back edge: the II>1 instance must be idle at each re-entry (the
-    # drained-edge bound in Lir.__post_init__ for II=latency+1). Trip count is fixed at 3 but it is a real back edge,
-    # not an unrolled for.
-    def kernel(x: float) -> float:
-        acc = x
-        i = 0.0
-        while i < 3.0:
-            acc = math.cos(acc)
-            i = i + 1.0
-        return acc
-
-    run_cosim(sim, kernel, default_options(FloatFormat(8, 24)), "cs_sincos_loop")
+    run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="cs_atan2_hypot"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -772,7 +624,7 @@ def test_cosim_library_composites(sim: str) -> None:
     def kernel(x: float, y: float) -> tuple[float, float, float, float, float]:
         return math.cbrt(x), math.tan(y), pow(x, 3.0), math.sinh(x), math.tanh(y)
 
-    run_cosim(sim, kernel, default_options(FloatFormat(8, 24)), "cs_lib_composites")
+    run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="cs_lib_composites"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -791,7 +643,7 @@ def test_cosim_tan_pole_latches_no_error(sim: str) -> None:
         {"x": -pole},
         {"x": 0.5},
     ]
-    run_cosim(sim, kernel, default_options(fmt), "cs_tan_pole", vectors=vectors)
+    run_cosim(sim, holoso.synthesize(kernel, default_options(fmt), name="cs_tan_pole"), vectors=vectors)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -801,53 +653,24 @@ def test_cosim_phi_swap_computed_arm(sim: str) -> None:
     # Explicit vectors keep the while trip count small; the bench's own sweep would draw huge counts.
     fmt = FloatFormat(6, 18)
     vectors: list[Mapping[str, ScalarLike]] = [{"x": x, "n": n} for x in (1.0, 2.0, -1.5) for n in (1.0, 2.0, 4.0)]
-    run_cosim(sim, phi_swap_computed_loop, default_options(fmt), "cs_phi_swap_computed", vectors=vectors)
-
-
-class _SharedLiveOut:
-    """Two slots ending the transaction holding one value; the emitter's boundary install shares a register with
-    opcode writes, which it used to refuse rather than emit."""
-
-    def __init__(self) -> None:
-        self.a = 0.0
-        self.b = 1.0
-
-    def __call__(self, x: float) -> float:
-        self.a = x + self.a
-        self.a = x + self.a
-        self.b = self.a
-        return self.b
+    result = holoso.synthesize(phi_swap_computed_loop, default_options(fmt), name="cs_phi_swap_computed")
+    run_cosim(sim, result, vectors=vectors)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_shared_live_out_state_slots(sim: str) -> None:
     # The install arm outranks the opcode arm in the same statement, so if the two could ever be enabled on one PC the
     # DUT would diverge from the model here -- across a persistent recurrence, on the very first transaction.
-    run_cosim(sim, _SharedLiveOut().__call__, default_options(FloatFormat(6, 18)), "shared_live_out")
-
-
-class _SharedBoolLiveOut:
-    """
-    Two boolean slots ending the transaction holding one value, with ``d``'s early read freeing ``a``'s register so the
-    allocator lands an opcode write on it: a boundary-installing bool slot whose own register also takes one.
-    """
-
-    def __init__(self) -> None:
-        self.a = False
-        self.b = True
-        self.d = False
-
-    def __call__(self, x: bool, y: bool) -> tuple[bool, bool, bool]:
-        keep = self.d
-        self.d = x and self.a
-        self.a = y or self.a
-        self.a = x and self.a
-        self.b = self.a
-        return keep, self.b, self.d
+    # _modelref.SharedLiveOut is the one home of this kernel; its elaboration/premise twin lives in test_backend.
+    result = holoso.synthesize(SharedLiveOut().step, default_options(FloatFormat(6, 18)), name="shared_live_out")
+    run_cosim(sim, result)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_shared_live_out_bool_state_slots(sim: str) -> None:
     # The boolean bank leans on the same priority argument as the wide one, and boolean installs are boundary-only, so
     # a shadowed write here would diverge from the model on the recurrence rather than on a single transaction.
-    run_cosim(sim, _SharedBoolLiveOut().__call__, default_options(FloatFormat(6, 18)), "shared_bool_live_out")
+    result = holoso.synthesize(
+        SharedLiveOutBool().step, default_options(FloatFormat(6, 18)), name="shared_bool_live_out"
+    )
+    run_cosim(sim, result)

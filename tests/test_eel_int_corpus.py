@@ -1,80 +1,39 @@
 """
-The corpus differential: every kernel is oracle-verified against CPython -- exact ints, multi-transaction,
-state included -- and then lowered. The float kernels are the two residual-loop exit shapes plus the FIR and
-biquad examples, whose exactness against CPython this suite adds on top of the tolerance-based example matrix.
-
-The integer kernels additionally run through :class:`MirInterpreter` and the numerical model built from the LIR,
-both compared against the HIR evaluator per transaction. They agree only while nothing reaches a rail -- HIR is
-unbounded, the machine saturates -- which the generous word width below buys.
+The corpus differential in two layers. The HIR oracle (CPython against ``HirEvaluator``) runs the float kernels --
+whose binary64-exact comparison has no black-box spelling -- and ONLY the five UART integer cases, whose written FSM
+slots are private: those rows check exact private-slot changes, parameter/port mirroring, output-name uniqueness and
+private-slot non-exposure, none of which a public port can observe. The remaining integer corpus is accepted
+publicly: ``synthesize`` and the numerical model against a fresh CPython reference, mapped by port NAME -- never
+positionally, because an assign-and-return leaf may be elided onto its ``state_*`` port -- with a typed
+``(kind, value)`` comparison, since Python's ``==`` conflates ``True``, ``1`` and ``1.0``.
 """
 
+import inspect
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 import holoso
+from holoso import BoolType, FloatType, IntType
 from holoso._eel import lower
-from holoso._hir import HirEvaluator
-from holoso._mir import MirInterpreter, lower as lower_to_mir
-from holoso._value import FloatValue, IntValue, ScalarValue
+from holoso._value import FloatValue, IntValue
 
-from ._modelref import build_lir, build_model, build_ops
-from ._eel_corpus import Crc8, Debouncer, IntUartRx, IntUartTx, Lfsr16, NcoPhase, PriorityEncoder, Pwm
-from ._eel_corpus import band_scan, convergence_steps
-from ._eeloracle import InputRow, assert_hir_matches_reference
+from ._modelref import flatten_value, port_name
+from ._eel_corpus import INT_CASES, band_scan, convergence_steps, int_corpus_options, rows
+from ._eeloracle import InputRow, assert_hir_matches_reference, instance_leaves
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from biquad import Biquad  # noqa: E402
 from fir import Fir4  # noqa: E402
 
-
-def _uart_tx_vectors() -> list[InputRow]:
-    idle = 16 * 11 + 4
-    rows: list[InputRow] = [{"start": True, "char": 0xA5}]
-    rows += [{"start": False, "char": 0}] * idle
-    rows += [{"start": True, "char": 0x0F}, {"start": True, "char": 0xFF}]
-    rows += [{"start": False, "char": 0}] * idle
-    return rows
-
-
-def _uart_rx_vectors() -> list[InputRow]:
-    def frame(char: int, parity: bool, stop: bool) -> list[bool]:
-        bits = [False] + [(char >> i) & 1 == 1 for i in range(8)] + [parity, stop]
-        return [level for bit in bits for level in [bit] * OVERSAMPLE]
-
-    OVERSAMPLE = 16
-    line = [True] * 8 + frame(0x5A, True, True) + [True] * 20 + frame(0xC3, False, False) + [True] * 20
-    line += [False] * 4 + [True] * 20  # a false start: the line recovers before the first mid-bit sample
-    return [{"rx": level} for level in line]
-
-
-def _rows(name: str, values: Sequence[float | bool | int]) -> list[InputRow]:
-    return [{name: value} for value in values]
-
-
-_INT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]] = [
-    ("int_uart_tx_8e1", lambda: IntUartTx(parity=False).__call__, _uart_tx_vectors()),
-    ("int_uart_tx_8n1", lambda: IntUartTx(parity=None).__call__, _uart_tx_vectors()),
-    ("int_uart_rx_8e1", lambda: IntUartRx(parity=False).__call__, _uart_rx_vectors()),
-    ("int_uart_rx_8o1", lambda: IntUartRx(parity=True).__call__, _uart_rx_vectors()),
-    ("int_uart_rx_8n1", lambda: IntUartRx(parity=None).__call__, _uart_rx_vectors()),
-    ("crc8", lambda: Crc8().step, _rows("byte", [0x31, 0x32, 0x33, 0xFF, 0x00, 0x80, 0x01])),
-    ("lfsr16", lambda: Lfsr16().step, _rows("advance", [True] * 20 + [False] * 2 + [True] * 3)),
-    ("nco_phase", lambda: NcoPhase().step, _rows("increment", [0x40000000] * 5 + [0x3FFFFFFF] * 3 + [1, 0])),
-    ("pwm", lambda: Pwm(top=5).step, _rows("duty", [3] * 12 + [0] * 3 + [5] * 6)),
-    ("priority_encoder", lambda: PriorityEncoder().step, _rows("bits", [0b1000, 0b0101, 0b0000, 0xFF, 0x80, 1])),
-    (
-        "debouncer",
-        lambda: Debouncer(n=3).step,
-        _rows("raw", [False, True, False, True, True, True, True, False, False, False, True, False, False, False]),
-    ),
-]
+_UART_CASES = [case for case in INT_CASES if case[0].startswith("int_uart")]
+assert len(_UART_CASES) == 5
 
 _FLOAT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]] = [
-    ("fir4", lambda: Fir4().__call__, _rows("x", [1.0, 2.0, -1.0, 0.5, 3.0, -2.5, 0.0])),
-    ("biquad", lambda: Biquad().__call__, _rows("x", [1.0, 0.0, 0.0, 2.0, -1.0, 0.5, 0.0])),
+    ("fir4", lambda: Fir4().__call__, rows("x", [1.0, 2.0, -1.0, 0.5, 3.0, -2.5, 0.0])),
+    ("biquad", lambda: Biquad().__call__, rows("x", [1.0, 0.0, 0.0, 2.0, -1.0, 0.5, 0.0])),
     (
         "convergence_steps",
         lambda: convergence_steps,
@@ -87,10 +46,10 @@ _FLOAT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow
     ),
 ]
 
-_CASES = _INT_CASES + _FLOAT_CASES
+_ORACLE_CASES = _UART_CASES + _FLOAT_CASES
 
 
-@pytest.mark.parametrize("name,make,vectors", _CASES, ids=[name for name, _, _ in _CASES])
+@pytest.mark.parametrize("name,make,vectors", _ORACLE_CASES, ids=[name for name, _, _ in _ORACLE_CASES])
 def test_corpus_oracle(name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]) -> None:
     target = make()
     compared = assert_hir_matches_reference(lower(target).hir, target, vectors, label=name)
@@ -112,34 +71,13 @@ def _ops() -> holoso.Options:
 
 
 @pytest.mark.parametrize("name,make,vectors", _FLOAT_CASES, ids=[name for name, _, _ in _FLOAT_CASES])
-def test_float_corpus_lowers_through_mir(
+def test_float_corpus_synthesizes(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
-    lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ifconv_max_ops)
+    holoso.synthesize(make(), _ops(), name=f"float_{name}")
 
 
-def _int_ops() -> holoso.Options:
-    """
-    ``NcoPhase`` masks with ``0xFFFFFFFF`` and adds a ``2**30`` increment to a value already that wide, so the word
-    must hold ``2**33`` for the sum to stay exact -- anything narrower saturates and the comparison below is no
-    longer against CPython's arithmetic but against the rails.
-    """
-    return holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
-            fdiv=holoso.FDivOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
-            ffromint=holoso.FFromIntOptions(),
-            ftoint=holoso.FToIntOptions(),
-        ),
-        ffmt=holoso.FloatFormat(wexp=8, wman=23),
-        wint_min=34,
-    )
-
-
-def _typed(value: ScalarValue | float | bool | int) -> tuple[type, float | bool | int]:
+def _typed(value: object) -> tuple[type, float | bool | int]:
     """Python's ``==`` conflates ``True``, ``1`` and ``1.0``, blinding a bare comparison to family substitution."""
     match value:
         case bool():
@@ -148,24 +86,47 @@ def _typed(value: ScalarValue | float | bool | int) -> tuple[type, float | bool 
             return int, int(value)
         case FloatValue():
             return float, float(value)
-        case _:
-            return type(value), value
+        case int():
+            return int, value
+        case float():
+            return float, value
+    raise AssertionError(value)
 
 
-@pytest.mark.parametrize("name,make,vectors", _INT_CASES, ids=[name for name, _, _ in _INT_CASES])
-def test_int_corpus_agrees_across_hir_interpreter_and_model(
+def _family(scalar_type: object) -> type:
+    match scalar_type:
+        case BoolType():
+            return bool
+        case IntType():
+            return int
+        case FloatType():
+            return float
+    raise AssertionError(scalar_type)
+
+
+@pytest.mark.parametrize("name,make,vectors", INT_CASES, ids=[name for name, _, _ in INT_CASES])
+def test_int_corpus_model_matches_python(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
-    options = _int_ops()
-    hir = lower(make()).hir
-    mir = lower_to_mir(hir, build_ops(options), options.ifconv_max_ops)
-    model = build_model(build_lir(mir, name))  # the scheduled machine over the same selection
-    evaluator, interpreter = HirEvaluator(hir), MirInterpreter(mir)
-    names = hir.input_names()
-    assert [out.name for out in mir.outputs] == [out.name for out in hir.outputs]
-    assert model.inputs == interpreter.inputs and model.outputs == interpreter.outputs
+    result = holoso.synthesize(make(), int_corpus_options(), name=f"corpus_{name}")
+    model = result.numerical_model.elaborate()
+    reference = make()
+    instance = reference.__self__ if inspect.ismethod(reference) else None
+    assert instance is not None
+    input_names = [port.name for port in model.inputs]
+    port_families = {port.name: _family(port.scalar_type) for port in result.output_ports}
+    assert list(port_families) == [port.name for port in model.outputs]
     for index, row in enumerate(vectors):
-        arguments = [row[port] for port in names]
-        expected = [_typed(value) for value in evaluator.run(*arguments)]
-        assert [_typed(value) for value in interpreter.run(*arguments)] == expected, f"{name}[{index}]"
-        assert [_typed(value) for value in model.run(*arguments)] == expected, f"{name}[{index}]"
+        arguments = [row[input_name] for input_name in input_names]
+        returned = reference(*arguments)
+        leaves = {} if returned is None else {port_name(path): leaf for path, leaf in flatten_value(returned)}
+        slots = instance_leaves(instance)
+        produced = dict(zip([port.name for port in model.outputs], model.run(*arguments), strict=True))
+        for out_name, actual in produced.items():
+            expected = slots[out_name[len("state_") :]] if out_name.startswith("state_") else leaves[out_name]
+            assert _typed(actual) == _typed(expected), f"{name}[{index}] {out_name}"
+            assert port_families[out_name] is _typed(expected)[0], f"{name}[{index}] {out_name} family"
+        for leaf_name, leaf in leaves.items():  # an elided return leaf must be observable through a state port
+            if leaf_name not in produced:
+                held = [slots[out_name[len("state_") :]] for out_name in produced if out_name.startswith("state_")]
+                assert any(_typed(leaf) == _typed(value) for value in held), f"{name}[{index}] {leaf_name}"

@@ -1,6 +1,7 @@
 """
 The integer operators, pooled and inline: their reference semantics, their closed-form timing, and the one knob
-among them. No lowering selects these yet, so they are driven directly.
+among them. The lowering selects these (pinned in ``test_int_selection``); here they are driven directly because
+only a direct drive can sweep every operand of the narrow widths exhaustively.
 
 The sweeps score ``evaluate`` against the very oracle the HDL benches score the RTL against, so the values are
 checked rather than merely claimed. What they do NOT check is the configuration the hardware is built in: the

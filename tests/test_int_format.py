@@ -1,8 +1,8 @@
 """
 The native integer format and type: the arithmetic surface, the plumbing from ``Options`` down into the emitted RTL,
-and the port conditioning an integer type admits. No lowering selects an integer operator yet, so the format's only
-hardware footprint is the ``WINT`` localparam -- which is nevertheless enough to pin the whole chain from the public
-entry point through MIR and LIR to the Verilog backend.
+and the port conditioning an integer type admits. The format sizes the shared wide register bank (the ``WINT``
+localparam), pinned here from the public entry point down to the Verilog backend; the operators the lowering selects
+for it are covered by ``test_int_operators`` and ``test_int_selection``.
 """
 
 import dataclasses
@@ -12,13 +12,12 @@ import pytest
 
 import holoso
 from holoso import FloatFormat, IntFormat, OperatorOptions, Options
-from holoso._eel import lower as lower_frontend
-from holoso._mir import MirOperation, MirPhi, lower as lower_to_mir
+from holoso._mir import MirOperation, MirPhi
 from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, SelectOperator, identity_conditioner
 from holoso._type import BoolType, IntType
 from holoso._value import IntValue
 
-from ._modelref import build_lir, build_ops, default_options
+from ._modelref import default_options
 
 FMT = FloatFormat(6, 18)
 
@@ -116,9 +115,6 @@ def test_default_options_carry_the_documented_int_format() -> None:
 def test_the_int_format_is_never_narrower_than_the_float(wint_min: int, width: int) -> None:
     options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
     assert options.ifmt == IntFormat(width)
-    mir = lower_to_mir(lower_frontend(_add).hir, build_ops(options), options.ifconv_max_ops)
-    assert mir.int_format == options.ifmt
-    assert build_lir(mir, "int_format_probe").int_format == options.ifmt
 
 
 @pytest.mark.parametrize("wint_min,width", ((2, 24), (16, 24), (33, 33), (44, 44)))

@@ -1,12 +1,10 @@
 """
-Public-API, black-box behavioral tests for the front-end language features landed alongside the UART example: the
-boolean ``^`` operator, instance/inherited method calls, ``@property`` reads, and module-level numeric/boolean
-constant resolution. Every test drives the compiler ONLY through ``holoso.synthesize(fn, ops)`` and exercises the
-elaborated numerical model, asserting on observable output values, so the tests survive a refactor of the front end.
-
-The two rejection checks (``^`` on floats, a state-writing helper) guard real soundness boundaries: without them a
-float ``^`` would silently miscompile and a state-mutating helper would be inlined past the entry method's state-slot
-analysis -- both behavioral, not mere input validation.
+Public-API, black-box behavioral tests for front-end language features: the boolean ``^`` operator, instance/
+inherited/static method calls, ``@property`` reads, descriptor and attribute-access-protocol boundaries, and
+module-level constant resolution. Every test drives the compiler ONLY through ``holoso.synthesize(fn, ops)`` and
+exercises the elaborated numerical model, asserting on observable output values, so the tests survive a refactor of
+the front end. The rejection checks guard soundness boundaries where a silent miscompile would otherwise diverge
+from Python -- behavioral, not mere input validation.
 """
 
 import itertools
@@ -26,8 +24,8 @@ from holoso import (
     FloatFormat,
     OperatorOptions,
     Options,
+    UnsupportedConstruct,
 )
-from holoso._errors import UnsupportedConstruct
 
 _FMT = FloatFormat(4, 8)
 
@@ -49,22 +47,12 @@ def _model(target: Callable[..., object]) -> holoso.NumericalSimulator:
     return holoso.synthesize(target, _ops()).numerical_model.elaborate()
 
 
-def _xor2(a: bool, b: bool) -> bool:
-    return a ^ b
-
-
 def _xor_chain(a: bool, b: bool, c: bool, d: bool) -> bool:
     return a ^ b ^ c ^ d
 
 
 def _float_xor(x: float, y: float) -> float:
     return x ^ y  # type: ignore[operator, no-any-return]  # deliberately ill-typed: exercises rejection of float ^
-
-
-def test_bool_xor_truth_table() -> None:
-    sim = _model(_xor2)
-    for a, b in itertools.product((False, True), repeat=2):
-        assert bool(sim.run(a, b)[0]) == (a != b), f"xor {a} {b}"
 
 
 def test_bool_xor_chain_is_parity() -> None:
@@ -93,18 +81,6 @@ class _ParityUser(_ParityBase):
         return self._polarized_parity(a, b, c)  # an INHERITED method call, resolved through the MRO
 
 
-class _StateWriter:
-    def __init__(self) -> None:
-        self._latch = False
-
-    def _absorb(self, x: bool) -> bool:
-        self._latch = x
-        return x
-
-    def __call__(self, x: bool) -> bool:
-        return self._absorb(x)
-
-
 def test_inherited_method_call_even_and_odd() -> None:
     even = _model(_ParityUser(False).__call__)
     odd = _model(_ParityUser(True).__call__)
@@ -112,12 +88,6 @@ def test_inherited_method_call_even_and_odd() -> None:
         want_even = sum(bits) % 2 == 1
         assert bool(even.run(*bits)[0]) == want_even, f"even {bits}"
         assert bool(odd.run(*bits)[0]) == (not want_even), f"odd {bits}"
-
-
-def test_method_writing_self_state_is_rejected() -> None:
-    # A called method may read self but not write it (the entry method owns the state-slot analysis).
-    with pytest.raises(UnsupportedConstruct, match="a helper method cannot write attributes of the receiver"):
-        holoso.synthesize(_StateWriter().__call__, _ops())
 
 
 class _Thresholded:

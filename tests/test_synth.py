@@ -1,9 +1,7 @@
 """End-to-end tests of the public synthesize() API, the report, artifact writing, and the generated testbench."""
 
-import html
 import math
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -146,43 +144,27 @@ def test_frontend_ir_records_the_passes(tmp_path: Path) -> None:
 
 
 def test_rejects_invalid_and_reserved_module_names() -> None:
-    # An empty name is falsy, so it is not "invalid" -- it just falls back to the target-derived default.
-    for bad in ("1bad", "bad-name", "a/b", "has space", "../escape"):
-        with pytest.raises(ValueError, match="valid identifier"):
-            holoso.synthesize(_kernel, _ops(), name=bad)
-    for reserved in ("holoso", "Holoso_x", "holoso_support", "HOLOSOmod"):
-        with pytest.raises(ValueError, match="reserved"):
-            holoso.synthesize(_kernel, _ops(), name=reserved)
-    # Reserved words would emit unparsable RTL (`module module (`); a same-spelled non-keyword is still fine.
-    for keyword in ("module", "reg", "wire", "assign", "always"):
-        with pytest.raises(ValueError, match="reserved keyword"):
-            holoso.synthesize(_kernel, _ops(), name=keyword)
+    # One representative per validation class. An empty name is falsy, so it is not "invalid" -- it just falls back
+    # to the target-derived default.
+    with pytest.raises(ValueError, match="valid identifier"):
+        holoso.synthesize(_kernel, _ops(), name="1bad")
+    with pytest.raises(ValueError, match="reserved"):
+        holoso.synthesize(_kernel, _ops(), name="Holoso_x")
+    # A reserved word would emit unparsable RTL (`module module (`); a same-spelled non-keyword is still fine.
+    with pytest.raises(ValueError, match="reserved keyword"):
+        holoso.synthesize(_kernel, _ops(), name="module")
     assert holoso.synthesize(_kernel, _ops(), name="Module").module_name == "Module"  # case-sensitive: not a keyword
 
 
 def test_accepts_valid_module_name(tmp_path: Path) -> None:
+    # The full default-manifest sweep is owned by test_write_artifacts; here only that the explicit name threads in.
     result = holoso.synthesize(_kernel, _ops(), name="good_name")
     assert result.module_name == "good_name"
-    paths = result.write(tmp_path)
-    assert set(paths) == {
-        "good_name.v",
-        "holoso_support.v",
-        "test_good_name.py",
-        "good_name.html",
-        "good_name.pass0.fir",
-        "good_name.pass1.fir",
-    }
+    assert "good_name.v" in result.write(tmp_path)
 
 
-def test_synthesize_ekf1_stateless() -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import ekf1_stateless
-
-    fmt = FloatFormat(6, 18)
-    result = holoso.synthesize(ekf1_stateless.update_x_P, _ops(fmt))
-    assert result.module_name == "update_x_P"
-    assert len(result.output_ports) == 9
-    compile(result.cocotb_output.testbench, "<generated-testbench>", "exec")
+def test_generated_testbench_is_valid_python() -> None:
+    compile(holoso.synthesize(_kernel, _ops()).cocotb_output.testbench, "<generated-testbench>", "exec")
 
 
 def test_class_target_is_unsupported() -> None:

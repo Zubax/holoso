@@ -10,7 +10,6 @@ Subnormals, NaN, and -0 are excluded from stimulus because ZKF does not define t
 those classes are mapped through ZKF's zero/MIN_NORMAL boundary rule and canonical-zero rule.
 """
 
-import math
 import os
 import tempfile
 from collections import deque
@@ -24,18 +23,9 @@ from holoso._backend.verilog._support import support_files
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
-
-def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
-    """Whether ``actual`` is within ``atol + rtol*|expected|`` of ``expected`` (infinities must match exactly)."""
-    if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
-        return actual == expected
-    return abs(actual - expected) <= atol + rtol * abs(expected)
-
-
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
 HDL_DIR = Path(holoso.__file__).resolve().parent / "_backend" / "verilog"
-TESTS_DIR = REPO_ROOT / "tests"
 SUPPORT_BUILD_DIR = REPO_ROOT / "build" / "holoso_support"  # where the assembled support library is materialized
 
 SIMULATORS = (os.environ["SIM"],) if "SIM" in os.environ else ("icarus", "verilator")
@@ -182,14 +172,6 @@ DIRECTED_F32: tuple[int, ...] = (
 def add_oracle_bits(a_bits: int, b_bits: int) -> int | None:
     """ZKF-compatible float32 add. Returns None if the result would be NaN."""
     y = bits_to_f32(a_bits) + bits_to_f32(b_bits)
-    yb = f32_to_bits(y)
-    if is_nan_f32(yb):
-        return None
-    return _flush_to_zkf(yb)
-
-
-def sub_oracle_bits(a_bits: int, b_bits: int) -> int | None:
-    y = bits_to_f32(a_bits) - bits_to_f32(b_bits)
     yb = f32_to_bits(y)
     if is_nan_f32(yb):
         return None

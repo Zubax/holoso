@@ -4,29 +4,20 @@ asserts the diagnostic class, a message fragment, and the presence of a source l
 """
 
 import functools
-import inspect
-import types
 from collections.abc import Callable
 
 import pytest
 
-from holoso._eel import lower
-from holoso._eel._desugar import desugar
-from holoso._errors import UnsupportedConstruct
+import holoso
+from holoso import UnsupportedConstruct
+
+_OPTIONS = holoso.Options(holoso.OperatorOptions())
 
 
 def _reject(target: object, fragment: str) -> None:
-    fn = target.__func__ if inspect.ismethod(target) else target
-    assert isinstance(fn, types.FunctionType)
+    assert callable(target)
     with pytest.raises(UnsupportedConstruct, match=fragment) as info:
-        desugar(fn)
-    assert info.value.location is not None
-    assert info.value.location.lineno > 0
-
-
-def _reject_lowering(target: object, fragment: str) -> None:
-    with pytest.raises(UnsupportedConstruct, match=fragment) as info:
-        lower(target)
+        holoso.synthesize(target, _OPTIONS, name="k")
     assert info.value.location is not None
     assert info.value.location.lineno > 0
 
@@ -471,12 +462,12 @@ _PE_CASES: list[tuple[object, str]] = [
 
 @pytest.mark.parametrize("fn,fragment", _PE_CASES, ids=[getattr(fn, "__name__", "?") for fn, _ in _PE_CASES])
 def test_pe_rejection(fn: object, fragment: str) -> None:
-    _reject_lowering(fn, fragment)
+    _reject(fn, fragment)
 
 
 def test_lambda_rejection_points_at_the_lambda_token() -> None:
     with pytest.raises(UnsupportedConstruct) as info:
-        desugar(_k_lambda_target)  # type: ignore[arg-type]
+        holoso.synthesize(_k_lambda_target, _OPTIONS, name="k")
     location = info.value.location
     assert location is not None and location.line is not None
     assert location.line[location.col :].startswith("lambda")

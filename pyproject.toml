@@ -81,7 +81,6 @@ markers = [
     "cosim: end-to-end cocotb cosimulation; slow, needs a simulator",
     "fuzz: end-to-end blackbox differential fuzzing; slow, no simulator",
     "synth: end-to-end out-of-context FPGA synthesis of the example matrix; slow, needs a synthesis tool",
-    "whitebox: reaches past the public API where a black-box spelling is now possible; promote and drop the marker",
 ]
 
 [tool.black]

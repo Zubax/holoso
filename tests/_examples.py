@@ -10,13 +10,12 @@ import os
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
 
 from holoso import FloatFormat
-from ._modelref import bounded, format_edge_bits, log_uniform_positive, spd_matrix
+from ._modelref import bounded, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
@@ -76,20 +75,26 @@ type InputVector = dict[str, float | bool]
 """One input vector: input-name -> scalar value (a float, or a bool for a boolean-typed port)."""
 
 
-class ReferenceComparison(Enum):
+@dataclass(frozen=True)
+class OutputTolerance:
     """
-    How the Python-reference suite (``test_example_reference``) treats a kernel's scalar outputs.
-    EXACT: every float output is exact in the format (boolean logic, integer-valued counters/bytes, or exact
-    Sterbenz reductions), so it must match the float64 reference bit-for-bit. APPROXIMATE: float outputs
-    accumulate rounding (continuous arithmetic), so the comparison allows a format-derived tolerance. EXCLUDED:
-    the generic scalar-lane harness cannot drive the kernel -- it has public VECTOR state it would read by a
-    non-existent per-element attribute -- so its aggregate-state read-back is validated against Python separately in
-    ``test_verify``.
+    The independent accuracy budget of one float output lane whose arithmetic accumulates rounding, owned by the spec
+    so a compiler defect cannot loosen its own oracle. The allowed absolute error for one transaction is
+    ``(ulps + growth_ulps * age) * u * max(|reference|, floor)`` with ``u`` the format's unit roundoff and ``age`` the
+    number of transactions already driven: ``ulps`` bounds the rounding of one pass over the source expression,
+    ``growth_ulps`` the error a recurrence carries forward through state, and ``floor`` the scale of the lane's
+    intermediate operands over the spec's driven input domain, below which a cancellation-prone reference magnitude
+    would make a purely relative budget vacuous. Every budget is derived from the source algorithm and the driven
+    domain, never calibrated against the compiler under test.
     """
 
-    EXACT = "exact"
-    APPROXIMATE = "approximate"
-    EXCLUDED = "excluded"
+    ulps: int
+    growth_ulps: int = 0
+    floor: float = 1.0
+
+    def allowance(self, fmt: FloatFormat, reference: float, age: int) -> float:
+        assert self.ulps > 0 and self.growth_ulps >= 0 and self.floor > 0.0 and age >= 0
+        return (self.ulps + self.growth_ulps * age) * unit_roundoff(fmt) * max(abs(reference), self.floor)
 
 
 @dataclass(frozen=True)
@@ -109,7 +114,11 @@ class ExampleSpec:
     # The float format(s) to drive at. The matrix is e8m36 by plan; a kernel that wants a second datapath (e.g. a
     # shallow e6m18 alongside the deep e8m36, to exercise both pipeline depths) lists both here.
     formats: tuple[FloatFormat, ...] = (_FMT,)
-    reference: ReferenceComparison = ReferenceComparison.EXACT
+    # The Python-reference accuracy contract, keyed by output port name (``out_*``/``state_*``): a listed float lane
+    # is compared within its OutputTolerance allowance; an absent lane (and every bool lane) must match the float64
+    # reference bit-for-bit. ``None`` excludes the kernel from the generic scalar reference harness: public VECTOR
+    # state cannot be read back through per-element scalar attributes.
+    reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         inputs = set(self.inputs)
@@ -228,7 +237,7 @@ SPECS = [
         name="madd",
         inputs=("a", "b", "c"),
         make_kernel=lambda: madd.madd,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=8, floor=16.0)},  # two roundings; |a*b| <= 16 over the domain
         nominal={"a": 1.0, "b": 1.0, "c": 1.0},
         manual=[
             {"a": 1.0, "b": 1.0, "c": 0.0},
@@ -266,7 +275,7 @@ SPECS = [
         name="poly3",
         inputs=("x", "c0", "c1", "c2", "c3"),
         make_kernel=lambda: poly3.poly3,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=16, floor=64.0)},  # six Horner roundings; intermediates <= ~60
         nominal={"x": 1.0, "c0": 1.0, "c1": 1.0, "c2": 1.0, "c3": 1.0},
         manual=[
             {"x": 0.0, "c0": 1.0, "c1": 2.0, "c2": 3.0, "c3": 4.0},  # evaluates to c0
@@ -284,7 +293,7 @@ SPECS = [
         name="iir1_lpf",
         inputs=("x",),
         make_kernel=lambda: IIR1LPF().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"state_y": OutputTolerance(ulps=8, growth_ulps=1, floor=8.0)},  # 3 roundings/step at |x| <= 5
         nominal={"x": 1.0},
         manual=[  # one continuous stream: the first sample latches y=x, then the IIR settles toward the input
             *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
@@ -298,7 +307,11 @@ SPECS = [
         name="pid",
         inputs=_PID_INPUTS,
         make_kernel=lambda: PID().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={
+            "out_0": OutputTolerance(ulps=8, growth_ulps=1, floor=64.0),  # pre-clamp |u| <= kd*|de|/dt_min ~ 64
+            "state_integral": OutputTolerance(ulps=8, growth_ulps=1, floor=16.0),  # per-step addend ki*e*dt <= 4
+            "state_prev_error": OutputTolerance(ulps=8, floor=16.0),  # one subtraction at the |error| scale
+        },
         nominal={"setpoint": 1.0, "measurement": 0.0, "dt": 1.0},
         manual=_PID_MANUAL,
         draw_random=lambda rng: {
@@ -463,7 +476,7 @@ SPECS = [
         name="recip_newton",
         inputs=("x",),
         make_kernel=lambda: NewtonReciprocal().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=64)},  # a few same-trip Newton iterations; output in [0.5, 2]
         nominal={"x": 1.0},
         manual=[{"x": v} for v in (0.5, 0.75, 1.0, 1.3, 1.7, 2.0)],  # across the [0.5, 2.0] reciprocal domain
         draw_random=_draw_scalars(("x",), 0.5, 2.0),
@@ -505,7 +518,10 @@ SPECS = [
         name="equal_temperament",
         inputs=("note",),
         make_kernel=lambda: equal_temperament,
-        reference=ReferenceComparison.APPROXIMATE,  # continuous transcendental arithmetic rounds each step
+        reference={
+            "out_0": OutputTolerance(ulps=32),  # hertz: the exp2 polynomial is a few-ulp-relative approximation
+            "out_1": OutputTolerance(ulps=32, floor=64.0),  # recovered note: 12*log2 cancels against the 69 offset
+        },
         nominal={"note": 69.0},
         manual=[{"note": v} for v in (69.0, 60.0, 81.0, 57.0, 69.5, 0.0, 127.0)],  # landmark notes + MIDI-range ends
         draw_random=lambda rng: {"note": bounded(rng, 0.0, 127.0)},
@@ -515,7 +531,8 @@ SPECS = [
         name="cordic_sincos",
         inputs=("theta",),
         make_kernel=lambda: CordicSinCos().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # 12 micro-rotations of ~3 roundings each on unit-norm vectors; the same budget for both lanes.
+        reference={"out_0": OutputTolerance(ulps=64), "out_1": OutputTolerance(ulps=64)},
         nominal={"theta": 0.5},
         manual=[{"theta": v} for v in (0.0, 0.3, 0.7, -0.5, 1.0, -1.0)],  # angles within the convergence range
         draw_random=_draw_scalars(("theta",), -1.4, 1.4),
@@ -525,7 +542,8 @@ SPECS = [
         name="polar_to",  # fused hypot+atan2 -> one fatan2
         inputs=("x", "y"),
         make_kernel=lambda: polar_to,
-        reference=ReferenceComparison.APPROXIMATE,  # the turn scale rounds; the CORDIC is faithful, not exact
+        # The CORDIC operator is faithful (few-ulp), not exact; both lanes carry the same operator-level budget.
+        reference={"out_0": OutputTolerance(ulps=64), "out_1": OutputTolerance(ulps=64)},
         nominal={"x": 1.0, "y": 1.0},
         manual=[
             {"x": 3.0, "y": 4.0},
@@ -543,7 +561,8 @@ SPECS = [
         name="polar_from",  # coalesced cos+sin -> one fsincos
         inputs=("magnitude", "angle"),
         make_kernel=lambda: polar_from,
-        reference=ReferenceComparison.APPROXIMATE,
+        # A near-axis angle makes one lane |magnitude*eps|, so the floor is the |magnitude| <= 4 operand scale.
+        reference={"out_0": OutputTolerance(ulps=64, floor=4.0), "out_1": OutputTolerance(ulps=64, floor=4.0)},
         nominal={"magnitude": 1.0, "angle": 0.5},
         manual=[
             {"magnitude": 1.0, "angle": 0.0},
@@ -560,7 +579,7 @@ SPECS = [
         name="kepler",  # Newton loop; sin(E)+cos(E) coalesce into one fsincos per iteration
         inputs=("mean_anomaly", "eccentricity"),
         make_kernel=lambda: kepler.eccentric_anomaly,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=64, floor=4.0)},  # same-trip Newton at the |M| + e scale
         nominal={"mean_anomaly": 0.5, "eccentricity": 0.3},
         manual=[
             {"mean_anomaly": 0.8, "eccentricity": 0.3},
@@ -588,7 +607,8 @@ SPECS = [
         name="integrator",
         inputs=("x", "dt"),
         make_kernel=lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # Four roundings/step at the per-step addend scale |x|*dt <= 0.0625; the sum carries the error forward.
+        reference={"state_y": OutputTolerance(ulps=8, growth_ulps=1, floor=0.0625)},
         nominal={"x": 1.0, "dt": 1.0e-3},
         manual=[  # one continuous stream: settle at zero, a step, an impulse, then a ramp
             *({"x": v, "dt": 1.0e-3} for v in (0.0, 0.0, 1.0, 1.0, 1.0, 1.0)),
@@ -603,7 +623,13 @@ SPECS = [
         name="ekf1_stateless",
         inputs=_EKF_STATELESS_INPUTS,
         make_kernel=lambda: ekf1_stateless.update_x_P,
-        reference=ReferenceComparison.APPROXIMATE,
+        # The 1e3-scale measurement noise enters only through the relative error of S=P+R and 1/S, so the floors are
+        # the per-lane intermediate scales: the state block |x| + K*innovation ~ 4, the covariance block's P-products
+        # ~ 16 -- NOT the 1e3 input scale, so a small lane cannot hide a large absolute error.
+        reference={
+            **{f"out_{i}_0": OutputTolerance(ulps=64, floor=4.0) for i in range(3)},
+            **{f"out_{i}_0": OutputTolerance(ulps=64, floor=16.0) for i in range(3, 9)},
+        },
         nominal={
             "P00": 1.0, "P01": 0.0, "P02": 0.0, "P11": 1.0, "P12": 0.0, "P22": 1.0,
             "Q_R": 1e-3, "Q_g": 1e-3, "Q_i": 1e-3, "R_ct": 1e2, "R_shunt": 1e2, "dt": 1e-2,
@@ -628,7 +654,8 @@ SPECS = [
         name="fir",
         inputs=("x",),
         make_kernel=lambda: Fir4().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # No growth: the private delay line holds verbatim samples, so only the output convolution rounds.
+        reference={"out_0": OutputTolerance(ulps=16, floor=4.0)},
         nominal={"x": 1.0},
         manual=[  # an impulse walking the whole line, then a step, then a sign flip
             *({"x": v} for v in (1.0, 0.0, 0.0, 0.0, 0.0)),
@@ -642,7 +669,12 @@ SPECS = [
         name="biquad",
         inputs=("x",),
         make_kernel=lambda: Biquad().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # Stable feedback (|a1|, a2 < 1) contracts carried error, so linear growth is a conservative envelope.
+        reference={
+            "out_0": OutputTolerance(ulps=16, growth_ulps=1, floor=4.0),
+            "state_s1": OutputTolerance(ulps=16, growth_ulps=1, floor=4.0),
+            "state_s2": OutputTolerance(ulps=16, growth_ulps=1, floor=4.0),
+        },
         nominal={"x": 1.0},
         manual=[  # an impulse response, then a step the two accumulators settle through
             *({"x": v} for v in (1.0, 0.0, 0.0, 0.0, 0.0)),
@@ -656,7 +688,7 @@ SPECS = [
         name="ekf1_stateful",
         inputs=("dt", "u_shunt", "di_dt"),
         make_kernel=_fresh_stateful_ekf,
-        reference=ReferenceComparison.EXCLUDED,  # carried x/P_urt vectors only; no scalar lane for the reference harness
+        reference=None,  # carried x/P_urt VECTOR state has no per-element scalar attribute the harness could read
         nominal={"dt": 1e-2, "u_shunt": 0.5, "di_dt": 0.5},
         manual=[  # a short measurement sequence threaded through the carried state
             {"dt": 1e-2, "u_shunt": 0.0, "di_dt": 0.0},

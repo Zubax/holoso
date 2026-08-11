@@ -133,3 +133,28 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
                     assert cell in edge_sources, f"no dataflow edge anchored to the arm landing cell {cell}"
                 checked += 1
     assert checked > 0, "overlap_spill_kernel produced no multi-arm spill -- the regression is vacuous"
+
+
+def test_control_arrows_anchor_at_the_terminator_pc() -> None:
+    # Regression (HTML report exactness): the grid row axis is the model fetch PC, so a control-transfer arrow must root
+    # at the terminator PC (where the redirect mux reads the condition register and that register's residence ends) and
+    # point at the destination block's base PC -- no fetch_lag offset. Crash-before: the arrow rooted fetch_lag rows
+    # below the terminator, where the condition register is already dead, so its dotted feed pointed at a blank cell.
+    from holoso._backend.html._schedule import _control_arrows
+
+    lir = build_lir(
+        lower_to_mir(lower(overlap_spill_kernel).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        "overlap_spill_arrows",
+    )
+    arrows = _control_arrows(lir)
+    assert arrows, "the branchy kernel must emit at least one control-transfer arrow"
+    term_pcs = {lir.term_pc(block) for block in lir.blocks}
+    bases = set(lir.block_base)
+    bool_live = lir.bool_liveness
+    for arrow in arrows:
+        assert arrow.src_cyc in term_pcs, f"arrow root {arrow.src_cyc} is not a terminator PC"
+        assert arrow.dst_cyc in bases, f"arrow target {arrow.dst_cyc} is not a block base PC"
+        if (
+            arrow.cond is not None
+        ):  # the branch reads its condition on its terminator row, so the register is live there
+            assert arrow.src_cyc in bool_live[arrow.cond], "the condition register is dead at the arrow's root row"

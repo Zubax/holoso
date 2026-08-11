@@ -27,7 +27,6 @@ from holoso._lir import build
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
-from holoso._hir import Hir, Operation, Operator
 from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat, IntFormat
@@ -62,6 +61,14 @@ class OperatorCase:
     fcmp_latency: int
 
 
+@dataclass(frozen=True, slots=True)
+class OptionsCase:
+    """The public-Options twin of :class:`OperatorCase`, for consumers that synthesize through the public API."""
+
+    label: str
+    make_options: Callable[[FloatFormat], Options]
+
+
 def build_model(lir: Lir) -> NumericalSimulator:
     return generate(lir).elaborate()
 
@@ -81,11 +88,6 @@ def build_model_and_interpreter(
     """
     mir = lower_to_mir(lower_frontend(kernel).hir, ops, ifconv_max_ops)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
-
-
-def arith_count(hir: Hir, op_type: type[Operator]) -> int:
-    """The number of HIR operations whose operator is exactly ``op_type`` -- a structural probe for lowering tests."""
-    return sum(1 for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is op_type)
 
 
 def show_value(value: ScalarValue) -> str:
@@ -142,10 +144,6 @@ def flatten_value(root: object) -> list[tuple[Path, Any]]:
 def evaluate_reference(fn: Callable[..., object], inputs: Mapping[str, float]) -> list[float]:
     result = fn(**inputs)
     return [float(value) for _, value in flatten_value(result)]
-
-
-def output_names(root: object) -> list[str]:
-    return [port_name(path) for path, _ in flatten_value(root)]
 
 
 def unit_roundoff(fmt: FloatFormat) -> float:
@@ -262,15 +260,15 @@ def default_ops(fmt: FloatFormat) -> OpConfig:
     return build_ops(default_options(fmt))
 
 
-def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
-    """The default config with only the comparator's stage knob varied (latency ``1 + stage_input``)."""
+def fcmp_s1_options(fmt: FloatFormat) -> Options:
+    """The default config with only the comparator's stage knob raised (latency 2)."""
     options = default_options(fmt)
-    operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=stage_input))
-    return build_ops(dataclasses.replace(options, operator=operator))
+    operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=1))
+    return dataclasses.replace(options, operator=operator)
 
 
 def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
-    return fcmp_staged_ops(fmt, 1)
+    return build_ops(fcmp_s1_options(fmt))
 
 
 def branch_boundary_kernel(a: float, b: float, c: float) -> float:
@@ -435,6 +433,17 @@ COMPARATOR_OP_CASES = (
     OperatorCase("default", default_ops, 1),
     OperatorCase("fcmp_s1", fcmp_s1_ops, 2),
     OperatorCase("staged", staged_ops, 2),
+)
+
+PIPELINE_OPTIONS_CASES = (
+    OptionsCase("default", default_options),
+    OptionsCase("staged", staged_options),
+)
+
+COMPARATOR_OPTIONS_CASES = (
+    OptionsCase("default", default_options),
+    OptionsCase("fcmp_s1", fcmp_s1_options),
+    OptionsCase("staged", staged_options),
 )
 
 
@@ -605,3 +614,42 @@ class SlotSwap:
         self._a = old_b  # swap: a <- old b
         self._b = old_a  # swap: b <- old a
         return old_a * 2.0 + old_b * 4.0 + x  # exact for integer x; reads both OLD slot values to observe the swap
+
+
+class SharedLiveOut:
+    """
+    Two slots ending the transaction holding one value. The read-modify-write pair frees ``a``'s home register
+    mid-transaction and the allocator reuses it, so a boundary-installing slot's register also carries opcode writes --
+    the shape the emitter used to refuse outright. Shared by the backend elaboration/premise test and its cosim twin.
+    """
+
+    def __init__(self) -> None:
+        self.a = 0.0
+        self.b = 1.0
+
+    def step(self, x: float) -> float:
+        self.a = x + self.a
+        self.a = x + self.a
+        self.b = self.a
+        return self.b
+
+
+class SharedLiveOutBool:
+    """
+    The boolean-bank twin (emission is bank-specific, so each bank needs its own coexistence witness): three slots
+    ending the transaction holding one value, with ``d``'s early read freeing ``a``'s register so the allocator lands
+    an opcode write on it -- a boundary-installing bool slot whose own register also takes one.
+    """
+
+    def __init__(self) -> None:
+        self.a = False
+        self.b = True
+        self.d = False
+
+    def step(self, x: bool, y: bool) -> tuple[bool, bool, bool]:
+        keep = self.d
+        self.d = x and self.a
+        self.a = y or self.a
+        self.a = x and self.a
+        self.b = self.a
+        return keep, self.b, self.d

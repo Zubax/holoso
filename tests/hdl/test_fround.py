@@ -38,9 +38,10 @@ from .hdl_float_oracle import (
     start_clock,
 )
 
-# (stage_input, stage_decode, stage_pack, stage_output): base (output reg only, latency 1) + each knob alone + all-on.
-# At least one stage must be enabled -- the zkf_round core is combinational, so a pooled rounder needs a register.
-STAGE_COMBOS = ((0, 0, 0, 1), (1, 0, 0, 1), (0, 1, 0, 1), (0, 0, 1, 1), (1, 1, 1, 1))
+# (stage_input, stage_decode, stage_pack, stage_output): the public default (input reg only, latency 1), base
+# (output reg only, latency 1), each knob alone, and all-on. At least one stage must be enabled -- the zkf_round core
+# is combinational, so a pooled rounder needs a register.
+STAGE_COMBOS = ((1, 0, 0, 0), (0, 0, 0, 1), (1, 0, 0, 1), (0, 1, 0, 1), (0, 0, 1, 1), (1, 1, 1, 1))
 
 # Directed corner cases beyond DIRECTED_F32: ties (x.5) exercise nearest-even both parities, and |x| < 1 exercises the
 # rounder's sub-one branch (floor(-0.3) = -1, ceil(-0.3) = +0) which the integer-boundary path never reaches.

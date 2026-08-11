@@ -1,8 +1,15 @@
 """
 The integer corpus: the kernels the float examples stand in for (``examples/uart.py``'s TODO(integers) notes),
-plus the residual-loop exit kernels. Each verifies against CPython exactly and runs through the MIR interpreter
-and the numerical model; a subset also cosimulates against the emitted RTL.
+plus the residual-loop exit kernels. This module is the single owner of the integer acceptance matrix
+(``INT_CASES`` with its vectors and ``int_corpus_options``); the public model-vs-CPython acceptance, the retained
+UART HIR-oracle rows, the MIR-interpreter qualification, and the cosim subset all feed off it.
 """
+
+from collections.abc import Callable, Sequence
+
+import holoso
+
+from ._eeloracle import InputRow
 
 OVERSAMPLE = 16
 LAST_PHASE = OVERSAMPLE - 1
@@ -236,3 +243,66 @@ def convergence_steps(x: float, tol: float) -> float:
         if steps > 6.0:
             break
     return err + steps * 0.001
+
+
+def rows(name: str, values: Sequence[float | bool | int]) -> list[InputRow]:
+    return [{name: value} for value in values]
+
+
+def uart_tx_vectors() -> list[InputRow]:
+    idle = 16 * 11 + 4
+    result: list[InputRow] = [{"start": True, "char": 0xA5}]
+    result += [{"start": False, "char": 0}] * idle
+    result += [{"start": True, "char": 0x0F}, {"start": True, "char": 0xFF}]
+    result += [{"start": False, "char": 0}] * idle
+    return result
+
+
+def uart_rx_vectors() -> list[InputRow]:
+    def frame(char: int, parity: bool, stop: bool) -> list[bool]:
+        bits = [False] + [(char >> i) & 1 == 1 for i in range(8)] + [parity, stop]
+        return [level for bit in bits for level in [bit] * OVERSAMPLE]
+
+    line = [True] * 8 + frame(0x5A, True, True) + [True] * 20 + frame(0xC3, False, False) + [True] * 20
+    line += [False] * 4 + [True] * 20  # a false start: the line recovers before the first mid-bit sample
+    return [{"rx": level} for level in line]
+
+
+INT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]] = [
+    ("int_uart_tx_8e1", lambda: IntUartTx(parity=False).__call__, uart_tx_vectors()),
+    ("int_uart_tx_8n1", lambda: IntUartTx(parity=None).__call__, uart_tx_vectors()),
+    ("int_uart_rx_8e1", lambda: IntUartRx(parity=False).__call__, uart_rx_vectors()),
+    ("int_uart_rx_8o1", lambda: IntUartRx(parity=True).__call__, uart_rx_vectors()),
+    ("int_uart_rx_8n1", lambda: IntUartRx(parity=None).__call__, uart_rx_vectors()),
+    ("crc8", lambda: Crc8().step, rows("byte", [0x31, 0x32, 0x33, 0xFF, 0x00, 0x80, 0x01])),
+    ("lfsr16", lambda: Lfsr16().step, rows("advance", [True] * 20 + [False] * 2 + [True] * 3)),
+    ("nco_phase", lambda: NcoPhase().step, rows("increment", [0x40000000] * 5 + [0x3FFFFFFF] * 3 + [1, 0])),
+    ("pwm", lambda: Pwm(top=5).step, rows("duty", [3] * 12 + [0] * 3 + [5] * 6)),
+    ("priority_encoder", lambda: PriorityEncoder().step, rows("bits", [0b1000, 0b0101, 0b0000, 0xFF, 0x80, 1])),
+    (
+        "debouncer",
+        lambda: Debouncer(n=3).step,
+        rows("raw", [False, True, False, True, True, True, True, False, False, False, True, False, False, False]),
+    ),
+]
+
+
+def int_corpus_options() -> holoso.Options:
+    """
+    ``NcoPhase`` masks with ``0xFFFFFFFF`` and adds a ``2**30`` increment to a value already that wide, so the word
+    must hold ``2**33`` for the sum to stay exact -- anything narrower saturates and a comparison against CPython's
+    arithmetic becomes a comparison against the rails.
+    """
+    return holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+            ffromint=holoso.FFromIntOptions(),
+            ftoint=holoso.FToIntOptions(),
+        ),
+        ffmt=holoso.FloatFormat(wexp=8, wman=23),
+        wint_min=34,
+    )

@@ -1,7 +1,13 @@
-"""Unit tests for HIR optimization and MIR selection passes."""
+"""
+HIR optimization and MIR selection: public synthesize-level behavior (values against CPython or independent
+literals, operator-module instantiation presence, the initiation-interval branch discriminator, verbatim refusal
+diagnostics) plus the white-box contracts that have no public spelling.
+"""
 
 import dataclasses
+import itertools
 import math
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,15 +21,20 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FDivOptions,
+    FFromIntOptions,
     FMulILog2Options,
     FMulOptions,
+    FRoundOptions,
+    FToIntOptions,
     FloatFormat,
+    FloatType,
     FloatValue,
     OperatorOptions,
     Options,
+    SynthesisError,
+    UnsupportedConstruct,
 )
-from holoso._operators import FAddOperator, FDivOperator, FMulOperator, OpConfig
-from holoso._errors import SynthesisError, UnsupportedConstruct
+from holoso._operators import FDivOperator
 from holoso._util import ValueId
 from holoso._eel import lower
 from holoso._hir import (
@@ -46,7 +57,7 @@ from holoso._hir import (
     Type,
     optimize,
 )
-from holoso._hir import Branch, BoolSelect, FloatDiv as HirFloatDiv, Phi, FloatSelect, StateRead
+from holoso._hir import Branch, BoolSelect, FloatDiv as HirFloatDiv, Phi, FloatSelect
 from holoso._hir import (
     FloatAbs,
     FloatAtan2,
@@ -96,44 +107,54 @@ from holoso._hir import (
     IntToFloat,
     IntType,
 )
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir
 from holoso._mir._refuse import refuse
-from holoso._mir import (
-    lower as lower_to_mir,
-    Mir,
-    MirFloatConst,
-    MirFloatInput,
-    MirFloatOutput,
-    MirIntConst,
-    MirInterpreter,
-    MirOperation,
-)
-from holoso._operators import FMulILog2Operator, FloatSignControl
+from holoso._mir import lower as lower_to_mir
 from ._importguard import forbidden_imports
 from ._modelref import (
+    DEFAULT_IFCONV_MAX_OPS,
     branch_boundary_kernel,
-    build_model,
     build_ops,
     const_branch_kernel,
+    default_tolerance,
     diamond_then_loop_kernel,
     overlap_spill_kernel,
     phi_swap_loop,
+    within,
 )
 from ._examples import equal_temperament
 
 FMT = FloatFormat(6, 18)
-OPS = build_ops(
-    Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdiv=FDivOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
-        ),
-        ffmt=FMT,
-    )
+OPTIONS = Options(
+    OperatorOptions(
+        fadd=FAddOptions(),
+        fmul=FMulOptions(),
+        fdiv=FDivOptions(),
+        fmul_ilog2=FMulILog2Options(),
+        fcmp=FCmpOptions(),
+    ),
+    ffmt=FMT,
 )
+INT_OPTIONS = Options(OperatorOptions())
+OPS = build_ops(OPTIONS)
+
+
+def _synth(
+    target: Callable[..., object], options: Options = OPTIONS, name: str | None = None
+) -> holoso.SynthesisResult:
+    return holoso.synthesize(target, options, name=name or target.__name__.strip("_"))
+
+
+def _instantiated(result: holoso.SynthesisResult) -> set[str]:
+    """Operator modules instantiated by the top module; the always-present support functions do not match."""
+    return set(re.findall(r"\b(holoso_\w+)\s+#\(", result.verilog_output.verilog))
+
+
+def _ints(values: list[FloatValue | holoso.IntValue | bool]) -> list[int | bool]:
+    out: list[int | bool] = []
+    for value in values:
+        assert not isinstance(value, FloatValue)
+        out.append(value if isinstance(value, bool) else int(value))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,29 +183,6 @@ class OtherFold(Operator):
         (operand,) = operands
         assert isinstance(operand, OtherConst)
         return OtherConst(operand.value + 1)
-
-
-def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
-    return lower_to_mir(lower(target).hir, ops, DEFAULT_IFCONV_MAX_OPS)
-
-
-def _op_count(mir: Mir, cls: type) -> int:
-    return sum(1 for n in mir.nodes.values() if isinstance(n, MirOperation) and isinstance(n.operator, cls))
-
-
-def _ops(mir: Mir) -> list[MirOperation]:
-    return [n for n in mir.nodes.values() if isinstance(n, MirOperation)]
-
-
-def _consts(mir: Mir) -> list[float]:
-    return [n.value for n in mir.nodes.values() if isinstance(n, MirFloatConst)]
-
-
-def _exponent_of(mir: Mir, op: MirOperation) -> int:
-    assert isinstance(op.operator, FMulILog2Operator)
-    exponent = mir.nodes[op.operands[1]]
-    assert isinstance(exponent, MirIntConst)
-    return exponent.value
 
 
 def test_hir_nodes_carry_float_type() -> None:
@@ -221,16 +219,6 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
         assert False, "expected HIR-to-MIR lowering to reject non-float semantic input"
 
 
-def test_hir_constant_folding_returns_float_const() -> None:
-    def f() -> float:
-        return 1.25 + 2.0
-
-    hir = optimize(lower(f).hir, DEFAULT_IFCONV_MAX_OPS)
-    node = hir.nodes[hir.outputs[0].value]
-    assert isinstance(node, FloatConst)
-    assert node.value == 3.25
-
-
 def test_hir_constant_folding_preserves_const_subclass() -> None:
     builder = HirBuilder()
     builder.block()
@@ -245,78 +233,59 @@ def test_hir_constant_folding_preserves_const_subclass() -> None:
     assert node.value == 11
 
 
-def test_mir_constant_only_node_carries_float_type() -> None:
+def test_a_constant_only_kernel_lowers_to_its_exact_value() -> None:
     def f() -> float:
         return 3.5
 
-    mir = _run(f)
-    const = mir.nodes[mir.outputs[0].value]
-    assert isinstance(const, MirFloatConst)
-    assert const.scalar_type.fmt == FMT
+    result = _synth(f, name="const_only")
+    assert _instantiated(result) == set()
+    assert float(result.numerical_model.elaborate().run()[0]) == 3.5
 
 
-def test_mul_by_pow2_const_becomes_ilog2() -> None:
-    def f(a: float) -> float:
+def test_a_power_of_two_scale_selects_the_exponent_operator() -> None:
+    def quarter(a: float) -> float:
         return a * 0.25
 
-    mir = _run(f)
-    ops = _ops(mir)
-    assert len(ops) == 1
-    assert _exponent_of(mir, ops[0]) == -2
-
-
-def test_left_const_fmul_pow2_is_commutative() -> None:
-    def f(a: float) -> float:
+    def doubled(a: float) -> float:
         return 2 * a
 
-    mir = _run(f)
-    ops = _ops(mir)
-    assert len(ops) == 1
-    assert _exponent_of(mir, ops[0]) == 1
-
-
-def test_div_by_pow2_becomes_ilog2() -> None:
-    def f(a: float) -> float:
+    def fourth(a: float) -> float:
         return a / 4.0
 
-    mir = _run(f)
-    ops = _ops(mir)
-    assert len(ops) == 1
-    assert _exponent_of(mir, ops[0]) == -2
+    for kernel in (quarter, doubled, fourth):
+        result = _synth(kernel)
+        assert _instantiated(result) == {"holoso_fmul_ilog2"}, kernel.__name__
+        sim = result.numerical_model.elaborate()
+        for a in (1.0, -0.5, 0.0, 6.0):
+            assert float(sim.run(a)[0]) == kernel(a), f"{kernel.__name__}({a})"
 
 
 def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
     def f(a: float) -> float:
         return a / 3.0
 
-    mir = _run(f)
-    ops = _ops(mir)
-    assert [type(o.operator) for o in ops] == [FMulOperator]
-    assert any(abs(c - 1.0 / 3.0) < 1e-12 for c in _consts(mir))
+    result = _synth(f, name="div3")
+    assert _instantiated(result) == {"holoso_fmul"}
+    sim = result.numerical_model.elaborate()
+    for a in (3.0, -1.5, 0.75):
+        want = a / 3.0
+        assert within(float(sim.run(a)[0]), want, *default_tolerance(FMT, 2, magnitude=max(1.0, abs(want)))), a
+
+
+def _narrow_options() -> Options:
+    return dataclasses.replace(OPTIONS, ffmt=FloatFormat(3, 4))
 
 
 def test_wide_supported_pow2_uses_ilog2_operator() -> None:
     def f(a: float) -> float:
         return a * 16.0
 
-    fmt = FloatFormat(3, 4)
-    ops = build_ops(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(),
-                fmul=FMulOptions(),
-                fdiv=FDivOptions(),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
-            ),
-            ffmt=fmt,
-        )
-    )
-    mir = _run(f, ops, fmt)
-    selected = _ops(mir)
-    assert [type(o.operator) for o in selected] == [FMulILog2Operator]
-    assert _exponent_of(mir, selected[0]) == 4
-    assert _consts(mir) == []
+    result = _synth(f, _narrow_options(), name="x16")
+    assert _instantiated(result) == {"holoso_fmul_ilog2"}
+    sim = result.numerical_model.elaborate()
+    # FloatFormat(3, 4) tops out at 2**3 * 1.9375 == 15.5, so 16.0 rails to the infinity while -8.0 is exact.
+    for value, want in [(1.0, math.inf), (-0.5, -8.0), (0.0, 0.0)]:
+        assert float(sim.run(value)[0]) == want, value
 
 
 def test_a_scale_past_the_float_range_builds_and_rails() -> None:
@@ -325,25 +294,12 @@ def test_a_scale_past_the_float_range_builds_and_rails() -> None:
     def f(a: float) -> float:
         return a * 64.0
 
-    fmt = FloatFormat(3, 4)
-    ops = build_ops(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(),
-                fmul=FMulOptions(),
-                fdiv=FDivOptions(),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
-            ),
-            ffmt=fmt,
-        )
-    )
-    mir = _run(f, ops, fmt)
-    selected = _ops(mir)
-    assert [type(o.operator) for o in selected] == [FMulILog2Operator]
-    assert _exponent_of(mir, selected[0]) == 6
-    for value in [1.0, -0.5, 0.0]:
-        assert MirInterpreter(mir).run(value) == [FloatValue.from_float(fmt, value).scale_pow2(6)]
+    result = _synth(f, _narrow_options(), name="x64")
+    assert _instantiated(result) == {"holoso_fmul_ilog2"}
+    sim = result.numerical_model.elaborate()
+    # 64.0 and -32.0 both lie past FloatFormat(3, 4)'s 15.5 ceiling, so each rails to its signed infinity.
+    for value, want in [(1.0, math.inf), (-0.5, -math.inf), (0.0, 0.0)]:
+        assert float(sim.run(value)[0]) == want, value
 
 
 def test_an_exponent_past_the_int_format_clamps_where_the_scaler_rails() -> None:
@@ -354,78 +310,71 @@ def test_an_exponent_past_the_int_format_clamps_where_the_scaler_rails() -> None
     def f(a: float) -> tuple[float, float]:
         return a * 2.0**1000, a / 2.0**1000
 
-    options = Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdiv=FDivOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
-        ),
-        ffmt=FloatFormat(4, 5),
-        wint_min=2,
-    )
-    mir = lower_to_mir(lower(f).hir, build_ops(options), DEFAULT_IFCONV_MAX_OPS)
-    scales = [op for op in _ops(mir) if isinstance(op.operator, FMulILog2Operator)]
-    assert sorted(_exponent_of(mir, op) for op in scales) == [options.ifmt.min, options.ifmt.max]
-    for value in [1.0, -1.5, 0.0]:
-        loaded = FloatValue.from_float(options.ffmt, value)
-        assert MirInterpreter(mir).run(value) == [loaded.scale_pow2(1000), loaded.scale_pow2(-1000)]
-
-
-def test_true_division_stays_fdiv() -> None:
-    def f(a: float, b: float) -> float:
-        return a / b
-
-    assert [type(o.operator) for o in _ops(_run(f))] == [FDivOperator]
+    options = dataclasses.replace(OPTIONS, ffmt=FloatFormat(4, 5), wint_min=2)
+    result = _synth(f, options, name="clamped_scale")
+    assert _instantiated(result) == {"holoso_fmul_ilog2"}
+    sim = result.numerical_model.elaborate()
+    # Any nonzero value scaled by 2**±1000 leaves FloatFormat(4, 5) entirely: signed infinity up, zero down.
+    for value, want in [(1.0, [math.inf, 0.0]), (-1.5, [-math.inf, 0.0]), (0.0, [0.0, 0.0])]:
+        assert [float(v) for v in sim.run(value)] == want, value
 
 
 def test_subtraction_folds_into_second_operand_sign() -> None:
     def f(a: float, b: float) -> float:
         return a - b
 
-    ops = _ops(_run(f))
-    assert len(ops) == 1
-    assert isinstance(ops[0].operator, FAddOperator) and ops[0].operand_conditioners[1] == FloatSignControl(negate=True)
+    result = _synth(f, name="sub")
+    assert _instantiated(result) == {"holoso_fadd"}
+    assert result.verilog_output.verilog.count("holoso_fadd #") == 1
+    sim = result.numerical_model.elaborate()
+    for a, b in [(2.0, 0.5), (0.5, 2.0), (-1.0, -3.0)]:
+        assert float(sim.run(a, b)[0]) == a - b
 
 
 def test_operand_negation_folds_into_operator() -> None:
     def f(a: float, b: float) -> float:
         return a * (-b)
 
-    ops = _ops(_run(f))
-    assert len(ops) == 1
-    assert isinstance(ops[0].operator, FMulOperator) and ops[0].operand_conditioners[1] == FloatSignControl(negate=True)
+    result = _synth(f, name="mulneg")
+    assert _instantiated(result) == {"holoso_fmul"}
+    assert result.verilog_output.verilog.count("holoso_fmul #") == 1
+    sim = result.numerical_model.elaborate()
+    for a, b in [(2.0, 0.5), (-4.0, 0.25), (3.0, 0.0)]:
+        assert float(sim.run(a, b)[0]) == a * (-b)
 
 
 def test_pure_sign_output_adds_no_operation() -> None:
     def f(a: float) -> float:
         return -abs(a)
 
-    mir = _run(f)
-    assert _ops(mir) == []
-    assert isinstance(mir.outputs[0], MirFloatOutput)
-    assert mir.outputs[0].conditioner == FloatSignControl(absolute=True).then(FloatSignControl(negate=True))
+    result = _synth(f, name="negabs")
+    assert _instantiated(result) == set()
+    sim = result.numerical_model.elaborate()
+    for a in (-2.0, 0.0, 1.5):
+        assert float(sim.run(a)[0]) == -abs(a)
 
 
-def test_selected_mir_has_only_input_const_operation_nodes() -> None:
+def test_a_mixed_expression_selects_only_real_operators() -> None:
     def f(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
 
-    mir = _run(f)
-    assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirIntConst, MirOperation)) for n in mir.nodes.values())
+    result = _synth(f, name="mixed_expr")
+    assert _instantiated(result) == {"holoso_fadd", "holoso_fmul", "holoso_fmul_ilog2"}
+    sim = result.numerical_model.elaborate()
+    for a, b in [(2.0, 0.5), (1.0, 1.0), (-4.0, 0.25)]:
+        assert float(sim.run(a, b)[0]) == f(a, b)
 
 
-def test_ekf1_stateless_lowering() -> None:
+def test_ekf1_stateless_synthesis() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
 
-    mir = _run(ekf1_stateless.update_x_P)
-    assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirIntConst, MirOperation)) for n in mir.nodes.values())
-    assert _op_count(mir, FDivOperator) == 1  # only x22 = 1 / x21
-    assert _op_count(mir, FMulILog2Operator) >= 1  # the "2 * ..." terms
-    assert len(mir.input_ids) == 17
-    assert len(mir.outputs) == 9
+    result = _synth(ekf1_stateless.update_x_P, name="ekf1_stateless")
+    assert len(result.input_ports) == 17
+    assert len(result.output_ports) == 9
+    verilog = result.verilog_output.verilog
+    assert verilog.count("holoso_fdiv #") == 1  # the source's only division, x22 = 1 / x21, on one pooled divider
+    assert verilog.count("holoso_fmul_ilog2 #") >= 1  # the "2 * ..." terms
 
 
 def test_unclosed_loop_phi_is_rejected() -> None:
@@ -460,15 +409,13 @@ def _deep_cfg_kernel(p0: float) -> float:
 
 def test_deep_cfg_does_not_overflow_recursion() -> None:
     # Regression: the HIR/MIR/LIR reverse-postorder traversals walked the block CFG recursively, so a deep CFG -- here
-    # nested unrolled loops chaining thousands of blocks -- overflowed Python's recursion limit with a RecursionError
-    # in _copy.reverse_postorder (and the symmetric _lir._mir_facts.mir_rpo). With recursion in place, optimize()
-    # raises; the iterative DFS compiles cleanly. Exercise the whole front-to-back pipeline (optimize, MIR lowering,
-    # LIR build) since each contains a CFG DFS, and check the bit-exact model against the plain-Python reference.
-    hir = lower(_deep_cfg_kernel).hir
-    assert len(hir.blocks) > 1000  # the CFG is genuinely deep (otherwise the regression would not bite)
-    model = build_model(build_lir(_run(_deep_cfg_kernel), "deep"))
+    # nested unrolled loops chaining thousands of blocks -- overflowed Python's recursion limit with a RecursionError;
+    # the iterative DFS compiles cleanly. The whole front-to-back pipeline runs (each layer contains a CFG DFS), and
+    # the bit-exact model is checked against the plain-Python reference.
+    options = Options(OperatorOptions(fadd=FAddOptions(), fcmp=FCmpOptions()), ffmt=FMT)
+    sim = _synth(_deep_cfg_kernel, options, name="deep_cfg").numerical_model.elaborate()
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
-        assert float(model.run(x)[0]) == _deep_cfg_kernel(x)
+        assert float(sim.run(x)[0]) == _deep_cfg_kernel(x)
 
 
 def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
@@ -496,6 +443,10 @@ def _hir_of(target: object, ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Hir
     return optimize(lower(target).hir, ifconv_max_ops)
 
 
+# A converted diamond leaves straight-line code whose latency is exact, so initiation_interval[1] is a number;
+# a surviving real branch makes the latency data-dependent and initiation_interval[1] is None.
+
+
 def test_if_conversion_collapses_a_pure_diamond() -> None:
     def f(a: float, b: float) -> float:
         if a > b:
@@ -504,10 +455,11 @@ def test_if_conversion_collapses_a_pure_diamond() -> None:
             y = a - b
         return y
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 1
-    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, FloatSelect)]
-    assert len(selects) == 1
+    result = _synth(f, name="pure_diamond")
+    assert result.initiation_interval[1] is not None
+    sim = result.numerical_model.elaborate()
+    for a, b in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)]:
+        assert float(sim.run(a, b)[0]) == f(a, b)
 
 
 def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
@@ -519,9 +471,12 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
             y = a / b
         return y
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 4  # the diamond survives as a real branch
-    assert not any(isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values())
+    result = _synth(f, name="unspec_arm")
+    assert result.initiation_interval[1] is None  # the diamond survives as a real branch
+    assert "holoso_fdiv" in _instantiated(result)
+    sim = result.numerical_model.elaborate()
+    for a, b in [(3.0, 1.0), (1.0, 2.0), (1.0, 4.0)]:
+        assert float(sim.run(a, b)[0]) == f(a, b)
 
 
 def test_if_conversion_respects_the_arm_size_budget() -> None:
@@ -532,8 +487,14 @@ def test_if_conversion_respects_the_arm_size_budget() -> None:
             y = a - b  # a negate and an add: exactly at the budget, so only the then-arm can refuse
         return y
 
-    assert len(_hir_of(f, 2).blocks) == 4
-    assert len(_hir_of(f, 3).blocks) == 1
+    over = _synth(f, dataclasses.replace(OPTIONS, ifconv_max_ops=2), name="budget_over")
+    within_budget = _synth(f, dataclasses.replace(OPTIONS, ifconv_max_ops=3), name="budget_within")
+    assert over.initiation_interval[1] is None
+    assert within_budget.initiation_interval[1] is not None
+    for result in (over, within_budget):
+        sim = result.numerical_model.elaborate()
+        for a, b in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)]:
+            assert float(sim.run(a, b)[0]) == f(a, b)
 
 
 def test_zero_budget_still_converts_the_operation_free_diamond() -> None:
@@ -551,10 +512,15 @@ def test_zero_budget_still_converts_the_operation_free_diamond() -> None:
             y = 1.0
         return y
 
-    hir = _hir_of(constant_arms, 0)
-    assert len(hir.blocks) == 1
-    assert any(isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values())
-    assert len(_hir_of(one_op_arm, 0).blocks) == 4
+    zero_budget = dataclasses.replace(OPTIONS, ifconv_max_ops=0)
+    converted = _synth(constant_arms, zero_budget, name="const_arms")
+    refused = _synth(one_op_arm, zero_budget, name="one_op_arm")
+    assert converted.initiation_interval[1] is not None
+    assert refused.initiation_interval[1] is None
+    for result, kernel in ((converted, constant_arms), (refused, one_op_arm)):
+        sim = result.numerical_model.elaborate()
+        for a, b in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)]:
+            assert float(sim.run(a, b)[0]) == kernel(a, b)
 
 
 def test_synthesize_honors_the_ifconv_option() -> None:
@@ -592,12 +558,14 @@ def test_ifconv_budget_changes_the_schedule_but_never_the_result() -> None:
     assert branchy.initiation_interval != converted.initiation_interval, "the budget no longer moves the schedule"
     left, right = branchy.numerical_model.elaborate(), converted.numerical_model.elaborate()
     for a, b, c in [(1.0, 0.5, 2.0), (0.5, 1.0, -2.0), (-3.0, -4.0, 0.25), (0.0, 0.0, 1.0), (2.0, 2.0, -1.0)]:
-        assert left.run(a, b, c) == right.run(a, b, c), f"if-conversion changed the result at ({a}, {b}, {c})"
+        want = f(a, b, c)  # exact at these vectors, so both configurations answer the CPython value
+        got_branchy, got_converted = float(left.run(a, b, c)[0]), float(right.run(a, b, c)[0])
+        assert got_branchy == want, f"branchy diverged from Python at ({a}, {b}, {c})"
+        assert got_converted == want, f"converted diverged from Python at ({a}, {b}, {c})"
 
 
 def test_if_conversion_converts_a_boolean_phi_merge() -> None:
-    # Bool-phi if-conversion: a diamond merging a boolean collapses to one block, the merge becoming a bselect
-    # (an fselect is the wide dual). Both arms here are dynamic comparisons, so strength reduction keeps the mux.
+    # A diamond merging a boolean collapses to straight-line code; both arms are dynamic comparisons.
     def f(a: float, b: float, c: float) -> float:
         if a > b:
             flag = b > c
@@ -605,13 +573,15 @@ def test_if_conversion_converts_a_boolean_phi_merge() -> None:
             flag = a > c
         return float(flag)
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 1
-    assert any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
+    result = _synth(f, name="bool_phi_merge")
+    assert result.initiation_interval[1] is not None
+    sim = result.numerical_model.elaborate()
+    for a, b, c in [(3.0, 2.0, 1.0), (3.0, 2.0, 2.5), (1.0, 2.0, 0.5), (1.0, 2.0, 1.5)]:
+        assert float(sim.run(a, b, c)[0]) == f(a, b, c)
 
 
 def test_if_conversion_converts_an_integer_phi_merge() -> None:
-    # The integer dual of the two above, so min/max/sign cost one mux rather than a branch.
+    # The integer dual, so min/max/sign cost one mux rather than a branch.
     def f(a: int, b: int) -> int:
         if a > b:
             y = a + b
@@ -619,9 +589,11 @@ def test_if_conversion_converts_an_integer_phi_merge() -> None:
             y = a - b
         return y
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 1
-    assert any(isinstance(n, Operation) and isinstance(n.operator, IntSelect) for n in hir.nodes.values())
+    result = _synth(f, INT_OPTIONS, name="int_phi_merge")
+    assert result.initiation_interval[1] is not None
+    sim = result.numerical_model.elaborate()
+    for a, b in [(3, 1), (1, 3), (2, 2), (-5, -9)]:
+        assert _ints(sim.run(a, b)) == [f(a, b)]
 
 
 def test_an_error_bearing_integer_arm_stays_behind_its_guard() -> None:
@@ -633,15 +605,17 @@ def test_an_error_bearing_integer_arm_stays_behind_its_guard() -> None:
             y = a // b
         return y
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 4
-    assert not any(isinstance(n, Operation) and isinstance(n.operator, IntSelect) for n in hir.nodes.values())
-    assert not any(isinstance(n, Operation) and isinstance(n.operator, FloatSelect) for n in hir.nodes.values())
+    result = _synth(f, INT_OPTIONS, name="int_guarded_div")
+    assert result.initiation_interval[1] is None
+    assert "holoso_idivs" in _instantiated(result)
+    sim = result.numerical_model.elaborate()
+    for a, b in [(3, 1), (1, 3), (-7, 2)]:
+        assert _ints(sim.run(a, b)) == [f(a, b)]
 
 
 def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
-    # The state-machine merge shape: arms are boolean constants, so the bselect reduces to and/or/not via strength
-    # reduction (no select node survives), exactly the schmitt/pfd collapse to a single straight-line block.
+    # The state-machine merge shape: arms are boolean constants, so the merge reduces to plain gates and the whole
+    # kernel stays straight-line -- exactly the schmitt/pfd collapse.
     def f(a: float, b: float, hold: bool) -> float:
         if a > b:
             flag = True
@@ -649,105 +623,70 @@ def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
             flag = hold  # passthrough arm
         return float(flag)
 
-    hir = _hir_of(f)
+    result = _synth(f, name="const_armed_select")
+    assert result.initiation_interval[1] is not None
+    hir = _hir_of(f)  # the collapse itself is invisible publicly (inline selects produce no branch): white-box
     assert len(hir.blocks) == 1
-    # bselect(a>b, True, hold) == (a>b) or hold -- reduced away, no select of either flavor remains.
     assert not any(
         isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
-    )
+    ), "the constant-armed bselect must reduce to gates, not survive as a mux"
+    sim = result.numerical_model.elaborate()
+    for a, b in [(2.0, 1.0), (1.0, 2.0)]:
+        for hold in (False, True):
+            assert float(sim.run(a, b, hold)[0]) == f(a, b, hold)
 
 
 def test_bselect_reductions_are_truth_table_correct() -> None:
     # The bool-mux strength-reduction identities (a bselect with constant arms collapses to and/or/not/passthrough)
-    # must be bit-exact. Each shape is run through the numerical model over every boolean input combination and checked
-    # against its Python reference; a wrong identity -- e.g. (c,False,True) reduced to c not ~c -- mismatches here.
-    import itertools
-
-    def s_tf(c: bool) -> bool:  # (c, True, False) -> c
-        if c:
-            y = True
+    # must be bit-exact. Every shape runs over the full boolean input cube against its CPython reference; a wrong
+    # identity -- e.g. (c,False,True) reduced to c not ~c -- mismatches here.
+    def shapes(c: bool, t: bool, f: bool) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
+        if c:  # (c, True, False) -> c
+            y0 = True
         else:
-            y = False
-        return y
-
-    def s_ft(c: bool) -> bool:  # (c, False, True) -> not c
-        if c:
-            y = False
+            y0 = False
+        if c:  # (c, False, True) -> not c
+            y1 = False
         else:
-            y = True
-        return y
-
-    def s_t_dyn(c: bool, f: bool) -> bool:  # (c, True, f) -> c or f
-        if c:
-            y = True
+            y1 = True
+        if c:  # (c, True, f) -> c or f
+            y2 = True
         else:
-            y = f
-        return y
-
-    def s_f_dyn(c: bool, f: bool) -> bool:  # (c, False, f) -> (not c) and f
-        if c:
-            y = False
+            y2 = f
+        if c:  # (c, False, f) -> (not c) and f
+            y3 = False
         else:
-            y = f
-        return y
-
-    def s_dyn_t(c: bool, t: bool) -> bool:  # (c, t, True) -> (not c) or t
-        if c:
-            y = t
+            y3 = f
+        if c:  # (c, t, True) -> (not c) or t
+            y4 = t
         else:
-            y = True
-        return y
-
-    def s_dyn_f(c: bool, t: bool) -> bool:  # (c, t, False) -> c and t
-        if c:
-            y = t
+            y4 = True
+        if c:  # (c, t, False) -> c and t
+            y5 = t
         else:
-            y = False
-        return y
-
-    def s_dyn_dyn(c: bool, t: bool, f: bool) -> bool:  # (c, t, f) -> bselect kept
-        if c:
-            y = t
+            y5 = False
+        if c:  # (c, t, f) -> bselect kept
+            y6 = t
         else:
-            y = f
-        return y
-
-    def s_dyn_not_dyn(c: bool, t: bool, f: bool) -> bool:  # (c, t, ~f) -> kept, arm inverted
-        if c:
-            y = t
+            y6 = f
+        if c:  # (c, t, ~f) -> kept, the inversion riding the arm conditioner
+            y7 = t
         else:
-            y = not f
-        return y
+            y7 = not f
+        return y0, y1, y2, y3, y4, y5, y6, y7
 
-    cases: list[tuple[Callable[..., bool], Callable[..., bool], int, bool]] = [
-        (s_tf, lambda c: c, 1, False),
-        (s_ft, lambda c: not c, 1, False),
-        (s_t_dyn, lambda c, f: c or f, 2, False),
-        (s_f_dyn, lambda c, f: (not c) and f, 2, False),
-        (s_dyn_t, lambda c, t: (not c) or t, 2, False),
-        (s_dyn_f, lambda c, t: c and t, 2, False),
-        (s_dyn_dyn, lambda c, t, f: t if c else f, 3, True),
-        # A surviving bselect whose arm carries a NOT-folded inversion: the inversion rides the arm conditioner
-        # (the generic inline-operand inversion path), distinct from the constant-arm reductions above.
-        (s_dyn_not_dyn, lambda c, t, f: t if c else (not f), 3, True),
-    ]
-    for fn, ref, arity, keeps_select in cases:
-        hir = _hir_of(fn)
-        has_select = any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
-        assert has_select == keeps_select, f"{fn.__name__}: bselect presence {has_select} != expected {keeps_select}"
-        model = build_model(build_lir(lower_to_mir(lower(fn).hir, OPS, DEFAULT_IFCONV_MAX_OPS), fn.__name__))
-        for combo in itertools.product([False, True], repeat=arity):
-            got = bool(model.run(*combo)[0])
-            assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"
+    result = _synth(shapes, name="bselect_shapes")
+    assert result.initiation_interval[1] is not None
+    sim = result.numerical_model.elaborate()
+    for combo in itertools.product([False, True], repeat=3):
+        assert list(sim.run(*combo)) == list(shapes(*combo)), combo
 
 
 def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
-    # ``mux(c, X, X) == X`` is the universal mux identity the constant-arm reductions above depend on: they read a
-    # ``True``/``True`` pair as the True/False table entry and answer ``c``, which is only never wrong because
-    # identical arms have already been reduced away. The shape cannot be witnessed before if-conversion -- while a
-    # block boundary separates the arms, their copies of ``x*2.0`` are distinct values and the phi is not trivial --
-    # so it appears only once the splice interns them into one block and each arm's comparison becomes a
-    # self-comparison. Both kernels are constant functions in Python and must be constant in hardware too.
+    # ``mux(c, X, X) == X`` is the universal mux identity the constant-arm reductions depend on. The shape appears
+    # only once if-conversion interns both arms into one block, so each arm's comparison becomes a self-comparison;
+    # the mux must be gone from the graph (white-box: inline selects are publicly invisible), and the kernels must
+    # answer exactly as CPython does.
     def identical_bool_arms(x: float) -> bool:
         doubled = x * 2.0
         if x > 0.0:
@@ -769,9 +708,11 @@ def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
         assert not any(
             isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
         ), f"{kernel.__name__}: a mux over identical arms survived"
-        model = build_model(build_lir(lower_to_mir(lower(kernel).hir, OPS, DEFAULT_IFCONV_MAX_OPS), kernel.__name__))
+        result = _synth(kernel)
+        assert result.initiation_interval[1] is not None, kernel.__name__
+        sim = result.numerical_model.elaborate()
         for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
-            got, want = read(model.run(x)[0]), read(kernel(x))
+            got, want = read(sim.run(x)[0]), read(kernel(x))
             assert got == want, f"{kernel.__name__}({x}): got {got}, want {want}"
 
 
@@ -787,15 +728,17 @@ def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
             b = a * 4.0
         return b
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 1
-    selects = [n for n in hir.nodes.values() if isinstance(n, Operation) and isinstance(n.operator, FloatSelect)]
-    assert len(selects) == 2
+    result = _synth(f, name="nested_chain")
+    assert result.initiation_interval[1] is not None
+    sim = result.numerical_model.elaborate()
+    for x, y in [(1.0, 2.0), (-1.0, 2.0), (1.0, -2.0), (-1.5, -0.5)]:
+        assert float(sim.run(x, y)[0]) == f(x, y)
 
 
 def test_if_conversion_repoints_loop_header_phi_arms() -> None:
     # A diamond inside a while body: the dissolved merge block fed the loop-header phis, whose arms must repoint to
-    # the spliced block (the localized pin for the repoint path; the examples exercise it only end-to-end).
+    # the spliced block (the localized pin for the repoint path; the examples exercise it only end-to-end). The outer
+    # runtime loop keeps the public II data-dependent either way, so the discriminator is blind here: white-box.
     def f(x: float) -> float:
         w = x
         while w > 0.0:
@@ -836,11 +779,12 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
         _ = y  # the merged result is never returned: the whole diamond, condition cone included, is dead
         return x
 
-    hir = _hir_of(f)
-    assert len(hir.blocks) == 1
-    assert not any(
-        isinstance(n, Operation) and isinstance(n.operator, HirFloatDiv) for n in hir.nodes.values()
-    ), "the unused condition cone (division included) is dead code after conversion"
+    result = _synth(f, name="dead_diamond")
+    assert result.initiation_interval[1] is not None
+    assert _instantiated(result) == set(), "the unused condition cone (division included) is dead code"
+    sim = result.numerical_model.elaborate()
+    for a, b, x in [(1.0, 0.0, 2.5), (0.0, 1.0, -3.0)]:  # the dead division never runs, so b == 0 is inert
+        assert float(sim.run(a, b, x)[0]) == x
 
 
 def test_operator_layer_does_not_import_hir() -> None:
@@ -936,47 +880,29 @@ def test_integer_operator_signature(operator: Operator, operand_types: list[Type
 
 
 def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_value() -> None:
-    # The declared integer identities and absorbing elements simplify against an operand the folder cannot see:
-    # nothing but the input survives the identity chain, and an absorbing operand fixes the result outright.
-    builder = HirBuilder()
-    builder.block()
-    n = builder.input("n", IntType())
-    zero, one, all_ones = builder.int_const(0), builder.int_const(1), builder.int_const(-1)
-    value = builder.operation(IntAdd(), [n, zero])
-    value = builder.operation(IntMul(), [value, one])
-    value = builder.operation(IntBwOr(), [value, zero])
-    value = builder.operation(IntBwXor(), [value, zero])
-    value = builder.operation(IntBwAnd(), [value, all_ones])
-    builder.output("identities", value)
-    builder.output("killed", builder.operation(IntMul(), [n, zero]))
-    builder.output("saturated", builder.operation(IntBwOr(), [n, all_ones]))
-    builder.output("masked_off", builder.operation(IntBwAnd(), [n, zero]))
-    builder.ret()
+    # The declared integer identities and absorbing elements simplify against an operand the folder cannot see.
+    # Only the arithmetic links (``+ 0``, ``* 1``, ``* 0``) would instantiate modules, so the empty set pins their
+    # folds; the bitwise links are inline either way, and their reductions are pinned white-box on the graph.
+    def f(n: int) -> tuple[int, int, int, int]:
+        return ((((n + 0) * 1) | 0) ^ 0) & -1, n * 0, n | -1, n & 0
 
-    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
-    outputs = {out.name: hir.nodes[out.value] for out in hir.outputs}
-    assert isinstance(outputs["identities"], InPort), "every identity must drop, leaving the input itself"
-    assert outputs["killed"] == outputs["masked_off"] == IntConst(0)
-    assert outputs["saturated"] == IntConst(-1)
-    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
+    result = _synth(f, INT_OPTIONS, name="int_identities")
+    assert _instantiated(result) == set()
+    sim = result.numerical_model.elaborate()
+    for n in (-9, -1, 0, 1, 7, 1000):
+        assert _ints(sim.run(n)) == list(f(n))
 
 
 def test_a_constant_integer_expression_folds_away_entirely() -> None:
     # Folding is exact at arbitrary precision -- no width, no saturation -- so a fully static integer expression
-    # disappears before MIR ever has to hold it in a machine word.
-    builder = HirBuilder()
-    builder.block()
-    value = builder.operation(IntAdd(), [builder.int_const(2), builder.int_const(3)])
-    value = builder.operation(IntMul(), [value, builder.int_const(2**24)])  # past the machine word, within the float
-    builder.output("y", builder.operation(IntToFloat(), [value]))
-    builder.ret()
+    # disappears before MIR ever has to hold it in a machine word, and no converter or multiplier is instantiated.
+    def f() -> float:
+        k = 2 + 3
+        return float(k * 2**24)  # past the machine word, within the float
 
-    raw = builder.finish()
-    hir = optimize(raw, DEFAULT_IFCONV_MAX_OPS)
-    assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
-    (out,) = hir.outputs
-    assert hir.nodes[out.value] == FloatConst(float(5 * 2**24))
-    lower_to_mir(raw, OPS, DEFAULT_IFCONV_MAX_OPS)  # nothing integer is left
+    result = _synth(f, name="const_int_fold")
+    assert _instantiated(result) == set()
+    assert float(result.numerical_model.elaborate().run()[0]) == float(5 * 2**24)
 
 
 def test_integer_folding_is_exact_across_the_vocabulary() -> None:
@@ -1032,119 +958,105 @@ def test_integer_folding_has_no_size_limit() -> None:
     lower_to_mir(raw, OPS, DEFAULT_IFCONV_MAX_OPS)  # nothing integer survives
 
 
-def _reduced_int_outputs(populate: Callable[[HirBuilder, ValueId], None]) -> dict[str, object]:
-    """One integer input ``n`` through ``optimize``; each named output resolved to its surviving node."""
-    builder = HirBuilder()
-    builder.block()
-    populate(builder, builder.input("n", IntType()))
-    builder.ret()
-    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
-    return {out.name: hir.nodes[out.value] for out in hir.outputs}
-
-
 def test_the_integer_subtraction_rules_the_shared_algebra_cannot_state() -> None:
-    # The declared algebra drops an identity operand from either side, which for subtraction is only true of the
-    # right one: ``x - 0`` is ``x`` while ``0 - x`` is the negation, so each direction is its own rule.
-    def populate(builder: HirBuilder, n: ValueId) -> None:
-        zero = builder.int_const(0)
-        builder.output("dropped", builder.operation(IntSub(), [n, zero]))
-        builder.output("negated", builder.operation(IntSub(), [zero, n]))
-        builder.output("cancelled", builder.operation(IntSub(), [n, n]))
+    # ``x - 0`` is ``x`` while ``0 - x`` is the negation, so each direction is its own rule; the negation is the
+    # only direction that needs the subtractor. Pooling hides op counts, so the artifact pins one subtractor
+    # instance and no other module class.
+    def f(n: int) -> tuple[int, int, int]:
+        return n - 0, 0 - n, n - n
 
-    outputs = _reduced_int_outputs(populate)
-    assert isinstance(outputs["dropped"], InPort)
-    assert isinstance(outputs["negated"], Operation) and outputs["negated"].operator == IntNeg()
-    assert outputs["cancelled"] == IntConst(0)
+    result = _synth(f, INT_OPTIONS, name="int_sub_rules")
+    assert _instantiated(result) == {"holoso_isubs"}
+    assert result.verilog_output.verilog.count("holoso_isubs #") == 1
+    sim = result.numerical_model.elaborate()
+    for n in (-9, -1, 0, 1, 7, 1000):
+        assert _ints(sim.run(n)) == list(f(n))
 
 
 def test_a_power_of_two_integer_product_mints_the_saturating_scaling() -> None:
     # The exponent is absorbed into the operator from either side, and the constant -- even one no machine word
-    # holds -- goes dead with it, so it is never asked to materialize.
-    def populate(builder: HirBuilder, n: ValueId) -> None:
-        builder.output("right", builder.operation(IntMul(), [n, builder.int_const(8)]))
-        builder.output("left", builder.operation(IntMul(), [builder.int_const(2**40), n]))
+    # holds -- goes dead with it, so it is never asked to materialize and no multiplier is instantiated.
+    def f(n: int) -> tuple[int, int]:
+        return n * 8, (2**40) * n
 
-    outputs = _reduced_int_outputs(populate)
-    assert isinstance(outputs["right"], Operation) and outputs["right"].operator == IntMulPow2(3)
-    assert isinstance(outputs["left"], Operation) and outputs["left"].operator == IntMulPow2(40)
+    result = _synth(f, INT_OPTIONS, name="int_pow2_product")
+    assert "holoso_imuls" not in result.verilog_output.verilog
+    sim = result.numerical_model.elaborate()
+    for n in (-9, -1, 0, 1, 7, 1000):
+        # The derived machine word is int24 and 2**40 lies far past it, so every nonzero product rails by sign.
+        railed = -(2**23) if n < 0 else 2**23 - 1 if n > 0 else 0
+        assert _ints(sim.run(n)) == [n * 8, railed]
 
 
 def test_integer_negations_share_one_tracking_across_their_spellings() -> None:
-    # ``x * -1``, ``x // -1`` and the written negation all name one node, ``-(-x)`` returns the base, and a sum
-    # of a value with its own negation is zero without anything firing.
-    def populate(builder: HirBuilder, n: ValueId) -> None:
-        neg = builder.operation(IntNeg(), [n])
-        builder.output("restored", builder.operation(IntNeg(), [neg]))
-        builder.output("cancelled", builder.operation(IntAdd(), [n, neg]))
-        builder.output("by_product", builder.operation(IntMul(), [n, builder.int_const(-1)]))
-        builder.output("by_quotient", builder.operation(IntDivFloor(), [n, builder.int_const(-1)]))
+    # ``x * -1`` and ``x // -1`` are negations rather than a product and a quotient, so no multiplier or divider
+    # module appears; ``-(-x)`` returns the base and ``n + (-n)`` folds to zero, so no adder appears either. The
+    # surviving negations bind the one pooled subtractor instance.
+    def f(n: int) -> tuple[int, int, int, int]:
+        return -(-n), n + (-n), n * -1, n // -1
 
-    outputs = _reduced_int_outputs(populate)
-    assert isinstance(outputs["restored"], InPort)
-    assert outputs["cancelled"] == IntConst(0)
-    assert outputs["by_product"] == outputs["by_quotient"]
-    assert isinstance(outputs["by_product"], Operation) and outputs["by_product"].operator == IntNeg()
+    result = _synth(f, INT_OPTIONS, name="int_negations")
+    verilog = result.verilog_output.verilog
+    assert verilog.count("holoso_isubs #") == 1
+    assert "holoso_imuls" not in verilog and "holoso_idivs" not in verilog and "holoso_iadds" not in verilog
+    sim = result.numerical_model.elaborate()
+    for n in (-9, -1, 0, 1, 7, 1000):
+        assert _ints(sim.run(n)) == list(f(n))
 
 
 def test_integer_division_and_remainder_reduce_against_their_constants() -> None:
-    def populate(builder: HirBuilder, n: ValueId) -> None:
-        builder.output("q_one", builder.operation(IntDivFloor(), [n, builder.int_const(1)]))
-        builder.output("q_pow2", builder.operation(IntDivFloor(), [n, builder.int_const(8)]))
-        builder.output("q_self", builder.operation(IntDivFloor(), [n, n]))
-        builder.output("q_zero", builder.operation(IntDivFloor(), [builder.int_const(0), n]))
-        builder.output("r_one", builder.operation(IntMod(), [n, builder.int_const(1)]))
-        builder.output("r_neg_one", builder.operation(IntMod(), [n, builder.int_const(-1)]))
-        builder.output("r_pow2", builder.operation(IntMod(), [n, builder.int_const(8)]))
-        builder.output("r_self", builder.operation(IntMod(), [n, n]))
-        builder.output("r_zero", builder.operation(IntMod(), [builder.int_const(0), n]))
+    # Every quotient and remainder here reduces -- identity, power-of-two shift/mask, self, zero -- so no divider
+    # is instantiated; where CPython raises (n == 0), the reductions answer for the operand they erased.
+    def f(n: int) -> tuple[int, int, int, int, int, int, int, int, int]:
+        return n // 1, n // 8, n // n, 0 // n, n % 1, n % -1, n % 8, n % n, 0 % n
 
-    outputs = _reduced_int_outputs(populate)
-    assert isinstance(outputs["q_one"], InPort)
-    assert isinstance(outputs["q_pow2"], Operation) and outputs["q_pow2"].operator == IntShiftRight()
-    assert outputs["q_self"] == IntConst(1)
-    assert outputs["q_zero"] == outputs["r_one"] == outputs["r_neg_one"] == IntConst(0)
-    assert outputs["r_self"] == outputs["r_zero"] == IntConst(0)
-    mask = outputs["r_pow2"]
-    assert isinstance(mask, Operation) and mask.operator == IntBwAnd()
+    result = _synth(f, INT_OPTIONS, name="int_divmod_rules")
+    assert "holoso_idivs" not in result.verilog_output.verilog
+    sim = result.numerical_model.elaborate()
+    for n in (-9, -1, 1, 7, 1000):
+        assert _ints(sim.run(n)) == list(f(n))
+    assert _ints(sim.run(0)) == [0, 0, 1, 0, 0, 0, 0, 0, 0]  # q // q == 1 and r % r == 0, whatever q turns out to be
 
 
 def test_bitwise_value_equality_and_complement_rules() -> None:
-    def populate(builder: HirBuilder, n: ValueId) -> None:
-        inverted = builder.operation(IntBwNot(), [n])
-        builder.output("xor_self", builder.operation(IntBwXor(), [n, n]))
-        builder.output("and_self", builder.operation(IntBwAnd(), [n, n]))
-        builder.output("or_self", builder.operation(IntBwOr(), [n, n]))
-        builder.output("complement", builder.operation(IntBwXor(), [n, builder.int_const(-1)]))
-        builder.output("restored", builder.operation(IntBwNot(), [inverted]))
-        builder.output("annihilated", builder.operation(IntBwAnd(), [n, inverted]))
-        builder.output("saturated", builder.operation(IntBwOr(), [n, inverted]))
-        builder.output("disagreed", builder.operation(IntBwXor(), [n, inverted]))
+    def f(n: int) -> tuple[int, int, int, int, int, int, int, int]:
+        return n ^ n, n & n, n | n, n ^ -1, ~(~n), n & ~n, n | ~n, n ^ ~n
 
-    outputs = _reduced_int_outputs(populate)
+    sim = _synth(f, INT_OPTIONS, name="int_bitwise_rules").numerical_model.elaborate()
+    for n in (-9, -1, 0, 1, 7, 1000):
+        assert _ints(sim.run(n)) == list(f(n))
+
+
+def test_the_bitwise_reductions_fold_on_the_graph() -> None:
+    # The bitwise operators are inline, so no public artifact can witness these folds: white-box over the optimizer.
+    builder = HirBuilder()
+    builder.block()
+    n = builder.input("n", IntType())
+    inverted = builder.operation(IntBwNot(), [n])
+    builder.output("xor_self", builder.operation(IntBwXor(), [n, n]))
+    builder.output("annihilated", builder.operation(IntBwAnd(), [n, inverted]))
+    builder.output("saturated", builder.operation(IntBwOr(), [n, inverted]))
+    builder.output("disagreed", builder.operation(IntBwXor(), [n, inverted]))
+    builder.output("complement", builder.operation(IntBwXor(), [n, builder.int_const(-1)]))
+    builder.ret()
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    outputs = {out.name: hir.nodes[out.value] for out in hir.outputs}
     assert outputs["xor_self"] == outputs["annihilated"] == IntConst(0)
-    assert isinstance(outputs["and_self"], InPort) and isinstance(outputs["or_self"], InPort)
-    assert isinstance(outputs["complement"], Operation) and outputs["complement"].operator == IntBwNot()
-    assert isinstance(outputs["restored"], InPort)
     assert outputs["saturated"] == outputs["disagreed"] == IntConst(-1)
+    assert isinstance(outputs["complement"], Operation) and outputs["complement"].operator == IntBwNot()
 
 
-@pytest.mark.parametrize(
-    "relation, expected",
-    [
-        (IntEqual(), True),
-        (IntLessOrEqual(), True),
-        (IntGreaterOrEqual(), True),
-        (IntNotEqual(), False),
-        (IntLess(), False),
-        (IntGreater(), False),
-    ],
-)
-def test_a_reflexive_integer_comparison_folds_to_its_truth(relation: Operator, expected: bool) -> None:
-    # No integer is a NaN, so every relation is decided over equal operands without seeing their value.
-    def populate(builder: HirBuilder, n: ValueId) -> None:
-        builder.output("y", builder.operation(relation, [n, n]))
+def test_a_reflexive_integer_comparison_folds_to_its_truth() -> None:
+    # No integer is a NaN, so every relation is decided over equal operands without seeing their value, and no
+    # comparator is instantiated.
+    def f(n: int) -> tuple[bool, bool, bool, bool, bool, bool]:
+        return n == n, n <= n, n >= n, n != n, n < n, n > n
 
-    assert _reduced_int_outputs(populate)["y"] == BoolConst(expected)
+    result = _synth(f, INT_OPTIONS, name="int_reflexive_cmp")
+    assert _instantiated(result) == set()
+    sim = result.numerical_model.elaborate()
+    for n in (-9, 0, 7):
+        assert list(sim.run(n)) == list(f(n))
 
 
 def test_the_boolean_connectives_fold_over_equal_operands() -> None:
@@ -1164,7 +1076,7 @@ def test_the_boolean_connectives_fold_over_equal_operands() -> None:
 
 
 def test_an_integer_self_division_erases_an_operand_that_names_no_number() -> None:
-    # The integer dual of the float rule above: ``5 // 0`` has no value for the fold, so it is an operand the
+    # The integer dual of the float rule below: ``5 // 0`` has no value for the fold, so it is an operand the
     # compiler cannot see, and ``q // q`` and ``q % q`` speak for it whatever it turns out to be -- the division
     # reduces, its operand goes dead, and nothing is left for the survivor sweep to convict.
     builder = HirBuilder()
@@ -1377,6 +1289,29 @@ def test_the_float_integer_round_trip_is_a_truncation() -> None:
     assert hir.nodes[hir.outputs[1].value] == Operation(FloatFloor(), (hir.input_ids[0],))
 
 
+def test_the_composed_cast_laws_are_observable_where_the_formats_distinguish_them() -> None:
+    # The public value rows for the two cast laws above. FloatFormat(6, 18) carries 19 significand bits, so
+    # 1048577 == 2**20 + 1 rounds to 2**20 through the float while wint_min=34 lets the integer word hold both
+    # sides -- the round trip is visibly not an identity; 3.75 truncates to 3 either side of zero.
+    options = Options(
+        OperatorOptions(fround=FRoundOptions(), ffromint=FFromIntOptions(), ftoint=FToIntOptions()),
+        ffmt=FMT,
+        wint_min=34,
+    )
+
+    def int_float_int(n: int) -> int:
+        return int(float(n))
+
+    def float_int_float(x: float) -> float:
+        return float(int(x))
+
+    int_sim = _synth(int_float_int, options).numerical_model.elaborate()
+    assert _ints(int_sim.run(1048577)) == [1048576]
+    float_sim = _synth(float_int_float, options).numerical_model.elaborate()
+    assert [float(v) for v in float_sim.run(3.75)] == [3.0]
+    assert [float(v) for v in float_sim.run(-3.75)] == [-3.0]
+
+
 def _optimized_constant_operation(operator: Operator, *operands: float | int) -> Hir:
     """``operator(consts...)`` wired to an output so DCE keeps it, run through the whole HIR pipeline."""
     builder = HirBuilder()
@@ -1488,25 +1423,26 @@ def _never_returns_through_a_loop_phi(x: float) -> float:
 
 @pytest.mark.parametrize("kernel", [_never_returns, _never_returns_through_a_loop_phi], ids=lambda fn: fn.__name__[1:])
 def test_a_kernel_that_provably_never_returns_is_refused(kernel: Callable[..., float]) -> None:
-    with pytest.raises(UnsupportedConstruct, match="never returns"):
-        optimize(lower(kernel).hir, DEFAULT_IFCONV_MAX_OPS)
+    with pytest.raises(UnsupportedConstruct) as exc:
+        holoso.synthesize(kernel, OPTIONS, name="never_returns")
+    assert exc.value.message == "the kernel provably never returns, so no output of it is ever raised"
 
 
 def test_an_arm_a_proven_guard_excludes_is_deleted_rather_than_merely_unconvicted() -> None:
-    # The dual of the above: the quotient is not spared a conviction, it is not there. A division is unspeculatable,
-    # so nothing but pruning can remove it.
+    # The dual of the refusal above: the quotient is not spared a conviction, it is not there. A division is
+    # unspeculatable, so nothing but pruning can remove it -- and with it the guard, leaving an exact schedule.
     def excluded_by_a_guard(x: float) -> float:
         r = x
         if (x * 0.0) > 1.0:
             r = 1.0 / (x * 0.0)
         return r
 
-    hir = optimize(lower(excluded_by_a_guard).hir, DEFAULT_IFCONV_MAX_OPS)
-    assert not [
-        node for node in hir.nodes.values() if isinstance(node, Operation) and isinstance(node.operator, HirFloatDiv)
-    ], "the excluded arm's quotient survived the pruning that proves its guard"
-    assert not [block for block in hir.blocks if isinstance(block.terminator, Branch)], "the guard itself survived"
-    assert hir.nodes[hir.outputs[0].value] == hir.nodes[hir.input_ids[0]], "the surviving path must return x itself"
+    result = _synth(excluded_by_a_guard)
+    assert result.initiation_interval[1] is not None, "the guard itself survived"
+    assert _instantiated(result) == set(), "the excluded arm's quotient survived the pruning that proves its guard"
+    sim = result.numerical_model.elaborate()
+    for x in (3.0, -1.0, 0.0):
+        assert float(sim.run(x)[0]) == x
 
 
 def test_a_loop_whose_test_is_proven_false_dissolves_entirely() -> None:
@@ -1517,17 +1453,17 @@ def test_a_loop_whose_test_is_proven_false_dissolves_entirely() -> None:
             y = y + 1.0
         return y
 
-    hir = optimize(lower(never_enters).hir, DEFAULT_IFCONV_MAX_OPS)
-    assert not [block for block in hir.blocks if isinstance(block.terminator, Branch)], "the loop test survived"
-    assert not [
-        node for node in hir.nodes.values() if isinstance(node, Operation)
-    ], "the body's addition survived a loop that is never entered"
-    assert hir.nodes[hir.outputs[0].value] == hir.nodes[hir.input_ids[0]]
+    result = _synth(never_enters)
+    assert result.initiation_interval[1] is not None, "the loop test survived"
+    assert _instantiated(result) == set(), "the body's addition survived a loop that is never entered"
+    sim = result.numerical_model.elaborate()
+    for x in (3.0, -1.0, 0.0):
+        assert float(sim.run(x)[0]) == x
 
 
 def test_pruning_one_guard_settles_the_next() -> None:
     # Why reduction and pruning are a mutual fixpoint and not a sequence: the second guard is undecidable until the
-    # first arm is gone, so one pass of each leaves it standing.
+    # first arm is gone, so one pass of each leaves it standing. Both guards must be gone, not merely the first.
     def cascade(x: float) -> float:
         r = 1.0
         if (x * 0.0) > 1.0:
@@ -1536,15 +1472,16 @@ def test_pruning_one_guard_settles_the_next() -> None:
             return 3.0
         return 4.0
 
-    hir = optimize(lower(cascade).hir, DEFAULT_IFCONV_MAX_OPS)
-    assert not [
-        block for block in hir.blocks if isinstance(block.terminator, Branch)
-    ], "both guards must be gone, not merely the first"
-    assert hir.nodes[hir.outputs[0].value] == FloatConst(4.0)
+    result = _synth(cascade)
+    assert result.initiation_interval[1] is not None
+    sim = result.numerical_model.elaborate()
+    for x in (3.0, -1.0, 0.0):
+        assert float(sim.run(x)[0]) == cascade(x) == 4.0
 
 
 def test_a_state_slot_live_out_follows_a_merge_pruning_collapses() -> None:
-    # A slot's live-out is the one reference outside the value DAG entirely, so a collapse reaches it only by hand.
+    # A slot's live-out is the one reference outside the value DAG entirely, so a collapse reaches it only by hand:
+    # the slot must carry its own live-in forward, and the schedule stays exact once the guard is pruned.
     class HeldByADeadGuard:
         def __init__(self) -> None:
             self.s = 0.0
@@ -1554,15 +1491,19 @@ def test_a_state_slot_live_out_follows_a_merge_pruning_collapses() -> None:
                 self.s = x
             return self.s
 
-    hir = optimize(lower(HeldByADeadGuard().__call__).hir, DEFAULT_IFCONV_MAX_OPS)
-    (slot,) = hir.state_slots
-    assert hir.nodes[slot.live_out] == StateRead("s", HirFloatType()), "the slot must carry its own live-in forward"
-    assert not [block for block in hir.blocks if isinstance(block.terminator, Branch)]
+    result = _synth(HeldByADeadGuard().__call__, name="held_by_dead_guard")
+    assert result.initiation_interval[1] is not None
+    assert [(port.name, port.scalar_type) for port in result.output_ports] == [("state_s", FloatType(FMT))]
+    sim = result.numerical_model.elaborate()
+    reference = HeldByADeadGuard()
+    for x in (3.0, -1.0, 0.0, 7.5):
+        assert [float(value) for value in sim.run(x)] == [reference(x)] == [0.0]
 
 
 def test_a_proven_break_kills_the_back_edge_and_collapses_the_carried_merges() -> None:
     # The latch becomes unreachable, so the header's loop-carried phis lose their latch arm and collapse. Distinct
-    # from a loop deleted whole, where no merge has to be repaired at all.
+    # from a loop deleted whole, where no merge has to be repaired at all. The outer runtime loop keeps the public II
+    # data-dependent whether or not the break is decided, so the discriminator is blind here: white-box.
     def breaks_on_the_first_trip(x: float, n: float) -> float:
         y = x
         t = n
@@ -1685,66 +1626,75 @@ def test_a_collapsed_merge_is_substituted_into_a_later_merge() -> None:
 
 
 @pytest.mark.parametrize(
-    "value,degrades",
+    "value,degraded",
     [
-        (1e-12, True),
-        (-1e-12, True),
-        (1e30, True),
-        (-1e30, True),
-        (0.0, False),
-        (math.inf, False),
-        (-math.inf, False),
-        (1.0, False),
-        (9.313225746154785e-10, False),  # the smallest normal
-        (4.656612873077393e-10, False),  # half of it, which ties upward to the smallest normal
-        (math.nextafter(4.656612873077393e-10, 0.0), True),  # one ulp below that tie, which encodes to nothing
+        (1e-12, "0.0"),
+        (-1e-12, "0.0"),
+        (1e30, "inf"),
+        (-1e30, "-inf"),
+        (0.0, None),
+        (math.inf, None),
+        (-math.inf, None),
+        (1.0, None),
+        (9.313225746154785e-10, None),  # the smallest normal
+        (4.656612873077393e-10, None),  # half of it, which ties upward to the smallest normal
+        (math.nextafter(4.656612873077393e-10, 0.0), "0.0"),  # one ulp below that tie, which encodes to nothing
     ],
     ids=lambda value: repr(value),
 )
 def test_a_literal_the_format_cannot_hold_is_refused_rather_than_silently_degraded(
-    value: float, degrades: bool
+    value: float, degraded: str | None
 ) -> None:
     # The float dual of the integer range refusal. An infinity is representable and so is accepted, where a finite
     # value that encodes to one -- or to zero -- is a literal the machine cannot hold, and substituting what it
     # encodes to would answer for a number the kernel did not write.
-    builder = HirBuilder()
-    builder.block()
-    builder.output("y", builder.operation(FloatAdd(), [builder.input("x", HirFloatType()), builder.float_const(value)]))
-    builder.ret()
-    if degrades:
-        with pytest.raises(UnsupportedConstruct, match="degrades"):
-            lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
+    def f(x: float) -> float:
+        return x + value
+
+    if degraded is None:
+        holoso.synthesize(f, OPTIONS, name="pinned_literal")
     else:
-        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
+        with pytest.raises(UnsupportedConstruct) as exc:
+            holoso.synthesize(f, OPTIONS, name="pinned_literal")
+        assert exc.value.message == (
+            f"constant {value} degrades to {degraded} in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
+        )
 
 
 def test_a_divisor_whose_reciprocal_degrades_is_never_silently_applied() -> None:
     # 3e9 is representable but its reciprocal is not, and the reciprocal is what HIR's ``x/c -> x*(1/c)`` hands the
     # machine, which would multiply by zero and answer zero for every input.
-    builder = HirBuilder()
-    builder.block()
-    x = builder.input("x", HirFloatType())
-    builder.output("y", builder.operation(HirFloatDiv(), [x, builder.float_const(3e9)]))
-    builder.ret()
-    with pytest.raises(UnsupportedConstruct, match="degrades"):
-        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
+    def f(x: float) -> float:
+        return x / 3e9
+
+    with pytest.raises(UnsupportedConstruct) as exc:
+        holoso.synthesize(f, OPTIONS, name="degrading_reciprocal")
+    assert exc.value.message == (
+        "constant 3.333333333333333e-10 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
+    )
 
 
 def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -> None:
     # A reset snapshot never becomes a pooled constant, so the node-level rule never sees it.
-    builder = HirBuilder()
-    builder.block()
-    x = builder.input("x", HirFloatType())
-    builder.state_slot("s", FloatConst(1e-12), x)
-    builder.output("y", x)
-    builder.ret()
-    with pytest.raises(UnsupportedConstruct, match="degrades"):
-        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
+    class TinyReset:
+        def __init__(self) -> None:
+            self.s = 1e-12
+
+        def __call__(self, x: float) -> float:
+            self.s = x
+            return x
+
+    with pytest.raises(UnsupportedConstruct) as exc:
+        holoso.synthesize(TinyReset().__call__, OPTIONS, name="tiny_reset")
+    assert exc.value.message == (
+        "state slot 's' reset 1e-12 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
+    )
 
 
 def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
     # The slot's live-out is a float while its reset snapshot is an integer: a slot register holds one family, and
-    # only a sweep over the slots themselves sees the mismatch, since no node in the graph carries it.
+    # only a sweep over the slots themselves sees the mismatch, since no node in the graph carries it. The frontend
+    # coerces such a literal, so the mismatched snapshot is only spellable at the builder level.
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", HirFloatType())
@@ -1757,25 +1707,22 @@ def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
 
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:
     # ``if c: r = a`` over a boolean leaves bselect(c, a, c) -- Python's eager ``and`` shape written as a branch --
-    # and its dual leaves bselect(c, c, b). Both are pure gates, so the mux must not reach the hardware.
-    def and_shape(c: bool, a: bool) -> bool:
-        r = c
+    # and its dual leaves bselect(c, c, b). The shape alone cannot tell an ``and`` rewritten as an ``or``; only the
+    # truth table can, so both are scored against CPython over the full input cube.
+    def gate_shapes(c: bool, a: bool, b: bool) -> tuple[bool, bool]:
+        r1 = c
         if c:
-            r = a
-        return r
-
-    def or_shape(c: bool, b: bool) -> bool:
-        r = b
+            r1 = a
+        r2 = b
         if c:
-            r = c
-        return r
+            r2 = c
+        return r1, r2
 
-    for kernel, gate in ((and_shape, BoolAnd), (or_shape, BoolOr)):
-        operators = [node.operator for node in _hir_of(kernel).nodes.values() if isinstance(node, Operation)]
-        assert not any(isinstance(op, BoolSelect) for op in operators), f"{kernel.__name__}: the mux survived"
-        assert any(isinstance(op, gate) for op in operators), f"{kernel.__name__}: expected a {gate.__name__}"
-        # The shape alone cannot tell an `and` rewritten as an `or`; only the truth table can.
-        sim = build_model(build_lir(_run(kernel), kernel.__name__))
-        for c in (False, True):
-            for other in (False, True):
-                assert sim.run(c, other)[0] is kernel(c, other), f"{kernel.__name__}({c}, {other})"
+    result = _synth(gate_shapes)
+    assert result.initiation_interval[1] is not None
+    operators = [node.operator for node in _hir_of(gate_shapes).nodes.values() if isinstance(node, Operation)]
+    assert not any(isinstance(op, BoolSelect) for op in operators), "a condition-repeating bselect survived"
+    assert any(isinstance(op, BoolAnd) for op in operators) and any(isinstance(op, BoolOr) for op in operators)
+    sim = result.numerical_model.elaborate()
+    for combo in itertools.product([False, True], repeat=3):
+        assert list(sim.run(*combo)) == list(gate_shapes(*combo)), combo

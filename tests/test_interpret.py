@@ -18,11 +18,14 @@ import numpy as np
 import pytest
 
 from holoso._backend.numerical import NumericalSimulator
-from holoso._mir import MirInterpreter
+from holoso._eel import lower as lower_frontend
+from holoso._mir import MirInterpreter, MirPhi, lower as lower_to_mir
 from holoso._operators import OpConfig
-from holoso._type import BoolType, FloatFormat
+from holoso._type import BoolType, FloatFormat, IntType
 from holoso._value import FloatValue, coerce_scalar
 
+from ._eel_corpus import INT_CASES, int_corpus_options
+from ._eeloracle import InputRow
 from ._examples import SPECS, ExampleSpec
 from ._importguard import forbidden_imports
 from ._modelref import (
@@ -36,6 +39,7 @@ from ._modelref import (
     branch_boundary_kernel,
     branchy_swap_mixed_arm_loop,
     build_model_and_interpreter,
+    build_ops,
     const_branch_kernel,
     default_ops,
     diamond_then_loop_kernel,
@@ -217,6 +221,36 @@ def test_state_slot_swap_writeback_is_parallel() -> None:
         assert model_out == interp_out, f"interp != model at x={x}"
         expected = reference.step(x)
         assert float(model_out[0]) == expected, f"model != python at x={x}: {float(model_out[0])} vs {expected}"
+
+
+@pytest.mark.parametrize("name,make,vectors", INT_CASES, ids=[name for name, _, _ in INT_CASES])
+def test_interpreter_matches_model_on_the_integer_corpus(
+    name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
+) -> None:
+    """
+    The schedule-independent LIR-fault oracle for the integer corpus: the interpreter runs the MIR directly, the
+    model runs the scheduled/allocated LIR built from it, so a divergence indicts the LIR layer alone.
+    """
+    options = int_corpus_options()
+    model, interpreter = build_model_and_interpreter(
+        make(), build_ops(options), name, options.ffmt, options.ifconv_max_ops
+    )
+    input_vectors: list[Vector] = [
+        [coerce_scalar(port.scalar_type, row[port.name], port.name) for port in model.inputs] for row in vectors
+    ]
+    assert_model_equals_interpreter(model, interpreter, input_vectors, name)
+
+
+def test_the_integer_corpus_reaches_an_integer_phi() -> None:
+    """The non-vacuity witness: at least one corpus kernel lowers to a MIR carrying an integer phi."""
+    options = int_corpus_options()
+    ops = build_ops(options)
+
+    def has_int_phi(make: Callable[[], Callable[..., object]]) -> bool:
+        mir = lower_to_mir(lower_frontend(make()).hir, ops, options.ifconv_max_ops)
+        return any(isinstance(node, MirPhi) and isinstance(node.scalar_type, IntType) for node in mir.nodes.values())
+
+    assert any(has_int_phi(make) for _, make, _ in INT_CASES)
 
 
 def test_interpreter_imports_nothing_from_lir() -> None:

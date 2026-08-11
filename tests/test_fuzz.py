@@ -18,7 +18,7 @@ import pytest
 from holoso._type import FloatFormat
 
 from . import _fuzz as fuzz_impl
-from ._fuzz import CheckKind, Divergence, run_campaign, save_reproducer
+from ._fuzz import CampaignStats, CheckKind, Divergence, Shape, run_campaign, save_reproducer
 
 # The campaign datapath: a shallow format keeps the per-kernel build fast while still exercising rounding, branches,
 # and the bool bank. The differential oracle is format-agnostic, so one well-chosen format suffices.
@@ -38,10 +38,7 @@ def _ansi(text: str, code: str) -> str:
     return f"\x1b[{code}m{text}\x1b[0m"
 
 
-def _print_summary(stats: object) -> None:
-    from ._fuzz import CampaignStats, Shape  # local import keeps the module import light
-
-    assert isinstance(stats, CampaignStats)
+def _print_summary(stats: CampaignStats) -> None:
     title = _ansi("  HOLOSO FUZZ CAMPAIGN  ", "1;97;44")
     print(f"\n{title}")
     print(
@@ -94,10 +91,9 @@ def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
         )
 
     # A campaign that produced no branchy kernels at all would silently test nothing; guard against a timid generator.
-    from ._fuzz import Shape
-
     assert stats.shape_counts[Shape.BRANCH] > 0, "no branchy kernels generated -- the fuzzer is degenerate"
     assert stats.shape_counts[Shape.OVERBUDGET_BRANCH] > 0, "no over-budget branch kernels generated"
+    assert stats.shape_counts[Shape.NESTED_IF] > 0, "no nested-branch kernels generated"
     assert stats.shape_counts[Shape.RELATION_PAIR] > 0, "no relation-pair kernels generated"
     assert stats.shape_counts[Shape.EXACT_WIRING] >= 2, "exact wiring kernels were not both generated"
 
@@ -120,13 +116,6 @@ def _surviving_forward_branches_for_probe(name: str, emit: Callable[[fuzz_impl._
         kernel.callable, fuzz_impl.OP_CONFIGS["default"](_FMT), name, _FMT
     )
     return fuzz_impl.surviving_forward_branches(mir)
-
-
-def test_branch_claiming_inner_shapes_survive_compilation() -> None:
-    """A branch-claiming inner shape must not pass merely because an outer branch survived."""
-    assert (
-        _surviving_forward_branches_for_probe("nested_probe", lambda em: fuzz_impl._emit_diamond(em, nested=True)) >= 2
-    )
 
 
 def test_a_const_branch_shape_keeps_only_the_branch_that_is_not_decided() -> None:

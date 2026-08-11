@@ -1,8 +1,8 @@
 """
 The Eel frontend differential oracle over example kernels: CPython executing the original kernel against the
-evaluator running the unoptimized HIR lowered by ``holoso._eel``. ``ORACLE_COVERED`` is the set of example
-names verified here. Array-parameter kernels are driven directly through their
-decomposed leaf ports (``v_0``, ``v_1``) with local vector tables; scalar kernels ride the shared SPECS rows.
+evaluator running the unoptimized HIR lowered by ``holoso._eel``. Every SPECS row rides its full shared
+reference sequence; array-parameter kernels are driven directly through their decomposed leaf ports
+(``v_0``, ``v_1``) with local vector tables.
 """
 
 import math
@@ -20,40 +20,6 @@ from ._examples import SPECS, ExampleSpec
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import imu_frame_transform  # noqa: E402
 import polar  # noqa: E402
-
-ORACLE_COVERED = frozenset(
-    {
-        "madd",
-        "poly3",
-        "signal_window",
-        "equal_temperament",
-        "ekf1_stateless",
-        "polar_to",
-        "polar_from",
-        "to_polar",
-        "from_polar",
-        "octave_index",
-        "remainder",
-        "kepler",
-        "recip_newton",
-        "cordic_sincos",
-        "imu_frame_transform",
-        "iir1_lpf",
-        "pid",
-        "schmitt_trigger",
-        "quadrature_encoder",
-        "phase_frequency_detector",
-        "latching_fault_register",
-        "majority_voter",
-        "integrator",
-        "uart_tx",
-        "uart_rx",
-        "ekf1_stateful",
-    }
-)
-
-_SPEC_COVERED = {spec.name for spec in SPECS} & ORACLE_COVERED
-_SPECS = [spec for spec in SPECS if spec.name in _SPEC_COVERED]
 
 
 def _polar_vectors() -> list[InputRow]:
@@ -103,12 +69,7 @@ _VECTOR_KERNELS: list[tuple[str, object, list[InputRow]]] = [
 ]
 
 
-def test_every_covered_name_is_verified_somewhere() -> None:
-    verified = {spec.name for spec in SPECS} | {name for name, _, _ in _VECTOR_KERNELS}
-    assert ORACLE_COVERED <= verified
-
-
-@pytest.mark.parametrize("spec", _SPECS, ids=[spec.name for spec in _SPECS])
+@pytest.mark.parametrize("spec", SPECS, ids=[spec.name for spec in SPECS])
 def test_eel_oracle_on_examples(spec: ExampleSpec) -> None:
     hir = lower(spec.make_kernel()).hir
     vectors = spec.reference_vectors()

@@ -10,13 +10,17 @@ from collections.abc import Callable, Mapping, Sequence
 import numpy as np
 import pytest
 
+import holoso
+from holoso import FAddOptions, FCmpOptions, FMulILog2Options, FMulOptions, OperatorOptions, Options
 from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
 
-from ._eel_corpus import convergence_steps
 from ._eeloracle import assert_hir_matches_reference
+from ._public import strip_locations
 
 type _Row = Mapping[str, float | bool | int]
+
+_MIN_OPTIONS = Options(OperatorOptions())
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
@@ -25,8 +29,9 @@ def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
 
 
 def _rejects(fn: object, match: str) -> None:
+    assert callable(fn)
     with pytest.raises(UnsupportedConstruct, match=match):
-        lower(fn)
+        holoso.synthesize(fn, _MIN_OPTIONS, name="k")
 
 
 _X_ROWS: list[_Row] = [{"x": 2.0}, {"x": -1.5}, {"x": 0.0}, {"x": 7.25}]
@@ -223,12 +228,6 @@ def _bool_carry(x: float) -> bool:
     return odd
 
 
-def _bare_name_condition(x: float, go: bool) -> float:
-    while go:
-        x = x + 1.0
-    return x
-
-
 def _nested_residual(x: float) -> float:
     total = 0.0
     while x > 0.0:
@@ -284,13 +283,28 @@ def test_residual_whiles_match_cpython() -> None:
     _oracle(_header_walrus_zero_trip, [{"x": 2.5}, {"x": 0.0}, {"x": -3.0}])
     _oracle(_header_walrus_rebinds_a_carry, [{"q": 1.0}, {"q": 6.0}])
     _oracle(_bool_carry, [{"x": 3.0}, {"x": 4.0}, {"x": 0.0}])
-    _oracle(_bare_name_condition, [{"x": 1.5, "go": False}])
     _oracle(_nested_residual, [{"x": 7.0}, {"x": 0.5}, {"x": -1.0}])
     _oracle(_static_inside_residual, [{"x": 9.0}, {"x": 1.0}])
     _oracle(_residual_inside_static, [{"x": 8.5}, {"x": 0.75}])
     _oracle(_residual_inside_branch, [{"x": 1.0, "up": True}, {"x": 1.0, "up": False}, {"x": 12.0, "up": True}])
     _oracle(_int_carry, [{"x": 3.5}, {"x": 0.0}, {"x": 1.0}])
     _oracle(_residual_int_back, [{"x": 2.0, "n": 3}, {"x": 0.0, "n": 3}, {"x": 1.0, "n": -4}])
+
+
+def test_the_public_artifacts_discriminate_unrolling_from_residualization() -> None:
+    """
+    The unroll-vs-residualize decision is itself public: a residual while keeps loop-carried phis in the
+    location-stripped ``frontend_ir[-1]`` and makes the transaction latency data-dependent (max II ``None``),
+    while an unrolled loop leaves neither.
+    """
+    unrolled = holoso.synthesize(_static_while, Options(OperatorOptions(fmul_ilog2=FMulILog2Options())), name="k")
+    residual = holoso.synthesize(_countdown, Options(OperatorOptions(fadd=FAddOptions(), fcmp=FCmpOptions())), name="k")
+    assert unrolled.initiation_interval[1] is not None
+    assert residual.initiation_interval[1] is None
+    unrolled_lines = strip_locations(unrolled.frontend_ir[-1]).splitlines()
+    residual_lines = strip_locations(residual.frontend_ir[-1]).splitlines()
+    assert not any(line.lstrip().startswith("phi %") for line in unrolled_lines)
+    assert any(line.lstrip().startswith("phi %") for line in residual_lines)
 
 
 def _body_only_name(x: float) -> float:
@@ -343,21 +357,6 @@ def _aggregate_truthiness_condition(x: float) -> float:
     return x
 
 
-class _Accumulating:
-    def __init__(self) -> None:
-        self.acc = 0.0
-
-    def step(self, x: float) -> float:
-        while x > 0.0:
-            self.acc = self.acc + x
-            x = x - 1.0
-        return self.acc
-
-
-def test_a_state_write_inside_a_residual_loop_carries_the_slot() -> None:
-    _oracle(_Accumulating().step, [{"x": 3.5}, {"x": 0.0}, {"x": 2.0}])
-
-
 def test_residual_while_gaps_and_bans() -> None:
     for fn, match in [
         (_body_only_name, "the local name 't' is not bound on every path"),
@@ -385,12 +384,6 @@ def _break_under_residual_condition(x: float) -> float:
         if x > float(i):
             break
         x = x + 1.0
-    return x
-
-
-def _continue_in_static_loop(x: float) -> float:
-    for i in range(3):
-        continue
     return x
 
 
@@ -708,7 +701,6 @@ def _post_break_binding_dropped_residual(x: float) -> float:
 def test_loop_exits_match_cpython() -> None:
     _oracle(_break_static, _X_ROWS)
     _oracle(_continue_static, _X_ROWS)
-    _oracle(_continue_in_static_loop, _X_ROWS)
     _oracle(_break_under_residual_condition, [{"x": 5.0}, {"x": -0.5}, {"x": 0.0}, {"x": -3.0}])
     _oracle(_break_at_threshold, [{"t": 0.0}, {"t": 1.0}, {"t": 2.0}, {"t": 3.0}, {"t": 4.5}])
     _oracle(_continue_under_residual_condition, [{"x": -1.0}, {"x": 1.5}, {"x": 2.5}, {"x": 5.0}])
@@ -742,7 +734,6 @@ def test_residual_loop_exits_match_cpython() -> None:
     _oracle(_mixed_exits, [{"x": 6.0, "lim": 2.0}, {"x": 3.0, "lim": 100.0}, {"x": 0.0, "lim": 1.0}])
     _oracle(_flag_on_break, [{"x": 3.5}, {"x": 0.5}, {"x": 0.0}, {"x": -2.0}])
     _oracle(_two_breaks, [{"x": 5.0, "a": 2.0}, {"x": 1.0, "a": 100.0}, {"x": 0.0, "a": 1.0}, {"x": 3.0, "a": 0.6}])
-    _oracle(convergence_steps, [{"x": 100.0, "tol": 1.0}, {"x": 3.0, "tol": 8.0}, {"x": 500.0, "tol": 0.0}])
     _oracle(_int_carry_with_break, [{"n": 7, "lim": 4}, {"n": 3, "lim": 100}, {"n": 0, "lim": 1}])
     # The promote-and-rerun cycle discards a pass that already built exit lanes and terminators.
     _oracle(_promoted_carry_with_break, [{"n": 6.0}, {"n": 1.0}, {"n": 0.0}, {"n": 3.0}])
@@ -816,10 +807,6 @@ def _empty_comp(x: float) -> float:
     return x + float(len(empty))
 
 
-def _comp_returned(x: float) -> tuple[float, ...]:
-    return tuple(v * x for v in (1.0, 2.0))
-
-
 def test_comprehensions_match_cpython() -> None:
     for fn in (
         _comp_over_sequence,
@@ -832,10 +819,6 @@ def test_comprehensions_match_cpython() -> None:
         _empty_comp,
     ):
         _oracle(fn, _X_ROWS)
-
-
-def test_a_generator_argument_is_still_a_ban() -> None:
-    _rejects(_comp_returned, "generator expressions are not supported")
 
 
 # Just over half the expansion budget, so one body fits and two do not.
@@ -864,7 +847,11 @@ def test_a_discarded_promote_pass_does_not_charge_the_budget() -> None:
     """
     Regression: the promote fixpoint discards what the previous pass built but kept charging its budget spend, so a
     body over half the budget was refused for the sole reason that its accumulator was seeded ``0`` and not ``0.0``.
+    The re-run kernel therefore must synthesize, to Verilog byte-identical with its float-seeded twin under the one
+    module name.
     """
-    fits = lower(_float_carry_fits).hir
-    promotes = lower(_int_carry_promotes_then_fits).hir
-    assert len(promotes.nodes) == len(fits.nodes)
+    options = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
+    fits = holoso.synthesize(_float_carry_fits, options, name="k")
+    promotes = holoso.synthesize(_int_carry_promotes_then_fits, options, name="k")
+    assert promotes.initiation_interval == fits.initiation_interval
+    assert promotes.verilog_output.verilog == fits.verilog_output.verilog

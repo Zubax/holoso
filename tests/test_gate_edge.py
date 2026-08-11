@@ -19,13 +19,14 @@ from pathlib import Path
 import pytest
 from cocotb_tools.runner import get_runner
 
+import holoso
 from holoso import FloatFormat
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, default_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, default_ops, default_options
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, sources
 
 _HDL_DIR = Path(__file__).resolve().parent / "hdl"
@@ -51,12 +52,7 @@ class _ConstInstallState:
 
 
 def _verilog(fn: Callable[..., object], name: str) -> str:
-    return generate_verilog(
-        build_lir(
-            lower_to_mir(lower(fn).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
-            name,
-        )
-    ).verilog
+    return holoso.synthesize(fn, default_options(_FMT), name=name).verilog_output.verilog
 
 
 def _assert_effect_trigger_gated(fn: Callable[..., object], name: str, prefix: str) -> None:

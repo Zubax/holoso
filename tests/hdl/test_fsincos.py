@@ -39,7 +39,8 @@ STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {"stage_product": 1, "stage_normalize": 1, "stage_pack": 1},
     {"unroll100": 50},
     {"unroll100": 200, "stage_product": 2},
-    {"stage_pack": 1, "stage_product": 2, "stage_normalize": 1},  # the from_polar timing-closed config
+    {"stage_pack": 1, "stage_product": 2, "stage_normalize": 1},
+    {"stage_pack": 1, "stage_product": 2, "stage_normalize": 2},  # the from_polar/Kepler timing-closed config
 )
 
 

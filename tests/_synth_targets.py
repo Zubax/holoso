@@ -75,19 +75,6 @@ def op_config(
     )
 
 
-def op_config_staged_output(fmt: FloatFormat) -> Options:
-    """
-    op_config(fmt) with an output register stage on the wide arithmetic operators (fadd/fmul/fdiv), enabled locally on
-    just the rows whose timing closure needs it. fmul_ilog2 and fcmp have no output stage and stay lean.
-    """
-    return op_config(
-        fmt,
-        fadd=FAddOptions(stage_output=1),
-        fmul=FMulOptions(stage_output=1),
-        fdiv=FDivOptions(stage_output=1),
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class SynthTarget:
     """One synthesis closure target: a kernel synthesized for one flow under one Options, asserted to meet f_max."""
@@ -215,7 +202,17 @@ TARGETS: list[SynthTarget] = [
     for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fmul=FMulOptions(stage_pack=1))),
     for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("integrator", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("integrator", FlowId.DIAMOND_ECP5, 100, op_config_staged_output(F_e6m18)),
+    for_example(
+        "integrator",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_output=1),
+            fmul=FMulOptions(stage_output=1),
+            fdiv=FDivOptions(stage_output=1),
+        ),
+    ),
     for_example("integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     # Straight-line multiply-accumulate chains; both close lean on all three flows.
     for_example("fir", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),

@@ -15,14 +15,17 @@ import numpy as np
 import pytest
 from jaxtyping import Float64
 
+import holoso
+from holoso import UnsupportedConstruct
 from holoso._eel import lower
-from holoso._errors import UnsupportedConstruct
 
 from ._eeloracle import assert_hir_matches_reference
 
 type _Row = Mapping[str, float | bool | int]
 
 _BUF = np.array([0.0, 0.0])
+
+_OPTIONS = holoso.Options(holoso.OperatorOptions())
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
@@ -31,8 +34,9 @@ def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
 
 
 def _rejects(fn: object, match: str) -> None:
+    assert callable(fn)
     with pytest.raises(UnsupportedConstruct, match=match):
-        lower(fn)
+        holoso.synthesize(fn, _OPTIONS, name="k")
 
 
 # ---------------------------------------------------------------------- blessed idioms, oracle-verified
@@ -313,15 +317,6 @@ def test_external_roots_are_never_mutable() -> None:
     _rejects(_default_store, r"in _helper_with_default\(\): cannot store into buf\[0\]: it arrived from outside")
 
 
-def test_numpy_slice_writes_reject_at_desugar() -> None:
-    def slice_write(x: float) -> float:
-        m = np.ones((2, 2))
-        m[0, :] = x
-        return m[0][0]  # type: ignore[no-any-return]
-
-    _rejects(slice_write, "slice assignment is not supported")
-
-
 # ---------------------------------------------------------------------- structural store rules
 
 
@@ -353,12 +348,6 @@ def _scalar_item_assignment(x: float) -> float:
     y = 1.0
     y[0] = x  # type: ignore[index]
     return y[0]  # type: ignore[index, no-any-return]
-
-
-def _dynamic_store_index(n: int, x: float) -> float:
-    m = np.zeros(2)
-    m[n] = x
-    return m[0]  # type: ignore[no-any-return]
 
 
 def _store_out_of_bounds(x: float) -> float:
@@ -414,7 +403,6 @@ def test_structural_store_rules() -> None:
         (_broadcast_store, "a store into an array must write one scalar element"),
         (_aggregate_rhs, "storing an aggregate into a container is not supported"),
         (_scalar_item_assignment, "a scalar does not support item assignment"),
-        (_dynamic_store_index, "a subscript index must be a compile-time constant int"),
         (_store_out_of_bounds, "index 2 is out of bounds for an axis of length 1"),
         (_float_into_int_array, "storing a float into an integer array truncates on the host"),
         (_int_in_place_family_change, "cannot change the array's element family from int to float"),

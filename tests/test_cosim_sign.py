@@ -7,6 +7,7 @@ import dataclasses
 
 import pytest
 
+import holoso
 from holoso import FloatFormat
 from ._cosim import run_cosim
 from ._modelref import default_options
@@ -32,4 +33,6 @@ def test_sign_conditioning_cosim(sim: str, wint_min: int | None) -> None:
     options = default_options(FloatFormat(wexp=6, wman=18))
     if wint_min is not None:
         options = dataclasses.replace(options, wint_min=wint_min)
-    run_cosim(sim, SignHold().__call__, options, "sign_hold")
+    # The module name carries the integer width because the two parametrizations build distinct machines.
+    result = holoso.synthesize(SignHold().__call__, options, name=f"sign_hold_r{options.ifmt.width}")
+    run_cosim(sim, result)

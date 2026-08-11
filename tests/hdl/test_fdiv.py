@@ -35,10 +35,18 @@ from .hdl_float_oracle import (
     get_seed,
     random_zkf_f32,
     sources,
+    stage_tag,
     start_clock,
 )
 
-STAGE_COMBOS = ((0, 0), (1, 0), (0, 1), (1, 1))  # (stage_input, stage_output) -- full cross-product
+# Base + each knob alone + the closure-used multi-input configuration (stage_input=3 with pack and output).
+STAGE_COMBOS: tuple[dict[str, int], ...] = (
+    {},
+    {"stage_input": 1},
+    {"stage_pack": 1},
+    {"stage_output": 1},
+    {"stage_input": 3, "stage_pack": 1, "stage_output": 1},
+)
 
 
 def _exp_is_zero(bits: int) -> bool:
@@ -128,13 +136,12 @@ async def holoso_fdiv_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0
 
 
-@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: f"i{s[0]}o{s[1]}")
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fdiv(sim: str, stages: tuple[int, int]) -> None:
-    stage_input, stage_output = stages
+def test_holoso_fdiv(sim: str, stages: dict[str, int]) -> None:
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_i{stage_input}o{stage_output}"
-    operator = FDivOperator(FloatFormat(8, 24), FDivOptions(stage_input=stage_input, stage_output=stage_output))
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_{stage_tag(stages)}"
+    operator = FDivOperator(FloatFormat(8, 24), FDivOptions(**stages))
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

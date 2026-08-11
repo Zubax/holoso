@@ -15,16 +15,6 @@ A `for` that cannot unroll -- a dynamic trip count, or a static one above the un
 than lowered to a counted back-edge loop, which needs a runtime integer counter; with runtime integers now carried
 through the whole pipeline, the counted back-edge loop is the natural follow-on.
 
-## White-box test promotion
-
-The `whitebox` marker is a promotion queue, not a category: it marks a test that reaches past the public API where a
-black-box spelling is now possible. The integer selection and RTL-shape suites carry it; each should become an
-ordinary kernel driven through `synthesize`, and the marker should go with the rewrite.
-
-Predating the marker is a large body of tests that reach into `lower_to_mir`, `build` and the allocation tables
-directly -- the schedule, install-landing, const-install, overlap and microcode suites among them. Sweep them the
-same way and promote whatever the public API can now express. That sweep is its own piece of work.
-
 ## Frontend limitations
 
 Valid kernels that are conservatively rejected. None is a wrong answer; each is a located refusal with a rewrite.

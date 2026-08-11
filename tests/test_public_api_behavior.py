@@ -1,36 +1,21 @@
 """
-Public-API, black-box behavioral tests for the components that lacked black-box coverage.
+Public-API, black-box behavioral tests for if-conversion and select forms, NOT-folding in every consumer position,
+phi-arm coalescing, typed ports and multi-output kernels, and persistent boolean state.
 
-Every test here drives the compiler ONLY through the public API: ``holoso.synthesize(fn, ops) -> SynthesisResult``,
-then ``result.numerical_model.elaborate() -> NumericalSimulator``, and exercises the simulator
-(``run`` / ``reset`` / typed ``inputs`` / ``outputs`` metadata). Assertions are on OBSERVABLE behavior only: output
-values against an INDEPENDENT reference (the same kernel evaluated in Python float64, agreeing within the format
-tolerance; or two mathematically-equivalent formulations the compiler lowers differently and which must agree; or a
-hand-computed exact value for bools and exactly-representable arithmetic), persistent state across multiple
-transactions including a ``reset`` partway, and the typed-port metadata. No internal LIR / schedule / register /
-cycle-count structure is inspected, so these survive a deep refactor of any mid/back-end pass.
-
-These complement test_overlap_behavior.py (the cross-block-overlap surface). The genuine gaps filled here:
-  - if-conversion + select: sign-fold-into-select on both orientations, a comparison->select->float-op chain that
-    stays straight-line, a select whose two arms are different arithmetic, a nested ternary, and a division-bearing
-    diamond that STAYS a real branch -- with an if-convertible / real-branch PAIR of the SAME math asserted to agree.
-  - NOT-folding: ``not`` in every consumer position (branch condition, boolean-logic operand, boolean output,
-    boolean state slot, boolean phi arm), double negation, and one comparison consumed in BOTH polarities -- bools
-    asserted exact over the full truth table.
-  - phi-arm coalescing: a PURE loop-carried recurrence and the soundness corner (a diamond whose arms reuse an
-    input that is also a phi result), value-checked over many vectors (coalescing is output-neutral, so a correct
-    output across these proves the coalescing path).
-  - typed ports + multi-output: bool input, bool output, mixed float+bool tuple AND list returns, an UNUSED bool
-    input proven neutral by output invariance, with the scalar-type metadata read from the elaborated simulator.
-  - persistent state: a chained-slot kernel and a boolean state slot, each over a long stream with a ``reset``
-    partway, asserted against a Python reference running the same class.
-  - Commutative orientation + constant folding: ``a < b`` vs ``b > a`` agree (bool-exact), a constant-only
-    subexpression folds, and a comparison of two compile-time constants folds an arm away (still correct).
+Every test drives the compiler ONLY through the public API: ``holoso.synthesize(fn, ops) -> SynthesisResult``, then
+``result.numerical_model.elaborate() -> NumericalSimulator``, and exercises the simulator (``run`` / ``reset`` /
+typed ``inputs`` / ``outputs`` metadata). Assertions are on OBSERVABLE behavior only: output values against an
+INDEPENDENT reference (the same kernel evaluated in Python float64 within the format tolerance, two mathematically-
+equivalent formulations that must agree, or a hand-computed exact value), persistent state across transactions
+including a ``reset`` partway, and the typed-port metadata. No internal LIR / schedule / register / cycle-count
+structure is inspected, so these survive a deep refactor of any mid/back-end pass. Complements
+test_overlap_behavior.py (the cross-block-overlap surface) and test_arithmetic_behavior.py (numerical behavior and
+constant folding).
 """
 
 from collections.abc import Callable
 
-import numpy as np
+import pytest
 
 import holoso
 from holoso import (
@@ -165,12 +150,20 @@ def test_ifconvertible_and_real_branch_forms_agree() -> None:
     # Same operands and the same single division on each path: the if-converted (select) form and the real-branch form
     # must agree on both polarities and at the boundary. They additionally happen to be bit-identical here, which we
     # assert as a stronger bonus check; if a future heuristic change broke that, the ``_close`` agreement still stands.
+    # The structural difference is compile-time, so a directed set suffices: both branch polarities, the c == 0
+    # boundary, both signs of each operand, and a nontrivial (non-power-of-two) divisor via y.
     sim_ifc = _sim(_ifconv_division_form, "ifc_div")
     sim_br = _sim(_real_branch_division_form, "br_div")
-    rng = np.random.default_rng(0xC0FFEE)
-    samples = [(2.0, 3.0, 1.0), (2.0, 3.0, -1.0), (2.0, 3.0, 0.0), (-1.0, 2.0, 0.5)]
-    samples += [
-        (float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0)), float(rng.uniform(-3.0, 3.0))) for _ in range(40)
+    samples = [
+        (2.0, 3.0, 1.0),
+        (2.0, 3.0, -1.0),
+        (2.0, 3.0, 0.0),
+        (-1.0, 2.0, 0.5),
+        (-2.0, -3.0, 1.0),
+        (2.0, -3.0, -0.5),
+        (-2.0, 3.0, 0.0),
+        (0.0, 0.5, 1.0),
+        (1.5, -0.5, -2.0),
     ]
     for x, y, c in samples:
         a = float(sim_ifc.run(x, y, c)[0])
@@ -400,33 +393,6 @@ def test_unused_bool_input_is_neutral() -> None:
             assert _close(with_true, want, op_count=2), f"x={x} y={y}: {with_true} vs {want}"
 
 
-class _ChainedSlots:
-    """``_a`` captures ``_b``'s OLD value while ``_b`` advances -- two chained copy slots (read-first ordering)."""
-
-    def __init__(self) -> None:
-        self._a = 0.0
-        self._b = 0.0
-
-    def __call__(self, x: float) -> float:
-        out = self._a
-        self._a = self._b
-        self._b = x
-        return out
-
-
-def test_chained_slots_stream_and_reset() -> None:
-    # The chained slots only copy representable inputs (no arithmetic), so every value is exact. The output stream is
-    # the input stream delayed by two; a reset partway reloads both slots and restarts the delay line.
-    sim = _sim(_ChainedSlots().__call__, "chained_slots")
-    reference = _ChainedSlots()
-    for x in [1.0, 2.0, 3.0, 4.0, -1.0, 0.5, -2.0]:
-        assert float(sim.run(x)[0]) == reference(x), f"chain delay at x={x}"
-    sim.reset()
-    fresh = _ChainedSlots()
-    for x in [7.0, 8.0, 9.0, 10.0, 11.0]:
-        assert float(sim.run(x)[0]) == fresh(x), f"post-reset chain at x={x}"
-
-
 class _BoolStateMachine:
     """A boolean state slot updated by a comparison and consumed both as state and to gate the float output."""
 
@@ -484,33 +450,12 @@ def test_commuted_comparisons_agree_bool_exact() -> None:
                 assert a is want and b is want, f"xy={xy}: lt={a} gt={b} want={want}"
 
 
-def _constant_subexpression(x: float) -> float:
-    # A purely constant subexpression (``2*3 + 1`` -> 7.0) must fold at compile time; only ``x + 7.0`` survives. The
-    # output is checked against the float64 reference, so a folding bug that changed the constant would be caught.
-    k = 2.0 * 3.0 + 1.0
-    return x + k
+def test_out_of_range_operator_stage_knob_is_rejected_at_synthesis() -> None:
+    # Stage knobs are public, documented configuration, so an out-of-range value must surface as a diagnostic through
+    # ``synthesize`` itself rather than deep in operator construction.
+    def add(a: float, b: float) -> float:
+        return a + b
 
-
-def test_constant_subexpression_folds_and_is_correct() -> None:
-    sim = _sim(_constant_subexpression, "const_subexpr")
-    for x in (-3.0, 0.0, 1.0, 5.0):
-        got = float(sim.run(x)[0])
-        assert got == _constant_subexpression(x), f"x={x}: {got}"  # x + 7.0 is exact for these x
-
-
-def _constant_condition_folds_arm(x: float) -> float:
-    # A comparison of two COMPILE-TIME constants (``2.0 > 1.0``) folds the condition; only the true arm is lowered.
-    # The else arm divides by a compile-time zero -- if it were ever lowered the build would record an error / produce
-    # a wrong value, so a correct result on the kept arm proves the dead arm was pruned, not merely never taken.
-    if 2.0 > 1.0:
-        r = x + 1.0
-    else:
-        r = x / 0.0
-    return r
-
-
-def test_constant_condition_folds_dead_arm_away() -> None:
-    sim = _sim(_constant_condition_folds_arm, "const_cond_fold")
-    for x in (-2.0, 0.0, 3.0, 7.0):
-        got = float(sim.run(x)[0])
-        assert got == x + 1.0, f"x={x}: {got}"  # x + 1.0 is exact for these x
+    options = Options(OperatorOptions(fadd=FAddOptions(stage_decode=7)), ffmt=FMT)
+    with pytest.raises(ValueError, match="outside"):
+        holoso.synthesize(add, options, name="bad_stage_knob")
