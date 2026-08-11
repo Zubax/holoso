@@ -269,6 +269,7 @@ TARGETS: list[SynthTarget] = [
             F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_decode=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -390,11 +391,11 @@ TARGETS: list[SynthTarget] = [
         op_config(
             F_e8m36,
             fadd=FAddOptions(
-                stage_input=2, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+                stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
             ),
             fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-            fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
-            fmul_ilog2=FMulILog2Options(stage_decode=1),
+            fdiv=FDivOptions(stage_input=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
     ),
     for_example(
