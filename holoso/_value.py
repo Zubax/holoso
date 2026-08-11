@@ -108,7 +108,7 @@ class FloatValue:
         return result.gt - result.lt
 
     def scale_pow2(self, k: int) -> FloatValue:
-        """Matches ``zkf_mul_ilog2_const``."""
+        """Matches ``zkf_mul_ilog2``."""
         if isinstance(k, bool) or not isinstance(k, int):
             raise TypeError(f"k must be int, got {type(k).__name__}")
         return FloatValue.from_bits(self.fmt, self._zval.mul_ilog2(k).bits)

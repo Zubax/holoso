@@ -27,8 +27,6 @@ from ._operators import (
     FFromIntOperator,
     FLog2Operator,
     FMulILog2Operator,
-    FMulILog2OperatorFamily,
-    FMulILog2VarOperator,
     FMulOperator,
     FRoundOperator,
     FSincosOperator,
@@ -108,7 +106,6 @@ class OperatorOptions:
     fmul: FMulOperator.Options | None = None
     fdiv: FDivOperator.Options | None = None
     fmul_ilog2: FMulILog2Operator.Options | None = None
-    fmul_ilog2_var: FMulILog2VarOperator.Options | None = None
     fcmp: FCmpOperator.Options | None = None
     fround: FRoundOperator.Options | None = None
     ffma: FFmaOperator.Options | None = None
@@ -188,8 +185,7 @@ def _build_op_config(options: Options) -> OpConfig:
         fadd=FAddOperator(fmt, op.fadd) if op.fadd is not None else None,
         fmul=FMulOperator(fmt, op.fmul, wmul) if op.fmul is not None else None,
         fdiv=FDivOperator(fmt, op.fdiv) if op.fdiv is not None else None,
-        fmul_ilog2=FMulILog2OperatorFamily(fmt, op.fmul_ilog2) if op.fmul_ilog2 is not None else None,
-        fmul_ilog2_var=FMulILog2VarOperator(fmt, ifmt, op.fmul_ilog2_var) if op.fmul_ilog2_var is not None else None,
+        fmul_ilog2=FMulILog2Operator(fmt, ifmt, op.fmul_ilog2) if op.fmul_ilog2 is not None else None,
         fcmp=FCmpOperator(fmt, op.fcmp) if op.fcmp is not None else None,
         fround=FRoundOperator(fmt, op.fround) if op.fround is not None else None,
         ffma=FFmaOperator(fmt, op.ffma, wmul) if op.ffma is not None else None,

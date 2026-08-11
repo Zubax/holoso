@@ -18,6 +18,7 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
+    FloatValue,
     OperatorOptions,
     Options,
 )
@@ -103,6 +104,8 @@ from holoso._mir import (
     MirFloatConst,
     MirFloatInput,
     MirFloatOutput,
+    MirIntConst,
+    MirInterpreter,
     MirOperation,
 )
 from holoso._operators import FMulILog2Operator, FloatSignControl
@@ -177,6 +180,13 @@ def _consts(mir: Mir) -> list[float]:
     return [n.value for n in mir.nodes.values() if isinstance(n, MirFloatConst)]
 
 
+def _exponent_of(mir: Mir, op: MirOperation) -> int:
+    assert isinstance(op.operator, FMulILog2Operator)
+    exponent = mir.nodes[op.operands[1]]
+    assert isinstance(exponent, MirIntConst)
+    return exponent.value
+
+
 def test_hir_nodes_carry_float_type() -> None:
     builder = HirBuilder()
     builder.block()
@@ -249,27 +259,30 @@ def test_mul_by_pow2_const_becomes_ilog2() -> None:
     def f(a: float) -> float:
         return a * 0.25
 
-    ops = _ops(_run(f))
+    mir = _run(f)
+    ops = _ops(mir)
     assert len(ops) == 1
-    assert isinstance(ops[0].operator, FMulILog2Operator) and ops[0].operator.k == -2
+    assert _exponent_of(mir, ops[0]) == -2
 
 
 def test_left_const_fmul_pow2_is_commutative() -> None:
     def f(a: float) -> float:
         return 2 * a
 
-    ops = _ops(_run(f))
+    mir = _run(f)
+    ops = _ops(mir)
     assert len(ops) == 1
-    assert isinstance(ops[0].operator, FMulILog2Operator) and ops[0].operator.k == 1
+    assert _exponent_of(mir, ops[0]) == 1
 
 
 def test_div_by_pow2_becomes_ilog2() -> None:
     def f(a: float) -> float:
         return a / 4.0
 
-    ops = _ops(_run(f))
+    mir = _run(f)
+    ops = _ops(mir)
     assert len(ops) == 1
-    assert isinstance(ops[0].operator, FMulILog2Operator) and ops[0].operator.k == -2
+    assert _exponent_of(mir, ops[0]) == -2
 
 
 def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
@@ -302,11 +315,13 @@ def test_wide_supported_pow2_uses_ilog2_operator() -> None:
     mir = _run(f, ops, fmt)
     selected = _ops(mir)
     assert [type(o.operator) for o in selected] == [FMulILog2Operator]
-    assert isinstance(selected[0].operator, FMulILog2Operator) and selected[0].operator.k == 4
+    assert _exponent_of(mir, selected[0]) == 4
     assert _consts(mir) == []
 
 
-def test_unsupported_pow2_shift_is_rejected() -> None:
+def test_a_scale_past_the_float_range_builds_and_rails() -> None:
+    """The exponent is an integer constant, so no scale is refused; past the format's range the scaler rails."""
+
     def f(a: float) -> float:
         return a * 64.0
 
@@ -323,12 +338,39 @@ def test_unsupported_pow2_shift_is_rejected() -> None:
             ffmt=fmt,
         )
     )
-    try:
-        _run(f, ops, fmt)
-    except UnsupportedConstruct as ex:
-        assert "unsupported power-of-two float scale" in str(ex)
-    else:
-        assert False, "expected an unsupported power-of-two shift"
+    mir = _run(f, ops, fmt)
+    selected = _ops(mir)
+    assert [type(o.operator) for o in selected] == [FMulILog2Operator]
+    assert _exponent_of(mir, selected[0]) == 6
+    for value in [1.0, -0.5, 0.0]:
+        assert MirInterpreter(mir).run(value) == [FloatValue.from_float(fmt, value).scale_pow2(6)]
+
+
+def test_an_exponent_past_the_int_format_clamps_where_the_scaler_rails() -> None:
+    """
+    A count past the int word lies far beyond the float's dynamic range, so the clamped exponent rails identically.
+    """
+
+    def f(a: float) -> tuple[float, float]:
+        return a * 2.0**1000, a / 2.0**1000
+
+    options = Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+        ),
+        ffmt=FloatFormat(4, 5),
+        wint_min=2,
+    )
+    mir = lower_to_mir(lower(f).hir, build_ops(options), options.ffmt, options.ifmt, DEFAULT_IFCONV_MAX_OPS)
+    scales = [op for op in _ops(mir) if isinstance(op.operator, FMulILog2Operator)]
+    assert sorted(_exponent_of(mir, op) for op in scales) == [options.ifmt.min, options.ifmt.max]
+    for value in [1.0, -1.5, 0.0]:
+        loaded = FloatValue.from_float(options.ffmt, value)
+        assert MirInterpreter(mir).run(value) == [loaded.scale_pow2(1000), loaded.scale_pow2(-1000)]
 
 
 def test_true_division_stays_fdiv() -> None:
@@ -371,7 +413,7 @@ def test_selected_mir_has_only_input_const_operation_nodes() -> None:
         return (a - b) * 0.25 + a * b
 
     mir = _run(f)
-    assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirOperation)) for n in mir.nodes.values())
+    assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirIntConst, MirOperation)) for n in mir.nodes.values())
 
 
 def test_ekf1_stateless_lowering() -> None:
@@ -379,7 +421,7 @@ def test_ekf1_stateless_lowering() -> None:
     import ekf1_stateless
 
     mir = _run(ekf1_stateless.update_x_P)
-    assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirOperation)) for n in mir.nodes.values())
+    assert all(isinstance(n, (MirFloatInput, MirFloatConst, MirIntConst, MirOperation)) for n in mir.nodes.values())
     assert _op_count(mir, FDivOperator) == 1  # only x22 = 1 / x21
     assert _op_count(mir, FMulILog2Operator) >= 1  # the "2 * ..." terms
     assert len(mir.input_ids) == 17

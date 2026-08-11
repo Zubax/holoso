@@ -22,7 +22,7 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, FSortOperator, OpConfig
+from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, FSortOperator, OpConfig, require
 from holoso._errors import UnsupportedConstruct
 from holoso._operators import Relation
 from holoso._eel import lower
@@ -618,7 +618,7 @@ def _const_branch_mir(ops: OpConfig) -> Mir:
     never hands selection this shape -- pruning settles a decided branch -- so it is built directly, the LIR behavior
     below being worth covering regardless.
     """
-    fcmp, fadd = ops.require("fcmp"), ops.require("fadd")
+    fcmp, fadd = require(ops.fcmp, "fcmp"), require(ops.fadd, "fadd")
     port, inversion = fcmp.tap_of(Relation.GT)
     builder = MirBuilder(FMT, default_ifmt(FMT))
     entry, decided, taken, untaken, merge, bypass, join = (builder.block() for _ in range(7))
@@ -1353,8 +1353,8 @@ def _ilog2(mir: Mir) -> list[int]:
     ]
 
 
-def test_fmul_ilog2_same_k_shares_one_instance() -> None:
-    # Two K=2 scalings that never run on the same cycle (the second waits on a multiply) pool onto one instance.
+def test_fmul_ilog2_non_concurrent_scalings_share_one_instance() -> None:
+    # Two by-4 scalings that never run on the same cycle (the second waits on a multiply) pool onto one instance.
     def f(a: float, b: float) -> tuple[float, float]:
         return (a * b) * 4.0, b * 4.0
 
@@ -1367,8 +1367,8 @@ def test_fmul_ilog2_same_k_shares_one_instance() -> None:
     assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
 
 
-def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> None:
-    # Two independent K=2 scalings are both ready at cycle 1; the per-kind budget governs them like any other kind.
+def test_fmul_ilog2_concurrent_scalings_serialize_by_default() -> None:
+    # Two independent by-4 scalings are both ready at cycle 1; the per-kind budget governs them like any other kind.
     def f(a: float, b: float) -> tuple[float, float]:
         return a * 4.0, b * 4.0
 
@@ -1381,22 +1381,17 @@ def test_fmul_ilog2_same_k_serializes_by_default_parallelizes_with_budget() -> N
     assert sum(1 for i in one.instances if isinstance(i.operator, FMulILog2Operator)) == 1
 
 
-def test_fmul_ilog2_different_k_never_shares() -> None:
+def test_fmul_ilog2_different_exponents_share_one_instance() -> None:
     def f(a: float, b: float) -> float:
-        return a * 4.0 + b * 8.0  # K=2 and K=3 -- distinct hardware modules
+        return a * 4.0 + b * 8.0  # exponents 2 and 3 ride as constant operands of the one scaler
 
     mir = _run(f)
     il = _ilog2(mir)
     assert len(il) == 2
     sched = _schedule(mir)
-    assert sched.inst_of[il[0]] != sched.inst_of[il[1]]
-    ks: set[int] = set()
-    for v in il:
-        op = sched.inst_of[v].operator
-        assert isinstance(op, FMulILog2Operator)
-        ks.add(op.k)
-    assert ks == {2, 3}
-    assert {sched.inst_of[v].index for v in il} == {0}  # indices are local to each concrete operator value
+    assert sched.inst_of[il[0]] == sched.inst_of[il[1]]
+    assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]
+    assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
 
 
 def test_build_lir_small_kernel() -> None:
@@ -1790,7 +1785,7 @@ def test_build_lir_ekf1_stateless() -> None:
     assert len(lir.wide_outputs) == 9
     fdivs = [inst for inst in lir.instances if isinstance(inst.operator, FDivOperator)]
     assert len(fdivs) == 1
-    # The two K=1 power-of-two scalings are non-concurrent, so they pool onto a single shared instance.
+    # The two by-2 power-of-two scalings are non-concurrent, so they pool onto a single shared instance.
     assert sum(1 for inst in lir.instances if isinstance(inst.operator, FMulILog2Operator)) == 1
     assert lir.regfile.nreg < len(lir.ops) + len(lir.wide_inputs)
     # The interference test runs in the hardware frame (a value frees its register as soon as its last read precedes the
@@ -1801,10 +1796,10 @@ def test_build_lir_ekf1_stateless() -> None:
     assert lir.regfile.nreg <= 41
     # Inputs preload through the regfile's load port (registers 0..nload-1), so nload spans the input block.
     assert lir.regfile.nload == 17
-    # Dedicated ports: one read port per operator operand (sum of arities = 2+2+1+2), one write port per tapped wide
-    # output-port lane (the comparator's boolean taps contribute none).
+    # Dedicated ports: one read port per operator operand (sum of arities = 2+2+2+2, the scaler's exponent operand
+    # included), one write port per tapped wide output-port lane (the comparator's boolean taps contribute none).
     assert lir.regfile.nwr == 4
-    assert lir.regfile.nrd == 7
+    assert lir.regfile.nrd == 8
     # The 1/x21 numerator survives as a constant immediate.
     assert any(c == FloatValue.from_float(FMT, 1.0) for c in lir.wide_consts)
 
@@ -1846,8 +1841,12 @@ def test_constant_pool_is_canonically_nonnegative() -> None:
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
     lir = build_lir(_run(filt.update), "ekf1_stateful")
-    assert all(isinstance(c, FloatValue) and not c.negative for c in lir.wide_consts)
-    assert len(lir.wide_consts) == 6  # the +1000.0 / -1000.0 pair collapsed (was 7)
+    # Only floats fold their sign into the port conditioner; an integer constant (the scaler's exponent) is stored
+    # as written.
+    floats = [c for c in lir.wide_consts if isinstance(c, FloatValue)]
+    assert all(not c.negative for c in floats)
+    assert len(floats) == 6  # the ±1000.0 pair collapsed to one magnitude
+    assert len(lir.wide_consts) == 7  # plus the scaler's integer exponent
 
 
 def test_stateful_slot_register_gaps_are_reused() -> None:
@@ -1958,16 +1957,6 @@ def test_wide_view_rejects_missing_input_id() -> None:
         MirWideView.from_mir(mir)
 
 
-def test_fmul_ilog2_operator_rejects_out_of_range_k() -> None:
-    limit = (1 << FMT.wexp) - 2
-    assert FMulILog2Operator(FMT, -limit, FMulILog2Options()).k == -limit
-    assert FMulILog2Operator(FMT, limit - 1, FMulILog2Options()).k == limit - 1
-    with pytest.raises(ValueError, match="outside"):
-        FMulILog2Operator(FMT, limit, FMulILog2Options())
-    with pytest.raises(ValueError, match="outside"):
-        FMulILog2Operator(FMT, -limit - 1, FMulILog2Options())
-
-
 def test_float_operator_rejects_bad_stage_knob_at_construction() -> None:
     with pytest.raises(ValueError, match="outside"):
         FAddOperator(FMT, FAddOptions(stage_decode=7))
@@ -2029,7 +2018,7 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(
 
 
 def test_optional_stages_raise_latency_without_changing_numerics() -> None:
-    # A kernel touching every operator family: fadd, fmul, fdiv, and the 2^-2 strength-reduced fmul_ilog2.
+    # A kernel touching every operator kind: fadd, fmul, fdiv, and the 2^-2 strength-reduced fmul_ilog2.
     def kernel(a: float, b: float, c: float) -> float:
         return (a - b) / c + a * b * 0.25
 

@@ -17,7 +17,6 @@ from holoso import (
     FDivOptions,
     FFromIntOptions,
     FMulILog2Options,
-    FMulILog2VarOptions,
     FMulOptions,
     FSortOptions,
     FToIntOptions,
@@ -31,7 +30,7 @@ from holoso import (
 )
 from holoso._operators import (
     FFromIntOperator,
-    FMulILog2VarOperator,
+    FMulILog2Operator,
     FSortOperator,
     FToIntOperator,
     IAbsOperator,
@@ -106,13 +105,11 @@ def test_operator_instance_names_include_hardware_identity() -> None:
 
     fmt = FloatFormat(6, 18)
     lir = build_lir(_run(scale, _ops(fmt), fmt), "scale")
-    names = re.findall(
-        r"\bholoso_fmul_ilog2_const\s+#\([^;]+?\)\s+u_([A-Za-z_][A-Za-z0-9_]*)\s+\(", generate(lir).verilog
-    )
+    names = re.findall(r"\bholoso_fmul_ilog2\s+#\([^;]+?\)\s+u_([A-Za-z_][A-Za-z0-9_]*)\s+\(", generate(lir).verilog)
 
-    assert len(names) == len(set(names))
-    assert all(re.fullmatch(r"fmul_ilog2_const_[0-9a-f]{8}_0", name) for name in names)
-    assert all("stage_decode" not in name and "e6_m18" not in name and "_k_" not in name for name in names)
+    assert len(names) == 1  # both exponents ride one pooled scaler
+    assert all(re.fullmatch(r"fmul_ilog2_[0-9a-f]{8}_0", name) for name in names)
+    assert all("stage_decode" not in name and "e6_m18" not in name for name in names)
     assert all(name == name.lower() for name in names)
 
 
@@ -180,8 +177,8 @@ def _mixed_format_operators(ffmt: FloatFormat, ifmt: IntFormat) -> list[PooledHa
         FFromIntOperator(ffmt, ifmt, FFromIntOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1)),
         FToIntOperator(ffmt, ifmt, FToIntOptions()),
         FToIntOperator(ffmt, ifmt, FToIntOptions(stage_input=2)),
-        FMulILog2VarOperator(ffmt, ifmt, FMulILog2VarOptions()),
-        FMulILog2VarOperator(ffmt, ifmt, FMulILog2VarOptions(stage_input=1, stage_decode=1)),
+        FMulILog2Operator(ffmt, ifmt, FMulILog2Options()),
+        FMulILog2Operator(ffmt, ifmt, FMulILog2Options(stage_input=1, stage_decode=1)),
     ]
 
 
@@ -263,7 +260,7 @@ def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     (
         FFromIntOperator(FloatFormat(6, 18), IntFormat(44), FFromIntOptions()),
         FToIntOperator(FloatFormat(6, 18), IntFormat(44), FToIntOptions()),
-        FMulILog2VarOperator(FloatFormat(6, 18), IntFormat(44), FMulILog2VarOptions()),
+        FMulILog2Operator(FloatFormat(6, 18), IntFormat(44), FMulILog2Options()),
     ),
     ids=lambda operator: operator.mnemonic,
 )

@@ -7,7 +7,6 @@ from ._common import (
     HardwareOperator as HardwareOperator,
     InlineHardwareOperator as InlineHardwareOperator,
     IntIdentity as IntIdentity,
-    ParameterizedHardwareOperator as ParameterizedHardwareOperator,
     PooledHardwareOperator as PooledHardwareOperator,
     PortConditioner as PortConditioner,
     Relation as Relation,
@@ -33,8 +32,6 @@ from ._float import (
     FFromIntOperator as FFromIntOperator,
     FLog2Operator as FLog2Operator,
     FMulILog2Operator as FMulILog2Operator,
-    FMulILog2VarOperator as FMulILog2VarOperator,
-    FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
     FRoundOperator as FRoundOperator,
     FSincosOperator as FSincosOperator,
@@ -66,4 +63,4 @@ from ._int import (
     IntShiftConstOperator as IntShiftConstOperator,
     IntToBoolOperator as IntToBoolOperator,
 )
-from ._config import OpConfig as OpConfig
+from ._config import OpConfig as OpConfig, require as require

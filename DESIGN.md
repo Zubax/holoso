@@ -175,7 +175,8 @@ Verilog over the whole register. Floats pay in unused flip-flops and slightly wi
 integer is the wider format; one representation with no edge cases is worth more than the bits it wastes.
 
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers
-travel the whole pipeline into every backend. A static integer folds away before MIR ever sees it.
+travel the whole pipeline into every backend. A static integer the kernel wrote folds away before MIR ever sees it;
+the integer constants MIR holds are the machine's own -- a shift count, a scaler exponent.
 
 ## Operators
 
@@ -185,7 +186,6 @@ float ones delegate their timing and their reference arithmetic to the external 
 a closed-form latency and their own saturating arithmetic. Every hardware operator owns its signature, and a pooled
 one also owns the port names of the module it stands for and a compact HDL-safe identity stem, so the fully specified
 operator instance is itself the resource-sharing key and equal operators time-share one module.
-Per-node-parameterized operators are factories that instantiate a concrete operator.
 
 Every float operator is optional, so presence is a semantic choice as well as an area one
 (`ffma` enables FMA contraction, `fsort` enables min/max); what a kernel cannot reach through the operators
@@ -331,9 +331,9 @@ absorbed into the semantic `imul_pow2`, which saturates where the raw shift drop
 right shift outright (`x >> k` is exactly the floor division, negative dividends included), and the remainder
 becomes the two's-complement mask. No rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR)
 is bounded by the count of left shifts in the graph, which is the other reason the product cannot become one --
-while a minted right shift is off that ledger, since nothing substitutes it. The absorbed exponent also decides
-what materializes -- a scale no machine word holds never becomes a constant, so `x * 2**40` builds at any width
-while the equivalent spelled-out product is refused at selection.
+while a minted right shift is off that ledger, since nothing substitutes it. The absorbed scale itself never
+becomes a word -- only its exponent materializes, clamped into the int format at lowering -- so `x * 2**40` builds
+at any width while the equivalent spelled-out product is refused at selection.
 
 ### DEFERRED
 
@@ -361,9 +361,10 @@ HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, ea
 RESULT is its own; the bool-result operations over wide operands (the comparators and the casts into the boolean bank)
 sit with the dispatch that chains them. The float lowerer maps each semantic float operator to its configured
 hardware operator and collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands,
-results, or output wires. Multiply-by-power-of-two selects the constant-shift operator when the float format supports
-that exponent (an out-of-range exponent is rejected -- the equivalent constant would overflow or underflow the format
-anyway); the four rounding operators map to one shared `fround` distinguished by its `round_mode` immediate, and a
+results, or output wires. Multiply-by-power-of-two selects the `fmul_ilog2` scaler, whose exponent is an ordinary
+integer operand materialized as a constant; no exponent is refused, since one past the int format is clamped where
+the scaler already rails or flushes identically. The four rounding operators map to one shared `fround`
+distinguished by its `round_mode` immediate, and a
 float-to-integer conversion reading one of them carries it as its own mode instead of waiting on its result -- the
 rounding survives only if something else observes it, and then each rounds the value independently.
 The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign

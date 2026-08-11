@@ -312,16 +312,6 @@ class InlineHardwareOperator(HardwareOperator, ABC):
     def verilog_expr(self, *operand_nets: str) -> str: ...
 
 
-class ParameterizedHardwareOperator(ABC):
-    """
-    A family of hardware operators needing per-node parameters.
-    It carries only config-time values; the concrete :class:`HardwareOperator` it produces owns the hardware metadata.
-    """
-
-    @abstractmethod
-    def instantiate(self, *params: int) -> HardwareOperator: ...
-
-
 @dataclass(frozen=True, slots=True)
 class ComparatorOperator(PooledHardwareOperator, ABC):
     """

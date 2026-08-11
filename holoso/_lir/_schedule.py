@@ -80,10 +80,7 @@ def resolve_pool(nodes: dict[ValueId, MirNode]) -> dict[type[HardwareOperator], 
     """
     The per-class instance budget over the FULL node table: at least one of every pooled operator class present in
     the graph, whichever bank its taps land in (a comparator whose every tap is boolean still needs its instance).
-
-    The budget is applied per distinct hardware operator, so ``fmul_ilog2_const`` gets the requested number of
-    instances for each distinct ``K``. Only pooled (module-backed) operators are budgeted; inline operators carry no
-    physical instance.
+    Only pooled (module-backed) operators are budgeted; inline operators carry no physical instance.
     """
     pool: dict[type[HardwareOperator], int] = {}
     for node in nodes.values():

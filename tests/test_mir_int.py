@@ -65,7 +65,7 @@ from holoso._operators import (
     BoolToIntOperator,
     FAddOperator,
     FFromIntOperator,
-    FMulILog2VarOperator,
+    FMulILog2Operator,
     FToIntOperator,
     FloatSignControl,
     HardwareOperator,
@@ -355,7 +355,7 @@ def test_cross_family_operators_carry_mixed_conditioner_lists() -> None:
     builder.float_output(
         "scaled",
         builder.operation(
-            FMulILog2VarOperator(FMT, IFMT, FMulILog2VarOperator.Options()),
+            FMulILog2Operator(FMT, IFMT, FMulILog2Operator.Options()),
             [builder.float_const(1.5, FTYPE), k],
             [FloatSignControl(), IntIdentity()],
         ),

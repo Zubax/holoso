@@ -293,16 +293,6 @@ def cmp_oracle(a_bits: int, b_bits: int) -> tuple[int, int, int]:
     return int(a > b), int(a == b), int(a < b)
 
 
-def mul_ilog2_oracle_bits(a_bits: int, k: int) -> int | None:
-    """y = a * 2^k, exactly (when in-range). Returns None on NaN."""
-    a = bits_to_f32(a_bits)
-    y = np.float32(np.ldexp(float(a), k))
-    yb = f32_to_bits(y)
-    if is_nan_f32(yb):
-        return None
-    return _flush_to_zkf(yb)
-
-
 # Round-mode opcodes -- must match zkf_round's round_mode encoding and FRoundOperator's immediate values.
 ROUND_NEAREST_EVEN = 0
 ROUND_FLOOR = 1

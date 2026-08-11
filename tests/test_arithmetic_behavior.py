@@ -21,7 +21,7 @@ FALSIFIABLE without a tolerance fudge wherever the hardware must be exact:
     bit-different operands.
 
   - Axis D (fmul_ilog2 strength reduction): multiplication by power-of-two constants (x*2, x*0.5, x*8, x*0.125, x*2**-5)
-    lowers to the fmul_ilog2 family and is EXACT (a power-of-two only shifts the exponent, barring overflow/underflow);
+    lowers to the fmul_ilog2 scaler and is EXACT (a power-of-two only shifts the exponent, barring overflow/underflow);
     a non-power-of-two constant (x*3) stays an ordinary fmul and is still correct; a power-of-two that pushes a normal
     input to overflow (largest*2 -> inf) and to underflow (smallest_normal*0.25 -> 0).
 
@@ -449,7 +449,7 @@ def test_trivial_fast_math_float_folds_are_operator_free_and_bit_exact() -> None
     assert "holoso_fadd #" not in verilog
     assert "holoso_fmul #" not in verilog
     assert "holoso_fdiv #" not in verilog
-    assert "holoso_fmul_ilog2_const" not in verilog
+    assert "holoso_fmul_ilog2" not in verilog
 
     sim = result.numerical_model.elaborate()
     vectors = [

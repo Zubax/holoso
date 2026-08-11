@@ -18,7 +18,6 @@ from ._common import (
     FloatSignControl,
     ImmediateField,
     InlineHardwareOperator,
-    ParameterizedHardwareOperator,
     PooledHardwareOperator,
     PortConditioner,
     ScalarSignature,
@@ -189,52 +188,47 @@ class FDivOperator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2Operator(FloatHardwareOperator):
-    """Exact scaling by a power of two, ``a * 2**k``; the concrete operator the family returns."""
+class FMulILog2Operator(ZkfBackedOperator):
+    """Exact scaling by a power of two: ``a * 2**k``; every ``k`` is legal."""
+
+    ifmt: IntFormat
 
     @dataclass(frozen=True, slots=True)
     class Options:
         stage_input: int = 0
         stage_decode: int = 0
 
-    mnemonic: ClassVar[str] = "fmul_ilog2_const"
-    operand_hdl_ports: ClassVar[list[str]] = ["a"]
+    mnemonic: ClassVar[str] = "fmul_ilog2"
+    operand_hdl_ports: ClassVar[list[str]] = ["a", "k"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    k: int
     opt: Options
 
     def __post_init__(self) -> None:
-        model = zkf.MulIlog2ConstModel(
+        model = zkf.MulIlog2Model(
             zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            k=self.k,
+            wk=self.ifmt.width,
             stage_input=self.opt.stage_input,
             stage_decode=self.opt.stage_decode,
         )
         object.__setattr__(self, "_model", model)
 
     @property
+    def params(self) -> dict[str, int]:
+        # The wrapper sizes the exponent port by the machine's integer format, so it spells the core's WK as WINT.
+        return {("WINT" if name == "WK" else name): value for name, value in self._model.params.items()}
+
+    @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
+        return ScalarSignature((FloatType(self.fmt), IntType(self.ifmt)), (FloatType(self.fmt),))
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands)
-        return (a.scale_pow2(self.k),)
+        a, k = self._validated_operands(operands)
+        assert isinstance(a, FloatValue) and isinstance(k, IntValue)
+        return (a.scale_pow2(k.value),)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
-        (a,) = operands
-        return f"{a}×2^{self.k}"
-
-
-@dataclass(frozen=True, slots=True)
-class FMulILog2OperatorFamily(ParameterizedHardwareOperator):
-    """The ilog2 family: a factory whose stage knobs are baked into every concrete operator it instantiates."""
-
-    fmt: FloatFormat
-    opt: FMulILog2Operator.Options
-
-    def instantiate(self, *params: int) -> FMulILog2Operator:
-        (k,) = params
-        return FMulILog2Operator(fmt=self.fmt, k=k, opt=self.opt)
+        a, k = operands
+        return f"{a}×2^{k}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -791,47 +785,3 @@ class FToIntOperator(ZkfBackedOperator):
         (a,) = operands
         (mode,) = immediates
         return f"i{_ROUND_LABEL[RoundMode(mode)]}({a})"
-
-
-@dataclass(frozen=True, slots=True)
-class FMulILog2VarOperator(ZkfBackedOperator):
-    """Exact scaling by a power of two: ``a * 2**k``; every ``k`` is legal."""
-
-    ifmt: IntFormat
-
-    @dataclass(frozen=True, slots=True)
-    class Options:
-        stage_input: int = 0
-        stage_decode: int = 0
-
-    mnemonic: ClassVar[str] = "fmul_ilog2"
-    operand_hdl_ports: ClassVar[list[str]] = ["a", "k"]
-    output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
-
-    def __post_init__(self) -> None:
-        model = zkf.MulIlog2Model(
-            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
-            wk=self.ifmt.width,
-            stage_input=self.opt.stage_input,
-            stage_decode=self.opt.stage_decode,
-        )
-        object.__setattr__(self, "_model", model)
-
-    @property
-    def params(self) -> dict[str, int]:
-        # The wrapper sizes the exponent port by the machine's integer format, so it spells the core's WK as WINT.
-        return {("WINT" if name == "WK" else name): value for name, value in self._model.params.items()}
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((FloatType(self.fmt), IntType(self.ifmt)), (FloatType(self.fmt),))
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
-        a, k = self._validated_operands(operands)
-        assert isinstance(a, FloatValue) and isinstance(k, IntValue)
-        return (a.scale_pow2(k.value),)
-
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
-        a, k = operands
-        return f"{a}×2^{k}"
