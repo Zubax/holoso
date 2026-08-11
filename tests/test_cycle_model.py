@@ -22,7 +22,7 @@ from holoso._eel import lower
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, default_ops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -67,7 +67,7 @@ def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., obje
     # The hand-driven tick loop and the run() convenience must produce the same outputs: run() is just a tick
     # driver, and the cycle count it would observe is the loop count below.
     lir = build_lir(
-        lower_to_mir(lower(factory()).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(factory()).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     by_tick = NumericalSimulator(lir)
@@ -92,7 +92,7 @@ def test_single_path_latency_is_the_static_initiation_interval(name: str) -> Non
     }
     factory = factories[name]
     lir = build_lir(
-        lower_to_mir(lower(factory()).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(factory()).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     model = NumericalSimulator(lir)
@@ -106,9 +106,7 @@ def test_loop_latency_grows_with_the_trip_count() -> None:
     # Newton's reciprocal iterates until convergence, so a harder input runs more loop trips and a strictly longer
     # transaction -- the data-dependent latency a fixed ``initiation_interval`` cannot express.
     lir = build_lir(
-        lower_to_mir(
-            lower(NewtonReciprocal().__call__).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS
-        ),
+        lower_to_mir(lower(NewtonReciprocal().__call__).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         "recip",
     )
     model = NumericalSimulator(lir)
@@ -122,7 +120,7 @@ def test_deep_loop_runs_in_bounded_memory() -> None:
     # count executes without unbounded growth. ``count_down`` runs ``n`` iterations; at n=20000 that is hundreds of
     # thousands of ticks completing in bounded memory and time -- a global-timeline design would be O(trips^2).
     lir = build_lir(
-        lower_to_mir(lower(_count_down).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(_count_down).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         "count_down",
     )
     shallow_cycles = _drive(NumericalSimulator(lir), [10.0])[1]
@@ -192,7 +190,7 @@ def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
     # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is ``<=``).
     factory, vectors, worst = _WORST_CASE_LATENCY[name]
     lir = build_lir(
-        lower_to_mir(lower(factory()).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(factory()).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     model = NumericalSimulator(lir)

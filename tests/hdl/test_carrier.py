@@ -83,9 +83,7 @@ async def float_leaves_the_upper_carrier_bits_clear(dut: Any) -> None:
 def test_float_leaves_the_upper_carrier_bits_clear(sim: str) -> None:
     options = _options()
     lir = build_lir(
-        lower_to_mir(
-            lower(_Accumulate().__call__).hir, build_ops(options), options.ffmt, options.ifmt, DEFAULT_IFCONV_MAX_OPS
-        ),
+        lower_to_mir(lower(_Accumulate().__call__).hir, build_ops(options), DEFAULT_IFCONV_MAX_OPS),
         "carrier",
     )
     assert lir.int_format.width == WINT_MIN > options.ffmt.width

@@ -25,7 +25,7 @@ from holoso._eel import lower
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, default_ops
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, sources
 
 _HDL_DIR = Path(__file__).resolve().parent / "hdl"
@@ -53,7 +53,7 @@ class _ConstInstallState:
 def _verilog(fn: Callable[..., object], name: str) -> str:
     return generate_verilog(
         build_lir(
-            lower_to_mir(lower(fn).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
+            lower_to_mir(lower(fn).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
             name,
         )
     ).verilog
@@ -127,7 +127,7 @@ def _run_bench(name: str, lir: Lir, testcase: str, env: dict[str, int], monkeypa
 def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_edge_k{k}"
     lir = build_lir(
-        lower_to_mir(lower(_cycle0_kernel).hir, default_ops(_FMT), _FMT, default_ifmt(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(_cycle0_kernel).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].ops), "kernel must issue a pooled op on cycle 0"
@@ -142,8 +142,6 @@ def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) 
         lower_to_mir(
             lower(_ConstInstallState().__call__).hir,
             default_ops(_FMT),
-            _FMT,
-            default_ifmt(_FMT),
             DEFAULT_IFCONV_MAX_OPS,
         ),
         name,

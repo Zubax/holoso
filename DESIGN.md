@@ -184,8 +184,8 @@ HIR carries pure semantic operations from a HIR-local operator hierarchy; an ope
 operand value IDs. Concrete hardware operators are frozen dataclasses whose fields are Holoso-exposed parameters;
 float ones delegate their timing and their reference arithmetic to the external ZKF library, while integer ones carry
 a closed-form latency and their own saturating arithmetic. Every hardware operator owns its signature, and a pooled
-one also owns the port names of the module it stands for and a compact HDL-safe identity stem, so the fully specified
-operator instance is itself the resource-sharing key and equal operators time-share one module.
+one also owns the port names of the module it stands for, so the fully specified operator instance is itself the
+resource-sharing key; a machine holds one configuration per pooled class, instances named by mnemonic and copy index.
 
 Every float operator is optional, so presence is a semantic choice as well as an area one
 (`ffma` enables FMA contraction, `fsort` enables min/max); what a kernel cannot reach through the operators
@@ -432,8 +432,8 @@ read-address latches were tried and dropped: inconsistent across result classes 
 installs). Because the banks and the pooled/inline classes are uniform instances of one model rather than hand-coded
 cases, boolean-logic and cast chains schedule back-to-back. Block-resident operands (inputs, state reads, phis) are
 available from the block's first control word. Ready ops issue in critical-path order onto free instances, pooled by
-the fully specified hardware operator itself (equal-by-value); a per-class budget, currently fixed at one instance
-per distinct operator value, serializes co-issues beyond it.
+the fully specified hardware operator itself (equal-by-value); a per-class budget, currently one, serializes
+co-issues beyond it.
 
 ### Register allocation
 

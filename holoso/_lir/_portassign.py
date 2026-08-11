@@ -70,7 +70,7 @@ def assign_commutative_ports(
         if orientation is None:
             _logger.warning(
                 "Commutative port assignment fallback: instance=%s index=%d uses=%d fan_in_before=%d",
-                inst.operator.instance_stem,
+                inst.operator.mnemonic,
                 inst.index,
                 len(uses),
                 before,

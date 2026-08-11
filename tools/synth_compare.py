@@ -65,8 +65,6 @@ def capture(out_path: str) -> None:
                 lower_to_mir(
                     lower(target.kernel()).hir,
                     build_ops(target.ops),
-                    target.ops.ffmt,
-                    target.ops.ifmt,
                     target.ops.ifconv_max_ops,
                 ),
                 target.name,

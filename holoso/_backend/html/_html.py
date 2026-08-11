@@ -93,7 +93,7 @@ def _stage_config(lir: Lir) -> str:
     rows = 0
     for op in seen:
         for param, value in op.params.items():
-            out.append(f"<tr><td>{_esc(op.instance_stem)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
+            out.append(f"<tr><td>{_esc(op.mnemonic)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
             rows += 1
     if rows == 0:
         out.append("<tr><td colspan='3'>(defaults)</td></tr>")

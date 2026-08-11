@@ -22,7 +22,7 @@ from holoso import (
     Options,
     UnsupportedConstruct,
 )
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_model, default_options, generate
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, build_model, default_options, generate
 from holoso._eel import lower
 from holoso._lir import Lir, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
@@ -82,7 +82,7 @@ def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
 
 
 def _run(target: Callable[..., object], ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Mir:
-    return lower_to_mir(lower(target).hir, OPS, FMT, default_ifmt(FMT), ifconv_max_ops)
+    return lower_to_mir(lower(target).hir, OPS, ifconv_max_ops)
 
 
 def test_model_exact_integer_comparison_is_not_folded_via_float() -> None:
@@ -388,7 +388,7 @@ def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
             ffmt=fmt,
         )
     )
-    model = build_model(build_lir(lower_to_mir(lower(f).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS), "f"))
+    model = build_model(build_lir(lower_to_mir(lower(f).hir, ops, DEFAULT_IFCONV_MAX_OPS), "f"))
     assert model.run(FloatValue.from_float(fmt, 0.5))[0] == FloatValue.from_float(fmt, 8.0)
 
 
@@ -433,7 +433,7 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
             ffmt=fmt,
         )
     )
-    mir = lower_to_mir(lower(f).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS)
+    mir = lower_to_mir(lower(f).hir, ops, DEFAULT_IFCONV_MAX_OPS)
     model = build_model(build_lir(mir, "f"))
     got = model.run(
         FloatValue.from_bits(fmt, 0x42BF30E6505),

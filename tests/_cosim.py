@@ -31,7 +31,7 @@ def run_cosim(
     """
     ops = build_ops(options) if ops is None else ops
     fmt, ifmt = options.ffmt, options.ifmt
-    lir = build_lir(lower_to_mir(lower(fn).hir, ops, fmt, ifmt, options.ifconv_max_ops), name)
+    lir = build_lir(lower_to_mir(lower(fn).hir, ops, options.ifconv_max_ops), name)
     model = generate(lir)
     # Generated sources live outside the cocotb build dir, which the runner wipes on clean=True.
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"{name}_w{fmt.wexp}_{fmt.wman}_r{ifmt.width}"

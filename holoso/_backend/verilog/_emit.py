@@ -68,7 +68,7 @@ class _Writer:
 
 
 def _sig(inst: OperatorInstance) -> str:
-    return f"s_{base_name(inst)}"
+    return f"s_{inst.name}"
 
 
 def _lit(width: int, value: int) -> str:
@@ -378,7 +378,7 @@ def _emit_consts(w: _Writer, lir: Lir) -> None:
 
 def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, int]]) -> None:
     for inst in lir.instances:
-        sig, base = _sig(inst), base_name(inst)
+        sig, base = _sig(inst), inst.name
         operator = inst.operator
         letters = PORT_LETTERS[: operator.signature.arity]
         # The module names its own operand ports; the nets and microcode fields they connect to stay positional.
@@ -598,7 +598,7 @@ def _emit_read_muxes(
     w.push()
     for inst in lir.instances:
         sig = _sig(inst)
-        base = base_name(inst)
+        base = inst.name
         for pos in range(inst.operator.signature.arity):
             _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", f_rd(base, PORT_LETTERS[pos]), read_books[(inst, pos)])
     w.pop()

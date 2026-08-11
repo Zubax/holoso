@@ -3,7 +3,7 @@
 import logging
 import math
 from collections import Counter
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 
 from .._errors import UnsupportedConstruct
 from .._hir import (
@@ -136,9 +136,7 @@ from .._operators import (
 )
 from .._type import (
     BoolType as ScalarBoolType,
-    FloatFormat,
     FloatType as ScalarFloatType,
-    IntFormat,
     IntType as ScalarIntType,
     ScalarType,
 )
@@ -479,36 +477,13 @@ def _plan_absorbed_roundings(hir: Hir, use_counts: dict[ValueId, int]) -> set[Va
     return _wholly_taken(absorptions, use_counts)
 
 
-def _operator_formats_match(
-    operator: HardwareOperator | None, float_format: FloatFormat, int_format: IntFormat
-) -> bool:
-    """
-    Every port of a configured operator must carry the machine's format for its own family. Read off the signature
-    rather than off the operator's ``fmt``, because a conversion operator carries one format per side and asking a
-    format which family it belongs to can only confirm that it matches its own kind.
-    """
-    if operator is None:
-        return True
-    signature = operator.signature
-    return all(
-        (ty.fmt == float_format if isinstance(ty, ScalarFloatType) else True)
-        and (ty.fmt == int_format if isinstance(ty, ScalarIntType) else True)
-        for ty in signature.operand_types + signature.result_types
-    )
-
-
 class _LoweringContext:
-    def __init__(self, hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat) -> None:
+    def __init__(self, hir: Hir, ops: OpConfig) -> None:
         self.hir = hir
         self.ops = ops
-        self.float_format = float_format
-        self.int_format = int_format
-        assert int_format.width >= float_format.width, "one wide register holds either family whole"
-        for field in fields(ops):
-            assert _operator_formats_match(
-                getattr(ops, field.name), float_format, int_format
-            ), f"the configured {field.name!r} is not built for the machine's format of every family its ports name"
-        self.builder = MirBuilder(float_format, int_format)
+        self.float_format = ops.float_format
+        self.int_format = ops.int_format
+        self.builder = MirBuilder(self.float_format, self.int_format)
         self.remap: dict[ValueId, ValueId] = {}
         # Every plan below reads the same whole-DAG reference count.
         use_counts = _compute_use_counts(hir)
@@ -1293,7 +1268,7 @@ class _IntLowerer:
         return True
 
 
-def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFormat, ifconv_max_ops: int) -> Mir:
+def lower(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Mir:
     """
     Optimize the front end's HIR against this machine, judge what survives, then select hardware operators for it and
     fold semantic signs onto MIR sign controls.
@@ -1307,7 +1282,7 @@ def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFor
     """
     hir = optimize(hir, ifconv_max_ops)
     rounds = left_shifts(hir) + 1  # every substitution deletes one, and no pass mints one
-    while (substituted := specialize(hir, int_format)) is not None:
+    while (substituted := specialize(hir, ops.int_format)) is not None:
         rounds -= 1
         assert rounds > 0, "specialization unsettled what an earlier round settled"
         hir = optimize(substituted, ifconv_max_ops)
@@ -1319,4 +1294,4 @@ def lower(hir: Hir, ops: OpConfig, float_format: FloatFormat, int_format: IntFor
         len(hir.blocks),
     )
     refuse(hir)
-    return _LoweringContext(hir, ops, float_format, int_format).run()
+    return _LoweringContext(hir, ops).run()

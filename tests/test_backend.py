@@ -46,7 +46,7 @@ from holoso._operators import (
 )
 from holoso._type import FloatType, IntType, ScalarType
 from holoso._backend.verilog import generate
-from holoso._backend.verilog._microcode import PORT_LETTERS, base_name, tapped_lanes
+from holoso._backend.verilog._microcode import PORT_LETTERS, tapped_lanes
 from holoso._eel import lower
 from holoso._lir import BoolRegRef, Lir, RegRef, pooled_write_word
 from holoso._mir import Mir, lower as lower_to_mir
@@ -73,7 +73,7 @@ def _ops(fmt: FloatFormat) -> OpConfig:
 
 
 def _run(target: object, ops: OpConfig, fmt: FloatFormat) -> Mir:
-    return lower_to_mir(lower(target).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS)
+    return lower_to_mir(lower(target).hir, ops, DEFAULT_IFCONV_MAX_OPS)
 
 
 def _compile(name: str, verilog: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
@@ -99,18 +99,14 @@ def _elaborate(name: str, verilog: str, tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_operator_instance_names_include_hardware_identity() -> None:
+def test_operator_instance_names_are_mnemonic_and_copy_index() -> None:
     def scale(a: float, b: float) -> float:
         return a * 4.0 + b * 8.0
 
     fmt = FloatFormat(6, 18)
     lir = build_lir(_run(scale, _ops(fmt), fmt), "scale")
     names = re.findall(r"\bholoso_fmul_ilog2\s+#\([^;]+?\)\s+u_([A-Za-z_][A-Za-z0-9_]*)\s+\(", generate(lir).verilog)
-
-    assert len(names) == 1  # both exponents ride one pooled scaler
-    assert all(re.fullmatch(r"fmul_ilog2_[0-9a-f]{8}_0", name) for name in names)
-    assert all("stage_decode" not in name and "e6_m18" not in name for name in names)
-    assert all(name == name.lower() for name in names)
+    assert names == ["fmul_ilog2_0"]  # both exponents ride one pooled scaler, named by mnemonic and copy index
 
 
 @requires_iverilog
@@ -554,13 +550,11 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         # Each per-port result is a combinational output wire (s_..._y{q}, no _q register) that drives the register
         # write directly.
         assert f"_y{q}_q" not in verilog, "the per-port result register must not be emitted"
+        assert re.search(rf"wire\s+\[WFLT-1:0\]\s+s_fsort_0_y{q}\s*;", verilog), "per-port combinational result wire"
         assert re.search(
-            rf"wire\s+\[WFLT-1:0\]\s+s_fsort_\w+_0_y{q}\s*;", verilog
-        ), "per-port combinational result wire"
-        assert re.search(
-            rf"regs\[\d+\] <= s_fsort_\w+_0_y{q}\b", verilog
+            rf"regs\[\d+\] <= s_fsort_0_y{q}\b", verilog
         ), "the wide write must read the combinational output wire directly"
-        assert re.search(rf"uc_fsort_\w+_0_y{q}sgn\b", verilog)
+        assert re.search(rf"uc_fsort_0_y{q}sgn\b", verilog)
     assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")
@@ -683,7 +677,7 @@ def _instantiation(verilog: str, mnemonic: str) -> str:
 def _integer_lir() -> Lir:
     hir = lower(_IntegerKernel().step).hir
     ops = build_ops(_INT_OPTIONS)
-    return build_lir(lower_to_mir(hir, ops, _INT_OPTIONS.ffmt, _INT_OPTIONS.ifmt, DEFAULT_IFCONV_MAX_OPS), "int_kernel")
+    return build_lir(lower_to_mir(hir, ops, DEFAULT_IFCONV_MAX_OPS), "int_kernel")
 
 
 @pytest.mark.whitebox
@@ -710,7 +704,7 @@ def test_only_a_float_port_is_allocated_a_microcode_sign_field() -> None:
     tapped = tapped_lanes(lir)
     expected = set()
     for inst in lir.instances:
-        base = base_name(inst)
+        base = inst.name
         signature = inst.operator.signature
         expected |= {
             f"uc_{base}_{PORT_LETTERS[pos]}sgn"

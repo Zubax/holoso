@@ -116,7 +116,7 @@ def test_default_options_carry_the_documented_int_format() -> None:
 def test_the_int_format_is_never_narrower_than_the_float(wint_min: int, width: int) -> None:
     options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
     assert options.ifmt == IntFormat(width)
-    mir = lower_to_mir(lower_frontend(_add).hir, build_ops(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
+    mir = lower_to_mir(lower_frontend(_add).hir, build_ops(options), options.ifconv_max_ops)
     assert mir.int_format == options.ifmt
     assert build_lir(mir, "int_format_probe").int_format == options.ifmt
 

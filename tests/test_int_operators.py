@@ -28,8 +28,6 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._eel import lower
-from holoso._mir import lower as lower_to_mir
 from holoso._operators import (
     BoolToIntOperator,
     FFromIntOperator,
@@ -57,7 +55,7 @@ from holoso._operators import (
 from holoso._type import IntType
 from holoso._value import IntValue
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_ops
+from ._modelref import build_ops
 from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishl, signed
 
 EXHAUSTIVE_WIDTHS = (2, 3, 4, 5, 6)
@@ -242,7 +240,6 @@ def test_multiplier_staging_is_part_of_the_hardware_identity() -> None:
     # The operator is the resource-sharing key: two differently staged multipliers must not pool onto one module.
     fmt = IntFormat(33)
     instances = [IMulOperator(fmt, IMulOptions(stage_product=stage)) for stage in range(5)]
-    assert len({operator.instance_stem for operator in instances}) == len(instances)
     assert len(set(instances)) == len(instances)
     assert IMulOperator(fmt, IMulOptions()) == IMulOperator(fmt, IMulOptions(stage_product=0))
 
@@ -380,17 +377,13 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
     assert ops.ftoint.signature.result_types == (IntType(IntFormat(44)),)
 
 
-def test_the_lowering_checks_every_port_format_and_not_just_the_operator_kind() -> None:
-    # A conversion operator carries one format per side, so the check that keyed on the operator's own ``fmt`` could
+def test_the_configuration_checks_every_port_format_and_not_just_the_operator_kind() -> None:
+    # A conversion operator carries one format per side, so a check keyed on the operator's own ``fmt`` could
     # not see a wrong ``ifmt`` at all -- it read the float side and agreed with itself.
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33)
     ops = build_ops(options)
-    mismatched = replace(ops, ftoint=FToIntOperator(options.ffmt, IntFormat(17), FToIntOptions()))
-    hir = lower(_add).hir
-    budget = DEFAULT_IFCONV_MAX_OPS
-    lower_to_mir(hir, ops, options.ffmt, options.ifmt, budget)  # the premise: a matching configuration lowers
     with pytest.raises(AssertionError, match="ftoint"):
-        lower_to_mir(hir, mismatched, options.ffmt, options.ifmt, budget)
+        replace(ops, ftoint=FToIntOperator(options.ffmt, IntFormat(17), FToIntOptions()))
 
 
 def _add(a: float, b: float) -> float:

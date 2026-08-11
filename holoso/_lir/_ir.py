@@ -212,7 +212,7 @@ def residence_rows(
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
     """
-    One physical operator module, e.g. ``u_fadd_326215ea_0`` or ``u_fcmp_7296114c_0``.
+    One physical operator module, e.g. ``u_fadd_0`` or ``u_fcmp_0``.
 
     ``operator`` is the fully specified pooled hardware operator it elaborates; ``index`` numbers the copies of that
     operator value. The scheduler pools firings by the hardware-operator instance: equal operators may time-share one
@@ -221,6 +221,10 @@ class OperatorInstance:
 
     operator: PooledHardwareOperator
     index: int  # 0-based within this concrete operator value
+
+    @property
+    def name(self) -> str:
+        return f"{self.operator.mnemonic}_{self.index}"
 
     def __post_init__(self) -> None:
         # A pooled result commits at issue + latency, so latency >= 1 keeps its write opcode off the held ``ucode[0]``
@@ -689,6 +693,9 @@ class Lir:
     def __post_init__(self) -> None:
         assert self.int_format.width >= self.float_format.width  # the wide bank is exactly the integer width
         assert self.fetch_lag in (1, 2), self.fetch_lag
+        assert len({inst.operator for inst in self.instances}) == len(
+            {type(inst.operator) for inst in self.instances}
+        ), "instance names index within the mnemonic, so one operator configuration per pooled class"
         # Cross-block instance reuse on a DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
         # header, the Ret), which carries no per-instance busy residue -- needs the instance provably idle by the
         # time that successor first issues on it: the worst case is a firing committing at its block's makespan
@@ -851,7 +858,7 @@ class Lir:
                 if (op.inst, write.port) not in writers:
                     writers.append((op.inst, write.port))
         for writers in sets.values():
-            writers.sort(key=lambda lane: (lane[0].operator.instance_stem, lane[0].index, lane[1]))
+            writers.sort(key=lambda lane: (lane[0].operator.mnemonic, lane[0].index, lane[1]))
         return sets
 
     @property
@@ -902,7 +909,7 @@ class Lir:
             for ops in group.values():
                 ops.sort(
                     key=lambda op: (
-                        op.inst.operator.instance_stem,
+                        op.inst.operator.mnemonic,
                         op.inst.index,
                         op.writes[0].dst.index,
                         op.issue_cycle,

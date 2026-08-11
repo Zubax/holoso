@@ -182,6 +182,8 @@ def _build_op_config(options: Options) -> OpConfig:
     """The one place the user's configuration becomes hardware."""
     fmt, ifmt, wmul, op = options.ffmt, options.ifmt, options.wmultiplier or 0, options.operator
     return OpConfig(
+        float_format=fmt,
+        int_format=ifmt,
         fadd=FAddOperator(fmt, op.fadd) if op.fadd is not None else None,
         fmul=FMulOperator(fmt, op.fmul, wmul) if op.fmul is not None else None,
         fdiv=FDivOperator(fmt, op.fdiv) if op.fdiv is not None else None,
@@ -221,7 +223,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     _logger.info("\tifmt: %s (derived)", options.ifmt)
 
     frontend = lower_frontend(target)
-    mir = lower_to_mir(frontend.hir, _build_op_config(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
+    mir = lower_to_mir(frontend.hir, _build_op_config(options), options.ifconv_max_ops)
     lir = build(
         mir,
         module_name,

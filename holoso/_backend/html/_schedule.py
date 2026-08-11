@@ -290,7 +290,7 @@ def render_schedule(lir: Lir) -> str:
     for inst in lir.instances:
         lat = inst.operator.latency
         # full name, set vertically so a 1-stage operator does not widen
-        name = f"{inst.operator.instance_stem}_{inst.index}"
+        name = inst.name
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
             f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{operator_colors[type(inst.operator)]}'>"

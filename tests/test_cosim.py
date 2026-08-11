@@ -29,7 +29,6 @@ from holoso._value import ScalarLike
 from ._cosim import run_cosim
 from ._modelref import (
     DEFAULT_IFCONV_MAX_OPS,
-    default_ifmt,
     default_options,
     build_ops,
     build_lir,
@@ -428,7 +427,7 @@ def test_cosim_div0_error(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
     name = f"kdiv_{config.label}"
     lir = build_lir(
-        lower_to_mir(lower(kdiv).hir, config.make_ops(fmt), fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(kdiv).hir, config.make_ops(fmt), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     bench = _ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
@@ -494,7 +493,7 @@ def test_cosim_log2_error(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
     name = f"klog2_{config.label}"
     lir = build_lir(
-        lower_to_mir(lower(klog2).hir, config.make_ops(fmt), fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(klog2).hir, config.make_ops(fmt), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     bench = _LOG2_ERR_BENCH.replace("@@WEXP@@", str(fmt.wexp)).replace("@@WMAN@@", str(fmt.wman))
@@ -563,9 +562,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OperatorCase) -> None:
     fmt = FloatFormat(6, 18)
     name = f"overlap_div_err_{config.label}"
     lir = build_lir(
-        lower_to_mir(
-            lower(overlap_div_err_kernel).hir, config.make_ops(fmt), fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS
-        ),
+        lower_to_mir(lower(overlap_div_err_kernel).hir, config.make_ops(fmt), DEFAULT_IFCONV_MAX_OPS),
         name,
     )
     entry = next(block for block in lir.blocks if block.index == lir.entry)

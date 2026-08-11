@@ -115,7 +115,7 @@ def _ops() -> holoso.Options:
 def test_float_corpus_lowers_through_mir(
     name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
 ) -> None:
-    lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ffmt, _ops().ifmt, _ops().ifconv_max_ops)
+    lower_to_mir(lower(make()).hir, build_ops(_ops()), _ops().ifconv_max_ops)
 
 
 def _int_ops() -> holoso.Options:
@@ -158,7 +158,7 @@ def test_int_corpus_agrees_across_hir_interpreter_and_model(
 ) -> None:
     options = _int_ops()
     hir = lower(make()).hir
-    mir = lower_to_mir(hir, build_ops(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
+    mir = lower_to_mir(hir, build_ops(options), options.ifconv_max_ops)
     model = build_model(build_lir(mir, name))  # the scheduled machine over the same selection
     evaluator, interpreter = HirEvaluator(hir), MirInterpreter(mir)
     names = hir.input_names()

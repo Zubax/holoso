@@ -3,28 +3,13 @@ The vocabulary every hardware operator family shares: the port conditioners, the
 two operators that belong to no one family.
 """
 
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import blake2s
 from typing import ClassVar, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
 from .._type import BoolType, FloatType, IntType, ScalarType
-
-
-def _instance_stem_text(text: str) -> str:
-    return re.sub(r"[^0-9a-z_]+", "_", text.lower()).strip("_") or "x"
-
-
-def _instance_stem_hash(params: dict[str, int]) -> str:
-    payload = "\n".join(f"{name}={value}" for name, value in sorted(params.items())).encode("ascii")
-    return blake2s(payload, digest_size=4).hexdigest()
-
-
-def _hashed_instance_stem(mnemonic: str, params: dict[str, int]) -> str:
-    return f"{_instance_stem_text(mnemonic)}_{_instance_stem_hash(params)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,14 +262,6 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     @property
     def module_name(self) -> str:
         return f"holoso_{self.mnemonic}"
-
-    @property
-    def instance_stem(self) -> str:
-        """
-        Verilog-safe physical instance stem, compactly identifying this operator family and its RTL parameters.
-        Override this if the operator's hardware identity is not fully captured by its mnemonic and parameters.
-        """
-        return _hashed_instance_stem(self.mnemonic, self.params)
 
     @property
     @abstractmethod

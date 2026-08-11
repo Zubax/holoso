@@ -96,7 +96,7 @@ from holoso._hir import (
     IntToFloat,
     IntType,
 )
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir
+from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir
 from holoso._mir._refuse import refuse
 from holoso._mir import (
     lower as lower_to_mir,
@@ -165,7 +165,7 @@ class OtherFold(Operator):
 
 
 def _run(target: Callable[..., object], ops: OpConfig = OPS, fmt: FloatFormat = FMT) -> Mir:
-    return lower_to_mir(lower(target).hir, ops, fmt, default_ifmt(fmt), DEFAULT_IFCONV_MAX_OPS)
+    return lower_to_mir(lower(target).hir, ops, DEFAULT_IFCONV_MAX_OPS)
 
 
 def _op_count(mir: Mir, cls: type) -> int:
@@ -214,7 +214,7 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
     hir = builder.finish()
 
     try:
-        lower_to_mir(hir, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(hir, OPS, DEFAULT_IFCONV_MAX_OPS)
     except UnsupportedConstruct as ex:
         assert "no MIR lowering rule" in str(ex)
     else:
@@ -365,7 +365,7 @@ def test_an_exponent_past_the_int_format_clamps_where_the_scaler_rails() -> None
         ffmt=FloatFormat(4, 5),
         wint_min=2,
     )
-    mir = lower_to_mir(lower(f).hir, build_ops(options), options.ffmt, options.ifmt, DEFAULT_IFCONV_MAX_OPS)
+    mir = lower_to_mir(lower(f).hir, build_ops(options), DEFAULT_IFCONV_MAX_OPS)
     scales = [op for op in _ops(mir) if isinstance(op.operator, FMulILog2Operator)]
     assert sorted(_exponent_of(mir, op) for op in scales) == [options.ifmt.min, options.ifmt.max]
     for value in [1.0, -1.5, 0.0]:
@@ -735,9 +735,7 @@ def test_bselect_reductions_are_truth_table_correct() -> None:
         hir = _hir_of(fn)
         has_select = any(isinstance(n, Operation) and isinstance(n.operator, BoolSelect) for n in hir.nodes.values())
         assert has_select == keeps_select, f"{fn.__name__}: bselect presence {has_select} != expected {keeps_select}"
-        model = build_model(
-            build_lir(lower_to_mir(lower(fn).hir, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS), fn.__name__)
-        )
+        model = build_model(build_lir(lower_to_mir(lower(fn).hir, OPS, DEFAULT_IFCONV_MAX_OPS), fn.__name__))
         for combo in itertools.product([False, True], repeat=arity):
             got = bool(model.run(*combo)[0])
             assert got == bool(ref(*combo)), f"{fn.__name__}{combo}: got {got}, want {ref(*combo)}"
@@ -771,11 +769,7 @@ def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
         assert not any(
             isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
         ), f"{kernel.__name__}: a mux over identical arms survived"
-        model = build_model(
-            build_lir(
-                lower_to_mir(lower(kernel).hir, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS), kernel.__name__
-            )
-        )
+        model = build_model(build_lir(lower_to_mir(lower(kernel).hir, OPS, DEFAULT_IFCONV_MAX_OPS), kernel.__name__))
         for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
             got, want = read(model.run(x)[0]), read(kernel(x))
             assert got == want, f"{kernel.__name__}({x}): got {got}, want {want}"
@@ -982,7 +976,7 @@ def test_a_constant_integer_expression_folds_away_entirely() -> None:
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     (out,) = hir.outputs
     assert hir.nodes[out.value] == FloatConst(float(5 * 2**24))
-    lower_to_mir(raw, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)  # nothing integer is left
+    lower_to_mir(raw, OPS, DEFAULT_IFCONV_MAX_OPS)  # nothing integer is left
 
 
 def test_integer_folding_is_exact_across_the_vocabulary() -> None:
@@ -1035,7 +1029,7 @@ def test_integer_folding_has_no_size_limit() -> None:
     hir = optimize(raw, DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
-    lower_to_mir(raw, OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)  # nothing integer survives
+    lower_to_mir(raw, OPS, DEFAULT_IFCONV_MAX_OPS)  # nothing integer survives
 
 
 def _reduced_int_outputs(populate: Callable[[HirBuilder, ValueId], None]) -> dict[str, object]:
@@ -1408,7 +1402,7 @@ def test_selection_cannot_be_reached_without_passing_the_gate() -> None:
     builder.output("y", builder.operation(HirFloatDiv(), [builder.float_const(1.0), builder.float_const(0.0)]))
     builder.ret()
     with pytest.raises(SynthesisError, match="names no number"):
-        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
 
 
 @pytest.mark.parametrize(
@@ -1719,9 +1713,9 @@ def test_a_literal_the_format_cannot_hold_is_refused_rather_than_silently_degrad
     builder.ret()
     if degrades:
         with pytest.raises(UnsupportedConstruct, match="degrades"):
-            lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+            lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
     else:
-        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
 
 
 def test_a_divisor_whose_reciprocal_degrades_is_never_silently_applied() -> None:
@@ -1733,7 +1727,7 @@ def test_a_divisor_whose_reciprocal_degrades_is_never_silently_applied() -> None
     builder.output("y", builder.operation(HirFloatDiv(), [x, builder.float_const(3e9)]))
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="degrades"):
-        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
 
 
 def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -> None:
@@ -1745,7 +1739,7 @@ def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -
     builder.output("y", x)
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="degrades"):
-        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
 
 
 def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
@@ -1758,7 +1752,7 @@ def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
     builder.output("y", x)
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="holds FloatType.. but resets to IntType"):
-        lower_to_mir(builder.finish(), OPS, FMT, default_ifmt(FMT), DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
 
 
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:

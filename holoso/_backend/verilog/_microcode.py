@@ -67,10 +67,6 @@ class Field:
         return 0 if self.gated else None
 
 
-def base_name(inst: OperatorInstance) -> str:
-    return f"{inst.operator.instance_stem}_{inst.index}"
-
-
 def code_width(count: int) -> int:
     """Bit width of a dense code enumerating ``count`` distinct values (at least 1 bit)."""
     return max(1, (count - 1).bit_length()) if count > 1 else 1
@@ -298,7 +294,7 @@ def build_microcode(
         field.values[step] = value
 
     for inst in lir.instances:
-        base = base_name(inst)
+        base = inst.name
         add(f_issue(base), 1, gated=True)
         for imm in inst.operator.immediate_ports:
             add(f_imm(base, imm.name), imm.width)
@@ -316,7 +312,7 @@ def build_microcode(
         add(f_op(dst), book.opcode_width, gated=True)
 
     for op in lir.ops:
-        base = base_name(op.inst)
+        base = op.inst.name
         ci = op.issue_cycle
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
         put(f_issue(base), ci, 1)

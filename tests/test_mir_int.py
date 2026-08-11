@@ -512,8 +512,6 @@ def _select_with_budget(target: Callable[..., object], ifconv_max_ops: int) -> M
     return lower_to_mir(
         lower_frontend(target).hir,
         build_ops(KERNEL_OPTIONS),
-        KERNEL_OPTIONS.ffmt,
-        KERNEL_OPTIONS.ifmt,
         ifconv_max_ops,
     )
 
@@ -823,8 +821,6 @@ def _scaled_by_a_power_of_two(k: int) -> Mir:
     return lower_to_mir(
         builder.finish(),
         build_ops(KERNEL_OPTIONS),
-        KERNEL_OPTIONS.ffmt,
-        KERNEL_OPTIONS.ifmt,
         KERNEL_OPTIONS.ifconv_max_ops,
     )
 
@@ -1224,7 +1220,7 @@ def _shift_both_ways(width: int, count: int) -> Mir:
     builder.output("l", builder.operation(IntShiftLeft(), [x, shamt]))
     builder.output("r", builder.operation(IntShiftRight(), [x, shamt]))
     builder.ret()
-    return lower_to_mir(builder.finish(), build_ops(options), options.ffmt, options.ifmt, options.ifconv_max_ops)
+    return lower_to_mir(builder.finish(), build_ops(options), options.ifconv_max_ops)
 
 
 @pytest.mark.parametrize("width", [16, 24, 33])
@@ -1323,8 +1319,6 @@ def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     mir = lower_to_mir(
         builder.finish(),
         build_ops(KERNEL_OPTIONS),
-        KERNEL_OPTIONS.ffmt,
-        KERNEL_OPTIONS.ifmt,
         KERNEL_OPTIONS.ifconv_max_ops,
     )
     assert _mnemonics(mir) == ["fround", "ftoint"]
@@ -1348,8 +1342,6 @@ def test_an_absorbed_rounding_is_still_emitted_for_the_reader_that_survives_it()
     mir = lower_to_mir(
         builder.finish(),
         build_ops(KERNEL_OPTIONS),
-        KERNEL_OPTIONS.ffmt,
-        KERNEL_OPTIONS.ifmt,
         KERNEL_OPTIONS.ifconv_max_ops,
     )
     assert _mnemonics(mir) == ["fround", "ftoint"]
@@ -1384,8 +1376,6 @@ def test_a_rounding_that_only_a_conversion_reads_needs_no_rounding_operator_conf
     mir = lower_to_mir(
         lower_frontend(floored_to_int).hir,
         build_ops(without_fround),
-        without_fround.ffmt,
-        without_fround.ifmt,
         without_fround.ifconv_max_ops,
     )
     assert _mnemonics(mir) == ["ftoint"]
@@ -1393,8 +1383,6 @@ def test_a_rounding_that_only_a_conversion_reads_needs_no_rounding_operator_conf
         lower_to_mir(
             lower_frontend(floored_for_two_readers).hir,
             build_ops(without_fround),
-            without_fround.ffmt,
-            without_fround.ifmt,
             without_fround.ifconv_max_ops,
         )
 
