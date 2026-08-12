@@ -219,7 +219,9 @@ TARGETS: list[SynthTarget] = [
     for_example("fir", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
     for_example("fir", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("biquad", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("biquad", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
+    # Diamond routes the adder's close-cancellation normalize cascade long enough to miss 100 MHz once the
+    # composed scaling shortens the schedule around it; one barrier splits it.
+    for_example("biquad", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     for_example("biquad", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
     for_example("uart_tx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
     for_example("uart_tx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
@@ -346,6 +348,7 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
+            fadd=FAddOptions(stage_normalize=1),
             fexp2=FExp2Options(stage_product=2),
             flog2=FLog2Options(stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
