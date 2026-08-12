@@ -1,6 +1,7 @@
 """
-The integer operators. The pooled ones each carry their own closed-form latency and their own saturating arithmetic;
-the inline ones are native Verilog over the whole wide bank, sound only under the carrier contract in DESIGN.md.
+The integer operators. The pooled ones each carry their own closed-form latency and their own reference arithmetic,
+saturating wherever the operation can leave the format; the inline ones are native Verilog over the whole wide bank,
+sound only under the carrier contract in DESIGN.md.
 """
 
 from abc import ABC
@@ -241,6 +242,46 @@ class IShrOperator(IntHardwareOperator):
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b = operands
         return f"{a}>>{b}"
+
+
+@dataclass(frozen=True, slots=True)
+class IPopcntOperator(IntHardwareOperator):
+    """
+    The population count of the magnitude, as Python's `int.bit_count()`, so a negative operand counts the ones of `-x`.
+    The negation that overflows a signed word is exactly the magnitude ``2**(W-1)`` read unsigned, so unlike
+    :class:`IAbsOperator` nothing saturates and the count never reaches the width. The module answers on a port only
+    as wide as that count needs, which the reader widens; a count is never negative, so the widening is a zero fill.
+    """
+
+    mnemonic: ClassVar[str] = "ipopcnt"
+    operand_hdl_ports: ClassVar[list[str]] = ["x"]
+    output_hdl_ports: ClassVar[list[str]] = ["y"]
+
+    @property
+    def count_width(self) -> int:
+        """The narrowest unsigned port holding a count of the magnitude; the RTL derives it again as ``$clog2(W)``."""
+        width = (self.fmt.width - 1).bit_length()
+        assert self.fmt.width - 1 < (1 << width)
+        assert self.fmt.width - 1 >= (1 << (width - 1))
+        return width
+
+    @property
+    def params(self) -> dict[str, int]:
+        return {"W": self.fmt.width, "WY": self.count_width, "LATENCY": self.latency}
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,), (self.scalar_type,))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        (a,) = self._validated_operands(operands)
+        count = abs(a.value).bit_count()
+        assert 0 <= count < self.fmt.width
+        return (IntValue.from_int(self.fmt, count),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"popcnt({a})"
 
 
 @dataclass(frozen=True, slots=True)

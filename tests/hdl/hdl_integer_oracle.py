@@ -76,6 +76,8 @@ def expected_simple(module: str, a_bits: int, b_bits: int, width: int) -> dict[s
         return {"shft": shifted.shft, "prod": shifted.prod, "saturated": int(shifted.saturated)}
     if module == "holoso_ishr":
         return {"shft": ishr(a_bits, b_bits, width)}
+    if module == "holoso_ipopcnt":
+        return {"y": abs(a).bit_count()}
     exact = {
         "holoso_iadds": a + b,
         "holoso_isubs": a - b,

@@ -12,6 +12,7 @@
 //  holoso_ishl     | Arith. shift, left+/right-            | 2     | x, shamt  | shft, prod, saturated
 //  holoso_ishr     | Arith. shift, right+/left-            | 2     | x, shamt  | shft
 //  holoso_icmp     | Signed comparison                     | 2     | a, b      | a_gt_b, a_eq_b, a_lt_b
+//  holoso_ipopcnt  | Population count of the magnitude     | 2     | x         | y
 
 `timescale 1ns/1ps
 
@@ -809,6 +810,223 @@ module holoso_icmp#(parameter W = 44, parameter integer LATENCY = 0) (
         a_gt_b <= ~less & ~equal;
         a_eq_b <= equal;
         a_lt_b <= less;
+        if (rst) begin
+            input_valid_q <= 1'b0;
+            out_valid <= 1'b0;
+        end else begin
+            input_valid_q <= in_valid;
+            out_valid <= input_valid_q;
+        end
+    end
+endmodule
+
+// Population count of the magnitude, as Python's int.bit_count(), so a negative operand counts the ones of -x.
+// The negation that overflows a signed word is exactly the magnitude 2**(W-1) read unsigned, so unlike holoso_iabss
+// nothing saturates here and the count never reaches W. WY rides the parameters rather than the port range so that
+// a caller disagreeing about the width fails to elaborate instead of truncating.
+//
+// Negating first would put a W-bit carry chain in series with the reduction and misses timing by a wide margin, so
+// the sign is folded into the operand instead: -x = ~x + 1 agrees with ~x everywhere above the lowest set bit of x,
+// and below it the increment clears a run of tz(x) ones and sets one, hence popcount(-x) = popcount(~x) + 1 - tz(x).
+// Counting x ^ {W{sign}} costs nothing (the sign is just another item), the +1 rides in as a constant item, and the
+// trailing-zero count comes from its own shallow priority tree that runs beside the reduction.
+//
+// The reduction is written as explicit counters and carry-save levels rather than as an addition tree because a
+// synthesizer flattens a chain of additions into one carry-save tree that consumes every operand in its first
+// compression level. That schedule ignores arrival times and would stack the whole reduction underneath the
+// trailing-zero cone. Here the cone lands beside a carry-save pair instead, and only the closing addition sees it.
+// A level counts up to seven values per column into three weighted results, and three values collapse to a
+// carry-save pair, so the value count runs 7 -> 3 -> 2 at common widths: one logic level each.
+// None of that is paid for in fabric, which is the counterintuitive part: measured against the addition tree it
+// replaces, this network holds the flip-flop count exactly and spends fewer 4-LUTs at common widths,
+// because explicit counters pack into 4-LUTs where a generic multiply-accumulate expansion does not.
+// A synthesizer that retimes will still grow its own registers here, but that is the speed being taken,
+// not the structure costing it.
+module holoso_ipopcnt#(parameter W = 44, parameter integer WY = 6, parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire in_valid,
+    input  wire signed [W-1:0] x,
+    output reg out_valid,
+    output reg [WY-1:0] y
+);
+    localparam integer LATENCY_REF = 2;
+    localparam integer WY_REF = $clog2(W);
+    // Items to count: the W-1 magnitude bits below the sign (the topmost one is zero after folding), the sign, and
+    // the constant that completes the two's complement of the inverted trailing-zero count.
+    localparam integer NI = W + 1;
+    localparam integer NL = (NI + 6) / 7;   // seven items per counter is the widest cut a LUT holds in one level
+    localparam integer NT = (W + 3) / 4;    // trailing-zero nibbles
+    localparam integer TL = ($clog2(NT) + 1) / 2;
+    localparam integer NTP = 1 << (2 * TL);  // nibbles padded to a power of four: the priority tree is four-way
+    generate
+        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
+            _holoso_invalid_integer_latency u_invalid();
+        end
+        if (WY != WY_REF) begin : g_invalid_result_width
+            _holoso_invalid_ipopcnt_result_width u_invalid();
+        end
+    endgenerate
+
+    function integer reduced;  // values leaving a compression level that receives the given number of values
+        input integer n;
+        begin
+            if (n > 3) reduced = 3 * ((n + 6) / 7);  // seven-input column counters, three weighted results each
+            else if (n == 3) reduced = 2;            // a carry-save adder
+            else reduced = n;
+        end
+    endfunction
+
+    function integer values_at;  // values entering the given compression level
+        input integer level;
+        integer n, i;
+        begin
+            n = NL;
+            for (i = 0; i < level; i = i + 1) n = reduced(n);
+            values_at = n;
+        end
+    endfunction
+
+    function integer value_base;  // flat index of the first value of the given compression level
+        input integer level;
+        integer b, i;
+        begin
+            b = 0;
+            for (i = 0; i < level; i = i + 1) b = b + values_at(i);
+            value_base = b;
+        end
+    endfunction
+
+    function integer depth;  // compression levels needed to reach a carry-save pair
+        input integer start;
+        integer n;
+        begin
+            n = start;
+            depth = 0;
+            while (n > 2) begin
+                n = reduced(n);
+                depth = depth + 1;
+            end
+        end
+    endfunction
+
+    function integer tz_base;  // flat index of the first node of the given priority-tree level, zero being nibbles
+        input integer level;
+        begin
+            tz_base = (4 * NTP - 4 * (NTP >> (2 * level))) / 3;
+        end
+    endfunction
+
+    function [2:0] count7;  // seven-input counter, written as gates so it stays one logic level rather than a chain
+        input [6:0] v;
+        reg s0, k0, s1, k1, s2, k2;
+        begin
+            s0 = v[0] ^ v[1] ^ v[2];
+            k0 = (v[0] & v[1]) | (v[0] & v[2]) | (v[1] & v[2]);
+            s1 = v[3] ^ v[4] ^ v[5];
+            k1 = (v[3] & v[4]) | (v[3] & v[5]) | (v[4] & v[5]);
+            s2 = s0 ^ s1 ^ v[6];
+            k2 = (s0 & s1) | (s0 & v[6]) | (s1 & v[6]);
+            count7 = {(k0 & k1) | ((k0 ^ k1) & k2), k0 ^ k1 ^ k2, s2};
+        end
+    endfunction
+
+    function [WY-1:0] nibble_tz;  // trailing zeros of a nonzero nibble; a zero nibble is resolved one level up
+        input [3:0] v;
+        begin
+            nibble_tz = v[0] ? 0 : v[1] ? 1 : v[2] ? 2 : 3;
+        end
+    endfunction
+
+    localparam integer RL = depth(NL);
+    localparam integer NV = value_base(RL) + values_at(RL);
+    localparam integer NTV = tz_base(TL) + 1;
+
+    reg signed [W-1:0] x_q;
+    reg input_valid_q;
+    wire sign = x_q[W-1];
+
+    // Seven constant zeros rather than a (7*NL-NI)-wide replication, which vanishes wherever seven divides the item
+    // count. The surplus slots sit inside the group the last counter already reads.
+    wire [7*NL+6:0] items = {7'b0, 1'b1, sign, x_q[W-2:0] ^ {(W-1){sign}}};
+    // Four constant zeros rather than a (NTP*4-W)-wide replication, which vanishes wherever four divides the width.
+    wire [W+3:0] nibbles = {4'b0, x_q};
+
+    wire [WY-1:0] value [0:NV-1];
+    wire [WY-1:0] tz_val [0:NTV-1];
+    wire tz_zero [0:NTV-1];
+    wire [WY-1:0] pair_hi;
+
+    genvar i, l, p, c, b, r, j;
+    generate
+        for (i = 0; i < NL; i = i + 1) begin : g_leaf
+            assign value[i] = count7(items[7*i +: 7]);
+        end
+        for (l = 0; l < RL; l = l + 1) begin : g_level
+            if (values_at(l) > 3) begin : g_count
+                for (c = 0; c < (values_at(l) + 6) / 7; c = c + 1) begin : g_chunk
+                    wire [2:0] cnt [0:WY-1];
+                    for (b = 0; b < WY; b = b + 1) begin : g_column
+                        wire [6:0] slice;
+                        for (j = 0; j < 7; j = j + 1) begin : g_slice
+                            if (7 * c + j < values_at(l)) begin : g_take
+                                assign slice[j] = value[value_base(l) + 7 * c + j][b];
+                            end else begin : g_pad
+                                assign slice[j] = 1'b0;
+                            end
+                        end
+                        assign cnt[b] = count7(slice);
+                    end
+                    for (r = 0; r < 3; r = r + 1) begin : g_weight
+                        for (b = 0; b < WY; b = b + 1) begin : g_bit
+                            if (b >= r) begin : g_shifted
+                                assign value[value_base(l+1) + 3 * c + r][b] = cnt[b-r][r];
+                            end else begin : g_below
+                                assign value[value_base(l+1) + 3 * c + r][b] = 1'b0;
+                            end
+                        end
+                    end
+                end
+            end else begin : g_carry_save
+                assign value[value_base(l+1)] =
+                    value[value_base(l)] ^ value[value_base(l)+1] ^ value[value_base(l)+2];
+                assign value[value_base(l+1)+1] = ((value[value_base(l)] & value[value_base(l)+1])
+                    | (value[value_base(l)] & value[value_base(l)+2])
+                    | (value[value_base(l)+1] & value[value_base(l)+2])) << 1;
+            end
+        end
+        if (values_at(RL) > 1) begin : g_pair
+            assign pair_hi = value[value_base(RL)+1];
+        end else begin : g_single
+            assign pair_hi = {WY{1'b0}};
+        end
+
+        for (i = 0; i < NTP; i = i + 1) begin : g_tz_leaf
+            if (i < NT) begin : g_nibble
+                assign tz_zero[i] = ~|nibbles[4*i +: 4];
+                assign tz_val[i] = nibble_tz(nibbles[4*i +: 4]);
+            end else begin : g_pad
+                assign tz_zero[i] = 1'b1;
+                assign tz_val[i] = {WY{1'b0}};
+            end
+        end
+        for (l = 1; l <= TL; l = l + 1) begin : g_tz_level
+            for (p = 0; p < (NTP >> (2 * l)); p = p + 1) begin : g_tz_node
+                localparam integer ME = tz_base(l) + p;
+                localparam integer CH = tz_base(l-1) + 4 * p;
+                localparam integer WT = 1 << (2 * l);  // bits spanned by one child, so a digit is a set bit
+                assign tz_zero[ME] = tz_zero[CH] & tz_zero[CH+1] & tz_zero[CH+2] & tz_zero[CH+3];
+                assign tz_val[ME] =
+                    !tz_zero[CH]   ? tz_val[CH] :
+                    !tz_zero[CH+1] ? (tz_val[CH+1] | WT) :
+                    !tz_zero[CH+2] ? (tz_val[CH+2] | (2 * WT)) : (tz_val[CH+3] | (3 * WT));
+            end
+        end
+    endgenerate
+
+    always @(posedge clk) begin
+        x_q <= x;
+        y <= value[value_base(RL)] + pair_hi + ~(tz_val[NTV-1] & {WY{sign}});
         if (rst) begin
             input_valid_q <= 1'b0;
             out_valid <= 1'b0;

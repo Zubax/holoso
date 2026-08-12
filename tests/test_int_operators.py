@@ -1,6 +1,7 @@
 """
 The integer operators, pooled and inline: their reference semantics, their closed-form timing, and the one knob
-among them. The lowering selects these (pinned in ``test_int_selection``); here they are driven directly because
+among them. The lowering selects the reachable ones (pinned in ``test_int_selection``), while ``ipopcnt`` exists as
+hardware and model ahead of its own lowering, so nothing selects it yet; here they are all driven directly because
 only a direct drive can sweep every operand of the narrow widths exhaustively.
 
 The sweeps score ``evaluate`` against the very oracle the HDL benches score the RTL against, so the values are
@@ -39,6 +40,7 @@ from holoso._operators import (
     ICmpOperator,
     IDivOperator,
     IMulOperator,
+    IPopcntOperator,
     IShlOperator,
     IShrOperator,
     ISubOperator,
@@ -95,12 +97,14 @@ def _oracle(expected: dict[str, int], operator: IntHardwareOperator) -> dict[str
 def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: int) -> None:
     fmt = IntFormat(width)
     binary = [IAddOperator(fmt), ISubOperator(fmt), ICmpOperator(fmt), IShlOperator(fmt), IShrOperator(fmt)]
-    idiv, iabs = IDivOperator(fmt), IAbsOperator(fmt)
+    idiv = IDivOperator(fmt)
+    unary = [IAbsOperator(fmt), IPopcntOperator(fmt)]
     # Staging is a timing knob, so every multiplier configuration must answer the one product.
     multipliers = [IMulOperator(fmt, IMulOptions(stage_product=stage)) for stage in range(5)]
     for a in range(1 << width):
-        want = expected_simple(iabs.module_name, a, 0, width)
-        assert _bits(iabs, a) == _oracle(want, iabs)
+        for operator in unary:
+            want = expected_simple(operator.module_name, a, 0, width)
+            assert _bits(operator, a) == _oracle(want, operator), (operator.mnemonic, a)
         for b in range(1 << width):
             for operator in binary:
                 want = expected_simple(operator.module_name, a, b, width)
@@ -208,6 +212,7 @@ def test_closed_form_latencies(width: int) -> None:
         IShlOperator(fmt),
         IShrOperator(fmt),
         ICmpOperator(fmt),
+        IPopcntOperator(fmt),
     ):
         assert operator.latency == 2
         assert operator.initiation_interval == 1
@@ -233,8 +238,30 @@ def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None
         IShlOperator(fmt),
         IShrOperator(fmt),
         ICmpOperator(fmt),
+        IPopcntOperator(fmt),
     ):
         assert operator.error_ports == [], operator.mnemonic
+
+
+@pytest.mark.parametrize("width", (2, 3, *PRODUCTION_WIDTHS))
+def test_the_population_count_counts_the_magnitude_and_answers_on_a_minimal_port(width: int) -> None:
+    # Counting the magnitude is what makes -1 answer 1 rather than filling the word, and what caps the count one
+    # short of the width -- MIN counts its single bit because the negation that overflows a signed word is exactly
+    # the magnitude. WY is pinned because it sizes the RTL port, and the count that just fits it is what makes the
+    # width minimal rather than merely sufficient.
+    fmt = IntFormat(width)
+    operator = IPopcntOperator(fmt)
+    assert operator.params == {"W": width, "WY": (width - 1).bit_length(), "LATENCY": 2}
+    assert width - 1 < (1 << operator.count_width) and width - 1 >= (1 << (operator.count_width - 1))
+    assert operator.signature.result_types == (IntType(fmt),), "the count is an ordinary machine integer"
+    corners = (0, -1, fmt.min, fmt.min + 1, fmt.max)
+    assert {value: _evaluate(operator, value)[0] for value in corners} == {
+        0: 0,
+        -1: 1,
+        fmt.min: 1,
+        fmt.min + 1: width - 1,
+        fmt.max: width - 1,
+    }
 
 
 def test_multiplier_staging_is_part_of_the_hardware_identity() -> None:

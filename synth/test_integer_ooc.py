@@ -6,7 +6,7 @@ import shutil
 import pytest
 from holoso import FFromIntOptions, FToIntOptions, FloatFormat, IntFormat
 from holoso._backend.verilog._support import support_files
-from holoso._operators import FFromIntOperator, FToIntOperator
+from holoso._operators import FFromIntOperator, FToIntOperator, IPopcntOperator
 from synth import OocDesign, SourceFile
 
 from synth._ooc import KEEP_ATTR
@@ -14,7 +14,7 @@ from synth._synth import BUILD_ROOT
 from synth.flows import FlowId, make_flow
 
 _SATURATING = ("holoso_iadds", "holoso_isubs", "holoso_iabss")
-_UNARY = frozenset(("holoso_iabss",))
+_SATURATING_UNARY = frozenset(("holoso_iabss",))  # the saturating wrapper shape that reads one operand
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +66,7 @@ class _DividerTarget:
 
 _TARGETS = tuple(
     _Target(operator, width, flow, frequency)
-    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishl", "holoso_ishr")
+    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishl", "holoso_ishr", "holoso_ipopcnt")
     for width in (24, 44)
     for flow, frequency in (
         (FlowId.YOSYS_ECP5, 100.0),
@@ -261,6 +261,8 @@ def _build_ooc_design(operator: str, width: int) -> OocDesign:
         wrapper = _render_shift_wrapper(top, width)
     elif operator == "holoso_ishr":
         wrapper = _render_shift_right_wrapper(top, width)
+    elif operator == "holoso_ipopcnt":
+        wrapper = _render_popcnt_wrapper(top, width)
     else:
         wrapper = _render_saturating_wrapper(top, operator, width)
     files = [SourceFile(Path(name), content) for name, content in support_files().items()]
@@ -543,13 +545,13 @@ endmodule
 
 
 def _render_saturating_wrapper(top: str, operator: str, width: int, parameters: str | None = None) -> str:
-    binary_port = f"    input  wire in_sel,\n" if operator not in _UNARY else ""
-    operand_reg = f"    {KEEP_ATTR} reg [{width - 1}:0] r_b;\n" if operator not in _UNARY else ""
-    operand_port = ", .b(r_b)" if operator not in _UNARY else ""
-    first_operand_port = "x" if operator in _UNARY else "a"
+    binary_port = f"    input  wire in_sel,\n" if operator not in _SATURATING_UNARY else ""
+    operand_reg = f"    {KEEP_ATTR} reg [{width - 1}:0] r_b;\n" if operator not in _SATURATING_UNARY else ""
+    operand_port = ", .b(r_b)" if operator not in _SATURATING_UNARY else ""
+    first_operand_port = "x" if operator in _SATURATING_UNARY else "a"
     operand_load = (
         "        if (in_sel) r_b <= io_in;\n        else        r_a <= io_in;"
-        if operator not in _UNARY
+        if operator not in _SATURATING_UNARY
         else ("        r_a <= io_in;")
     )
     parameters = parameters or f".W({width}), .LATENCY(2)"
@@ -757,6 +759,57 @@ module {top} (
         if (in_sel) r_shamt <= io_in;
         else        r_x <= io_in;
         r_shft <= dut_shft;
+        if (rst) begin
+            r_in_valid <= 1'b0;
+            r_out_valid <= 1'b0;
+        end else begin
+            r_in_valid <= in_valid;
+            r_out_valid <= dut_out_valid;
+        end
+    end
+endmodule
+
+`default_nettype wire
+"""
+
+
+def _render_popcnt_wrapper(top: str, width: int) -> str:
+    """
+    One operand, one output and no sideband, so neither selector is needed. The result register stays as narrow as
+    the count port and the zero fill happens on the way out: a full-width boundary register would hold the constant
+    high bits under the keep attribute and charge them to the measurement.
+    """
+    operator = IPopcntOperator(IntFormat(width))
+    count_width = operator.count_width
+    parameters = ", ".join(f".{name}({value})" for name, value in operator.params.items())
+    return f"""`default_nettype none
+
+module {top} (
+    input  wire clk,
+    input  wire rst,
+    input  wire in_valid,
+    input  wire [{width - 1}:0] io_in,
+    output wire out_valid,
+    output wire [{width - 1}:0] io_out
+);
+    {KEEP_ATTR} reg r_in_valid;
+    {KEEP_ATTR} reg [{width - 1}:0] r_x;
+    wire dut_out_valid;
+    wire [{count_width - 1}:0] dut_y;
+    {KEEP_ATTR} reg [{count_width - 1}:0] r_y;
+    {KEEP_ATTR} reg r_out_valid;
+
+    assign out_valid = r_out_valid;
+    assign io_out = {{{{{width - count_width}{{1'b0}}}}, r_y}};
+
+    holoso_ipopcnt#({parameters}) dut (
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x),
+        .out_valid(dut_out_valid), .y(dut_y)
+    );
+
+    always @(posedge clk) begin
+        r_x <= io_in;
+        r_y <= dut_y;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;

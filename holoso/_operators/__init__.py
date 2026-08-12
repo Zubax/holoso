@@ -51,6 +51,7 @@ from ._int import (
     ICmpOperator as ICmpOperator,
     IDivOperator as IDivOperator,
     IMulOperator as IMulOperator,
+    IPopcntOperator as IPopcntOperator,
     IShlOperator as IShlOperator,
     IShrOperator as IShrOperator,
     ISubOperator as ISubOperator,

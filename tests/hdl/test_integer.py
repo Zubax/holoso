@@ -12,6 +12,7 @@ from holoso._operators import (
     IAbsOperator,
     IAddOperator,
     ICmpOperator,
+    IPopcntOperator,
     IShlOperator,
     IShrOperator,
     ISubOperator,
@@ -32,7 +33,7 @@ from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, expected_simp
 
 # The operator model is the source of the module name, its RTL parameters, its port names and its latency, so a
 # declaration that drifted from the hardware fails right here, across every width the sweep covers.
-_OPERATORS = (IAddOperator, ISubOperator, IAbsOperator, ICmpOperator, IShlOperator, IShrOperator)
+_OPERATORS = (IAddOperator, ISubOperator, IAbsOperator, ICmpOperator, IShlOperator, IShrOperator, IPopcntOperator)
 
 
 @cocotb.test()

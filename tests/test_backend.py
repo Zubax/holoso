@@ -41,6 +41,7 @@ from holoso._operators import (
     ICmpOperator,
     IDivOperator,
     IMulOperator,
+    IPopcntOperator,
     IShlOperator,
     IShrOperator,
     ISubOperator,
@@ -175,6 +176,7 @@ def _integer_operators(ifmt: IntFormat) -> list[PooledHardwareOperator]:
         IShlOperator(ifmt),
         IShrOperator(ifmt),
         ICmpOperator(ifmt),
+        IPopcntOperator(ifmt),
         *(IMulOperator(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
     ]
 
@@ -260,6 +262,19 @@ def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     result = _compile("wrong_int_latency", verilog, tmp_path)
     assert result.returncode != 0
     assert "_holoso_invalid_integer_latency" in result.stderr
+
+
+@requires_iverilog
+def test_popcount_wrapper_rejects_wrong_result_width(tmp_path: Path) -> None:
+    # The count port is narrower than the word it counts, and Verilog would accept a wrapper that disagreed about
+    # how much narrower -- silently padding or truncating. The guard is what makes the width a checked claim, so it
+    # needs its own negative twin.
+    operator = IPopcntOperator(IntFormat(33))
+    width = operator.count_width
+    verilog = _pooled_probe("wrong_popcnt_width", [operator]).replace(f".WY({width})", f".WY({width + 1})")
+    result = _compile("wrong_popcnt_width", verilog, tmp_path)
+    assert result.returncode != 0
+    assert "_holoso_invalid_ipopcnt_result_width" in result.stderr
 
 
 @requires_iverilog
