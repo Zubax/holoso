@@ -351,6 +351,26 @@ class FloatCos(Operator):
         return _fold_float(operands, "the cosine", math.cos)
 
 
+_QUARTER_TURN = math.tau / 4.0
+
+
+def _turn_sincos(a: float) -> tuple[float, float]:
+    """
+    Sine and cosine of an angle in turns, reduced in turns. Every step of the reduction is exact -- a remainder by
+    one, a scaling by four, a split at the integer -- so a whole or quarter turn arrives as an angle of exactly zero
+    and answers exactly, and no residual argument ever exceeds an eighth of a revolution. Reducing in radians can do
+    neither: the reduction is inexact from the first multiplication.
+
+    The remainder is signed, which a nonnegative one could not be without cancelling a tiny negative phase away
+    entirely, so the quadrant is taken over its magnitude and the parity of each function restores the sign.
+    """
+    r = math.remainder(a, 1.0)  # exact, in [-0.5, 0.5]; raises over an infinity, which the caller answers for
+    quadrant, fraction = divmod(abs(r) * 4.0, 1.0)
+    s, c = math.sin(fraction * _QUARTER_TURN), math.cos(fraction * _QUARTER_TURN)
+    sine, cosine = ((s, c), (c, -s), (-s, -c))[int(quadrant)]
+    return (-sine if r < 0.0 else sine) + 0.0, cosine + 0.0
+
+
 @dataclass(frozen=True, slots=True)
 class FloatSinTurns(Operator):
     """
@@ -366,7 +386,7 @@ class FloatSinTurns(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the sine", lambda a: math.sin(math.tau * a))
+        return _fold_float(operands, "the sine", lambda a: _turn_sincos(a)[0])
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,7 +399,7 @@ class FloatCosTurns(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the cosine", lambda a: math.cos(math.tau * a))
+        return _fold_float(operands, "the cosine", lambda a: _turn_sincos(a)[1])
 
 
 @dataclass(frozen=True, slots=True)

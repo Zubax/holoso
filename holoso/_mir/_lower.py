@@ -95,6 +95,7 @@ from .._hir import (
 )
 from ._refuse import refuse
 from ._specialize import constant_shift_count, left_shifts, specialize
+from ._rescale import rescale
 from ._trig_abi import trig_abi
 from .._util import ValueId
 from .._operators import (
@@ -1292,5 +1293,6 @@ def lower(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Mir:
         len(hir.nodes),
         len(hir.blocks),
     )
+    hir = rescale(hir, ops)
     refuse(hir)
     return _LoweringContext(hir, ops).run()

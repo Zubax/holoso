@@ -26,7 +26,7 @@ def optimize(hir: Hir, ifconv_max_ops: int) -> Hir:
         hir = _prune.run(hir) or hir
         hir = _if_convert.run(hir, ifconv_max_ops) or hir
         hir = _thread_merges.run(hir) or hir
-        hir = _dce.run(hir)
+        hir = _dce.eliminate_dead_code(hir)
         if hir == previous:
             _logger.info(
                 "HIR optimization: settled after %d of at most %d round(s); %d block(s), %d node(s) remain",

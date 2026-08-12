@@ -752,6 +752,35 @@ def test_a_full_turn_scale_cancels_the_conversion_entirely() -> None:
         assert _bits(out[1]) == _v(x).sincos()[0].bits, f"sin of a whole turn x={x}"
 
 
+def test_a_turn_native_fold_reduces_in_turns() -> None:
+    # The operators exist to delete the radian round trip, so their fold must not reinstate it. Reduction in turns is
+    # exact at every step, which makes a whole or quarter turn answer exactly and bounds the residual argument to an
+    # eighth of a revolution -- where reducing in radians is inexact from the first multiplication.
+    def sin_of(x: float) -> float:
+        return math.sin(x)
+
+    def cos_of(x: float) -> float:
+        return math.cos(x)
+
+    # ``y - y`` is folded by a value-equality identity rather than by the front end, so the phase becomes constant
+    # only inside HIR -- which is the one way a constant reaches the turn-native operator at all. Spelled as a
+    # literal it would be folded through the radian operator before the restatement ever runs.
+    def cardinal(turns: float) -> Callable[[float], float]:
+        def kernel(y: float) -> float:
+            return math.sin((y - y + turns) * math.tau)
+
+        return kernel
+
+    for index, (turns, want) in enumerate(((0.5, 0.0), (0.25, 1.0), (3.0, 0.0), (-0.75, 1.0))):
+        sim = _sim(cardinal(turns), f"cardinal_turn_{index}")
+        assert float(sim.run(1.0)[0]) == want, f"sin of {turns} turns is exactly {want}"
+    # The runtime path is unchanged: the fold speaks for what the core would have answered, not against it.
+    for kernel, ref in ((sin_of, 0), (cos_of, 1)):
+        runtime = _sim(kernel, f"turn_fold_runtime_{ref}")
+        for x in _TRIG_VECTORS:
+            assert _bits(runtime.run(x)[0]) == _sincos_ref(x)[ref], f"{kernel.__name__} x={x}"
+
+
 def test_a_negation_between_two_scalings_is_not_opaque() -> None:
     # A negation is itself a scaling, by the cheapest constant there is, so it must not stand between the kernel's
     # scale and the conversion and stop them meeting. Both spellings below name one value and must cost the same.

@@ -342,6 +342,65 @@ def test_a_composition_landing_on_a_negative_power_of_two_keeps_its_exponent() -
     assert _instantiated(_synth(negated, scaler_only, name="negated_scaler_only")) == {"holoso_fmul_ilog2"}
 
 
+def test_a_constant_multiplier_the_format_cannot_hold_is_carried_apart() -> None:
+    # A constant the optimizer minted faces the format alone, and the significand of any scaling lies in [1, 2),
+    # which every format holds exactly. So a scale that fits no single constant always fits two, and the kernels
+    # below build rather than being refused over a number appearing nowhere in their source.
+    def composed(a: float) -> float:
+        return (a * 2.0**40) * 3.0
+
+    def tiny_constant(a: float) -> float:
+        return a * math.cos(math.pi / 2)  # the front end folds this to 6.1e-17, which e6m18 cannot hold
+
+    for kernel, probes in ((composed, (1e-9, 3e-9)), (tiny_constant, (1e9, 4e9))):
+        result = _synth(kernel)
+        assert _instantiated(result) == {"holoso_fmul", "holoso_fmul_ilog2"}, kernel.__name__
+        sim = result.numerical_model.elaborate()
+        for a in probes:
+            want = kernel(a)
+            assert within(float(sim.run(a)[0]), want, *default_tolerance(FMT, 2, magnitude=want)), f"{kernel} {a}"
+
+
+def test_a_scale_past_the_formats_reach_is_refused_rather_than_split() -> None:
+    # Splitting pays only where some operand the machine holds reaches a result it holds. Past the format's own
+    # exponent span none does, so the split would buy an extra operation and answer zero anyway -- and the constant,
+    # which names the trouble and the way out, is worth refusing over after all.
+    def f(a: float) -> float:
+        return a * 1e-40  # e6m18 tops out near 4.3e9, so every product is far under the 9.3e-10 floor
+
+    with pytest.raises(UnsupportedConstruct) as exc:
+        _synth(f, name="past_the_reach")
+    assert exc.value.message == (
+        "constant 1e-40 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
+    )
+
+
+def test_without_the_scaler_the_constant_is_still_what_is_refused() -> None:
+    # The split needs the exponent scaler. Without it the kernel must be refused over the constant it cannot hold,
+    # which names both the trouble and the way out, rather than over an operator the kernel never asked for.
+    options = Options(OperatorOptions(fmul=FMulOptions(), fdiv=FDivOptions()), ffmt=FMT)
+
+    def f(x: float) -> float:
+        return x / 3e9
+
+    with pytest.raises(UnsupportedConstruct) as exc:
+        _synth(f, options, name="no_scaler_to_split_into")
+    assert exc.value.message == (
+        "constant 3.333333333333333e-10 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
+    )
+
+
+def test_an_ordinary_scaling_pair_is_not_split() -> None:
+    # The split is for what one constant cannot carry; a pair that composes to an ordinary constant must still
+    # collapse to the single multiply, not acquire a second operation.
+    def f(a: float) -> float:
+        return (a * 4.0) * 3.0
+
+    result = _synth(f, name="ordinary_pair")
+    assert _instantiated(result) == {"holoso_fmul"}
+    assert float(result.numerical_model.elaborate().run(2.0)[0]) == 24.0
+
+
 def test_a_composed_scaling_declines_where_the_host_arithmetic_rails() -> None:
     # The composition is the associativity identity, whose precondition is that the compiler's OWN arithmetic holds
     # the product -- not that the target format does. A railed product is no product, so the exact exponents stand,
@@ -1820,17 +1879,18 @@ def test_a_literal_the_format_cannot_hold_is_refused_rather_than_silently_degrad
         )
 
 
-def test_a_divisor_whose_reciprocal_degrades_is_never_silently_applied() -> None:
+def test_a_divisor_whose_reciprocal_degrades_is_carried_apart() -> None:
     # 3e9 is representable but its reciprocal is not, and the reciprocal is what HIR's ``x/c -> x*(1/c)`` hands the
-    # machine, which would multiply by zero and answer zero for every input.
+    # machine. Multiplying by it would answer zero for every input; carrying it as a significand this format holds
+    # and an exponent no format bounds costs one operation and answers to the format's own precision.
     def f(x: float) -> float:
         return x / 3e9
 
-    with pytest.raises(UnsupportedConstruct) as exc:
-        holoso.synthesize(f, OPTIONS, name="degrading_reciprocal")
-    assert exc.value.message == (
-        "constant 3.333333333333333e-10 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
-    )
+    result = _synth(f, name="degrading_reciprocal")
+    assert _instantiated(result) == {"holoso_fmul", "holoso_fmul_ilog2"}
+    sim = result.numerical_model.elaborate()
+    for x in (3e9, 1.5e9, 3e8):
+        assert within(float(sim.run(x)[0]), x / 3e9, *default_tolerance(FMT, 2, magnitude=x / 3e9)), x
 
 
 def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -> None:

@@ -169,6 +169,13 @@ whatever leaves the word, so `5000 << 3` wraps where `5000 * 8` rails. Truncatio
 word, and the left shifter offers both readings, so a rewrite of a power-of-two multiply into a shift must tap the
 saturating one rather than this.
 
+There is no modular flavour, so every wrapping accumulator carries an explicit mask -- and the mask cannot rescue the
+operation it guards, because saturation happens inside the add before the mask applies. A 32-bit DDS phase
+accumulator therefore forces a 34-bit machine word (one carry bit, one sign bit), and since the width is global those
+two bits are paid on every register and port in the design to serve one add. A wrapping add, or an unsigned integer
+type, would let the accumulator be exactly as wide as it is and delete the mask. One potential approach is to INFER
+wrapping/unsigned operations from the adjacent static mask applications.
+
 One wide register holds either family whole: it is as wide as the integer format, which is never narrower than the
 float, so an integer fills it exactly and a float occupies its low bits. The inline integer operators are then native
 Verilog over the whole register. Floats pay in unused flip-flops and slightly wider read muxes whenever the
@@ -334,20 +341,10 @@ becomes the two's-complement mask. No rule may mint a LEFT shift: the machine-wo
 is bounded by the count of left shifts in the graph, which is the other reason the product cannot become one --
 while a minted right shift is off that ledger, since nothing substitutes it. The absorbed scale itself never
 becomes a word -- only its exponent materializes, clamped into the int format at lowering -- so `x * 2**40` builds
-at any width while the equivalent spelled-out product is refused at selection. Two constant scalings of one value
-compose into one -- exponents adding, factors multiplying -- declined only where the compiler's own arithmetic rails
-or collapses, which is the identity's precondition rather than a question put to the format. A scaling carries its
-sign apart from its exponent, negation being the cheapest scaling there is, so composing can never strand an exact
-scale as a materialized constant the format then refuses.
-
-### DEFERRED
-
-A constant the optimizer mints faces the format alone, so a kernel whose own constants all fit can still be refused
-over a number appearing nowhere in its source: the reciprocal of `x / 3e9` at e6m18, or the product two composed
-scalings fold to. Declining the reciprocal needs the format-aware choice HIR is forbidden to make; the composed
-product does not, and is a scaling representation away -- one carrying a significand beside its exponent would keep
-the pair apart and materialize a second node only where one constant cannot hold both. A composed product landing on
-a power of two likewise migrates the kernel's requirement from `fmul` to `fmul_ilog2`.
+at any width. A constant scaling is read as sign, significand and exponent rather than as the number they multiply
+to, so composing two scalings of one value cannot itself fail -- `(x * 2.0**1023) * 4.0` becomes the one exponent
+scaling `2**1025`, materializing no constant at all. The product is formed only where it materializes, and the
+composition declined there if no host float names it, leaving the operands as the kernel wrote them.
 
 ## MIR
 
@@ -360,7 +357,14 @@ where a second, poorer copy of the optimizer would have to chase what it enables
 in turns, so the radian operators are restated over a turn-native vocabulary with an explicit conversion, ahead of the
 optimizer: a kernel whose phase is already in turns then has its own scaling meet that conversion and cancel. The
 machine word is told from inside the fixpoint instead, since only a fold can reveal a shift count -- and one
-substituted constant can leave another count constant for the next round.
+substituted constant can leave another count constant for the next round. The float format is told last, once
+nothing more will move: a multiplication by a constant the format cannot hold becomes one by its significand, which
+every format holds, and one by its exponent, which no format bounds -- so a scale that fits no single constant fits
+two, and a kernel is no longer refused over a number the optimizer minted and it never wrote: `x / 3e9` at e6m18
+mints a reciprocal under the format's floor though every quotient it computes is ordinary. Told any earlier, the
+optimizer would compose the pair straight back into the constant that does not fit. A scale past the format's own
+exponent span is left to be refused, since no operand the machine holds would then reach a result it holds --
+`x * 1e-40` there answers zero whatever it multiplies, and saying so beats computing it.
 
 What may be told is bounded by the same unboundedness that motivates it. A rule qualifies only if its answer is
 independent of every operand, since a later round can reveal one as a constant no word holds. A left shift past the
@@ -587,6 +591,15 @@ standing in for the operator pipeline: a result is computed when its operands ar
 landing PC, exactly as the hardware does, so it stays correct when blocks overlap and runs an arbitrarily deep loop
 in bounded memory.
 
+Saturation is invisible in the numerical model, which is where the wrong answers appear first: an accumulator that
+clamps instead of wrapping surfaces only as wrong numbers, with nothing naming the operation that clamped. A
+model-level saturation flag, or an opt-in assertion, would name that defect immediately -- worthwhile for a datapath
+whose headline property is saturation. The sharpest case is silent: a mask whose modulus the word can hold but whose
+sum it cannot is accepted without complaint, because the refusal fires on the mask literal and `0xFFFFFFFF` is
+exactly the maximum of a 33-bit word. Tying a masked addition's modulus to the width its operands
+need would catch at compile time exactly the mistake the mask idiom invites -- and would also give `wint_min`, today
+a declaration the compiler never checks against the kernel, something to be checked against.
+
 Generated RTL testbenches (Cocotb today) run the RTL simulator in cycle-by-cycle lockstep with the elaborated model,
 asserting each cycle that `out_valid` agrees (the data-dependent latency check) and that the output bits match when
 valid, back-pressure included; end-to-end verification of the original Python against the model is left to the user.
@@ -599,6 +612,13 @@ CPython against a host-precision evaluator of the unoptimized HIR, before optimi
 muddy the verdict; because the eager gates evaluate operands CPython may skip, a value that names no number is
 carried as poison and convicts only when it reaches an observable sink -- an output, a state live-out, a branch
 condition.
+
+The generated bench asserts `err_pc == 0` on every vector, so a transaction whose defined answer includes an
+asserted error sideband -- an input-fed `x // 0`, a float division by zero -- cannot be cosimulated end to end;
+that behavior is covered at the operator-bench and model levels instead. Letting an explicit vector declare its
+expected `err_pc` would close this for both families. The bench also caps a transaction at 2^20 cycles, so a valid
+loop that legitimately runs longer -- an input-fed counter, a counted loop over a huge static range -- is reported
+as a runaway; the numerical model carries its own, far higher ceiling.
 
 The HTML report must give humans an EXACT representation of the generated core behavior -- the tool for understanding
 and debugging what the compiler did -- not a simplified or approximated view.

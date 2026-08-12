@@ -6,10 +6,10 @@ or decline because the datapath would answer differently.
 
 import math
 import sys
-from dataclasses import dataclass
 
 from ._const import BoolConst, Const, FloatConst, IntConst
 from ._copy import copy_node, rebuild
+from ._scaling import Scaling, scaling_of
 from .._util import BlockId, ValueId
 from ._ir import Hir, HirBuilder, Node, Operation, Phi
 from ._operators import (
@@ -57,68 +57,9 @@ def _sole_operand(node: Node) -> ValueId:
     return node.operands[0]
 
 
-def _ilog2_exact(c: float) -> int | None:
-    """Return ``k`` if ``c == 2**k`` exactly for a positive ``c``, else ``None``."""
-    if c <= 0.0 or not math.isfinite(c):
-        return None
-    mantissa, exponent = math.frexp(c)  # c == mantissa * 2**exponent, mantissa in [0.5, 1)
-    return exponent - 1 if mantissa == 0.5 else None
-
-
 def _int_pow2_exponent(c: int) -> int | None:
     """Return ``k`` if ``c == 2**k`` for a positive ``c``, else ``None``."""
     return c.bit_length() - 1 if c > 0 and c & (c - 1) == 0 else None
-
-
-@dataclass(frozen=True, slots=True)
-class _Exponent:
-    """
-    A scaling by a signed exact power of two, carried as the exponent and a sign -- neither of which any format
-    bounds, where the equivalent materialized constant would be. Composing must never leave this representation for a
-    factor it can still stay inside, or a scale that builds at any width becomes one that does not.
-    """
-
-    k: int
-    negative: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _Factor:
-    c: float
-
-
-type _Scaling = _Exponent | _Factor
-
-
-def _scaling_of(c: float) -> _Scaling:
-    """A constant read as a scaling: an exact power of two rides its exponent, sign apart; anything else is itself."""
-    k = _ilog2_exact(abs(c))
-    return _Factor(c) if k is None else _Exponent(k, c < 0.0)
-
-
-def _compose(outer: _Scaling, inner: _Scaling) -> _Scaling | None:
-    """
-    Fuse two constant scalings of one value into the single scaling they amount to, or ``None`` where the compiler's
-    own arithmetic cannot carry it -- the precondition of the associativity identity, not a question put to the target
-    format, which the composed scaling faces later exactly as any other constant does.
-    """
-    if isinstance(outer, _Exponent) and isinstance(inner, _Exponent):
-        return _Exponent(outer.k + inner.k, outer.negative != inner.negative)
-    match (outer, inner):
-        case (_Exponent(k=k, negative=negative), _Factor(c=c)) | (_Factor(c=c), _Exponent(k=k, negative=negative)):
-            try:
-                # ldexp, not ``c * 2.0**k``, whose intermediate rails where the product itself need not.
-                product = math.ldexp(-c if negative else c, k)
-            except OverflowError:
-                return None
-        case _:
-            assert isinstance(outer, _Factor) and isinstance(inner, _Factor)
-            product = outer.c * inner.c
-    # The product must be a NORMAL host float, not merely a finite one: a subnormal keeps only the bits gradual
-    # underflow leaves it, and materializing that would round a constant the target format holds exactly. Declining
-    # instead leaves the rules below to answer over the operands as written, where ``x*0 == 0`` and the exact
-    # exponent scalings still hold.
-    return _Factor(product) if sys.float_info.min <= abs(product) < math.inf else None
 
 
 def run(hir: Hir) -> Hir:
@@ -209,10 +150,25 @@ def run(hir: Hir) -> Hir:
             return emit_float_const(builder, 0.0)
         return reduce_algebra(builder, FloatAdd(), [a, b])
 
-    def emit_exponent(builder: HirBuilder, base: ValueId, scaling: _Exponent) -> ValueId:
+    def emit_exponent(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId:
         """An exponent scaling over a value: the scaler, the sign sideband it rides with, or at zero exponent neither."""
+        assert scaling.is_power_of_two
         scaled = builder.operation(FloatMulPow2(scaling.k), [base]) if scaling.k else base
         return make_neg(builder, scaled) if scaling.negative else scaled
+
+    def emit_scaling(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId | None:
+        """
+        The one node a scaling becomes over a value, or None where no host float names its coefficient and the
+        operands must stand as written -- each of which the machine layer can still carry apart, where this cannot.
+        """
+        if scaling.is_power_of_two:
+            return emit_exponent(builder, base, scaling)
+        coefficient = scaling.coefficient()
+        return (
+            None
+            if coefficient is None
+            else reduce_algebra(builder, FloatMul(), [base, emit_float_const(builder, coefficient)])
+        )
 
     def scale_or_multiply(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
         if is_neg_one(a):
@@ -221,30 +177,33 @@ def run(hir: Hir) -> Hir:
             return make_neg(builder, a)
         for const_side, other in ((b, a), (a, b)):
             scale = float_of(const_side)
-            if scale is not None:
-                scaling = _scaling_of(scale)
-                # A zero exponent is ``x*1``, left to the declared identity rather than minted as a shift; ``x*-1``
-                # never reaches here, the negation above having claimed it.
-                if isinstance(scaling, _Exponent) and scaling.k:
-                    return emit_exponent(builder, other, scaling)
+            # A unit scaling is ``x*1``, left to the declared identity rather than minted as a shift; ``x*-1`` never
+            # reaches here, the negation above having claimed it.
+            if (
+                scale is not None
+                and (scaling := scaling_of(scale)) is not None
+                and scaling.is_power_of_two
+                and scaling.k
+            ):
+                return emit_exponent(builder, other, scaling)
         return reduce_algebra(builder, FloatMul(), [a, b])
 
-    def scaling(remap: dict[ValueId, ValueId], old_id: ValueId) -> tuple[ValueId, _Scaling] | None:
+    def scaling(remap: dict[ValueId, ValueId], old_id: ValueId) -> tuple[ValueId, Scaling] | None:
         """The value an old-graph node scales and the constant it scales it by; ``None`` if it scales nothing."""
         match hir.nodes[old_id]:
             case Operation(operator=FloatMulPow2(k=k), operands=(x,)):
-                return x, _Exponent(k, False)
+                return x, Scaling(1.0, k, False)
             case Operation(operator=FloatNeg(), operands=(x,)):
-                return x, _Exponent(0, True)  # a negation is a scaling by -1, and the cheapest one there is
+                return x, Scaling(1.0, 0, True)  # a negation is a scaling by -1, and the cheapest one there is
             case Operation(operator=FloatMul(), operands=(x, y)):
                 for base, other in ((x, y), (y, x)):
                     factor = float_of(remap[other])
-                    if factor is not None:
-                        return base, _scaling_of(factor)
+                    if factor is not None and (found := scaling_of(factor)) is not None:
+                        return base, found
         return None
 
     def reassociate(
-        builder: HirBuilder, remap: dict[ValueId, ValueId], outer: _Scaling, old_operand: ValueId
+        builder: HirBuilder, remap: dict[ValueId, ValueId], outer: Scaling, old_operand: ValueId
     ) -> ValueId | None:
         """
         Scaling an already-scaled value scales it once. Cost is never the question: the composed node replaces the
@@ -254,29 +213,21 @@ def run(hir: Hir) -> Hir:
         if found is None:
             return None
         base, inner = found
-        match _compose(outer, inner):
-            case None:
-                return None
-            case _Exponent() as composed:
-                return emit_exponent(builder, remap[base], composed)
-            case _Factor(c=c):
-                # Back through the rules above, which is what turns a composed -1 into a negation, an exact power of
-                # two into an exponent, and a composed 1 into nothing at all.
-                return scale_or_multiply(builder, remap[base], emit_float_const(builder, c))
+        return emit_scaling(builder, remap[base], outer.compose(inner))
 
     def reduce_mul(builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, old_b: ValueId) -> ValueId:
         # The only reduction that reads the shape of the OLD graph, hence the old ids: composition needs the operand's
         # own operator, which the rebuilt operand no longer names once it has been reduced.
         for const_side, other in ((old_b, old_a), (old_a, old_b)):
             factor = float_of(remap[const_side])
-            if factor is not None:
-                fused = reassociate(builder, remap, _scaling_of(factor), other)
+            if factor is not None and (outer := scaling_of(factor)) is not None:
+                fused = reassociate(builder, remap, outer, other)
                 if fused is not None:
                     return fused
         return scale_or_multiply(builder, remap[old_a], remap[old_b])
 
     def reduce_mul_pow2(builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, k: int) -> ValueId:
-        fused = reassociate(builder, remap, _Exponent(k, False), old_a)
+        fused = reassociate(builder, remap, Scaling(1.0, k, False), old_a)
         return fused if fused is not None else builder.operation(FloatMulPow2(k), [remap[old_a]])
 
     def reduce_div(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
@@ -292,9 +243,9 @@ def run(hir: Hir) -> Hir:
         # A zero divisor is excluded because there is no reciprocal to multiply by at all. An infinite one is excluded
         # only because nothing has needed the fold; ``1/inf`` is ``0.0``, a perfectly good second factor.
         if divisor is not None and divisor != 0.0 and math.isfinite(divisor):
-            scaling = _scaling_of(divisor)
-            if isinstance(scaling, _Exponent):  # dividing by a signed power of two is scaling by its negated exponent
-                return emit_exponent(builder, a, _Exponent(-scaling.k, scaling.negative))
+            scaling = scaling_of(divisor)
+            if scaling is not None and scaling.is_power_of_two:  # by a signed power of two: its negated exponent
+                return emit_exponent(builder, a, Scaling(1.0, -scaling.k, scaling.negative))
             # The same normality test as the composition above: a divisor whose reciprocal rails or falls into the
             # host's subnormals has none this arithmetic can carry, so the division stands as written.
             reciprocal = 1.0 / divisor

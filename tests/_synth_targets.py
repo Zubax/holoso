@@ -200,7 +200,9 @@ TARGETS: list[SynthTarget] = [
     # Diamond's critical path here is the fmul post-product cone (DSP product register through pack/normalize into
     # the register file), 18 logic levels at 58% route. One pack stage splits it; the other two flows close lean.
     for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fmul=FMulOptions(stage_pack=1))),
-    for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    # Vivado closes this lean only on some releases: 2025.2 clears 150 MHz, 2026.1 misses by 0.078 ns on the same
+    # adder normalize cascade the Diamond rows above split. One barrier holds it on both.
+    for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     for_example("integrator", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
     for_example(
         "integrator",
