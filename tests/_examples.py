@@ -563,8 +563,10 @@ SPECS = [
         name="iq_oscillator",
         inputs=("frequency", "dt", "phase_offset"),
         make_kernel=lambda: IqOscillator().tick,
-        # One fsincos firing serves both lanes; the budget is the radian round trip plus the core, and it does not
-        # grow with age because the phase recurrence is integer and exact -- no float state drifts.
+        # One fsincos firing serves both lanes; the budget is the source's own phase scaling plus the core, and it
+        # does not grow with age because the phase recurrence is integer and exact -- no float state drifts. It is a
+        # bound rather than a fit: the scaling now composes with the cores' turn ABI into a single exact exponent, so
+        # the realized error sits well inside it.
         reference={"out_0": OutputTolerance(ulps=64), "out_1": OutputTolerance(ulps=64)},
         nominal={"frequency": 64.0, "dt": _IQ_DT, "phase_offset": 0.0},
         manual=[

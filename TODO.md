@@ -27,13 +27,6 @@ exactly the maximum of a 33-bit word. Tying a masked addition's modulus to the w
 need would catch at compile time exactly the mistake the mask idiom invites -- and would also give `wint_min`, today
 a declaration the compiler never checks against the kernel, something to be checked against.
 
-The sincos core is turn-native but only radians are exposed, so `sin(x)` lowers as `fsincos(x * (1 / (2 * pi)))`.
-A DDS phase is already in turns, so it multiplies by `tau / 2**WPHASE` purely so the compiler can multiply the
-factor back out: two multiplies and two roundings to compute an identity, and that round trip dominates the output
-error of the I/Q oscillator, exceeding the core's own. A turn-native intrinsic would delete both multiplies, both
-roundings, and the scaler the kernel otherwise needs -- direct digital synthesis being the natural application of
-the hardware that already exists.
-
 There is no population count or XOR reduction: the parity of a byte, one operator in hardware, is written as an
 eight-trip loop of `&`/`>>`/`^` that folds correctly but cannot say what it means. `int.bit_count()` is refused
 (cleanly, naming the attribute). Recognizing it, or the unrolled reduction it expands into, would close the gap.

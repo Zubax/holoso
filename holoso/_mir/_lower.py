@@ -1,7 +1,6 @@
 """Lower optimized HIR to selected MIR."""
 
 import logging
-import math
 from collections import Counter
 from dataclasses import dataclass
 
@@ -20,11 +19,11 @@ from .._hir import (
     Const,
     FloatAbs,
     FloatAdd,
-    FloatAtan2,
+    FloatAtan2Turns,
     FloatCeil,
     FloatComparison,
     FloatConst,
-    FloatCos,
+    FloatCosTurns,
     FloatDiv,
     FloatEqual,
     FloatExp2,
@@ -48,7 +47,7 @@ from .._hir import (
     FloatNotEqual,
     FloatRound,
     FloatSelect,
-    FloatSin,
+    FloatSinTurns,
     FloatSqrt,
     FloatToBool,
     FloatToInt,
@@ -96,6 +95,7 @@ from .._hir import (
 )
 from ._refuse import refuse
 from ._specialize import constant_shift_count, left_shifts, specialize
+from ._trig_abi import trig_abi
 from .._util import ValueId
 from .._operators import (
     BoolAndOperator,
@@ -409,9 +409,9 @@ def _operand_base_set(hir: Hir, node: Operation) -> tuple[ValueId, ...]:
 
 def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     """
-    Map each FloatHypot2 to a same-block FloatAtan2 over the same value pair so MIR can tap the atan2's magnitude port
-    (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR firing fusion it
-    feeds.
+    Map each FloatHypot2 to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's magnitude
+    port (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR firing fusion
+    it feeds.
     """
     if ops.fatan2 is None:
         return {}
@@ -419,7 +419,7 @@ def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     for block in hir.blocks:
         atan2_by_pair: dict[tuple[ValueId, ...], ValueId] = {}
         for vid in block.operations:
-            if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatAtan2):
+            if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatAtan2Turns):
                 atan2_by_pair.setdefault(_operand_base_set(hir, node), vid)
         for vid in block.operations:
             if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatHypot2):
@@ -804,12 +804,12 @@ class _FloatLowerer:
                 return self._lower_unary_pooled(semantic, require(self.context.ops.fexp2, "fexp2"), a)
             case Operation(operator=FloatLog2() as semantic, operands=(a,)):
                 return self._lower_unary_pooled(semantic, require(self.context.ops.flog2, "flog2"), a)
-            case Operation(operator=(FloatSin() | FloatCos()) as semantic, operands=(a,)):
+            case Operation(operator=(FloatSinTurns() | FloatCosTurns()) as semantic, operands=(a,)):
                 return self._lower_sincos(semantic, a)
             case Operation(operator=FloatSqrt() as semantic, operands=(a,)):
                 base, sign = _collapse_signs(self.context.hir.nodes, a)
                 return self._sqrt_via_exp2_log2(semantic, self.context.remap[base], sign)
-            case Operation(operator=FloatAtan2() as semantic, operands=(y, x)):
+            case Operation(operator=FloatAtan2Turns() as semantic, operands=(y, x)):
                 return self._lower_atan2(semantic, y, x)
             case Operation(operator=FloatHypot2() as semantic, operands=(y, x)):
                 return self._lower_hypot2_naive(semantic, y, x)  # a fusible hypot is intercepted in lower_node
@@ -909,27 +909,23 @@ class _FloatLowerer:
             semantic, operator, a, b, output_port=0 if isinstance(semantic, FloatMin) else 1
         )
 
-    def _lower_sincos(self, semantic: FloatSin | FloatCos, a: ValueId) -> ValueId:
-        # The turn-native zkf_sincos is fed radians/(2*pi) via a VISIBLE fmul -- its rounding is part of the model<->RTL
-        # contract and must not hide in the wrapper. The sign folds onto that fmul, so one scaled value serves
-        # sin(-x)/cos(-x) and a sin+cos over one argument fuse into one firing.
+    def _lower_sincos(self, semantic: FloatSinTurns | FloatCosTurns, a: ValueId) -> ValueId:
+        # zkf_sincos already counts in turns, so the operand needs no scaling here at all -- whatever conversion the
+        # kernel's angle wanted was stated in HIR and folded there. The sign rides the core's own operand, so one
+        # value serves sin(-x)/cos(-x) and a sin+cos over one argument fuse into one firing.
         operator = require(self.context.ops.fsincos, "fsincos")
         base, sign = _collapse_signs(self.context.hir.nodes, a)
-        inv_tau = self._lower_float_const(1.0 / (2.0 * math.pi))
-        scaled = self.context.builder.operation(
-            _select_hardware(semantic, require(self.context.ops.fmul, "fmul")),
-            [self.context.remap[base], inv_tau],
-            [sign, FloatSignControl()],
+        return self.context.builder.operation(
+            _select_hardware(semantic, operator),
+            [self.context.remap[base]],
+            [sign],
+            output_port=0 if isinstance(semantic, FloatSinTurns) else 1,
         )
-        return self._mir_op(semantic, operator, [scaled], output_port=0 if isinstance(semantic, FloatSin) else 1)
 
-    def _lower_atan2(self, semantic: FloatAtan2, y: ValueId, x: ValueId) -> ValueId:
-        # zkf_atan2 returns theta in turns; a visible post-scale by 2*pi gives radians. Its magnitude port is tapped
-        # only by a fusible adjacent hypot (intercepted in lower_node).
-        operator = require(self.context.ops.fatan2, "fatan2")
-        turns = self._lower_binary_float(semantic, operator, y, x)
-        tau = self._lower_float_const(2.0 * math.pi)
-        return self._mir_op(semantic, require(self.context.ops.fmul, "fmul"), [turns, tau])
+    def _lower_atan2(self, semantic: FloatAtan2Turns, y: ValueId, x: ValueId) -> ValueId:
+        # zkf_atan2 returns theta in turns, which is what the operator now means. Its magnitude port is tapped only by
+        # a fusible adjacent hypot (intercepted in lower_node).
+        return self._lower_binary_float(semantic, require(self.context.ops.fatan2, "fatan2"), y, x)
 
     def _lower_fused_hypot(self, atan2_id: ValueId) -> ValueId:
         # Emitting the fatan2 firing from the ATAN2's own operands/signs makes the two collapse into one CORDIC; the
@@ -1275,11 +1271,14 @@ def lower(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Mir:
 
     Optimization is not the caller's to run. A substituted constant cascades, and can leave another count constant for
     the next round, so the passes run again after every substitution and the judgement waits for the last graph: a
-    caller who optimized first would also have judged first, convicting whatever a later round erases.
+    caller who optimized first would also have judged first, convicting whatever a later round erases. What this
+    machine knows is told to the graph before any of it: the trigonometric unit up front, since it is the optimizer's
+    input rather than its consumer, and the word width from within the fixpoint, since only a fold can reveal a count.
 
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
     ``fmul_ilog2`` with the exponent materialized as an integer constant; no exponent is refused.
     """
+    hir = trig_abi(hir)
     hir = optimize(hir, ifconv_max_ops)
     rounds = left_shifts(hir) + 1  # every substitution deletes one, and no pass mints one
     while (substituted := specialize(hir, ops.int_format)) is not None:

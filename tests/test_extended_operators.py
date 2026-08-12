@@ -32,6 +32,7 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._value import ScalarValue
+from ._modelref import instantiated_modules as _modules
 
 # Bare-name imports so a ``from math import floor`` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -660,7 +661,8 @@ def test_exp2_log2_unconfigured_is_rejected() -> None:
             holoso.synthesize(fn, ops, name=fn.__name__)
 
 
-# The turn<->radian scale constants MIR inserts, encoded in the format exactly as the compiler does.
+# The turn<->radian scale constants the trigonometric restatement inserts, encoded in the format exactly as the
+# compiler does. They survive as ordinary multiplies wherever the kernel offers nothing for them to fold against.
 _INV_TAU = FloatValue.from_float(FMT, 1.0 / (2.0 * math.pi))
 _TAU = FloatValue.from_float(FMT, 2.0 * math.pi)
 
@@ -669,7 +671,7 @@ _TRIG_VECTORS = [0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, math.pi / 2,
 
 
 def _sincos_ref(x: float) -> tuple[int, int]:
-    # Bit-exact reference: turn-native model of the format-scaled operand, mirroring MIR's fmul + fsincos.
+    # Bit-exact reference: turn-native model of the format-scaled operand, mirroring the restated fmul + fsincos.
     s, c = (_v(x) * _INV_TAU).sincos()
     return s.bits, c.bits
 
@@ -704,8 +706,83 @@ def test_lone_sin_value() -> None:
         assert _bits(sim.run(x)[0]) == _sincos_ref(x)[0], f"lone sin x={x}"
 
 
+def test_a_turn_scaled_angle_sheds_the_conversion() -> None:
+    # The point of restating the cores' turn ABI in HIR: a phase counted in turns scales by ``tau/2**k`` only so the
+    # conversion can take it back out, and the two now meet as ordinary constants whose product is an exact exponent.
+    # No general multiply survives -- the round trip that once dominated a DDS oscillator's error is gone.
+    def kernel(x: float) -> float:
+        return math.sin(x * (math.tau / 2**8))
+
+    def flipped(x: float) -> float:
+        return math.sin(x * (-math.tau / 2**8))
+
+    # The sign-flipped spelling composes to a NEGATIVE power of two, which must still ride the exponent scaler --
+    # a kernel given only that scaler and the core must build, having written no general product anywhere.
+    scaler_only = Options(OperatorOptions(fmul_ilog2=FMulILog2Options(), fsincos=FSincosOptions()), ffmt=FMT)
+    for label, turned, options in (
+        ("full", kernel, _ops()),
+        ("lean", kernel, scaler_only),
+        ("neg", flipped, scaler_only),
+    ):
+        result = holoso.synthesize(turned, options, name=f"turn_scaled_{label}")
+        assert _modules(result) == {"holoso_fmul_ilog2", "holoso_fsincos"}, label
+        sim = result.numerical_model.elaborate()
+        for x in (0.0, 1.0, -1.0, 64.0, -96.0, 128.0):
+            assert abs(float(sim.run(x)[0]) - turned(x)) <= 4 * _ulp32(1.0), f"{label} x={x}"
+
+
+def test_a_full_turn_scale_cancels_the_conversion_entirely() -> None:
+    # ``tau * (1/tau)`` is exactly one, so a kernel spelling a whole turn hands the core its operand untouched. The
+    # angle's own multiply is shared with a second consumer here and must survive for it, which is what shows that
+    # composing a shared scaling neither duplicates it nor blocks the fold on the path that can take it.
+    def shared(x: float) -> tuple[float, float]:
+        angle = x * math.tau
+        return angle, math.sin(angle)
+
+    result = holoso.synthesize(shared, _ops(), name="shared_turn")
+    assert _modules(result) == {"holoso_fmul", "holoso_fsincos"}
+    sim = result.numerical_model.elaborate()
+    # 0.7, 1.3, 5.9 and 0.35 do not survive a multiply by tau followed by one by its reciprocal, so they tell a
+    # cancelled conversion from a performed one; the rest are ordinary vectors.
+    for x in (0.7, 1.3, 5.9, 0.35, 0.25, -0.5, 1.0, 2.0):
+        out = sim.run(x)
+        # The sine's bits are those of the core reading x itself. Had any conversion survived, they would be the bits
+        # of a value rounded twice more, which is what this pins.
+        assert _bits(out[0]) == (_v(x) * _TAU).bits, f"angle x={x}"
+        assert _bits(out[1]) == _v(x).sincos()[0].bits, f"sin of a whole turn x={x}"
+
+
+def test_a_negation_between_two_scalings_is_not_opaque() -> None:
+    # A negation is itself a scaling, by the cheapest constant there is, so it must not stand between the kernel's
+    # scale and the conversion and stop them meeting. Both spellings below name one value and must cost the same.
+    def outside(x: float) -> float:
+        return math.sin(-(x * math.tau))
+
+    def inside(x: float) -> float:
+        return math.sin((-x) * math.tau)
+
+    result = holoso.synthesize(outside, _ops(), name="neg_outside")
+    assert _modules(result) == {"holoso_fsincos"}
+    assert result.initiation_interval == holoso.synthesize(inside, _ops(), name="neg_inside").initiation_interval
+    sim = result.numerical_model.elaborate()
+    for x in (0.7, 1.3, 0.25, -0.5, 2.0):
+        assert _bits(sim.run(x)[0]) == _v(-x).sincos()[0].bits, f"sin of a negated whole turn x={x}"
+
+
+def test_a_turn_scaled_kernel_can_need_the_exponent_scaler() -> None:
+    # The composed constant faces operator availability on its own, so a kernel whose every written multiply is
+    # general can still be refused over the exponent scaler its folded scale selects.
+    def kernel(x: float) -> float:
+        return math.sin(x * (math.tau / 2**8))
+
+    options = Options(OperatorOptions(fmul=FMulOptions(), fsincos=FSincosOptions()), ffmt=FMT)
+    with pytest.raises(UnsupportedConstruct, match="fmul_ilog2"):
+        holoso.synthesize(kernel, options, name="turn_scaled_no_ilog2")
+
+
 def test_sincos_sign_folds_into_operand() -> None:
-    # sin(-x)/cos(-x) fold the negation onto the scaled operand (CORDIC fed -(x/tau)), so both reuse one firing.
+    # sin(-x)/cos(-x) fold the negation onto the turn-scaled operand (CORDIC fed -(x/tau)), so both reuse one
+    # firing.
     def kernel(x: float) -> tuple[float, float]:
         return (math.sin(-x), math.cos(-x))
 
@@ -739,7 +816,7 @@ _ATAN2_VECTORS = [(1.0, 1.0), (3.0, 4.0), (-3.0, 4.0), (3.0, -4.0), (-3.0, -4.0)
 
 
 def _atan2_ref(y: float, x: float) -> tuple[int, int]:
-    # theta is scaled from turns to radians by MIR's post-multiply; magnitude (hypot) is units-free and unscaled.
+    # theta is scaled from turns to radians by the restatement's post-multiply; magnitude (hypot) is unscaled.
     theta_turns, mag = FloatValue.atan2(_v(y), _v(x))
     return (theta_turns * _TAU).bits, mag.bits
 

@@ -2,12 +2,14 @@
 
 import dataclasses
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+import holoso
 from holoso import (
     FAddOptions,
     FAtan2Options,
@@ -165,6 +167,11 @@ def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
     if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
         return actual == expected
     return abs(actual - expected) <= atol + rtol * abs(expected)
+
+
+def instantiated_modules(result: holoso.SynthesisResult) -> set[str]:
+    """Operator modules the top module instantiates; the always-present support functions do not match."""
+    return set(re.findall(r"\b(holoso_\w+)\s+#\(", result.verilog_output.verilog))
 
 
 def bounded(rng: np.random.Generator, lo: float, hi: float) -> float:

@@ -7,7 +7,6 @@ diagnostics) plus the white-box contracts that have no public spelling.
 import dataclasses
 import itertools
 import math
-import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -118,6 +117,7 @@ from ._modelref import (
     default_tolerance,
     DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
+    instantiated_modules as _instantiated,
     overlap_spill_kernel,
     phi_swap_loop,
     within,
@@ -143,11 +143,6 @@ def _synth(
     target: Callable[..., object], options: Options = OPTIONS, name: str | None = None
 ) -> holoso.SynthesisResult:
     return holoso.synthesize(target, options, name=name or target.__name__.strip("_"))
-
-
-def _instantiated(result: holoso.SynthesisResult) -> set[str]:
-    """Operator modules instantiated by the top module; the always-present support functions do not match."""
-    return set(re.findall(r"\b(holoso_\w+)\s+#\(", result.verilog_output.verilog))
 
 
 def _ints(values: list[FloatValue | holoso.IntValue | bool]) -> list[int | bool]:
@@ -271,6 +266,167 @@ def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
     for a in (3.0, -1.5, 0.75):
         want = a / 3.0
         assert within(float(sim.run(a)[0]), want, *default_tolerance(FMT, 2, magnitude=max(1.0, abs(want)))), a
+
+
+_WIDE_OPTIONS = dataclasses.replace(OPTIONS, ffmt=FloatFormat(12, 24))
+"""An exponent field wide enough to hold values the compiler's own binary64 cannot, which is what makes the host-side
+declinations below reachable through the public API at all."""
+
+
+def test_a_reciprocal_the_host_cannot_hold_leaves_the_division_standing() -> None:
+    # ``x/c == x*(1/c)`` only where the reciprocal is a number: a subnormal divisor has none the host can hold, so
+    # minting it answers infinity for a quotient that is an ordinary, representable value.
+    def f(a: float) -> float:
+        return a / 1e-320
+
+    result = _synth(f, _WIDE_OPTIONS, name="div_subnormal")
+    assert _instantiated(result) == {"holoso_fdiv"}
+    got = float(result.numerical_model.elaborate().run(1e-20)[0])
+    want = 1e-20 / 1e-320
+    assert within(got, want, *default_tolerance(_WIDE_OPTIONS.ffmt, 2, magnitude=want))
+
+
+def test_adjacent_constant_scalings_compose_into_one() -> None:
+    # Associativity is chartered, so a value scaled twice is scaled once -- and costs exactly what the collapsed
+    # spelling costs, whether the two scales are ordinary factors, exact exponents, or one of each.
+    def factors(a: float) -> float:
+        return (a * 3.0) * 5.0
+
+    def one_factor(a: float) -> float:
+        return a * 15.0
+
+    def exponents(a: float) -> float:
+        return (((a * 2.0) * 4.0) * 8.0) * 16.0
+
+    def one_exponent(a: float) -> float:
+        return a * 1024.0
+
+    def mixed(a: float) -> float:
+        return (a * 3.0) * 4.0
+
+    def one_mixed(a: float) -> float:
+        return a * 12.0
+
+    for composed, collapsed in ((factors, one_factor), (exponents, one_exponent), (mixed, one_mixed)):
+        result, reference = _synth(composed), _synth(collapsed)
+        assert result.initiation_interval == reference.initiation_interval, composed.__name__
+        assert _instantiated(result) == _instantiated(reference), composed.__name__
+        sim = result.numerical_model.elaborate()
+        for a in (1.0, -0.5, 0.0, 6.0):
+            assert float(sim.run(a)[0]) == collapsed(a), f"{composed.__name__}({a})"
+
+
+def test_a_composition_landing_on_a_negative_power_of_two_keeps_its_exponent() -> None:
+    # The sign is part of a scaling, not part of its constant: a composition landing on a NEGATIVE power of two must
+    # stay an exponent plus a free sign sideband, exactly as the pair it replaces was. Materializing it as a constant
+    # instead subjects an unbounded exact scale to the format, which refuses whatever the format cannot hold.
+    def negated(a: float) -> float:
+        return (a * 2.0**40) * -1.0
+
+    def negated_and_doubled(a: float) -> float:
+        return (a * 2.0**40) * -2.0
+
+    for kernel in (negated, negated_and_doubled):
+        result = _synth(kernel)
+        assert _instantiated(result) == {"holoso_fmul_ilog2"}, kernel.__name__
+
+    # The same fact where the format CAN hold the constant, so nothing refuses and only the selection shows it.
+    wide = _synth(negated, dataclasses.replace(OPTIONS, ffmt=FloatFormat(8, 36)), name="negated_wide")
+    assert _instantiated(wide) == {"holoso_fmul_ilog2"}
+    sim = wide.numerical_model.elaborate()
+    for a in (1.0, -0.5, 0.0, 6.0):
+        assert float(sim.run(a)[0]) == -(a * 2.0**40), a
+
+    # And the scaler alone suffices: a kernel needing no general multiplier must not acquire one.
+    scaler_only = Options(OperatorOptions(fmul_ilog2=FMulILog2Options()), ffmt=FMT)
+    assert _instantiated(_synth(negated, scaler_only, name="negated_scaler_only")) == {"holoso_fmul_ilog2"}
+
+
+def test_a_composed_scaling_declines_where_the_host_arithmetic_rails() -> None:
+    # The composition is the associativity identity, whose precondition is that the compiler's OWN arithmetic holds
+    # the product -- not that the target format does. A railed product is no product, so the exact exponents stand,
+    # where folding them would scale by a materialized infinity instead.
+    def f(a: float) -> float:
+        return (a * 2.0**1023) * 4.0
+
+    result = _synth(f, name="railed_pair")
+    assert _instantiated(result) == {"holoso_fmul_ilog2"}
+    assert float(result.numerical_model.elaborate().run(0.0)[0]) == 0.0
+
+
+def _two_chained_multiplies(a: float, b: float) -> float:
+    """A chain no composition can shorten -- the cost reference for a declined one."""
+    return (a * 3.0) * b
+
+
+def test_a_composed_scaling_declines_where_the_host_arithmetic_collapses() -> None:
+    # The other side of the same precondition. Both constants survive this format, and so does their true product;
+    # only the host loses it, and folding there would answer zero for every input.
+    def f(a: float) -> float:
+        return (a * 1e-200) * 1e-200
+
+    result = _synth(f, _WIDE_OPTIONS, name="collapsed_pair")
+    assert _instantiated(result) == {"holoso_fmul"}
+    assert result.initiation_interval == _synth(_two_chained_multiplies, _WIDE_OPTIONS).initiation_interval
+    got = float(result.numerical_model.elaborate().run(1e100)[0])
+    assert within(got, 1e-300, *default_tolerance(FloatFormat(12, 24), 2, magnitude=1e-300))
+
+
+def test_a_composed_scaling_declines_where_the_product_is_subnormal() -> None:
+    # Gradual underflow is a partial collapse, and the guard is about what the compiler's arithmetic can carry, not
+    # about whether it returned something: a product landing in the host's subnormals keeps only the bits underflow
+    # leaves it, so materializing it would round a constant this format holds exactly.
+    def f(a: float) -> float:
+        return (a * 1e-200) * 1e-120
+
+    result = _synth(f, _WIDE_OPTIONS, name="subnormal_product")
+    assert _instantiated(result) == {"holoso_fmul"}
+    assert result.initiation_interval == _synth(_two_chained_multiplies, _WIDE_OPTIONS).initiation_interval
+    # 1e-320 is a host subnormal carrying ~13 significand bits; folding it lands ~185 ulp off the true product.
+    got = float(result.numerical_model.elaborate().run(1.0)[0])
+    assert within(got, 1e-200 * 1e-120, *default_tolerance(_WIDE_OPTIONS.ffmt, 2, magnitude=1e-320))
+
+
+def test_a_signed_power_of_two_scales_by_its_exponent_however_it_is_spelled() -> None:
+    # One value, three spellings, one selection: the sign of an exact power of two rides the free sideband, so
+    # nothing here needs a general multiplier and a kernel configured without one still builds.
+    def scaled(a: float) -> float:
+        return a * -16.0
+
+    def divided(a: float) -> float:
+        return a / -8.0
+
+    scaler_only = Options(OperatorOptions(fmul_ilog2=FMulILog2Options()), ffmt=FMT)
+    for kernel in (scaled, divided):
+        result = _synth(kernel, scaler_only)
+        assert _instantiated(result) == {"holoso_fmul_ilog2"}, kernel.__name__
+        sim = result.numerical_model.elaborate()
+        for a in (1.0, -2.5, 0.0, 6.0):
+            assert float(sim.run(a)[0]) == kernel(a), f"{kernel.__name__}({a})"
+
+
+def test_the_absorbing_zero_outranks_a_composition() -> None:
+    # ``x*0 == 0`` holds for the non-finite operand too, so the pair must not be combined into the indeterminate form
+    # first: composing ``inf`` with ``0.0`` names no number and would refuse a build that has a defined answer.
+    def f(a: float) -> float:
+        return (a * math.inf) * 0.0
+
+    result = _synth(f, name="inf_then_zero")
+    assert _instantiated(result) == set()
+    assert float(result.numerical_model.elaborate().run(3.0)[0]) == 0.0
+
+
+def test_a_composition_can_migrate_the_multiplier_the_kernel_needs() -> None:
+    # The composed constant faces operator availability on its own: a product landing exactly on a power of two
+    # selects the exponent scaler, so a kernel spelling only general products can be refused over an operator it
+    # never asked for. Documented under the optimizer's DEFERRED note rather than prevented.
+    options = Options(OperatorOptions(fmul=FMulOptions()), ffmt=FMT)
+
+    def f(a: float) -> float:
+        return (a * 3.0) * (2.0 / 3.0)
+
+    with pytest.raises(UnsupportedConstruct, match="fmul_ilog2"):
+        _synth(f, options, name="migrated_multiplier")
 
 
 def _narrow_options() -> Options:

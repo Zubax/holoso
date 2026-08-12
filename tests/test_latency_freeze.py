@@ -1,6 +1,8 @@
 """
-Golden schedule-length freeze for a representative cross-section of example kernels -- a committed regression
-guard on scheduling efficiency, standing in for the deferred makespan/II optimization work.
+Golden schedule-length freeze over the WHOLE example matrix -- a committed regression guard on scheduling
+efficiency, standing in for the deferred makespan/II optimization work. Every spec is frozen at every format it
+declares, and the table is checked against the matrix, so a newly added example cannot escape the guard by
+omission.
 
 The differential fuzzer and the example-reference suite compare output VALUES only; they are structurally blind
 to cycle count, so a schedule that still computes the right result but takes longer -- a wasted cycle, a lost
@@ -28,68 +30,107 @@ from holoso._lir import WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
 
-from ._examples import SPECS
-from ._modelref import build_lir, DEFAULT_IFCONV_MAX_OPS, default_ops, default_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._examples import ExampleSpec, SPECS
+from ._modelref import (
+    build_lir,
+    build_ops,
+    DEFAULT_IFCONV_MAX_OPS,
+    default_ops,
+    default_options,
+    DEFAULT_UNROLL_MAX_TRIPS,
+)
 
-# Kernel name -> frozen (min initiation interval, last microcode PC). last_pc is the out_valid boundary PC -- the
+# Kernel label -> frozen (min initiation interval, last microcode PC). last_pc is the out_valid boundary PC -- the
 # end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
-# kernels. A representative cross-section of shapes: straight-line and deep arithmetic, clamp/select, stateful
-# filters, branchy logic, data-dependent loops, and a large kernel.
+# kernels. One row per spec per declared format; a spec listing two formats is frozen at both, since the second
+# exists precisely to exercise a different pipeline depth.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
-    "madd": (14, 14),
-    "signal_window": (9, 9),
-    "poly3": (23, 23),
-    "iir1_lpf": (15, 15),
-    "schmitt_trigger": (6, 6),
-    "majority_voter": (14, 19),
+    "madd-e8m36": (14, 14),
+    "signal_window-e8m36": (9, 9),
+    "poly3-e8m36": (23, 23),
+    "iir1_lpf-e8m36": (15, 15),
+    "pid-e8m36": (36, 68),
+    "schmitt_trigger-e8m36": (6, 6),
+    "quadrature_encoder-e8m36": (6, 6),
+    "phase_frequency_detector-e8m36": (6, 6),
+    "latching_fault_register-e8m36": (5, 5),
+    "majority_voter-e8m36": (14, 19),
+    # The turn-native trigonometric ABI lets the phase scaling meet the cores' own conversion and cancel, so the I/Q
+    # oscillator's two general multiplies collapse to one exponent add.
+    "iq_oscillator-e8m36": (55, 55),
+    "nco-e6m18": (12, 12),
+    "pwm-e6m18": (11, 11),
+    "debouncer-e6m18": (10, 10),
+    "priority_encoder-e6m18": (21, 21),
+    "crc32-e6m18": (45, 45),
+    "lfsr16-e6m18": (12, 12),
+    # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
+    # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
+    # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
+    # uart_tx additionally has an empty overlapping branch block (the idle "not busy" arm) whose only act is to test a
+    # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
+    "uart_tx-e6m18": (7, 47),
+    "uart_rx-e6m18": (6, 68),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
     # The convergence test is statically true on entry (delta is seeded above the tolerance), so the first trip is
     # peeled at compile time and only trips 2..N remain residual: one body's worth of extra microcode, and a realized
     # transaction that is shorter, not longer (test_cycle_model).
-    "recip_newton": (29, 46),
-    "remainder": (37, 54),
-    "cordic_sincos": (104, 104),
-    "ekf1_stateless": (125, 125),
-    # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
-    # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
-    # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
-    "uart_rx": (6, 68),
-    # uart_tx additionally has an empty overlapping branch block (the idle "not busy" arm) whose only act is to test a
-    # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
-    "uart_tx": (7, 47),
-    "octave_index": (14, 36),
+    "recip_newton-e8m36": (29, 46),
+    "remainder-e8m36": (37, 54),
+    "octave_index-e6m18": (14, 36),
+    "octave_index-e8m36": (14, 45),
+    "equal_temperament-e8m36": (40, 40),
+    "cordic_sincos-e8m36": (104, 104),
+    "polar_to-e8m36": (63, 63),
+    "polar_from-e8m36": (38, 38),
+    "kepler-e8m36": (80, 155),
+    "integrator-e8m36": (16, 16),
+    "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
     # control flow at all), so their whole schedule is one block and min II equals last PC.
-    "fir": (20, 20),
-    "biquad": (21, 21),
+    "fir-e8m36": (20, 20),
+    "biquad-e8m36": (21, 21),
+    "ekf1_stateful-e8m36": (125, 125),
 }
 
-_SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
+
+def _label(spec: ExampleSpec, fmt: FloatFormat) -> str:
+    return f"{spec.name}-e{fmt.wexp}m{fmt.wman}"
 
 
-@pytest.mark.parametrize("name", sorted(_FROZEN_SCHEDULE))
-def test_schedule_length_is_frozen(name: str) -> None:
+_CASES = [(spec, fmt) for spec in SPECS for fmt in spec.formats]
+
+
+def test_every_example_is_frozen() -> None:
+    """The guard's own coverage: an example added without a frozen row would otherwise be silently unguarded."""
+    assert sorted(_FROZEN_SCHEDULE) == sorted(_label(spec, fmt) for spec, fmt in _CASES)
+
+
+@pytest.mark.parametrize("spec,fmt", [pytest.param(s, f, id=_label(s, f)) for s, f in _CASES])
+def test_schedule_length_is_frozen(spec: ExampleSpec, fmt: FloatFormat) -> None:
     # The min II column is the public ``SynthesisResult.initiation_interval[0]``; the last PC has no public spelling
-    # (the public tuple reports None past a surviving branch), so it stays pinned on the LIR.
-    spec = _SPEC_BY_NAME[name]
-    frozen_ii, frozen_last_pc = _FROZEN_SCHEDULE[name]
-    result = holoso.synthesize(spec.make_kernel(), default_options(spec.formats[0]), name=name)
+    # (the public tuple reports None past a surviving branch), so it stays pinned on the LIR. Each spec is driven at
+    # its OWN configuration, since an integer-heavy kernel needs a word the shared default does not supply.
+    label = _label(spec, fmt)
+    frozen_ii, frozen_last_pc = _FROZEN_SCHEDULE[label]
+    options = spec.options(fmt)
+    result = holoso.synthesize(spec.make_kernel(), options, name=spec.name)
     assert result.initiation_interval[0] == frozen_ii, (
-        f"{name}: scheduling efficiency changed -- min II {result.initiation_interval[0]} differs from the frozen "
+        f"{label}: scheduling efficiency changed -- min II {result.initiation_interval[0]} differs from the frozen "
         f"{frozen_ii}. If this is a deliberate schedule improvement, update the frozen value."
     )
     lir = build_lir(
         lower_to_mir(
             lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir,
-            default_ops(spec.formats[0]),
+            build_ops(options),
             DEFAULT_IFCONV_MAX_OPS,
         ),
-        name,
+        spec.name,
     )
     assert (lir.min_initiation_interval, lir.last_pc) == (frozen_ii, frozen_last_pc), (
-        f"{name}: scheduling efficiency changed -- (min II, last PC) differs from the frozen "
-        f"{_FROZEN_SCHEDULE[name]}. If this is a deliberate schedule improvement, update the frozen value."
+        f"{label}: scheduling efficiency changed -- (min II, last PC) differs from the frozen "
+        f"{_FROZEN_SCHEDULE[label]}. If this is a deliberate schedule improvement, update the frozen value."
     )
 
 

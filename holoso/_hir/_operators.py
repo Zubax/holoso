@@ -352,6 +352,37 @@ class FloatCos(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatSinTurns(Operator):
+    """
+    The turn-native trigonometric vocabulary, in the spirit of C's ``sinpi``: one turn is a full revolution, so a
+    phase already counted in turns needs no unit conversion at all.
+    """
+
+    mnemonic: ClassVar[str] = "fsin_turns"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the sine", lambda a: math.sin(math.tau * a))
+
+
+@dataclass(frozen=True, slots=True)
+class FloatCosTurns(Operator):
+    mnemonic: ClassVar[str] = "fcos_turns"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the cosine", lambda a: math.cos(math.tau * a))
+
+
+@dataclass(frozen=True, slots=True)
 class FloatSqrt(Operator):
     mnemonic: ClassVar[str] = "fsqrt"
 
@@ -374,6 +405,19 @@ class FloatAtan2(Operator):
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the arctangent", math.atan2)
+
+
+@dataclass(frozen=True, slots=True)
+class FloatAtan2Turns(Operator):
+    mnemonic: ClassVar[str] = "fatan2_turns"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _float_signature(2)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the arctangent", lambda y, x: math.atan2(y, x) / math.tau)
 
 
 @dataclass(frozen=True, slots=True)

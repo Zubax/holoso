@@ -297,9 +297,10 @@ not fire an error sideband.
 Running both arms can RAISE the static lower-bound II while LOWERING the realized per-transaction latency, which is
 the goal -- the regression guard is realized latency, not the static bound. The budget counts HIR operations, so an
 arm is charged for whatever selection later collapses -- today the int-returning roundings and the constant shifts,
-tomorrow whatever else MIR folds; what a substitution round erases is charged only until that round runs. Overcharging
-costs an arm its conversion and never a wrong answer, so the budget stays a count of what the kernel wrote rather than
-a prediction of what the machine will hold.
+tomorrow whatever else MIR folds; what a substitution round erases is charged only until that round runs. It equally
+charges an arm for what MIR told the graph before the budget ever saw it -- the conversion beside a restated
+trigonometric operation, which the fold next to it usually erases. Overcharging costs an arm its conversion and never
+a wrong answer, so the budget stays a count of operations present rather than a prediction of what the machine holds.
 
 Loops with a static trip count unroll fully, below the unroll threshold (`unroll_max_trips`); above it, or with a
 runtime trip count, a `for` over `range` becomes a counted back-edge loop: a hidden counter phi, bounds captured by
@@ -333,24 +334,33 @@ becomes the two's-complement mask. No rule may mint a LEFT shift: the machine-wo
 is bounded by the count of left shifts in the graph, which is the other reason the product cannot become one --
 while a minted right shift is off that ledger, since nothing substitutes it. The absorbed scale itself never
 becomes a word -- only its exponent materializes, clamped into the int format at lowering -- so `x * 2**40` builds
-at any width while the equivalent spelled-out product is refused at selection.
+at any width while the equivalent spelled-out product is refused at selection. Two constant scalings of one value
+compose into one -- exponents adding, factors multiplying -- declined only where the compiler's own arithmetic rails
+or collapses, which is the identity's precondition rather than a question put to the format. A scaling carries its
+sign apart from its exponent, negation being the cheapest scaling there is, so composing can never strand an exact
+scale as a materialized constant the format then refuses.
 
 ### DEFERRED
 
-Dividing by a representable constant whose reciprocal is not (`x / 3e9` at e6m18) is refused over the reciprocal
-`x/c` mints rather than over anything the kernel wrote, since keeping `fdiv` there needs a format-aware choice HIR
-is forbidden to make.
+A constant the optimizer mints faces the format alone, so a kernel whose own constants all fit can still be refused
+over a number appearing nowhere in its source: the reciprocal of `x / 3e9` at e6m18, or the product two composed
+scalings fold to. Declining the reciprocal needs the format-aware choice HIR is forbidden to make; the composed
+product does not, and is a scaling representation away -- one carrying a significand beside its exponent would keep
+the pair apart and materialize a second node only where one constant cannot hold both. A composed product landing on
+a power of two likewise migrates the kernel's requirement from `fmul` to `fmul_ilog2`.
 
 ## MIR
 
 MIR owns the whole boundary: it optimizes the front end's HIR, judges what survives, and only then selects hardware.
 Optimization is not the caller's to run, because the judgement must see the last graph and no earlier one.
 
-It is also where the machine word is written back INTO HIR -- the direction the layering permits: nothing in HIR may
-ASK a format, but the format may TELL HIR. Answering a left shift past the word at selection would strand the
-constant there, where a second, poorer copy of the optimizer would have to chase what it enables, so the fact is
-substituted into the graph and the optimizer runs again, to a fixpoint: one substituted constant can leave another
-count constant for the next round.
+It is also where what the machine knows is written back INTO HIR -- the direction the layering permits: nothing in HIR
+may ASK a format, but the machine may TELL HIR, since answering at selection would strand the fact past every fold,
+where a second, poorer copy of the optimizer would have to chase what it enables. The trigonometric cores count angles
+in turns, so the radian operators are restated over a turn-native vocabulary with an explicit conversion, ahead of the
+optimizer: a kernel whose phase is already in turns then has its own scaling meet that conversion and cancel. The
+machine word is told from inside the fixpoint instead, since only a fold can reveal a shift count -- and one
+substituted constant can leave another count constant for the next round.
 
 What may be told is bounded by the same unboundedness that motivates it. A rule qualifies only if its answer is
 independent of every operand, since a later round can reveal one as a constant no word holds. A left shift past the
@@ -374,7 +384,8 @@ by nothing reduces earlier, in HIR, where the if-conversion budget counts it. `i
 reading its saturating product tap; the power-of-two quotient arrives here already spelled as a constant `>>`.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter
-transaction, sin/cos computed simultaneously by the sincos operator, FMA contraction of a single-use `a*b+c`, a
+transaction, sin/cos computed simultaneously by the sincos operator, FMA contraction of a single-use `a*b+c`
+(including one the turn restatement left, so enabling `ffma` can drop a rounding from an expression never spelled), a
 directional infinity classifier for an infinity predicate adjacent to a sign test -- matched at MIR because this is
 the first layer aware of hardware semantics. Some semantic operators lower into combinations of hardware operators
 depending on availability and context (e.g. hypotenuse via fatan2, sensible only when arctan is also computed); such
