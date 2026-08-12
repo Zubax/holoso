@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-A 4-tap finite impulse response filter on a numpy delay line.
-"""
+"""A 4-tap finite impulse response filter on a numpy delay line."""
 
 from pathlib import Path
 
@@ -12,10 +10,10 @@ import holoso
 
 class Fir4:
     """
-    A 4-tap FIR: ``y[n] = sum(taps[i] * x[n-3+i])``. The taps are frozen at construction and fold to constants; the
-    default ones are a unit-gain smoothing kernel and none is a power of two, so each costs a real multiply rather
-    than a shift. The delay line is private persistent state, shifted by rebuilding it from its own tail plus the new
-    sample -- the idiom that keeps the array unaliased, so the shift is a register-to-register move in hardware.
+    A 4-tap FIR: `y[n] = sum(taps[i] * x[n-3+i])`.
+    The taps fold to constants; the default ones are a unit-gain smoothing kernel.
+    The delay line is shifted by rebuilding it from its own tail plus the new sample -- the idiom compiled into
+    a register-to-register move in hardware.
     """
 
     def __init__(self, taps: tuple[float, float, float, float] = (0.1, 0.3, 0.4, 0.2)) -> None:

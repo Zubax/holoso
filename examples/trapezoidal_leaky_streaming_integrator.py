@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-A sample-by-sample integrator with an optional DC leak term.
-"""
+"""A sample-by-sample integrator with an optional DC leak term."""
 
 from pathlib import Path
 import holoso

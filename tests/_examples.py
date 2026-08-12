@@ -5,17 +5,18 @@ baseline, curated and random vector generators, and the datapath format(s). Cons
 the model vs the original Python), so the two views stay in lockstep over one source of truth.
 """
 
+import dataclasses
 import math
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from holoso import FloatFormat
-from ._modelref import bounded, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
+from holoso import FFromIntOptions, FloatFormat, FToIntOptions, OperatorOptions, Options
+from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
@@ -23,18 +24,25 @@ import ekf1_stateless as ekf1_stateless  # noqa: E402
 import imu_frame_transform as imu_frame_transform  # noqa: E402  # synth matrix only; matrix/vector I/O has no scalar SPEC
 import kepler  # noqa: E402
 import madd  # noqa: E402
+from nco import Nco  # noqa: E402
 import polar as polar  # noqa: E402  # scalar-driven below; vector I/O pinned in test_verify
 import poly3  # noqa: E402
 from polar import from_polar, to_polar  # noqa: E402  # bare names so the frontend inlines them into the wrappers
 from biquad import Biquad  # noqa: E402
 from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
+from crc32 import POLY_IEEE8023, Crc32  # noqa: E402
+from debouncer import Debouncer  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
 from fir import Fir4  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
+from iq_oscillator import IqOscillator  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
+from lfsr16 import Lfsr16  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
 from pid import PID as PID  # noqa: E402
+from priority_encoder import PriorityEncoder  # noqa: E402
+from pwm import Pwm  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector as PhaseFrequencyDetector  # noqa: E402
 from quadrature_encoder import QuadratureEncoder  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
@@ -46,6 +54,8 @@ from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
 # The wide scalar datapath: the one configuration the example matrix is synthesized in.
 _FMT = FloatFormat(8, 36)
+# What a kernel that builds no float operator gets by default; for those, the format only sizes the integer word.
+_NARROW = FloatFormat(6, 18)
 # Frozen random vectors per example (over and above the manual and edge vectors); scale via the env knob to trade
 # coverage for cosimulation wall-clock.
 _RANDOM_COUNT = int(os.environ.get("HOLOSO_TEST_RANDOM_COUNT", "48"))
@@ -71,8 +81,104 @@ _PID_MANUAL = [  # first update (D suppressed), then a varying measurement (D ac
 ]
 
 
-type InputVector = dict[str, float | bool]
-"""One input vector: input-name -> scalar value (a float, or a bool for a boolean-typed port)."""
+type InputVector = dict[str, float | bool | int]
+"""One input vector: input-name -> scalar value, matching the family of its port (float, int, or bool)."""
+
+
+def _drive(name: str, values: Sequence[float | bool | int]) -> list[InputVector]:
+    """The single-input drive sequence: one vector per value, in order."""
+    return [{name: value} for value in values]
+
+
+# The published check message runs first, straight out of the all-ones reset, so the ninth row reproduces the
+# catalogue value 0xCBF43926 exactly -- the same number ``zlib.crc32`` reports for those bytes. The byte rails and
+# checkerboards then fold into the register that message left behind.
+_CRC32_MANUAL = _drive("byte", list(b"123456789") + [0x00, 0xFF, 0x80, 0x01, 0x7F, 0xAA, 0x55, 0x00])
+
+_LFSR_MANUAL = _drive(
+    "advance",
+    [True] * 20
+    + [False] * 3  # gated: both the register and the emitted bit must hold
+    + [True] * 8  # and resume in phase
+    + [False]
+    + [True] * 5,
+)
+
+# A clean edge, two rejected bounces, the N-1/N boundary (which discriminates >= from >), and a re-bounce one sample
+# after a flip, which must not flip back because the tally restarts on the flip.
+_DEBOUNCE_MANUAL = _drive(
+    "raw",
+    [False] * 2
+    + [True] * 5
+    + [False, False, False, True] * 2
+    + [False] * 7
+    + [True] * 3
+    + [False]
+    + [True] * 4
+    + [False, True]
+    + [False] * 4,
+)
+
+# The idle bus and its sentinel, one bit at each position, multi-bit words where the lowest wins, and words whose
+# set bits lie above the scanned range -- both the bits above the bus width and the negative words, which the scan
+# must ignore because it reads only shifts 0..7.
+_PRIORITY_MANUAL = _drive(
+    "request",
+    [0, 1, 2, 4, 8, 16, 32, 64, 128]
+    + [0b1010, 0b1100_0000, 0xFF, 0x81, 0b10_1000, 0b110]
+    + [0x100, 0x180, 0x1FF]
+    + [-1, -2, -256],
+)
+
+_NCO_PHASE_MASK = (1 << 32) - 1
+_NCO_MANUAL: list[InputVector] = [
+    {"increment": increment, "phase_offset": offset}
+    for increment, offset in (
+        [(1 << 31, 0)] * 6  # half the tick rate: the MSB toggles every tick
+        + [(1 << 30, 0)] * 8  # a quarter of it: a period-4 square wave, two full wraps
+        + [(0x3FFFFFFF, 0)] * 8  # one count short of a quarter turn: the one-tick edge jitter
+        + [(0xC0000000, 0)] * 8  # past Nyquist: wraps on three ticks out of four
+        + [(_NCO_PHASE_MASK, 0)] * 4  # full scale: the aliased one-LSB-per-tick backward ramp
+        + [(0, 0)] * 3  # halted: the phase holds and the output must not move
+        # The accumulator is frozen across these, so the offset alone must move the output through a whole turn.
+        + [(0, 1 << 30), (0, 1 << 31), (0, 0xC0000000), (0, _NCO_PHASE_MASK)]
+        + [(1, 0)] * 3  # the smallest tuning step, from a nonzero phase
+        + [(1 << 30, 1 << 31)] * 4  # retuning and offsetting at once
+    )
+]
+
+_PWM_TOP = 8  # the period this spec drives; the vectors below are written in terms of it
+_PWM_MANUAL = _drive(
+    "duty",
+    [_PWM_TOP // 2] * (2 * _PWM_TOP)  # a full triangle period at half duty
+    + [0] * _PWM_TOP  # always off
+    + [_PWM_TOP] * (2 * _PWM_TOP)  # the fullest duty that still has an off tick
+    + [_PWM_TOP + 5] * _PWM_TOP  # above top: always on
+    + [1] * (2 * _PWM_TOP)  # the shortest pulse
+    + [3] * 5  # ends part-way up the ramp, so the next change lands mid-period
+    + [6] * 7  # retuned while counting up, and this segment ends on the way down
+    + [2] * 6,  # so this one is retuned while counting down
+)
+
+
+# The I/Q oscillator's exact grid: ``frequency * dt * 2**32`` must be an integer in e8m36 and in float64 alike, so the
+# float-to-int conversion rounds identically on both sides and the integer phase stays bit-identical to CPython for
+# any run length. Off the grid the two roundings disagree near a half-integer and a diverged accumulator never
+# re-converges, which no output tolerance could absorb.
+_IQ_DT = 2.0**-10  # 1024 transactions per second
+_IQ_FREQ_LSB = 2.0**-22  # exactly one accumulator unit per tick
+
+
+def _draw_iq(rng: np.random.Generator) -> InputVector:
+    return {
+        "frequency": float(rng.integers(-(1 << 31), 1 << 31)) * _IQ_FREQ_LSB,
+        "dt": _IQ_DT,
+        "phase_offset": float(rng.integers(0, 1 << 32)) / 2.0**32,
+    }
+
+
+def _iq(frequency: float, phase_offset: float = 0.0) -> InputVector:
+    return {"frequency": frequency, "dt": _IQ_DT, "phase_offset": phase_offset}
 
 
 @dataclass(frozen=True)
@@ -107,13 +213,19 @@ class ExampleSpec:
     nominal: InputVector  # baseline for the per-input edge sweep (each input perturbed in turn)
     manual: list[InputVector]  # sensible vectors; an ordered sequence for stateful kernels
     draw_random: Callable[[np.random.Generator], InputVector]
-    edge_values: tuple[float | bool, ...]
+    edge_values: tuple[float | bool | int, ...]
     # Per-input edge-sweep overrides: a listed input is swept over its own values instead of ``edge_values`` (e.g. a
     # divisor pinned to positive magnitudes so it never reaches zero). Inputs absent here use ``edge_values``.
-    edge_overrides: Mapping[str, tuple[float | bool, ...]] = field(default_factory=dict)
+    edge_overrides: Mapping[str, tuple[float | bool | int, ...]] = field(default_factory=dict)
     # The float format(s) to drive at. The matrix is e8m36 by plan; a kernel that wants a second datapath (e.g. a
     # shallow e6m18 alongside the deep e8m36, to exercise both pipeline depths) lists both here.
     formats: tuple[FloatFormat, ...] = (_FMT,)
+    # The native integer width the kernel needs, where the format's own width does not already supply it: an
+    # accumulator that must wrap at a given modulus needs the word to hold it without saturating on the way.
+    wint_min: int = Options(OperatorOptions()).wint_min
+    # How this kernel's operator set differs from the one the catalogue shares: a datapath crossing between the
+    # families needs the conversions, which no float-only kernel builds.
+    operators: Callable[[OperatorOptions], OperatorOptions] = lambda ops: ops
     # The Python-reference accuracy contract, keyed by output port name (``out_*``/``state_*``): a listed float lane
     # is compared within its OutputTolerance allowance; an absent lane (and every bool lane) must match the float64
     # reference bit-for-bit. ``None`` excludes the kernel from the generic scalar reference harness: public VECTOR
@@ -126,6 +238,14 @@ class ExampleSpec:
         for row in self.manual:
             assert set(row) == inputs, f"{self.name}: manual row keys {set(row)} != inputs {inputs}"
         assert set(self.edge_overrides) <= inputs, f"{self.name}: edge_overrides keys outside inputs {inputs}"
+
+    def options(self, fmt: FloatFormat) -> Options:
+        """The spec's synthesis configuration: the shared default at one format, adjusted to what the kernel needs."""
+        return self.configured(default_options(fmt))
+
+    def configured(self, options: Options) -> Options:
+        """The same adjustment over an arbitrary base, so the pipeline-depth variants stay in one place."""
+        return dataclasses.replace(options, operator=self.operators(options.operator), wint_min=self.wint_min)
 
     def reference_vectors(self) -> list[InputVector]:
         """
@@ -174,29 +294,30 @@ def _draw_scalars(names: tuple[str, ...], lo: float, hi: float) -> Callable[[np.
     return lambda rng: {name: bounded(rng, lo, hi) for name in names}
 
 
-_UART_FMT = FloatFormat(4, 8)  # the narrowest format that holds a 0..255 byte exactly (wman=8), per examples/uart.py
-
-
-def _uart_tx_drive(payload: tuple[int, ...]) -> list[dict[str, float | bool]]:
+def _uart_tx_drive(payload: tuple[int, ...]) -> list[InputVector]:
     """A transmit sequence: assert start for one tick with each byte, then idle through its whole (<= 11-bit) frame."""
-    rows: list[dict[str, float | bool]] = []
+    rows: list[InputVector] = []
     for value in payload:
-        rows.append({"start": True, "char": float(value)})
-        rows += [{"start": False, "char": 0.0}] * (OVERSAMPLE * 11)
+        rows.append({"start": True, "char": value})
+        rows += [{"start": False, "char": 0}] * (OVERSAMPLE * 11)
     return rows
 
 
 def _uart_rx_frame(
-    value: int, parity_odd: bool, *, flip_parity: bool = False, drop_stop: bool = False
-) -> list[dict[str, float | bool]]:
+    value: int, parity: bool | None, *, flip_parity: bool = False, drop_stop: bool = False
+) -> list[InputVector]:
     """
-    A receive sequence: one oversampled 8E1/8O1 serial frame -- idle, start, 8 data bits LSB first, parity, stop. With
-    ``flip_parity`` the parity bit is corrupted (the receiver must flag ``parity_error``); with ``drop_stop`` the stop
-    bit is held low (it must flag ``frame_error``) -- so the error lanes are driven to their non-default value.
+    A receive sequence: one oversampled serial frame -- idle, start, 8 data bits LSB first, the parity bit only when
+    the framing carries one, stop. With ``flip_parity`` the parity bit is corrupted (the receiver must flag
+    ``parity_error``); with ``drop_stop`` the stop bit is held low (it must flag ``frame_error``) -- so the error lanes
+    are driven to their non-default value. An 8N1 receiver stops one bit earlier, so feeding it a parity bit would
+    make it read that bit as the stop bit and flag a spurious framing error.
     """
     data = [(value >> i) & 1 for i in range(8)]
-    parity = (sum(data) % 2 == 1) != parity_odd  # even-parity bit, inverted for odd parity
-    levels = [True] * 4 + [False] + [bool(d) for d in data] + [parity != flip_parity] + [not drop_stop] + [True] * 4
+    levels = [True] * 4 + [False] + [bool(d) for d in data]
+    if parity is not None:
+        levels.append(((sum(data) % 2 == 1) != parity) != flip_parity)  # even-parity bit, inverted for odd parity
+    levels += [not drop_stop] + [True] * 4
     return [{"rx": level} for level in levels for _ in range(OVERSAMPLE)]
 
 
@@ -439,23 +560,128 @@ SPECS = [
         edge_values=(False, True),
     ),
     ExampleSpec(
+        name="iq_oscillator",
+        inputs=("frequency", "dt", "phase_offset"),
+        make_kernel=lambda: IqOscillator().tick,
+        # One fsincos firing serves both lanes; the budget is the radian round trip plus the core, and it does not
+        # grow with age because the phase recurrence is integer and exact -- no float state drifts.
+        reference={"out_0": OutputTolerance(ulps=64), "out_1": OutputTolerance(ulps=64)},
+        nominal={"frequency": 64.0, "dt": _IQ_DT, "phase_offset": 0.0},
+        manual=[
+            _iq(0.0),  # DC: the phase must not move
+            *[_iq(256.0) for _ in range(4)],  # quarter rate: I/Q hit exact 0 and +-1, returning to the start phase
+            # The accumulator is frozen across these three, so the bit-exact phase lane must be identical on all of
+            # them while I/Q rotate a quarter turn each -- the offset's independence from the state, checkably.
+            _iq(0.0, 0.25),
+            _iq(0.0, 0.5),
+            _iq(0.0, 0.75),
+            _iq(-256.0),  # negative: the phase runs backwards
+            _iq(1023.99993896484375),  # just under one turn per tick
+            _iq(768.0),  # 0.75 turn/tick, which folds to -0.25
+            _iq(68.0, 0.125),  # an ordinary tone, wrapping slowly
+            _iq(68.0, 0.125),
+        ],
+        draw_random=_draw_iq,
+        # The edge sweep drives dt and frequency to the format rails, overflowing the product to infinity and taking
+        # the conversion to its own rail; those rows reach cosim only, where both sides saturate identically.
+        edge_values=_WIDE_EDGES,
+        formats=(_FMT,),  # wman >= 32: a shallower format would quantize the grid and measure itself, not the compiler
+        wint_min=34,  # a carry bit above the phase, then a sign bit
+        operators=lambda ops: dataclasses.replace(ops, ffromint=FFromIntOptions(), ftoint=FToIntOptions()),
+    ),
+    ExampleSpec(
+        name="nco",
+        inputs=("increment", "phase_offset"),
+        make_kernel=lambda: Nco().tick,
+        nominal={"increment": 1 << 30, "phase_offset": 0},
+        manual=_NCO_MANUAL,
+        # Both control words are architecturally 32 bits and the ports are wider only because the machine has one
+        # native integer width, but masking each input keeps every sum inside the word, so the kernel is total over
+        # the port and the edge sweep can leave the 32-bit range.
+        draw_random=lambda rng: {
+            "increment": int(rng.integers(0, 1 << 32)),
+            "phase_offset": int(rng.integers(0, 1 << 32)),
+        },
+        edge_values=(0, 1, 1 << 30, 1 << 31, 0xC0000000, _NCO_PHASE_MASK, 1 << 32, -1),
+        formats=(FloatFormat(6, 18),),  # width 24, so the kernel's own wint_min is what sizes the accumulator
+        wint_min=34,  # the pre-mask sum reaches 2**33 - 2: one carry bit above the accumulator, plus the sign bit
+    ),
+    ExampleSpec(
+        name="pwm",
+        inputs=("duty",),
+        make_kernel=lambda: Pwm(top=_PWM_TOP).tick,
+        nominal={"duty": _PWM_TOP // 2},
+        manual=_PWM_MANUAL,
+        draw_random=lambda rng: {"duty": int(rng.integers(0, _PWM_TOP + 2))},
+        edge_values=(0, 1, _PWM_TOP // 2, _PWM_TOP - 1, _PWM_TOP, _PWM_TOP + 5),
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+    ),
+    ExampleSpec(
+        name="debouncer",
+        inputs=("raw",),
+        make_kernel=lambda: Debouncer(samples=4).__call__,
+        nominal={"raw": False},
+        manual=_DEBOUNCE_MANUAL,
+        draw_random=lambda rng: {"raw": bool(rng.integers(0, 2))},
+        edge_values=(False, True),
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+    ),
+    ExampleSpec(
+        name="priority_encoder",
+        inputs=("request",),
+        make_kernel=lambda: PriorityEncoder(width=8).__call__,
+        nominal={"request": 0},
+        manual=_PRIORITY_MANUAL,
+        draw_random=lambda rng: {"request": int(rng.integers(0, 256))},
+        edge_values=(0, 1, 0x80, 0xFF, 0x100, -1),
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+    ),
+    ExampleSpec(
+        name="crc32",
+        inputs=("byte",),
+        make_kernel=lambda: Crc32(POLY_IEEE8023).__call__,
+        nominal={"byte": 0x00},
+        manual=_CRC32_MANUAL,
+        draw_random=lambda rng: {"byte": int(rng.integers(0, 256))},
+        edge_values=(0x00, 0x01, 0x7F, 0x80, 0xFF),
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        wint_min=33,  # the reversed polynomial is 32 unsigned bits, which a signed word carries one above
+    ),
+    ExampleSpec(
+        name="lfsr16",
+        inputs=("advance",),
+        make_kernel=lambda: Lfsr16().__call__,
+        nominal={"advance": True},
+        manual=_LFSR_MANUAL,
+        draw_random=lambda rng: {"advance": bool(rng.integers(0, 2))},
+        edge_values=(False, True),
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        wint_min=17,  # the tap mask 0xB400 does not fit a signed 16-bit word
+    ),
+    ExampleSpec(
         name="uart_tx",
         inputs=("start", "char"),
-        make_kernel=lambda: UartTx(parity=False).__call__,
-        nominal={"start": False, "char": 0.0},
+        make_kernel=lambda: UartTx(parity=False).tick,
+        nominal={"start": False, "char": 0},
         # 0x01 and 0x7F have an ODD number of set bits, so the even-parity bit is HIGH for them: the parity XOR
-        # reduction must emit a 1, not just the 0 that every even-popcount byte (0x55/0xC3/0x00/0xFF) yields.
-        manual=_uart_tx_drive((0x55, 0xC3, 0x00, 0x01, 0x7F, 0xFF)),
-        draw_random=lambda rng: {"start": bool(rng.integers(0, 8) == 0), "char": float(rng.integers(0, 256))},
-        # The per-input edge sweep is uniform over inputs, so it cannot mix a boolean lane (start) with a float lane
-        # (char); the random draw already sweeps char across the whole 0..255 byte range, so no separate edge set.
+        # reduction must emit a 1, not just the 0 that every even-popcount byte (0x55/0xC3/0x00/0xFF) yields. The
+        # trailing pair asserts start while the machine is busy: the second byte must be ignored, not latched mid-frame.
+        manual=(
+            _uart_tx_drive((0x55, 0xC3, 0x00, 0x01, 0x7F, 0xFF))
+            + [{"start": True, "char": 0x0F}, {"start": True, "char": 0xA5}]
+            + [{"start": False, "char": 0}] * (OVERSAMPLE * 11)
+        ),
+        draw_random=lambda rng: {"start": bool(rng.integers(0, 8) == 0), "char": int(rng.integers(0, 256))},
+        # The per-input sweep is uniform over the inputs, so one value set cannot serve both a boolean lane and a byte
+        # lane; and a byte only enters the machine on a latching tick, which a one-row perturbation cannot arrange.
+        # The byte edges therefore ride the manual sequence, which latches each of them.
         edge_values=(),
-        formats=(_UART_FMT,),
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
     ),
     ExampleSpec(
         name="uart_rx",
         inputs=("rx",),
-        make_kernel=lambda: UartRx(parity=False).__call__,
+        make_kernel=lambda: UartRx(parity=False).tick,
         nominal={"rx": True},
         manual=(
             _uart_rx_frame(0x55, False)
@@ -467,10 +693,11 @@ SPECS = [
             + _uart_rx_frame(0x7F, False)  # 7 bits set (odd) -> exercises most of the parity reduction, still no error
             + _uart_rx_frame(0x96, False, flip_parity=True)  # corrupted parity bit -> parity_error asserts
             + _uart_rx_frame(0x3C, False, drop_stop=True)  # stop bit held low -> frame_error asserts
+            + [{"rx": level} for level in [False] * 4 + [True] * 24]  # false start: recovers before the mid-bit sample
         ),
         draw_random=lambda rng: {"rx": bool(rng.integers(0, 2))},
         edge_values=(False, True),
-        formats=(_UART_FMT,),
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
     ),
     ExampleSpec(
         name="recip_newton",

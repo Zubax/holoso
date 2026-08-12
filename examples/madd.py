@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Tiny multiply-add kernel. The const mults strength-reduce to fmul_ilog2 (K = -2); ``a`` and ``b`` are each read twice
-(small reuse), the products are single-use.
+Tiny multiply-add kernel, a leftover from the very early days of Holoso.
+The const mults strength-reduce to fmul_ilog2 (K = -2); `a` and `b` are each read twice, the products are single-use.
 """
 
 from pathlib import Path
@@ -9,7 +9,7 @@ import holoso
 
 
 def madd(a: float, b: float, c: float) -> float:
-    """``c`` is an unused argument, kept as given to exercise dead-input handling."""
+    """`c` is an unused argument, kept as given to exercise dead-input handling."""
     return (a - b) * 0.25 + a * b * 8
 
 

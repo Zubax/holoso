@@ -18,13 +18,14 @@ The example specs are shared with the cosimulation suite via ``_examples``: the 
 ``raw_vectors()`` (manual + random + edges), this suite the ``reference_vectors()`` subset, over one source of truth.
 """
 
+import dataclasses
 from collections.abc import Callable, Mapping
 
 import numpy as np
 import pytest
 
 import holoso
-from holoso import BoolType, FloatFormat
+from holoso import BoolType, FloatFormat, FloatType, IntType
 from ._examples import SPECS, ExampleSpec, InputVector, OutputTolerance
 from ._modelref import default_options, flatten_value, port_name, within
 
@@ -37,9 +38,29 @@ _CASES = [
 ]
 
 
-def _quantize(value: float | bool, fmt: FloatFormat) -> float | bool:
-    """A float rounded into ``fmt`` (so the model and float64 reference get an identical operand); a bool unchanged."""
-    return value if isinstance(value, bool) else fmt.decode(fmt.encode(value))
+def _quantize(value: float | bool | int, fmt: FloatFormat) -> float | bool | int:
+    """A float rounded into ``fmt``, so the model and the float64 reference get one operand; a bool/int is exact."""
+    return value if isinstance(value, (bool, int)) else fmt.decode(fmt.encode(value))
+
+
+def _declared_family(scalar_type: object) -> type:
+    match scalar_type:
+        case BoolType():
+            return bool
+        case IntType():
+            return int
+        case FloatType():
+            return float
+    raise AssertionError(scalar_type)
+
+
+def _family_of(value: object) -> type:
+    """The family a value actually carries, on either side: the model's typed scalars and Python's own numbers."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool
+    if isinstance(value, (int, np.integer, holoso.IntValue)):
+        return int
+    return float
 
 
 def _assert_model_matches_reference(
@@ -66,7 +87,7 @@ def _assert_model_matches_reference(
         got = model.run(*[quantized[port.name] for port in model.inputs])
         result = reference(*[quantized[name] for name in inputs])
         return_leaves = {port_name(path): leaf for path, leaf in flatten_value(result)}
-        expected: dict[str, float | bool] = {}
+        expected: dict[str, float | bool | int] = {}
         for port in model.outputs:
             if port.name.startswith(_STATE_PREFIX):
                 value = getattr(instance, port.name[len(_STATE_PREFIX) :])
@@ -83,15 +104,18 @@ def _assert_model_matches_reference(
                 ), f"{label} {row}: return leaf {leaf_name} has no port and matches no public state live-out"
         for port, got_value in zip(model.outputs, got, strict=True):
             want = expected[port.name]
-            declared_bool = isinstance(port.scalar_type, BoolType)
+            family = _declared_family(port.scalar_type)
             assert (
-                isinstance(got_value, (bool, np.bool_)) == declared_bool
+                _family_of(got_value) is family
             ), f"{label} {row} {port.name}: model value {got_value!r} is not of the declared {port.scalar_type}"
             assert (
-                isinstance(want, (bool, np.bool_)) == declared_bool
+                _family_of(want) is family
             ), f"{label} {row} {port.name}: reference value {want!r} is not of the declared {port.scalar_type}"
-            if declared_bool:
+            if family is bool:
                 assert bool(got_value) == bool(want), f"{label} {row} {port.name}: {bool(got_value)} != {bool(want)}"
+            elif family is int:
+                assert isinstance(got_value, holoso.IntValue) and isinstance(want, int)
+                assert int(got_value) == want, f"{label} {row} {port.name}: {int(got_value)} != {want}"
             else:
                 budget = tolerances.get(port.name)
                 atol = 0.0 if budget is None else budget.allowance(fmt, float(want), age)
@@ -102,7 +126,7 @@ def _assert_model_matches_reference(
 
 @pytest.mark.parametrize("spec,fmt", _CASES)
 def test_example_matches_python_reference(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    model = holoso.synthesize(spec.make_kernel(), default_options(fmt), name=spec.name).numerical_model.elaborate()
+    model = holoso.synthesize(spec.make_kernel(), spec.options(fmt), name=spec.name).numerical_model.elaborate()
     assert spec.reference is not None
     _assert_model_matches_reference(
         spec.name, model, spec.make_kernel(), spec.inputs, spec.reference_vectors(), fmt, spec.reference

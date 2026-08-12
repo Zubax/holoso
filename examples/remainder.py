@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-The IEEE 754 floating-point remainder ``remainder(x, y) = x - n*y``, where ``n`` is ``x/y`` rounded to the nearest
-integer (ties to even), so the result lies in ``[-|y|/2, +|y|/2]``.
+The IEEE 754 floating-point remainder `remainder(x, y) = x - n*y`, where n is `x/y` rounded to the nearest integer
+(ties to even), so the result lies in `[-|y|/2, +|y|/2]`.
 
-Computed by the standard iterative reduction: scale ``|y|`` up to the largest ``2**k * |y|`` not exceeding ``|x|``,
-then subtract scaled divisors while halving back down to ``|y|``, which leaves the truncated remainder
-``fmod(|x|, |y|)`` in ``[0, |y|)``; a final round-to-nearest-even step centers it. Each subtraction is exact (Sterbenz),
-so the result is the exact IEEE remainder whenever that remainder is representable in the configured float format --
-which it is for any normal-magnitude result.
-
-The trip count of both loops is the binary magnitude ratio of ``x`` to ``y``, hence data-dependent --
-the machine runs a variable number of cycles per input.
+Computed by the standard iterative reduction: scale `|y|` up to the largest `2**k * |y|` not exceeding `|x|`,
+then subtract scaled divisors while halving back down to `|y|`, which leaves the truncated remainder `fmod(|x|, |y|)`
+in `[0, |y|)`; a final round-to-nearest-even step centers it. Each subtraction is exact (Sterbenz), so the result is
+the exact IEEE remainder.
 """
 
 from pathlib import Path

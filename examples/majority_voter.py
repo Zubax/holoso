@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
 A 3-out-of-5 (3oo5) majority voter with latched channel diagnostics -- the modular-redundancy pattern from
-safety-critical control. The voted output is the majority of five redundant boolean inputs; while ``enabled``, each
-channel that disagrees with the voted value (an exclusive-or against it) latches a sticky per-channel fault that holds
-until the synchronous reset clears it. Five-way redundancy of this flavour flew on the Space Shuttle, whose five
-general-purpose computers ran a four-way cross-voted primary avionics set alongside a dissimilarly-developed backup;
+safety-critical control. Five-way redundancy of this flavour flew on the Space Shuttle, whose five general-purpose
+computers ran a four-way cross-voted primary avionics set alongside a dissimilarly-developed backup;
 this kernel is the idealised flat 3oo5 majority rather than that exact 4-plus-1 arrangement.
 
-The diagnostic update is deliberately gated behind ``enabled`` rather than folded into the always-on vote, so it stays
-a real conditional branch: the five distinct ``channel ^ voted`` disagreements and five sticky-fault latches keep the
+The diagnostic update is deliberately gated behind `enabled` rather than folded into the always-on vote, so it stays
+a real conditional branch: the five distinct `channel ^ voted` disagreements and five sticky-fault latches keep the
 arm's work irreducible, so it survives even aggressive boolean simplification rather than collapsing into the vote.
 """
 

@@ -1,128 +1,21 @@
 """
-The integer corpus: the kernels the float examples stand in for (``examples/uart.py``'s TODO(integers) notes),
-plus the residual-loop exit kernels. This module is the single owner of the integer acceptance matrix
+The integer corpus: the small stateful kernels of the integer acceptance matrix, plus the residual-loop exit
+kernels. The UART rows drive ``examples/uart.py`` itself over framings the example catalogue does not carry
+(8N1 and 8O1 beside its 8E1). This module is the single owner of the integer acceptance matrix
 (``INT_CASES`` with its vectors and ``int_corpus_options``); the public model-vs-CPython acceptance, the retained
 UART HIR-oracle rows, the MIR-interpreter qualification, and the cosim subset all feed off it.
 """
 
+import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import holoso
 
 from ._eeloracle import InputRow
 
-OVERSAMPLE = 16
-LAST_PHASE = OVERSAMPLE - 1
-HALF_BIT = OVERSAMPLE // 2 - 1
-
-
-class _IntUartFrame:
-    def __init__(self, parity: bool | None) -> None:
-        self._parity_present = parity is not None
-        self._parity_odd = bool(parity)
-
-    @property
-    def _last_index(self) -> int:
-        return 10 if self._parity_present else 9
-
-    def _parity_bit(self, char: int) -> bool:
-        rest = char
-        parity = self._parity_odd
-        for _ in range(8):
-            parity = parity ^ ((rest & 1) == 1)
-            rest = rest >> 1
-        return parity
-
-
-class IntUartTx(_IntUartFrame):
-    """
-    The integer rewrite of ``examples/uart.py``'s transmitter: the byte shifts out of an int register LSB
-    first, so the float version's bit peeling and byte reversal disappear, and the counters are ints.
-    """
-
-    def __init__(self, parity: bool | None) -> None:
-        super().__init__(parity)
-        self._busy = False
-        self._phase = 0
-        self._index = 0
-        self._shift = 0
-        self._parity = False
-
-    def __call__(self, start: bool, char: int, /) -> tuple[bool, bool]:
-        if not self._busy:
-            tx = True
-            if start:
-                self._busy = True
-                self._phase = LAST_PHASE
-                self._index = 0
-                self._shift = char
-                self._parity = self._parity_bit(char)
-        else:
-            if self._index <= 0:
-                tx = False
-            elif self._index <= 8:
-                tx = (self._shift & 1) == 1
-            elif self._index <= 9:
-                tx = self._parity if self._parity_present else True
-            else:
-                tx = True
-            if self._phase <= 0:
-                if (self._index >= 1) and (self._index <= 8):
-                    self._shift = self._shift >> 1
-                if self._index >= self._last_index:
-                    self._busy = False
-                else:
-                    self._index = self._index + 1
-                    self._phase = LAST_PHASE
-            else:
-                self._phase = self._phase - 1
-        return tx, self._busy
-
-
-class IntUartRx(_IntUartFrame):
-    """The integer receiver: each sampled bit lands in bit 7 and shifts down, rebuilding the byte LSB first."""
-
-    def __init__(self, parity: bool | None) -> None:
-        super().__init__(parity)
-        self._busy = False
-        self._count = 0
-        self._index = 0
-        self._char = 0
-        self._parity_rx = False
-
-    def __call__(self, rx: bool, /) -> tuple[bool, int, bool, bool]:
-        valid = False
-        parity_error = False
-        frame_error = False
-        if not self._busy:
-            if not rx:
-                self._busy = True
-                self._count = HALF_BIT
-                self._index = 0
-                self._char = 0
-        elif self._count <= 0:
-            if self._index <= 0:
-                if rx:
-                    self._busy = False
-                else:
-                    self._count = LAST_PHASE
-                    self._index = 1
-            elif self._index <= 8:
-                self._char = (self._char >> 1) | (int(rx) << 7)
-                self._count = LAST_PHASE
-                self._index = self._index + 1
-            elif self._index < self._last_index:
-                self._parity_rx = rx
-                self._count = LAST_PHASE
-                self._index = self._index + 1
-            else:
-                valid = True
-                self._busy = False
-                frame_error = not rx
-                parity_error = (self._parity_rx ^ self._parity_bit(self._char)) if self._parity_present else False
-        else:
-            self._count = self._count - 1
-        return valid, self._char, parity_error, frame_error
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
 
 class Crc8:
@@ -269,11 +162,11 @@ def uart_rx_vectors() -> list[InputRow]:
 
 
 INT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]] = [
-    ("int_uart_tx_8e1", lambda: IntUartTx(parity=False).__call__, uart_tx_vectors()),
-    ("int_uart_tx_8n1", lambda: IntUartTx(parity=None).__call__, uart_tx_vectors()),
-    ("int_uart_rx_8e1", lambda: IntUartRx(parity=False).__call__, uart_rx_vectors()),
-    ("int_uart_rx_8o1", lambda: IntUartRx(parity=True).__call__, uart_rx_vectors()),
-    ("int_uart_rx_8n1", lambda: IntUartRx(parity=None).__call__, uart_rx_vectors()),
+    ("int_uart_tx_8e1", lambda: UartTx(parity=False).tick, uart_tx_vectors()),
+    ("int_uart_tx_8n1", lambda: UartTx(parity=None).tick, uart_tx_vectors()),
+    ("int_uart_rx_8e1", lambda: UartRx(parity=False).tick, uart_rx_vectors()),
+    ("int_uart_rx_8o1", lambda: UartRx(parity=True).tick, uart_rx_vectors()),
+    ("int_uart_rx_8n1", lambda: UartRx(parity=None).tick, uart_rx_vectors()),
     ("crc8", lambda: Crc8().step, rows("byte", [0x31, 0x32, 0x33, 0xFF, 0x00, 0x80, 0x01])),
     ("lfsr16", lambda: Lfsr16().step, rows("advance", [True] * 20 + [False] * 2 + [True] * 3)),
     ("nco_phase", lambda: NcoPhase().step, rows("increment", [0x40000000] * 5 + [0x3FFFFFFF] * 3 + [1, 0])),

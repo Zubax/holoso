@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Rigid-body frame transform for a strapdown IMU: place a body-frame point in the world frame and resolve a specific-force
-measurement into world-frame linear acceleration, using only matrix products (no inversion, no trigonometry).
+measurement into world-frame linear acceleration, using only matrix products.
 """
 
 from pathlib import Path

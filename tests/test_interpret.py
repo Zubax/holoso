@@ -67,7 +67,7 @@ _EXAMPLE_CASES = [
 
 @pytest.mark.parametrize("spec,fmt", _EXAMPLE_CASES)
 def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    model, interpreter = build_model_and_interpreter(spec.make_kernel(), default_ops(fmt), spec.name, fmt)
+    model, interpreter = build_model_and_interpreter(spec.make_kernel(), build_ops(spec.options(fmt)), spec.name, fmt)
     vectors = [_spec_vector(model, row) for row in spec.raw_vectors()]
     assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
 

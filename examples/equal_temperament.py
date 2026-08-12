@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Twelve-tone equal temperament -- the transcendental counterpart to octave_index.py (which does log2 the hard way). It
-maps a MIDI note to its frequency (exp2, reached through ``2 ** x``) and recovers the note back from that frequency
+Twelve-tone equal temperament -- the transcendental counterpart to octave_index.py (which does log2 the hard way).
+Maps a MIDI note to its frequency (exp2, reached through `2 ** x`) and recovers the note back from that frequency
 (log2), so the two operators are exercised as inverses. log2's argument is the exp2 output, always positive.
 """
 

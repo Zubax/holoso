@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-A Schmitt trigger: a comparator with hysteresis. The output latches high once the input rises above ``HIGH`` and low
-once it falls below ``LOW``; between the two thresholds it holds its previous value (the hysteresis deadband).
-"""
+"""A Schmitt trigger: a comparator with hysteresis."""
 
 from pathlib import Path
 
@@ -10,6 +7,8 @@ import holoso
 
 
 class SchmittTrigger:
+    """Between the two thresholds the output holds its previous value (the hysteresis deadband)."""
+
     def __init__(self, *, high: float = 1.0, low: float = -1.0, initial: bool = False) -> None:
         self.high: float = high
         self.low: float = low

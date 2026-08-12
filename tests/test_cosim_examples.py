@@ -1,8 +1,9 @@
 """
 End-to-end cosimulation of every catalogued scalar-drivable example: each is driven with hand-built sensible vectors, a
 frozen random sweep, and format edge cases, then checked bit-for-bit against its embedded model under a lean (no
-optional stages) and a deeply pipelined operator configuration at each spec's datapath formats -- e8m36 for most, the
-UART pair at e4m8, and octave_index additionally at the shallow e6m18.
+optional stages) and a deeply pipelined operator configuration at each spec's datapath formats -- e8m36 for most,
+e6m18 for the kernels that build no float operator at all (where the format only sizes the integer word, so this is
+the width their own scripts generate), and octave_index at both.
 
 This proves ``RTL == embedded numerical model``; it does NOT prove ``model == Python semantics`` (both descend from the
 same lowering). ``test_example_reference.py`` covers that second half, driving the same example specs against a fresh
@@ -53,5 +54,6 @@ _SPEC_FORMATS = [
 @pytest.mark.parametrize("spec,fmt", _SPEC_FORMATS)
 def test_example_cosim(spec: ExampleSpec, fmt: FloatFormat, config: OptionsCase, sim: str) -> None:
     name = f"{spec.name}_{config.label}_e{fmt.wexp}m{fmt.wman}"
-    result = holoso.synthesize(spec.make_kernel(), config.make_options(fmt), name=name)
+    options = spec.configured(config.make_options(fmt))
+    result = holoso.synthesize(spec.make_kernel(), options, name=name)
     run_cosim(sim, result, vectors=spec.raw_vectors())

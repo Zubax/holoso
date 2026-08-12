@@ -54,11 +54,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
     # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
     # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
-    "uart_rx": (6, 120),
+    "uart_rx": (6, 68),
     # uart_tx additionally has an empty overlapping branch block (the idle "not busy" arm) whose only act is to test a
     # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
-    "uart_tx": (7, 103),
-    "octave_index": (14, 38),
+    "uart_tx": (7, 47),
+    "octave_index": (14, 36),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
     # control flow at all), so their whole schedule is one block and min II equals last PC.
     "fir": (20, 20),

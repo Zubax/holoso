@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Reciprocal by Newton-Raphson iteration, with no hardware divider: ``y <- y * (2 - x*y)`` converges quadratically to
-``1/x``. A linear seed ``y0 = 1.5 - 0.5*x`` is accurate on the restricted domain ``x in [0.5, 2.0]``, and the loop
-runs until the update ``delta = y_next - y`` falls below a tolerance -- a variable, convergence-tested iteration count.
-This is the real back-edge loop: the body lowers once to a basic block whose latch jumps back to the loop header, and
-the header re-tests the condition each iteration (unlike the fixed-count loops, e.g. CORDIC, which fully unroll).
+Reciprocal by Newton-Raphson iteration, with no hardware divider: `y <- y * (2 - x*y)` converges quadratically to 1/x.
+A linear seed `y0 = 1.5 - 0.5*x` is accurate on the restricted domain `x in [0.5, 2.0]`, and the loop runs until the
+update `delta = y_next - y` falls below a tolerance.
+
+This is illustrative; obviously Holoso can compute the same in hardware natively.
 """
 
 from pathlib import Path
