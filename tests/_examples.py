@@ -124,9 +124,7 @@ _DEBOUNCE_MANUAL = _drive(
 # bus carried signed, so a line above the bus is the sign bit and those words are the negative ones.
 _PRIORITY_MANUAL = _drive(
     "request",
-    [0, 1, 2, 4, 8, 16, 32, 64, 128]
-    + [0b1010, 0b1100_0000, 0xFF, 0x81, 0b10_1000, 0b110]
-    + [-256, -128, -1, -2],
+    [0, 1, 2, 4, 8, 16, 32, 64, 128] + [0b1010, 0b1100_0000, 0xFF, 0x81, 0b10_1000, 0b110] + [-256, -128, -1, -2],
 )
 
 _NCO_PHASE_MASK = (1 << 32) - 1
