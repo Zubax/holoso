@@ -193,7 +193,7 @@ BASELINE: dict[str, Metrics] = {
     "latching_fault_register": Metrics(
         False, nreg=0, bnreg=6, steering=2, copies=0, min_ii=5, last_pc=5, max_block_span=5
     ),
-    "majority_voter": Metrics(False, nreg=0, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
+    "majority_voter": Metrics(False, nreg=7, bnreg=11, steering=13, copies=0, min_ii=15, last_pc=20, max_block_span=11),
     # recip_newton's loop opens with a statically-true convergence test, so the partial evaluator peels the first
     # trip: one more live value across the loop entry (nreg, steering) and one body's worth of extra microcode, in
     # exchange for a shorter realized transaction (test_cycle_model).

@@ -24,12 +24,7 @@ class _UartFrame:
         return 10 if self._parity_present else 9
 
     def _parity_bit(self, char: int) -> bool:
-        rest = char
-        parity = self._parity_odd  # seeding with the polarity leaves the odd chain inverted for free
-        for _ in range(8):  # unrolls into a plain eight-input exclusive-or tree
-            parity = parity ^ ((rest & 1) == 1)
-            rest = rest >> 1
-        return parity
+        return self._parity_odd ^ bool((char & 0xFF).bit_count() & 1)  # polarity seed inverts the odd chain for free
 
 
 class UartTx(_UartFrame):

@@ -768,8 +768,7 @@ class BoolToFloat(Operator):
 
 # Signed integers before hardware width selection. Folding is exact at arbitrary precision -- no width, no saturation
 # -- so a fully static integer expression disappears before MIR ever has to hold it in a machine word.
-# Add/sub/mul/neg/abs and the bitwise and shift operators are speculatable; floor-division and modulo
-# assert the div-by-zero error flag, so they are not.
+# Floor-division and modulo assert the div-by-zero error flag, so they are not speculatable.
 
 
 def _int_signature(arity: int) -> Signature:
@@ -873,6 +872,19 @@ class IntAbs(Operator):
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the magnitude", abs)
+
+
+@dataclass(frozen=True, slots=True)
+class IntPopcount(Operator):
+    mnemonic: ClassVar[str] = "ipopcnt"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return _int_signature(1)
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_int(operands, "the population count", int.bit_count)
 
 
 @dataclass(frozen=True, slots=True)

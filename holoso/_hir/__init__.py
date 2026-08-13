@@ -84,6 +84,7 @@ from ._operators import (
     IntMulPow2 as IntMulPow2,
     IntNeg as IntNeg,
     IntNotEqual as IntNotEqual,
+    IntPopcount as IntPopcount,
     IntSelect as IntSelect,
     IntShiftLeft as IntShiftLeft,
     IntShiftRight as IntShiftRight,

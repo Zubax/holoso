@@ -14,6 +14,7 @@ from ._reject import reject
 from ._snapshot import describe_opaque, ndarray_annotation
 from ._values import (
     Allocation,
+    BoundMethod,
     ExpansionBudget,
     Opaque,
     RangeValue,
@@ -21,7 +22,6 @@ from ._values import (
     Scalar,
     SequenceValue,
     StaticScalar,
-    TensorMethod,
     TensorValue,
     Value,
 )
@@ -44,8 +44,10 @@ def kind_label(value: Value) -> str:
             return "array"
         case Opaque():
             return "captured object"
-        case TensorMethod():
+        case BoundMethod(receiver=TensorValue()):
             return "bound array method"
+        case BoundMethod():
+            return "bound scalar method"
         case RangeValue():
             return "range"
         case _:

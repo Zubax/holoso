@@ -526,6 +526,7 @@ SPECS = [
         name="majority_voter",
         inputs=("enabled", "a", "b", "c", "d", "e"),
         make_kernel=lambda: MajorityVoter().__call__,
+        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
         # nominal ``enabled`` is True so the per-input edge sweep actually enters the ``if enabled:`` diagnostic block
         # (perturbing one channel against an all-low background flips the voted value and trips that channel's fault).
         nominal={"enabled": True, "a": False, "b": False, "c": False, "d": False, "e": False},
@@ -665,8 +666,7 @@ SPECS = [
         inputs=("start", "char"),
         make_kernel=lambda: UartTx(parity=False).tick,
         nominal={"start": False, "char": 0},
-        # 0x01 and 0x7F have an ODD number of set bits, so the even-parity bit is HIGH for them: the parity XOR
-        # reduction must emit a 1, not just the 0 that every even-popcount byte (0x55/0xC3/0x00/0xFF) yields. The
+        # 0x01 and 0x7F have an ODD number of set bits, so the even-parity bit is HIGH for them. The
         # trailing pair asserts start while the machine is busy: the second byte must be ignored, not latched mid-frame.
         manual=(
             _uart_tx_drive((0x55, 0xC3, 0x00, 0x01, 0x7F, 0xFF))
@@ -692,7 +692,7 @@ SPECS = [
             + _uart_rx_frame(
                 0x01, False
             )  # odd popcount -> true even-parity bit HIGH, so the recomputed parity must be 1
-            + _uart_rx_frame(0x7F, False)  # 7 bits set (odd) -> exercises most of the parity reduction, still no error
+            + _uart_rx_frame(0x7F, False)  # 7 bits set (odd), still no error
             + _uart_rx_frame(0x96, False, flip_parity=True)  # corrupted parity bit -> parity_error asserts
             + _uart_rx_frame(0x3C, False, drop_stop=True)  # stop bit held low -> frame_error asserts
             + [{"rx": level} for level in [False] * 4 + [True] * 24]  # false start: recovers before the mid-bit sample

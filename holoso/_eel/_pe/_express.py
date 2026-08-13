@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .._annotations import annotation_stype
+from .._annotations import annotation_stype, host_type
 from .._ir import *
 from .._lib import Array, Conversion, Factory, Operand, ScalarFunction, resolve
 from . import _aggregate, _ops
@@ -16,19 +16,20 @@ from ._reject import reject
 from ._snapshot import describe_opaque as _describe_opaque, nan_payload, tensor_of
 from ._values import (
     Allocation,
+    BoundMethod,
     Opaque,
     RangeValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
     StaticScalar,
-    TensorMethod,
     TensorValue,
     Value,
 )
 
 if TYPE_CHECKING:
     from ._interpret import Frame, Interpreter, Sink
+
 
 _AGGREGATE = (SequenceValue, TensorValue)
 
@@ -51,9 +52,12 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
                 return StaticScalar(_ops.make_const(0))
             if attr == "shape":
                 return SequenceValue((), Allocation())
+            found = resolve(getattr(host_type(base_value.stype), attr, None))
+            if isinstance(found, ScalarFunction):
+                return BoundMethod(base_value, attr)
             reject(origin, f"a scalar has no supported attribute {attr!r}")
-        case TensorMethod():
-            reject(origin, "a bound array method can only be called")
+        case BoundMethod():
+            reject(origin, f"{_aggregate.a_kind(base_value)} can only be called")
         case RangeValue():
             reject(origin, f"a range has no supported attribute {attr!r}")
         case Opaque(name=name, value=value) if isinstance(value, (types.ModuleType, type)):
@@ -84,7 +88,7 @@ def _tensor_attr(
         if inspect.isdatadescriptor(descriptor):
             return _array_call(interp, origin, f".{attr}", found, [tensor], frame, sink)
         share(tensor)
-        return TensorMethod(tensor, attr)
+        return BoundMethod(tensor, attr)
     reject(origin, f"an array has no supported attribute {attr!r}")
 
 
@@ -99,8 +103,8 @@ def scalar(value: Value, origin: Origin) -> Scalar:
             reject(origin, _describe_opaque(value))
         case SequenceValue() | TensorValue() | RangeValue():
             reject(origin, f"{_aggregate.a_kind(value)} cannot be used as a scalar here")
-        case TensorMethod():
-            reject(origin, "a bound array method can only be called")
+        case BoundMethod():
+            reject(origin, f"{_aggregate.a_kind(value)} can only be called")
 
 
 def materialize(scalar: Scalar, origin: Origin) -> Atom:
@@ -292,8 +296,8 @@ def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: V
 
 def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     callee = interp.expr(node.callee, frame, sink)
-    if isinstance(callee, TensorMethod):
-        return _tensor_method(interp, node, callee, frame, sink)
+    if isinstance(callee, BoundMethod):
+        return _bound_method(interp, node, callee, frame, sink)
     if not isinstance(callee, Opaque):
         reject(node.origin, "the callee is not a callable object")
     raw = callee.value
@@ -486,15 +490,24 @@ def _array_call(
     return result
 
 
-def _tensor_method(interp: Interpreter, node: Call, method: TensorMethod, frame: Frame, sink: Sink) -> Value:
-    found = resolve(getattr(np.ndarray, method.name))
-    assert isinstance(found, Array), "a minted method stays resolvable"
+def _bound_method(interp: Interpreter, node: Call, method: BoundMethod, frame: Frame, sink: Sink) -> Value:
+    receiver = method.receiver
     display = f".{method.name}"
-    values = _positional_arguments(interp, node, display, frame, sink)
-    arity = found.stub.__code__.co_argcount - 1
+    if isinstance(receiver, TensorValue):
+        found = resolve(getattr(np.ndarray, method.name))
+        assert isinstance(found, Array), "a minted method stays resolvable"
+        values = _positional_arguments(interp, node, display, frame, sink)
+        arity = found.stub.__code__.co_argcount - 1
+        if len(values) != arity:
+            reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
+        return _array_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
+    scalar_found = resolve(getattr(host_type(receiver.stype), method.name))
+    assert isinstance(scalar_found, ScalarFunction), "a minted method stays resolvable"
+    values = _operand_arguments(interp, node, display, frame, sink)
+    arity = scalar_found.arity - 1
     if len(values) != arity:
         reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
-    return _array_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
+    return _scalar_call(interp, node.origin, display, scalar_found, [receiver, *values], frame, sink)
 
 
 def _factory(interp: Interpreter, node: Call, display: str, match: Factory, frame: Frame, sink: Sink) -> Value:
@@ -675,7 +688,7 @@ def bind_signature(
     bindings: dict[str, Value] = {}
     for name, value in bound.arguments.items():
         if isinstance(
-            value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, TensorMethod, RangeValue)
+            value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, BoundMethod, RangeValue)
         ):
             bindings[name] = value
         else:

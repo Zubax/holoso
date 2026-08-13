@@ -907,3 +907,41 @@ def rounded_to_float(x: float) -> float:
 def test_a_float_only_kernel_reaching_an_integer_operator_still_synthesizes() -> None:
     """``float(math.floor(x))`` folds the conversion pair away, so the built machine is float-only throughout."""
     holoso.synthesize(rounded_to_float, _INT16, name="RoundedToFloat")
+
+
+def popcount_of(x: int) -> int:
+    return x.bit_count()
+
+
+def popcount_parity(x: int) -> bool:
+    return bool((x & 0xFF).bit_count() & 1)
+
+
+def test_the_population_count_counts_the_magnitude_on_its_own_module() -> None:
+    """
+    ``int.bit_count()`` is the one spelling, and it counts the magnitude exactly as CPython does -- so the rails
+    answer 1 rather than the width, and no absolute value is spent reaching them.
+    """
+    result = holoso.synthesize(popcount_of, _INT16, name="Popcount")
+    assert _modules(result) == ["ipopcnt"], "the count is one pooled module and nothing else"
+    sim = result.numerical_model.elaborate()
+    for x in [0, 1, -1, 7, -7, 255, MIN, MIN + 1, MAX, -12345]:
+        assert _run(sim, x) == [abs(x).bit_count()], x
+
+
+def test_the_parity_of_a_masked_byte_rides_the_count() -> None:
+    parity = holoso.synthesize(popcount_parity, _INT16, name="PopcountParity")
+    assert _modules(parity) == ["ipopcnt"], "the mask and the parity bit are inline; only the count is a module"
+    sim = parity.numerical_model.elaborate()
+    for x in [0, 1, -1, 0xFF, 0x7F, 256, MIN, MAX]:
+        assert _run(sim, x) == [bool((x & 0xFF).bit_count() & 1)], x
+
+
+def popcount_of_a_literal(x: int) -> int:
+    return (0x1234).bit_count() + x
+
+
+def test_a_static_population_count_folds_away() -> None:
+    result = holoso.synthesize(popcount_of_a_literal, _INT16, name="PopcountStatic")
+    assert _modules(result) == ["iadds"], "a count of a literal is answered before hardware is selected"
+    assert _run(result.numerical_model.elaborate(), 3) == [(0x1234).bit_count() + 3]

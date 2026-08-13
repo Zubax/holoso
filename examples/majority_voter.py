@@ -26,18 +26,8 @@ class MajorityVoter:
     @staticmethod
     def _majority(a: bool, b: bool, c: bool, d: bool, e: bool) -> bool:
         """True when at least three of the five redundant channels agree -- the 3-of-5 voted value."""
-        return (
-            (a and b and c)
-            or (a and b and d)
-            or (a and b and e)
-            or (a and c and d)
-            or (a and c and e)
-            or (a and d and e)
-            or (b and c and d)
-            or (b and c and e)
-            or (b and d and e)
-            or (c and d and e)
-        )
+        packed = int(a) | (int(b) << 1) | (int(c) << 2) | (int(d) << 3) | (int(e) << 4)
+        return packed.bit_count() >= 3  # Synthesized into popcount and compare
 
     def __call__(self, enabled: bool, a: bool, b: bool, c: bool, d: bool, e: bool, /) -> tuple[bool, ...]:
         voted = self._majority(a, b, c, d, e)
@@ -53,7 +43,7 @@ class MajorityVoter:
 
 
 def main() -> None:
-    options = holoso.Options(holoso.OperatorOptions())  # purely boolean: no float operator, no float format
+    options = holoso.Options(holoso.OperatorOptions())
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(MajorityVoter().__call__, options)
     for filename, path in result.write(out_dir).items():

@@ -19,6 +19,7 @@ The example specs are shared with the cosimulation suite via ``_examples``: the 
 """
 
 import dataclasses
+import itertools
 from collections.abc import Callable, Mapping
 
 import numpy as np
@@ -27,6 +28,8 @@ import pytest
 import holoso
 from holoso import BoolType, FloatFormat, FloatType, IntType
 from ._examples import SPECS, ExampleSpec, InputVector, OutputTolerance
+from majority_voter import MajorityVoter  # noqa: E402  # _examples put examples/ on the path
+from uart import UartTx  # noqa: E402
 from ._modelref import default_options, flatten_value, port_name, within
 
 _STATE_PREFIX = "state_"
@@ -161,3 +164,17 @@ def test_a_folded_state_leaf_ahead_of_a_computed_leaf_maps_by_name() -> None:
         fmt,
         {},
     )
+
+
+def test_the_popcount_witnesses_match_an_independent_reduction() -> None:
+    """
+    Both suites above run the rewritten kernel against itself, so a rewrite that is wrong in both directions passes
+    them. These oracles are spelled independently of the kernels: a bit-string count for the parity and a plain sum
+    for the vote, driven over the values the shared vectors never reach.
+    """
+    for odd in (False, True):
+        for char in [*range(-300, 301), 0x55, 0xC3, 0x7F, 0x01, 256, 511, -(2**33), 2**33 - 1]:
+            expected = odd ^ (bin(char & 0xFF).count("1") % 2 == 1)
+            assert UartTx(parity=odd)._parity_bit(char) == expected, (char, odd)
+    for bits in itertools.product((False, True), repeat=5):
+        assert MajorityVoter._majority(*bits) == (sum(bits) >= 3), bits

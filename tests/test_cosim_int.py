@@ -16,7 +16,7 @@ from ._eeloracle import InputRow
 from ._modelref import default_options
 from .hdl.hdl_float_oracle import SIMULATORS
 from .test_int_selection import countdown
-from .test_int_synthesis import divmod_pair
+from .test_int_synthesis import divmod_pair, popcount_of
 
 # NcoPhase sums a 2**30 increment over a 32-bit mask, so exactness needs at least a 34-bit word.
 _OPTIONS = dataclasses.replace(default_options(FloatFormat(wexp=6, wman=18)), wint_min=34)
@@ -37,6 +37,21 @@ def test_int_corpus_cosim(sim: str, case: tuple[str, Callable[[], Callable[..., 
 
 def divmod_rails(a: int, b: int) -> tuple[int, int, int]:
     return a // b, a % b, a + b
+
+
+@pytest.mark.cosim
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_int_popcount_cosim(sim: str) -> None:
+    """
+    The count port is narrower than the word it lands in, so the emitted top zero-extends it. The bench's own sweep
+    draws small operands whose counts never set the port's top bit, which cannot tell a zero fill from a sign fill:
+    only a large-magnitude vector discriminates, so the rails are driven explicitly.
+    """
+    values = [0, 1, -1, 7, -7, _IFMT.min, _IFMT.min + 1, _IFMT.max, _IFMT.max - 1, -12345]
+    count_width = (_IFMT.width - 1).bit_length()
+    assert _IFMT.max.bit_count() >= 1 << (count_width - 1), "a rail must set the count port's top bit"
+    result = holoso.synthesize(popcount_of, _OPTIONS, name="popcount_int")
+    run_cosim(sim, result, vectors=[{"x": x} for x in values])
 
 
 @pytest.mark.cosim

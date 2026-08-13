@@ -11,15 +11,6 @@ either family, but when no float operator is configured no float ever enters the
 absent in that case, so the word comes from `wint_min` alone, would end the ritual; it would also give
 `ExampleSpec.formats` a meaning for a float-free kernel, where two formats today differ only in register width.
 
-The population count has hardware and a model -- `holoso_ipopcnt` and `IPopcntOperator` -- but nothing selects it
-yet, so the parity of a byte is still written as an eight-trip loop of `&`/`>>`/`^` that folds correctly but cannot
-say what it means, and `int.bit_count()` is still refused (cleanly, naming the attribute). What remains is the
-lowering: a HIR operator, a selection arm, and the two witnesses rewritten over it. The second witness is
-`examples/majority_voter.py`, whose 3-of-5 vote is ten explicit three-way conjunctions where a popcount says
-`>= 3` -- a voter over more channels grows as C(n, k) terms and stops being writable at all. Both that example and
-`examples/uart.py`'s parity loop are today hand-expansions of the very reduction the hardware would do in one step.
-The module counts the magnitude, so `int.bit_count()` is exactly what it computes and the lowering is a rename.
-
 ## Frontend limitations
 
 Valid kernels that are conservatively rejected. None is a wrong answer; each is a located refusal with a rewrite.

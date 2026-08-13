@@ -54,7 +54,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "quadrature_encoder-e8m36": (6, 6),
     "phase_frequency_detector-e8m36": (6, 6),
     "latching_fault_register-e8m36": (5, 5),
-    "majority_voter-e8m36": (14, 19),
+    "majority_voter-e6m18": (15, 20),
     # The turn-native trigonometric ABI lets the phase scaling meet the cores' own conversion and cancel, so the I/Q
     # oscillator's two general multiplies collapse to one exponent add.
     "iq_oscillator-e8m36": (55, 55),
@@ -67,10 +67,8 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
     # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
     # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
-    # uart_tx additionally has an empty overlapping branch block (the idle "not busy" arm) whose only act is to test a
-    # resident input condition; a non-entry branch may redirect at its own base PC, so its terminator drains nothing.
-    "uart_tx-e6m18": (7, 47),
-    "uart_rx-e6m18": (6, 68),
+    "uart_tx-e6m18": (12, 37),
+    "uart_rx-e6m18": (6, 51),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
     # The convergence test is statically true on entry (delta is seeded above the tolerance), so the first trip is

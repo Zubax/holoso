@@ -272,12 +272,32 @@ def _array_unknown_attribute(x: float) -> float:
     return _ARRAY.strides[0] * x
 
 
+def _float_bit_count(x: float) -> int:
+    return x.bit_count()  # type: ignore[attr-defined, no-any-return]
+
+
+def _bool_bit_count(b: bool) -> int:
+    return b.bit_count()
+
+
+def _bit_count_with_argument(x: int) -> int:
+    return x.bit_count(3)  # type: ignore[call-arg]
+
+
+def _bit_count_not_called(x: int) -> int:
+    return x.bit_count  # type: ignore[return-value]
+
+
 def test_attribute_rejections() -> None:
     for fn, match in [
         (_sequence_shape, r"`.shape` on a Python sequence is not supported; build a numpy array"),
         (_sequence_append, "a sequence has no supported attribute 'append'"),
         (_scalar_attribute, "a scalar has no supported attribute 'imag'"),
         (_array_unknown_attribute, "an array has no supported attribute 'strides'"),
+        (_float_bit_count, "a scalar has no supported attribute 'bit_count'"),
+        (_bool_bit_count, r"\.bit_count\(\) takes int operands, got bool"),
+        (_bit_count_with_argument, r"\.bit_count\(\) takes 0 argument\(s\), got 1"),
+        (_bit_count_not_called, "the returned value is not a int scalar"),
     ]:
         _rejects(fn, match)
 
@@ -700,3 +720,24 @@ def _factory_budget(x: float) -> float:
 
 def test_factories_charge_the_budget() -> None:
     _rejects(_factory_budget, "graph expansion budget is exhausted while expanding the array factory")
+
+
+class _StoresABoundMethod:
+    def __init__(self) -> None:
+        self.slot = 0
+
+    def __call__(self, x: int) -> int:
+        self.slot = x.bit_count  # type: ignore[assignment]
+        return 0
+
+
+def _stores_a_bound_method_into_an_array(x: int) -> float:
+    v = np.asarray((1.0, 2.0))
+    v[0] = x.bit_count
+    return float(v[0])
+
+
+def test_a_bound_method_is_named_by_its_receiver_wherever_it_is_refused() -> None:
+    """Both store sites report the kind; a scalar receiver must never be called an array method."""
+    _rejects(_StoresABoundMethod().__call__, "a bound scalar method cannot be stored")
+    _rejects(_stores_a_bound_method_into_an_array, "a bound scalar method cannot be stored")

@@ -41,6 +41,7 @@ from .test_int_synthesis import (
     mux_and_casts,
     negated_by_product,
     negated_crossing,
+    popcount_of,
     shift_pair,
     times_eight,
     truncated_and_floored,
@@ -115,6 +116,7 @@ def countdown(n: int) -> int:
         (eighth, ["ishiftc"]),
         (eighth_remainder, ["ibwand"]),
         (negated_by_product, ["isubs"]),
+        (popcount_of, ["ipopcnt"]),
     ],
     ids=lambda value: getattr(value, "__name__", str(value)),
 )

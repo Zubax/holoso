@@ -1,7 +1,6 @@
 """
 The integer operators, pooled and inline: their reference semantics, their closed-form timing, and the one knob
-among them. The lowering selects the reachable ones (pinned in ``test_int_selection``), while ``ipopcnt`` exists as
-hardware and model ahead of its own lowering, so nothing selects it yet; here they are all driven directly because
+among them. The lowering selects these (pinned in ``test_int_selection``); here they are driven directly because
 only a direct drive can sweep every operand of the narrow widths exhaustively.
 
 The sweeps score ``evaluate`` against the very oracle the HDL benches score the RTL against, so the values are

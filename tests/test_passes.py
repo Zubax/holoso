@@ -98,6 +98,7 @@ from holoso._hir import (
     IntMulPow2,
     IntNeg,
     IntNotEqual,
+    IntPopcount,
     IntSelect,
     IntShiftLeft,
     IntShiftRight,
@@ -1064,6 +1065,7 @@ _INT_OPERATORS: list[tuple[Operator, list[Type], Type]] = [
     (IntBwXor(), [IntType(), IntType()], IntType()),
     (IntNeg(), [IntType()], IntType()),
     (IntAbs(), [IntType()], IntType()),
+    (IntPopcount(), [IntType()], IntType()),
     (IntBwNot(), [IntType()], IntType()),
     (IntLess(), [IntType(), IntType()], BoolType()),
     (IntLessOrEqual(), [IntType(), IntType()], BoolType()),
@@ -1143,6 +1145,7 @@ def test_integer_folding_is_exact_across_the_vocabulary() -> None:
         (IntNeg(), [huge], -huge),
         (IntMulPow2(64), [huge], huge << 64),
         (IntAbs(), [-huge], huge),
+        (IntPopcount(), [-huge], huge.bit_count()),
         (IntBwNot(), [huge], ~huge),
     ]
     for operator, operands, expected in cases:

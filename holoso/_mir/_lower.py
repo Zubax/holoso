@@ -74,6 +74,7 @@ from .._hir import (
     IntMulPow2,
     IntNeg,
     IntNotEqual,
+    IntPopcount,
     IntSelect,
     IntShiftLeft,
     IntShiftRight,
@@ -114,6 +115,7 @@ from .._operators import (
     IAddOperator,
     ICmpOperator,
     IDivOperator,
+    IPopcntOperator,
     IShlOperator,
     IShrOperator,
     ISubOperator,
@@ -1132,6 +1134,8 @@ class _IntLowerer:
                 return self._negate(semantic, self.context.remap[a])
             case Operation(operator=IntAbs() as semantic, operands=(a,)):
                 return self._emit(semantic, IAbsOperator(fmt), a)
+            case Operation(operator=IntPopcount() as semantic, operands=(a,)):
+                return self._emit(semantic, IPopcntOperator(fmt), a)
             # The quotient and the remainder are two taps of one divider: written from the same operands with the same
             # conditioners, they share a MIR intern key up to the port and fuse into a single firing at LIR build.
             case Operation(operator=IntDivFloor() as semantic, operands=(a, b)):

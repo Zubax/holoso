@@ -122,6 +122,7 @@ _INT_AND_FLOAT: list[object] = [
     round, np.round, np.around, math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix,
     pow, math.pow, np.power, np.float_power, BinaryOp.POW,
 ]  # fmt: skip
+_INT_ONLY: list[object] = [int.bit_count, np.bitwise_count]
 
 
 def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
@@ -137,6 +138,10 @@ def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
         match = resolve(external)
         assert isinstance(match, ScalarFunction), external
         assert match.domains == [ScalarType.INT, ScalarType.FLOAT], external
+    for external in _INT_ONLY:
+        match = resolve(external)
+        assert isinstance(match, ScalarFunction), external
+        assert match.domains == [ScalarType.INT], external
     for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.matmul, BinaryOp.MATMUL):
         assert isinstance(resolve(external), Array), external
     for member in (np.ndarray.T, np.ndarray.dot, np.ndarray.flatten, np.ndarray.ravel, np.ndarray.transpose):

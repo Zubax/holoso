@@ -43,6 +43,11 @@ def abs_int(x: int) -> int:
     return abs(x)
 
 
+@intrinsic(IntPopcount, int.bit_count, np.bitwise_count)
+def popcount(x: int) -> int:
+    return x.bit_count()
+
+
 # np.minimum/maximum (and NaN-suppressing np.fmin/fmax) are the binary elementwise forms; np.min/np.max are reductions.
 # NaN-propagation differences between the spellings are moot under the fast-math / no-NaN policy.
 @intrinsic(FloatMin, min, np.minimum, np.fmin)

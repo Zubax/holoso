@@ -92,10 +92,10 @@ class TensorValue:
 
 
 @dataclass(frozen=True, slots=True)
-class TensorMethod:
-    """A read of a registered array method; only a call consumes it."""
+class BoundMethod:
+    """A read of a registered method; only a call consumes it."""
 
-    receiver: TensorValue
+    receiver: Scalar | TensorValue
     name: str
 
 
@@ -115,7 +115,7 @@ class RangeValue:
         assert self.start.stype is ScalarType.INT and self.stop.stype is ScalarType.INT
 
 
-type Value = StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | TensorMethod | RangeValue
+type Value = StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | BoundMethod | RangeValue
 
 
 def same(a: Value, b: Value) -> bool:
@@ -147,7 +147,7 @@ def same(a: Value, b: Value) -> bool:
                 and a.family is b.family
                 and all(same(x, y) for x, y in zip(a.leaves, b.leaves))
             )
-        case TensorMethod(), TensorMethod():
+        case BoundMethod(), BoundMethod():
             return a.name == b.name and same(a.receiver, b.receiver)
         case RangeValue(), RangeValue():
             return same(a.start, b.start) and same(a.stop, b.stop) and a.step == b.step

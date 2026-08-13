@@ -13,11 +13,11 @@ from ._state import ScalarSpec, SequenceSpec, Spec, TensorSpec
 from ._values import (
     Allocation,
     AllocationState,
+    BoundMethod,
     Opaque,
     ResidualScalar,
     SequenceValue,
     StaticScalar,
-    TensorMethod,
     TensorValue,
     Value,
     same,
@@ -108,8 +108,8 @@ def _receiver_store(
     else:
         value = rhs
     match value:
-        case TensorMethod():
-            reject(origin, "a bound array method cannot be stored")
+        case BoundMethod():
+            reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
         case SequenceValue() | TensorValue():
             if same(value, slot_value):
                 return  # rebinding the attribute to its own current tree is Python's no-op
@@ -226,7 +226,9 @@ def _element_store(
         value = _express.binary(interp, origin, stmt.op, old, rhs, frame, sink)
     else:
         value = rhs
-    if isinstance(value, (SequenceValue, TensorValue, TensorMethod)):
+    if isinstance(value, BoundMethod):
+        reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
+    if isinstance(value, (SequenceValue, TensorValue)):
         reject(origin, "storing an aggregate into a container is not supported; rebind or build with a comprehension")
     assert isinstance(value, (StaticScalar, ResidualScalar, Opaque))
     leaf = _express.tensor_leaf(interp, origin, site.holder.family, value, sink)

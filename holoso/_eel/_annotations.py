@@ -26,3 +26,7 @@ def annotation_stype(annotation: object) -> ScalarType | None:
     if annotation is float:
         return ScalarType.FLOAT
     return None
+
+
+def host_type(stype: ScalarType) -> type:
+    return {ScalarType.BOOL: bool, ScalarType.INT: int, ScalarType.FLOAT: float}[stype]
