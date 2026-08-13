@@ -54,7 +54,7 @@ from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
 # The wide scalar datapath: the one configuration the example matrix is synthesized in.
 _FMT = FloatFormat(8, 36)
-# What a kernel that builds no float operator gets by default; for those, the format only sizes the integer word.
+# What a kernel that builds no float operator gets by default; it sizes nothing for them, so it only tracks main().
 _NARROW = FloatFormat(6, 18)
 # Frozen random vectors per example (over and above the manual and edge vectors); scale via the env knob to trade
 # coverage for cosimulation wall-clock.
@@ -120,14 +120,13 @@ _DEBOUNCE_MANUAL = _drive(
 )
 
 # The idle bus and its sentinel, one bit at each position, multi-bit words where the lowest wins, and words whose
-# set bits lie above the scanned range -- both the bits above the bus width and the negative words, which the scan
-# must ignore because it reads only shifts 0..7.
+# set bits lie above the scanned range, which the scan must ignore because it reads only shifts 0..7. The port is the
+# bus carried signed, so a line above the bus is the sign bit and those words are the negative ones.
 _PRIORITY_MANUAL = _drive(
     "request",
     [0, 1, 2, 4, 8, 16, 32, 64, 128]
     + [0b1010, 0b1100_0000, 0xFF, 0x81, 0b10_1000, 0b110]
-    + [0x100, 0x180, 0x1FF]
-    + [-1, -2, -256],
+    + [-256, -128, -1, -2],
 )
 
 _NCO_PHASE_MASK = (1 << 32) - 1
@@ -147,7 +146,7 @@ _NCO_MANUAL: list[InputVector] = [
     )
 ]
 
-_PWM_TOP = 8  # the period this spec drives; the vectors below are written in terms of it
+_PWM_TOP = 8  # a shorter period than the example ships, so a full triangle costs 16 vectors rather than 200
 _PWM_MANUAL = _drive(
     "duty",
     [_PWM_TOP // 2] * (2 * _PWM_TOP)  # a full triangle period at half duty
@@ -220,7 +219,7 @@ class ExampleSpec:
     # The float format(s) to drive at. The matrix is e8m36 by plan; a kernel that wants a second datapath (e.g. a
     # shallow e6m18 alongside the deep e8m36, to exercise both pipeline depths) lists both here.
     formats: tuple[FloatFormat, ...] = (_FMT,)
-    # The native integer width the kernel needs, where the format's own width does not already supply it: an
+    # The native integer width the kernel needs, which for a float-free kernel is exactly the word it gets: an
     # accumulator that must wrap at a given modulus needs the word to hold it without saturating on the way.
     wint_min: int = Options(OperatorOptions()).wint_min
     # How this kernel's operator set differs from the one the catalogue shares: a datapath crossing between the
@@ -526,7 +525,8 @@ SPECS = [
         name="majority_voter",
         inputs=("enabled", "a", "b", "c", "d", "e"),
         make_kernel=lambda: MajorityVoter().__call__,
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=6,  # the five channels pack into as many bits, which a signed word carries one above
         # nominal ``enabled`` is True so the per-input edge sweep actually enters the ``if enabled:`` diagnostic block
         # (perturbing one channel against an all-low background flips the voted value and trips that channel's fault).
         nominal={"enabled": True, "a": False, "b": False, "c": False, "d": False, "e": False},
@@ -606,7 +606,7 @@ SPECS = [
             "phase_offset": int(rng.integers(0, 1 << 32)),
         },
         edge_values=(0, 1, 1 << 30, 1 << 31, 0xC0000000, _NCO_PHASE_MASK, 1 << 32, -1),
-        formats=(FloatFormat(6, 18),),  # width 24, so the kernel's own wint_min is what sizes the accumulator
+        formats=(FloatFormat(6, 18),),  # float-free, so the kernel's own wint_min alone sizes the accumulator
         wint_min=34,  # the pre-mask sum reaches 2**33 - 2: one carry bit above the accumulator, plus the sign bit
     ),
     ExampleSpec(
@@ -617,7 +617,8 @@ SPECS = [
         manual=_PWM_MANUAL,
         draw_random=lambda rng: {"duty": int(rng.integers(0, _PWM_TOP + 2))},
         edge_values=(0, 1, _PWM_TOP // 2, _PWM_TOP - 1, _PWM_TOP, _PWM_TOP + 5),
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=5,  # what this period needs: a word holding _PWM_TOP, plus the sign bit
     ),
     ExampleSpec(
         name="debouncer",
@@ -627,7 +628,8 @@ SPECS = [
         manual=_DEBOUNCE_MANUAL,
         draw_random=lambda rng: {"raw": bool(rng.integers(0, 2))},
         edge_values=(False, True),
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=4,  # the dwell count reaches samples, plus the sign bit
     ),
     ExampleSpec(
         name="priority_encoder",
@@ -636,8 +638,9 @@ SPECS = [
         nominal={"request": 0},
         manual=_PRIORITY_MANUAL,
         draw_random=lambda rng: {"request": int(rng.integers(0, 256))},
-        edge_values=(0, 1, 0x80, 0xFF, 0x100, -1),
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        edge_values=(0, 1, 0x80, 0xFF, -256, -1),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=9,  # the request bus is width lines, carried signed
     ),
     ExampleSpec(
         name="crc32",
@@ -647,7 +650,7 @@ SPECS = [
         manual=_CRC32_MANUAL,
         draw_random=lambda rng: {"byte": int(rng.integers(0, 256))},
         edge_values=(0x00, 0x01, 0x7F, 0x80, 0xFF),
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
         wint_min=33,  # the reversed polynomial is 32 unsigned bits, which a signed word carries one above
     ),
     ExampleSpec(
@@ -658,7 +661,7 @@ SPECS = [
         manual=_LFSR_MANUAL,
         draw_random=lambda rng: {"advance": bool(rng.integers(0, 2))},
         edge_values=(False, True),
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
         wint_min=17,  # the tap mask 0xB400 does not fit a signed 16-bit word
     ),
     ExampleSpec(
@@ -678,7 +681,8 @@ SPECS = [
         # lane; and a byte only enters the machine on a latching tick, which a one-row perturbation cannot arrange.
         # The byte edges therefore ride the manual sequence, which latches each of them.
         edge_values=(),
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=9,  # the 8-bit character, which a signed word carries one bit above
     ),
     ExampleSpec(
         name="uart_rx",
@@ -699,7 +703,8 @@ SPECS = [
         ),
         draw_random=lambda rng: {"rx": bool(rng.integers(0, 2))},
         edge_values=(False, True),
-        formats=(_NARROW,),  # a float-free kernel: the format only sizes the integer word, and this is what main() gets
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=9,  # the 8-bit character, which a signed word carries one bit above
     ),
     ExampleSpec(
         name="recip_newton",

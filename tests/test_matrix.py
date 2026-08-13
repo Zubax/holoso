@@ -16,13 +16,12 @@ import pytest
 from jaxtyping import Bool, Float, Float64, Int, Shaped
 
 import holoso
-from holoso._operators import FFmaOperator
 from holoso import FFmaOptions, FloatFormat, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import imu_frame_transform
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ops, default_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import default_mir, default_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude, strip_locations
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
@@ -171,10 +170,10 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
         return v @ w  # type: ignore[no-any-return]
 
     def mnemonic_counts(with_fma: bool) -> dict[str, int]:
-        ops = default_ops(_FMT)
+        ops = default_mir(_FMT)
         if with_fma:
-            ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT, FFmaOptions(), 0))
-        mir = lower_to_mir(lower(dot, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, DEFAULT_IFCONV_MAX_OPS)
+            ops = dataclasses.replace(ops, operator=dataclasses.replace(ops.operator, ffma=FFmaOptions()))
+        mir = lower_to_mir(lower(dot, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
         counts: dict[str, int] = {}
         for node in mir.nodes.values():
             operator = getattr(node, "operator", None)

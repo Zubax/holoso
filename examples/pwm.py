@@ -17,7 +17,7 @@ class Pwm:
     top always on, so the steps are the odd counts and the two rails.
     """
 
-    def __init__(self, top: int = 8) -> None:
+    def __init__(self, top: int = 100) -> None:
         self._top = top
         self.counter: int = 0
         self._down: bool = False
@@ -38,7 +38,8 @@ class Pwm:
 
 
 def main() -> None:
-    options = holoso.Options(holoso.OperatorOptions(), wint_min=17)
+    # The counter walks up to top and the duty compares against it, so a word that holds top, plus the sign bit.
+    options = holoso.Options(holoso.OperatorOptions(), wint_min=8)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(Pwm().tick, options)
     for filename, path in result.write(out_dir).items():

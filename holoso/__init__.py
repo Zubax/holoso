@@ -1,7 +1,6 @@
 """Holoso: a narrow Python-to-Verilog synthesizer for numeric kernels."""
 
 from ._api import (
-    OperatorOptions as OperatorOptions,
     Options as Options,
     SynthesisResult as SynthesisResult,
     synthesize as synthesize,
@@ -23,6 +22,7 @@ from ._type import (
     IntFormat as IntFormat,
     IntType as IntType,
 )
+from ._operators import OperatorOptions as OperatorOptions
 from ._value import FloatValue as FloatValue, IntValue as IntValue
 from ._errors import (
     HolosoError as HolosoError,

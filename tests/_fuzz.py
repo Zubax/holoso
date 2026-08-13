@@ -43,22 +43,21 @@ from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
 from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
 from holoso._lir import operand_read_cycle
-from holoso._mir import Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
+from holoso._mir import MirOptions, Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
 from holoso._mir import lower as lower_to_mir
-from holoso._operators import OpConfig
 from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue, IntValue, ScalarValue
 
 from ._modelref import (
     build_lir,
     DEFAULT_IFCONV_MAX_OPS,
-    default_ops,
+    default_mir,
     default_tolerance,
     DEFAULT_UNROLL_MAX_TRIPS,
     flatten_value,
     format_edge_bits,
     show_value,
-    staged_ops,
+    staged_mir,
     Vector,
     within,
 )
@@ -72,9 +71,9 @@ _FUZZ_TMP = _REPO / "build" / "fuzz_tmp"
 # the regression replayer can rebuild it. Two points: the minimum-latency default and a deeply-pipelined config (the
 # model's timing -- but never the interpreter's -- changes with latency, so this cross-checks the LIR layer at two
 # depths against the one fixed reference).
-OP_CONFIGS: dict[str, Callable[[FloatFormat], OpConfig]] = {
-    "default": default_ops,
-    "staged": staged_ops,
+OP_CONFIGS: dict[str, Callable[[FloatFormat], MirOptions]] = {
+    "default": default_mir,
+    "staged": staged_mir,
 }
 
 
@@ -1036,7 +1035,7 @@ class CampaignStats:
 
 
 def _build_with_lir(
-    fn: Callable[..., object], ops: OpConfig, name: str, fmt: FloatFormat
+    fn: Callable[..., object], ops: MirOptions, name: str, fmt: FloatFormat
 ) -> tuple[Mir, Lir, NumericalSimulator, MirInterpreter]:
     """
     Lower the kernel ONCE to MIR/LIR, then build both the numerical model (from that LIR) and the interpreter (from the
@@ -1044,7 +1043,7 @@ def _build_with_lir(
     or touching simulator internals. Shared by the campaign runner and the regression replayer, so both drive the
     identical build path.
     """
-    mir = lower_to_mir(lower_frontend(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, DEFAULT_IFCONV_MAX_OPS)
+    mir = lower_to_mir(lower_frontend(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
     lir = build_lir(mir, name)
     model = generate(lir).elaborate()
     interpreter = MirInterpreter(mir)
@@ -1450,7 +1449,7 @@ class _Differential:
 def run_kernel(
     kernel: GeneratedKernel,
     op_label: str,
-    ops: OpConfig,
+    ops: MirOptions,
     fmt: FloatFormat,
     effort: str,
     n_vectors: int,

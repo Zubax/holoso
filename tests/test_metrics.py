@@ -33,7 +33,7 @@ from holoso import FloatFormat
 from holoso._eel import lower
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
-from ._modelref import build_lir, DEFAULT_IFCONV_MAX_OPS, default_ops, DEFAULT_UNROLL_MAX_TRIPS, SHIPPED_TUNING
+from ._modelref import build_lir, default_mir, DEFAULT_UNROLL_MAX_TRIPS, SHIPPED_TUNING
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -115,7 +115,7 @@ class Metrics:
 # leak in here; changing a default deliberately re-freezes them.
 def _measure(name: str) -> Metrics:
     lir: Lir = build_lir(
-        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
         SHIPPED_TUNING,
     )

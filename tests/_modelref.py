@@ -23,7 +23,8 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._api import _build_op_config
+from holoso._api import _mir_options
+from holoso._mir import MirOptions
 from holoso._lir import RegallocTuning
 from holoso._lir import build
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
@@ -46,8 +47,13 @@ DEFAULT_IFCONV_MAX_OPS: int = _DEFAULTS.ifconv_max_ops
 DEFAULT_UNROLL_MAX_TRIPS: int = _DEFAULTS.unroll_max_trips
 
 
+mir_options = _mir_options
+"""Selection's own view of the user's Options, so a white-box build settles the word exactly as synthesize does."""
+
+
 def default_ifmt(ffmt: FloatFormat) -> IntFormat:
-    return Options(OperatorOptions(), ffmt=ffmt).ifmt
+    """The word a float-carrying kernel takes at the default floor; a hand-built MIR names it rather than derives it."""
+    return IntFormat(max(Options(OperatorOptions()).wint_min, ffmt.width))
 
 
 DEFAULT_TUNING = RegallocTuning(
@@ -60,7 +66,7 @@ DEFAULT_TUNING = RegallocTuning(
 @dataclass(frozen=True, slots=True)
 class OperatorCase:
     label: str
-    make_ops: Callable[[FloatFormat], OpConfig]
+    make_mir: Callable[[FloatFormat], MirOptions]
     fcmp_latency: int
 
 
@@ -78,10 +84,9 @@ def build_model(lir: Lir) -> NumericalSimulator:
 
 def build_model_and_interpreter(
     kernel: Callable[..., object],
-    ops: OpConfig,
+    ops: MirOptions,
     name: str,
     fmt: FloatFormat,
-    ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
@@ -89,7 +94,7 @@ def build_model_and_interpreter(
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
     (upstream of ``build``), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, ifconv_max_ops)
+    mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 
@@ -231,9 +236,9 @@ def _if_supported[O](operator: Callable[..., object], fmt: FloatFormat, opt: O) 
     return opt
 
 
-def build_ops(options: Options) -> OpConfig:
-    """For the white-box tests that drive MIR lowering directly."""
-    return _build_op_config(options)
+def build_ops(options: Options, width: int) -> OpConfig:
+    """For the few tests that inspect a built machine with no kernel to settle its word, so they name the width."""
+    return OpConfig.build(options.operator, options.ffmt, options.wmultiplier or 0, IntFormat(width))
 
 
 DEFAULT_FETCH_STAGES = 3
@@ -264,8 +269,8 @@ def default_options(fmt: FloatFormat) -> Options:
     )
 
 
-def default_ops(fmt: FloatFormat) -> OpConfig:
-    return build_ops(default_options(fmt))
+def default_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(default_options(fmt))
 
 
 def fcmp_s1_options(fmt: FloatFormat) -> Options:
@@ -275,8 +280,8 @@ def fcmp_s1_options(fmt: FloatFormat) -> Options:
     return dataclasses.replace(options, operator=operator)
 
 
-def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
-    return build_ops(fcmp_s1_options(fmt))
+def fcmp_s1_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(fcmp_s1_options(fmt))
 
 
 def branch_boundary_kernel(a: float, b: float, c: float) -> float:
@@ -428,19 +433,19 @@ def staged_options(fmt: FloatFormat) -> Options:
     )
 
 
-def staged_ops(fmt: FloatFormat) -> OpConfig:
-    return build_ops(staged_options(fmt))
+def staged_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(staged_options(fmt))
 
 
 PIPELINE_OP_CASES = (
-    OperatorCase("default", default_ops, 1),
-    OperatorCase("staged", staged_ops, 2),
+    OperatorCase("default", default_mir, 1),
+    OperatorCase("staged", staged_mir, 2),
 )
 
 COMPARATOR_OP_CASES = (
-    OperatorCase("default", default_ops, 1),
-    OperatorCase("fcmp_s1", fcmp_s1_ops, 2),
-    OperatorCase("staged", staged_ops, 2),
+    OperatorCase("default", default_mir, 1),
+    OperatorCase("fcmp_s1", fcmp_s1_mir, 2),
+    OperatorCase("staged", staged_mir, 2),
 )
 
 PIPELINE_OPTIONS_CASES = (

@@ -33,9 +33,8 @@ from holoso._mir import lower as lower_to_mir
 from ._examples import ExampleSpec, SPECS
 from ._modelref import (
     build_lir,
-    build_ops,
-    DEFAULT_IFCONV_MAX_OPS,
-    default_ops,
+    mir_options,
+    default_mir,
     default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
 )
@@ -119,11 +118,7 @@ def test_schedule_length_is_frozen(spec: ExampleSpec, fmt: FloatFormat) -> None:
         f"{frozen_ii}. If this is a deliberate schedule improvement, update the frozen value."
     )
     lir = build_lir(
-        lower_to_mir(
-            lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir,
-            build_ops(options),
-            DEFAULT_IFCONV_MAX_OPS,
-        ),
+        lower_to_mir(lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         spec.name,
     )
     assert (lir.min_initiation_interval, lir.last_pc) == (frozen_ii, frozen_last_pc), (
@@ -176,11 +171,7 @@ def test_chained_copy_schedule_is_frozen(
     result = holoso.synthesize(kernel_cls().__call__, default_options(_FMT), name=name)
     assert result.initiation_interval[0] == frozen[0]
     lir = build_lir(
-        lower_to_mir(
-            lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir,
-            default_ops(_FMT),
-            DEFAULT_IFCONV_MAX_OPS,
-        ),
+        lower_to_mir(lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
     slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]

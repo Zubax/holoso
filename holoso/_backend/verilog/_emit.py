@@ -110,7 +110,8 @@ class _WideRenderer:
     (an integer fills the register exactly, a boolean has its own bank), so a float view narrows to WFLT and a float
     write spells the high bits ``1'bx`` -- don't-care beats a materialized zero fill on Diamond LSE and is measured
     neutral on Vivado and Yosys, which sweep the dead bits under either spelling (DESIGN.md, Fabric-area exploration).
-    Engages only at gap > 0; a zero replication count would be illegal Verilog anyway.
+    Engages only at gap > 0: a zero replication count would be illegal Verilog, and a kernel whose word is narrower
+    than the float format -- which one carrying no float may be -- has no float to render in the first place.
     """
 
     gap: int

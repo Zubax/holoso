@@ -2,7 +2,7 @@
 Black-box integer synthesis through the public API: every kernel drives ``synthesize`` and the numerical model
 against CPython or independent literals. Selection facts are asserted through the one public spelling they have --
 ``holoso_<mnemonic> #(`` instantiations present or absent in ``verilog_output.verilog`` -- and refusal diagnostics
-verbatim. ``ffmt=FloatFormat(5, 11)`` pins the int16 machine word where the original vectors depend on it; the
+verbatim. ``wint_min`` alone pins the machine word of a float-free kernel, so the vectors that depend on it say so; the
 inline operators (``ishiftc``, ``ibwand``, ...) have no public name, so their selection lives in
 ``test_int_selection``.
 """
@@ -92,7 +92,7 @@ def accumulator_result() -> holoso.SynthesisResult:
 def test_an_integer_state_kernel_synthesizes_and_the_model_matches_python(
     accumulator_result: holoso.SynthesisResult,
 ) -> None:
-    fmt = _OPTIONS.ifmt
+    fmt = accumulator_result.int_format
     model = pickle.loads(pickle.dumps(accumulator_result.numerical_model))  # the blob a generated bench embeds
     assert [(port.name, port.scalar_type) for port in model.inputs] == [("x", holoso.IntType(fmt))]
     assert [(port.name, port.scalar_type) for port in model.outputs] == [
@@ -115,13 +115,14 @@ def test_a_mixed_family_kernel_synthesizes_end_to_end() -> None:
     options = holoso.Options(holoso.OperatorOptions(fadd=holoso.FAddOptions()))
     result = holoso.synthesize(mixed_constants, options, name="MixedConstants")
     sim = result.numerical_model.elaborate()
-    for x, n in [(2.5, 40), (-1.0, -3), (0.0, options.ifmt.max)]:
+    word = result.int_format
+    for x, n in [(2.5, 40), (-1.0, -3), (0.0, word.max)]:
         out_x, out_n1, out_n7 = sim.run(x, n)
         assert isinstance(out_x, holoso.FloatValue)
         assert (float(out_x), _as_int(out_n1), _as_int(out_n7)) == (
             x + 1.0,
-            options.ifmt.saturate(n + 1),
-            options.ifmt.saturate(n + 7),
+            word.saturate(n + 1),
+            word.saturate(n + 7),
         )
 
 
@@ -140,7 +141,9 @@ def test_power_of_two_strength_reduction_survives_synthesis_and_matches_python()
     shift and the negation -- driven through ``synthesize`` against the same class running in CPython. The vectors
     stay short of the rails, where the machine's answer and CPython's coincide exactly.
     """
-    result = holoso.synthesize(PhaseDecimator().step, _OPTIONS, name="PhaseDecimator")
+    # x*4 reaches 400_000 on these vectors, and no float lends this kernel a word, so it asks for one that holds it.
+    options = dataclasses.replace(_OPTIONS, wint_min=24)
+    result = holoso.synthesize(PhaseDecimator().step, options, name="PhaseDecimator")
     sim = result.numerical_model.elaborate()
     reference = PhaseDecimator()
     for x in [5, -12, 4095, -4096, 100_000, -100_000, 0, 77, -1]:
@@ -156,7 +159,7 @@ def test_a_divider_kernel_model_matches_python() -> None:
     """The RTL cosim shares the model's LIR, so a swapped quotient/remainder lane is visible only upstream."""
     result = holoso.synthesize(divmod_pair, _OPTIONS, name="DivmodPair")
     sim = result.numerical_model.elaborate()
-    fmt = _OPTIONS.ifmt
+    fmt = result.int_format
     for a, b in [(7, 3), (-7, 3), (7, -3), (-7, -3), (17, 5), (fmt.max, 2), (fmt.min, 7), (0, 5)]:
         assert [_as_int(value) for value in sim.run(a, b)] == [a // b, a % b], (a, b)
     assert [_as_int(value) for value in sim.run(fmt.min, -1)] == [fmt.max, 0]
@@ -223,7 +226,7 @@ def family_crossings(x: float, n: int) -> tuple[int, float]:
 def test_a_conversion_pair_crosses_the_family_boundary_and_types_its_ports() -> None:
     """The typed-port metadata is public, so a wide carrier that lost its scalar family fails right here."""
     result = holoso.synthesize(family_crossings, _INT16, name="FamilyCrossings")
-    ifmt, ffmt = _INT16.ifmt, _INT16.ffmt
+    ifmt, ffmt = result.int_format, _INT16.ffmt
     assert [(p.name, p.scalar_type) for p in result.input_ports] == [
         ("in_x", holoso.FloatType(ffmt)),
         ("in_n", holoso.IntType(ifmt)),
@@ -283,8 +286,8 @@ class RunningTotal:
 def test_a_state_slot_loads_its_declared_reset_and_carries_across_transactions() -> None:
     result = holoso.synthesize(RunningTotal().step, _INT16, name="RunningTotal")
     assert [(p.name, p.scalar_type) for p in result.output_ports] == [
-        ("out_0", holoso.IntType(_INT16.ifmt)),
-        ("state_total", holoso.IntType(_INT16.ifmt)),
+        ("out_0", holoso.IntType(result.int_format)),
+        ("state_total", holoso.IntType(result.int_format)),
     ]
     sim = result.numerical_model.elaborate()
     reference = RunningTotal()
@@ -343,7 +346,7 @@ def test_a_kernel_mixing_integer_and_float_state_keeps_them_apart() -> None:
     result = holoso.synthesize(MixedState().step, _INT16, name="MixedState")
     # The typed ports pin the scalar families: Python ``==`` over the values alone conflates 3 and 3.0.
     assert [(port.name, port.scalar_type) for port in result.output_ports] == [
-        ("state_count", holoso.IntType(_INT16.ifmt)),
+        ("state_count", holoso.IntType(result.int_format)),
         ("state_level", holoso.FloatType(_INT16.ffmt)),
     ]
     sim = result.numerical_model.elaborate()

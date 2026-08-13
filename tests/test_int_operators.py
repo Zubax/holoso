@@ -273,11 +273,11 @@ def test_multiplier_staging_is_part_of_the_hardware_identity() -> None:
 
 def test_the_multiplier_knob_reaches_the_built_machine() -> None:
     # It must arrive carrying the user's staging AND the machine's integer format, not the float one.
-    imul = build_ops(Options(OperatorOptions(imul=IMulOptions(stage_product=3)), wint_min=44)).imul
+    imul = build_ops(Options(OperatorOptions(imul=IMulOptions(stage_product=3)), wint_min=44), 44).imul
     assert imul.fmt == IntFormat(44)
     assert imul.latency == 5
     assert imul.params == {"W": 44, "STAGE_PRODUCT": 3, "LATENCY": 5}
-    assert build_ops(Options(OperatorOptions())).imul.opt == IMulOptions(stage_product=0)
+    assert build_ops(Options(OperatorOptions()), 16).imul.opt == IMulOptions(stage_product=0)
 
 
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
@@ -383,7 +383,8 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
             OperatorOptions(ffromint=FFromIntOptions(stage_input=1, stage_pack=1), ftoint=FToIntOptions(stage_input=2)),
             ffmt=FloatFormat(6, 18),
             wint_min=44,
-        )
+        ),
+        44,
     )
     assert ops.ffromint is not None and ops.ftoint is not None
     assert ops.ffromint.latency == 3 and ops.ftoint.latency == 6
@@ -408,7 +409,7 @@ def test_the_configuration_checks_every_port_format_and_not_just_the_operator_ki
     # A conversion operator carries one format per side, so a check keyed on the operator's own ``fmt`` could
     # not see a wrong ``ifmt`` at all -- it read the float side and agreed with itself.
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33)
-    ops = build_ops(options)
+    ops = build_ops(options, options.wint_min)
     with pytest.raises(AssertionError, match="ftoint"):
         replace(ops, ftoint=FToIntOperator(options.ffmt, IntFormat(17), FToIntOptions()))
 
@@ -419,7 +420,7 @@ def _add(a: float, b: float) -> float:
 
 def test_a_float_only_build_configures_an_integer_operator_without_instantiating_it() -> None:
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=44)
-    ops = build_ops(options)
+    ops = build_ops(options, options.wint_min)
     assert ops.imul.fmt == IntFormat(44)
     assert ops.ffromint is None and ops.ftoint is None, "a conversion is optional, as every float operator is"
     verilog = holoso.synthesize(_add, options, name="ImulUnused").verilog_output.verilog

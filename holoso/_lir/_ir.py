@@ -6,6 +6,7 @@ which typed storage resources, with which folded port conditioners.
 """
 
 from bisect import bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TypeVar, assert_never
 
@@ -690,8 +691,23 @@ class Lir:
     bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered by attribute path
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
 
+    def _wide_widths(self) -> Iterator[int]:
+        for carrier in [*self.inputs, *self.outputs]:
+            if isinstance(carrier, (WideInputLoad, WideOutputWire)):
+                yield carrier.scalar_type.width
+        for value in [*self.wide_consts, *(slot.reset_value for slot in self.wide_state_slots)]:
+            yield value.fmt.width
+        firings: list[HardwareOperator] = [inst.operator for inst in self.instances]
+        firings += [op.operator for block in self.blocks for op in block.inline_ops]
+        for operator in firings:
+            signature = operator.signature
+            yield from (ty.width for ty in signature.operand_types + signature.result_types if ty.is_wide)
+
     def __post_init__(self) -> None:
-        assert self.int_format.width >= self.float_format.width  # the wide bank is exactly the integer width
+        # Nothing wider than the bank may live in it, and the float format alone no longer answers whether anything
+        # does: a kernel carrying no float sizes the word below it. Registers are untyped, so every typed carrier and
+        # every operator port is the evidence instead.
+        assert all(width <= self.int_format.width for width in self._wide_widths())
         assert self.fetch_lag in (1, 2), self.fetch_lag
         assert len({inst.operator for inst in self.instances}) == len(
             {type(inst.operator) for inst in self.instances}

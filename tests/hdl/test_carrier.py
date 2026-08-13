@@ -18,7 +18,7 @@ from holoso._eel import lower
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, drive_reset, sources, start_clock
-from .._modelref import build_lir, build_ops, DEFAULT_IFCONV_MAX_OPS, DEFAULT_UNROLL_MAX_TRIPS
+from .._modelref import build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 
 FMT = FloatFormat(6, 18)
 WINT_MIN = 33
@@ -83,9 +83,7 @@ async def float_leaves_the_upper_carrier_bits_clear(dut: Any) -> None:
 def test_float_leaves_the_upper_carrier_bits_clear(sim: str) -> None:
     options = _options()
     lir = build_lir(
-        lower_to_mir(
-            lower(_Accumulate().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, build_ops(options), DEFAULT_IFCONV_MAX_OPS
-        ),
+        lower_to_mir(lower(_Accumulate().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         "carrier",
     )
     assert lir.int_format.width == WINT_MIN > options.ffmt.width

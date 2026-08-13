@@ -22,7 +22,7 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, FSortOperator, OpConfig, require
+from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, OpConfig, require
 from holoso._errors import UnsupportedConstruct
 from holoso._operators import Relation
 from holoso._eel import lower
@@ -54,6 +54,7 @@ from holoso._lir._ir import (
 from holoso._mir import (
     Mir,
     MirBuilder,
+    MirOptions,
     MirFloatInput,
     MirNode,
     MirOperation,
@@ -68,7 +69,7 @@ from holoso._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_model
+from ._modelref import default_ifmt, build_lir, build_model
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType
 from holoso._value import FloatValue, ScalarValue
@@ -76,10 +77,10 @@ from holoso._value import FloatValue, ScalarValue
 from ._modelref import (
     branch_boundary_kernel,
     build_model_and_interpreter,
-    build_ops,
+    mir_options,
     ChainedSlots,
     COMPARATOR_OP_CASES,
-    default_ops,
+    default_mir,
     default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
@@ -103,7 +104,7 @@ def _examples_on_path() -> Iterator[None]:
     sys.path.remove(_EXAMPLES_DIR)
 
 
-OPS = build_ops(
+OPS = mir_options(
     Options(
         OperatorOptions(
             fadd=FAddOptions(),
@@ -120,11 +121,10 @@ _FETCH_LAG = 2  # the datapath lag the tests schedule against: one less than the
 
 def _run(
     target: Callable[..., object],
-    ops: OpConfig = OPS,
+    ops: MirOptions = OPS,
     fmt: FloatFormat = FMT,
-    ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> Mir:
-    return lower_to_mir(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, ifconv_max_ops)
+    return lower_to_mir(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
 
 
 def _view(mir: Mir) -> MirWideView:
@@ -190,7 +190,7 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: O
     def f(x: float, lo: float, hi: float) -> float:
         return 0.0 if lo < x < hi else x
 
-    lir = build_lir(_run(f, config.make_ops(FMT)), f"deadband_{config.label}")
+    lir = build_lir(_run(f, config.make_mir(FMT)), f"deadband_{config.label}")
     in_valid_pcs = [
         lir.block_base[block.index] + op.issue_cycle
         for block in lir.blocks
@@ -207,7 +207,7 @@ def test_branch_comparison_commits_at_block_makespan(config: OperatorCase) -> No
     # (_modelref.branch_boundary_kernel) actually hits the boundary-slack corner -- the comparison is the last commit
     # in its block and feeds the branch -- at comparator-only and full-pipeline latency points. If a schedule change
     # ever moves the comparison off the makespan, this fails before the cosim silently de-targets.
-    ops = config.make_ops(FMT)
+    ops = config.make_mir(FMT)
     lir = build_lir(_run(branch_boundary_kernel, ops), f"cmp_at_boundary_{config.label}")
     branch_blocks = [block for block in lir.blocks if isinstance(block.terminator, Branch)]
     assert len(branch_blocks) == 1
@@ -228,7 +228,7 @@ def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: Operat
     # that chain's write word while the result lands in the single-pred arm frames. (recip_newton's loop header
     # does not shrink -- its drained boundary is naturally tight, landing exactly at the boundary;
     # test_overlapping_loop_kernel_landings_are_real_model_writes pins that tight drain.)
-    lir = build_lir(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_shrink_{config.label}")
+    lir = build_lir(_run(overlap_spill_kernel, config.make_mir(FMT)), f"overlap_shrink_{config.label}")
     shrunk = [
         block
         for block in lir.blocks
@@ -340,7 +340,7 @@ def test_overlap_spilled_result_lands_in_successor_frame(config: OperatorCase) -
     # to the chain's WRITE WORD and the chain result lands PAST the terminator -- in the single-predecessor arm frames.
     # Pins that a wide result genuinely spills (landing_cycle beyond term_offset, while its write word stays in the
     # block); the cosim twin proves the arm read waits for the in-flight landing rather than reading stale data.
-    lir = build_lir(_run(overlap_spill_kernel, config.make_ops(FMT)), f"overlap_spill_{config.label}")
+    lir = build_lir(_run(overlap_spill_kernel, config.make_mir(FMT)), f"overlap_spill_{config.label}")
     spilled = [
         (block, op, write)
         for block in lir.blocks
@@ -366,7 +366,7 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame(config: OperatorCase) 
     # frame. The data write is unaffected (it still lands correctly), so only a step-accurate err_pc check sees it; the
     # shrink floor must keep the err_pc latch in-block: term_offset >= the write word + fetch_lag for an error-bearing
     # op. Crash-before: term_offset was the bare write word (one fetch_lag short), so err_pc latched a redirected pc.
-    lir = build_lir(_run(overlap_div_err_kernel, config.make_ops(FMT)), f"overlap_div_err_{config.label}")
+    lir = build_lir(_run(overlap_div_err_kernel, config.make_mir(FMT)), f"overlap_div_err_{config.label}")
     checked = False
     for block in lir.blocks:
         if not isinstance(block.terminator, Branch):
@@ -408,7 +408,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         (overlap_dead_arm_spill_kernel, "dead_arm_spill"),
         (overlap_div_err_kernel, "overlap_div_err"),
     ]:
-        lir = build_lir(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}")
+        lir = build_lir(_run(kernel, config.make_mir(FMT)), f"{name}_{config.label}")
         # These kernels write every register through an operation (no copies/installs/state), so the model's writeback
         # set is exactly the op-result landings -- the cleanest tie to write_landing_pcs.
         assert not any(block.wide_copies or block.bool_writes for block in lir.blocks)
@@ -455,7 +455,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
                 self.writes.setdefault(dst.index, set()).add(self.pc)
             super()._write(dst, value)  # type: ignore[arg-type]
 
-    lir = build_lir(_run(NewtonReciprocal().__call__, config.make_ops(FMT)), f"recip_newton_{config.label}")
+    lir = build_lir(_run(NewtonReciprocal().__call__, config.make_mir(FMT)), f"recip_newton_{config.label}")
     assert any(
         isinstance(block.terminator, Branch) and block.term_offset == boundary_step(block.block_makespan, lir.fetch_lag)
         for block in lir.blocks
@@ -525,7 +525,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
         return r, x
 
     computed = bool_install_blocks(
-        build_lir(_run(computed_source_install, ifconv_max_ops=0), "computed_source_install")
+        build_lir(_run(computed_source_install, replace(OPS, ifconv_max_ops=0)), "computed_source_install")
     )
     assert computed and all(
         not w.resident_source for b in computed for w in b.bool_writes
@@ -542,7 +542,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
         return r, a
 
     resident = bool_install_blocks(
-        build_lir(_run(resident_source_install, ifconv_max_ops=0), "resident_source_install")
+        build_lir(_run(resident_source_install, replace(OPS, ifconv_max_ops=0)), "resident_source_install")
     )
     assert resident and all(
         w.resident_source for b in resident for w in b.bool_writes
@@ -594,13 +594,15 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
     assert sf == 0, "an entry inline op producing a persistent-state live-out issues on cycle 0, reclaiming ucode[0]"
 
 
-def _const_branch_mir(ops: OpConfig) -> Mir:
+def _const_branch_mir(ops: MirOptions) -> Mir:
     """
     A block that branches on a literal, nested under a runtime diamond, computing ``x + 1.0 if x > y else x``. HIR
     never hands selection this shape -- pruning settles a decided branch -- so it is built directly, the LIR behavior
     below being worth covering regardless.
     """
-    fcmp, fadd = require(ops.fcmp, "fcmp"), require(ops.fadd, "fadd")
+    # The machine this case asks for, not the default one: the parametrized cases differ only in operator staging.
+    built = OpConfig.build(ops.operator, ops.float_format, ops.wmultiplier, default_ifmt(FMT))
+    fcmp, fadd = require(built.fcmp, "fcmp"), require(built.fadd, "fadd")
     port, inversion = fcmp.tap_of(Relation.GT)
     builder = MirBuilder(FMT, default_ifmt(FMT))
     entry, decided, taken, untaken, merge, bypass, join = (builder.block() for _ in range(7))
@@ -641,7 +643,7 @@ def test_const_branch_install_block_drains_to_its_inline_landing(config: Operato
     # drain to exactly that landing, where the terminator then reads the condition the following step. The drain must
     # neither shrink below it (terminator reads a stale condition -- the original B1 bug) nor pay the wider
     # computed-source-copy boundary. Crash-before: KeyError (model) / stale branch read (RTL).
-    lir = build_lir(_const_branch_mir(config.make_ops(FMT)), f"const_branch_{config.label}")
+    lir = build_lir(_const_branch_mir(config.make_mir(FMT)), f"const_branch_{config.label}")
     const_blocks = [
         b
         for b in lir.blocks
@@ -689,7 +691,7 @@ def test_empty_merge_block_is_threaded_into_its_successor(config: OperatorCase) 
     # terminated diamond arms. Merge threading eliminates it, composing the diamond's phi arms into the loop header's
     # init arm. Crash-before (no merge threading): that empty Jump merge survives. The bit-exact RTL check of the
     # resulting three-arm loop-header phi is the cosim twin (test_cosim.py test_cosim_diamond_then_loop).
-    lir = build_lir(_run(diamond_then_loop_kernel, config.make_ops(FMT)), f"diamond_then_loop_{config.label}")
+    lir = build_lir(_run(diamond_then_loop_kernel, config.make_mir(FMT)), f"diamond_then_loop_{config.label}")
     by_index = {block.index: block for block in lir.blocks}
     preds: dict[int, list[int]] = {block.index: [] for block in lir.blocks}
     for block in lir.blocks:
@@ -728,7 +730,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
     # optimally, so no II is lost). So tightness here is read_pc in {landing, landing+1}; a real coordinate-frame
     # regression (the historical land - term_offset +1 bug) would push every read to landing+2.
     for kernel, name in [(overlap_spill_kernel, "overlap_spill"), (overlap_dead_arm_spill_kernel, "dead_arm_spill")]:
-        lir = build_lir(_run(kernel, config.make_ops(FMT)), f"{name}_{config.label}")
+        lir = build_lir(_run(kernel, config.make_mir(FMT)), f"{name}_{config.label}")
         by_index = {block.index: block for block in lir.blocks}
         spilled_any = False
         tight = 0
@@ -1451,7 +1453,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
             a = a + 4.0
         return a
 
-    lir = build_lir(_run(f, ifconv_max_ops=0), "branches")
+    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches")
     comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons
@@ -1482,7 +1484,7 @@ def test_diamond_op_result_arms_coalesce() -> None:
             z = x * y
         return z * x  # an operator use of the merged value, not only the boundary output
 
-    lir = build_lir(_run(f, ifconv_max_ops=0), "phicoal")
+    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "phicoal")
     assert (
         sum(len(b.wide_copies) for b in lir.blocks) == 0
     ), "the diamond's op-result arms must coalesce away their copies"
@@ -1735,7 +1737,7 @@ def test_commutative_port_assignment_never_increases_read_mux_fan_in(
 
     import ekf1_stateless
 
-    cfg = build_ops(
+    cfg = mir_options(
         Options(
             OperatorOptions(
                 fadd=FAddOptions(stage_decode=1),
@@ -1926,13 +1928,17 @@ def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
     # II is latency + boundary_step(0, fetch_lag) + 1 == 8. Real operators stay within it (the CORDIC II=latency+1
     # clears it), so it is never tripped in practice; this pins both sides directly. The check needs the fetch lag,
     # absent from OperatorInstance, so it lives in Lir.__post_init__ over every pooled instance.
-    def _add(a: float, b: float) -> float:
-        return a + b
+    # A throttled adder is not something any configuration can ask for, so the MIR is built rather than compiled.
+    def _sum_mir(fadd: FAddOperator) -> Mir:
+        builder = MirBuilder(FMT, default_ifmt(FMT))
+        builder.position_at(builder.block())
+        a = builder.float_input("a", FloatType(FMT))
+        b = builder.float_input("b", FloatType(FMT))
+        builder.float_output("out_0", builder.operation(fadd, [a, b], [FloatSignControl(), FloatSignControl()]))
+        builder.ret()
+        return builder.finish()
 
-    def _ops(fadd: FAddOperator) -> OpConfig:
-        return replace(default_ops(FMT), fadd=fadd)
-
-    build_lir(_run(_add, _ops(_HeavilyThrottledAdd(FMT, FAddOptions()))), "at_bound")  # II == 8 == bound: builds clean
+    build_lir(_sum_mir(_HeavilyThrottledAdd(FMT, FAddOptions())), "at_bound")  # II == 8 == bound: builds clean
 
     class _OverBoundAdd(_HeavilyThrottledAdd):
         @property
@@ -1940,7 +1946,7 @@ def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
             return 9  # one past the bound: a drained-edge successor issuing at cycle 0 could double-issue this instance
 
     with pytest.raises(AssertionError, match="cross-block busy tracking"):
-        build_lir(_run(_add, _ops(_OverBoundAdd(FMT, FAddOptions()))), "over_bound")
+        build_lir(_sum_mir(_OverBoundAdd(FMT, FAddOptions())), "over_bound")
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
@@ -1954,7 +1960,7 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
         above = b < a
         return float(below), float(above)
 
-    lir = build_lir(_run(f, config.make_ops(FMT)), f"mirrored_{config.label}")
+    lir = build_lir(_run(f, config.make_mir(FMT)), f"mirrored_{config.label}")
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 2
     sources = [tuple(operand.source for operand in op.operands) for op in firings]
@@ -1972,7 +1978,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
     # early-install decision did not, so "_b"'s new value landed before "_a"'s boundary copy captured the old one.
     # The RTL then returned the NEW "_b" through "_a" while the model kept the old one (cosim diverged on the second
     # transaction). The tapped slot must now install at the boundary, and the model must match plain Python.
-    lir = build_lir(_run(ChainedSlots().__call__, config.make_ops(FMT)), f"chained_slots_{config.label}")
+    lir = build_lir(_run(ChainedSlots().__call__, config.make_mir(FMT)), f"chained_slots_{config.label}")
     slots = {slot.name: slot for slot in lir.wide_state_slots}
     assert lir.state_copy_step(slots["_b"]) == lir.initiation_interval, "the tapped slot must not install early"
     reference = ChainedSlots()
@@ -2013,7 +2019,7 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
     # step (issue + latency + fetch_lag + 1), one cycle past where an issue-frame bound would have allowed the
     # slot's install copy to fire -- an early install bounded by issue cycles would overwrite the live-in before
     # the select reads it (RTL would take the NEW value through ``old`` while the model keeps the old one).
-    lir = build_lir(_run(SelectHold().step, config.make_ops(FMT)), f"select_hold_{config.label}")
+    lir = build_lir(_run(SelectHold().step, config.make_mir(FMT)), f"select_hold_{config.label}")
     selects = [
         (block, op)
         for block in lir.blocks
@@ -2108,7 +2114,7 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: Operato
             d = b
         return float(flag), d
 
-    lir = build_lir(_run(f, config.make_ops(FMT)), f"inverted_arm_{config.label}")
+    lir = build_lir(_run(f, config.make_mir(FMT)), f"inverted_arm_{config.label}")
     sources = [(write.source.source, write.source.inversion) for block in lir.blocks for write in block.bool_writes]
     flag_sources = [(src, inv) for src, inv in sources if isinstance(src, BoolRegRef)]
     assert len(flag_sources) == 2, flag_sources
@@ -2206,8 +2212,8 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
 # CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing -- the first operators with
 # initiation_interval > 1, so the scheduler's busy_until spacing is exercised here for the first time.
 
-# default_ops already carries fexp2/flog2/fsincos/fatan2; the lone-hypot decomposition also needs fsort.
-_CORDIC_OPS = replace(default_ops(FMT), fsort=FSortOperator(FMT, FSortOptions()))
+# default_mir already carries fexp2/flog2/fsincos/fatan2; the lone-hypot decomposition also needs fsort.
+_CORDIC_OPS = replace(default_mir(FMT), operator=replace(default_mir(FMT).operator, fsort=FSortOptions()))
 
 
 def _instance_counts(lir: Lir) -> Counter[str]:
@@ -2327,7 +2333,7 @@ def test_forced_install_regrowth_pins_and_stays_correct(
     monkeypatch.setattr(_build, "actual_install_blocks", fake_installs)
     fmt = FloatFormat(6, 18)
     with caplog.at_level("INFO", logger="holoso._lir._build"):
-        model, interpreter = build_model_and_interpreter(kernel, default_ops(fmt), "forced_pin", fmt)
+        model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "forced_pin", fmt)
     assert any("pinning regrown block" in r.message for r in caplog.records), "the faked narrowing did not pin"
     for x in (1.0, -2.0):
         for n in (1.0, 3.0):
@@ -2364,7 +2370,7 @@ def test_forced_state_copy_regrowth_latches_and_stays_correct(
     monkeypatch.setattr(_build, "_has_state_copy", fake_state)
     fmt = FloatFormat(8, 36)
     with caplog.at_level("INFO", logger="holoso._lir._build"):
-        model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_ops(fmt), "forced_latch", fmt)
+        model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_mir(fmt), "forced_latch", fmt)
     assert any("latching the state-copy charge" in r.message for r in caplog.records), "the fake did not latch"
     reference = Delay2()
     for raw in (1.0, 2.0, 3.0, 4.0, 5.0):

@@ -14,7 +14,7 @@ from holoso._eel import lower
 from holoso._mir import MirOperation
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import build_ops, DEFAULT_IFCONV_MAX_OPS, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import mir_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude
 
 _OPTIONS = Options(OperatorOptions(fcmp=FCmpOptions()), ffmt=FloatFormat(6, 18))
@@ -77,7 +77,7 @@ def test_directional_inf_fusion_suppresses_predicate_shared_only_by_fused_ands()
 
 def test_band_survives_only_where_fusion_leaves_a_conjunction() -> None:
     def band_count(kernel: Callable[..., object]) -> int:
-        mir = lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, build_ops(_OPTIONS), DEFAULT_IFCONV_MAX_OPS)
+        mir = lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(_OPTIONS))
         return sum(1 for n in mir.nodes.values() if isinstance(n, MirOperation) and n.operator.mnemonic == "band")
 
     assert band_count(_directional) == 0

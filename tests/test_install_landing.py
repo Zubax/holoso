@@ -24,9 +24,8 @@ from ._modelref import (
     assert_model_equals_interpreter,
     build_lir,
     build_model_and_interpreter,
-    build_ops,
-    DEFAULT_IFCONV_MAX_OPS,
-    default_ops,
+    mir_options,
+    default_mir,
     default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
     Vector,
@@ -36,9 +35,7 @@ from ._modelref import (
 def _build(spec: ExampleSpec) -> Lir:
     return build_lir(
         lower_to_mir(
-            lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir,
-            build_ops(spec.options(spec.formats[0])),
-            DEFAULT_IFCONV_MAX_OPS,
+            lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(spec.options(spec.formats[0]))
         ),
         spec.name,
     )
@@ -106,11 +103,7 @@ def test_resident_register_source_install_is_inline_class() -> None:
     """
     fmt = FloatFormat(8, 36)
     lir = build_lir(
-        lower_to_mir(
-            lower_frontend(_InputArmSource().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir,
-            default_ops(fmt),
-            DEFAULT_IFCONV_MAX_OPS,
-        ),
+        lower_to_mir(lower_frontend(_InputArmSource().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(fmt)),
         "input_arm_source",
     )
     input_regs = {load.dst for load in lir.inputs}
@@ -174,11 +167,7 @@ def test_state_read_sourced_install_is_inline_class() -> None:
     """
     options = dataclasses.replace(default_options(FloatFormat(6, 18)), ifconv_max_ops=0)
     lir = build_lir(
-        lower_to_mir(
-            lower_frontend(_HoldOrUpdateBool().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir,
-            build_ops(options),
-            options.ifconv_max_ops,
-        ),
+        lower_to_mir(lower_frontend(_HoldOrUpdateBool().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         "hold_or_update_bool",
     )
     resident_non_const = [x for b in lir.blocks for x in b.bool_writes if x.resident_source and not x.is_const]
@@ -223,10 +212,10 @@ def test_cross_block_source_install_residence_stays_in_predecessor_frame() -> No
     install land far past the predecessor's terminator, and the assert raises (verified by injecting that lookup).
     """
     fmt = FloatFormat(8, 36)
-    ops = default_ops(fmt)
+    ops = default_mir(fmt)
     kernel = _LiveThroughArm().__call__
     lir = build_lir(
-        lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops),
         "live_through_arm",
     )  # raises on the off-frame drift
     cross = [c for blk in lir.blocks for c in blk.wide_copies if not c.resident_source]
@@ -274,10 +263,10 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     by the schedule-independent model-vs-interpreter differential.
     """
     fmt = FloatFormat(8, 36)
-    ops = default_ops(fmt)
+    ops = default_mir(fmt)
     kernel = _LastWorkArmSource().__call__
     lir = build_lir(
-        lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops, DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops),
         "last_work_arm",
     )
     pushed = [

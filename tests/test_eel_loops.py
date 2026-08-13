@@ -7,6 +7,8 @@ CPython; every ban is pinned as a located rejection.
 
 from collections.abc import Callable, Mapping, Sequence
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -1113,9 +1115,10 @@ def _counted_rail_overshoot() -> tuple[int, int]:
 
 
 def test_a_saturating_counter_overshoot_is_unobservable() -> None:
-    """The final advance saturates at the int24 rail, which must only end the loop, never leak into a value."""
+    """The final advance saturates at the rail the kernel asked for, which must end the loop and never leak."""
+    options = Options(OperatorOptions(), wint_min=24, unroll_max_trips=0)  # the bounds are 24-bit; nothing lends it
     for kernel, expected in ((_counted_rail_overshoot, [3, 8388606]), (_counted_rail_overshoot_down, [3, -8388606])):
-        forced = holoso.synthesize(kernel, Options(OperatorOptions(), unroll_max_trips=0), name="k")
+        forced = holoso.synthesize(kernel, options, name="k")
         assert [_as_int(v) for v in forced.numerical_model.elaborate().run()] == expected
 
 
@@ -1151,7 +1154,9 @@ def _returned_static_range() -> tuple[int, ...]:
 
 def test_static_ranges_decay_wherever_a_sequence_is_demanded() -> None:
     _oracle(_range_join_equal, [{"c": True}, {"c": False}])
-    result = holoso.synthesize(_static_range_consumers, _MIN_OPTIONS, name="k")
+    # ``len(range(10**6))`` folds to a value no 16-bit word holds, so this kernel names the width it needs.
+    wide = dataclasses.replace(_MIN_OPTIONS, wint_min=24)
+    result = holoso.synthesize(_static_range_consumers, wide, name="k")
     (out,) = result.numerical_model.elaborate().run()
     assert _as_int(out) == _static_range_consumers()
     returned = holoso.synthesize(_returned_static_range, _MIN_OPTIONS, name="k")

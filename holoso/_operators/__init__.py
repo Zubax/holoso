@@ -64,4 +64,4 @@ from ._int import (
     IntShiftConstOperator as IntShiftConstOperator,
     IntToBoolOperator as IntToBoolOperator,
 )
-from ._config import OpConfig as OpConfig, require as require
+from ._config import OpConfig as OpConfig, OperatorOptions as OperatorOptions, require as require

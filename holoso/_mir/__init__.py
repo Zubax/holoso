@@ -35,3 +35,4 @@ from ._ir import (
 )
 from ._interpret import MirInterpreter as MirInterpreter
 from ._lower import lower as lower
+from ._options import MirOptions as MirOptions

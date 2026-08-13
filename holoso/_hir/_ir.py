@@ -206,6 +206,15 @@ class Hir:
                 refs.append(block.terminator.cond)
         return refs
 
+    def value_types(self) -> frozenset[Type]:
+        """
+        What sizes the machine word: a family absent from the graph needs no room in the wide register, however the
+        machine is configured. Node types alone are complete -- every operand is itself a node, so a comparison's
+        boolean result cannot hide its integer operands, and a slot's reset shares its live-out's type by the
+        selection gate's own rule.
+        """
+        return frozenset(node.type for node in self.nodes.values())
+
     def input_names(self) -> list[str]:
         names: list[str] = []
         for vid in self.input_ids:

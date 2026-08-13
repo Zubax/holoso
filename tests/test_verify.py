@@ -7,6 +7,7 @@ layout, and the merged-slots interpreter differential) that has no public spelli
 import math
 import pickle
 from collections.abc import Callable
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -31,15 +32,14 @@ from holoso import (
 from holoso._eel import lower
 from holoso._lir import Lir, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
-from holoso._mir import Mir, lower as lower_to_mir
+from holoso._mir import MirOptions, Mir, lower as lower_to_mir
 from ._modelref import (
     assert_model_equals_interpreter,
     bounded,
     build_lir,
     build_model,
     build_model_and_interpreter,
-    build_ops,
-    DEFAULT_IFCONV_MAX_OPS,
+    mir_options,
     default_options,
     default_tolerance,
     DEFAULT_UNROLL_MAX_TRIPS,
@@ -1208,7 +1208,7 @@ def test_polar_example_round_trip_and_native_reference() -> None:
 # commit (``needs_copy``) coalescing group, and the merged/aliased-slot interpreter differentials drive the internal
 # pipeline directly.
 
-OPS = build_ops(
+OPS = mir_options(
     Options(
         OperatorOptions(
             fadd=FAddOptions(),
@@ -1222,8 +1222,8 @@ OPS = build_ops(
 )
 
 
-def _run(target: Callable[..., object], ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Mir:
-    return lower_to_mir(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, OPS, ifconv_max_ops)
+def _run(target: Callable[..., object], ops: MirOptions = OPS) -> Mir:
+    return lower_to_mir(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
 
 
 def test_model_handles_unused_input_ports() -> None:
@@ -1435,7 +1435,7 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce() -> None:
                 self.w = 0.0
             return self.x, self.w
 
-    lir = build_lir(_run(LiveInFeedsAnotherSlotPhi().__call__, ifconv_max_ops=0), "livein_other_slot")
+    lir = build_lir(_run(LiveInFeedsAnotherSlotPhi().__call__, replace(OPS, ifconv_max_ops=0)), "livein_other_slot")
     assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
     model = build_model(lir)
     reference = LiveInFeedsAnotherSlotPhi()
@@ -1548,6 +1548,10 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
         for cond, k in [(True, 1.0), (False, 1.0), (True, 3.0), (True, -2.0), (False, 0.5), (False, 4.0), (True, 0.0)]
     ]
     for cls in (Forward, Reversed):
-        model, interpreter = build_model_and_interpreter(cls().__call__, OPS, cls.__name__, FMT, ifconv_max_ops=0)
+        model, interpreter = build_model_and_interpreter(
+            cls().__call__, replace(OPS, ifconv_max_ops=0), cls.__name__, FMT
+        )
         assert_model_equals_interpreter(model, interpreter, vectors, cls.__name__)
-    build_lir(_run(InputPhi().__call__, ifconv_max_ops=0), "input_phi_alias")  # phi-of-inputs shape must compile
+    build_lir(
+        _run(InputPhi().__call__, replace(OPS, ifconv_max_ops=0)), "input_phi_alias"
+    )  # phi-of-inputs shape must compile

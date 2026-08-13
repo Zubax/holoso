@@ -1,16 +1,5 @@
 # TODO
 
-## Integer support adjacent
-
-The native integer width is `max(wint_min, ffmt.width)`, so a kernel that builds no float operator at all still
-inherits the default float format's width: the UART's byte lane emerges as a 24-bit port for a 0..255 value, and the
-LFSR's genuine `wint_min=17` is inert because the default format is already wider. Sizing an integer design
-therefore runs through a float format it will never instantiate, and the
-only way to tighten the word today is to shrink a format nothing reads. The floor exists so one register can hold
-either family, but when no float operator is configured no float ever enters the register file. Letting `ffmt` go
-absent in that case, so the word comes from `wint_min` alone, would end the ritual; it would also give
-`ExampleSpec.formats` a meaning for a float-free kernel, where two formats today differ only in register width.
-
 ## Frontend limitations
 
 Valid kernels that are conservatively rejected. None is a wrong answer; each is a located refusal with a rewrite.

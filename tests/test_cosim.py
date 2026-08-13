@@ -29,7 +29,7 @@ from ._cosim import run_cosim
 from ._modelref import (
     branch_boundary_kernel,
     build_lir,
-    build_ops,
+    mir_options,
     ChainedSlots,
     COMPARATOR_OPTIONS_CASES,
     const_branch_kernel,
@@ -437,9 +437,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OptionsCase) -> None:
     name = f"overlap_div_err_{config.label}"
     options = config.make_options(fmt)
     lir = build_lir(
-        lower_to_mir(
-            lower(overlap_div_err_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, build_ops(options), options.ifconv_max_ops
-        ),
+        lower_to_mir(lower(overlap_div_err_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         name,
     )
     entry = next(block for block in lir.blocks if block.index == lir.entry)

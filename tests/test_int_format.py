@@ -6,12 +6,13 @@ for it are covered by ``test_int_operators`` and ``test_int_selection``.
 """
 
 import dataclasses
+from collections.abc import Callable
 import re
 
 import pytest
 
 import holoso
-from holoso import FloatFormat, IntFormat, OperatorOptions, Options
+from holoso import FloatFormat, IntFormat, Options
 from holoso._mir import MirOperation, MirPhi
 from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, SelectOperator, identity_conditioner
 from holoso._type import BoolType, IntType
@@ -105,26 +106,167 @@ def _add(a: float, b: float) -> float:
     return a + b
 
 
-def test_default_options_carry_the_documented_int_format() -> None:
-    # The floor is low enough that a float-only build at a practical format pays nothing for the integer half.
-    assert Options(OperatorOptions()).ifmt == IntFormat(24)
-    assert Options(OperatorOptions(), ffmt=FloatFormat(4, 8)).ifmt == IntFormat(16)
+def _increment(n: int) -> int:
+    return n + 1
+
+
+def _both(a: float, n: int) -> tuple[float, int]:
+    return a + 1.0, n + 1
+
+
+def _flags(a: bool, b: bool) -> tuple[bool, bool]:
+    return a and b, a or b
+
+
+def _word_of(kernel: Callable[..., object], options: Options, name: str) -> tuple[IntFormat, str]:
+    result = holoso.synthesize(kernel, options, name=name)
+    return result.int_format, result.verilog_output.verilog
 
 
 @pytest.mark.parametrize("wint_min,width", ((2, 24), (16, 24), (33, 33), (44, 44)))
-def test_the_int_format_is_never_narrower_than_the_float(wint_min: int, width: int) -> None:
+def test_a_float_carrying_kernel_takes_the_wider_of_the_two(wint_min: int, width: int) -> None:
     options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
-    assert options.ifmt == IntFormat(width)
+    assert _word_of(_add, options, "WintFloat")[0] == IntFormat(width)
+    assert _word_of(_both, options, "WintMixed")[0] == IntFormat(width)
 
 
-@pytest.mark.parametrize("wint_min,width", ((2, 24), (16, 24), (33, 33), (44, 44)))
-def test_the_int_format_sizes_the_wide_register_bank_in_the_rtl(wint_min: int, width: int) -> None:
+@pytest.mark.parametrize("wint_min", (2, 16, 17, 33))
+def test_a_kernel_carrying_no_float_answers_to_the_floor_alone(wint_min: int) -> None:
+    """The float format sizes nothing where the kernel instantiates none of it, however wide it is configured."""
+    for ffmt in (FMT, FloatFormat(8, 36)):
+        options = dataclasses.replace(default_options(ffmt), wint_min=wint_min)
+        assert _word_of(_increment, options, "WintInt")[0] == IntFormat(wint_min), ffmt
+        assert _word_of(_flags, options, "WintBool")[0] == IntFormat(wint_min), ffmt
+
+
+def test_the_machine_word_sizes_the_wide_register_bank_in_the_rtl() -> None:
     # The end-to-end pin: driven through the public entry point, so a build that dropped the derivation anywhere
     # between here and the Verilog backend -- or substituted a plausible-but-wrong width -- fails right here.
-    options = dataclasses.replace(default_options(FMT), wint_min=wint_min)
-    verilog = holoso.synthesize(_add, options, name="WintProbe").verilog_output.verilog
-    (wint,) = re.findall(r"^localparam\s+WINT\s*=\s*(\d+);", verilog, re.MULTILINE)
-    (wreg,) = re.findall(r"^localparam\s+WREG\s*=\s*(\d+);", verilog, re.MULTILINE)
-    assert int(wint) == width and int(wreg) == width
-    assert "WFLT      = WEXP + WMAN;" in verilog, "the float keeps its own width inside the wider register"
-    assert re.search(r"reg\s+\[WREG-1:0\]\s+regs\b", verilog)
+    options = dataclasses.replace(default_options(FMT), wint_min=33)
+    for kernel, name, width in ((_add, "WintProbe", 33), (_increment, "WintProbeInt", 33)):
+        word, verilog = _word_of(kernel, options, name)
+        (wint,) = re.findall(r"^localparam\s+WINT\s*=\s*(\d+);", verilog, re.MULTILINE)
+        (wreg,) = re.findall(r"^localparam\s+WREG\s*=\s*(\d+);", verilog, re.MULTILINE)
+        assert word == IntFormat(width) and int(wint) == width and int(wreg) == width
+        assert re.search(r"reg\s+\[WREG-1:0\]\s+regs\b", verilog)
+    assert "WFLT      = WEXP + WMAN;" in _word_of(_add, options, "WintProbe")[1]
+
+
+def test_a_boolean_only_kernel_allocates_no_wide_register() -> None:
+    """Its word is inert -- nothing wide is stored -- which is why the floor may answer for it unexamined."""
+    verilog = _word_of(_flags, default_options(FMT), "BoolOnlyBank")[1]
+    assert not re.search(r"reg\s+\[WREG-1:0\]\s+regs\b", verilog)
+
+
+def _shift_past_the_narrow_word(x: int) -> int:
+    return x << 20  # survives a 24-bit word and truncates to zero under a 16-bit one
+
+
+def _float_arm_behind_a_shift(x: int, y: int) -> int:
+    """Oscillates: the word that erases the float arm is the one whose own graph then keeps it."""
+    q = (x << 24) // (y << 16)
+    if q == 0:
+        return 1
+    return int(float(x) / float(y))
+
+
+def _zero_div_behind_a_shift(a: int) -> int:
+    """Refused at a 24-bit word, accepted at 16: the narrower word erases the arm the wider one convicts."""
+    z = a - a
+    if (a << 20) != 0:
+        return 7 // z
+    return 0
+
+
+class _OversizedReset:
+    def __init__(self) -> None:
+        self.acc = 100_000
+
+    def step(self, x: int) -> int:
+        self.acc = self.acc + x
+        return self.acc
+
+
+def test_the_second_derivation_reshapes_the_graph_under_the_word_it_settled_on() -> None:
+    """
+    The word is an INPUT to the graph that answers it, so settling on a narrower one obliges a re-derivation. A
+    machine sized in one pass would emit a shifter its own word cannot express.
+    """
+    options = dataclasses.replace(default_options(FMT), wint_min=16)  # the count lies inside [16, 24)
+    result = holoso.synthesize(_shift_past_the_narrow_word, options, name="ShiftFoldsLate")
+    assert result.int_format == IntFormat(16)
+    assert "holoso_ishl" not in result.verilog_output.verilog, "the count is past the settled word, so it folded"
+    (out,) = result.numerical_model.elaborate().run(3)
+    assert isinstance(out, IntValue) and int(out) == 0
+
+
+def test_a_narrowing_that_does_not_settle_keeps_the_widest_word() -> None:
+    """No fixpoint need exist, so the loop is bounded and falls back rather than failing on a legal kernel."""
+    operator = dataclasses.replace(
+        default_options(FMT).operator, ffromint=holoso.FFromIntOptions(), ftoint=holoso.FToIntOptions()
+    )
+    options = dataclasses.replace(default_options(FMT), operator=operator, wint_min=16)
+    result = holoso.synthesize(_float_arm_behind_a_shift, options, name="Oscillates")
+    assert result.int_format == IntFormat(24), "the widest word every family fits stands where narrowing will not"
+
+
+def _loop_behind_a_shift(x: int) -> int:
+    y = 0
+    while (x << 20) == 0:  # a real loop at the wide word; at the narrow one the header decides and never exits
+        y = y + 1
+    return y
+
+
+def _scale_past_a_tiny_word(n: int) -> int:
+    return n * 4  # the absorbed count is itself a machine integer, which a two-bit word cannot hold
+
+
+def test_a_narrowing_that_leaves_nothing_buildable_keeps_the_widest_word() -> None:
+    """A refusal inside the speculative narrow derivation is a failed narrowing, not a kernel that cannot be built."""
+    options = dataclasses.replace(default_options(FMT), wint_min=16)
+    result = holoso.synthesize(_loop_behind_a_shift, options, name="LoopBehindShift")
+    assert result.int_format == IntFormat(24)
+    (out,) = result.numerical_model.elaborate().run(1)
+    assert isinstance(out, IntValue) and int(out) == 0
+
+
+def test_an_absorbed_shift_count_fits_the_word_that_carries_it() -> None:
+    """Only a two-bit word cannot represent its own width, and every count from width-1 up rails identically."""
+    options = dataclasses.replace(default_options(FMT), wint_min=2)
+    result = holoso.synthesize(_scale_past_a_tiny_word, options, name="TinyWordScale")
+    assert result.int_format == IntFormat(2)
+    sim = result.numerical_model.elaborate()
+    for n, expect in ((0, 0), (1, 1), (-1, -2), (-2, -2)):  # int2 holds -2..1, so every nonzero product rails
+        (out,) = sim.run(n)
+        assert isinstance(out, IntValue) and int(out) == expect, n
+
+
+def test_judgement_waits_for_the_graph_the_machine_actually_builds() -> None:
+    """Refusal convicts what survives, and what survives depends on the word, so it may not run on a draft graph."""
+    options = dataclasses.replace(default_options(FMT), wint_min=16)
+    result = holoso.synthesize(_zero_div_behind_a_shift, options, name="ZeroDivErased")
+    assert result.int_format == IntFormat(16)
+    (out,) = result.numerical_model.elaborate().run(3)
+    assert isinstance(out, IntValue) and int(out) == 0
+
+
+def test_a_state_reset_past_the_floor_is_refused_by_its_own_gate() -> None:
+    """A slot's reset is no HIR node, so it is the one oversized value the literal gate cannot catch."""
+    options = dataclasses.replace(default_options(FloatFormat(8, 36)), wint_min=16)
+    with pytest.raises(holoso.UnsupportedConstruct, match=r"slot 'acc' reset 100000 does not fit int16"):
+        holoso.synthesize(_OversizedReset().step, options, name="ResetTooWide")
+    widened = dataclasses.replace(options, wint_min=24)
+    assert holoso.synthesize(_OversizedReset().step, widened, name="ResetFits").int_format == IntFormat(24)
+
+
+def test_a_literal_past_the_floor_is_refused_where_a_wide_float_used_to_carry_it() -> None:
+    """The float format no longer lends its width to an integer kernel, so the kernel must ask for what it needs."""
+
+    def big(n: int) -> int:
+        return n + 100_000
+
+    options = dataclasses.replace(default_options(FloatFormat(8, 36)), wint_min=16)
+    with pytest.raises(holoso.UnsupportedConstruct, match="does not fit int16; raise wint_min"):
+        holoso.synthesize(big, options, name="TooNarrow")
+    widened = dataclasses.replace(options, wint_min=24)
+    assert holoso.synthesize(big, widened, name="WideEnough").int_format == IntFormat(24)

@@ -2,8 +2,8 @@
 End-to-end cosimulation of every catalogued scalar-drivable example: each is driven with hand-built sensible vectors, a
 frozen random sweep, and format edge cases, then checked bit-for-bit against its embedded model under a lean (no
 optional stages) and a deeply pipelined operator configuration at each spec's datapath formats -- e8m36 for most,
-e6m18 for the kernels that build no float operator at all (where the format only sizes the integer word, so this is
-the width their own scripts generate), and octave_index at both.
+e6m18 for the kernels that build no float operator at all (where the format is inert, this being the one their own
+scripts generate), and octave_index at both.
 
 This proves ``RTL == embedded numerical model``; it does NOT prove ``model == Python semantics`` (both descend from the
 same lowering). ``test_example_reference.py`` covers that second half, driving the same example specs against a fresh

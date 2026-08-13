@@ -34,7 +34,8 @@ class Debouncer:
 
 
 def main() -> None:
-    options = holoso.Options(holoso.OperatorOptions())  # a counter and a flag: no float operator is built
+    # The dwell count reaches samples, plus the sign bit; wint_min=4 --> max count 15.
+    options = holoso.Options(holoso.OperatorOptions(), wint_min=4)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(Debouncer().__call__, options)
     for filename, path in result.write(out_dir).items():

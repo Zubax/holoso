@@ -37,8 +37,9 @@ Constant folding and constant evaluation run in the compiler's own arithmetic (i
 host precision), never in the target format, so a folded result MAY differ from what the hardware datapath computes
 for the same expression; that is designed, not broken. Never add a guard that declines a rewrite because the hardware
 would answer differently, and never consult a numeric format to decide whether a rewrite is legal. That binds the
-optimizer's own passes. The layer that knows the machine may substitute a fact back into the graph and hand it to the
-optimizer again -- telling, never being asked -- which is how a shift past the word is settled (see MIR).
+optimizer's own passes, never the layer that knows the machine: that one substitutes facts back into the graph and
+hands it to the optimizer again -- telling, never being asked -- which is how a shift past the word is settled, and
+it may ask what survived, re-asking whenever its own answer reshapes the graph (see MIR).
 
 Optimization identities are provided for what the compiler cannot see. Over an operand of unknown value they hold
 whatever that value turns out to be; the absence of NaN is a significant enabler: commutativity and associativity;
@@ -159,10 +160,14 @@ Runtime values are only:
 - `int` -- a semantic integer, width-less through the front-end and HIR; its hardware width binds at MIR and below
   (the LIR wide data register file is already neutral storage). Mixed int/float expressions promote to float, C-style.
 
-The two hardware formats are carried side by side from `Options` through MIR into LIR, so every layer below the
-front-end knows both without rediscovering either. Only the float format and a lower bound on the integer width are
-configured; the integer format itself is derived, never narrower than the float. Integers are signed two's
-complement and saturate at the extremes rather than wrapping. Saturation is defined behaviour, the dual of a float
+The two hardware formats are carried side by side through MIR into LIR, so every layer below the front-end knows
+both without rediscovering either. Only the float format and a lower bound on the integer width are configured: the
+word is `wint_min`, raised to the float's width only where a float must fit the same register. Neither the
+configuration nor any one graph settles that, the word being written INTO the graph -- a shift past it folds to zero,
+and cascades -- so selection derives at the widest word configured and again at the narrower one the survivors ask
+for, keeping the narrower machine where its own graph asks for it too and the wider pair otherwise. Narrowing can
+erase work rather than reveal it, so it need not converge and is tried once rather than iterated. Integers are signed
+two's complement and saturate at the extremes rather than wrapping. Saturation is defined behaviour, the dual of a float
 overflowing to infinity, so it is not an error flag -- were it one, an if-converted arm that saturated would raise an
 error the untaken path never earned. The shift is the deliberate exception: `<<` is the raw bit shift and drops
 whatever leaves the word, so `5000 << 3` wraps where `5000 * 8` rails. Truncation is what `<<` means over a machine
@@ -171,15 +176,15 @@ saturating one rather than this.
 
 There is no modular flavour, so every wrapping accumulator carries an explicit mask -- and the mask cannot rescue the
 operation it guards, because saturation happens inside the add before the mask applies. A 32-bit DDS phase
-accumulator therefore forces a 34-bit machine word (one carry bit, one sign bit), and since the width is global those
-two bits are paid on every register and port in the design to serve one add. A wrapping add, or an unsigned integer
-type, would let the accumulator be exactly as wide as it is and delete the mask. One potential approach is to INFER
-wrapping/unsigned operations from the adjacent static mask applications.
+accumulator therefore forces a 34-bit machine word (one carry bit, one sign bit) paid on every register and port in
+the design to serve one add, the width being global. A wrapping add, or an unsigned integer type, would let the
+accumulator be exactly as wide as it is and delete the mask; one approach is to INFER wrapping/unsigned operations
+from the adjacent static mask applications.
 
-One wide register holds either family whole: it is as wide as the integer format, which is never narrower than the
-float, so an integer fills it exactly and a float occupies its low bits. The inline integer operators are then native
-Verilog over the whole register. Floats pay in unused flip-flops and slightly wider read muxes whenever the
-integer is the wider format; one representation with no edge cases is worth more than the bits it wastes.
+One wide register holds either family whole: it is as wide as the integer format, so an integer fills it exactly and
+a float occupies its low bits, the inline integer operators being native Verilog over the whole register. Floats pay
+in unused flip-flops and slightly wider read muxes, but only where an integer in the same kernel asked for the extra
+width; one representation with no edge cases is worth more than the bits it wastes.
 
 Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers
 travel the whole pipeline into every backend. A static integer the kernel wrote folds away before MIR ever sees it;
@@ -597,9 +602,8 @@ clamps instead of wrapping surfaces only as wrong numbers, with nothing naming t
 model-level saturation flag, or an opt-in assertion, would name that defect immediately -- worthwhile for a datapath
 whose headline property is saturation. The sharpest case is silent: a mask whose modulus the word can hold but whose
 sum it cannot is accepted without complaint, because the refusal fires on the mask literal and `0xFFFFFFFF` is
-exactly the maximum of a 33-bit word. Tying a masked addition's modulus to the width its operands
-need would catch at compile time exactly the mistake the mask idiom invites -- and would also give `wint_min`, today
-a declaration the compiler never checks against the kernel, something to be checked against.
+exactly the maximum of a 33-bit word. Tying a masked addition's modulus to the width its operands need would catch
+at compile time exactly the mistake the mask idiom invites.
 
 Generated RTL testbenches (Cocotb today) run the RTL simulator in cycle-by-cycle lockstep with the elaborated model,
 asserting each cycle that `out_valid` agrees (the data-dependent latency check) and that the output bits match when

@@ -128,7 +128,7 @@ def _cycles_to_out_valid(simulator: holoso.NumericalSimulator, *inputs: float) -
 
 def test_staged_configuration_is_genuinely_deeper() -> None:
     # This guards the WHOLE axis from passing vacuously: the bit-identity tests above only mean something if the two
-    # configurations actually differ in latency. If a future change neutralized ``staged_ops`` (or a kernel stopped
+    # configurations actually differ in latency. If a future change neutralized ``staged_mir`` (or a kernel stopped
     # using any staged operator), the equivalence tests would still pass trivially -- this catches that by requiring
     # the deeply-staged pipeline to take strictly more cycles than the minimum-latency one on a representative kernel.
     short, long = _pair(_newton_reciprocal, "newton_depth")

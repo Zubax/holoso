@@ -33,6 +33,7 @@ def test_sign_conditioning_cosim(sim: str, wint_min: int | None) -> None:
     options = default_options(FloatFormat(wexp=6, wman=18))
     if wint_min is not None:
         options = dataclasses.replace(options, wint_min=wint_min)
-    # The module name carries the integer width because the two parametrizations build distinct machines.
-    result = holoso.synthesize(SignHold().__call__, options, name=f"sign_hold_r{options.ifmt.width}")
+    # The module name carries the floor because the two parametrizations build distinct machines: this kernel
+    # carries a float, so the wider floor raises the word above it and the wide register outsizes what it holds.
+    result = holoso.synthesize(SignHold().__call__, options, name=f"sign_hold_r{options.wint_min}")
     run_cosim(sim, result)

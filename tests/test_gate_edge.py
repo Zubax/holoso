@@ -26,7 +26,7 @@ from holoso._eel import lower
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import build_lir, DEFAULT_IFCONV_MAX_OPS, default_ops, default_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import build_lir, default_mir, default_options, DEFAULT_UNROLL_MAX_TRIPS
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, sources
 
 _HDL_DIR = Path(__file__).resolve().parent / "hdl"
@@ -123,7 +123,7 @@ def _run_bench(name: str, lir: Lir, testcase: str, env: dict[str, int], monkeypa
 def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_edge_k{k}"
     lir = build_lir(
-        lower_to_mir(lower(_cycle0_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_ops(_FMT), DEFAULT_IFCONV_MAX_OPS),
+        lower_to_mir(lower(_cycle0_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
     assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].ops), "kernel must issue a pooled op on cycle 0"
@@ -135,11 +135,7 @@ def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pyt
 def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_state_k{k}"
     lir = build_lir(
-        lower_to_mir(
-            lower(_ConstInstallState().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir,
-            default_ops(_FMT),
-            DEFAULT_IFCONV_MAX_OPS,
-        ),
+        lower_to_mir(lower(_ConstInstallState().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
     slots = lir.wide_state_slots

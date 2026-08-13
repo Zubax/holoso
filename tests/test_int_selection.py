@@ -29,7 +29,7 @@ from holoso._operators import FMulILog2Operator, FloatSignControl, IntIdentity, 
 from holoso._type import FloatType, IntType
 from holoso._value import FloatValue, IntValue
 
-from ._modelref import build_lir, build_ops, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import default_ifmt, build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 from .test_eel_calls import _min_max_of_ints
 from .test_int_synthesis import (
     cross_boundary,
@@ -61,9 +61,7 @@ OPTIONS = Options(
 
 
 def _select(target: Callable[..., object]) -> Mir:
-    return lower_to_mir(
-        lower_frontend(target, DEFAULT_UNROLL_MAX_TRIPS).hir, build_ops(OPTIONS), OPTIONS.ifconv_max_ops
-    )
+    return lower_to_mir(lower_frontend(target, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(OPTIONS))
 
 
 def _mnemonics(mir: Mir) -> list[str]:
@@ -186,7 +184,8 @@ def test_a_runtime_exponent_scaling_carries_mixed_conditioner_lists() -> None:
     runtime-exponent ``fmul_ilog2`` contract -- a float port beside an integer port, each with its own conditioner
     algebra -- is reachable only as a hand-built graph.
     """
-    fmt, ifmt = OPTIONS.ffmt, OPTIONS.ifmt
+    fmt = OPTIONS.ffmt
+    ifmt = default_ifmt(fmt)  # hand-built, so the word is named rather than settled
     builder = MirBuilder(fmt, ifmt)
     builder.block()
     k = builder.int_input("k", IntType(ifmt))
@@ -248,7 +247,7 @@ def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     floored = builder.operation(FloatFloor(), [x])
     builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [floored])]))
     builder.ret()
-    mir = lower_to_mir(builder.finish(), build_ops(OPTIONS), OPTIONS.ifconv_max_ops)
+    mir = lower_to_mir(builder.finish(), mir_options(OPTIONS))
     assert _mnemonics(mir) == ["fround", "ftoint"]
     interpreter = MirInterpreter(mir)
     for value in (0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.25, -100.25):

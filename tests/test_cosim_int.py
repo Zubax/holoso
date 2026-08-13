@@ -9,7 +9,7 @@ from collections.abc import Callable
 import pytest
 
 import holoso
-from holoso import FloatFormat, Options
+from holoso import FloatFormat, IntFormat, Options
 from ._cosim import run_cosim
 from ._eel_corpus import INT_CASES, rows
 from ._eeloracle import InputRow
@@ -20,7 +20,7 @@ from .test_int_synthesis import divmod_pair, popcount_of
 
 # NcoPhase sums a 2**30 increment over a 32-bit mask, so exactness needs at least a 34-bit word.
 _OPTIONS = dataclasses.replace(default_options(FloatFormat(wexp=6, wman=18)), wint_min=34)
-_IFMT = _OPTIONS.ifmt
+_IFMT = IntFormat(_OPTIONS.wint_min)  # these kernels carry no float, so the floor alone is the machine word
 
 # A deliberately small state-machine subset of the corpus; the full matrix is owned model-vs-CPython by
 # the integer acceptance suite, and this checks the same witnesses model-vs-RTL.

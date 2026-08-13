@@ -36,7 +36,7 @@ from ._examples import SPECS, ekf1_stateful, imu_frame_transform, polar
 
 F_e6m18 = FloatFormat(6, 18)
 F_e8m36 = FloatFormat(8, 36)
-F_e4m8 = FloatFormat(4, 8)  # the narrowest datapath; for the float-free UART it is purely a 16-bit integer word
+F_e4m8 = FloatFormat(4, 8)  # the narrowest datapath; the float-free UART ignores it and takes its 16-bit floor
 
 
 def op_config(

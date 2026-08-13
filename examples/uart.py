@@ -130,7 +130,8 @@ class UartRx(_UartFrame):
 
 
 def main() -> None:
-    options = holoso.Options(holoso.OperatorOptions())  # bits, counters and flags only: no float operator is built
+    # The widest value on the lane is the 8-bit character, plus the sign bit for the total of nine.
+    options = holoso.Options(holoso.OperatorOptions(), wint_min=9)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     for label, target in (
         ("uart_tx", UartTx(parity=False).tick),  # 8E1: even parity

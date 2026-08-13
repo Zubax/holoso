@@ -140,10 +140,12 @@ from .._operators import (
 from .._type import (
     BoolType as ScalarBoolType,
     FloatType as ScalarFloatType,
+    IntFormat,
     IntType as ScalarIntType,
     ScalarType,
 )
 from ._ir import Mir, MirBuilder
+from ._options import MirOptions
 
 _logger = logging.getLogger(__name__)
 
@@ -1224,12 +1226,14 @@ class _IntLowerer:
         """
         The left shifter's OTHER reading: ``prod`` saturates where ``shft`` lets the high bits fall off the word, and
         saturating is what a multiplication does. The count is unbounded where the word is not, so it clamps at the
-        width -- past that every count rails the same operand the same way, and only zero survives either.
+        width -- past that every count rails the same operand the same way, and only zero survives either. It is
+        itself a machine integer, and a two-bit word cannot hold its own width, so it clamps into the word as well:
+        every count from ``width - 1`` up rails identically, and ``max`` is never below that.
         """
         fmt = self.context.int_format
         return self.context.builder.operation(
             _select_hardware(semantic, IShlOperator(fmt)),
-            [self.context.remap[a], self._const(min(semantic.k, fmt.width))],
+            [self.context.remap[a], self._const(fmt.saturate(min(semantic.k, fmt.width)))],
             [IntIdentity(), IntIdentity()],
             output_port=1,
         )
@@ -1269,19 +1273,10 @@ class _IntLowerer:
         return True
 
 
-def lower(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Mir:
+def _derive(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Hir:
     """
-    Optimize the front end's HIR against this machine, judge what survives, then select hardware operators for it and
-    fold semantic signs onto MIR sign controls.
-
-    Optimization is not the caller's to run. A substituted constant cascades, and can leave another count constant for
-    the next round, so the passes run again after every substitution and the judgement waits for the last graph: a
-    caller who optimized first would also have judged first, convicting whatever a later round erases. What this
-    machine knows is told to the graph before any of it: the trigonometric unit up front, since it is the optimizer's
+    Everything this machine knows, told to the graph. The trigonometric unit goes first, since it is the optimizer's
     input rather than its consumer, and the word width from within the fixpoint, since only a fold can reveal a count.
-
-    Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
-    ``fmul_ilog2`` with the exponent materialized as an integer constant; no exponent is refused.
     """
     hir = trig_abi(hir)
     hir = optimize(hir, ifconv_max_ops)
@@ -1290,6 +1285,59 @@ def lower(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Mir:
         rounds -= 1
         assert rounds > 0, "specialization unsettled what an earlier round settled"
         hir = optimize(substituted, ifconv_max_ops)
+    return rescale(hir, ops)
+
+
+def _widest_word(options: MirOptions) -> int:
+    return max(options.wint_min, options.float_format.width)
+
+
+def _word(hir: Hir, options: MirOptions) -> int:
+    return _widest_word(options) if HirFloatType() in hir.value_types() else options.wint_min
+
+
+def lower(hir: Hir, options: MirOptions) -> Mir:
+    """
+    Optimize the front end's HIR against this machine, judge what survives, then select hardware operators for it and
+    fold semantic signs onto MIR sign controls.
+
+    The machine word is settled here because it cannot be settled anywhere else: it is not read off the graph but
+    written into it, a constant shift past the word folding to zero and cascading, so a single reading would answer
+    for a graph built under a different word. Deriving twice settles it -- at the widest word the configuration
+    admits, then at the narrower one the surviving families ask for, adopting that machine only where its own graph
+    asks for it in turn. Where it does not, the wider pair stands, which every family fits by construction: an
+    identity that applies to an unknown divisor and not to a known-zero one can erase work as the word NARROWS, so
+    no fixpoint need exist, and a graph left unbuildable by the narrower word is a narrowing that failed rather than
+    a kernel that cannot be built.
+
+    Optimization is not the caller's to run, and neither is judgement: a substituted constant cascades, so the passes
+    run again after every substitution and ``refuse`` waits for the graph that is actually built. A caller who
+    optimized first would also have judged first, convicting whatever a later round -- or a later word -- erases.
+
+    Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
+    ``fmul_ilog2`` with the exponent materialized as an integer constant; no exponent is refused.
+    """
+    original, widest = hir, _widest_word(options)
+    ops = OpConfig.build(options.operator, options.float_format, options.wmultiplier, IntFormat(widest))
+    hir = _derive(original, ops, options.ifconv_max_ops)
+    if (word := _word(hir, options)) != widest:
+        narrow = OpConfig.build(options.operator, options.float_format, options.wmultiplier, IntFormat(word))
+        try:
+            candidate = _derive(original, narrow, options.ifconv_max_ops)
+        except UnsupportedConstruct as ex:
+            _logger.warning("Machine word: int%d, since int%d leaves nothing buildable (%s)", widest, word, ex)
+        else:
+            if _word(candidate, options) == word:
+                ops, hir = narrow, candidate
+                _logger.info("Machine word: int%d, narrowed from int%d by the families the kernel keeps", word, widest)
+            else:
+                _logger.warning(
+                    "Machine word: int%d, since int%d revives work the wider word erased and so does not settle",
+                    widest,
+                    word,
+                )
+    else:
+        _logger.info("Machine word: int%d, the widest the configuration admits", widest)
     _logger.info(
         "Optimized HIR:\n\tinputs=%s\n\toutputs=%s\n\tnodes=%d\n\tblocks=%d",
         hir.input_ids,
@@ -1297,6 +1345,5 @@ def lower(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Mir:
         len(hir.nodes),
         len(hir.blocks),
     )
-    hir = rescale(hir, ops)
     refuse(hir)
     return _LoweringContext(hir, ops).run()

@@ -43,7 +43,8 @@ class MajorityVoter:
 
 
 def main() -> None:
-    options = holoso.Options(holoso.OperatorOptions())
+    # The five channels pack into as many bits, which a signed word carries one above.
+    options = holoso.Options(holoso.OperatorOptions(), wint_min=6)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(MajorityVoter().__call__, options)
     for filename, path in result.write(out_dir).items():

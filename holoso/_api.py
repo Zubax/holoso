@@ -16,25 +16,8 @@ from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
 from ._eel import lower as lower_frontend
 from ._lir import Branch, ControlPort, DataInputPort, DataOutputPort, Port, RegallocTuning, build
-from ._mir import lower as lower_to_mir
-from ._operators import (
-    FAddOperator,
-    FAtan2Operator,
-    FCmpOperator,
-    FDivOperator,
-    FExp2Operator,
-    FFmaOperator,
-    FFromIntOperator,
-    FLog2Operator,
-    FMulILog2Operator,
-    FMulOperator,
-    FRoundOperator,
-    FSincosOperator,
-    FSortOperator,
-    FToIntOperator,
-    IMulOperator,
-    OpConfig,
-)
+from ._mir import MirOptions, lower as lower_to_mir
+from ._operators import OperatorOptions
 from ._type import FloatFormat, IntFormat
 
 type Target = Callable[..., Any]
@@ -61,6 +44,13 @@ class SynthesisResult:
     input_ports: list[DataInputPort]
     output_ports: list[DataOutputPort]
     control_ports: list[ControlPort]
+
+    int_format: IntFormat
+    """
+    The integer format (machine word) chosen for this kernel.
+    Guaranteed to be at least :attr:`Options.wint_min` bits wide.
+    Defines the range of the (saturating) integer arithmetics.
+    """
 
     initiation_interval: tuple[int, int | None]  # (min II, max II or None when not statically determined)
     verilog_output: VerilogOutput
@@ -96,31 +86,6 @@ class SynthesisResult:
 
 
 @dataclass(frozen=True, slots=True)
-class OperatorOptions:
-    """
-    ``None`` is not built, and a kernel needing it is refused by name; a configured but unused operator costs nothing.
-    Integer operators are always available, so only their knobs appear here.
-    """
-
-    fadd: FAddOperator.Options | None = None
-    fmul: FMulOperator.Options | None = None
-    fdiv: FDivOperator.Options | None = None
-    fmul_ilog2: FMulILog2Operator.Options | None = None
-    fcmp: FCmpOperator.Options | None = None
-    fround: FRoundOperator.Options | None = None
-    ffma: FFmaOperator.Options | None = None
-    fsort: FSortOperator.Options | None = None
-    fexp2: FExp2Operator.Options | None = None
-    flog2: FLog2Operator.Options | None = None
-    fsincos: FSincosOperator.Options | None = None
-    fatan2: FAtan2Operator.Options | None = None
-    ffromint: FFromIntOperator.Options | None = None
-    ftoint: FToIntOperator.Options | None = None
-
-    imul: IMulOperator.Options = IMulOperator.Options()
-
-
-@dataclass(frozen=True, slots=True)
 class Options:
     """Everything configurable that controls how the ZISC machine and its microcode are built."""
 
@@ -130,7 +95,11 @@ class Options:
     """wexp is usually 6..11 bits; wman is usually a multiple of the DSP tile operand width, 18 bits on most FPGAs."""
 
     wint_min: int = 16
-    """Lower bound on the native integer bit width; see :attr:`ifmt`. Integers are signed and saturating."""
+    """
+    Lower bound on the native integer bit width.
+    The actual integer width may be greater if the kernel uses floats and the floats are wider than this minimum.
+    Integers saturate, so the settled word sets their rails; it is reported as :attr:`SynthesisResult.int_format`.
+    """
 
     wmultiplier: int | None = None
     """
@@ -162,11 +131,6 @@ class Options:
     regalloc_register_price: float = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
     """What one register is worth in steering mux arms. Greater values buy fewer registers with heavier steering."""
 
-    @property
-    def ifmt(self) -> IntFormat:
-        """The effective native integer format; always at least wint_min bits wide."""
-        return IntFormat(max(self.wint_min, self.ffmt.width))
-
     def __post_init__(self) -> None:
         if self.wint_min < 2:
             raise ValueError(f"wint_min must be >= 2, got {self.wint_min}")
@@ -186,27 +150,14 @@ class Options:
             raise ValueError(f"regalloc_register_price must be > 0, got {self.regalloc_register_price}")
 
 
-def _build_op_config(options: Options) -> OpConfig:
-    """The one place the user's configuration becomes hardware."""
-    fmt, ifmt, wmul, op = options.ffmt, options.ifmt, options.wmultiplier or 0, options.operator
-    return OpConfig(
-        float_format=fmt,
-        int_format=ifmt,
-        fadd=FAddOperator(fmt, op.fadd) if op.fadd is not None else None,
-        fmul=FMulOperator(fmt, op.fmul, wmul) if op.fmul is not None else None,
-        fdiv=FDivOperator(fmt, op.fdiv) if op.fdiv is not None else None,
-        fmul_ilog2=FMulILog2Operator(fmt, ifmt, op.fmul_ilog2) if op.fmul_ilog2 is not None else None,
-        fcmp=FCmpOperator(fmt, op.fcmp) if op.fcmp is not None else None,
-        fround=FRoundOperator(fmt, op.fround) if op.fround is not None else None,
-        ffma=FFmaOperator(fmt, op.ffma, wmul) if op.ffma is not None else None,
-        fsort=FSortOperator(fmt, op.fsort) if op.fsort is not None else None,
-        fexp2=FExp2Operator(fmt, op.fexp2, wmul) if op.fexp2 is not None else None,
-        flog2=FLog2Operator(fmt, op.flog2, wmul) if op.flog2 is not None else None,
-        fsincos=FSincosOperator(fmt, op.fsincos, wmul) if op.fsincos is not None else None,
-        fatan2=FAtan2Operator(fmt, op.fatan2, wmul) if op.fatan2 is not None else None,
-        ffromint=FFromIntOperator(fmt, ifmt, op.ffromint) if op.ffromint is not None else None,
-        ftoint=FToIntOperator(fmt, ifmt, op.ftoint) if op.ftoint is not None else None,
-        imul=IMulOperator(ifmt, op.imul),
+def _mir_options(options: Options) -> MirOptions:
+    """What selection needs of the configuration; the integer width is absent because it is an answer, not a knob."""
+    return MirOptions(
+        operator=options.operator,
+        float_format=options.ffmt,
+        wint_min=options.wint_min,
+        wmultiplier=options.wmultiplier or 0,
+        ifconv_max_ops=options.ifconv_max_ops,
     )
 
 
@@ -228,10 +179,9 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
                     _logger.info("\toperator.%s: %s", op_field.name, configured)
         else:
             _logger.info("\t%s: %s", field.name, value)
-    _logger.info("\tifmt: %s (derived)", options.ifmt)
 
     frontend = lower_frontend(target, options.unroll_max_trips)
-    mir = lower_to_mir(frontend.hir, _build_op_config(options), options.ifconv_max_ops)
+    mir = lower_to_mir(frontend.hir, _mir_options(options))
     lir = build(
         mir,
         module_name,
@@ -260,6 +210,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
         input_ports=lir.input_ports,
         output_ports=lir.output_ports,
         control_ports=lir.control_ports,
+        int_format=lir.int_format,
         initiation_interval=ii,
         verilog_output=verilog_output,
         numerical_model=model,

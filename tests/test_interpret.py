@@ -19,8 +19,7 @@ import pytest
 
 from holoso._backend.numerical import NumericalSimulator
 from holoso._eel import lower as lower_frontend
-from holoso._mir import MirInterpreter, MirPhi, lower as lower_to_mir
-from holoso._operators import OpConfig
+from holoso._mir import MirOptions, MirInterpreter, MirPhi, lower as lower_to_mir
 from holoso._type import BoolType, FloatFormat, IntType
 from holoso._value import FloatValue, coerce_scalar
 
@@ -35,10 +34,10 @@ from ._modelref import (
     branch_boundary_kernel,
     branchy_swap_mixed_arm_loop,
     build_model_and_interpreter,
-    build_ops,
+    mir_options,
     ChainedSlots,
     const_branch_kernel,
-    default_ops,
+    default_mir,
     DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
     overlap_dead_arm_spill_kernel,
@@ -51,7 +50,7 @@ from ._modelref import (
     random_legal_bits,
     SelectHold,
     SlotSwap,
-    staged_ops,
+    staged_mir,
     Vector,
 )
 
@@ -67,7 +66,7 @@ _EXAMPLE_CASES = [
 
 @pytest.mark.parametrize("spec,fmt", _EXAMPLE_CASES)
 def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    model, interpreter = build_model_and_interpreter(spec.make_kernel(), build_ops(spec.options(fmt)), spec.name, fmt)
+    model, interpreter = build_model_and_interpreter(spec.make_kernel(), mir_options(spec.options(fmt)), spec.name, fmt)
     vectors = [_spec_vector(model, row) for row in spec.raw_vectors()]
     assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
 
@@ -103,10 +102,10 @@ def _bounded_vectors(model: NumericalSimulator, fmt: FloatFormat, rng: np.random
     return vectors
 
 
-@pytest.mark.parametrize("ops_factory", [default_ops, staged_ops], ids=["default", "staged"])
+@pytest.mark.parametrize("ops_factory", [default_mir, staged_mir], ids=["default", "staged"])
 @pytest.mark.parametrize("label,make_kernel", _CORNER_KERNELS, ids=[name for name, _ in _CORNER_KERNELS])
 def test_interpreter_matches_model_on_corners(
-    label: str, make_kernel: Callable[[], Callable[..., object]], ops_factory: Callable[[FloatFormat], OpConfig]
+    label: str, make_kernel: Callable[[], Callable[..., object]], ops_factory: Callable[[FloatFormat], MirOptions]
 ) -> None:
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(make_kernel(), ops_factory(fmt), label, fmt)
@@ -117,7 +116,7 @@ def test_interpreter_matches_model_on_corners(
 
 def test_interpreter_matches_model_on_edge_bits() -> None:
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_ops(fmt), "branch_boundary", fmt)
+    model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_mir(fmt), "branch_boundary", fmt)
     rng = np.random.default_rng(0x5EED)
     vectors: list[Vector] = [
         [FloatValue.from_bits(fmt, random_legal_bits(fmt, rng)) for _ in model.inputs] for _ in range(256)
@@ -132,7 +131,7 @@ def test_loop_header_phi_swap_resolves_in_parallel() -> None:
     either oracle -- or one shared by both -- surfaces as a divergence. Integer-valued inputs keep every output exact.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(phi_swap_loop, default_ops(fmt), "phi_swap_loop", fmt)
+    model, interpreter = build_model_and_interpreter(phi_swap_loop, default_mir(fmt), "phi_swap_loop", fmt)
     for x in (2.0, -3.0, 0.5, 5.0):
         for n in (1.0, 2.0, 3.0, 4.0):
             vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
@@ -153,7 +152,7 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
     the same LIR, and interp==model is asserted so a divergence localizes the guilty layer.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_ops(fmt), "phi_swap_computed", fmt)
+    model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_mir(fmt), "phi_swap_computed", fmt)
     for x in (1.0, 2.0, -1.5):
         for n in (1.0, 2.0, 3.0, 4.0):
             vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
@@ -170,7 +169,7 @@ def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> N
     """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not WideCopys."""
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(
-        bool_phi_swap_computed_loop, default_ops(fmt), "bool_phi_swap_computed", fmt
+        bool_phi_swap_computed_loop, default_mir(fmt), "bool_phi_swap_computed", fmt
     )
     for x in (False, True):
         for n in (1.0, 2.0, 3.0, 4.0):
@@ -193,7 +192,7 @@ def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
     """
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(
-        branchy_swap_mixed_arm_loop, default_ops(fmt), "mixed_arm_swap", fmt
+        branchy_swap_mixed_arm_loop, default_mir(fmt), "mixed_arm_swap", fmt
     )
     for x in (1.0, -1.0):
         for n in (1.0, 2.0, 3.0):
@@ -213,7 +212,7 @@ def test_state_slot_swap_writeback_is_parallel() -> None:
     surfaces. Integer inputs keep the output exact.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(SlotSwap().step, default_ops(fmt), "slot_swap", fmt)
+    model, interpreter = build_model_and_interpreter(SlotSwap().step, default_mir(fmt), "slot_swap", fmt)
     reference = SlotSwap()
     for x in (0.0, 1.0, -2.0, 3.0, -4.0, 5.0):
         vector = [FloatValue.from_float(fmt, x)]
@@ -233,9 +232,7 @@ def test_interpreter_matches_model_on_the_integer_corpus(
     model runs the scheduled/allocated LIR built from it, so a divergence indicts the LIR layer alone.
     """
     options = int_corpus_options()
-    model, interpreter = build_model_and_interpreter(
-        make(), build_ops(options), name, options.ffmt, options.ifconv_max_ops
-    )
+    model, interpreter = build_model_and_interpreter(make(), mir_options(options), name, options.ffmt)
     input_vectors: list[Vector] = [
         [coerce_scalar(port.scalar_type, row[port.name], port.name) for port in model.inputs] for row in vectors
     ]
@@ -245,10 +242,10 @@ def test_interpreter_matches_model_on_the_integer_corpus(
 def test_the_integer_corpus_reaches_an_integer_phi() -> None:
     """The non-vacuity witness: at least one corpus kernel lowers to a MIR carrying an integer phi."""
     options = int_corpus_options()
-    ops = build_ops(options)
+    ops = mir_options(options)
 
     def has_int_phi(make: Callable[[], Callable[..., object]]) -> bool:
-        mir = lower_to_mir(lower_frontend(make(), DEFAULT_UNROLL_MAX_TRIPS).hir, ops, options.ifconv_max_ops)
+        mir = lower_to_mir(lower_frontend(make(), DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
         return any(isinstance(node, MirPhi) and isinstance(node.scalar_type, IntType) for node in mir.nodes.values())
 
     assert any(has_int_phi(make) for _, make, _ in INT_CASES)

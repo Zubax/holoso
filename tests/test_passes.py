@@ -112,7 +112,7 @@ from holoso._mir import lower as lower_to_mir
 from ._importguard import forbidden_imports
 from ._modelref import (
     branch_boundary_kernel,
-    build_ops,
+    mir_options,
     const_branch_kernel,
     DEFAULT_IFCONV_MAX_OPS,
     default_tolerance,
@@ -137,7 +137,7 @@ OPTIONS = Options(
     ffmt=FMT,
 )
 INT_OPTIONS = Options(OperatorOptions())
-OPS = build_ops(OPTIONS)
+OPS = mir_options(OPTIONS)
 
 
 def _synth(
@@ -209,7 +209,7 @@ def test_lower_rejects_non_float_hir_input_type() -> None:
     hir = builder.finish()
 
     try:
-        lower_to_mir(hir, OPS, DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(hir, OPS)
     except UnsupportedConstruct as ex:
         assert "no MIR lowering rule" in str(ex)
     else:
@@ -1174,7 +1174,7 @@ def test_integer_folding_has_no_size_limit() -> None:
     hir = optimize(raw, DEFAULT_IFCONV_MAX_OPS)
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
     assert hir.nodes[hir.outputs[0].value] == FloatConst(0.0)
-    lower_to_mir(raw, OPS, DEFAULT_IFCONV_MAX_OPS)  # nothing integer survives
+    lower_to_mir(raw, OPS)  # nothing integer survives
 
 
 def test_the_integer_subtraction_rules_the_shared_algebra_cannot_state() -> None:
@@ -1201,9 +1201,10 @@ def test_a_power_of_two_integer_product_mints_the_saturating_scaling() -> None:
     result = _synth(f, INT_OPTIONS, name="int_pow2_product")
     assert "holoso_imuls" not in result.verilog_output.verilog
     sim = result.numerical_model.elaborate()
+    word = result.int_format
     for n in (-9, -1, 0, 1, 7, 1000):
-        # The derived machine word is int24 and 2**40 lies far past it, so every nonzero product rails by sign.
-        railed = -(2**23) if n < 0 else 2**23 - 1 if n > 0 else 0
+        # 2**40 lies far past any machine word, so every nonzero product rails by sign whatever the kernel settled on.
+        railed = word.min if n < 0 else word.max if n > 0 else 0
         assert _ints(sim.run(n)) == [n * 8, railed]
 
 
@@ -1556,7 +1557,7 @@ def test_selection_cannot_be_reached_without_passing_the_gate() -> None:
     builder.output("y", builder.operation(HirFloatDiv(), [builder.float_const(1.0), builder.float_const(0.0)]))
     builder.ret()
     with pytest.raises(SynthesisError, match="names no number"):
-        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(builder.finish(), OPS)
 
 
 @pytest.mark.parametrize(
@@ -1924,7 +1925,7 @@ def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
     builder.output("y", x)
     builder.ret()
     with pytest.raises(UnsupportedConstruct, match="holds FloatType.. but resets to IntType"):
-        lower_to_mir(builder.finish(), OPS, DEFAULT_IFCONV_MAX_OPS)
+        lower_to_mir(builder.finish(), OPS)
 
 
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:

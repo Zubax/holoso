@@ -34,7 +34,7 @@ from holoso._lir import RegallocTuning, build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
 from synth import build_compiler_ooc_design  # noqa: E402
 from synth.flows import make_flow  # noqa: E402
-from tests._modelref import build_ops  # noqa: E402
+from tests._modelref import mir_options  # noqa: E402
 from tests._synth_targets import TARGETS  # noqa: E402
 
 # Per-flow resource-primitive names for the LUT/FF/DSP/BRAM report columns; each tool names them differently.
@@ -62,11 +62,7 @@ def capture(out_path: str) -> None:
         }
         try:
             lir = build(
-                lower_to_mir(
-                    lower(target.kernel(), target.ops.unroll_max_trips).hir,
-                    build_ops(target.ops),
-                    target.ops.ifconv_max_ops,
-                ),
+                lower_to_mir(lower(target.kernel(), target.ops.unroll_max_trips).hir, mir_options(target.ops)),
                 target.name,
                 target.ops.ucode_fetch_stages,
                 RegallocTuning(
