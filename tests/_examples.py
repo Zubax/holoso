@@ -146,7 +146,7 @@ _NCO_MANUAL: list[InputVector] = [
     )
 ]
 
-_PWM_TOP = 8  # a shorter period than the example ships, so a full triangle costs 16 vectors rather than 200
+_PWM_TOP = 100  # the period the example ships; the vectors below are written in terms of it
 _PWM_MANUAL = _drive(
     "duty",
     [_PWM_TOP // 2] * (2 * _PWM_TOP)  # a full triangle period at half duty
@@ -618,7 +618,7 @@ SPECS = [
         draw_random=lambda rng: {"duty": int(rng.integers(0, _PWM_TOP + 2))},
         edge_values=(0, 1, _PWM_TOP // 2, _PWM_TOP - 1, _PWM_TOP, _PWM_TOP + 5),
         formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
-        wint_min=5,  # what this period needs: a word holding _PWM_TOP, plus the sign bit
+        wint_min=8,  # a word holding _PWM_TOP, plus the sign bit
     ),
     ExampleSpec(
         name="debouncer",

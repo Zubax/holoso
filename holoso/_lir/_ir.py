@@ -691,6 +691,16 @@ class Lir:
     bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered by attribute path
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
 
+    @property
+    def wide_register_width(self) -> int:
+        """
+        The wide bank's own width, which the RTL spells WREG. It equals the integer format's because one register
+        holds either family whole -- an integer filling it exactly, a float occupying the low bits -- and that is a
+        design decision rather than an identity, so the physical width is asked for by name and the two readings
+        cannot drift apart unnoticed.
+        """
+        return self.int_format.width
+
     def _wide_widths(self) -> Iterator[int]:
         for carrier in [*self.inputs, *self.outputs]:
             if isinstance(carrier, (WideInputLoad, WideOutputWire)):
@@ -707,7 +717,7 @@ class Lir:
         # Nothing wider than the bank may live in it, and the float format alone no longer answers whether anything
         # does: a kernel carrying no float sizes the word below it. Registers are untyped, so every typed carrier and
         # every operator port is the evidence instead.
-        assert all(width <= self.int_format.width for width in self._wide_widths())
+        assert all(width <= self.wide_register_width for width in self._wide_widths())
         assert self.fetch_lag in (1, 2), self.fetch_lag
         assert len({inst.operator for inst in self.instances}) == len(
             {type(inst.operator) for inst in self.instances}

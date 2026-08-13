@@ -229,7 +229,7 @@ def generate(lir: Lir) -> VerilogOutput:
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
-    renderer = _WideRenderer(gap=lir.int_format.width - lir.float_format.width)
+    renderer = _WideRenderer(gap=lir.wide_register_width - lir.float_format.width)
 
     _emit_header(w, lir)
     _emit_localparams(w, lir, cycw, pcw, ucw)
@@ -297,7 +297,7 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
-    fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.int_format.width
+    fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.wide_register_width
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     fetch_lag = lir.fetch_lag
     fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
