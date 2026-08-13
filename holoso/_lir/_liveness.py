@@ -10,7 +10,7 @@ phi result is defined at the head of its block, and each phi arm value is live o
 values stay live across the whole loop body.
 
 Second, within each block every live value is given a half-open residence interval in that block's executing-step
-(hardware) frame -- the same frame as :attr:`Lir.reg_liveness` and the numerical model -- using the
+(hardware) frame -- the same frame as Lir.reg_liveness and the numerical model -- using the
 shared cycle helpers. A value resident from a predecessor (live-in, or a phi result) lands on the block's first step; a
 value defined by an in-block operator -- pooled or inline, on either bank -- lands on the one bank- and
 class-independent landing cycle (fetch lag plus the read-first edge after its commit); a value that is live out of the
@@ -20,11 +20,11 @@ result additionally occupies its register at the tail of every arm predecessor, 
 writes it one step before the boundary -- deliberately also foreclosing the phi sharing a register with its own arm
 values, although that same-step read-first self-copy would be harmless (conservatism a future copy-coalescing pass
 can reclaim, not a safety invariant). Two values interfere when their intervals overlap in *some* block under the
-read-first rule ``R(a) < W(b)``. Values that live entirely within mutually-exclusive blocks (the two arms of an
-``if``) share no block, so they never interfere -- path-awareness falls out of the per-block quantification with no
+read-first rule `R(a) < W(b)`. Values that live entirely within mutually-exclusive blocks (the two arms of an
+`if`) share no block, so they never interfere -- path-awareness falls out of the per-block quantification with no
 explicit reasoning about which arms are exclusive.
 
-This module is bank-agnostic: the caller supplies a :class:`BankLiveness` describing one register family (the wide
+This module is bank-agnostic: the caller supplies a BankLiveness describing one register family (the wide
 bank or the 1-bit boolean bank) and receives the symmetric interference adjacency over that bank's values.
 """
 
@@ -38,15 +38,15 @@ class BankLiveness:
     """
     One register family's liveness inputs. For a drained block every result lands before the next block fetches, so a
     cross-block live-in is resident from its block's first step; under cross-block software pipelining a predecessor's
-    result may instead spill past its (shrunk) terminator and land inside this block, which ``inflight_defs`` records.
+    result may instead spill past its (shrunk) terminator and land inside this block, which `inflight_defs` records.
 
-    All cycles are block-local in the executing-step frame (block start is step 1). ``op_landing`` is each in-block
-    definition's landing cycle (the caller computes it with the shared ``_ir`` ``landing_cycle`` helper -- bank- and
-    class-independent now that every result writes the array combinationally). ``reads``
-    carries every in-block operand read with its hardware read cycle; ``boundary_users`` carries values consumed at a
+    All cycles are block-local in the executing-step frame (block start is step 1). `op_landing` is each in-block
+    definition's landing cycle (the caller computes it with the shared `_ir` `landing_cycle` helper -- bank- and
+    class-independent now that every result writes the array combinationally). `reads`
+    carries every in-block operand read with its hardware read cycle; `boundary_users` carries values consumed at a
     block's boundary that are not otherwise live out (outputs and state live-outs at the Ret block, a branch
-    condition); ``arm_out`` carries, per block, the phi-arm values a successor's phi takes from that block (each is
-    live out of it); ``installs`` carries, per block, the phi-result values whose install copy WRITES their register
+    condition); `arm_out` carries, per block, the phi-arm values a successor's phi takes from that block (each is
+    live out of it); `installs` carries, per block, the phi-result values whose install copy WRITES their register
     at this block's tail (one entry per arm predecessor) -- the install is a real write the emitter performs one step
     before the block boundary, so the phi register must be modeled as occupied there or it could clobber a value
     still read at the boundary (e.g. the very branch condition selecting the successor).
@@ -58,7 +58,7 @@ class BankLiveness:
     # Per-block terminator offset (the boundary step where values live-out / consumed-at-boundary must still reside).
     # Under per-block draining it is the latest cycle a value lands in the block's frame, taken per op; a separate
     # field so cross-block overlap can shrink it below the drain without disturbing an install's fire step, which the
-    # caller stamps per install in ``installs``.
+    # caller stamps per install in `installs`.
     term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
     op_landing: dict[ValueId, int]  # op-result value -> its landing cycle in its def block (block-local)
@@ -69,7 +69,7 @@ class BankLiveness:
     arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi-arm values live out of it
     # block -> {phi dest installed at its tail: the install's block-local FIRE step}. The fire step is per install, not
     # per block: a computed-source copy fires at its copy step, an install of a block-entry-resident source
-    # (``value_resident_at_entry``) one read-first edge earlier, so its destination register is occupied from the true
+    # (`value_resident_at_entry`) one read-first edge earlier, so its destination register is occupied from the true
     # (earlier) write cycle and a tenant cannot be clobbered.
     installs: dict[int, dict[ValueId, int]] = field(default_factory=dict)
     # Cross-block overlap: per block, a predecessor value whose in-flight write SPILLS past the predecessor's shrunk

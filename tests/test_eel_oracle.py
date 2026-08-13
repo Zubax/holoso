@@ -1,8 +1,8 @@
 """
 The Eel frontend differential oracle over example kernels: CPython executing the original kernel against the
-evaluator running the unoptimized HIR lowered by ``holoso._eel``. Every SPECS row rides its full shared
+evaluator running the unoptimized HIR lowered by `holoso._eel`. Every SPECS row rides its full shared
 reference sequence; array-parameter kernels are driven directly through their decomposed leaf ports
-(``v_0``, ``v_1``) with local vector tables.
+(`v_0`, `v_1`) with local vector tables.
 """
 
 import math

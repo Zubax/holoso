@@ -1,8 +1,8 @@
 """
-Statically-shaped matrix/vector support: the ``@`` operator, elementwise aggregate arithmetic, transpose, numpy-style
+Statically-shaped matrix/vector support: the `@` operator, elementwise aggregate arithmetic, transpose, numpy-style
 subscripts, jaxtyping-annotated parameters/returns, matrix state, and ndarray module constants. Diagnostics and
 structure are checked through the public synthesis artifacts (ports, initiation interval, emitted Verilog, residual
-``frontend_ir``); numerical behavior is checked black-box through the public API against numpy executing the very
+`frontend_ir`); numerical behavior is checked black-box through the public API against numpy executing the very
 same kernel. The binding-time tests pinning what folds statically stay on the lowered HIR, and the FMA-chain test
 keeps a compact MIR population sentinel for the exact operator count that module pooling erases from the Verilog.
 """
@@ -41,7 +41,7 @@ MEAS_VAR = np.array([4.0e-2, 2.5e-1])
 class TrackingFilter:
     """
     A self-contained 2-state Kalman-style filter exercising the full matrix feature surface in one stateful kernel:
-    matrix/vector parameters and state, ndarray module constants, ``@`` in every shape, transpose, elementwise scalar
+    matrix/vector parameters and state, ndarray module constants, `@` in every shape, transpose, elementwise scalar
     broadcast, an annotated local, a static row loop, and a shaped return. It is ordinary executable numpy, so its own
     native execution is the reference.
     """
@@ -93,7 +93,7 @@ def _run(sim: holoso.NumericalSimulator, *arrays: np.ndarray | float) -> np.ndar
 def _assert_python_matches_holoso(fn: Callable[..., object], *inputs: np.ndarray | float) -> None:
     # Runs the kernel as plain Python and asserts it agrees with Holoso; the Python call also proves the kernel is
     # genuinely valid, runnable Python, so a construct Holoso accepts but Python rejects fails here instead of passing
-    # as a spurious "positive" (e.g. ``mat + [1, 2]`` sneaking into a success test).
+    # as a spurious "positive" (e.g. `mat + [1, 2]` sneaking into a success test).
     want = np.asarray(fn(*inputs)).flatten()
     got = _run(_sim(fn), *inputs)
     assert np.allclose(got, want, rtol=1e-9, atol=1e-300), fn.__name__
@@ -143,7 +143,7 @@ def test_matmul_rejections() -> None:
     _refused(dim_mismatch, "mismatch")
 
     def ragged(a: float, b: float) -> float:
-        # A bare Python list has no ``@`` (a TypeError in Python), so the matrix product is rejected as a list operation
+        # A bare Python list has no `@` (a TypeError in Python), so the matrix product is rejected as a list operation
         # before rectangularity is even considered; the ragged literal cannot be wrapped in np.array either.
         return [[a, b], [a]] @ [a, b]  # type: ignore[operator, no-any-return]
 
@@ -272,7 +272,7 @@ def test_transpose_structure() -> None:
 
 
 def test_state_attributes_named_shape_and_ndim_shadow_the_shape_queries() -> None:
-    # ``.shape``/``.ndim`` on the instance keep Python's own attribute-resolution priority, exactly as ``.T`` does:
+    # `.shape`/`.ndim` on the instance keep Python's own attribute-resolution priority, exactly as `.T` does:
     # they are state reads, not compile-time shape queries.
     @dataclasses.dataclass
     class Holder:
@@ -350,7 +350,7 @@ def test_shaped_parameter_annotation_rejections() -> None:
 
     _refused(shapeless, "annotation of parameter 'v' is not supported")
 
-    class _FakeArray:  # structurally array-like (has ``dims``) but its dims is not a real jaxtyping tuple
+    class _FakeArray:  # structurally array-like (has `dims`) but its dims is not a real jaxtyping tuple
         dims = None
 
     def fake(v: _FakeArray) -> float:
@@ -491,8 +491,8 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
 
 
 def test_transpose_of_matrix_state_attribute() -> None:
-    # Coverage: ``self.P.T`` transposes state (the chained case of the ``.T``-vs-``self.T`` resolution), distinct from
-    # the ``self.T`` state-read carve-out.
+    # Coverage: `self.P.T` transposes state (the chained case of the `.T`-vs-`self.T` resolution), distinct from
+    # the `self.T` state-read carve-out.
     @dataclasses.dataclass
     class Holder:
         P: Float64[np.ndarray, "2 2"]
@@ -541,7 +541,7 @@ def test_ndarray_module_constant_rejections() -> None:
 
 
 def test_ndarray_subclass_constant_and_state_are_rejected() -> None:
-    # Regression: an ndarray subclass (np.matrix) redefines operators (``*`` is matmul), so folding it as a plain array
+    # Regression: an ndarray subclass (np.matrix) redefines operators (`*` is matmul), so folding it as a plain array
     # would silently diverge from its own Python semantics; it must be rejected, both as a module constant and a reset.
     def constant(a: float) -> float:
         return _MATRIX_CONST[0, 1] + a  # type: ignore[no-any-return]
@@ -665,7 +665,7 @@ def test_integer_dtype_module_constant_folds_to_floats() -> None:
 
 def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> None:
     # Locks in the whole matrix feature surface composed in one stateful kernel across transactions: matrix/vector
-    # parameters and carried state, ndarray module constants, ``@`` in every shape with transpose, elementwise scalar
+    # parameters and carried state, ndarray module constants, `@` in every shape with transpose, elementwise scalar
     # broadcast, an annotated local, a static row loop, a shaped return, and the runtime-divisor Kalman gain.
     sim = holoso.synthesize(TrackingFilter().update, default_options(_FMT), name="tracker").numerical_model.elaborate()
     assert [p.name for p in sim.outputs] == [
@@ -778,7 +778,7 @@ def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
 
 
 def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
-    # A stub validates its own operands with a ``raise`` on a statically taken path; the error must name the user's
+    # A stub validates its own operands with a `raise` on a statically taken path; the error must name the user's
     # spelling and point at the user's line, never into the stub source.
     def bad(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]

@@ -2,9 +2,9 @@
 The mutation/ownership model, one test per event: every second-handle route, the escaped roots, the
 structural store rules, the borrow overlay of active loops/comprehensions, and comprehension embedding.
 
-Recorded conservatism (a ruling, not a defect): a chained element read of a 2-D array (``m[0][1]``) derives
+Recorded conservatism (a ruling, not a defect): a chained element read of a 2-D array (`m[0][1]`) derives
 the row on the way, so the array is shared from then on and later stores through it reject -- the spellings
-that stay admitted are multi-axis reads (``m[0, 1]``) and chained STORE targets, whose prefix is exempt.
+that stay admitted are multi-axis reads (`m[0, 1]`) and chained STORE targets, whose prefix is exempt.
 Allocation states are global monotone facts, so a sharing event in one residual arm conservatively blocks a
 store in the sibling arm as well.
 """

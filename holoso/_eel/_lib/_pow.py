@@ -1,12 +1,12 @@
 """
-The four lowerings of a power, under one entry keyed by ``**`` and by every spelling of it; the exponent's binding
+The four lowerings of a power, under one entry keyed by `**` and by every spelling of it; the exponent's binding
 time and sign, declared on the stubs, are what select between them. There is no integer power hardware, so only a
 compile-time base stays integral.
 
 Exponentiation is square-and-multiply rather than a linear chain: shorter, and free of any residual branch, at an
-accuracy cost the chain did not pay -- reassociating the products drifts to tens of ULP around ``n = 100``, which
+accuracy cost the chain did not pay -- reassociating the products drifts to tens of ULP around `n = 100`, which
 the fast-math charter allows. The stubs compute through the intrinsic stubs like the rest of the library, so a fold
-saturates where the host raises: ``2.0 ** 10000`` is ``inf``, as ``exp2(1e30)`` already is.
+saturates where the host raises: `2.0 ** 10000` is `inf`, as `exp2(1e30)` already is.
 """
 
 import math
@@ -25,7 +25,7 @@ _POW = (pow, math.pow, np.power, np.pow, np.float_power, BinaryOp.POW)
 
 def _chain(acc: _N, base: _N, k: int) -> _N:
     """
-    The seed is what types the whole power, so it is the caller's to choose. The leading ``acc * base`` is a
+    The seed is what types the whole power, so it is the caller's to choose. The leading `acc * base` is a
     multiply by one, left for the HIR's identity elision rather than dodged with a flag here.
     """
     while k > 0:  # a while, not a range: unrolling a static test costs no materialized sequence

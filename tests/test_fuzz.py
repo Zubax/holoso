@@ -1,12 +1,12 @@
 """
 End-to-end blackbox differential fuzzing entry point.
 
-The marked campaign (``pytest -m fuzz``) generates many kernels and drives them through the differential runner; it is
-slow and excluded from the normal ``tests`` session. A tiny UNMARKED smoke campaign runs in the normal session so the
+The marked campaign (`pytest -m fuzz`) generates many kernels and drives them through the differential runner; it is
+slow and excluded from the normal `tests` session. A tiny UNMARKED smoke campaign runs in the normal session so the
 fuzzer cannot bit-rot. Both read their budget from the environment (with sane defaults), so a CI job can scale coverage
-without editing code. The regalloc effort is whatever ``HOLOSO_REGALLOC_EFFORT`` was at process import (it is frozen
-once in ``holoso._lir._regalloc`` and cannot be changed in-process), and any divergence saves a self-contained
-reproducer under ``tests/fuzz_regressions/`` before failing.
+without editing code. The regalloc effort is whatever `HOLOSO_REGALLOC_EFFORT` was at process import (it is frozen
+once in `holoso._lir._regalloc` and cannot be changed in-process), and any divergence saves a self-contained
+reproducer under `tests/fuzz_regressions/` before failing.
 """
 
 import os
@@ -66,7 +66,7 @@ def _print_summary(stats: CampaignStats) -> None:
 def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
     """
     Run a campaign, save a reproducer for every divergence, print the summary, and fail if any divergence occurred. An
-    ``interp_vs_model`` divergence is a genuine LIR-layer miscompile; a ``model_vs_float64`` divergence (only ever
+    `interp_vs_model` divergence is a genuine LIR-layer miscompile; a `model_vs_float64` divergence (only ever
     reported in EXACT mode) is a front/mid-end or operator discrepancy. Either is a real bug -- the saved reproducer is
     a permanent regression.
     """
@@ -119,7 +119,7 @@ def _surviving_forward_branches_for_probe(name: str, emit: Callable[[fuzz_impl._
 
 
 def test_a_const_branch_shape_keeps_only_the_branch_that_is_not_decided() -> None:
-    # The dual pin: this shape's inner condition is constant under the graph's own ``x*0 == 0`` identity, so pruning
+    # The dual pin: this shape's inner condition is constant under the graph's own `x*0 == 0` identity, so pruning
     # must delete it and leave ONLY the outer runtime diamond. Two surviving branches would mean the decided one
     # reached hardware after all -- the very thing the shape is generated to catch.
     assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) == 1
@@ -135,8 +135,8 @@ def test_fuzz_campaign() -> None:
 
 def test_fuzz_smoke() -> None:
     """
-    A tiny fixed-budget campaign that runs in the NORMAL (unmarked) ``tests`` session so the fuzzer can never bit-rot.
+    A tiny fixed-budget campaign that runs in the NORMAL (unmarked) `tests` session so the fuzzer can never bit-rot.
     It exercises the full generator + runner end to end on a handful of kernels and asserts the differential oracle.
-    Deliberately UNMARKED, so it is collected by ``-m "not cosim and not fuzz"``.
+    Deliberately UNMARKED, so it is collected by `-m "not cosim and not fuzz"`.
     """
     _run_and_assert(n_kernels=8, n_vectors=12, seed=0x5A1ED)

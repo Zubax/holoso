@@ -1,7 +1,7 @@
 """
 Shared example-kernel catalogue: each compilable example plus the domain knowledge needed to drive it -- a factory, a
 baseline, curated and random vector generators, and the datapath format(s). Consumed by both the cosimulation suite
-(``test_cosim_examples.py``, RTL vs the embedded model) and the Python-reference suite (``test_example_reference.py``,
+(`test_cosim_examples.py`, RTL vs the embedded model) and the Python-reference suite (`test_example_reference.py`,
 the model vs the original Python), so the two views stay in lockstep over one source of truth.
 """
 
@@ -91,7 +91,7 @@ def _drive(name: str, values: Sequence[float | bool | int]) -> list[InputVector]
 
 
 # The published check message runs first, straight out of the all-ones reset, so the ninth row reproduces the
-# catalogue value 0xCBF43926 exactly -- the same number ``zlib.crc32`` reports for those bytes. The byte rails and
+# catalogue value 0xCBF43926 exactly -- the same number `zlib.crc32` reports for those bytes. The byte rails and
 # checkerboards then fold into the register that message left behind.
 _CRC32_MANUAL = _drive("byte", list(b"123456789") + [0x00, 0xFF, 0x80, 0x01, 0x7F, 0xAA, 0x55, 0x00])
 
@@ -158,7 +158,7 @@ _PWM_MANUAL = _drive(
 )
 
 
-# The I/Q oscillator's exact grid: ``frequency * dt * 2**32`` must be an integer in e8m36 and in float64 alike, so the
+# The I/Q oscillator's exact grid: `frequency * dt * 2**32` must be an integer in e8m36 and in float64 alike, so the
 # float-to-int conversion rounds identically on both sides and the integer phase stays bit-identical to CPython for
 # any run length. Off the grid the two roundings disagree near a half-integer and a diverged accumulator never
 # re-converges, which no output tolerance could absorb.
@@ -183,9 +183,9 @@ class OutputTolerance:
     """
     The independent accuracy budget of one float output lane whose arithmetic accumulates rounding, owned by the spec
     so a compiler defect cannot loosen its own oracle. The allowed absolute error for one transaction is
-    ``(ulps + growth_ulps * age) * u * max(|reference|, floor)`` with ``u`` the format's unit roundoff and ``age`` the
-    number of transactions already driven: ``ulps`` bounds the rounding of one pass over the source expression,
-    ``growth_ulps`` the error a recurrence carries forward through state, and ``floor`` the scale of the lane's
+    `(ulps + growth_ulps * age) * u * max(|reference|, floor)` with `u` the format's unit roundoff and `age` the
+    number of transactions already driven: `ulps` bounds the rounding of one pass over the source expression,
+    `growth_ulps` the error a recurrence carries forward through state, and `floor` the scale of the lane's
     intermediate operands over the spec's driven input domain, below which a cancellation-prone reference magnitude
     would make a purely relative budget vacuous. Every budget is derived from the source algorithm and the driven
     domain, never calibrated against the compiler under test.
@@ -211,8 +211,8 @@ class ExampleSpec:
     manual: list[InputVector]  # sensible vectors; an ordered sequence for stateful kernels
     draw_random: Callable[[np.random.Generator], InputVector]
     edge_values: tuple[float | bool | int, ...]
-    # Per-input edge-sweep overrides: a listed input is swept over its own values instead of ``edge_values`` (e.g. a
-    # divisor pinned to positive magnitudes so it never reaches zero). Inputs absent here use ``edge_values``.
+    # Per-input edge-sweep overrides: a listed input is swept over its own values instead of `edge_values` (e.g. a
+    # divisor pinned to positive magnitudes so it never reaches zero). Inputs absent here use `edge_values`.
     edge_overrides: Mapping[str, tuple[float | bool | int, ...]] = field(default_factory=dict)
     # The float format(s) to drive at. The matrix is e8m36 by plan; a kernel that wants a second datapath (e.g. a
     # shallow e6m18 alongside the deep e8m36, to exercise both pipeline depths) lists both here.
@@ -223,9 +223,9 @@ class ExampleSpec:
     # How this kernel's operator set differs from the one the catalogue shares: a datapath crossing between the
     # families needs the conversions, which no float-only kernel builds.
     operators: Callable[[OperatorOptions], OperatorOptions] = lambda ops: ops
-    # The Python-reference accuracy contract, keyed by output port name (``out_*``/``state_*``): a listed float lane
+    # The Python-reference accuracy contract, keyed by output port name (`out_*`/`state_*`): a listed float lane
     # is compared within its OutputTolerance allowance; an absent lane (and every bool lane) must match the float64
-    # reference bit-for-bit. ``None`` excludes the kernel from the generic scalar reference harness: public VECTOR
+    # reference bit-for-bit. `None` excludes the kernel from the generic scalar reference harness: public VECTOR
     # state cannot be read back through per-element scalar attributes.
     reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
 
@@ -305,8 +305,8 @@ def _uart_rx_frame(
 ) -> list[InputVector]:
     """
     A receive sequence: one oversampled serial frame -- idle, start, 8 data bits LSB first, the parity bit only when
-    the framing carries one, stop. With ``flip_parity`` the parity bit is corrupted (the receiver must flag
-    ``parity_error``); with ``drop_stop`` the stop bit is held low (it must flag ``frame_error``) -- so the error lanes
+    the framing carries one, stop. With `flip_parity` the parity bit is corrupted (the receiver must flag
+    `parity_error`); with `drop_stop` the stop bit is held low (it must flag `frame_error`) -- so the error lanes
     are driven to their non-default value. An 8N1 receiver stops one bit earlier, so feeding it a parity bit would
     make it read that bit as the stop bit and flag a spurious framing error.
     """
@@ -525,7 +525,7 @@ SPECS = [
         make_kernel=lambda: MajorityVoter().__call__,
         formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
         wint_min=6,  # the five channels pack into as many bits, which a signed word carries one above
-        # nominal ``enabled`` is True so the per-input edge sweep actually enters the ``if enabled:`` diagnostic block
+        # nominal `enabled` is True so the per-input edge sweep actually enters the `if enabled:` diagnostic block
         # (perturbing one channel against an all-low background flips the voted value and trips that channel's fault).
         nominal={"enabled": True, "a": False, "b": False, "c": False, "d": False, "e": False},
         manual=[

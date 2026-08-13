@@ -3,12 +3,12 @@ Public-API behavioral tests for numerical behavior: floating-point edge identiti
 breadth, fmul_ilog2 power-of-two strength reduction, trivial fast-math folds, constant folding / static evaluation,
 and bounded loop unrolling.
 
-Every test drives the compiler only through the public API (``holoso.synthesize(fn, ops)`` and the numerical
+Every test drives the compiler only through the public API (`holoso.synthesize(fn, ops)` and the numerical
 simulator). Most assertions are on observable output values -- bits for floats, identity for bools -- while explicit
 operator selection guards inspect generated Verilog text through the public synthesis result. The references are
 chosen to be FALSIFIABLE without a tolerance fudge wherever the hardware must be exact: edge inputs are passed as
-exact ``FloatValue.from_bits`` so the extremes stay exact even where they would overflow a Python float, outputs are
-compared on ``.bits``, and format-sensitive references use ``FloatFormat.round`` so overflow and underflow follow the
+exact `FloatValue.from_bits` so the extremes stay exact even where they would overflow a Python float, outputs are
+compared on `.bits`, and format-sensitive references use `FloatFormat.round` so overflow and underflow follow the
 FORMAT's own rounding, not float64. Associativity is never asserted -- it does not hold in finite precision.
 """
 
@@ -490,7 +490,7 @@ def _div_by_zero_in_a_live_arm(x: float) -> float:
 
 def _div_by_zero_behind_a_folded_guard(x: float) -> float:
     """
-    The kernel writes ``x / w``, never ``x / 0.0``: unrolling is what substitutes the zero. Whether the guard resolves
+    The kernel writes `x / w`, never `x / 0.0`: unrolling is what substitutes the zero. Whether the guard resolves
     before the body is lowered or after it reaches HIR decides only which pass deletes the disabled tap, never whether
     the kernel builds -- refusing what the compiler's own transformation put there is what survivor-based refusal
     exists to prevent.
@@ -512,7 +512,7 @@ def _failure_discarded_by_a_frontend_shortcut(x: float) -> float:
 
 
 def test_a_failure_an_identity_deletes_is_not_refused() -> None:
-    # ``x/x == 1`` answers the first kernel and ``**0`` the second, leaving the division by zero dead for DCE. Refusal
+    # `x/x == 1` answers the first kernel and `**0` the second, leaving the division by zero dead for DCE. Refusal
     # is over the SURVIVORS, so an expression no operation is left reading was never the program's to answer for.
     # Python has no answer for either -- it evaluates what the optimizer deletes and raises there -- which is the
     # charter's own divergence: what the optimizer deletes signals no error.
@@ -533,7 +533,7 @@ def test_a_division_by_a_zero_constant_stays_a_division() -> None:
         assert "holoso_fmul #" not in verilog, kernel
     # A value nothing reads is deleted before the sweep sees it, and so is an arm a guard excludes -- whether that
     # guard is resolved by the front end or by HIR. Neither is in the program the sweep is given.
-    # 4.0 rather than ``_dead_div_by_zero(3.0)``: Python evaluates the statement the optimizer deletes and raises.
+    # 4.0 rather than `_dead_div_by_zero(3.0)`: Python evaluates the statement the optimizer deletes and raises.
     assert float(_sim(_dead_div_by_zero, "dead_div_zero").run(FloatValue.from_float(FMT, 3.0))[0]) == 4.0
     guarded = _sim(_div_by_zero_behind_a_folded_guard, "div_zero_behind_guard")
     assert float(guarded.run(FloatValue.from_float(FMT, 3.0))[0]) == 4.5

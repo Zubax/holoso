@@ -9,7 +9,7 @@ widths instead of sampling it. The widest exhaustive case is a few hundred thous
 TEST_WIDTHS = (2, 3, 4, 5, 6, 7, 8, 9, 24, 33, 44)
 """
 Every width up to the exhaustive limit, then the two production formats and the default one. Widths where 4 divides
-``width - 1`` matter to the shifter: its magnitude ends exactly on a group boundary there, so the largest shift
+`width - 1` matter to the shifter: its magnitude ends exactly on a group boundary there, so the largest shift
 amounts select a group that lies wholly in the padding.
 """
 

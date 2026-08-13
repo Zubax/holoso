@@ -25,7 +25,7 @@ type Target = Callable[..., Any]
 Currently supported targets are:
 - A plain stateless function. It must be importable, so a lambda is refused: its source cannot be recovered.
 - A bound method of a class instance -- stateful. An attribute the method WRITES becomes a state register, and a
-  public one additionally gets a ``state_<attr>`` output port; an attribute it only reads folds to its value.
+  public one additionally gets a `state_<attr>` output port; an attribute it only reads folds to its value.
 - Later on we may potentially add support for multiple methods per class, where the generated module will provide
   a selector port to choose which method to execute, all sharing the same state. In this case we would accept
   a tuple containing the class type and a list of its unbound methods. This remains to be seen.
@@ -48,7 +48,7 @@ class SynthesisResult:
     int_format: IntFormat
     """
     The integer format (machine word) chosen for this kernel.
-    Guaranteed to be at least :attr:`Options.wint_min` bits wide.
+    Guaranteed to be at least Options.wint_min bits wide.
     Defines the range of the (saturating) integer arithmetics.
     """
 
@@ -65,7 +65,7 @@ class SynthesisResult:
 
     def write(self, out_dir: Path | str) -> dict[str, Path]:
         """
-        Write every artifact to ``out_dir`` and return the written paths keyed by filename.
+        Write every artifact to `out_dir` and return the written paths keyed by filename.
         This is the only Holoso operation that touches the filesystem.
         """
         directory = Path(out_dir)
@@ -98,7 +98,7 @@ class Options:
     """
     Lower bound on the native integer bit width.
     The actual integer width may be greater if the kernel uses floats and the floats are wider than this minimum.
-    Integers saturate, so the settled word sets their rails; it is reported as :attr:`SynthesisResult.int_format`.
+    Integers saturate, so the settled word sets their rails; it is reported as SynthesisResult.int_format.
     """
 
     wmultiplier: int | None = None
@@ -163,8 +163,8 @@ def _mir_options(options: Options) -> MirOptions:
 
 def synthesize(target: Target, /, options: Options, *, name: str | None = None) -> SynthesisResult:
     """
-    Synthesize ``target`` (a plain function or a bound method of a constructed instance) into RTL.
-    ``options`` configures the machine; ``name`` overrides the generated module name (inferred from target by default).
+    Synthesize `target` (a plain function or a bound method of a constructed instance) into RTL.
+    `options` configures the machine; `name` overrides the generated module name (inferred from target by default).
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)-5.5s %(name)s: %(message)s")  # no-op if already setup
     module_name: str = name or _default_module_name(target)

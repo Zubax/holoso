@@ -45,7 +45,7 @@ def _refuse_degrading(value: float, fmt: FloatFormat, what: str) -> None:
     degradation: an infinity is representable, and zero is what zero already encodes to.
 
     Asked of the ENCODED bits rather than the decoded value: a coarse mantissa can round a magnitude UP past the
-    double range, so ``decode`` saturates to an infinity for a target value that is perfectly finite.
+    double range, so `decode` saturates to an infinity for a target value that is perfectly finite.
     """
     if not math.isfinite(value) or value == 0.0:
         return
@@ -62,8 +62,8 @@ def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType) -> N
 @dataclass(frozen=True, slots=True)
 class MirOperation:
     """
-    A selected hardware-operator use producing ONE value: the ``output_port``-th result, conditioned by
-    ``output_conditioner``. Operations sharing one block, operator, operands, and operand conditioners while tapping
+    A selected hardware-operator use producing ONE value: the `output_port`-th result, conditioned by
+    `output_conditioner`. Operations sharing one block, operator, operands, and operand conditioners while tapping
     DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all its results at
     once. The operation belongs to the resource family of its tapped port's type; operands may reference either family
     (a comparison reads float operands and produces booleans; the bool->float cast the reverse).
@@ -103,7 +103,7 @@ class MirOutput:
 
 @dataclass(frozen=True, slots=True)
 class MirStateSlot:
-    """A persistent slot register holding ``live_out`` at the transaction boundary."""
+    """A persistent slot register holding `live_out` at the transaction boundary."""
 
     name: str
     reset_value: float | int | bool
@@ -198,9 +198,9 @@ class MirIntConst(MirConst):
 @dataclass(frozen=True, slots=True)
 class MirPhi:
     """
-    An SSA merge at a block's entry: one ``(predecessor_block, value, conditioner)`` arm per incoming edge, of one
+    An SSA merge at a block's entry: one `(predecessor_block, value, conditioner)` arm per incoming edge, of one
     scalar type. The arm conditioner is the type's own sideband, applied when the arm value is installed: a folded
-    sign control on a float arm (``y = -x`` on one branch), an optional inversion on a boolean arm (``f = not g``),
+    sign control on a float arm (`y = -x` on one branch), an optional inversion on a boolean arm (`f = not g`),
     and nothing at all on an integer arm, which has no free sideband to fold into.
     """
 
@@ -302,7 +302,7 @@ type MirTerminator = MirJump | MirBranch | MirRet
 
 @dataclass(frozen=True, slots=True)
 class MirBlock:
-    """``operations`` is straight-line in evaluation order; ``phis`` merge at block entry."""
+    """`operations` is straight-line in evaluation order; `phis` merge at block entry."""
 
     id: BlockId
     phis: tuple[ValueId, ...]
@@ -312,7 +312,7 @@ class MirBlock:
 
 @dataclass(frozen=True, slots=True)
 class Mir:
-    """A selected graph arranged into a CFG of basic blocks; ``blocks[0]`` is the entry."""
+    """A selected graph arranged into a CFG of basic blocks; `blocks[0]` is the entry."""
 
     float_format: FloatFormat
     int_format: IntFormat
@@ -328,20 +328,20 @@ class Mir:
 
     @property
     def ret_block(self) -> BlockId:
-        """The id of the sole function-exit block (a kernel has exactly one ``MirRet``)."""
+        """The id of the sole function-exit block (a kernel has exactly one `MirRet`)."""
         return next(block.id for block in self.blocks if isinstance(block.terminator, MirRet))
 
 
 class _MirBankView(ABC):
     """
     Common structure of a single-bank MIR resource view: the phi-arm subset and the per-block operation listing, both
-    derived identically from the bank's narrowed node table. Each concrete view fixes the element types of ``nodes``
-    and supplies ``operation_nodes`` -- the bank's defining membership predicate over the operations.
+    derived identically from the bank's narrowed node table. Each concrete view fixes the element types of `nodes`
+    and supplies `operation_nodes` -- the bank's defining membership predicate over the operations.
     """
 
     __slots__ = ()
 
-    # Each concrete view narrows this to its bank's node element type (e.g. ``dict[ValueId, MirWideNode]``).
+    # Each concrete view narrows this to its bank's node element type (e.g. `dict[ValueId, MirWideNode]`).
     nodes: Mapping[ValueId, MirNode]
 
     @property
@@ -353,7 +353,7 @@ class _MirBankView(ABC):
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
 
     def block_operations(self, block: MirBlock) -> list[ValueId]:
-        """The bank's operation ids defined in ``block``, in evaluation order."""
+        """The bank's operation ids defined in `block`, in evaluation order."""
         return [vid for vid in block.operations if vid in self.operation_nodes]
 
 
@@ -361,8 +361,8 @@ class _MirBankView(ABC):
 class MirWideView(_MirBankView):
     """
     The wide data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per
-    block. The bank is physical, not a scalar family -- it holds floats and integers alike: :meth:`from_mir` admits
-    operations and phis structurally, on ``scalar_type.is_wide``, and only the leaves nominally.
+    block. The bank is physical, not a scalar family -- it holds floats and integers alike: from_mir admits
+    operations and phis structurally, on `scalar_type.is_wide`, and only the leaves nominally.
     """
 
     nodes: dict[ValueId, MirWideNode]
@@ -519,9 +519,9 @@ class _MirBlockUC:
 
 class MirBuilder:
     """
-    Builds a selected CFG. The first :meth:`block` is the entry. Inputs, constants, and state reads are entry-global
+    Builds a selected CFG. The first block is the entry. Inputs, constants, and state reads are entry-global
     (constants and state reads interned); operations are interned within their block; phis are never interned. A block
-    is sealed by :meth:`jump` / :meth:`branch` / :meth:`ret`.
+    is sealed by jump / branch / ret.
     """
 
     def __init__(self, float_format: FloatFormat, int_format: IntFormat) -> None:
@@ -639,10 +639,10 @@ class MirBuilder:
         immediates: tuple[int, ...] = (),
     ) -> ValueId:
         """
-        Append a hardware-operator use producing the ``output_port``-th result, interned within the current block.
+        Append a hardware-operator use producing the `output_port`-th result, interned within the current block.
         The value's resource family follows the tapped port's type; operands are type-checked against the operator
-        signature and may reference either resource family. ``output_conditioner`` defaults to the tapped port's
-        identity conditioner. ``immediates`` carries the per-firing immediate values (e.g. a rounding mode). The intern
+        signature and may reference either resource family. `output_conditioner` defaults to the tapped port's
+        identity conditioner. `immediates` carries the per-firing immediate values (e.g. a rounding mode). The intern
         key includes the tapped port, both conditioner sides, and the immediates, so two relations over one comparator
         firing -- or two rounding modes over one operand -- stay distinct values while identical taps collapse.
         """

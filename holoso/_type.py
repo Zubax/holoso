@@ -22,14 +22,14 @@ class ScalarType(ABC):
 @dataclass(frozen=True, slots=True)
 class FloatFormat:
     """
-    A Zubax Kulibin float (ZKF) format: ``wexp`` exponent bits and ``wman`` significand bits.
+    A Zubax Kulibin float (ZKF) format: `wexp` exponent bits and `wman` significand bits.
 
-    ``wman`` counts the significand *including* the hidden leading bit, matching the ``WMAN`` convention of
-    ``holoso_support.v``. The total port width is ``wexp + wman`` (a sign bit, ``wexp`` exponent bits, and
-    ``wman - 1`` stored significand bits).
+    `wman` counts the significand *including* the hidden leading bit, matching the `WMAN` convention of
+    `holoso_support.v`. The total port width is `wexp + wman` (a sign bit, `wexp` exponent bits, and
+    `wman - 1` stored significand bits).
 
     Engine-agnostic float facade: the codec delegates to the bit-exact ZKF model, which is the single source
-    of numeric truth. ``exp == 0`` is zero and the all-ones exponent is infinity; ZKF has no subnormals.
+    of numeric truth. `exp == 0` is zero and the all-ones exponent is infinity; ZKF has no subnormals.
     """
 
     wexp: int
@@ -52,7 +52,7 @@ class FloatFormat:
     def decode(self, bits: int) -> float:
         """
         The value as the nearest Python double, correctly rounded in a single step. Formats wider than IEEE double
-        (``wman > 53``, reaching the double-subnormal range) round up to 1 ULP tighter than a naive ``ldexp`` decode
+        (`wman > 53`, reaching the double-subnormal range) round up to 1 ULP tighter than a naive `ldexp` decode
         that double-rounds; no float32/float64-class ZKF format reaches that regime, so this is invisible in practice.
         A finite value past the double range saturates to an infinity, which is what correct rounding means there.
         """
@@ -82,8 +82,8 @@ class FloatFormat:
 @dataclass(frozen=True, slots=True)
 class IntFormat:
     """
-    The native signed integer format: ``width`` bits in two's complement. Arithmetic saturates at the extremes
-    rather than wrapping, so the representable range is exactly ``[min, max]``.
+    The native signed integer format: `width` bits in two's complement. Arithmetic saturates at the extremes
+    rather than wrapping, so the representable range is exactly `[min, max]`.
     """
 
     width: int
@@ -101,7 +101,7 @@ class IntFormat:
         return (1 << (self.width - 1)) - 1
 
     def encode(self, value: int) -> int:
-        """An out-of-range value is rejected; pass it through :meth:`saturate` first if clamping is the intent."""
+        """An out-of-range value is rejected; pass it through saturate first if clamping is the intent."""
         if not self.fits(value):
             raise ValueError(f"{value} is out of range for {self}: [{self.min}, {self.max}]")
         bits = value & ((1 << self.width) - 1)

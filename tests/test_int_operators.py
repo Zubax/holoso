@@ -1,14 +1,14 @@
 """
 The integer operators, pooled and inline: their reference semantics, their closed-form timing, and the one knob
-among them. The lowering selects these (pinned in ``test_int_selection``); here they are driven directly because
+among them. The lowering selects these (pinned in `test_int_selection`); here they are driven directly because
 only a direct drive can sweep every operand of the narrow widths exhaustively.
 
-The sweeps score ``evaluate`` against the very oracle the HDL benches score the RTL against, so the values are
+The sweeps score `evaluate` against the very oracle the HDL benches score the RTL against, so the values are
 checked rather than merely claimed. What they do NOT check is the configuration the hardware is built in: the
 latencies, the RTL parameters and the port names are pinned elsewhere -- by the elaboration probe in
-``test_backend.py`` and by the benches, which take all three from the operator itself. A wrong ``QUOTIENT_FLOOR``
+`test_backend.py` and by the benches, which take all three from the operator itself. A wrong `QUOTIENT_FLOOR`
 would leave every assertion here passing and fail there, as would a wide-bank expression that lost its sign
-extension (``tests/hdl/test_int_inline.py``).
+extension (`tests/hdl/test_int_inline.py`).
 """
 
 from collections.abc import Callable
@@ -226,7 +226,7 @@ def test_multiplier_staging_costs_exactly_one_cycle_each(stage_product: int) -> 
 
 def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None:
     # Saturation is the integer type's defined behaviour, and the saturating operators are speculatable, so none of
-    # them may raise the machine's error flag; MIN // -1 saturates the divider too, and must stay off ``div0``.
+    # them may raise the machine's error flag; MIN // -1 saturates the divider too, and must stay off `div0`.
     fmt = IntFormat(33)
     assert IDivOperator(fmt).error_ports == ["div0"]
     for operator in (
@@ -283,7 +283,7 @@ def test_the_multiplier_knob_reaches_the_built_machine() -> None:
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_inline_bitwise_and_casts_answer_over_every_operand(width: int) -> None:
     # The reference works on the raw bit patterns, so it knows nothing of the operator's own sign convention. A
-    # bitwise combination never leaves the range, so a saturating implementation would answer the rail for ``~min``.
+    # bitwise combination never leaves the range, so a saturating implementation would answer the rail for `~min`.
     fmt = IntFormat(width)
     mask = (1 << width) - 1
     conjunction, disjunction, exclusive = IntBwAndOperator(fmt), IntBwOrOperator(fmt), IntBwXorOperator(fmt)
@@ -328,7 +328,7 @@ def test_the_constant_shift_serves_only_the_counts_that_are_shifts() -> None:
 
 
 def test_the_constant_shift_is_the_raw_shift_and_not_the_saturating_one() -> None:
-    # The inline shift drops what leaves the word; the saturating reading needs the pooled ``holoso_ishl``.
+    # The inline shift drops what leaves the word; the saturating reading needs the pooled `holoso_ishl`.
     fmt = IntFormat(33)
     assert _evaluate(IntShiftConstOperator(fmt, 1), fmt.max) == [-2]
     assert _evaluate(IShlOperator(fmt), fmt.max, 1) == [-2, fmt.max]
@@ -406,8 +406,8 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
 
 
 def test_the_configuration_checks_every_port_format_and_not_just_the_operator_kind() -> None:
-    # A conversion operator carries one format per side, so a check keyed on the operator's own ``fmt`` could
-    # not see a wrong ``ifmt`` at all -- it read the float side and agreed with itself.
+    # A conversion operator carries one format per side, so a check keyed on the operator's own `fmt` could
+    # not see a wrong `ifmt` at all -- it read the float side and agreed with itself.
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33)
     ops = build_ops(options, options.wint_min)
     with pytest.raises(AssertionError, match="ftoint"):

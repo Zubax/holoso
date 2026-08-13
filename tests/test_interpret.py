@@ -1,14 +1,14 @@
 """
-Acceptance gate + independence guard for the MIR interpreter (``holoso._mir.MirInterpreter``).
+Acceptance gate + independence guard for the MIR interpreter (`holoso._mir.MirInterpreter`).
 
 The interpreter is the schedule-independent bit-exact oracle: it evaluates the MIR dataflow graph directly, sharing the
-front/mid-end and ``operator.evaluate`` with the numerical model but NONE of the LIR scheduling/binding/regalloc/overlap
+front/mid-end and `operator.evaluate` with the numerical model but NONE of the LIR scheduling/binding/regalloc/overlap
 machinery. Before it can be trusted as an oracle it must agree bit-for-bit with the numerical model on kernels that are
-already known correct -- every bundled example (validated against Python in ``test_example_reference``) and every
+already known correct -- every bundled example (validated against Python in `test_example_reference`) and every
 scheduling corner kernel (validated against RTL in the cosim suite). A disagreement here means the interpreter is wrong,
 not the compiler; only once this gate is green does an interpreter-vs-model divergence elsewhere indict the LIR layer.
 
-The independence guard asserts the interpreter's TRANSITIVE import closure excludes ``holoso._lir`` -- the layer it
+The independence guard asserts the interpreter's TRANSITIVE import closure excludes `holoso._lir` -- the layer it
 exists to verify -- so the oracle can never silently re-couple to the artifact under test, even through an intermediary.
 """
 
@@ -126,7 +126,7 @@ def test_interpreter_matches_model_on_edge_bits() -> None:
 
 def test_loop_header_phi_swap_resolves_in_parallel() -> None:
     """
-    A loop-header phi swap (``a, b = b, a``) must resolve its cross-referencing phis as a parallel snapshot. Checked
+    A loop-header phi swap (`a, b = b, a`) must resolve its cross-referencing phis as a parallel snapshot. Checked
     against the float64 Python reference (which swaps correctly) AND interp==model, so a sequential-phi regression in
     either oracle -- or one shared by both -- surfaces as a divergence. Integer-valued inputs keep every output exact.
     """
@@ -146,7 +146,7 @@ def test_loop_header_phi_swap_resolves_in_parallel() -> None:
 
 def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
     """
-    The computed-arm swap (``a, b = b, a + x``): the latch mixes a phi-sourced install with a computed-source install,
+    The computed-arm swap (`a, b = b, a + x`): the latch mixes a phi-sourced install with a computed-source install,
     so a placement that fires one tail install after a sibling has overwritten its source register miscompiles even
     though the pure swap (same-placement installs) stays correct. Python is the oracle; the model and the RTL replay
     the same LIR, and interp==model is asserted so a divergence localizes the guilty layer.
@@ -206,7 +206,7 @@ def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
 
 def test_state_slot_swap_writeback_is_parallel() -> None:
     """
-    Two persistent slots that swap (``self._a, self._b = self._b, self._a``) force the parallel, read-first state
+    Two persistent slots that swap (`self._a, self._b = self._b, self._a`) force the parallel, read-first state
     writeback to exchange their registers from OLD values. Checked against the float64 Python reference (which swaps
     correctly) AND interp==model, so a sequential-writeback regression in either oracle -- or one shared by both --
     surfaces. Integer inputs keep the output exact.
@@ -253,7 +253,7 @@ def test_the_integer_corpus_reaches_an_integer_phi() -> None:
 
 def test_interpreter_imports_nothing_from_lir() -> None:
     """
-    The oracle must never re-couple to the layer it verifies: its TRANSITIVE import closure excludes ``holoso._lir``.
+    The oracle must never re-couple to the layer it verifies: its TRANSITIVE import closure excludes `holoso._lir`.
     """
     offenders = forbidden_imports(MirInterpreter.__module__, "holoso._lir")
     assert not offenders, f"interpreter transitively imports the LIR layer it verifies: {offenders}"

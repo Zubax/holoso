@@ -1,6 +1,6 @@
 """
 Coverage for the multi-distinct-constant install path. A register that receives two or more DISTINCT constant phi-arm
-installs selects among them through its per-register write opcode, one ``case`` arm per constant ``const_N`` net. No
+installs selects among them through its per-register write opcode, one `case` arm per constant `const_N` net. No
 bundled example exercises this -- each installs at most one distinct constant per register -- so this kernel pins it: a
 comparison-gated branch (a division per arm blocks if-conversion, so the merge stays a real phi) assigns two distinct
 constants to one merged variable.

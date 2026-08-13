@@ -58,7 +58,7 @@ def _sole_operand(node: Node) -> ValueId:
 
 
 def _int_pow2_exponent(c: int) -> int | None:
-    """Return ``k`` if ``c == 2**k`` for a positive ``c``, else ``None``."""
+    """Return `k` if `c == 2**k` for a positive `c`, else `None`."""
     return c.bit_length() - 1 if c > 0 and c & (c - 1) == 0 else None
 
 
@@ -130,7 +130,7 @@ def run(hir: Hir) -> Hir:
     def reduce_algebra(builder: HirBuilder, operator: Operator, operands: list[ValueId]) -> ValueId:
         """
         The algebra an operator declares, applied over an operand the compiler cannot see: an absorbing operand fixes
-        the result regardless of the others (``x or True``), and an identity operand drops out (``x and True`` -> x).
+        the result regardless of the others (`x or True`), and an identity operand drops out (`x and True` -> x).
         Sound for any associative operator that declares them, which every declaration here is. This is the shared
         fallback of the reductions rather than a pass of its own, so no rewrite escapes it.
         """
@@ -177,7 +177,7 @@ def run(hir: Hir) -> Hir:
             return make_neg(builder, a)
         for const_side, other in ((b, a), (a, b)):
             scale = float_of(const_side)
-            # A unit scaling is ``x*1``, left to the declared identity rather than minted as a shift; ``x*-1`` never
+            # A unit scaling is `x*1`, left to the declared identity rather than minted as a shift; `x*-1` never
             # reaches here, the negation above having claimed it.
             if (
                 scale is not None
@@ -189,7 +189,7 @@ def run(hir: Hir) -> Hir:
         return reduce_algebra(builder, FloatMul(), [a, b])
 
     def scaling(remap: dict[ValueId, ValueId], old_id: ValueId) -> tuple[ValueId, Scaling] | None:
-        """The value an old-graph node scales and the constant it scales it by; ``None`` if it scales nothing."""
+        """The value an old-graph node scales and the constant it scales it by; `None` if it scales nothing."""
         match hir.nodes[old_id]:
             case Operation(operator=FloatMulPow2(k=k), operands=(x,)):
                 return x, Scaling(1.0, k, False)
@@ -234,14 +234,14 @@ def run(hir: Hir) -> Hir:
         if a == b:
             return emit_float_const(builder, 1.0)
         if float_of(a) == 0.0:
-            return emit_float_const(builder, 0.0)  # ``0/x == 0``: a numerator rule, so no operator algebra states it
+            return emit_float_const(builder, 0.0)  # `0/x == 0`: a numerator rule, so no operator algebra states it
         if is_one(b):
             return a
         if is_neg_one(b):
             return make_neg(builder, a)
         divisor = float_of(b)
         # A zero divisor is excluded because there is no reciprocal to multiply by at all. An infinite one is excluded
-        # only because nothing has needed the fold; ``1/inf`` is ``0.0``, a perfectly good second factor.
+        # only because nothing has needed the fold; `1/inf` is `0.0`, a perfectly good second factor.
         if divisor is not None and divisor != 0.0 and math.isfinite(divisor):
             scaling = scaling_of(divisor)
             if scaling is not None and scaling.is_power_of_two:  # by a signed power of two: its negated exponent
@@ -276,7 +276,7 @@ def run(hir: Hir) -> Hir:
             scale = int_of(const_side)
             if scale is not None:
                 k = _int_pow2_exponent(scale)
-                if k:  # a zero exponent is ``x*1``, left to the declared identity rather than minted as a scaling
+                if k:  # a zero exponent is `x*1`, left to the declared identity rather than minted as a scaling
                     return builder.operation(IntMulPow2(k), [other])
         return reduce_algebra(builder, IntMul(), [a, b])
 
@@ -319,7 +319,7 @@ def run(hir: Hir) -> Hir:
         if int_of(a) == -1:
             return make_ibwnot(builder, b)
         if int_of(b) == -1:
-            return make_ibwnot(builder, a)  # ``x ^ -1`` is the complement at every width
+            return make_ibwnot(builder, a)  # `x ^ -1` is the complement at every width
         return reduce_algebra(builder, IntBwXor(), [a, b])
 
     def reduce_iand(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
@@ -364,17 +364,17 @@ def run(hir: Hir) -> Hir:
 
     def reduce_bselect(builder: HirBuilder, cond: ValueId, a: ValueId, b: ValueId) -> ValueId:
         """
-        Reduce ``bselect(cond, a, b)`` using its constant arms, which the universal mux identity in ``build_value``
+        Reduce `bselect(cond, a, b)` using its constant arms, which the universal mux identity in `build_value`
         has already made distinct; the NOTs fold consumer-side at MIR lowering. Every connective minted here goes
         through the declared algebra, because a constant arm often makes the gate it becomes a constant in turn -- a
-        one-shot latch reduces to ``first and False``, which is the latch's live-out written the long way.
+        one-shot latch reduces to `first and False`, which is the latch's live-out written the long way.
         """
         assert a != b, "equal arms would read as the True/False entry below; the mux identity must have reduced them"
         a_const, b_const = bool_of(a), bool_of(b)
         if b == cond:
-            return reduce_algebra(builder, BoolAnd(), [cond, a])  # (c, a, c) == c and a: Python's eager ``and`` shape
+            return reduce_algebra(builder, BoolAnd(), [cond, a])  # (c, a, c) == c and a: Python's eager `and` shape
         if a == cond:
-            return reduce_algebra(builder, BoolOr(), [cond, b])  # (c, c, b) == c or b: Python's eager ``or`` shape
+            return reduce_algebra(builder, BoolOr(), [cond, b])  # (c, c, b) == c or b: Python's eager `or` shape
         if a_const is not None and b_const is not None:  # both constant and distinct -> True/False or False/True
             return cond if a_const else builder.operation(BoolNot(), [cond])
         if a_const is True:
@@ -399,7 +399,7 @@ def run(hir: Hir) -> Hir:
                     folded = node.operator.evaluate(consts)
                 except NoNumber:
                     # The operation names no number, so it is copied verbatim and no rewrite below is offered it: with
-                    # every operand in view there is nothing left for an identity to speak for, and ``inf*0`` is not
+                    # every operand in view there is nothing left for an identity to speak for, and `inf*0` is not
                     # the absorbing zero. Whether this costs the build is settled by the refusal gate, once every
                     # deletion has had its turn.
                     return copy_node(builder, node, remap)

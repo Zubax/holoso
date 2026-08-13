@@ -43,17 +43,17 @@ def _int_const(const: Const) -> IntConst:
 
 class NoNumber(HolosoError):
     """
-    The signal :meth:`Operator.evaluate` raises when the operands prove the expression names no number -- an
-    indeterminate form like ``inf - inf``, or an argument outside a function's domain like ``sqrt(-1)``. It is not an
+    The signal Operator.evaluate raises when the operands prove the expression names no number -- an
+    indeterminate form like `inf - inf`, or an argument outside a function's domain like `sqrt(-1)`. It is not an
     answer, so it is not a return value.
 
     It is a signal and not a refusal. Every pass that folds speculatively catches it and leaves the operation exactly
     as it stands, because unrolling and inlining SUBSTITUTE values and so manufacture expressions the kernel never
-    wrote -- ``for w in [1.0, 0.0]: if w > 0.0: x / w`` becomes ``x / 0.0`` -- and convicting one of those is the
+    wrote -- `for w in [1.0, 0.0]: if w > 0.0: x / w` becomes `x / 0.0` -- and convicting one of those is the
     compiler answering for its own transformation. What refuses is the gate at the HIR-to-MIR boundary, over what is
     left once every deletion and substitution has run. See the fastmath charter in DESIGN.md.
 
-    ``what`` names the expression for that diagnostic; the signal carries no message of its own because where it is
+    `what` names the expression for that diagnostic; the signal carries no message of its own because where it is
     raised is not where it is reported.
     """
 
@@ -85,7 +85,7 @@ def _fold_float(operands: list[Const], name: str, evaluate: Callable[..., float]
 def _fold_int(operands: list[Const], name: str, evaluate: Callable[..., int]) -> Const:
     """
     Arbitrary-precision integer folding -- no width, no saturation, and no size limit. An expression the user wrote is
-    one the user asked for: ``1 << 10**9`` takes as long as it takes, exactly as it would in the Python the kernel is
+    one the user asked for: `1 << 10**9` takes as long as it takes, exactly as it would in the Python the kernel is
     written in. A host fault means the operands are outside the operation's domain, so no value exists.
     """
     try:
@@ -117,25 +117,25 @@ class Operator(ABC):
         Evaluation runs in the compiler's own arithmetic -- unbounded integers, host-precision floats -- and never in
         the target format, so a folded constant may differ from what the datapath would compute; see the fastmath
         charter in DESIGN.md. Nothing declines a fold: not size, not representability, and never a result the hardware
-        would disagree with. Where no value exists at all it raises :class:`NoNumber`.
+        would disagree with. Where no value exists at all it raises NoNumber.
 
         A caller asks only where it sees EVERY operand. One it cannot see leaves the expression unnamed, and then the
-        algebraic identities below speak for it instead -- which is why ``x*0`` is zero for an unknown ``x`` while
-        ``inf*0`` names no number.
+        algebraic identities below speak for it instead -- which is why `x*0` is zero for an unknown `x` while
+        `inf*0` names no number.
         """
 
     def absorbing(self) -> Const | None:
         """
         The constant operand that forces the result to that constant regardless of the others (the absorbing element):
-        ``True`` for ``or``, ``False`` for ``and``. None if the operator has none. Strength reduction uses it to reduce
-        a partially-constant expression like ``x or True`` to a constant.
+        `True` for `or`, `False` for `and`. None if the operator has none. Strength reduction uses it to reduce
+        a partially-constant expression like `x or True` to a constant.
         """
         return None
 
     def identity(self) -> Const | None:
         """
-        The constant operand that leaves the result unchanged (the identity element): ``False`` for ``or``,
-        ``True`` for ``and``. None if the operator has none. Strength reduction drops it (``x and True`` -> x).
+        The constant operand that leaves the result unchanged (the identity element): `False` for `or`,
+        `True` for `and`. None if the operator has none. Strength reduction drops it (`x and True` -> x).
         """
         return None
 
@@ -153,7 +153,7 @@ class FloatAdd(Operator):
         return _fold_float(operands, "the sum", lambda a, b: a + b)
 
     def identity(self) -> Const | None:
-        # ``x + 0 == x``, declared rather than hand-coded so every rewrite agrees about it
+        # `x + 0 == x`, declared rather than hand-coded so every rewrite agrees about it
         return FloatConst(0.0)
 
 
@@ -169,9 +169,9 @@ class FloatMul(Operator):
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the product", lambda a, b: a * b)
 
-    # ``x*0 == 0`` is the charter's identity, declared here rather than hand-coded in one pass so that every rewrite
+    # `x*0 == 0` is the charter's identity, declared here rather than hand-coded in one pass so that every rewrite
     # reasoning about known values sees it. It cannot fire on two constants: an all-known product is evaluated first,
-    # and ``inf*0`` names no number.
+    # and `inf*0` names no number.
     def absorbing(self) -> Const | None:
         return FloatConst(0.0)
 
@@ -232,7 +232,7 @@ class FloatMulPow2(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        # ``np.ldexp`` rather than ``math.ldexp`` because this operator stands for a multiplication, which saturates:
+        # `np.ldexp` rather than `math.ldexp` because this operator stands for a multiplication, which saturates:
         # the raise is the math module's, not the operation's, and answering it would be inventing a value.
         return _fold_float(operands, "the scaling", lambda a: float(np.ldexp(a, self.k)))
 
@@ -307,8 +307,8 @@ class FloatExp2(Operator):
         return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
-        # ``np.exp2`` is this operator's reference -- the intrinsic stub is registered against it -- and it saturates.
-        # ``math.exp2`` raises instead, which is the math module's convention and not this operation's answer.
+        # `np.exp2` is this operator's reference -- the intrinsic stub is registered against it -- and it saturates.
+        # `math.exp2` raises instead, which is the math module's convention and not this operation's answer.
         return _fold_float(operands, "the exponential", lambda a: float(np.exp2(a)))
 
 
@@ -374,7 +374,7 @@ def _turn_sincos(a: float) -> tuple[float, float]:
 @dataclass(frozen=True, slots=True)
 class FloatSinTurns(Operator):
     """
-    The turn-native trigonometric vocabulary, in the spirit of C's ``sinpi``: one turn is a full revolution, so a
+    The turn-native trigonometric vocabulary, in the spirit of C's `sinpi`: one turn is a full revolution, so a
     phase already counted in turns needs no unit conversion at all.
     """
 
@@ -515,7 +515,7 @@ class FloatIsNegInf(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
-    """Fused multiply-add ``a*b + c`` from an explicit ``math.fma`` call: always single-rounds."""
+    """Fused multiply-add `a*b + c` from an explicit `math.fma` call: always single-rounds."""
 
     mnemonic: ClassVar[str] = "ffma"
     speculatable: ClassVar[bool] = True
@@ -700,7 +700,7 @@ class BoolNot(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatSelect(Operator):
     """
-    A data mux ``a if cond else b`` over float values. In HIR it is produced by the if-conversion pass, which refuses
+    A data mux `a if cond else b` over float values. In HIR it is produced by the if-conversion pass, which refuses
     constant conditions; MIR composite lowerings may also use the selected inline hardware mux directly.
     """
 
@@ -719,9 +719,9 @@ class FloatSelect(Operator):
 @dataclass(frozen=True, slots=True)
 class BoolSelect(Operator):
     """
-    A boolean mux ``a if cond else b`` over boolean values, the 1-bit dual of :class:`FloatSelect`. Produced only by
-    if-conversion of a boolean-phi diamond. Its constant arms (the common ``True``/``False`` arms of a state-machine
-    merge) are reduced to ``and``/``or``/``not``/passthrough by strength reduction.
+    A boolean mux `a if cond else b` over boolean values, the 1-bit dual of FloatSelect. Produced only by
+    if-conversion of a boolean-phi diamond. Its constant arms (the common `True`/`False` arms of a state-machine
+    merge) are reduced to `and`/`or`/`not`/passthrough by strength reduction.
     """
 
     mnemonic: ClassVar[str] = "bselect"
@@ -738,7 +738,7 @@ class BoolSelect(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatToBool(Operator):
-    """A scalar cast ``bool(x)``: a float is truthy iff it is nonzero."""
+    """A scalar cast `bool(x)`: a float is truthy iff it is nonzero."""
 
     mnemonic: ClassVar[str] = "float_to_bool"
     speculatable: ClassVar[bool] = True
@@ -827,8 +827,8 @@ class IntMul(Operator):
 @dataclass(frozen=True, slots=True)
 class IntMulPow2(Operator):
     """
-    The integer dual of :class:`FloatMulPow2`: exact scaling by a power of two. It is a MULTIPLICATION and not the
-    ``<<`` that shares its arithmetic -- what leaves the word rails here where the shift drops it -- which is why the
+    The integer dual of FloatMulPow2: exact scaling by a power of two. It is a MULTIPLICATION and not the
+    `<<` that shares its arithmetic -- what leaves the word rails here where the shift drops it -- which is why the
     two cannot be one operator however alike their folding looks.
     """
 
@@ -1008,7 +1008,7 @@ class IntBwNot(Operator):
 
 @dataclass(frozen=True, slots=True)
 class IntComparison(Operator, ABC):
-    """The integer dual of :class:`FloatComparison`: one relation per operator, exact at any magnitude."""
+    """The integer dual of FloatComparison: one relation per operator, exact at any magnitude."""
 
     speculatable: ClassVar[bool] = True
 
@@ -1073,7 +1073,7 @@ class IntGreater(IntComparison):
 
 @dataclass(frozen=True, slots=True)
 class IntSelect(Operator):
-    """A data mux ``a if cond else b`` over integer values, the integer dual of :class:`FloatSelect`."""
+    """A data mux `a if cond else b` over integer values, the integer dual of FloatSelect."""
 
     mnemonic: ClassVar[str] = "iselect"
     speculatable: ClassVar[bool] = True
@@ -1106,7 +1106,7 @@ class IntToFloat(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatToInt(Operator):
-    """A truncation-toward-zero cast ``int(x)``; no error sideband, so speculatable."""
+    """A truncation-toward-zero cast `int(x)`; no error sideband, so speculatable."""
 
     mnemonic: ClassVar[str] = "float_to_int"
     speculatable: ClassVar[bool] = True

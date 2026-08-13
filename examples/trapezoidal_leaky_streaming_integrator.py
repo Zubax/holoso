@@ -13,17 +13,17 @@ class TrapezoidalLeakyStreamingIntegrator:
 
         x[n]  - input derivative sample at discrete time n.
         y[n]  - integrator output at discrete time n.
-        T     - sample period, i.e. ``dt``.
+        T     - sample period, i.e. `dt`.
         k     - leak coefficient.
-        r     - leak pole, ``r = 1 - k``.
+        r     - leak pole, `r = 1 - k`.
         z^-1  - one-sample delay.
-        omega - normalized angular frequency, ``omega = 2*pi*f/f_s``.
+        omega - normalized angular frequency, `omega = 2*pi*f/f_s`.
 
     The returned output obeys the recurrence:
 
         y[n] = r*y[n-1] + T*a[n]
 
-    where ``a[n]`` is the addend, and the leak function forms the standard IIR filter with a single pole at r.
+    where `a[n]` is the addend, and the leak function forms the standard IIR filter with a single pole at r.
 
         a[n] = (x[n] + x[n-1]) / 2
         H(z) = Y(z)/X(z) = T*(1 + z^-1) / (2*(1 - r*z^-1))

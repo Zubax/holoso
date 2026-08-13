@@ -1,15 +1,15 @@
 """
 Sublayer 3: residual Eel -> HIR, mechanically. Every semantic decision was the partial evaluator's: operations
-arrive as ``IntrinsicCall`` nodes carrying their HIR operator, every assignment is typed, and control is
+arrive as `IntrinsicCall` nodes carrying their HIR operator, every assignment is typed, and control is
 structured: branches, data-dependent loops with their carried phis, and the loop and inlined-frame exits. The emitter
 keeps one environment of binding -> value id, forks it per branch arm,
 and at the join keeps the intersection, phi-ing entries whose ids differ -- names bound on one side only were
 already dropped (and any later read rejected) by the partial evaluator's definite-assignment rule. Parameters
 become input ports in declaration order whether read or not: the module interface mirrors the signature.
 
-Every ``ResidualReturn`` is one return SITE: an arm that returns simply never jumps to its local join. All
+Every `ResidualReturn` is one return SITE: an arm that returns simply never jumps to its local join. All
 sites meet in a single exit block -- one phi per output row and per slot leaf when there are several -- so
-``Ret`` stays the sole function exit and each ``StateSlot.live_out`` is the value at that exit. The phi types
+`Ret` stays the sole function exit and each `StateSlot.live_out` is the value at that exit. The phi types
 agree across sites because the partial evaluator conformed every site against the one annotation-fixed table.
 """
 

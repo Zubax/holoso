@@ -1,10 +1,10 @@
 """
-The inline integer operators in fabric: each one's own ``verilog_expr`` spliced into a combinational harness, scored
+The inline integer operators in fabric: each one's own `verilog_expr` spliced into a combinational harness, scored
 against an independent Python bit formula per operator family.
 
 The generated transport -- the emitter's operand nets, conditioners and register writes -- is owned elsewhere:
-test_cosim_int drives inline operators end-to-end through generated machines (the inline xor in ``sat_mix``, the
-inline shift/mask in ``pow2_strength``) and test_int_selection pins which operators MIR selects.
+test_cosim_int drives inline operators end-to-end through generated machines (the inline xor in `sat_mix`, the
+inline shift/mask in `pow2_strength`) and test_int_selection pins which operators MIR selects.
 """
 
 import os
@@ -38,7 +38,7 @@ EXHAUSTIVE_WIDTH_LIMIT = 6
 TOPLEVEL = "holoso_int_inline_tb"
 
 
-# Every width up to the exhaustive limit, then the production formats. Widths where 4 divides ``width - 1`` matter to
+# Every width up to the exhaustive limit, then the production formats. Widths where 4 divides `width - 1` matter to
 # the shift, whose largest amounts land on a group boundary.
 _WIDTHS = (*range(2, EXHAUSTIVE_WIDTH_LIMIT + 1), 9, 24, 33, 44)
 
@@ -56,8 +56,8 @@ def _shift_counts(fmt: IntFormat) -> list[int]:
 class _Case:
     """
     One operator over one folded-conditioner assignment of its operands, owning its literal operand nets and result
-    family: the boolean port takes the harness net ``c``, the integer ones ``a`` then ``b``. An integer port folds
-    nothing, but a boolean port folds an inversion that the emitter splices as ``~net``, so an operator taking one
+    family: the boolean port takes the harness net `c`, the integer ones `a` then `b`. An integer port folds
+    nothing, but a boolean port folds an inversion that the emitter splices as `~net`, so an operator taking one
     must serve both spellings.
     """
 
@@ -139,8 +139,8 @@ def _harness(width: int, cases: Sequence[_Case]) -> str:
 
 def _expected_bits(operator: InlineHardwareOperator, width: int, a: int, b: int, c: bool) -> int:
     """
-    The independent oracle: a plain Python bit formula per operator family over the signed operands ``a``/``b`` and
-    the boolean ``c``, never the operator's own ``evaluate``.
+    The independent oracle: a plain Python bit formula per operator family over the signed operands `a`/`b` and
+    the boolean `c`, never the operator's own `evaluate`.
     """
     mask = (1 << width) - 1
     if isinstance(operator, IntBwAndOperator):

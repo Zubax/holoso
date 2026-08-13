@@ -59,7 +59,7 @@ def reverse_postorder(hir: Hir) -> list[BlockId]:
     """
     Block ids in reverse-postorder of the CFG from the entry. Predecessors precede successors (a back-edge target
     precedes its body), so visiting blocks in this order remaps every operand and forward phi arm before its use --
-    numeric id order does not (a nested ``if``'s merge gets a higher id than the outer merge it feeds).
+    numeric id order does not (a nested `if`'s merge gets a higher id than the outer merge it feeds).
     """
     succs = {block.id: successors(block) for block in hir.blocks}
     order: list[BlockId] = []
@@ -86,13 +86,13 @@ def reverse_postorder(hir: Hir) -> list[BlockId]:
 
 def rebuild(hir: Hir, build_value: BuildValue, keep: Set[ValueId] | None = None) -> Hir:
     """
-    Rebuild ``hir`` into a fresh :class:`HirBuilder`, delegating each value's construction to ``build_value`` and
+    Rebuild `hir` into a fresh HirBuilder, delegating each value's construction to `build_value` and
     copying the CFG structure (blocks, phis, terminators) generically. Block ids are preserved. Values are visited in a
     dominance-respecting order -- inputs, then entry-global constants/state reads, then each block's phis and
     operations in reverse-postorder of the blocks -- so operands and phi arms are already remapped when used. The one
     exception is a loop-header phi's latch (back-edge) arm, which references a body value defined later in the order:
-    such a phi is copied open with its available arms (``build_value`` is bypassed, as the pass cannot fold an
-    incomplete merge) and its arms are closed once every block has been visited. ``keep`` (DCE) restricts which
+    such a phi is copied open with its available arms (`build_value` is bypassed, as the pass cannot fold an
+    incomplete merge) and its arms are closed once every block has been visited. `keep` (DCE) restricts which
     non-input values are emitted; dropped values must not be referenced by any kept value.
     """
     builder = HirBuilder()

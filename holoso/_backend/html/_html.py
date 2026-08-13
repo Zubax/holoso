@@ -1,8 +1,8 @@
 """
 Render a self-contained, light-themed single-page HTML report for a synthesized module.
 
-The stylesheet and the interactive layer live alongside this module as ``html.css`` and ``html.js`` (declared as
-package data in ``pyproject.toml``); they are inlined into the self-contained report so it has no external dependency
+The stylesheet and the interactive layer live alongside this module as `html.css` and `html.js` (declared as
+package data in `pyproject.toml`); they are inlined into the self-contained report so it has no external dependency
 beyond the web font.
 
 Do not define any styles or colors here, do that in CSS.

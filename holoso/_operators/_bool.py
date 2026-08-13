@@ -12,8 +12,8 @@ from ._common import InlineHardwareOperator, ScalarSignature
 @dataclass(frozen=True, slots=True)
 class BoolLogicOperator(InlineHardwareOperator, ABC):
     """
-    A boolean-logic operator (AND/OR/XOR): a plain ``& | ^`` gate folded into its boolean register's write.
-    Never added to :class:`OpConfig` -- it has no module and no configuration.
+    A boolean-logic operator (AND/OR/XOR): a plain `& | ^` gate folded into its boolean register's write.
+    Never added to OpConfig -- it has no module and no configuration.
     """
 
     @property

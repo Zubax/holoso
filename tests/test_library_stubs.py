@@ -73,7 +73,7 @@ _INF = float("inf")
 def test_registry_resolves_the_expected_externals() -> None:
     for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer):
         assert isinstance(resolve(external), Array), external
-    # An operator is a key like any callee object, so ``**`` and its every spelling are ONE four-lowering entry.
+    # An operator is a key like any callee object, so `**` and its every spelling are ONE four-lowering entry.
     power_entry = resolve(BinaryOp.POW)
     assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 4
     for power in (pow, math.pow, np.power, np.pow, np.float_power):
@@ -210,7 +210,7 @@ def test_exp_log() -> None:
 
 
 def test_pow_recovers_the_sign_of_a_negative_base() -> None:
-    # The magnitude rides the exp2/log2 identity over ``abs(b)``, so an integer exponent gets its sign back from the
+    # The magnitude rides the exp2/log2 identity over `abs(b)`, so an integer exponent gets its sign back from the
     # exponent's parity rather than from a per-exponent ladder: exact wherever the identity itself is exact.
     for b in (2.0, -2.0, 0.5, -0.5):
         for e in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0):
@@ -224,7 +224,7 @@ def test_pow_recovers_the_sign_of_a_negative_base() -> None:
 def test_pow_general_path() -> None:
     for b, e in ((2.0, 0.5), (3.0, 2.5), (10.0, -1.5), (0.5, 8.0), (1.0, 123.456), (-1.5, 3.0), (-2.0, 6.0)):
         assert pow_(b, e) == pytest.approx(math.pow(b, e), rel=1e-12), (b, e)
-    # ``|b| == 1`` with a non-finite exponent is the IEEE special case the guard chain answers ahead of exp2(inf*0).
+    # `|b| == 1` with a non-finite exponent is the IEEE special case the guard chain answers ahead of exp2(inf*0).
     assert pow_(-1.0, _INF) == 1.0 and pow_(-1.0, -_INF) == 1.0 and pow_(1.0, _INF) == 1.0
 
 
@@ -238,7 +238,7 @@ def test_pow_chain_matches_the_host_where_the_chain_is_exact() -> None:
     assert pow_chain_float(0.0, 0) == 1.0 and pow_chain_float(-7.5, 0) == 1.0
     assert pow_chain_float(0.0, 3) == 0.0
     with pytest.raises(ZeroDivisionError):
-        pow_reciprocal(0.0, -1)  # the reciprocal raises exactly as ``0.0 ** -1`` does
+        pow_reciprocal(0.0, -1)  # the reciprocal raises exactly as `0.0 ** -1` does
     for b, n in ((7.0, 5), (1.0000001, 4), (-3.25, 7)):
         assert pow_chain_float(b, n) == pytest.approx(b**n, rel=1e-13), (b, n)
 

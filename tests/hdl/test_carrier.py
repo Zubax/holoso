@@ -1,6 +1,6 @@
 """
 The one property no model can observe: a float occupies only the low bits of the wide register, so nothing ever SETS
-a bit above ``WFLT`` (an unwritten datapath register reads X, being outside the reset cone). Both oracles store typed
+a bit above `WFLT` (an unwritten datapath register reads X, being outside the reset cone). Both oracles store typed
 values rather than register words, so this is checkable only against the RTL, and only where the integer is wider.
 """
 

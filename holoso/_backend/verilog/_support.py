@@ -50,7 +50,7 @@ def inline_support() -> str:
 
 @cache
 def support_files() -> dict[str, str]:
-    """The shipped support library ``{filename: content}`` -- just the module library."""
+    """The shipped support library `{filename: content}` -- just the module library."""
     files = {_MEGAFILE: _build_megafile()}
     _logger.info("Assembled support library: %s", ", ".join(f"{n} ({len(t.encode())} B)" for n, t in files.items()))
     return files

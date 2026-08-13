@@ -18,7 +18,7 @@ from ._regalloc import Producer, RegallocTuning
 class PooledConst:
     """
     A constant's place in the pool, with the conditioner its consumers compose onto. Only the float half folds
-    anything there -- the magnitude/sign split rides the free ``holoso_fsgnop`` sideband, which two's complement has
+    anything there -- the magnitude/sign split rides the free `holoso_fsgnop` sideband, which two's complement has
     no counterpart for -- so an integer entry is stored whole and carries the identity.
     """
 
@@ -63,7 +63,7 @@ class OverlapLayout:
     The per-block schedule plus the install-inclusive makespan, the (possibly overlap-shrunk) terminator offset, and
     the spills each block receives -- the predecessor values landing in it past an overlapped terminator, mapped to
     their block-local landing cycle (fed to the allocator's liveness so a spilled register stays reserved in the
-    block, and identical to the scheduler's ``livein_landing`` so the two cannot drift). Empty under draining.
+    block, and identical to the scheduler's `livein_landing` so the two cannot drift). Empty under draining.
     """
 
     block_sched: dict[int, Schedule]

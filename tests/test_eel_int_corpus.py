@@ -1,11 +1,11 @@
 """
-The corpus differential in two layers. The HIR oracle (CPython against ``HirEvaluator``) runs the float kernels --
+The corpus differential in two layers. The HIR oracle (CPython against `HirEvaluator`) runs the float kernels --
 whose binary64-exact comparison has no black-box spelling -- and ONLY the five UART integer cases, whose written FSM
 slots are private: those rows check exact private-slot changes, parameter/port mirroring, output-name uniqueness and
 private-slot non-exposure, none of which a public port can observe. The remaining integer corpus is accepted
-publicly: ``synthesize`` and the numerical model against a fresh CPython reference, mapped by port NAME -- never
-positionally, because an assign-and-return leaf may be elided onto its ``state_*`` port -- with a typed
-``(kind, value)`` comparison, since Python's ``==`` conflates ``True``, ``1`` and ``1.0``.
+publicly: `synthesize` and the numerical model against a fresh CPython reference, mapped by port NAME -- never
+positionally, because an assign-and-return leaf may be elided onto its `state_*` port -- with a typed
+`(kind, value)` comparison, since Python's `==` conflates `True`, `1` and `1.0`.
 """
 
 import inspect
@@ -78,7 +78,7 @@ def test_float_corpus_synthesizes(
 
 
 def _typed(value: object) -> tuple[type, float | bool | int]:
-    """Python's ``==`` conflates ``True``, ``1`` and ``1.0``, blinding a bare comparison to family substitution."""
+    """Python's `==` conflates `True`, `1` and `1.0`, blinding a bare comparison to family substitution."""
     match value:
         case bool():
             return bool, value

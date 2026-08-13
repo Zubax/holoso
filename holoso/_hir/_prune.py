@@ -145,7 +145,7 @@ def _references(hir: Hir) -> list[ValueId]:
 def run(hir: Hir) -> Hir | None:
     """
     Repeats because taking one edge can settle the next condition; bounded, since each pruning replaces a branch
-    with a jump and never mints one. ``None`` reports that nothing was pruned.
+    with a jump and never mints one. `None` reports that nothing was pruned.
     """
     pruned = 0
     while (decided := _proven_branch(hir)) is not None:

@@ -94,7 +94,7 @@ def test_report_reveals_boolean_operators_and_casts() -> None:
 
 
 def test_report_shows_persistent_boolean_state() -> None:
-    # pid carries a boolean ``_started`` state; the report must show persistent state and a boolean register bank.
+    # pid carries a boolean `_started` state; the report must show persistent state and a boolean register bank.
     html = _report("pid")
     assert "persistent state" in html
     assert "b0" in html

@@ -1086,7 +1086,7 @@ class _SlotCommitAtLoopReturn:
 
 class _PromotedCarryWithLoopReturn:
     """
-    The INT carry assumption meets a FLOAT back value (``k + 0.5``), so the body pass is discarded and
+    The INT carry assumption meets a FLOAT back value (`k + 0.5`), so the body pass is discarded and
     re-run; the return site committed by the discarded pass must not poison the output table or the
     elision bookkeeping. Both sites return the public slot itself, so both must stay ELIDED.
     """

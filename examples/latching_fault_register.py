@@ -3,7 +3,7 @@
 A latching fault register: the sticky status/alarm bits behind a hardware safety interlock. Each fault input, once
 asserted, stays latched until the synchronous reset clears it, so a transient overcurrent/overvoltage/overtemperature
 event that has already disappeared remains visible to the supervisor that polls the register.
-A combinational ``any_fault`` summary ORs the latched channels for a single trip line.
+A combinational `any_fault` summary ORs the latched channels for a single trip line.
 """
 
 from pathlib import Path

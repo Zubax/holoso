@@ -463,8 +463,8 @@ def _two_division_kernel(a: float, b: float, c: float, d: float) -> float:
 
 def test_error_gate_ors_over_multiple_landing_registers() -> None:
     # An error-bearing operator (fdiv) whose result lands in >=2 distinct registers reconstructs its commit window as
-    # the OR, over those registers, of ``uc_op_<reg> == <its source code>``. No bundled example produces a multi-term
-    # err gate, and the numerical model does not simulate ``err``, so cosim cannot reach it -- pin the reconstruction.
+    # the OR, over those registers, of `uc_op_<reg> == <its source code>`. No bundled example produces a multi-term
+    # err gate, and the numerical model does not simulate `err`, so cosim cannot reach it -- pin the reconstruction.
     options = Options(
         OperatorOptions(fadd=FAddOptions(), fdiv=FDivOptions()),
         ffmt=FloatFormat(6, 18),
@@ -712,7 +712,7 @@ def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width(integ
 def test_only_a_float_port_is_allocated_a_microcode_sign_field(integer_result: SynthesisResult) -> None:
     """
     The literal field set for this known kernel: float operand/result ports only -- no integer port and, the unique
-    pruning claim, no field for the untapped ``fsort.max`` result lane.
+    pruning claim, no field for the untapped `fsort.max` result lane.
     """
     assert set(re.findall(r"\buc_\w+?sgn\b", integer_result.verilog_output.verilog)) == {
         "uc_fadd_0_asgn",

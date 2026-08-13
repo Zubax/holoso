@@ -182,7 +182,7 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: OperatorCase) -> None:
-    # Regression: a chained comparison (here ``lo < x < hi``) puts two comparator firings with distinct operand
+    # Regression: a chained comparison (here `lo < x < hi`) puts two comparator firings with distinct operand
     # pairs in one block. The single pooled holoso_fcmp instance serves one firing per initiation interval, so the
     # two must issue on distinct cycles. Before the contention rule the scheduler let both issue on the same cycle
     # -> they collided on the single comparator (one read the other's operands), corrupting the result in the RTL
@@ -353,7 +353,7 @@ def test_overlap_spilled_result_lands_in_successor_frame(config: OperatorCase) -
     assert spilled, "no wide result spilled past a shrunk terminator: the overlap corner did not trigger"
     # The spilling write's control WORD stays in the block (only the read-first landing tail crosses the terminator) --
     # so the emitter places it normally and the single-writer microcode validator never sees a replica. The word sits at
-    # the commit step itself (``pooled_write_word``), and the shrunk terminator must still clear it.
+    # the commit step itself (`pooled_write_word`), and the shrunk terminator must still clear it.
     for block, op, _write in spilled:
         assert pooled_write_word(op.commit_cycle) <= block.term_offset
 
@@ -510,7 +510,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     # +1 and the block drains one step LATER -- shrinking it would read the copy one PC before it lands. A source
     # RESIDENT at block entry (here an input) needs no read-first: the install fires inline-class at the work makespan,
     # so the block drains one step EARLIER, at boundary_step(makespan). Both residual installs are
-    # forced by ``return r, <arm>`` keeping the c-false arm live past the merge so it cannot coalesce onto the phi
+    # forced by `return r, <arm>` keeping the c-false arm live past the merge so it cannot coalesce onto the phi
     # register; if-conversion is disabled so each diamond stays a real branch rather than collapsing to a select.
     # (In-place state commit elided the former majority_voter sticky-fault installs.)
 
@@ -556,7 +556,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
 
 def test_entry_block_reclaims_its_first_control_word() -> None:
     # An inline op reads combinationally (latency 0), so the entry block's first boolean operation
-    # issues on block-local cycle 0 and FIRES on executing step 0 -- reclaiming ``ucode[0]``. Crash-before: the cycle-1
+    # issues on block-local cycle 0 and FIRES on executing step 0 -- reclaiming `ucode[0]`. Crash-before: the cycle-1
     # scheduler start and the inline latency of 1 together pushed the first op two steps late, to executing step 2.
     from quadrature_encoder import QuadratureEncoder
 
@@ -570,9 +570,9 @@ def test_entry_block_reclaims_its_first_control_word() -> None:
 
 def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
     # An entry-block inline op producing a persistent-state live-out issues on cycle 0 like any other, reclaiming
-    # ``ucode[0]``. It is safe because the backend gates every operator's ``in_valid`` with ``transacting`` (the idle
+    # `ucode[0]`. It is safe because the backend gates every operator's `in_valid` with `transacting` (the idle
     # re-fetch commits nothing) and the state write lands at pc >= fetch_lag, never the held pc 0 -- the
-    # ``latching_fault_register`` example is the end-to-end check. This pins that the state-bearing producer issues on
+    # `latching_fault_register` example is the end-to-end check. This pins that the state-bearing producer issues on
     # cycle 0, the same as its stateless twin.
     class _Stateful:
         def __init__(self) -> None:
@@ -596,7 +596,7 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
 
 def _const_branch_mir(ops: MirOptions) -> Mir:
     """
-    A block that branches on a literal, nested under a runtime diamond, computing ``x + 1.0 if x > y else x``. HIR
+    A block that branches on a literal, nested under a runtime diamond, computing `x + 1.0 if x > y else x`. HIR
     never hands selection this shape -- pruning settles a decided branch -- so it is built directly, the LIR behavior
     below being worth covering regardless.
     """
@@ -780,12 +780,12 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
 
 
 def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycle() -> None:
-    # Coverage for the OTHER half of the cross-block-overlap carry: ``entry_busy`` (the per-instance busy residue an
-    # overlapping predecessor hands its single-pred successor via ``successor_local_cycle`` at _build.py, the busy
+    # Coverage for the OTHER half of the cross-block-overlap carry: `entry_busy` (the per-instance busy residue an
+    # overlapping predecessor hands its single-pred successor via `successor_local_cycle` at _build.py, the busy
     # branch of the spill carry). The spilled-value READ timing has a regression above, but the busy residue is empty
     # for every current kernel -- a residue survives only when an operator's initiation interval exceeds its latest
     # write word, which no II=1 operator does -- so no end-to-end build exercises it. Pin its consumption directly:
-    # ``schedule_ops`` must hold a pooled firing off its instance until that instance frees in the successor frame.
+    # `schedule_ops` must hold a pooled firing off its instance until that instance frees in the successor frame.
     def f(a: float, b: float) -> float:
         return a * b  # one pooled firing; both operands are inputs (block-start ready), so nothing else can delay it
 
@@ -803,8 +803,8 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
     # attributable to the inherited busy residue alone, not a dependency.
     assert schedule_ops(mir.nodes, pool, schedulable, _FETCH_LAG).issue_cycle[mul] == 0
 
-    # The predecessor freed this instance at block-local ``free``; a successor whose terminator shrank to
-    # ``term_offset`` inherits that as ``successor_local_cycle(free, term_offset)`` -- exactly the map the busy branch
+    # The predecessor freed this instance at block-local `free`; a successor whose terminator shrank to
+    # `term_offset` inherits that as `successor_local_cycle(free, term_offset)` -- exactly the map the busy branch
     # of the spill carry applies. The firing must then issue precisely on that inherited free cycle, not before (a
     # still-in-flight instance) and not at cycle 1 (ignoring the residue).
     free, term_offset = 12, 4
@@ -824,7 +824,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
     # occupant, painting a register's residence spuriously back toward the block entry (dead register tinted LIVE) --
     # fixed by the write-then-read strict `<`; (c) a pc-gated install (a phi copy, a boolean write, or an early slot
     # writeback) was tinted at its FIRE step, one cycle before the model commits it -- fixed by routing both
-    # the model and the diagnostic through ``install_landing`` (fire + 1), while a boundary slot install is read-first
+    # the model and the diagnostic through `install_landing` (fire + 1), while a boundary slot install is read-first
     # at the boundary. Tied to the model oracle in BOTH banks: reg_liveness/bool_liveness must equal the union over both
     # branch arms (or, for the loop kernel, the executed trace) of the model's per-path residence, computed with an
     # INDEPENDENT write-then-read liveness that does not share residence_rows' rule. Crash-before: false-arm mid-rows
@@ -1077,7 +1077,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
 
     # A step is (pc, float reads, float writes, bool reads, bool writes, read_first). read_first marks the boundary
     # install bundle, where the hardware reads every source then writes every destination on the boundary edge, so a
-    # read outlives a same-register write (an in-place ``b <= ~b`` keeps its live-in); others are write-then-read
+    # read outlives a same-register write (an in-place `b <= ~b` keeps its live-in); others are write-then-read
     # (a read on a value's landing reads the NEW value).
     Step = tuple[int, frozenset[int], frozenset[int], frozenset[int], frozenset[int], bool]
 
@@ -1348,7 +1348,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     assert bool(lir.wide_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, WideOperand)
     assert isinstance(slot.tap.source, RegRef)
     # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value
-    # from the cycle the new value LANDS (one PC after the copy fires and samples its source, ``install_landing``;
+    # from the cycle the new value LANDS (one PC after the copy fires and samples its source, `install_landing`;
     # previously absent, which is why the report could not render it).
     landing = install_landing(lir.state_copy_step(slot))
     assert landing in lir.reg_liveness[slot.reg]
@@ -1392,7 +1392,7 @@ def test_cfg_phi_merge_register_shows_residence() -> None:
 
 def test_cfg_write_only_state_slot_is_reserved() -> None:
     # A state slot written on every arm but never read before the write has no live-in, so its dedicated register is
-    # never pinned to a value. The folded sign on the live-out (``self.acc = -t``) keeps it from coalescing in place, so
+    # never pinned to a value. The folded sign on the live-out (`self.acc = -t`) keeps it from coalescing in place, so
     # the register is reserved-but-empty (no live-in occupant, installed by the boundary copy). The colorer must still
     # reserve it -- a temporary considering it as a reuse candidate must skip it rather than fault on the missing pool
     # entry. (Without the sign fold the write-only live-out would coalesce onto the slot register; see the next test.)
@@ -1462,7 +1462,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
 
 
 def _coalescing_self_copies(lir: Lir) -> int:
-    """Count no-op identity copies (``r <= r`` with identity sign): a coalescable arm the pass should have merged."""
+    """Count no-op identity copies (`r <= r` with identity sign): a coalescable arm the pass should have merged."""
     return sum(
         1
         for block in lir.blocks
@@ -1647,8 +1647,8 @@ type _Producer = tuple[str, int]
 
 def _build_write_timeline(lir: Lir) -> dict[RegRef, list[tuple[int, _Producer]]]:
     """
-    Per-register ``(landing cycle, producer)`` timeline in the hardware/executing-step frame: inputs and state live-ins
-    land on cycle 1, an operator result on its ``write_landing_pcs`` landing. A flat per-register ordering is path-exact
+    Per-register `(landing cycle, producer)` timeline in the hardware/executing-step frame: inputs and state live-ins
+    land on cycle 1, an operator result on its `write_landing_pcs` landing. A flat per-register ordering is path-exact
     only on a single-block kernel, so the resolver is restricted to that case.
     """
     (block,) = lir.blocks
@@ -1671,7 +1671,7 @@ def _build_write_timeline(lir: Lir) -> dict[RegRef, list[tuple[int, _Producer]]]
 def _latest_producer_before(
     writes: dict[RegRef, list[tuple[int, _Producer]]], source: RegRef, read_cycle: int
 ) -> _Producer:
-    """The producer of the value ``source`` holds at ``read_cycle`` (a read on a landing cycle reads that value)."""
+    """The producer of the value `source` holds at `read_cycle` (a read on a landing cycle reads that value)."""
     chosen: _Producer | None = None
     for landing_cycle, producer in writes[source]:
         if landing_cycle <= read_cycle:
@@ -1851,7 +1851,7 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
 
 
 def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
-    # ``a < b`` taps the lt flag plainly and ``a >= b`` taps the SAME flag inverted: one output-port lane writes once
+    # `a < b` taps the lt flag plainly and `a >= b` taps the SAME flag inverted: one output-port lane writes once
     # per firing, so these must stay two firings, spaced by instance contention. Both values must still be correct.
     def f(a: float, b: float) -> tuple[float, ...]:
         below = a < b
@@ -1897,7 +1897,7 @@ def test_initiation_interval_spaces_firings_on_one_instance() -> None:
 class _HeavilyThrottledAdd(FAddOperator):
     """
     A test-only adder throttled to the deepest initiation interval the per-block busy windows support
-    (latency + the inter-block drain gap; validated in ``Lir.__post_init__``).
+    (latency + the inter-block drain gap; validated in `Lir.__post_init__`).
     """
 
     @property
@@ -1990,7 +1990,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
 
 
 def test_select_folds_arm_signs_into_operand_conditioners() -> None:
-    # ``x if c else -x`` costs exactly one comparison and one select: the arm negation rides the select's operand
+    # `x if c else -x` costs exactly one comparison and one select: the arm negation rides the select's operand
     # conditioner (the inline dual of the pooled operators' sign sidebands), never a separate float operation.
     def f(x: float, c: float) -> float:
         y = x if c > 0.0 else -x
@@ -2018,7 +2018,7 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
     # Pins the read-step frame of the state early-install bound: an inline select reads its operands at its fire
     # step (issue + latency + fetch_lag + 1), one cycle past where an issue-frame bound would have allowed the
     # slot's install copy to fire -- an early install bounded by issue cycles would overwrite the live-in before
-    # the select reads it (RTL would take the NEW value through ``old`` while the model keeps the old one).
+    # the select reads it (RTL would take the NEW value through `old` while the model keeps the old one).
     lir = build_lir(_run(SelectHold().step, config.make_mir(FMT)), f"select_hold_{config.label}")
     selects = [
         (block, op)
@@ -2060,7 +2060,7 @@ def test_not_folds_into_every_sink_position() -> None:
 
 
 def test_not_on_a_branch_condition_swaps_the_targets() -> None:
-    # ``if not cond`` costs nothing: the branch takes the complementary target instead of inverting the register.
+    # `if not cond` costs nothing: the branch takes the complementary target instead of inverting the register.
     # The division arms keep the diamond a real branch (if-conversion refuses them).
     def f(a: float, b: float) -> float:
         if not (a > b):
@@ -2088,7 +2088,7 @@ def test_double_negation_cancels() -> None:
 
 
 def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
-    # ``x`` and ``not x`` share one comparator tap and one boolean register: the polarity lives on each consumer.
+    # `x` and `not x` share one comparator tap and one boolean register: the polarity lives on each consumer.
     def f(a: float, b: float) -> tuple[float, ...]:
         flag = a > b
         return float(flag), float(not flag)
@@ -2167,7 +2167,7 @@ def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None
     # A Ret reached by a branch that writes nothing itself, whose output was produced in a PREDECESSOR (resident,
     # already landed with every pipeline edge -- fetch lag and read-first -- paid), needs NO boundary drain at all:
     # out_valid asserts at the Ret block's own base PC. A drained block's boundary covers only values that LAND in its
-    # frame; a pure-drain block has none, so its terminator offset is 0 (not the phantom ``boundary_step(0)`` of a
+    # frame; a pure-drain block has none, so its terminator offset is 0 (not the phantom `boundary_step(0)` of a
     # value that never commits there). This is the structural premise keeping two twins non-vacuous: the value grid at
     # test_overlap_behavior.py test_octave_index_resident_output_drain_only_ret_matches_reference and the exact
     # reclaimed latency in test_latency_freeze.py's frozen octave_index row.

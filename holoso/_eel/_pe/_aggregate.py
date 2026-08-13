@@ -65,7 +65,7 @@ def static_range(value: RangeValue) -> range | None:
 
 
 def range_length(span: range) -> int:
-    """Exact arithmetic: host ``len()`` of a huge range overflows Py_ssize_t."""
+    """Exact arithmetic: host `len()` of a huge range overflows Py_ssize_t."""
     return max(0, (span.stop - span.start + span.step - (1 if span.step > 0 else -1)) // span.step)
 
 
@@ -137,8 +137,8 @@ def slice_read(origin: Origin, base: Value, lo: int | None, hi: int | None) -> V
 
 def multi_index_read(origin: Origin, base: Value, axes: tuple[ResolvedAxis, ...]) -> Value:
     """
-    The ``m[i, j]`` / ``m[:, k]`` / ``m[a:b, c:d]`` read; a sliced axis arrives as its resolved
-    ``(lo, hi)`` bounds pair, an indexed axis as its value.
+    The `m[i, j]` / `m[:, k]` / `m[a:b, c:d]` read; a sliced axis arrives as its resolved
+    `(lo, hi)` bounds pair, an indexed axis as its value.
     """
     if not isinstance(base, TensorValue):
         reject(origin, f"too many indices: a multi-axis subscript works only on an array, not {a_kind(base)}")
@@ -264,7 +264,7 @@ def _derived(base: TensorValue, shape: tuple[int, ...], leaves: tuple[Scalar | O
 
 def array_annotation_shape(annotation: object, origin: Origin, what: str) -> tuple[tuple[int, ...], ScalarType] | None:
     """
-    Detected structurally (a type carrying ``dims``), so the annotation library stays a dependency of the
+    Detected structurally (a type carrying `dims`), so the annotation library stays a dependency of the
     user's code only.
     """
     if not (isinstance(annotation, type) and hasattr(annotation, "dims")):

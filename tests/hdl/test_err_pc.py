@@ -1,7 +1,7 @@
 """
-Directed cosim: a divide-by-zero latches ``err_pc`` to the fdiv's write step, and it resets each run.
+Directed cosim: a divide-by-zero latches `err_pc` to the fdiv's write step, and it resets each run.
 
-Builds the tiny module ``a / b``, then drives three back-to-back invocations: a normal one (err_pc stays 0), a
+Builds the tiny module `a / b`, then drives three back-to-back invocations: a normal one (err_pc stays 0), a
 zero-divisor one (err_pc latches the executing step on which the fdiv result is written back -- the commit step
 itself -- which is nonzero), and a normal one again (the per-initiation reset
 must have cleared the prior error). Parametrized over the fdiv output stage so the err flag and the result are shown

@@ -1,15 +1,15 @@
 """
-Gate verification for the ``transacting`` issue/install qualifier.
+Gate verification for the `transacting` issue/install qualifier.
 
 Three structural guards (no simulator) keep a later refactor from silently dropping the gate: every pooled operator
-``iv``, every ucode-driven constant install, and every pooled commit write-enable must be ANDed with ``transacting``.
-Two cosims (Icarus, which exposes the internal ``transacting`` wire and the ``regs`` array; Verilator may optimize
+`iv`, every ucode-driven constant install, and every pooled commit write-enable must be ANDed with `transacting`.
+Two cosims (Icarus, which exposes the internal `transacting` wire and the `regs` array; Verilator may optimize
 them away) drive a swept idle dwell:
-``test_transacting_edge_pins_at_accept_plus_fetch_lag`` certifies the qualifier rises on exactly the genuine step-0 (a
+`test_transacting_edge_pins_at_accept_plus_fetch_lag` certifies the qualifier rises on exactly the genuine step-0 (a
 late rise drops step-0; an early rise fires a spurious fill-window issue, inert for today's feed-forward operators and
 thus cosim-invisible -- the hazard the gate exists to stop once iterative operators land), and
-``test_state_slot_inert_during_dwell`` certifies a cycle-0 constant install does not commit to its persistent-state
-register while the PC dwells idle at pc 0 (the held ``ucode[0]`` commits nothing).
+`test_state_slot_inert_during_dwell` certifies a cycle-0 constant install does not commit to its persistent-state
+register while the PC dwells idle at pc 0 (the held `ucode[0]` commits nothing).
 """
 
 import shutil
@@ -56,14 +56,14 @@ def _verilog(fn: Callable[..., object], name: str) -> str:
 
 
 def _assert_effect_trigger_gated(fn: Callable[..., object], name: str, prefix: str) -> None:
-    # Every decode wire for an effect-trigger field (named by ``prefix``) must AND ``transacting``, so a held ucode[0]
+    # Every decode wire for an effect-trigger field (named by `prefix`) must AND `transacting`, so a held ucode[0]
     # dwell, a fill bubble, or a stale pre-reset word triggers nothing.
     arms = [
         line.strip() for line in _verilog(fn, name).splitlines() if line.lstrip().startswith("wire") and prefix in line
     ]
     assert arms, f"kernel produced no {prefix} wires to check"
     for line in arms:
-        # A 1-bit trigger masks as ``transacting & ...``; a wider write opcode as ``{W{transacting}} & ...``.
+        # A 1-bit trigger masks as `transacting & ...`; a wider write opcode as `{W{transacting}} & ...`.
         assert "transacting" in line and " & " in line, f"{prefix} decode is not gated by transacting: {line}"
 
 

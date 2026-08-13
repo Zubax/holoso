@@ -13,7 +13,7 @@ from ._int import IMulOperator
 @dataclass(frozen=True, slots=True)
 class OperatorOptions:
     """
-    ``None`` is not built, and a kernel needing it is refused by name; a configured but unused operator costs nothing.
+    `None` is not built, and a kernel needing it is refused by name; a configured but unused operator costs nothing.
     Integer operators are always available, so only their knobs appear here.
     """
 
@@ -41,11 +41,11 @@ class OpConfig:
     The machine's formats and every configurable operator built for them; construction validates the pairing, so an
     OpConfig cannot name an operator whose ports disagree with its own formats.
     Operators that don't have tunable parameters can be constructed ad-hoc instead.
-    An integer operator is never optional, only tuned, so it is always here and never goes through :func:`require`.
+    An integer operator is never optional, only tuned, so it is always here and never goes through require.
 
     The integer format is an answer rather than a knob, settled against the kernel at selection, so one
     configuration builds more than one of these and nothing here may assume a relation between the two formats:
-    a kernel carrying no float leaves the word answering to ``wint_min`` alone, below the float's width.
+    a kernel carrying no float leaves the word answering to `wint_min` alone, below the float's width.
     """
 
     float_format: FloatFormat
@@ -92,7 +92,7 @@ class OpConfig:
         )
 
     def __post_init__(self) -> None:
-        # Read off the signature rather than off the operator's ``fmt``: a conversion operator carries one format per
+        # Read off the signature rather than off the operator's `fmt`: a conversion operator carries one format per
         # side, and asking a format which family it belongs to can only confirm that it matches its own kind.
         for field in fields(self):
             operator = getattr(self, field.name)

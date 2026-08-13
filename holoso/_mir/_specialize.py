@@ -35,10 +35,10 @@ def left_shifts(hir: Hir) -> int:
 
 def specialize(hir: Hir, int_format: IntFormat) -> Hir | None:
     """
-    ``None`` ends the caller's fixpoint. A rule belongs here only where its answer is independent of every operand,
+    `None` ends the caller's fixpoint. A rule belongs here only where its answer is independent of every operand,
     since HIR integers are unbounded and a later round can reveal one as a constant no word holds: a left shift past
     the word is zero whatever it shifts, where a right shift past it repeats the sign fill only for a value the word
-    already holds -- so that clamp stays at lowering. A negative count and ``imul_pow2`` settle nothing here either.
+    already holds -- so that clamp stays at lowering. A negative count and `imul_pow2` settle nothing here either.
     """
     width = int_format.width
     assert width >= 2

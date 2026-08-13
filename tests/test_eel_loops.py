@@ -302,7 +302,7 @@ def test_residual_whiles_match_cpython() -> None:
 def test_the_public_artifacts_discriminate_unrolling_from_residualization() -> None:
     """
     The unroll-vs-residualize decision is itself public: a residual while keeps loop-carried phis in the
-    location-stripped ``frontend_ir[-1]`` and makes the transaction latency data-dependent (max II ``None``),
+    location-stripped `frontend_ir[-1]` and makes the transaction latency data-dependent (max II `None`),
     while an unrolled loop leaves neither.
     """
     unrolled = holoso.synthesize(_static_while, Options(OperatorOptions(fmul_ilog2=FMulILog2Options())), name="k")
@@ -850,7 +850,7 @@ def _int_carry_promotes_then_fits(n: int, x: float) -> float:
 def test_a_discarded_promote_pass_does_not_charge_the_budget() -> None:
     """
     Regression: the promote fixpoint discards what the previous pass built but kept charging its budget spend, so a
-    body over half the budget was refused for the sole reason that its accumulator was seeded ``0`` and not ``0.0``.
+    body over half the budget was refused for the sole reason that its accumulator was seeded `0` and not `0.0`.
     The re-run kernel therefore must synthesize, to Verilog byte-identical with its float-seeded twin under the one
     module name.
     """
@@ -1154,7 +1154,7 @@ def _returned_static_range() -> tuple[int, ...]:
 
 def test_static_ranges_decay_wherever_a_sequence_is_demanded() -> None:
     _oracle(_range_join_equal, [{"c": True}, {"c": False}])
-    # ``len(range(10**6))`` folds to a value no 16-bit word holds, so this kernel names the width it needs.
+    # `len(range(10**6))` folds to a value no 16-bit word holds, so this kernel names the width it needs.
     wide = dataclasses.replace(_MIN_OPTIONS, wint_min=24)
     result = holoso.synthesize(_static_range_consumers, wide, name="k")
     (out,) = result.numerical_model.elaborate().run()

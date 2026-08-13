@@ -189,7 +189,7 @@ class FDivOperator(FloatHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class FMulILog2Operator(ZkfBackedOperator):
-    """Exact scaling by a power of two: ``a * 2**k``; every ``k`` is legal."""
+    """Exact scaling by a power of two: `a * 2**k`; every `k` is legal."""
 
     ifmt: IntFormat
 
@@ -256,7 +256,7 @@ class FCmpOperator(FloatHardwareOperator, ComparatorOperator):
 class FRoundOperator(FloatHardwareOperator):
     """
     Round a float to an integral-valued float. One pooled instance serves all four modes (nearest-even, floor, ceil,
-    trunc) via the 2-bit ``round_mode`` immediate, as one comparator serves every relation.
+    trunc) via the 2-bit `round_mode` immediate, as one comparator serves every relation.
     """
 
     @dataclass(frozen=True, slots=True)
@@ -311,8 +311,8 @@ class FRoundOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FFmaOperator(FloatHardwareOperator):
     """
-    Fused multiply-add ``a*b + c``, single-rounded (full-width product rounded once with ``c``). Arity 3; serves the
-    explicit ``math.fma`` and the implicit ``a*b+c`` fusion. Not commutative under operand reversal (gives ``c*b+a``).
+    Fused multiply-add `a*b + c`, single-rounded (full-width product rounded once with `c`). Arity 3; serves the
+    explicit `math.fma` and the implicit `a*b+c` fusion. Not commutative under operand reversal (gives `c*b+a`).
     """
 
     @dataclass(frozen=True, slots=True)
@@ -361,8 +361,8 @@ class FFmaOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FSortOperator(FloatHardwareOperator):
     """
-    A 2-element float sorter emitting the ascending ``(min, max)`` of its operands, with input and per-output sign
-    conditioning. ``min(a,b)`` taps port 0 and ``max(a,b)`` port 1; one instance serves both, and a min and a max over
+    A 2-element float sorter emitting the ascending `(min, max)` of its operands, with input and per-output sign
+    conditioning. `min(a,b)` taps port 0 and `max(a,b)` port 1; one instance serves both, and a min and a max over
     one operand pair fuse into a single firing (as the comparator's relations do).
     NOT commutative: min/max preserve the selected operand's exact bits, and the sorter breaks a tie toward the second
     operand, so swapping operands can flip the sign of a zero result (a -0 conditioned from a zero magnitude).
@@ -750,7 +750,7 @@ class FFromIntOperator(ZkfBackedOperator):
 class FToIntOperator(ZkfBackedOperator):
     """
     Float to signed integer, saturating at the rails, an infinity reaching one of them. One pooled instance serves
-    all four modes through the ``round_mode`` immediate, as ``fround`` does.
+    all four modes through the `round_mode` immediate, as `fround` does.
     """
 
     ifmt: IntFormat

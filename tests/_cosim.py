@@ -12,8 +12,8 @@ from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, sources
 
 def run_cosim(sim: str, result: SynthesisResult, vectors: Sequence[Mapping[str, ScalarLike]] | None = None) -> None:
     """
-    ``result`` is the caller's single public ``holoso.synthesize`` product; ``sim`` plus the module name (unique per
-    machine across the suite) identify the build. ``vectors`` is an explicit input sequence (each maps an input-port
+    `result` is the caller's single public `holoso.synthesize` product; `sim` plus the module name (unique per
+    machine across the suite) identify the build. `vectors` is an explicit input sequence (each maps an input-port
     name to its typed scalar value); when omitted the shipped bench replays its own fixed-seed sweep. There is no
     public way to hand vectors to the bench, so the explicit-vectors path re-renders it through the private backend.
     """

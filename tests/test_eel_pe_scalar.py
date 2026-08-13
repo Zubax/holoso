@@ -1,9 +1,9 @@
 """
 The partial-evaluator scalar core, driven black-box through the differential oracle wherever the behavior is
-observable (kernels defined here, lowered through ``holoso._eel`` and compared against CPython), with residual
-pins on the location-stripped public ``frontend_ir[-1]`` where the behavior is invisible to the oracle
-(static-control folding, orphan dropping). Survivor refusals are pinned publicly as bare ``SynthesisError``
-(never ``UnsupportedConstruct``: the kernel residualized rather than being refused early). Rejections pin one
+observable (kernels defined here, lowered through `holoso._eel` and compared against CPython), with residual
+pins on the location-stripped public `frontend_ir[-1]` where the behavior is invisible to the oracle
+(static-control folding, orphan dropping). Survivor refusals are pinned publicly as bare `SynthesisError`
+(never `UnsupportedConstruct`: the kernel residualized rather than being refused early). Rejections pin one
 located diagnostic per family.
 """
 
@@ -72,7 +72,7 @@ def _rejects(fn: object, match: str) -> None:
 
 
 def _residual_text(fn: Callable[..., object]) -> str:
-    """For the kernels public synthesis refuses; everything that synthesizes pins text via :func:`_residual`."""
+    """For the kernels public synthesis refuses; everything that synthesizes pins text via _residual."""
     assert isinstance(fn, types.FunctionType)
     return print_eel(partial_evaluate(desugar(fn), fn, None, DEFAULT_UNROLL_MAX_TRIPS))
 
@@ -358,7 +358,7 @@ def _overflowing_static_float_power(x: float) -> float:
 def test_a_static_power_the_host_refuses_saturates_like_the_datapath() -> None:
     """
     The lowering owns the answer at every binding time: a fold runs the very stub the hardware runs, so an
-    overflow saturates to inf as ``exp2`` already does, and each exponent domain answers its pole the way its own
+    overflow saturates to inf as `exp2` already does, and each exponent domain answers its pole the way its own
     datapath does -- the composite's guarded +inf under a float exponent, a division that names no number under an
     integer one, judged by the survivor sweep rather than predicted.
     """
@@ -785,7 +785,7 @@ def _abs_stays_integer(n: int) -> int:
 def test_a_static_integer_folds_in_the_integer_domain() -> None:
     """
     Regression: every entry named a float operator, so a static integer was rounded before the fold --
-    ``abs(-(2**53+1))`` compared equal to 2**53 -- and gone before the gate below HIR could refuse it.
+    `abs(-(2**53+1))` compared equal to 2**53 -- and gone before the gate below HIR could refuse it.
     """
     for kernel in (_abs_of_an_unholdable_int, _round_of_an_unholdable_int, _floor_of_an_unholdable_int):
         result = holoso.synthesize(kernel, _INT_ONLY, name="k")
@@ -807,7 +807,7 @@ def _np_abs_at_the_int64_boundary() -> int:
 
 
 def test_the_integer_abs_is_exact_at_arbitrary_precision() -> None:
-    """Both spellings share the one IntAbs entry, where the host has numpy wrapping under int64 and ``abs`` not."""
+    """Both spellings share the one IntAbs entry, where the host has numpy wrapping under int64 and `abs` not."""
     for kernel in (_abs_at_the_int64_boundary, _np_abs_at_the_int64_boundary):
         assert HirEvaluator(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir).run() == [2**63], kernel.__name__
 
@@ -847,7 +847,7 @@ def test_an_integer_entry_can_be_a_composite_as_well_as_an_operator() -> None:
 def test_a_symbol_with_no_integer_entry_promotes_rather_than_asking_the_host() -> None:
     """
     Regression: a static integer used to fold by CALLING the named callee, and a raise there is not an answer --
-    ``math.log2(0)`` raises where the operator's reference computes -inf. Promotion cannot differ for 0 and 0.0.
+    `math.log2(0)` raises where the operator's reference computes -inf. Promotion cannot differ for 0 and 0.0.
     """
     for kernel, want in ((_log2_of_an_integer_zero, -math.inf), (_exp2_of_an_integer_overflow, math.inf)):
         result = holoso.synthesize(kernel, _FADD, name="k")

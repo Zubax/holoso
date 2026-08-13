@@ -2,7 +2,7 @@
 The white-box integer selection sentinels: fabric, latency and resource contracts that no public artifact names.
 Values, typed ports and the public initiation interval cannot tell one shared firing from two, an inline operator
 from a module, or a conditioner fold from a survived sign chain -- these few tests pin them directly, while all
-value coverage lives in ``test_int_synthesis``.
+value coverage lives in `test_int_synthesis`.
 """
 
 import math
@@ -122,9 +122,9 @@ def test_the_lowering_names_each_integer_operator_in_one_table(
     target: Callable[..., object], selected: list[str]
 ) -> None:
     """
-    Every operator the lowering can choose, named in one place: ``-x`` selects ``isubs`` because there is no
+    Every operator the lowering can choose, named in one place: `-x` selects `isubs` because there is no
     negation module, each shift direction selects the module that names it, the strength rewrites pick the
-    inline ``ishiftc``/``ibwand`` no public artifact can name, and ``min``/``max`` become one compare-and-select
+    inline `ishiftc`/`ibwand` no public artifact can name, and `min`/`max` become one compare-and-select
     pair each rather than branches.
     """
     assert _mnemonics(_select(target)) == selected
@@ -135,7 +135,7 @@ def _wide_firings(lir: Lir) -> list[PooledScheduledOp]:
 
 
 def test_the_quotient_and_the_remainder_share_one_divider_firing() -> None:
-    """``a // b`` beside ``a % b`` is one activation with two taps -- counted, because fusion is not automatic."""
+    """`a // b` beside `a % b` is one activation with two taps -- counted, because fusion is not automatic."""
     lir = build_lir(_select(divmod_pair), "divmod_pair")
     (firing,) = _wide_firings(lir)
     assert [instance.operator.mnemonic for instance in lir.instances] == ["idivs"]
@@ -144,7 +144,7 @@ def test_the_quotient_and_the_remainder_share_one_divider_firing() -> None:
 
 def test_relations_fuse_into_one_firing_and_opposite_inversions_split() -> None:
     """
-    Three relations, three flags, one activation. A firing taps each port at most once, so ``a <= b`` and ``a > b``
+    Three relations, three flags, one activation. A firing taps each port at most once, so `a <= b` and `a > b`
     -- the same flag under opposite inversions -- need an activation each, still bound to the one pooled comparator:
     the cost is a cycle, never a module.
     """
@@ -164,8 +164,8 @@ def strength_mix(x: int, n: int) -> tuple[int, int, int, int]:
 def test_strength_selection_shares_the_shifter_and_keeps_the_divider() -> None:
     """
     One graph holding every strength decision: the saturating scale and the raw runtime shift bind to a SINGLE
-    ``ishl`` instance through their opposite taps, the non-power-of-two quotient still pays the divider, and the
-    constant count ``3`` is an ``ishiftc`` immediate -- neither a module nor a pooled constant.
+    `ishl` instance through their opposite taps, the non-power-of-two quotient still pays the divider, and the
+    constant count `3` is an `ishiftc` immediate -- neither a module nor a pooled constant.
     """
     mir = _select(strength_mix)
     assert _mnemonics(mir) == ["idivs", "ishiftc", "ishl", "ishl"]
@@ -180,8 +180,8 @@ def test_strength_selection_shares_the_shifter_and_keeps_the_divider() -> None:
 
 def test_a_runtime_exponent_scaling_carries_mixed_conditioner_lists() -> None:
     """
-    The frontend can only spell a STATIC ``FloatMulPow2(k)``, which lowering materializes as a constant, so the
-    runtime-exponent ``fmul_ilog2`` contract -- a float port beside an integer port, each with its own conditioner
+    The frontend can only spell a STATIC `FloatMulPow2(k)`, which lowering materializes as a constant, so the
+    runtime-exponent `fmul_ilog2` contract -- a float port beside an integer port, each with its own conditioner
     algebra -- is reachable only as a hand-built graph.
     """
     fmt = OPTIONS.ffmt
@@ -229,7 +229,7 @@ def test_conversions_share_one_instance_and_read_the_unrounded_value() -> None:
 
 def test_a_negated_operand_folds_onto_the_conversion() -> None:
     """
-    ``int(-x)`` conditions the ``ftoint`` float port rather than emitting a sign operator of its own; the public
+    `int(-x)` conditions the `ftoint` float port rather than emitting a sign operator of its own; the public
     module regex cannot see an inline sign, so the exact mnemonic list is the sentinel.
     """
     assert _mnemonics(_select(negated_crossing)) == ["ftoint"]
@@ -238,7 +238,7 @@ def test_a_negated_operand_folds_onto_the_conversion() -> None:
 def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     """
     The conversion's operand conditioner applies before it rounds, so a negation applied after the rounding cannot
-    move there -- ``-floor(x)`` is not ``floor(-x)``. The front end sinks such a negation to the integer side, which
+    move there -- `-floor(x)` is not `floor(-x)`. The front end sinks such a negation to the integer side, which
     is why the shape is built directly rather than written in Python.
     """
     builder = HirBuilder()

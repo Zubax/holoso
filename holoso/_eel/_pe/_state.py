@@ -4,12 +4,12 @@ syntactic may-write scan of the entry method, dead arms included; runs re-trim S
 was reached -- folding only kills writes, so the loop is monotone. A rejection under the conservative
 assumption is FINAL, annotated with the pinning writes.
 
-Reset values come from the instance ``__dict__``, never through descriptors. Each build checks the state
+Reset values come from the instance `__dict__`, never through descriptors. Each build checks the state
 trees pairwise-disjoint, disjoint from everything the environment could hand the kernel (frozen siblings and
-environment aggregates eagerly; lazy captures through ``check_capture``, sound one-directionally because
+environment aggregates eagerly; lazy captures through `check_capture`, sound one-directionally because
 state trees build first), and internally alias-free with exact ndarray storage overlap, self-overlap through
 strides included -- the flat slot decomposition assigns one register per leaf path, which is exactly what an
-alias would break. Raw tuples launder nothing only when their subtrees hold no mutable object: ``__init__``
+alias would break. Raw tuples launder nothing only when their subtrees hold no mutable object: `__init__`
 ran arbitrary Python, unlike the in-model sequences the install gate sees.
 """
 
@@ -58,7 +58,7 @@ def _spell(path: SlotPath) -> str:
 
 
 class StateModel:
-    """One model per lowering; ``prepare`` rebuilds the specs and the raw registry for each run of the trim loop."""
+    """One model per lowering; `prepare` rebuilds the specs and the raw registry for each run of the trim loop."""
 
     def __init__(self, instance: object, seed: dict[str, Origin], environment: list[tuple[str, object]]) -> None:
         assert seed
@@ -340,14 +340,14 @@ _WRITE_PROTOCOLS = ("__setattr__", "__delattr__")
 
 
 def overridden_protocol(instance: object, protocols: tuple[str, ...]) -> str | None:
-    """The first of ``protocols`` the instance's class overrides, or None when it inherits all of them."""
+    """The first of `protocols` the instance's class overrides, or None when it inherits all of them."""
     return next((p for p in protocols if getattr(type(instance), p, None) is not getattr(object, p, None)), None)
 
 
 def descriptor_guard(instance: object, seed: dict[str, Origin]) -> None:
     """
     State reads and writes lower to plain slot operations, so anything that would make CPython run code on
-    attribute access instead -- a custom attribute protocol, a data descriptor, a __dict__-less instance --
+    attribute access instead -- a custom attribute protocol, a data descriptor, a `__dict__`-less instance --
     is a located rejection at the pinning write.
     """
     anchor = seed[min(seed)]

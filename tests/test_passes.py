@@ -275,7 +275,7 @@ declinations below reachable through the public API at all."""
 
 
 def test_a_reciprocal_the_host_cannot_hold_leaves_the_division_standing() -> None:
-    # ``x/c == x*(1/c)`` only where the reciprocal is a number: a subnormal divisor has none the host can hold, so
+    # `x/c == x*(1/c)` only where the reciprocal is a number: a subnormal divisor has none the host can hold, so
     # minting it answers infinity for a quotient that is an ordinary, representable value.
     def f(a: float) -> float:
         return a / 1e-320
@@ -466,8 +466,8 @@ def test_a_signed_power_of_two_scales_by_its_exponent_however_it_is_spelled() ->
 
 
 def test_the_absorbing_zero_outranks_a_composition() -> None:
-    # ``x*0 == 0`` holds for the non-finite operand too, so the pair must not be combined into the indeterminate form
-    # first: composing ``inf`` with ``0.0`` names no number and would refuse a build that has a defined answer.
+    # `x*0 == 0` holds for the non-finite operand too, so the pair must not be combined into the indeterminate form
+    # first: composing `inf` with `0.0` names no number and would refuse a build that has a defined answer.
     def f(a: float) -> float:
         return (a * math.inf) * 0.0
 
@@ -636,9 +636,9 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
 
 
 def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
-    # Regression (user): a partially-constant connective reduces through its absorbing element (``x or True`` -> True,
-    # ``x and False`` -> False), and its identity element drops out (``x or False`` -> x, ``x and True`` -> x), which
-    # is what collapses the residual ``and`` a chained comparison leaves once a statically-true link folds.
+    # Regression (user): a partially-constant connective reduces through its absorbing element (`x or True` -> True,
+    # `x and False` -> False), and its identity element drops out (`x or False` -> x, `x and True` -> x), which
+    # is what collapses the residual `and` a chained comparison leaves once a statically-true link folds.
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", BoolType())  # a dynamic boolean operand
@@ -900,7 +900,7 @@ def test_bselect_reductions_are_truth_table_correct() -> None:
 
 
 def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
-    # ``mux(c, X, X) == X`` is the universal mux identity the constant-arm reductions depend on. The shape appears
+    # `mux(c, X, X) == X` is the universal mux identity the constant-arm reductions depend on. The shape appears
     # only once if-conversion interns both arms into one block, so each arm's comparison becomes a self-comparison;
     # the mux must be gone from the graph (white-box: inline selects are publicly invisible), and the kernels must
     # answer exactly as CPython does.
@@ -1007,7 +1007,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
 def test_operator_layer_does_not_import_hir() -> None:
     """
     The hardware operator models are a base vocabulary layer below the IR pipeline; they must never reach back into the
-    semantic HIR -- the smell W12 removed (importing a relation enum from ``_hir``). Locks the severed edge
+    semantic HIR -- the smell W12 removed (importing a relation enum from `_hir`). Locks the severed edge
     transitively.
     """
     offenders = forbidden_imports("holoso._operators", "holoso._hir")
@@ -1016,7 +1016,7 @@ def test_operator_layer_does_not_import_hir() -> None:
 
 def test_the_operator_families_are_leaves_over_one_shared_vocabulary() -> None:
     """
-    The families answer only to ``_common``: were one to import another, the shared vocabulary would have to live in
+    The families answer only to `_common`: were one to import another, the shared vocabulary would have to live in
     whichever family happened to be lowest, which is how a family module becomes everyone's dumping ground.
     """
     families = ["holoso._operators._float", "holoso._operators._int", "holoso._operators._bool"]
@@ -1028,7 +1028,7 @@ def test_the_operator_families_are_leaves_over_one_shared_vocabulary() -> None:
 
 
 def test_a_reduction_minted_constant_does_not_reach_the_datapath() -> None:
-    # A reduction can mint what another rule would erase: the one-shot latch below reduces to ``first and False``,
+    # A reduction can mint what another rule would erase: the one-shot latch below reduces to `first and False`,
     # which is the constant False written the long way. Every connective a reduction mints therefore passes through
     # the declared algebra in the same walk, or the latch live-out ships as a live boolean operation.
     class Primed:
@@ -1099,7 +1099,7 @@ def test_integer_operator_signature(operator: Operator, operand_types: list[Type
 
 def test_integer_identity_and_absorbing_operands_simplify_against_a_runtime_value() -> None:
     # The declared integer identities and absorbing elements simplify against an operand the folder cannot see.
-    # Only the arithmetic links (``+ 0``, ``* 1``, ``* 0``) would instantiate modules, so the empty set pins their
+    # Only the arithmetic links (`+ 0`, `* 1`, `* 0`) would instantiate modules, so the empty set pins their
     # folds; the bitwise links are inline either way, and their reductions are pinned white-box on the graph.
     def f(n: int) -> tuple[int, int, int, int]:
         return ((((n + 0) * 1) | 0) ^ 0) & -1, n * 0, n | -1, n & 0
@@ -1178,7 +1178,7 @@ def test_integer_folding_has_no_size_limit() -> None:
 
 
 def test_the_integer_subtraction_rules_the_shared_algebra_cannot_state() -> None:
-    # ``x - 0`` is ``x`` while ``0 - x`` is the negation, so each direction is its own rule; the negation is the
+    # `x - 0` is `x` while `0 - x` is the negation, so each direction is its own rule; the negation is the
     # only direction that needs the subtractor. Pooling hides op counts, so the artifact pins one subtractor
     # instance and no other module class.
     def f(n: int) -> tuple[int, int, int]:
@@ -1209,8 +1209,8 @@ def test_a_power_of_two_integer_product_mints_the_saturating_scaling() -> None:
 
 
 def test_integer_negations_share_one_tracking_across_their_spellings() -> None:
-    # ``x * -1`` and ``x // -1`` are negations rather than a product and a quotient, so no multiplier or divider
-    # module appears; ``-(-x)`` returns the base and ``n + (-n)`` folds to zero, so no adder appears either. The
+    # `x * -1` and `x // -1` are negations rather than a product and a quotient, so no multiplier or divider
+    # module appears; `-(-x)` returns the base and `n + (-n)` folds to zero, so no adder appears either. The
     # surviving negations bind the one pooled subtractor instance.
     def f(n: int) -> tuple[int, int, int, int]:
         return -(-n), n + (-n), n * -1, n // -1
@@ -1296,8 +1296,8 @@ def test_the_boolean_connectives_fold_over_equal_operands() -> None:
 
 
 def test_an_integer_self_division_erases_an_operand_that_names_no_number() -> None:
-    # The integer dual of the float rule below: ``5 // 0`` has no value for the fold, so it is an operand the
-    # compiler cannot see, and ``q // q`` and ``q % q`` speak for it whatever it turns out to be -- the division
+    # The integer dual of the float rule below: `5 // 0` has no value for the fold, so it is an operand the
+    # compiler cannot see, and `q // q` and `q % q` speak for it whatever it turns out to be -- the division
     # reduces, its operand goes dead, and nothing is left for the survivor sweep to convict.
     builder = HirBuilder()
     builder.block()
@@ -1350,13 +1350,13 @@ def _wrapped_infinity_times_zero(wrapper: Operator) -> Hir:
 
 
 def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression() -> None:
-    # "Known" has to mean known, not "spelled as a constant node". ``abs(inf)``, ``floor(inf)``, ``trunc(inf)``
-    # each IS the infinity, however written, so the product is the same indeterminate form as ``inf * 0.0`` and
+    # "Known" has to mean known, not "spelled as a constant node". `abs(inf)`, `floor(inf)`, `trunc(inf)`
+    # each IS the infinity, however written, so the product is the same indeterminate form as `inf * 0.0` and
     # survives to be refused.
     for spelled in (FloatAbs(), FloatFloor(), FloatTrunc()):
         with pytest.raises(SynthesisError, match="names no number"):
             _wrapped_infinity_times_zero(spelled)
-    # The other side of the same rule, and the reason it is not a dodge: ``sin(inf)`` names NO number, so it is an
+    # The other side of the same rule, and the reason it is not a dodge: `sin(inf)` names NO number, so it is an
     # operand the compiler cannot see, and the absorbing zero claims it exactly as it claims a runtime one. The wrapper
     # is deleted by that rewrite, so nothing naming no number survives -- a refusal missed under the charter's license,
     # never a wrong answer, and the alternative would be an identity that consults how its operand was produced.
@@ -1365,7 +1365,7 @@ def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression()
 
 
 def test_a_self_division_erases_an_operand_that_names_no_number() -> None:
-    # ``x/x == 1`` speaks for an operand the compiler cannot see, and ``inf + -inf`` is one: the fold has no value for
+    # `x/x == 1` speaks for an operand the compiler cannot see, and `inf + -inf` is one: the fold has no value for
     # it. So the quotient reduces and the sum goes with it, leaving nothing for the survivor sweep to convict.
     builder = HirBuilder()
     builder.block()
@@ -1378,7 +1378,7 @@ def test_a_self_division_erases_an_operand_that_names_no_number() -> None:
 
 
 def _merge_of(builder: HirBuilder, arm: Callable[[HirBuilder], ValueId]) -> ValueId:
-    """A phi merging two separately-built arms behind a runtime condition -- the shape a plain ``if/else`` leaves."""
+    """A phi merging two separately-built arms behind a runtime condition -- the shape a plain `if/else` leaves."""
     entry = builder.current_block
     then_block, else_block, merge = builder.block(), builder.block(), builder.block()
     builder.position_at(entry)
@@ -1465,7 +1465,7 @@ def test_a_constant_condition_selects_a_mux_arm_in_every_scalar_family() -> None
 
 
 def test_the_integer_float_round_trip_is_not_an_identity() -> None:
-    # ``int(float(n)) == n`` is NOT an axiom here, so the nest stands over an operand the compiler cannot see. The
+    # `int(float(n)) == n` is NOT an axiom here, so the nest stands over an operand the compiler cannot see. The
     # carrier may be coarser than the integer, and then the round trip ROUNDS -- exactness is promised only where a
     # float holds the integer, and an identity may claim nothing weaker than every value. The constant case shows the
     # rounding the axiom would have had to deny.
@@ -1533,7 +1533,7 @@ def test_the_composed_cast_laws_are_observable_where_the_formats_distinguish_the
 
 
 def _optimized_constant_operation(operator: Operator, *operands: float | int) -> Hir:
-    """``operator(consts...)`` wired to an output so DCE keeps it, run through the whole HIR pipeline."""
+    """`operator(consts...)` wired to an output so DCE keeps it, run through the whole HIR pipeline."""
     builder = HirBuilder()
     builder.block()
     values = [
@@ -1666,7 +1666,7 @@ def test_an_arm_a_proven_guard_excludes_is_deleted_rather_than_merely_unconvicte
 
 
 def test_a_loop_whose_test_is_proven_false_dissolves_entirely() -> None:
-    # Only the graph's ``x*0 == 0`` identity decides this test, so the front end residualizes a real loop.
+    # Only the graph's `x*0 == 0` identity decides this test, so the front end residualizes a real loop.
     def never_enters(x: float) -> float:
         y = x
         while (y * 0.0) > 1.0:
@@ -1884,7 +1884,7 @@ def test_a_literal_the_format_cannot_hold_is_refused_rather_than_silently_degrad
 
 
 def test_a_divisor_whose_reciprocal_degrades_is_carried_apart() -> None:
-    # 3e9 is representable but its reciprocal is not, and the reciprocal is what HIR's ``x/c -> x*(1/c)`` hands the
+    # 3e9 is representable but its reciprocal is not, and the reciprocal is what HIR's `x/c -> x*(1/c)` hands the
     # machine. Multiplying by it would answer zero for every input; carrying it as a significand this format holds
     # and an exponent no format bounds costs one operation and answers to the format's own precision.
     def f(x: float) -> float:
@@ -1929,8 +1929,8 @@ def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
 
 
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:
-    # ``if c: r = a`` over a boolean leaves bselect(c, a, c) -- Python's eager ``and`` shape written as a branch --
-    # and its dual leaves bselect(c, c, b). The shape alone cannot tell an ``and`` rewritten as an ``or``; only the
+    # `if c: r = a` over a boolean leaves bselect(c, a, c) -- Python's eager `and` shape written as a branch --
+    # and its dual leaves bselect(c, c, b). The shape alone cannot tell an `and` rewritten as an `or`; only the
     # truth table can, so both are scored against CPython over the full input cube.
     def gate_shapes(c: bool, a: bool, b: bool) -> tuple[bool, bool]:
         r1 = c

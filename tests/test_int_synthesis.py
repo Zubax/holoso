@@ -1,10 +1,10 @@
 """
-Black-box integer synthesis through the public API: every kernel drives ``synthesize`` and the numerical model
+Black-box integer synthesis through the public API: every kernel drives `synthesize` and the numerical model
 against CPython or independent literals. Selection facts are asserted through the one public spelling they have --
-``holoso_<mnemonic> #(`` instantiations present or absent in ``verilog_output.verilog`` -- and refusal diagnostics
-verbatim. ``wint_min`` alone pins the machine word of a float-free kernel, so the vectors that depend on it say so; the
-inline operators (``ishiftc``, ``ibwand``, ...) have no public name, so their selection lives in
-``test_int_selection``.
+`holoso_<mnemonic> #(` instantiations present or absent in `verilog_output.verilog` -- and refusal diagnostics
+verbatim. `wint_min` alone pins the machine word of a float-free kernel, so the vectors that depend on it say so; the
+inline operators (`ishiftc`, `ibwand`, ...) have no public name, so their selection lives in
+`test_int_selection`.
 """
 
 import dataclasses
@@ -107,7 +107,7 @@ def test_an_integer_state_kernel_synthesizes_and_the_model_matches_python(
 
 
 def mixed_constants(x: float, n: int) -> tuple[float, int, int]:
-    """``1`` beside ``1.0`` pools a FloatValue and an IntValue side by side; ``7`` reads at a non-value index."""
+    """`1` beside `1.0` pools a FloatValue and an IntValue side by side; `7` reads at a non-value index."""
     return x + 1.0, n + 1, n + 7
 
 
@@ -138,7 +138,7 @@ class PhaseDecimator:
 def test_power_of_two_strength_reduction_survives_synthesis_and_matches_python() -> None:
     """
     Every constant power-of-two rewrite in one stateful kernel -- the saturating scaling, the mask, the inline
-    shift and the negation -- driven through ``synthesize`` against the same class running in CPython. The vectors
+    shift and the negation -- driven through `synthesize` against the same class running in CPython. The vectors
     stay short of the rails, where the machine's answer and CPython's coincide exactly.
     """
     # x*4 reaches 400_000 on these vectors, and no float lends this kernel a word, so it asks for one that holds it.
@@ -168,7 +168,7 @@ def test_a_divider_kernel_model_matches_python() -> None:
 
 
 def test_an_integer_input_rejects_a_bool(accumulator_result: holoso.SynthesisResult) -> None:
-    """``bool`` is an ``int`` subclass, so a silently float-free miscoercion -- not a crash -- is the failure mode."""
+    """`bool` is an `int` subclass, so a silently float-free miscoercion -- not a crash -- is the failure mode."""
     sim = accumulator_result.numerical_model.elaborate()
     with pytest.raises(TypeError, match=r"input 0 must be IntValue or int"):
         sim.run(True)
@@ -241,7 +241,7 @@ def test_a_conversion_pair_crosses_the_family_boundary_and_types_its_ports() -> 
 
 
 def cross_boundary(f: float) -> tuple[float, int]:
-    """``float(int(f) & 0xFF)`` -- an integer constant, both mixed-format operators, and an inline bitwise between."""
+    """`float(int(f) & 0xFF)` -- an integer constant, both mixed-format operators, and an inline bitwise between."""
     masked = int(f) & 0xFF
     return float(masked), masked
 
@@ -344,7 +344,7 @@ class MixedState:
 
 def test_a_kernel_mixing_integer_and_float_state_keeps_them_apart() -> None:
     result = holoso.synthesize(MixedState().step, _INT16, name="MixedState")
-    # The typed ports pin the scalar families: Python ``==`` over the values alone conflates 3 and 3.0.
+    # The typed ports pin the scalar families: Python `==` over the values alone conflates 3 and 3.0.
     assert [(port.name, port.scalar_type) for port in result.output_ports] == [
         ("state_count", holoso.IntType(result.int_format)),
         ("state_level", holoso.FloatType(_INT16.ffmt)),
@@ -471,7 +471,7 @@ def a_right_shift_over_a_value_no_word_holds(x: int) -> int:
 
 
 def test_a_right_shift_is_clamped_where_its_operand_is_a_machine_value() -> None:
-    # Clamped in HIR the round after this select folds, the shift answered ``(MAX + 1) >> 15 == 1`` against the 0
+    # Clamped in HIR the round after this select folds, the shift answered `(MAX + 1) >> 15 == 1` against the 0
     # both the machine and CPython give: the clamp holds only for a value the word already holds.
     assert _run(_elaborate(a_right_shift_over_a_value_no_word_holds, "ClampedOperand"), 0) == [0]
 
@@ -597,7 +597,7 @@ def shift_right_by_a_negative_constant(x: int) -> int:
 
 
 def shift_by_a_count_a_loop_phi_carries(x: int, n: int) -> int:
-    # An optimizer that stops before the phi folds leaves a runtime count, and the shifter reverses it into ``x >> 1``.
+    # An optimizer that stops before the phi folds leaves a runtime count, and the shifter reverses it into `x >> 1`.
     count = (x * 0) - 1
     t = n
     while t > 0:
@@ -707,7 +707,7 @@ def _scale_by(k: int) -> Callable[[int], int]:
 @pytest.mark.parametrize("k", [1, 2, 14, 15, 16, 40])
 def test_a_power_of_two_scaling_reads_the_shifter_where_it_saturates(k: int) -> None:
     """
-    The one thing separating this operator from ``x << k``: a multiplication rails where the raw shift drops what
+    The one thing separating this operator from `x << k`: a multiplication rails where the raw shift drops what
     leaves the word. The count is unbounded where the word is not, so every one past the width rails the same way.
     """
     result = holoso.synthesize(_scale_by(k), _INT16, name=f"ScaleBy{k}")
@@ -742,7 +742,7 @@ def negated_by_product(x: int) -> int:
 
 
 def test_a_minted_power_of_two_product_saturates_like_the_multiplication() -> None:
-    """Strength reduction hands ``x * 8`` to the shifter's saturating tap, so the rails answer as the product."""
+    """Strength reduction hands `x * 8` to the shifter's saturating tap, so the rails answer as the product."""
     result = holoso.synthesize(times_eight, _INT16, name="TimesEight")
     assert _modules(result) == ["ishl"]
     sim = result.numerical_model.elaborate()
@@ -751,7 +751,7 @@ def test_a_minted_power_of_two_product_saturates_like_the_multiplication() -> No
 
 
 def test_a_minted_power_of_two_quotient_is_one_inline_shift() -> None:
-    """``x // 8`` pays neither the divider nor any module: the arithmetic shift IS the floor division."""
+    """`x // 8` pays neither the divider nor any module: the arithmetic shift IS the floor division."""
     result = holoso.synthesize(eighth, _INT16, name="Eighth")
     assert _modules(result) == []
     sim = result.numerical_model.elaborate()
@@ -760,7 +760,7 @@ def test_a_minted_power_of_two_quotient_is_one_inline_shift() -> None:
 
 
 def test_a_minted_power_of_two_remainder_is_the_mask() -> None:
-    """``x % 8`` is the two's-complement mask, negative dividends included, with no divider error sideband."""
+    """`x % 8` is the two's-complement mask, negative dividends included, with no divider error sideband."""
     result = holoso.synthesize(eighth_remainder, _INT16, name="EighthRemainder")
     assert _modules(result) == []
     sim = result.numerical_model.elaborate()
@@ -794,7 +794,7 @@ def boundary_quotient(x: int) -> int:
 
 def test_the_boundary_exponent_builds_where_its_divisor_constant_could_not() -> None:
     """
-    ``2**15`` fits no int16 word, so the spelled-out divisor is refused at selection; the mask and the shift the
+    `2**15` fits no int16 word, so the spelled-out divisor is refused at selection; the mask and the shift the
     rewrites leave are in-word and exact, so the boundary exponent builds and answers as CPython does.
     """
     remainder_sim = _elaborate(boundary_remainder, "BoundaryRemainder")
@@ -829,7 +829,7 @@ def ceiled_to_int(x: float) -> int:
 
 
 def truncated_to_int(x: float) -> int:
-    """``math.trunc`` already answers an integer, so the float-valued truncation comes from a conversion round trip."""
+    """`math.trunc` already answers an integer, so the float-valued truncation comes from a conversion round trip."""
     return int(float(int(x)))
 
 
@@ -861,8 +861,8 @@ def test_a_conversion_carries_its_rounding_as_a_mode_rather_than_a_second_module
     target: Callable[..., object],
 ) -> None:
     """
-    Only the conversion is instantiated: no ``holoso_fround`` (the rounding is a mode field) and no
-    ``holoso_isubs`` (a sign folds onto the conversion's operand rather than costing a module).
+    Only the conversion is instantiated: no `holoso_fround` (the rounding is a mode field) and no
+    `holoso_isubs` (a sign folds onto the conversion's operand rather than costing a module).
     """
     result = holoso.synthesize(target, _INT16, name="Conv")
     assert _modules(result) == ["ftoint"]
@@ -891,7 +891,7 @@ def test_two_conversions_over_one_value_stay_apart_on_their_modes_alone() -> Non
 
 
 def test_a_rounding_that_only_a_conversion_reads_needs_no_rounding_operator_configured() -> None:
-    """Absorbed, the rounding is never selected, so a kernel that only converts one no longer demands ``fround``."""
+    """Absorbed, the rounding is never selected, so a kernel that only converts one no longer demands `fround`."""
     without_fround = holoso.Options(
         holoso.OperatorOptions(
             fadd=holoso.FAddOptions(), ffromint=holoso.FFromIntOptions(), ftoint=holoso.FToIntOptions()
@@ -908,7 +908,7 @@ def rounded_to_float(x: float) -> float:
 
 
 def test_a_float_only_kernel_reaching_an_integer_operator_still_synthesizes() -> None:
-    """``float(math.floor(x))`` folds the conversion pair away, so the built machine is float-only throughout."""
+    """`float(math.floor(x))` folds the conversion pair away, so the built machine is float-only throughout."""
     holoso.synthesize(rounded_to_float, _INT16, name="RoundedToFloat")
 
 
@@ -922,7 +922,7 @@ def popcount_parity(x: int) -> bool:
 
 def test_the_population_count_counts_the_magnitude_on_its_own_module() -> None:
     """
-    ``int.bit_count()`` is the one spelling, and it counts the magnitude exactly as CPython does -- so the rails
+    `int.bit_count()` is the one spelling, and it counts the magnitude exactly as CPython does -- so the rails
     answer 1 rather than the width, and no absolute value is spent reaching them.
     """
     result = holoso.synthesize(popcount_of, _INT16, name="Popcount")

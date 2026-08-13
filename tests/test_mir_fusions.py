@@ -1,7 +1,7 @@
 """
-Directional-infinity composite recognition (``isinf(x) and x > 0`` -> one classifier), asserted on public
+Directional-infinity composite recognition (`isinf(x) and x > 0` -> one classifier), asserted on public
 artifacts: classifier call sites in the emitted Verilog with the support-function prelude stripped, pooled
-``fcmp`` presence/absence, and model values against CPython. The post-fusion ``band`` facts keep one white-box
+`fcmp` presence/absence, and model values against CPython. The post-fusion `band` facts keep one white-box
 MIR sentinel because a boolean AND renders as an inline expression with no call-site spelling.
 """
 

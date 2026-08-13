@@ -4,7 +4,7 @@ Everything environment-rooted (globals, closure cells, injected defaults, attrib
 enters ESCAPED per the ownership model, and conversion is MEMOIZED BY OBJECT IDENTITY,
 so two captures sharing a sub-object map to the same allocation and every read of one object yields one identity.
 Anything inadmissible stays a lazily-judged Opaque -- binding it is CPython-legal; only a use rejects.
-The optional ``guard`` is the overlap check against the state trees, called on every captured
+The optional `guard` is the overlap check against the state trees, called on every captured
 aggregate with the capturing read's origin; the state trees are built before any capture, so this one
 direction establishes the disjointness invariant.
 """

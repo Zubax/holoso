@@ -1,9 +1,9 @@
 """
 The MIR interpreter: a bit-exact, schedule-independent reference model of a kernel.
 
-Where the numerical backend (``holoso._backend.numerical``) replays the scheduled, register-allocated LIR cycle by
+Where the numerical backend (`holoso._backend.numerical`) replays the scheduled, register-allocated LIR cycle by
 cycle, this interpreter evaluates the unscheduled MIR dataflow graph directly: it walks the CFG, evaluates each
-operation once through the operator's own bit-exact ``evaluate``, and resolves phis by the edge actually taken. It owns
+operation once through the operator's own bit-exact `evaluate`, and resolves phis by the edge actually taken. It owns
 no registers, no operator instances, and no cycle counter, so it is independent of scheduling, instance binding,
 register allocation, and the cross-block overlap machinery. Comparing it against the numerical model therefore isolates
 exactly that LIR layer, bit-for-bit and with no tolerance: a divergence is a scheduling/binding/regalloc/overlap
@@ -11,7 +11,7 @@ miscompile -- the class the RTL-vs-model cosimulation is structurally blind to, 
 RTL is emitted from.
 
 It is a first-class verification peer of the numerical model, not a test helper, and deliberately imports nothing from
-``holoso._lir`` -- that independence is the whole point and a guard test enforces it.
+`holoso._lir` -- that independence is the whole point and a guard test enforces it.
 """
 
 from typing import assert_never
@@ -46,9 +46,9 @@ from ._ir import (
 
 class MirInterpreter:
     """
-    A runnable bit-exact reference for one selected MIR graph. ``run`` evaluates one whole transaction (inputs to
+    A runnable bit-exact reference for one selected MIR graph. `run` evaluates one whole transaction (inputs to
     outputs) and advances the persistent slot state, so a caller drives an ordered sequence of transactions the same
-    way it drives :meth:`NumericalSimulator.run`; ``reset`` reloads the slot reset snapshot. Construct one per kernel.
+    way it drives NumericalSimulator.run; `reset` reloads the slot reset snapshot. Construct one per kernel.
     """
 
     def __init__(self, mir: Mir) -> None:
@@ -82,8 +82,8 @@ class MirInterpreter:
 
     def run(self, *inputs: ScalarLike, max_blocks: int = 10_000_000) -> list[ScalarValue]:
         """
-        Evaluate one whole transaction: bind the inputs and the entry-global leaves, walk the CFG to the ``Ret``,
-        read the outputs, then advance the persistent state (read-first). ``max_blocks`` bounds a non-terminating loop.
+        Evaluate one whole transaction: bind the inputs and the entry-global leaves, walk the CFG to the `Ret`,
+        read the outputs, then advance the persistent state (read-first). `max_blocks` bounds a non-terminating loop.
         """
         env = self._initial_env(inputs)
         current = self._mir.entry
@@ -148,7 +148,7 @@ class MirInterpreter:
 
     def _resolve_phis(self, block: MirBlock, previous: int | None, env: dict[ValueId, ScalarValue]) -> None:
         """
-        Bind every phi in ``block`` as a parallel snapshot of the arm taken from ``previous`` (loop swaps need this).
+        Bind every phi in `block` as a parallel snapshot of the arm taken from `previous` (loop swaps need this).
         """
         if not block.phis:
             return

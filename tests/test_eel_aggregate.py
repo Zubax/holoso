@@ -516,7 +516,7 @@ def _calls_instance_method(x: float) -> float:
 
 
 def _calls_classmethod(x: float) -> float:
-    # The classmethod reads ``cls.deep``, overridden in ``_Derived``, so a wrong receiver folds the other arm.
+    # The classmethod reads `cls.deep`, overridden in `_Derived`, so a wrong receiver folds the other arm.
     if _DERIVED.is_deep():
         return x + 8.0
     return x - 5.0

@@ -70,7 +70,7 @@ Minimize the public API surface.
 Importing anything from a package or subpackage is only allowed as long as it doesn't involve referencing
 underscore-prefixed names. Exceptions apply for importing from parent modules with the dot notation, and for unit tests.
 Accessing underscore-prefixed names from outside a class (or its descendants) is not allowed;
-all externally accessble entities must be non-underscore-prefixed.
+all externally accessible entities must be non-underscore-prefixed.
 
 For invariant checking use plain `assert` statements copiously; usually any nontrivial function should contain at
 least a few. Their disappearance under `-O` is intentional.
@@ -79,6 +79,9 @@ do not spell out what is clear from the asserted expression.
 
 Avoid files longer than about ~2000 lines (this is a soft limit).
 If a file grows beyond that, consider refactoring into smaller modules.
+
+Docstrings must be written in Markdown with minimal formatting. ReST syntax is not allowed.
+Optimize for readability in source form, not for rendered form.
 
 If a docstring comment doesn't fit on one line, add an initial line break like this:
 

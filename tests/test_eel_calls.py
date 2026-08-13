@@ -4,7 +4,7 @@ registry identity dispatch (every spelling, and the typed lowering each operand 
 inlining with CPython signature binding, boundary conformance, the pow one-behavior rule, raise semantics, and the
 re-attribution of every rejection arising inside an inlined callee to the user's call site. Typed-lowering facts
 are pinned on public artifacts: lean operator sets that refuse by name, pooled-module sets in the emitted
-Verilog, and location-stripped ``frontend_ir[-1]`` text.
+Verilog, and location-stripped `frontend_ir[-1]` text.
 """
 
 import dataclasses

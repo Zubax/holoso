@@ -30,7 +30,7 @@ _REPO = Path(__file__).resolve().parent.parent
 
 class TwoCarried:
     """
-    Two persistent attributes first WRITTEN inside a ``while``: materializing their live-ins creates StateRead nodes
+    Two persistent attributes first WRITTEN inside a `while`: materializing their live-ins creates StateRead nodes
     whose creation order is decided by the carried-attribute iteration -- the second historical hash-order leak.
     """
 
@@ -51,7 +51,7 @@ class TwoCarried:
 
 def coalesce_conflict(x: float, b: float, cc: float) -> tuple[float, float, float]:
     """
-    The phi-coalescing residual-install hazard: ``a`` coalesces onto ``x`` while ``x`` is still live as ``z``'s arm,
+    The phi-coalescing residual-install hazard: `a` coalesces onto `x` while `x` is still live as `z`'s arm,
     so the soundness fixpoint must de-coalesce. The fixpoint's de-coalescing is set-driven, so this exercises that its
     iteration order -- and the resulting register assignment -- is seed-independent. The division keeps the diamond a
     real branch (un-if-converted), which is what creates the phi merge.

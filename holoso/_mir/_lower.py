@@ -150,7 +150,7 @@ from ._options import MirOptions
 _logger = logging.getLogger(__name__)
 
 # The seam between the semantic relation and the comparator flag it taps; the two vocabularies meet only here.
-# Both comparator families share it: an integer comparison taps ``icmp`` exactly as a float one taps ``fcmp``.
+# Both comparator families share it: an integer comparison taps `icmp` exactly as a float one taps `fcmp`.
 _RELATION_OF: dict[type[Operator], Relation] = {
     FloatLess: Relation.LT,
     FloatLessOrEqual: Relation.LE,
@@ -167,7 +167,7 @@ _RELATION_OF: dict[type[Operator], Relation] = {
 }
 
 
-# Shared by the standalone ``fround`` and the ``ftoint`` that absorbs one: the same field on both.
+# Shared by the standalone `fround` and the `ftoint` that absorbs one: the same field on both.
 _ROUND_MODE_OF: dict[type[Operator], RoundMode] = {
     FloatRound: RoundMode.NEAREST_EVEN,
     FloatFloor: RoundMode.FLOOR,
@@ -178,8 +178,8 @@ _ROUND_MODE_OF: dict[type[Operator], RoundMode] = {
 
 def _select_hardware(semantic: Operator, hardware: HardwareOperator) -> HardwareOperator:
     """
-    The single choke point where a semantic operator meets the hardware operator selected for it. ``speculatable``
-    (semantic side) and ``error_ports`` (hardware side) declare one fact -- whether evaluation on a never-taken path
+    The single choke point where a semantic operator meets the hardware operator selected for it. `speculatable`
+    (semantic side) and `error_ports` (hardware side) declare one fact -- whether evaluation on a never-taken path
     is observable -- so the two declarations are enforced in lockstep here: a speculatable semantic operator must
     never lower to error-bearing hardware, or if-conversion would assert the module error flag for untaken paths.
     """
@@ -203,7 +203,7 @@ def _sign_of(node: Operation) -> FloatSignControl | None:
 def _collapse_bool_inversions(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, BoolInversion]:
     """
     Peel a chain of semantic NOT operations, returning the base value and the combined inversion -- the boolean dual
-    of :func:`_collapse_signs`. Folding happens on the CONSUMER side only: a NOT over a comparison must never flip
+    of _collapse_signs. Folding happens on the CONSUMER side only: a NOT over a comparison must never flip
     the producer's tap conditioner (two taps of one comparator port with different inversions cannot fuse and would
     serialize two firings), and consumer-side folding keeps one shared producer for both polarities of a value.
     """
@@ -219,7 +219,7 @@ def _collapse_bool_inversions(nodes: dict[ValueId, Node], vid: ValueId) -> tuple
 def _collapse_conditioner(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, PortConditioner]:
     """
     Collapse the type's own sideband chain: sign operations over a float value, NOTs over a boolean one. An integer
-    has no free sideband, so ``ineg``/``iabs`` are hardware and nothing collapses.
+    has no free sideband, so `ineg`/`iabs` are hardware and nothing collapses.
     """
     ty = nodes[vid].type
     match ty:
@@ -250,8 +250,8 @@ def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, 
 @dataclass(frozen=True, slots=True)
 class _FmaPlan:
     """
-    A planned contraction of ``a*b + c`` into one ``ffma``. ``mul`` is the FloatMul whose standalone MIR op is
-    suppressed, ``ma``/``mb`` its operands, ``c`` the addend, ``product_sign`` the sign peeled off the product operand.
+    A planned contraction of `a*b + c` into one `ffma`. `mul` is the FloatMul whose standalone MIR op is
+    suppressed, `ma`/`mb` its operands, `c` the addend, `product_sign` the sign peeled off the product operand.
     """
 
     mul: ValueId
@@ -263,7 +263,7 @@ class _FmaPlan:
 
 @dataclass(frozen=True, slots=True)
 class _DirectionalInfPlan:
-    """A planned contraction of ``isinf(x) and x`` sign tests into one directional infinity predicate."""
+    """A planned contraction of `isinf(x) and x` sign tests into one directional infinity predicate."""
 
     operand: ValueId
     sign: FloatSignControl
@@ -319,7 +319,7 @@ def _match_zero_sign_relation(
     operand, sign = _collapse_signs(hir.nodes, left if right_zero else right)
     if sign.absolute:
         return None
-    # ``x > 0`` and ``0 < x`` both test the positive side; either mirroring alone flips it.
+    # `x > 0` and `0 < x` both test the positive side; either mirroring alone flips it.
     return operand, sign, FloatIsPosInf() if greater == right_zero else FloatIsNegInf()
 
 
@@ -360,9 +360,9 @@ def _plan_directional_inf_fusions(hir: Hir, use_counts: dict[ValueId, int]) -> d
 
 def _exclusive_mul(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tuple[ValueId, FloatSignControl] | None:
     """
-    If ``vid`` is a single-use ``a*b`` reached through single-use sign ops, return the FloatMul and its combined sign;
+    If `vid` is a single-use `a*b` reached through single-use sign ops, return the FloatMul and its combined sign;
     else None. Every node on the path must have use-count 1, so the rounded product is observed nowhere else -- only
-    then is contracting to a single rounding faithful. A FloatMulPow2 (``a*2**k``) is not a FloatMul, so never matches.
+    then is contracting to a single rounding faithful. A FloatMulPow2 (`a*2**k`) is not a FloatMul, so never matches.
     """
     signs: list[FloatSignControl] = []
     node = hir.nodes[vid]
@@ -382,7 +382,7 @@ def _exclusive_mul(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tu
 
 def _plan_fma_fusions(hir: Hir, ops: OpConfig, use_counts: dict[ValueId, int]) -> dict[ValueId, _FmaPlan]:
     """
-    Map each FloatAdd that will contract into an ``ffma`` to its plan (only when ``ffma`` is configured). When both
+    Map each FloatAdd that will contract into an `ffma` to its plan (only when `ffma` is configured). When both
     addends are exclusive products only the first contracts -- one fma carries one product.
     """
     if ops.ffma is None:
@@ -456,8 +456,8 @@ def _plan_folded_shift_counts(hir: Hir, use_counts: dict[ValueId, int]) -> set[V
 
 def _absorbed_rounding(hir: Hir, operand: ValueId) -> tuple[RoundMode, ValueId] | None:
     """
-    The mode a ``FloatToInt`` carries instead of reading a rounding's result, with the value it rounds. Only a
-    rounding read DIRECTLY: anything between conditions the ROUNDED value, and ``-floor(x)`` is not ``floor(-x)``.
+    The mode a `FloatToInt` carries instead of reading a rounding's result, with the value it rounds. Only a
+    rounding read DIRECTLY: anything between conditions the ROUNDED value, and `-floor(x)` is not `floor(-x)`.
     """
     node = hir.nodes[operand]
     if not isinstance(node, Operation) or type(node.operator) not in _ROUND_MODE_OF:
@@ -549,7 +549,7 @@ class _LoweringContext:
 
     def _lower_phi(self, old_id: ValueId, node: Node, deferred: list[ValueId]) -> None:
         # Each arm folds its type's OWN sideband chain into the arm conditioner, applied by the merge install: a sign
-        # chain on a float arm (a branch assigning ``-x``/``abs(x)``), a NOT chain on a boolean arm (``f = not g``).
+        # chain on a float arm (a branch assigning `-x`/`abs(x)`), a NOT chain on a boolean arm (`f = not g`).
         # A loop-header phi's latch arm is a body value lowered after the header: open the phi with its available arms
         # now (so the body can reference it) and close it once every block is lowered.
         assert isinstance(node, Phi)
@@ -665,7 +665,7 @@ class _LoweringContext:
                 return True
             case Operation(operator=BoolSelect() as semantic, operands=(cond, a, b)):
                 # The boolean if-conversion mux: a NOT chain on the condition or either arm folds into that operand's
-                # inversion conditioner, exactly like FloatSelect's sign folding -- so ``a if not c else b`` is free.
+                # inversion conditioner, exactly like FloatSelect's sign folding -- so `a if not c else b` is free.
                 self._lower_bool_logic(
                     old_id, _select_hardware(semantic, SelectOperator(ScalarBoolType())), [cond, a, b]
                 )
@@ -676,7 +676,7 @@ class _LoweringContext:
                 # consumer that bypassed the collapse would fail loudly on the missing remap entry.
                 return True
             case Operation(operator=FloatToBool() as semantic, operands=(a,)):
-                # ``bool(x)`` reads a float operand (its sign is irrelevant: the exponent test is sign-invariant) and
+                # `bool(x)` reads a float operand (its sign is irrelevant: the exponent test is sign-invariant) and
                 # writes the boolean bank, like the comparison but with an inline exponent reduction in place of fcmp.
                 base, sign = _collapse_signs(self.hir.nodes, a)
                 self.remap[old_id] = self.builder.operation(
@@ -687,7 +687,7 @@ class _LoweringContext:
                 return False
 
     def _lower_bool_logic(self, old_id: ValueId, operator: HardwareOperator, operands: list[ValueId]) -> None:
-        # NOT chains over the operands fold into the operand conditioners: ``band(~a, b)`` is one gate.
+        # NOT chains over the operands fold into the operand conditioners: `band(~a, b)` is one gate.
         bases = [_collapse_bool_inversions(self.hir.nodes, operand) for operand in operands]
         self.remap[old_id] = self.builder.operation(
             operator, [self.remap[base] for base, _ in bases], [inversion for _, inversion in bases]
@@ -823,7 +823,7 @@ class _FloatLowerer:
             case Operation(operator=FloatFma() as semantic, operands=(a, b, c)):
                 return self._emit_ffma(semantic, a, b, c, FloatSignControl())
             case Operation(operator=BoolToFloat() as semantic, operands=(a,)):
-                # ``float(cond)`` crosses from the boolean bank into the wide bank; a NOT chain folds into the
+                # `float(cond)` crosses from the boolean bank into the wide bank; a NOT chain folds into the
                 # operand conditioner.
                 base, inversion = _collapse_bool_inversions(self.context.hir.nodes, a)
                 return self.context.builder.operation(
@@ -839,7 +839,7 @@ class _FloatLowerer:
                 )
             case Operation(operator=FloatSelect() as semantic, operands=(cond, a, b)):
                 # The if-conversion mux: arm signs and a condition NOT chain fold into the operand conditioners
-                # (``x if c else -x`` and ``a if not c else b`` cost no hardware beyond the mux itself).
+                # (`x if c else -x` and `a if not c else b` cost no hardware beyond the mux itself).
                 base_c, inv_c = _collapse_bool_inversions(self.context.hir.nodes, cond)
                 base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
                 base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
@@ -1090,10 +1090,10 @@ class _FloatLowerer:
 
 class _IntLowerer:
     """
-    The integer dual of :class:`_FloatLowerer`, owning every operation whose RESULT is an integer. Its operands never
-    carry a folded sideband: an integer port conditions with the identity alone, so ``ineg`` and ``iabs`` are hardware
+    The integer dual of _FloatLowerer, owning every operation whose RESULT is an integer. Its operands never
+    carry a folded sideband: an integer port conditions with the identity alone, so `ineg` and `iabs` are hardware
     where their float counterparts are free. Integer operators are never optional, so only the two conversions that
-    cross into the float half go through :func:`require`.
+    cross into the float half go through require.
     """
 
     def __init__(self, context: _LoweringContext) -> None:
@@ -1155,7 +1155,7 @@ class _IntLowerer:
             case Operation(operator=IntBwNot() as semantic, operands=(a,)):
                 return self._emit(semantic, IntBwNotOperator(fmt), a)
             case Operation(operator=IntSelect() as semantic, operands=(cond, a, b)):
-                # The integer if-conversion mux: only the condition folds (``a if not c else b`` costs no extra gate).
+                # The integer if-conversion mux: only the condition folds (`a if not c else b` costs no extra gate).
                 base_c, inv_c = _collapse_bool_inversions(self.context.hir.nodes, cond)
                 return self.context.builder.operation(
                     _select_hardware(semantic, SelectOperator(self.int_type)),
@@ -1174,7 +1174,7 @@ class _IntLowerer:
 
     def _lower_to_int(self, semantic: FloatToInt, a: ValueId) -> ValueId:
         """
-        ``int(x)`` truncates toward zero, and a rounding it reads becomes its mode instead of a module of its own.
+        `int(x)` truncates toward zero, and a rounding it reads becomes its mode instead of a module of its own.
         The surviving operand's sign chain folds onto the float port, applied before the rounding as the source has it.
         """
         mode, operand = _absorbed_rounding(self.context.hir, a) or (RoundMode.TRUNC, a)
@@ -1196,7 +1196,7 @@ class _IntLowerer:
     def _runtime_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
         """
         Each direction has the module that names it, so neither negates its count to reach the other's. The left
-        shifter is tapped on its raw reading, because ``<<`` drops what leaves the word rather than saturating. Both
+        shifter is tapped on its raw reading, because `<<` drops what leaves the word rather than saturating. Both
         modules clamp the amount at the word, which is where the two readings of an unbounded count meet -- a left
         shift past the word answers zero and a right shift past it answers the sign fill, as Python's own unbounded
         shift does once the word truncates it.
@@ -1224,11 +1224,11 @@ class _IntLowerer:
 
     def _scale_by_pow2(self, semantic: IntMulPow2, a: ValueId) -> ValueId:
         """
-        The left shifter's OTHER reading: ``prod`` saturates where ``shft`` lets the high bits fall off the word, and
+        The left shifter's OTHER reading: `prod` saturates where `shft` lets the high bits fall off the word, and
         saturating is what a multiplication does. The count is unbounded where the word is not, so it clamps at the
         width -- past that every count rails the same operand the same way, and only zero survives either. It is
         itself a machine integer, and a two-bit word cannot hold its own width, so it clamps into the word as well:
-        every count from ``width - 1`` up rails identically, and ``max`` is never below that.
+        every count from `width - 1` up rails identically, and `max` is never below that.
         """
         fmt = self.context.int_format
         return self.context.builder.operation(
@@ -1239,7 +1239,7 @@ class _IntLowerer:
         )
 
     def _negate(self, semantic: Operator, value: ValueId) -> ValueId:
-        """``0 - x``: there is no negation module, and the subtractor saturates ``-MIN`` correctly."""
+        """`0 - x`: there is no negation module, and the subtractor saturates `-MIN` correctly."""
         return self.context.builder.operation(
             _select_hardware(semantic, ISubOperator(self.context.int_format)),
             [self._const(0), value],
@@ -1311,11 +1311,11 @@ def lower(hir: Hir, options: MirOptions) -> Mir:
     a kernel that cannot be built.
 
     Optimization is not the caller's to run, and neither is judgement: a substituted constant cascades, so the passes
-    run again after every substitution and ``refuse`` waits for the graph that is actually built. A caller who
+    run again after every substitution and `refuse` waits for the graph that is actually built. A caller who
     optimized first would also have judged first, convicting whatever a later round -- or a later word -- erases.
 
     Semantic sign operations are never emitted as standalone scheduled operators. Exact power-of-two scaling selects
-    ``fmul_ilog2`` with the exponent materialized as an integer constant; no exponent is refused.
+    `fmul_ilog2` with the exponent materialized as an integer constant; no exponent is refused.
     """
     original, widest = hir, _widest_word(options)
     ops = OpConfig.build(options.operator, options.float_format, options.wmultiplier, IntFormat(widest))

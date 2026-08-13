@@ -219,11 +219,11 @@ def build_const_pool(
 ) -> tuple[list[WideValue], dict[ValueId, PooledConst]]:
     """
     Build the immediate/ROM pool shared by both wide families, interned by the typed encoded value, so
-    encoding-equal float literals share a word and class-aware equality keeps ``1`` and ``1.0`` distinct where raw
+    encoding-equal float literals share a word and class-aware equality keeps `1` and `1.0` distinct where raw
     Python keys would collide. A FLOAT is stored as its nonnegative magnitude, the sign folded into the consumer's
-    free sign-control sideband -- value-preserving because ``encode(|c|)`` with the sign bit set equals ``encode(c)``,
-    and MIR normalizes ``-0.0`` and refuses magnitudes degrading to zero, so a folded negate can never emit the ``-0``
-    ZKF has no room for. An INTEGER has no sideband and is stored whole. ``bool_operations`` (the bool-result
+    free sign-control sideband -- value-preserving because `encode(|c|)` with the sign bit set equals `encode(c)`,
+    and MIR normalizes `-0.0` and refuses magnitudes degrading to zero, so a folded negate can never emit the `-0`
+    ZKF has no room for. An INTEGER has no sideband and is stored whole. `bool_operations` (the bool-result
     combinational ops) contribute their wide operand constants too.
     """
     ids: list[ValueId] = []

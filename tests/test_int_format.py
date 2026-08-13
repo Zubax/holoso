@@ -1,8 +1,8 @@
 """
-The native integer format and type: the arithmetic surface, the plumbing from ``Options`` down into the emitted RTL,
-and the port conditioning an integer type admits. The format sizes the shared wide register bank (the ``WINT``
+The native integer format and type: the arithmetic surface, the plumbing from `Options` down into the emitted RTL,
+and the port conditioning an integer type admits. The format sizes the shared wide register bank (the `WINT`
 localparam), pinned here from the public entry point down to the Verilog backend; the operators the lowering selects
-for it are covered by ``test_int_operators`` and ``test_int_selection``.
+for it are covered by `test_int_operators` and `test_int_selection`.
 """
 
 import dataclasses

@@ -34,13 +34,13 @@ def value_resident_at_entry(node: MirNode) -> bool:
     a literal constant, an input load, a persistent-state read, or a phi result. A phi is entry-resident in any
     frontend-generated (well-formed, dominance-respecting) MIR: its register settles before any frame that reads it
     begins -- install-bearing predecessors drain rather than overlap, multi-predecessor blocks receive no spills, and a
-    phi is never itself an in-flight spill. Residency decides a tail install's PLACEMENT (``install_issue_cycle``):
+    phi is never itself an in-flight spill. Residency decides a tail install's PLACEMENT (`install_issue_cycle`):
     every resident-source install sits AT the work makespan, so installs that read each other's registers (the
-    cross-referencing loop-header phis of ``a, b = b, a + x``) share one fire step, where both backends resolve them as
+    cross-referencing loop-header phis of `a, b = b, a + x`) share one fire step, where both backends resolve them as
     a read-then-write parallel bundle; classifying a phi as computed instead pushes its install one step past its
     siblings, which then read an already-overwritten source. An operator result stays NOT entry-resident: locally it
     genuinely lands mid/late-block, and a foreign one may arrive as an overlap spill; its conservative pushed placement
-    is harmless because an operator-result source is live through the boundary (``phi_arm_out``), so interference keeps
+    is harmless because an operator-result source is live through the boundary (`phi_arm_out`), so interference keeps
     every sibling install destination off its register. The lone source of this residency fact, shared by the install
     seed, the post-coalescing refinement, the builder, and the allocator residence, so they cannot drift. The positive
     test means a future node kind defaults to non-resident -- the safe direction (the conservative computed-source
@@ -102,7 +102,7 @@ def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]
     """
     Per block, the phi-arm values live out of it (each read by the phi's install copy at the block's tail) -- a liveness
     input for both banks. The residual installs (which phi registers a block writes) are derived separately, per chosen
-    coalescing, by :func:`_residual_installs`, so they are not precomputed here.
+    coalescing, by _residual_installs, so they are not precomputed here.
     """
     arm_out: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
     for _vid, phi in phi_nodes.items():
@@ -114,9 +114,9 @@ def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]
 
 def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueId]:
     """
-    Per block, the constant branch condition it materializes at its tail. A block whose ``MirBranch`` tests a globally
+    Per block, the constant branch condition it materializes at its tail. A block whose `MirBranch` tests a globally
     interned boolean constant has no condition register, so the constant is written into a bool register in the
-    branching block. The single source of this CFG-shape fact, shared by ``block_has_install`` (whose key universe the
+    branching block. The single source of this CFG-shape fact, shared by `block_has_install` (whose key universe the
     install fixpoint asserts every post-allocation classification stays within) and the allocator's materialization
     (which also needs the condition value to write).
     """
@@ -134,9 +134,9 @@ def block_has_install(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView) ->
     whose source is an operator result rather than block-entry RESIDENT (a literal constant, including a phi-arm const
     arm or a const branch condition, an input, a state read, or a phi result). This is the
     CONSERVATIVE seed for the makespan +1: a computed source MIGHT be the block's own last work, which the install must
-    fire one step past to read-first (pushing the makespan); the fixpoint's ``actual_install_blocks`` narrows it to the
+    fire one step past to read-first (pushing the makespan); the fixpoint's `actual_install_blocks` narrows it to the
     blocks that actually push, once the schedule is known. Determinable from the MIR shape before register assignment
-    (``value_resident_at_entry``), conservatively: an arm is assumed not to coalesce, so a computed-source arm marks the
+    (`value_resident_at_entry`), conservatively: an arm is assumed not to coalesce, so a computed-source arm marks the
     block even if it later coalesces away (the fixpoint then narrows it). The liveness boundary and the layout share
     this classification so the per-block makespan and drain agree.
     """

@@ -1,14 +1,14 @@
 """
 Steering/area non-regression gate for the LIR build.
 
-Every currently-synthesizing example (all except ``iir1_hpf`` and ``finite_set_current_controller``, which the
+Every currently-synthesizing example (all except `iir1_hpf` and `finite_set_current_controller`, which the
 frontend cannot yet lower) is built to LIR and measured on the metrics that bound the synthesized fabric (here
 "straight-line" means the pure-float flat path: single block, no boolean fabric -- an if-converted kernel can be
 single-block without being straight-line in this sense): the wide and
 boolean register counts, the per-port read-mux fan-in and per-register write-select fan-in (the steering cost that
 dominates the LUTs), and the statically-known latency lower bound. The baseline below was re-frozen on the converged
 build with the bank-independent read/landing model, at the default register-allocation effort. Value numbering is
-seed-independent (``tests/test_determinism.py`` proves byte-identical Verilog across ``PYTHONHASHSEED`` values), so
+seed-independent (`tests/test_determinism.py` proves byte-identical Verilog across `PYTHONHASHSEED` values), so
 these figures hold in any process without pinning the hash seed.
 
 The contract: NO example may regress past its frozen baseline on any metric. A single-block (straight-line) kernel is
@@ -86,19 +86,19 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 @dataclass(frozen=True, slots=True)
 class Metrics:
     """
-    The non-regression figures sampled off a built :class:`Lir`.
+    The non-regression figures sampled off a built Lir.
 
-    ``steering`` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the upper-bound write-select fan-in
-    (:attr:`Lir.write_select_fanin`, which counts every write-chain driver the backend synthesizes: pooled lanes,
+    `steering` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the upper-bound write-select fan-in
+    (Lir.write_select_fanin, which counts every write-chain driver the backend synthesizes: pooled lanes,
     inline casts, phi-arm copies, and slot installs). Counting the copies matters here: phi-arm coalescing trades
     pc-gated copies for shared pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a
-    regression. ``copies`` is the total phi-arm install count (wide copies plus boolean writes), the direct measure
+    regression. `copies` is the total phi-arm install count (wide copies plus boolean writes), the direct measure
     of how many phi arms still install by copy rather than coalescing onto the merged register.
 
-    ``last_pc`` is the static ROM length (:attr:`Lir.initiation_interval`) -- the total stage count: blocks tile the
+    `last_pc` is the static ROM length (Lir.initiation_interval) -- the total stage count: blocks tile the
     ROM, so a per-block drain regression in ANY block inflates it, the primary "excessive stages" guard.
-    ``max_block_span`` is the largest per-block terminator offset (``max term_offset``), localizing a per-block drain
-    regression to one block (unlike ``last_pc``, it does not move with the number of blocks).
+    `max_block_span` is the largest per-block terminator offset (`max term_offset`), localizing a per-block drain
+    regression to one block (unlike `last_pc`, it does not move with the number of blocks).
     """
 
     straight_line: bool
@@ -170,7 +170,7 @@ def _measure(name: str) -> Metrics:
 #   coalesced-install fixpoint -- a phi-arm predecessor whose every arm coalesces installs nothing, so its
 #   +1 install drain is dropped. The drained boundary is the latest value LANDING per op: every op -- inline (a
 #   select or a bool->float cast) or pooled -- lands at the same uniform per-op landing, and an install reading a
-#   block-entry-RESIDENT source (``value_resident_at_entry``) fires at the
+#   block-entry-RESIDENT source (`value_resident_at_entry`) fires at the
 #   combinational step and drops its +1 install drain. last_pc tiles every block's span (a per-block drain regression
 #   anywhere inflates it); max_block_span localizes it to one block. These timing rules move the schedule-length
 #   guards but not nreg/bnreg/steering/copies; signal_window carries a deliberately-loosened steering arm (one freed
@@ -214,7 +214,7 @@ BASELINE: dict[str, Metrics] = {
     "biquad": Metrics(True, nreg=6, bnreg=0, steering=5, copies=0, min_ii=21, last_pc=21, max_block_span=21),
     # The two largest kernels carry slightly higher register pressure as a deliberate latency-for-area point: the
     # uniform landing keeps min_ii/last_pc tight, so a result resides a cycle longer, raising register
-    # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (``<=``) pinned
+    # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (`<=`) pinned
     # tight to the converged build, so a later improvement may sit below its bound until the next re-freeze.
     "ekf1_stateless": Metrics(
         True, nreg=41, bnreg=0, steering=100, copies=0, min_ii=125, last_pc=125, max_block_span=125
@@ -237,7 +237,7 @@ def test_metrics_do_not_regress(name: str) -> None:
 
 
 def test_build_is_deterministic() -> None:
-    """The allocator's annealing is ``seed=0``; two builds of the same kernel must agree, so the baseline is stable."""
+    """The allocator's annealing is `seed=0`; two builds of the same kernel must agree, so the baseline is stable."""
     first = _measure("ekf1_stateless")
     second = _measure("ekf1_stateless")
     assert first == second

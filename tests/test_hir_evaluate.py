@@ -1,6 +1,6 @@
 """
-Acceptance gate + independence guard for the HIR evaluator (``holoso._hir.HirEvaluator``) and the front-end
-differential-oracle harness (``tests/_eeloracle.py``).
+Acceptance gate + independence guard for the HIR evaluator (`holoso._hir.HirEvaluator`) and the front-end
+differential-oracle harness (`tests/_eeloracle.py`).
 
 Hand-built builder graphs pin the semantics no lowered kernel reaches: the poison family, the integer vocabulary,
 parallel phi snapshots, state carry/reset/commit atomicity, and the runaway bound. The example differential itself
@@ -186,7 +186,7 @@ def test_poison_dead_operation_is_harmless() -> None:
 
 
 def _gated_poison(gate_value: bool) -> Hir:
-    """``gate and (1.0/x > 0.0)`` as the eager frontends spell it; poison appears whenever x == 0."""
+    """`gate and (1.0/x > 0.0)` as the eager frontends spell it; poison appears whenever x == 0."""
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", FloatType())
@@ -540,7 +540,7 @@ def _big_kernel() -> int:
 def test_promoted_big_integer_compares_as_its_float_image() -> None:
     """
     C-promotion at a join is a deliberate type-system deviation, so a float lane meeting an int the reference states
-    exactly carries ``float(int)`` -- rounding included -- and that is the faithful value, not a divergence.
+    exactly carries `float(int)` -- rounding included -- and that is the faithful value, not a divergence.
     """
     builder = HirBuilder()
     builder.block()
@@ -614,7 +614,7 @@ _DROPPED_LEAF_CASES: list[tuple[str, Callable[[], Hir], Callable[..., object], s
 def test_dropped_leaf_convicts_in_every_family(
     label: str, make_hir: Callable[[], Hir], reference: Callable[..., object], match: str
 ) -> None:
-    """``False == 0.0`` and ``1 == 1.0`` in Python; a dropped bool/int leaf must not hide behind an equal slot."""
+    """`False == 0.0` and `1 == 1.0` in Python; a dropped bool/int leaf must not hide behind an equal slot."""
     with pytest.raises(AssertionError, match=match):
         assert_hir_matches_reference(make_hir(), reference, [{"x": 2.0}], label=f"dropped_{label}")
 

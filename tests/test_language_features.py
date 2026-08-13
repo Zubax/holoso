@@ -1,7 +1,7 @@
 """
-Public-API, black-box behavioral tests for front-end language features: the boolean ``^`` operator, instance/
-inherited/static method calls, ``@property`` reads, descriptor and attribute-access-protocol boundaries, and
-module-level constant resolution. Every test drives the compiler ONLY through ``holoso.synthesize(fn, ops)`` and
+Public-API, black-box behavioral tests for front-end language features: the boolean `^` operator, instance/
+inherited/static method calls, `@property` reads, descriptor and attribute-access-protocol boundaries, and
+module-level constant resolution. Every test drives the compiler ONLY through `holoso.synthesize(fn, ops)` and
 exercises the elaborated numerical model, asserting on observable output values, so the tests survive a refactor of
 the front end. The rejection checks guard soundness boundaries where a silent miscompile would otherwise diverge
 from Python -- behavioral, not mere input validation.
@@ -62,7 +62,7 @@ def test_bool_xor_chain_is_parity() -> None:
 
 
 def test_xor_on_floats_is_rejected() -> None:
-    # ``^`` requires boolean operands; a float operand must fail loudly, not silently lower to some float op.
+    # `^` requires boolean operands; a float operand must fail loudly, not silently lower to some float op.
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_float_xor, _ops())
 
@@ -358,8 +358,8 @@ def test_guarded_helper_state_write_is_rejected() -> None:
 
 class _PropertyShadowsDict:
     """
-    A class ``property`` whose name also has an instance ``__dict__`` entry: the data descriptor shadows the dict
-    slot, so a read of ``self._mode`` must resolve through the getter (True), not the snapshot value (False).
+    A class `property` whose name also has an instance `__dict__` entry: the data descriptor shadows the dict
+    slot, so a read of `self._mode` must resolve through the getter (True), not the snapshot value (False).
     """
 
     @property
@@ -388,7 +388,7 @@ def test_property_shadowing_dict_entry_resolves_via_getter() -> None:
 
 class _PropertySetterWrite:
     """
-    A property with a setter, shadowed by a same-named ``__dict__`` entry. ``self.flag = x`` invokes the setter in
+    A property with a setter, shadowed by a same-named `__dict__` entry. `self.flag = x` invokes the setter in
     Python (descriptor precedence) but would be a plain state-slot store to the dead snapshot entry in the compiler --
     a silent divergence, since the reader inlines the getter. The write must be rejected, not miscompiled.
     """
@@ -418,7 +418,7 @@ def test_property_setter_assignment_is_rejected() -> None:
 
 
 class _DataDescriptor:
-    """A minimal data descriptor (defines ``__set__``, so it takes precedence over a same-named instance __dict__)."""
+    """A minimal data descriptor (defines `__set__`, so it takes precedence over a same-named instance `__dict__`)."""
 
     def __get__(self, instance: object, owner: object) -> bool:
         return True
@@ -477,7 +477,7 @@ def test_data_descriptor_read_is_rejected() -> None:
 class _Meta(type):
     @property
     def flag(cls) -> bool:
-        return False  # a metaclass property: governs ``Class.flag``, NOT instance access
+        return False  # a metaclass property: governs `Class.flag`, NOT instance access
 
 
 class _MetaclassPropertyShadow(metaclass=_Meta):
@@ -491,7 +491,7 @@ class _MetaclassPropertyShadow(metaclass=_Meta):
 
 
 class _InterceptingRead:
-    """A receiver whose ``__getattribute__`` rescales one attribute -- an honest idiom, but not one Holoso can read."""
+    """A receiver whose `__getattribute__` rescales one attribute -- an honest idiom, but not one Holoso can read."""
 
     def __init__(self) -> None:
         self.gain = 2.0

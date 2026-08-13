@@ -98,7 +98,7 @@ def sat_mix(a: int, b: int) -> tuple[int, int]:
 @pytest.mark.cosim
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_random_sweep_cosim(sim: str) -> None:
-    """``vectors=None`` draws the bench's own bounded integer sweep through pooled add/multiply and an inline xor."""
+    """`vectors=None` draws the bench's own bounded integer sweep through pooled add/multiply and an inline xor."""
     run_cosim(sim, holoso.synthesize(sat_mix, _OPTIONS, name="sat_mix_int"))
 
 

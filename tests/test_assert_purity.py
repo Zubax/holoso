@@ -1,7 +1,7 @@
 """
-Every ``assert`` in the package must be side-effect free. Asserts are stripped under ``python -O`` (CLAUDE.md relies on
+Every `assert` in the package must be side-effect free. Asserts are stripped under `python -O` (CLAUDE.md relies on
 that for invariant checks), so an assert whose expression MUTATES state silently skips the mutation under -O and
-miscompiles. The canonical trap is ``assert d.setdefault(k, v) == v``, which both populates ``d`` and checks it: under
+miscompiles. The canonical trap is `assert d.setdefault(k, v) == v`, which both populates `d` and checks it: under
 -O the populate vanishes. This guard caught exactly that in the register coalescer, where the unpopulated
 pinned-register map then KeyError-ed the colorer under -O.
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import holoso
 
-# Container mutators whose call inside an assert is silently skipped under -O. ``NamedExpr`` (the walrus ``:=``) is the
+# Container mutators whose call inside an assert is silently skipped under -O. `NamedExpr` (the walrus `:=`) is the
 # other side effect and is checked directly.
 _MUTATORS = frozenset(
     {

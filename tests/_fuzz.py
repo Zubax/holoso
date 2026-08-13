@@ -1,11 +1,11 @@
 """
 End-to-end blackbox differential fuzzing of the Holoso compiler.
 
-The campaign generates small kernels as Python *source text* -- rendered to real importable modules under ``build/`` so
-the frontend's ``inspect.getsourcelines`` retrieval succeeds -- and drives each through the public-ish compiler pipeline
+The campaign generates small kernels as Python *source text* -- rendered to real importable modules under `build/` so
+the frontend's `inspect.getsourcelines` retrieval succeeds -- and drives each through the public-ish compiler pipeline
 twice: once into the numerical model (downstream of LIR scheduling/binding/regalloc/overlap) and once into the MIR
 interpreter (the schedule-independent oracle, upstream of the LIR layer). The two share the front/mid-end and
-``operator.evaluate`` but NOT the LIR, so the primary check ``interpreter == model`` (bit-exact, exception-free on both
+`operator.evaluate` but NOT the LIR, so the primary check `interpreter == model` (bit-exact, exception-free on both
 ZKF sides) isolates exactly the LIR layer -- the miscompile class the RTL-versus-model cosimulation is blind to.
 
 The generator emits the *danger shapes by construction* -- real un-if-convertible diamonds (kept branchy by either an
@@ -62,7 +62,7 @@ from ._modelref import (
     within,
 )
 
-# The directory the generated kernel modules are rendered into. ``build/`` is gitignored, so the fuzz corpus never
+# The directory the generated kernel modules are rendered into. `build/` is gitignored, so the fuzz corpus never
 # pollutes the tree; the directory is created on demand.
 _REPO = Path(__file__).resolve().parent.parent
 _FUZZ_TMP = _REPO / "build" / "fuzz_tmp"
@@ -80,7 +80,7 @@ OP_CONFIGS: dict[str, Callable[[FloatFormat], MirOptions]] = {
 class Shape(Enum):
     """
     A structural feature a generated kernel exercises. A kernel carries the set of shapes it realizes; the set drives
-    the campaign histogram and -- for :data:`Shape.BRANCH` -- the post-compile survival assertion.
+    the campaign histogram and -- for Shape.BRANCH -- the post-compile survival assertion.
     """
 
     BRANCH = auto()  # a real (un-if-converted) diamond: the compiled MIR must keep more than one block
@@ -89,13 +89,13 @@ class Shape(Enum):
     WIDE_CHAIN = auto()  # a long register-pressure multiply-add chain
     NESTED_IF = auto()  # a branch nested inside a branch
     CONST_BRANCH = auto()  # a constant-true inner condition the graph's own identity settles, for pruning to delete
-    LOOP = auto()  # a bounded back-edge ``while`` loop
+    LOOP = auto()  # a bounded back-edge `while` loop
     DIAMOND_THEN_LOOP = auto()  # a real diamond whose merge feeds a loop header (a three-arm header phi)
-    SELECT = auto()  # a ternary ``a if c else b`` select
+    SELECT = auto()  # a ternary `a if c else b` select
     BOOL_BANK = auto()  # boolean inputs and/or boolean connectives (the cross-domain bool/float bank)
     RELATION_PAIR = auto()  # two comparator taps over the same ordered operand pair
     EXACT_WIRING = auto()  # exact non-commutative arithmetic that exposes operand transposition
-    REDUCTION = auto()  # an unrolled ``for`` reduction over a literal range
+    REDUCTION = auto()  # an unrolled `for` reduction over a literal range
     STATE = auto()  # persistent private slots (a stateful class), including the chained-slot pattern
 
 
@@ -120,7 +120,7 @@ class GeneratedKernel:
     index: int
     is_stateful: bool
     # A factory for a *fresh* reference instance (stateful kernels only) so the float64 reference is stepped on its own
-    # instance, independent of the one the model was compiled from. ``None`` for a stateless kernel.
+    # instance, independent of the one the model was compiled from. `None` for a stateless kernel.
     fresh_reference: Callable[[], Callable[..., object]] | None = None
     dead_arm_chain_depth: int | None = None
 
@@ -184,8 +184,8 @@ def _binary_literal(significand: float, exp: int) -> str:
 
 def _render_module(name: str, source: str) -> types.ModuleType:
     """
-    The frontend retrieves the kernel's source via ``inspect.getsourcelines``, which a REPL/exec-only function cannot
-    satisfy -- hence the real, linecache-backed file rather than a bare ``exec``.
+    The frontend retrieves the kernel's source via `inspect.getsourcelines`, which a REPL/exec-only function cannot
+    satisfy -- hence the real, linecache-backed file rather than a bare `exec`.
     """
     _FUZZ_TMP.mkdir(parents=True, exist_ok=True)
     path = str((_FUZZ_TMP / f"{name}.py").resolve())
@@ -254,10 +254,10 @@ class _Emitter:
 
     def pick_floats(self, n: int) -> list[str]:
         """
-        ``n`` operand names, DISTINCT when the pool is large enough -- so a relation like ``a < b`` stays
-        input-dependent. A self-comparison (``a < a``) is constant and makes one branch arm UNREACHABLE, which would let
+        `n` operand names, DISTINCT when the pool is large enough -- so a relation like `a < b` stays
+        input-dependent. A self-comparison (`a < a`) is constant and makes one branch arm UNREACHABLE, which would let
         a forced dead-arm kernel pass a real clobber regression vacuously (the clobbered value is never read on the dead
-        path). Falls back to with-replacement only for a pool too small to supply ``n`` distinct names.
+        path). Falls back to with-replacement only for a pool too small to supply `n` distinct names.
         """
         if len(self._floats) >= n:
             return [str(name) for name in self._rng.choice(self._floats, size=n, replace=False)]
@@ -299,14 +299,14 @@ class _Emitter:
         return self.randint(1, min(3, _max_normal_exp(self._fmt)))
 
     def exact_division_denominator_hi_exp(self, scale_exp: int) -> int:
-        """The largest denominator exponent whose product with ``2**scale_exp`` stays finite with guard margin."""
+        """The largest denominator exponent whose product with `2**scale_exp` stays finite with guard margin."""
         assert 1.5 < 2.0 - (2.0 ** (1 - self._fmt.wman))
         hi_exp = _max_normal_exp(self._fmt) - scale_exp
         assert hi_exp >= 0
         return hi_exp
 
     def sterbenz_hi_lower_literal(self) -> str:
-        """A lower bound for ``hi`` that keeps ``hi / 2.0`` normal while preserving Sterbenz exactness."""
+        """A lower bound for `hi` that keeps `hi / 2.0` normal while preserving Sterbenz exactness."""
         return _power2_literal(max(_min_normal_exp(self._fmt) + 1, 1))
 
     def small_literal(self) -> str:
@@ -317,7 +317,7 @@ class _Emitter:
         return f"({v} * {v})"
 
     def nonzero_divisor(self) -> str:
-        """A structurally-positive divisor ``(<nonneg>) + c`` with ``c`` a positive literal."""
+        """A structurally-positive divisor `(<nonneg>) + c` with `c` a positive literal."""
         c = self.choice(["1.0", "0.5", "2.0"])
         return f"(({self.nonneg_expr()}) + {c})"
 
@@ -331,7 +331,7 @@ class _Emitter:
 
     def wide_chain(self, width: int) -> str:
         """
-        A wide Horner-style multiply-add chain ``(((a*z + b)*z + b)...)`` of the requested width. This commits late and
+        A wide Horner-style multiply-add chain `(((a*z + b)*z + b)...)` of the requested width. This commits late and
         creates register pressure; reused as the spilled value in the dead-arm family. Continuous arithmetic.
         """
         z = self.pick_float()
@@ -344,7 +344,7 @@ class _Emitter:
     def exact_select_value(self, cond: _Fragment) -> _Fragment:
         """
         A select whose arms are *operands verbatim* (no arithmetic), so the result is exact in the format. Includes the
-        ``x if c else -x`` sign-flip shape (negation is exact).
+        `x if c else -x` sign-flip shape (negation is exact).
         """
         a, b = self.pick_float(), self.pick_float()
         if self.chance(0.4):
@@ -356,7 +356,7 @@ class _Emitter:
     def scaled_value(self) -> _Fragment:
         """
         A power-of-two scaling bounded away from overflow and underflow, so it is exact at every tested input edge.
-        The selected operand magnitude is clamped into an exponent window ``[lo, hi]`` such that adding the shift keeps
+        The selected operand magnitude is clamped into an exponent window `[lo, hi]` such that adding the shift keeps
         the product within the format's finite normal exponent range.
         """
         x = self.pick_float()
@@ -373,7 +373,7 @@ class _Emitter:
 
     def exact_clamp_value(self) -> _Fragment:
         """
-        Emit a clamp of one live float into ``[-1, 1]`` via two selects (each arm an operand verbatim) and return the
+        Emit a clamp of one live float into `[-1, 1]` via two selects (each arm an operand verbatim) and return the
         result variable name. A clamp routes an operand or a literal verbatim, so it is exact in the format.
         """
         x = self.pick_float()
@@ -393,7 +393,7 @@ class _Emitter:
 
     def render_body(self, base_indent: int = 0) -> str:
         """
-        Render the accumulated body, shifting every line by ``base_indent`` levels. A top-level function uses 0 (its
+        Render the accumulated body, shifting every line by `base_indent` levels. A top-level function uses 0 (its
         body indent of 1 == 4 spaces); a class method uses 1 (its body lives one level deeper, at 8 spaces).
         """
         return "\n".join("    " * (indent + base_indent) + line for indent, line in self._lines)
@@ -432,7 +432,7 @@ def _merge_fragment(value: str, fragments: list[_Fragment], shapes: frozenset[Sh
 def _emit_condition(em: _Emitter, *, balanced: bool = False) -> _Fragment:
     """
     A runtime boolean condition: a float relation, or (when bool inputs exist) a boolean connective of them. With
-    ``balanced=True`` the float relation is restricted to inequalities, so a branch whose hazard lives in one arm is
+    `balanced=True` the float relation is restricted to inequalities, so a branch whose hazard lives in one arm is
     exercised over the vector sequence.
     """
     if em.has_bool() and em.chance(0.4):
@@ -480,7 +480,7 @@ def _emit_diamond(em: _Emitter, *, nested: bool) -> _Fragment:
     """
     A real diamond: a runtime comparison branches into two arms, one arm carries either an unspeculatable division or
     an over-budget exact chain, each arm assigns the result variable, and the kernel reads it after the merge. When
-    nested, the inner branch gets its own barrier arm so the :data:`Shape.NESTED_IF` tag means a surviving nested
+    nested, the inner branch gets its own barrier arm so the Shape.NESTED_IF tag means a surviving nested
     branch, not merely a generated one.
     """
     cond = _emit_condition(em, balanced=True)
@@ -507,9 +507,9 @@ def _emit_diamond(em: _Emitter, *, nested: bool) -> _Fragment:
 
 def _emit_dead_arm_spill(em: _Emitter) -> _Fragment:
     """
-    The dead-arm-spill soundness shape: several simultaneously-live values ``v`` computed in the entry block and read
-    in only one arm, plus a wide chain ``w`` that commits late and spills into both arms but is dead in the arm that
-    reads the ``v`` values.
+    The dead-arm-spill soundness shape: several simultaneously-live values `v` computed in the entry block and read
+    in only one arm, plus a wide chain `w` that commits late and spills into both arms but is dead in the arm that
+    reads the `v` values.
     """
     live = [em.fresh("v") for _ in range(em.randint(3, 6))]
     for v in live:
@@ -536,10 +536,10 @@ def _emit_dead_arm_spill(em: _Emitter) -> _Fragment:
 def _emit_const_branch(em: _Emitter) -> _Fragment:
     """
     A const-branch shape: an outer runtime diamond whose then arm holds an inner condition that is constant only
-    under the graph's ``x*0 == 0`` identity -- so it survives partial evaluation and reaches HIR as a constant branch,
+    under the graph's `x*0 == 0` identity -- so it survives partial evaluation and reaches HIR as a constant branch,
     where pruning proves it and deletes the arm it excludes. The inner false arm is over-budget, so what pruning
     deletes is real work rather than an empty block: the tag denotes a branch that must NOT survive, which is why it
-    carries no :data:`Shape.NESTED_IF` -- only the outer diamond is still a branch by the time MIR sees it.
+    carries no Shape.NESTED_IF -- only the outer diamond is still a branch by the time MIR sees it.
     """
     cond = _emit_condition(em, balanced=True)
     r = em.fresh("r")
@@ -576,8 +576,8 @@ def _emit_bounded_loop(em: _Emitter) -> _Fragment:
 
 def _emit_diamond_then_loop(em: _Emitter) -> _Fragment:
     """
-    A real diamond whose merge feeds a ``while`` loop (a three-arm loop-header phi), generalized from
-    ``diamond_then_loop_kernel``.
+    A real diamond whose merge feeds a `while` loop (a three-arm loop-header phi), generalized from
+    `diamond_then_loop_kernel`.
     """
     cond = _emit_condition(em, balanced=True)
     r = em.fresh("dl")
@@ -608,8 +608,8 @@ def _emit_reduction(em: _Emitter) -> _Fragment:
 
 def _emit_bool_logic(em: _Emitter) -> _Fragment:
     """
-    Cross-domain bool/float logic: build a boolean from a float relation, combine bools with ``and``/``or``/``not``/
-    ``^``, and cast back to float with ``float(cond)``. Exact (the result is 0.0 or 1.0).
+    Cross-domain bool/float logic: build a boolean from a float relation, combine bools with `and`/`or`/`not`/
+    `^`, and cast back to float with `float(cond)`. Exact (the result is 0.0 or 1.0).
     """
     a, b = em.pick_floats(2)
     c1 = em.fresh("c")
@@ -647,7 +647,7 @@ def _emit_relation_pair(em: _Emitter) -> _Fragment:
 
 
 def _emit_exact_division_wiring(em: _Emitter) -> _Fragment:
-    """An exact non-commutative division: ``(k*d)/d == k`` with a bounded non-one denominator."""
+    """An exact non-commutative division: `(k*d)/d == k` with a bounded non-one denominator."""
     k_exp = em.exact_division_scale_exp()
     den_hi_exp = em.exact_division_denominator_hi_exp(k_exp)
     k = _power2_literal(k_exp)
@@ -727,13 +727,13 @@ _DIRECTED_TEMPLATES: list[Callable[[_Emitter], _Fragment]] = [
     _emit_sterbenz_subtract,
     _emit_forced_overbudget_branch,
     # The nested diamond runs in EVERY campaign (including the smoke, whose random draw need not produce one), so
-    # ``_assert_danger_survived`` enforces the two-forward-branch nested invariant on every run.
+    # `_assert_danger_survived` enforces the two-forward-branch nested invariant on every run.
     lambda em: _emit_diamond(em, nested=True),
 ]
 
 
 def _seed_rng(master_seed: int, index: int) -> np.random.Generator:
-    """An independent generator for kernel ``index`` of campaign ``master_seed`` -- reproducible regardless of order."""
+    """An independent generator for kernel `index` of campaign `master_seed` -- reproducible regardless of order."""
     return np.random.default_rng(np.random.SeedSequence([master_seed, index]))
 
 
@@ -845,7 +845,7 @@ def _generate_dead_arm_kernel(
 ) -> GeneratedKernel:
     """
     A kernel consisting SOLELY of the dead-arm-spill shape, so no other fragment dilutes its block structure and the
-    wide chain reliably spills past the overlapped entry terminator into the dead arm. ``_armed_dead_arm_kernel``
+    wide chain reliably spills past the overlapped entry terminator into the dead arm. `_armed_dead_arm_kernel`
     re-rolls this until the spill is observed, guaranteeing armed overlap coverage independent of the random draw.
     """
     em = _make_emitter(_seed_rng(master_seed, index), ["a", "b", "c"], set(), fmt)
@@ -898,7 +898,7 @@ def _generate_stateful_kernel(
 ) -> GeneratedKernel:
     """
     Render one stateful kernel exercising the chained-slot pattern (capturing one slot's OLD value while another
-    advances). The slots are PRIVATE so no ``state_*`` output port is created -- a public attribute would break the
+    advances). The slots are PRIVATE so no `state_*` output port is created -- a public attribute would break the
     float64 comparison.
     """
     rng = _seed_rng(master_seed, index)
@@ -976,7 +976,7 @@ def _assemble_class(
 
 
 def _generate_kernel(master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT) -> GeneratedKernel:
-    """Reproducible by ``(seed, index)`` regardless of draw order, so any kernel replays from its provenance alone."""
+    """Reproducible by `(seed, index)` regardless of draw order, so any kernel replays from its provenance alone."""
     name = f"fuzz_k_{master_seed:x}_{index}"
     rng = np.random.default_rng(np.random.SeedSequence([master_seed, index, 0x5A5A]))
     if rng.random() < 0.3:
@@ -1101,8 +1101,8 @@ def _overlap_spill_depth(lir: Lir) -> int | None:
 def _has_fused_relation_pair(lir: Lir) -> bool:
     """
     Whether the LIR contains one comparator firing with multiple tapped order-flag outputs. The relation-pair directed
-    kernel emits ``a < b`` and ``a == b`` over the same ordered pair; if scheduler firing fusion regresses to two
-    independent comparator firings, each ``fcmp`` scheduled op will have only one write and this witness fails.
+    kernel emits `a < b` and `a == b` over the same ordered pair; if scheduler firing fusion regresses to two
+    independent comparator firings, each `fcmp` scheduled op will have only one write and this witness fails.
     """
     for block in lir.blocks:
         for op in block.ops:
@@ -1123,8 +1123,8 @@ def _branch_successors(terminator: MirTerminator) -> tuple[int, ...]:
 
 def surviving_forward_branches(mir: Mir) -> int:
     """
-    The number of FORWARD (non-loop-header) ``MirBranch`` terminators. A loop header is the target of a BACK EDGE -- an
-    edge ``b -> s`` where ``s`` DOMINATES ``b`` (every path from the entry to ``b`` runs through ``s``) -- so its branch
+    The number of FORWARD (non-loop-header) `MirBranch` terminators. A loop header is the target of a BACK EDGE -- an
+    edge `b -> s` where `s` DOMINATES `b` (every path from the entry to `b` runs through `s`) -- so its branch
     is the loop test, not a diamond, and is excluded. Using DOMINATORS (not mere reachability, which flags every block
     in a cycle, nor block-layout position, which is not guaranteed reverse-postorder) makes a degraded diamond drop the
     count even when a co-occurring loop -- or a diamond NESTED inside a loop -- keeps a branch terminator alive, without
@@ -1164,7 +1164,7 @@ def _assert_danger_survived(kernel: GeneratedKernel, mir: Mir, op_label: str) ->
     """
     A branchy kernel must keep a real FORWARD (diamond) branch after compilation. The generated diamonds are built
     un-if-convertible via an unspeculatable division or an over-budget exact arm, so a silent degradation to a
-    straight-line ``select`` should not happen -- this is a loud safety net against an unexpected if-conversion change.
+    straight-line `select` should not happen -- this is a loud safety net against an unexpected if-conversion change.
     Counting only FORWARD branches (excluding loop-header back-edge branches) is robust to a co-occurring loop, which
     would otherwise keep a branch terminator alive even if every diamond degraded away.
     """
@@ -1259,7 +1259,7 @@ def _reference_outputs(
     fn: Callable[..., object], fmt: FloatFormat, input_names: list[str], bool_inputs: frozenset[str], vector: Vector
 ) -> list[float | bool] | None:
     """
-    Evaluate the float64 reference for one vector, or ``None`` if it raises (ZeroDivisionError/OverflowError/ValueError)
+    Evaluate the float64 reference for one vector, or `None` if it raises (ZeroDivisionError/OverflowError/ValueError)
     -- in which case the secondary check skips this vector. Float inputs are decoded from their exact ZKF bits so the
     reference sees the same value the DUT received.
     """
@@ -1300,7 +1300,7 @@ def _secondary_ok(
     Compare the model output against the float64 reference, leaf by leaf: a bool lane must match exactly, a float lane
     within a format tolerance (EXACT mode: rtol=atol=0). A non-finite EXACT leaf is a hard failure because every
     EXACT-mode probe is required to stay finite in the configured ZKF format; only CONTINUOUS non-finite leaves are
-    reported ``SKIP_NONFINITE``. The tolerance is widened by the operation count.
+    reported `SKIP_NONFINITE`. The tolerance is widened by the operation count.
     """
     if len(model_out) != len(reference):
         return _SecondaryResult.STRUCTURAL_FAIL, f"output arity differs: model {len(model_out)} vs ref {len(reference)}"
@@ -1321,7 +1321,7 @@ def _secondary_ok(
         if isinstance(m, bool) != isinstance(r, bool) or isinstance(m, IntValue):
             # A lane's family must match the source's: a bool output lowered as a float (or vice versa), or an
             # integer where this float64 reference expects none, is a real miscompile that coercing the model value
-            # with ``bool(...)``/``float(...)`` would mask (model True or 1 vs reference 1.0 compare ==).
+            # with `bool(...)`/`float(...)` would mask (model True or 1 vs reference 1.0 compare ==).
             return (
                 _SecondaryResult.STRUCTURAL_FAIL,
                 f"lane {lane}: type mismatch -- model {type(m).__name__} vs reference {type(r).__name__}",
@@ -1337,7 +1337,7 @@ def _secondary_ok(
                 continue
             # Not comparable; defer the verdict. A non-finite lane -- INCLUDING the model saturating to inf where the
             # float64 reference stays finite -- is SKIPPED, not failed: ZKF's narrower range legitimately saturates on
-            # overflow, including INTERMEDIATE overflow (``a*b`` exceeds the format yet the true result fits), so a
+            # overflow, including INTERMEDIATE overflow (`a*b` exceeds the format yet the true result fits), so a
             # model-inf/finite-reference lane cannot be distinguished from a real shared inf-miscompile without false
             # positives. That narrow shared-upstream class is backstopped by the operator unit tests and the example
             # suite (same casts/operators vs Python), not by this best-effort float64 net.
@@ -1352,7 +1352,7 @@ def _secondary_ok(
         return _SecondaryResult.FAIL, exact_nonfinite_fail
     if nonfinite:
         # A non-finite lane voids the whole vector BEFORE a tolerance miss is reported: a finite lane derived from a
-        # saturated intermediate (e.g. ``1/inf``) can drift spuriously, so a saturation must SKIP, not FAIL. (STRUCTURAL
+        # saturated intermediate (e.g. `1/inf`) can drift spuriously, so a saturation must SKIP, not FAIL. (STRUCTURAL
         # failures already returned above -- they are real miscompiles independent of any saturation.)
         return _SecondaryResult.SKIP_NONFINITE, ""
     if tolerance_fail is not None:
@@ -1372,7 +1372,7 @@ class _Differential:
     """
     The per-vector differential engine shared by the campaign runner and the regression replayer: one model + one
     interpreter built from the same MIR, plus the float64 reference function and the kernel's numerical mode.
-    ``primary`` returns the bit-exact interp-vs-model detail (or None), and ``secondary`` runs the best-effort float64
+    `primary` returns the bit-exact interp-vs-model detail (or None), and `secondary` runs the best-effort float64
     net with the stateful-latch rule -- so both call sites drive the identical oracle and cannot drift.
     """
 
@@ -1412,7 +1412,7 @@ class _Differential:
     def secondary(self, vector: Vector, model_out: list[ScalarValue]) -> _SecondaryOutcome:
         """
         Run the best-effort float64 check for one vector, applying the stateful latch and EXACT-mode failure rule. A
-        CONTINUOUS finite out-of-tolerance mismatch is NOT reported as a divergence: ``default_tolerance`` is a linear
+        CONTINUOUS finite out-of-tolerance mismatch is NOT reported as a divergence: `default_tolerance` is a linear
         heuristic, not a sound bound on ZKF-vs-float64 divergence (catastrophic cancellation makes the relative error
         unbounded), so a finite continuous miss is treated as expected precision drift, not a miscompile -- the EXACT
         mode and the bit-exact interp==model check are the sound oracles. Any skip (a raise or a non-finite lane) that
@@ -1459,8 +1459,8 @@ def run_kernel(
     """
     Drive one (kernel, op-config) through the differential runner over an ordered vector sequence on ONE model + ONE
     interpreter (reset state shared). The model is built ONCE here and the vectors are drawn from it (so the campaign
-    compiles the kernel exactly once per op-config). Returns the first :class:`Divergence` found (its vector prefix
-    captured), or ``None`` if every check passed. The primary interp==model check is unconditional and never skipped;
+    compiles the kernel exactly once per op-config). Returns the first Divergence found (its vector prefix
+    captured), or `None` if every check passed. The primary interp==model check is unconditional and never skipped;
     the secondary float64 check is best-effort and latches off permanently for a stateful kernel once the float64
     reference diverges.
     """
@@ -1526,13 +1526,13 @@ _ARM_RETRIES = 8  # dead-arm-only kernels arm ~100%, so this re-roll is a guard,
 def _armed_dead_arm_kernel(master_seed: int, index: int, fmt: FloatFormat) -> GeneratedKernel:
     """
     A dead-arm-only kernel re-rolled until its wide chain actually spills past the overlapped terminator (arming the
-    register-reuse hazard). The shape arms reliably, so a re-roll is rare; failing after ``_ARM_RETRIES`` is a loud
+    register-reuse hazard). The shape arms reliably, so a re-roll is rare; failing after `_ARM_RETRIES` is a loud
     signal that the generator or the overlap machinery regressed.
     """
     for attempt in range(_ARM_RETRIES):
         kernel = _generate_dead_arm_kernel(f"deadarm_{index}_{attempt}", master_seed, index * 64 + attempt, fmt)
         assert kernel.dead_arm_chain_depth is not None
-        # Verify the chain spills under EVERY op-config the forced batch asserts (``expect_armed``), not just the
+        # Verify the chain spills under EVERY op-config the forced batch asserts (`expect_armed`), not just the
         # default -- so a future config under which the chain happens not to spill cannot false-fail the campaign.
         lirs = (
             _build_with_lir(kernel.callable, make_ops(fmt), kernel.name, fmt)[1] for make_ops in OP_CONFIGS.values()
@@ -1569,8 +1569,8 @@ def run_campaign(
     on_divergence: Callable[[Divergence], None],
 ) -> CampaignStats:
     """
-    Run a full campaign: generate ``n_kernels`` kernels, sweep each across :data:`OP_CONFIGS`, and drive ``n_vectors``
-    vectors through each. ``on_divergence`` is invoked with the FIRST divergence per (kernel, op-config) -- the caller
+    Run a full campaign: generate `n_kernels` kernels, sweep each across OP_CONFIGS, and drive `n_vectors`
+    vectors through each. `on_divergence` is invoked with the FIRST divergence per (kernel, op-config) -- the caller
     saves a reproducer and decides whether to fail. Returns the accumulated stats.
     """
     stats = CampaignStats()
@@ -1599,8 +1599,8 @@ REGRESSIONS_DIR = Path(__file__).resolve().parent / "fuzz_regressions"
 class ReproMeta:
     """
     The typed metadata of a saved reproducer: everything needed to rebuild and replay the failing case. It serializes
-    to a plain ``dict`` literal (so the saved module imports nothing) via :meth:`to_dict`, and parses back at a single
-    boundary via :meth:`from_dict` -- so the rest of the code works with this strongly-typed record, not a stringly
+    to a plain `dict` literal (so the saved module imports nothing) via to_dict, and parses back at a single
+    boundary via from_dict -- so the rest of the code works with this strongly-typed record, not a stringly
     -keyed dict.
     """
 
@@ -1640,7 +1640,7 @@ class ReproMeta:
 
     @classmethod
     def from_dict(cls, meta: Mapping[str, Any]) -> ReproMeta:
-        """Parse a saved ``META`` dict into the typed record -- the single place the on-disk format is decoded."""
+        """Parse a saved `META` dict into the typed record -- the single place the on-disk format is decoded."""
         return cls(
             kernel_name=str(meta["kernel_name"]),
             op_label=str(meta["op_label"]),
@@ -1661,7 +1661,7 @@ class ReproMeta:
 
 def save_reproducer(divergence: Divergence, fmt: FloatFormat) -> Path:
     """
-    Write a self-contained reproducer into :data:`REGRESSIONS_DIR`. The replayer (``test_fuzz_regressions``) globs
+    Write a self-contained reproducer into REGRESSIONS_DIR. The replayer (`test_fuzz_regressions`) globs
     these and re-asserts the previously-failing check.
     """
     REGRESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1690,7 +1690,7 @@ def save_reproducer(divergence: Divergence, fmt: FloatFormat) -> Path:
 def _vector_to_bits(kernel: GeneratedKernel, vector: Vector) -> dict[str, int]:
     """
     Map a positional vector to a name->exact-bits mapping with NO float round-trip: a float port keeps its raw ZKF
-    ``bits`` (a ``float()`` decode of a largest-finite value would overflow), a bool port keeps ``int(value)``.
+    `bits` (a `float()` decode of a largest-finite value would overflow), a bool port keeps `int(value)`.
     """
     bits: dict[str, int] = {}
     for name, value in zip(kernel.input_names, vector, strict=True):
@@ -1700,10 +1700,10 @@ def _vector_to_bits(kernel: GeneratedKernel, vector: Vector) -> dict[str, int]:
 
 def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object]) -> tuple[bool, str]:
     """
-    Replay a saved reproducer: rebuild the model + interpreter at the saved op-config (via the same ``_build_with_lir``
+    Replay a saved reproducer: rebuild the model + interpreter at the saved op-config (via the same `_build_with_lir`
     path the campaign uses), drive the saved bit-vectors in order, and re-check the previously-failing differential
-    check through the same ``_Differential`` engine. Returns ``(passes_now, detail)`` -- a fixed bug means ``passes_now
-    is True``. The regression replayer calls this in a subprocess pinned to the saved regalloc effort (which is import
+    check through the same `_Differential` engine. Returns `(passes_now, detail)` -- a fixed bug means `passes_now
+    is True`. The regression replayer calls this in a subprocess pinned to the saved regalloc effort (which is import
     -frozen), so the caller is responsible for having set the right effort before importing this module.
     """
     repro = ReproMeta.from_dict(meta)
@@ -1759,8 +1759,8 @@ def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object])
 
 def _render_reproducer(source: str, meta: dict[str, object]) -> str:
     """
-    Render a saved reproducer module: the kernel source verbatim plus a ``META`` dict literal. Float inputs are stored
-    as exact ZKF bits so replay is bit-faithful regardless of the float64 round-trip. The replayer imports ``META`` and
+    Render a saved reproducer module: the kernel source verbatim plus a `META` dict literal. Float inputs are stored
+    as exact ZKF bits so replay is bit-faithful regardless of the float64 round-trip. The replayer imports `META` and
     the kernel symbol by name.
     """
     import pprint

@@ -1,8 +1,8 @@
 """
 Public-API, black-box behavioral tests for register-allocation and merge-resolution regressions.
 
-Every test drives the compiler ONLY through the public API (``holoso.synthesize(fn, options)`` and the elaborated
-``numerical_model``) and asserts on observable values against a CPython reference or independent literals. These are
+Every test drives the compiler ONLY through the public API (`holoso.synthesize(fn, options)` and the elaborated
+`numerical_model`) and asserts on observable values against a CPython reference or independent literals. These are
 the behavior halves of allocator corners whose structural triggers (where one is needed to keep the corner exercised)
 live in test_schedule.py; the tests here assert only build success and output/state correctness, so they survive a
 deep refactor of the allocator, coalescer, and merge threading.
@@ -57,10 +57,10 @@ def test_back_edge_carried_merge_phi_kernel_builds_and_matches_reference() -> No
 
 
 def test_phi_coalescing_residual_install_conflict_is_resolved() -> None:
-    # Regression: a phi (``a``) coalesces onto input ``x``'s register because the install-free oracle sees no overlap,
-    # yet ``x`` stays live in the else block as a sibling phi's identity arm (``z = x``) exactly where ``a``'s residual
+    # Regression: a phi (`a`) coalesces onto input `x`'s register because the install-free oracle sees no overlap,
+    # yet `x` stays live in the else block as a sibling phi's identity arm (`z = x`) exactly where `a`'s residual
     # (sign-folded) else-arm install writes that shared register. The final, install-aware interference then flags the
-    # class against itself and the coloring backstop aborted the build. The fixpoint must de-coalesce ``a`` and build.
+    # class against itself and the coloring backstop aborted the build. The fixpoint must de-coalesce `a` and build.
     # The division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
     def k(x: float, b: float, cc: float) -> tuple[float, float, float]:
         if b < cc:
@@ -78,7 +78,7 @@ def test_phi_coalescing_residual_install_conflict_is_resolved() -> None:
 
 def test_phi_coalescing_conflict_resolved_under_reversed_declaration_order() -> None:
     # The same hazard with the assignments and the return reversed: value ids -- hence the deterministic phi processing
-    # order the union-find follows -- change, so a DIFFERENT phi wins the merge onto ``x``. The fixpoint must converge
+    # order the union-find follows -- change, so a DIFFERENT phi wins the merge onto `x`. The fixpoint must converge
     # regardless of which phi coalesced first; this pins the resolution as order-independent, not an artifact of one id
     # assignment.
     def k(x: float, b: float, cc: float) -> tuple[float, float, float]:
@@ -113,8 +113,8 @@ def test_phi_coalescing_conflict_resolved_with_swapped_branch_arms() -> None:
 
 
 def test_bool_phi_coalescing_residual_install_conflict_is_resolved() -> None:
-    # The boolean-bank twin of the residual-install conflict: phi ``a`` coalesces onto input ``q``'s 1-bit register
-    # while ``q`` stays live as sibling phi ``z``'s identity arm (``z = q``) where ``a``'s residual (inverted) else-arm
+    # The boolean-bank twin of the residual-install conflict: phi `a` coalesces onto input `q`'s 1-bit register
+    # while `q` stays live as sibling phi `z`'s identity arm (`z = q`) where `a`'s residual (inverted) else-arm
     # install writes the shared register. A boolean phi keeps the diamond a real branch (bool phis are never
     # if-converted). The fixpoint must de-coalesce and build; checked bit-exact across all eight boolean input vectors.
     def k(p: bool, q: bool, r: bool) -> tuple[bool, bool, bool]:
@@ -160,8 +160,8 @@ def test_noop_state_writeback_streams_and_matches_reference() -> None:
 
 def test_write_only_state_slot_matches_reference() -> None:
     # The behavior half of test_schedule.py test_cfg_write_only_state_slot_is_reserved: a state slot written on every
-    # arm but never read before the write. The returned value is the assign-and-return leaf of the public ``acc``
-    # state, so the model exposes it through the ``state_acc`` port; both arms' values are exact independent literals.
+    # arm but never read before the write. The returned value is the assign-and-return leaf of the public `acc`
+    # state, so the model exposes it through the `state_acc` port; both arms' values are exact independent literals.
     class WriteOnlyBranch:
         def __init__(self) -> None:
             self.acc = 0.0

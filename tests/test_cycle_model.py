@@ -1,10 +1,10 @@
 """
-Tests for the cycle-accurate :class:`NumericalSimulator`: the per-clock ``tick`` interface, the data-dependent latency
+Tests for the cycle-accurate NumericalSimulator: the per-clock `tick` interface, the data-dependent latency
 a caller recovers by counting ticks, and bounded-memory execution of an arbitrarily deep loop.
 
 The bit-exactness of the outputs themselves is covered by the broad model-equivalence suites (which call the model
-transaction-level via ``run``) and, against the RTL, by the cycle-accurate cosim lockstep. Here we exercise the
-cycle-level behaviour: that ``tick`` reaches ``out_valid`` on the cycle the RTL would, that the count is data-dependent
+transaction-level via `run`) and, against the RTL, by the cycle-accurate cosim lockstep. Here we exercise the
+cycle-level behaviour: that `tick` reaches `out_valid` on the cycle the RTL would, that the count is data-dependent
 on a branchy/looping kernel, and that a hard loop does not blow up state.
 """
 
@@ -80,7 +80,7 @@ def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., obje
 
 @pytest.mark.parametrize("name", ["madd", "poly3", "cordic_sincos", "ekf1_stateless"])
 def test_single_path_latency_is_the_static_initiation_interval(name: str) -> None:
-    # A kernel with one forward path takes exactly ``initiation_interval - 1`` cycles from the accept edge (pc==1) to
+    # A kernel with one forward path takes exactly `initiation_interval - 1` cycles from the accept edge (pc==1) to
     # out_valid (pc==LASTPC) -- the cycle count a caller recovers by counting ticks, here the static lower bound.
     factories: dict[str, Callable[[], Callable[..., object]]] = {
         "madd": lambda: madd.madd,
@@ -100,7 +100,7 @@ def test_single_path_latency_is_the_static_initiation_interval(name: str) -> Non
 
 def test_loop_latency_grows_with_the_trip_count() -> None:
     # Newton's reciprocal iterates until convergence, so a harder input runs more loop trips and a strictly longer
-    # transaction -- the data-dependent latency a fixed ``initiation_interval`` cannot express.
+    # transaction -- the data-dependent latency a fixed `initiation_interval` cannot express.
     result = _synthesize(lambda: NewtonReciprocal().__call__, "recip")
     model = result.numerical_model.elaborate()
     latencies = {_drive(model, [x])[1] for x in (0.5, 0.9, 1.3, 1.7, 2.5, 3.5, 6.0, 12.0)}
@@ -110,7 +110,7 @@ def test_loop_latency_grows_with_the_trip_count() -> None:
 
 def test_deep_loop_runs_in_bounded_memory() -> None:
     # The per-clock model holds only the register files and a small in-flight buffer, so a loop with a very high trip
-    # count executes without unbounded growth. ``count_down`` runs ``n`` iterations; at n=20000 that is hundreds of
+    # count executes without unbounded growth. `count_down` runs `n` iterations; at n=20000 that is hundreds of
     # thousands of ticks completing in bounded memory and time -- a global-timeline design would be O(trips^2).
     result = _synthesize(lambda: _count_down, "count_down")
     shallow_cycles = _drive(result.numerical_model.elaborate(), [10.0])[1]
@@ -137,7 +137,7 @@ def _count_down(n: float) -> float:
 # the loop trip count (recip_newton, remainder), and a branchy kernel's worst arm may not be its longest static path.
 # Each tuple is (factory, input vectors, frozen worst-case waited). The vectors are chosen to hit the draining/long
 # paths (schmitt's deadband, quadrature's simultaneous-change fault, pfd's both-pending, the loops' high-trip inputs).
-# The bound is ``<=`` so a future optimization may lower it; a regression that re-inflates a per-block drain trips it.
+# The bound is `<=` so a future optimization may lower it; a regression that re-inflates a per-block drain trips it.
 # If-conversion collapsed schmitt, pfd, and iir1_lpf to a single block (a fixed-latency transaction, down from tens of
 # cycles of branch-block drain); quadrature/recip/remainder stay multi-block and data-dependent. iir1_lpf is the
 # canonical "if-conversion RAISES min_ii but LOWERS realized latency" case (min_ii 15->21 as its rare cheap first-sample
@@ -174,10 +174,10 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
 
 @pytest.mark.parametrize("name", list(_WORST_CASE_LATENCY))
 def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
-    # The realized per-transaction latency (the cosim bench's ``waited``) over a fixed adversarial input set must not
+    # The realized per-transaction latency (the cosim bench's `waited`) over a fixed adversarial input set must not
     # exceed its frozen worst case. This is the teeth behind the latency-reduction work: a per-block drain regression
     # re-inflates the count, amplified across loop trips. Freezing the post-optimization figure makes the gate fail on
-    # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is ``<=``).
+    # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is `<=`).
     factory, vectors, worst = _WORST_CASE_LATENCY[name]
     model = _synthesize(factory, name).numerical_model.elaborate()
     waited = [_drive(model, inputs)[1] for inputs in vectors]

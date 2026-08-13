@@ -1,6 +1,6 @@
 """
 Public-API, black-box behavioral tests for the extended float operators.
-Every test drives the compiler only through ``holoso.synthesize(fn, ops).numerical_model.elaborate()``
+Every test drives the compiler only through `holoso.synthesize(fn, ops).numerical_model.elaborate()`
 and asserts on observable output values against an INDEPENDENT reference.
 """
 
@@ -34,7 +34,7 @@ from holoso import (
 from holoso._value import ScalarValue
 from ._modelref import instantiated_modules as _modules
 
-# Bare-name imports so a ``from math import floor`` style kernel resolves through the test module globals.
+# Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
 
 # Aliased imports: the local name is NOT the canonical spelling, so dispatch must resolve by callee-object identity.
@@ -189,7 +189,7 @@ def test_round_modes_match_reference() -> None:
 
 
 def test_round_dispatch_numpy_and_bare_name() -> None:
-    # numpy.<name> under an alias, and bare names imported via ``from math import ...`` must both dispatch.
+    # numpy.<name> under an alias, and bare names imported via `from math import ...` must both dispatch.
     def kernel(x: float) -> tuple[float, float, float, float, float, float]:
         return (np.floor(x), np.ceil(x), np.trunc(x), floor(x), ceil(x), trunc(x))
 
@@ -273,7 +273,7 @@ def test_fma_unconfigured_is_rejected() -> None:
 
 def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
     # An aliased import binds a non-canonical local name to the real function object; dispatch resolves by callee
-    # identity, so ``aliased_floor`` (= math.floor) lowers as floor and ``aliased_fma`` (= math.fma) as fma.
+    # identity, so `aliased_floor` (= math.floor) lowers as floor and `aliased_fma` (= math.fma) as fma.
     def kernel(a: float, b: float, c: float) -> tuple[float, float]:
         return (aliased_floor(a), aliased_fma(a, b, c))
 
@@ -286,7 +286,7 @@ def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
 
 @pytest.mark.skipif(hasattr(np, "fma"), reason="np.fma exists on this numpy and correctly dispatches to ffma")
 def test_numpy_fma_is_rejected() -> None:
-    # ``np.fma`` does not exist on this numpy, so it does not resolve to a real function and must not dispatch to ffma
+    # `np.fma` does not exist on this numpy, so it does not resolve to a real function and must not dispatch to ffma
     # by spelling alone (it would not run as plain Python either); the skip guards the numpy versions that do define it.
     def kernel(a: float, b: float, c: float) -> float:
         return np.fma(a, b, c)  # type: ignore[attr-defined, no-any-return]
@@ -300,7 +300,7 @@ def _v(x: float) -> FloatValue:
 
 
 def test_implicit_mul_add_contracts_to_fma_only_with_ffma() -> None:
-    # ``a*b + c`` with a single-use product contracts to one fma (single rounding) when ffma is configured, and stays
+    # `a*b + c` with a single-use product contracts to one fma (single rounding) when ffma is configured, and stays
     # a separate multiply-then-add (double rounding) when it is not. The two genuinely differ on many inputs, so the
     # contraction is observable; the test asserts the exact reference for each configuration and that they diverge.
     def kernel(a: float, b: float, c: float) -> float:
@@ -363,7 +363,7 @@ def test_implicit_fma_contracts_across_blocks() -> None:
 
 def test_implicit_fma_distributes_product_sign() -> None:
     # The product's folded sign distributes onto the multiplier operands: negation onto one, absolute onto both. Each
-    # variant is its OWN kernel so its product stays single-use (sharing one ``a*b`` across all three would intern to a
+    # variant is its OWN kernel so its product stays single-use (sharing one `a*b` across all three would intern to a
     # used-twice product and suppress the contraction).
     def k_neg(a: float, b: float, c: float) -> float:
         return -(a * b) + c
@@ -527,7 +527,7 @@ def test_a_cancelling_infinity_of_constants_is_refused_not_folded() -> None:
 
 
 def _ulp32(value: float) -> float:
-    """The binary32 quantum at ``value``'s magnitude, for the coarse native-accuracy guards."""
+    """The binary32 quantum at `value`'s magnitude, for the coarse native-accuracy guards."""
     if value == 0.0 or not math.isfinite(value):
         return math.ldexp(1.0, -149)
     return math.ldexp(1.0, max(math.frexp(abs(value))[1] - FMT.wman, -149))
@@ -707,7 +707,7 @@ def test_lone_sin_value() -> None:
 
 
 def test_a_turn_scaled_angle_sheds_the_conversion() -> None:
-    # The point of restating the cores' turn ABI in HIR: a phase counted in turns scales by ``tau/2**k`` only so the
+    # The point of restating the cores' turn ABI in HIR: a phase counted in turns scales by `tau/2**k` only so the
     # conversion can take it back out, and the two now meet as ordinary constants whose product is an exact exponent.
     # No general multiply survives -- the round trip that once dominated a DDS oscillator's error is gone.
     def kernel(x: float) -> float:
@@ -732,7 +732,7 @@ def test_a_turn_scaled_angle_sheds_the_conversion() -> None:
 
 
 def test_a_full_turn_scale_cancels_the_conversion_entirely() -> None:
-    # ``tau * (1/tau)`` is exactly one, so a kernel spelling a whole turn hands the core its operand untouched. The
+    # `tau * (1/tau)` is exactly one, so a kernel spelling a whole turn hands the core its operand untouched. The
     # angle's own multiply is shared with a second consumer here and must survive for it, which is what shows that
     # composing a shared scaling neither duplicates it nor blocks the fold on the path that can take it.
     def shared(x: float) -> tuple[float, float]:
@@ -762,7 +762,7 @@ def test_a_turn_native_fold_reduces_in_turns() -> None:
     def cos_of(x: float) -> float:
         return math.cos(x)
 
-    # ``y - y`` is folded by a value-equality identity rather than by the front end, so the phase becomes constant
+    # `y - y` is folded by a value-equality identity rather than by the front end, so the phase becomes constant
     # only inside HIR -- which is the one way a constant reaches the turn-native operator at all. Spelled as a
     # literal it would be folded through the radian operator before the restatement ever runs.
     def cardinal(turns: float) -> Callable[[float], float]:
@@ -866,7 +866,7 @@ def test_atan2_matches_model_and_native() -> None:
 
 
 def test_atan2_dispatch_numpy_arctan2() -> None:
-    # numpy spells the two-arg arctangent ``arctan2`` (== ``np.atan2`` on numpy>=2.0).
+    # numpy spells the two-arg arctangent `arctan2` (== `np.atan2` on numpy>=2.0).
     def kernel(y: float, x: float) -> float:
         return np.arctan2(y, x)  # type: ignore[no-any-return]
 
@@ -1004,7 +1004,7 @@ def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None
 
 
 def test_a_constant_zero_base_computes_its_poles_through_the_composite() -> None:
-    # ``0.0 ** e`` denotes a number for every e except a negative one. The general path is ``exp2(e * log2(b))``,
+    # `0.0 ** e` denotes a number for every e except a negative one. The general path is `exp2(e * log2(b))`,
     # and log2's evaluate answers the np reference's -inf at the folded zero base, so the
     # build no longer refuses: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
     # e==0 rung, 0.0 for a positive exponent, +inf past the negative pole (np.power semantics; math.pow raises

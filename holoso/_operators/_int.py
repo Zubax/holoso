@@ -23,9 +23,9 @@ from ._common import (
 @dataclass(frozen=True, slots=True)
 class IntHardwareOperator(PooledHardwareOperator, ABC):
     """
-    The dual of :class:`FloatHardwareOperator`, each operator carries its own closed-form latency and RTL parameters.
+    The dual of FloatHardwareOperator, each operator carries its own closed-form latency and RTL parameters.
     Saturation is what the integer type does at its extremes rather than a failure, and HIR marks the saturating
-    operations speculatable, so the ``saturated`` sideband every module raises stays unconnected and unmodeled -- an
+    operations speculatable, so the `saturated` sideband every module raises stays unconnected and unmodeled -- an
     if-converted arm that saturates must not raise the machine's error flag.
     """
 
@@ -74,7 +74,7 @@ class IAddOperator(IntHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class ISubOperator(IntHardwareOperator):
-    """Also serves negation as ``0-x``: there is no negation module, and this one saturates ``-MIN`` correctly."""
+    """Also serves negation as `0-x`: there is no negation module, and this one saturates `-MIN` correctly."""
 
     mnemonic: ClassVar[str] = "isubs"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
@@ -146,7 +146,7 @@ class IDivOperator(IntHardwareOperator):
 
     @property
     def params(self) -> dict[str, int]:
-        # Floor, because that is what Python's ``//`` and ``%`` mean and HIR has no other division; the core's
+        # Floor, because that is what Python's `//` and `%` mean and HIR has no other division; the core's
         # truncating mode is unreachable from a kernel.
         return {"W": self.fmt.width, "QUOTIENT_FLOOR": 1, "LATENCY": self.latency}
 
@@ -193,7 +193,7 @@ class IAbsOperator(IntHardwareOperator):
 class IShlOperator(IntHardwareOperator):
     """
     An arithmetic shift by a signed amount, left when positive. It emits both readings of a left shift at once:
-    ``shft`` lets the high bits fall off the word, while ``prod`` is the multiplication by a power of two, saturating
+    `shft` lets the high bits fall off the word, while `prod` is the multiplication by a power of two, saturating
     instead. Which one a shift wants is a lowering decision, so the operator commits to neither.
     """
 
@@ -223,7 +223,7 @@ class IShlOperator(IntHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class IShrOperator(IntHardwareOperator):
     """
-    The mirror of :class:`IShlOperator`, right when positive.
+    The mirror of IShlOperator, right when positive.
     Neither direction can rail, so it emits one raw reading and no saturation.
     """
 
@@ -248,8 +248,8 @@ class IShrOperator(IntHardwareOperator):
 class IPopcntOperator(IntHardwareOperator):
     """
     The population count of the magnitude, as Python's `int.bit_count()`, so a negative operand counts the ones of `-x`.
-    The negation that overflows a signed word is exactly the magnitude ``2**(W-1)`` read unsigned, so unlike
-    :class:`IAbsOperator` nothing saturates and the count never reaches the width. The module answers on a port only
+    The negation that overflows a signed word is exactly the magnitude `2**(W-1)` read unsigned, so unlike
+    IAbsOperator nothing saturates and the count never reaches the width. The module answers on a port only
     as wide as that count needs, which the reader widens; a count is never negative, so the widening is a zero fill.
     """
 
@@ -259,7 +259,7 @@ class IPopcntOperator(IntHardwareOperator):
 
     @property
     def count_width(self) -> int:
-        """The narrowest unsigned port holding a count of the magnitude; the RTL derives it again as ``$clog2(W)``."""
+        """The narrowest unsigned port holding a count of the magnitude; the RTL derives it again as `$clog2(W)`."""
         width = (self.fmt.width - 1).bit_length()
         assert self.fmt.width - 1 < (1 << width)
         assert self.fmt.width - 1 >= (1 << (width - 1))
@@ -298,7 +298,7 @@ class ICmpOperator(IntHardwareOperator, ComparatorOperator):
 
 @dataclass(frozen=True, slots=True)
 class IntInlineOperator(InlineHardwareOperator, ABC):
-    """The inline dual of :class:`IntHardwareOperator`."""
+    """The inline dual of IntHardwareOperator."""
 
     fmt: IntFormat
 
@@ -381,7 +381,7 @@ class IntBwNotOperator(IntInlineOperator):
 class IntShiftConstOperator(IntInlineOperator):
     """
     An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
-    drops what leaves the word rather than saturating as the pooled ``holoso_ishl`` also offers.
+    drops what leaves the word rather than saturating as the pooled `holoso_ishl` also offers.
     Shift by 0 or by an amount exceeding the operand width is a compile-time error (must fold/reject before LIR).
     """
 

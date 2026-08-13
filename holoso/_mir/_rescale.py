@@ -34,7 +34,7 @@ def _degrades(fmt: FloatFormat, value: float) -> bool:
 
 def _reaches(fmt: FloatFormat, k: int) -> bool:
     """
-    Whether scaling by ``2**k`` maps any representable magnitude back onto a representable one -- the format's own
+    Whether scaling by `2**k` maps any representable magnitude back onto a representable one -- the format's own
     exponent span is the reach. Past it no operand the machine can hold produces a result it can hold, so splitting
     would only compute the zero or the infinity more slowly, and the constant is worth refusing over after all.
     """

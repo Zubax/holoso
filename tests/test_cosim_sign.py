@@ -1,6 +1,6 @@
 """
-Cosim of the two inlined-``holoso_fsgnop`` sites the bundled examples miss: a folded sign on a state writeback and on
-output taps. The ``remainder``/``pid`` specs already cover the inline-firing and phi-arm-install sites.
+Cosim of the two inlined-`holoso_fsgnop` sites the bundled examples miss: a folded sign on a state writeback and on
+output taps. The `remainder`/`pid` specs already cover the inline-firing and phi-arm-install sites.
 """
 
 import dataclasses
@@ -15,7 +15,7 @@ from .hdl.hdl_float_oracle import SIMULATORS
 
 
 class SignHold:
-    """Negated-input hold: writes ``-a`` to persistent state and outputs the negated previous state."""
+    """Negated-input hold: writes `-a` to persistent state and outputs the negated previous state."""
 
     def __init__(self) -> None:
         self.acc = 0.0

@@ -271,7 +271,7 @@ async def div0_errpc(dut):
 
 
 def _run_err_bench(sim: str, name: str, fmt: FloatFormat, verilog: str, bench_text: str, suffix: str = "err") -> None:
-    """Build ``name``'s RTL plus a custom error-checking cocotb bench and run it -- the shared tail of the err tests."""
+    """Build `name`'s RTL plus a custom error-checking cocotb bench and run it -- the shared tail of the err tests."""
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / sim / f"{name}_{suffix}_w{fmt.wexp}_{fmt.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"{suffix}_{name}_w{fmt.wexp}_{fmt.wman}"
@@ -545,9 +545,9 @@ def test_cosim_inverted_bool_phi_arm(sim: str, config: OptionsCase) -> None:
 @pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_phi_coalescing_residual_install_conflict(sim: str, config: OptionsCase) -> None:
-    # RTL twin of test_schedule.test_phi_coalescing_residual_install_conflict_is_resolved: phi ``a`` would coalesce onto
-    # input ``x``'s register, but ``x`` is still live as sibling phi ``z``'s identity arm (``z = x``) where ``a``'s
-    # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces ``a``. This
+    # RTL twin of test_schedule.test_phi_coalescing_residual_install_conflict_is_resolved: phi `a` would coalesce onto
+    # input `x`'s register, but `x` is still live as sibling phi `z`'s identity arm (`z = x`) where `a`'s
+    # residual sign-folded else-arm install writes that register, so the soundness fixpoint de-coalesces `a`. This
     # proves the de-coalesced residual install is bit-exact in RTL, not only against the Python cycle model. The
     # division keeps the diamond a real branch (un-if-converted), which is what creates the phi merge.
     def kernel(x: float, b: float, cc: float) -> tuple[float, ...]:

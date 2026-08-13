@@ -15,7 +15,7 @@ class Scaling:
     multiplied together they may not be a number at all, which is why the product is formed once, by whoever
     materializes it, and declined there rather than guarded against at every composition.
 
-    The significand lies in ``[1, 2)``, which every float format represents exactly, so a scaling that cannot be
+    The significand lies in `[1, 2)`, which every float format represents exactly, so a scaling that cannot be
     one constant can always be two.
     """
 
@@ -53,7 +53,7 @@ class Scaling:
 def scaling_of(c: float) -> Scaling | None:
     """
     A constant read as a scaling. Zero and the infinities are excluded: they are the absorbing elements of
-    multiplication rather than scalings of it, and ``frexp`` cannot normalize them, so composition is total only
+    multiplication rather than scalings of it, and `frexp` cannot normalize them, so composition is total only
     over what this admits.
     """
     if c == 0.0 or not math.isfinite(c):

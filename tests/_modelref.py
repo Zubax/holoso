@@ -72,7 +72,7 @@ class OperatorCase:
 
 @dataclass(frozen=True, slots=True)
 class OptionsCase:
-    """The public-Options twin of :class:`OperatorCase`, for consumers that synthesize through the public API."""
+    """The public-Options twin of OperatorCase, for consumers that synthesize through the public API."""
 
     label: str
     make_options: Callable[[FloatFormat], Options]
@@ -90,9 +90,9 @@ def build_model_and_interpreter(
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
-    the single source of truth for the differential-oracle tests. The model descends through ``build`` (the
+    the single source of truth for the differential-oracle tests. The model descends through `build` (the
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
-    (upstream of ``build``), so the two share everything except the LIR layer.
+    (upstream of `build`), so the two share everything except the LIR layer.
     """
     mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
@@ -168,7 +168,7 @@ def default_tolerance(
 
 
 def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
-    """Whether ``actual`` is within ``atol + rtol*|expected|`` of ``expected`` (infinities must match exactly)."""
+    """Whether `actual` is within `atol + rtol*|expected|` of `expected` (infinities must match exactly)."""
     if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
         return actual == expected
     return abs(actual - expected) <= atol + rtol * abs(expected)
@@ -303,10 +303,10 @@ def branch_boundary_kernel(a: float, b: float, c: float) -> float:
 def overlap_spill_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block software-pipelining corner shared by the cosim test and its white-box twin. The branch CONDITION
-    (``x < y``) depends only on inputs, so it commits early; a wide chain (``w``) computed in the same block commits
-    much later. The block's terminator therefore shrinks to ``w``'s write word (not the early condition), and ``w``
+    (`x < y`) depends only on inputs, so it commits early; a wide chain (`w`) computed in the same block commits
+    much later. The block's terminator therefore shrinks to `w`'s write word (not the early condition), and `w`
     SPILLS past the terminator into BOTH (single-predecessor) arms, which read it -- so a consumer in an arm must wait
-    for ``w``'s in-flight landing in the successor frame. The unspeculatable division in the else arm keeps the diamond
+    for `w`'s in-flight landing in the successor frame. The unspeculatable division in the else arm keeps the diamond
     a real branch under default if-conversion (so the spill crosses a genuine branch, replicated onto both arms).
     """
     w = (x * z + y) * z + y  # a wide chain whose result outlives the early comparison's commit
@@ -320,10 +320,10 @@ def overlap_spill_kernel(x: float, y: float, z: float) -> float:
 def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block overlap SOUNDNESS corner: a value live ONLY in one arm shares no register hazard with a value the
-    sibling arm spills onto it. ``v`` is computed in the entry block and used only in the else arm; the wide chain
-    ``w`` commits late and spills past the shrunk terminator into BOTH arms (its write-enable fires unconditionally
-    before the redirect). In the else arm ``w`` is DEAD -- if the allocator reuses ``w``'s register for ``v`` there,
-    the unconditional spill of ``w`` clobbers ``v`` before the arm reads it (a silent miscompile the cosim cannot
+    sibling arm spills onto it. `v` is computed in the entry block and used only in the else arm; the wide chain
+    `w` commits late and spills past the shrunk terminator into BOTH arms (its write-enable fires unconditionally
+    before the redirect). In the else arm `w` is DEAD -- if the allocator reuses `w`'s register for `v` there,
+    the unconditional spill of `w` clobbers `v` before the arm reads it (a silent miscompile the cosim cannot
     catch, since the numerical model shares the same register file). The else arm's value must therefore be checked
     against the source semantics, not just RTL==model. The unspeculatable division keeps this a real branch.
     """
@@ -339,8 +339,8 @@ def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
 
 def const_branch_kernel(x: float, y: float) -> float:
     """
-    A guard the partial evaluator cannot decide and the graph can: ``(x * 0.0) > -1.0`` is constant only under the
-    VALUE identity ``x*0 == 0``, which partial evaluation deliberately withholds from a residual operand. Pruning
+    A guard the partial evaluator cannot decide and the graph can: `(x * 0.0) > -1.0` is constant only under the
+    VALUE identity `x*0 == 0`, which partial evaluation deliberately withholds from a residual operand. Pruning
     settles it and deletes the arm it excludes, so what the cosim checks is that the surviving path is the one the
     source names.
     """
@@ -375,10 +375,10 @@ def overlap_div_err_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the
     one error-bearing op -- commits late, so its result spills past the shrunk terminator. The data write lands in the
-    taken arm correctly, but the err_pc diagnostic latches ``pc - fetch_lag`` when the write-
+    taken arm correctly, but the err_pc diagnostic latches `pc - fetch_lag` when the write-
     enable executes, fetch_lag steps after its write word; if the terminator redirected to the NON-fall-through arm by
     then, err_pc would capture the successor frame instead of the division's step. The shrink floor must keep that
-    latch in-block. ``x < z`` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; ``y == 0``
+    latch in-block. `x < z` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; `y == 0`
     makes the division error. The else arm's division keeps this a real branch under default if-conversion.
     """
     q = x / y
@@ -462,7 +462,7 @@ COMPARATOR_OPTIONS_CASES = (
 
 class ChainedSlots:
     """
-    Chained persistent slots: ``_a`` captures ``_b``'s OLD value while ``_b`` advances, behind a long float tail.
+    Chained persistent slots: `_a` captures `_b`'s OLD value while `_b` advances, behind a long float tail.
     Shared by the schedule-level regression test and its RTL cosim twin -- the two must exercise the same kernel.
     """
 
@@ -494,11 +494,11 @@ class SelectHold:
 
 def phi_swap_loop(x: float, n: float) -> float:
     """
-    A while loop whose two carried values genuinely SWAP across the back edge (``a, b = b, a``), producing two
+    A while loop whose two carried values genuinely SWAP across the back edge (`a, b = b, a`), producing two
     loop-header phis whose back-edge arms cross-reference each other (phi_a's arm is phi_b and vice versa). The header
     must resolve its phis as a PARALLEL snapshot -- read both old values, then bind both; sequential resolution (bind
-    ``a``, then read the new ``a`` for ``b``) would collapse the swap into ``a == b`` and miscompile. A separate counter
-    ``n`` drives termination, so the swap is pure and the trip count is the integer part of ``n``. Both the numerical
+    `a`, then read the new `a` for `b`) would collapse the swap into `a == b` and miscompile. A separate counter
+    `n` drives termination, so the swap is pure and the trip count is the integer part of `n`. Both the numerical
     model and the MIR interpreter resolve phis in parallel, so this kernel is checked against the float64 Python
     reference -- which swaps correctly -- turning a sequential-phi regression in EITHER oracle into a divergence
     (interp==model alone could not catch it, since a shared sequential bug would still agree). With integer-valued
@@ -515,8 +515,8 @@ def phi_swap_loop(x: float, n: float) -> float:
 
 def phi_swap_computed_loop(x: float, n: float) -> float:
     """
-    The computed-arm variant of :func:`phi_swap_loop`: one cross-referencing back-edge arm is a value COMPUTED in the
-    body (``a + x``), not another phi. The pure swap cannot catch an install-placement (ordering) regression, because
+    The computed-arm variant of phi_swap_loop: one cross-referencing back-edge arm is a value COMPUTED in the
+    body (`a + x`), not another phi. The pure swap cannot catch an install-placement (ordering) regression, because
     both of its latch installs have phi sources and land on one placement PC, staying parallel however they are placed;
     here the latch mixes a phi-sourced install with a computed-source install, whose placements are derived differently,
     so it pins the LIR-level invariant that no tail install may fire after a sibling install has overwritten its source
@@ -534,9 +534,9 @@ def phi_swap_computed_loop(x: float, n: float) -> float:
 
 def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
     """
-    The boolean-bank twin of :func:`phi_swap_computed_loop`: the same cross-referencing loop-header phis with one
-    computed back-edge arm, carried in the 1-bit bank so the latch installs are ``BoolWrite``s rather than
-    ``WideCopy``s. The two banks derive install placement through the same helpers but emit through separate paths,
+    The boolean-bank twin of phi_swap_computed_loop: the same cross-referencing loop-header phis with one
+    computed back-edge arm, carried in the 1-bit bank so the latch installs are `BoolWrite`s rather than
+    `WideCopy`s. The two banks derive install placement through the same helpers but emit through separate paths,
     so each needs its own pin.
     """
     a = False
@@ -572,11 +572,11 @@ def branchy_swap_mixed_arm_loop(x: float, d: float, n: float) -> tuple[float, fl
 
 def overlap_drained_passthrough_kernel(x: float, y: float, z: float) -> float:
     """
-    A wide chain ``w`` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
-    does NO work and merely passes ``w`` through as the merged value, so ``w`` is the live-out of a fully-DRAINED,
-    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the ``term_offset <= drained
-    boundary`` invariant: the spill lands within the successor's drained-boundary cap because the predecessor's
-    issue-side envelope already tracks ``w``'s late write word, so the successor-local spill is only the fixed
+    A wide chain `w` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
+    does NO work and merely passes `w` through as the merged value, so `w` is the live-out of a fully-DRAINED,
+    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the `term_offset <= drained
+    boundary` invariant: the spill lands within the successor's drained-boundary cap because the predecessor's
+    issue-side envelope already tracks `w`'s late write word, so the successor-local spill is only the fixed
     fetch/latch gap regardless of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the
     cap; it cannot, and this kernel locks that in). The else arm's unspeculatable division keeps the diamond a real
     branch.
@@ -591,7 +591,7 @@ def overlap_drained_passthrough_kernel(x: float, y: float, z: float) -> float:
 
 def overlap_livein_branch_arm_kernel(x: float, y: float, z: float) -> float:
     """
-    The wide chain ``w`` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition ``c``
+    The wide chain `w` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition `c`
     (computed in the entry block, not the arm) -- exercising the overlap interaction the plain dead-arm shape never
     reaches: a block that receives a spill and branches on a RESIDENT live-in condition shrinks its terminator to the
     issue-side envelope (the resident condition adds no read floor) rather than pinning to the drained boundary. Every
@@ -611,7 +611,7 @@ def overlap_livein_branch_arm_kernel(x: float, y: float, z: float) -> float:
 
 class SlotSwap:
     """
-    Two persistent slots that SWAP each transaction (``self._a, self._b = self._b, self._a``), forcing the parallel,
+    Two persistent slots that SWAP each transaction (`self._a, self._b = self._b, self._a`), forcing the parallel,
     read-first state writeback to exchange their two registers from old values -- the register-swap correctness the
     forward chained-slot SHIFT never exercises. Checked against the float64 reference (Python swaps correctly), so a
     shared sequential-writeback bug in BOTH oracles would still surface as a divergence.
@@ -631,7 +631,7 @@ class SlotSwap:
 
 class SharedLiveOut:
     """
-    Two slots ending the transaction holding one value. The read-modify-write pair frees ``a``'s home register
+    Two slots ending the transaction holding one value. The read-modify-write pair frees `a`'s home register
     mid-transaction and the allocator reuses it, so a boundary-installing slot's register also carries opcode writes --
     the shape the emitter used to refuse outright. Shared by the backend elaboration/premise test and its cosim twin.
     """
@@ -650,7 +650,7 @@ class SharedLiveOut:
 class SharedLiveOutBool:
     """
     The boolean-bank twin (emission is bank-specific, so each bank needs its own coexistence witness): three slots
-    ending the transaction holding one value, with ``d``'s early read freeing ``a``'s register so the allocator lands
+    ending the transaction holding one value, with `d`'s early read freeing `a`'s register so the allocator lands
     an opcode write on it -- a boundary-installing bool slot whose own register also takes one.
     """
 

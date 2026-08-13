@@ -1,21 +1,21 @@
 """
 Behavioral validation of every compilable example against its ORIGINAL Python execution.
 
-The cosimulation suite (``test_cosim_examples.py``) checks the emitted RTL against the kernel's EMBEDDED numerical
+The cosimulation suite (`test_cosim_examples.py`) checks the emitted RTL against the kernel's EMBEDDED numerical
 model -- but both descend from the same front-end lowering, so a front-end miscompile poisons the RTL and the model
-identically and the bit-for-bit check still passes. That suite proves ``RTL == compiler-model``; it cannot prove
-``compiler-model == Python semantics``. This module closes that gap: it drives each example's numerical model AND a
-fresh plain-Python instance of the same kernel over ``reference_vectors()`` (the manual sequence then the random draw)
+identically and the bit-for-bit check still passes. That suite proves `RTL == compiler-model`; it cannot prove
+`compiler-model == Python semantics`. This module closes that gap: it drives each example's numerical model AND a
+fresh plain-Python instance of the same kernel over `reference_vectors()` (the manual sequence then the random draw)
 and asserts they agree. Boolean lanes and float lanes without a budget must match bit-for-bit; a lane whose arithmetic
-accumulates rounding carries a spec-owned independent ``OutputTolerance`` (scaled by its own reference magnitude and
+accumulates rounding carries a spec-owned independent `OutputTolerance` (scaled by its own reference magnitude and
 growing with the recurrence age for carried state), so a compiler defect cannot loosen its own oracle.
 Inputs are quantized into the format first, so the model and the reference see the same operands and only the
 per-operation rounding differs.
 The per-input format-edge sweep is excluded here -- the model legitimately diverges from float64 at the format extremes
 (an operation overflowing to the format's infinity stays finite in float64), which the cosim suite covers instead.
 
-The example specs are shared with the cosimulation suite via ``_examples``: the cosim suite drives the full
-``raw_vectors()`` (manual + random + edges), this suite the ``reference_vectors()`` subset, over one source of truth.
+The example specs are shared with the cosimulation suite via `_examples`: the cosim suite drives the full
+`raw_vectors()` (manual + random + edges), this suite the `reference_vectors()` subset, over one source of truth.
 """
 
 import dataclasses
@@ -42,7 +42,7 @@ _CASES = [
 
 
 def _quantize(value: float | bool | int, fmt: FloatFormat) -> float | bool | int:
-    """A float rounded into ``fmt``, so the model and the float64 reference get one operand; a bool/int is exact."""
+    """A float rounded into `fmt`, so the model and the float64 reference get one operand; a bool/int is exact."""
     return value if isinstance(value, (bool, int)) else fmt.decode(fmt.encode(value))
 
 
@@ -77,8 +77,8 @@ def _assert_model_matches_reference(
 ) -> None:
     """
     Advance the model and the plain-Python reference in lockstep, matching outputs BY NAME: a returned leaf maps to
-    its ``out_<path>`` port via ``port_name``, a ``state_<attr>`` port reads the reference instance's attribute, and
-    a returned leaf without a port must equal a public state live-out the model folded into its ``state_`` port.
+    its `out_<path>` port via `port_name`, a `state_<attr>` port reads the reference instance's attribute, and
+    a returned leaf without a port must equal a public state live-out the model folded into its `state_` port.
     Both sides must carry the port's declared scalar family before any coercion, so a bool/float swap cannot hide.
     """
     instance = getattr(reference, "__self__", None)
@@ -147,8 +147,8 @@ class _StateLeafAheadOfComputed:
 
 def test_a_folded_state_leaf_ahead_of_a_computed_leaf_maps_by_name() -> None:
     """
-    The FIRST returned leaf is public state (folded into ``state_acc``; only the second leaf keeps an ``out_`` port),
-    so a mapper pairing ``out_`` ports with the leading return leaves positionally would compare the computed port
+    The FIRST returned leaf is public state (folded into `state_acc`; only the second leaf keeps an `out_` port),
+    so a mapper pairing `out_` ports with the leading return leaves positionally would compare the computed port
     against the state leaf and fail. All values are dyadic, so the comparison is bit-exact with no budget.
     """
     fmt = FloatFormat(6, 18)

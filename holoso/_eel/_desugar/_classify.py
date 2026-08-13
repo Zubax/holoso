@@ -1,12 +1,12 @@
 """
 Name classification: CPython's own, taken from the function's code object and corrected for the one distortion
-PEP 709 introduces — comprehension targets land in ``co_varnames`` without creating a function-level binding.
+PEP 709 introduces — comprehension targets land in `co_varnames` without creating a function-level binding.
 
 A name occurrence not bound by an active comprehension rename is local iff it is in
-``co_varnames ∪ co_cellvars`` minus the comp-target-only names: names whose every binding site anywhere in the
+`co_varnames ∪ co_cellvars` minus the comp-target-only names: names whose every binding site anywhere in the
 function is a comprehension target. The binding-site scan is the ONE analysis that descends into asserts
 (their contents are whitelist-exempt but still shape the code object: an assert-resident walrus is a real
-binding, and an assert-resident capturer moves a local into ``co_cellvars``). The scan is rooted at the body —
+binding, and an assert-resident capturer moves a local into `co_cellvars`). The scan is rooted at the body —
 the root function's default, decorator, and annotation expressions execute in the enclosing scope — and at a
 nested function/lambda/class boundary it scans only the enclosing-scope expressions (defaults, decorators,
 bases), reapplying the boundary recursively. Generator-expression targets are their own scope and record
@@ -14,7 +14,7 @@ nothing, while a walrus inside one still binds this scope. Annotations are never
 evaluate them in function bodies, and a walrus inside one is a syntax error.
 
 A name bound only inside an assert classifies local, so a later read is a definite-assignment rejection at the
-partial evaluator — matching ``-O`` CPython and never silently folding a same-named module global.
+partial evaluator — matching `-O` CPython and never silently folding a same-named module global.
 """
 
 import ast
@@ -72,9 +72,9 @@ def build_classifier(fn: types.FunctionType, fndef: ast.FunctionDef) -> Classifi
 def _code_name(name: str, qualname: str, code_names: set[str]) -> str:
     """
     The code object's rendition of a scanned source name: mangling-eligible names inside a class body are
-    stored mangled (an assert-resident comprehension target ``__x`` in class C appears as ``_C__x``), and the
+    stored mangled (an assert-resident comprehension target `__x` in class C appears as `_C__x`), and the
     subtraction must remove the stored form. The mangled candidate is used only when the plain form is absent
-    and the candidate is present, so a plain function's coincidental ``_g__x`` local can never be captured.
+    and the candidate is present, so a plain function's coincidental `_g__x` local can never be captured.
     """
     if name in code_names or not mangles(name):
         return name

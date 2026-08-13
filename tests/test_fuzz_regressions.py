@@ -1,10 +1,10 @@
 """
-Replay of saved fuzz regressions (UNMARKED -- runs in the normal ``tests`` session).
+Replay of saved fuzz regressions (UNMARKED -- runs in the normal `tests` session).
 
-Globs ``tests/fuzz_regressions/*.py`` and replays each previously-found differential divergence, asserting the
-previously-failing check now passes. Each case was saved at a specific ``HOLOSO_REGALLOC_EFFORT``; since that effort is
-read once at import in ``holoso._lir._regalloc`` and cannot be changed in-process, every case is replayed in a
-SUBPROCESS pinned to its saved effort -- mirroring the subprocess-per-seed pattern in ``test_determinism.py``. A case is
+Globs `tests/fuzz_regressions/*.py` and replays each previously-found differential divergence, asserting the
+previously-failing check now passes. Each case was saved at a specific `HOLOSO_REGALLOC_EFFORT`; since that effort is
+read once at import in `holoso._lir._regalloc` and cannot be changed in-process, every case is replayed in a
+SUBPROCESS pinned to its saved effort -- mirroring the subprocess-per-seed pattern in `test_determinism.py`. A case is
 skipped
 (with a reason) only if its saved op-config is unknown to the current code.
 
@@ -27,9 +27,9 @@ _CASES = sorted(p for p in REGRESSIONS_DIR.glob("*.py") if p.name != "__init__.p
 
 def _replay_entry() -> None:
     """
-    Subprocess entry: load the saved reproducer module named by ``argv[1]``, pull its kernel callable and ``META``, and
+    Subprocess entry: load the saved reproducer module named by `argv[1]`, pull its kernel callable and `META`, and
     replay the saved check. Exits 0 on PASS; prints the failure detail and exits 1 on FAIL. The kernel symbol shares the
-    reproducer's filename (``META['kernel_name']``): a function for a stateless kernel, a class for a stateful one.
+    reproducer's filename (`META['kernel_name']`): a function for a stateless kernel, a class for a stateful one.
     """
     import importlib.util
 
@@ -54,7 +54,7 @@ def _replay_entry() -> None:
 
 
 def _read_meta(path: Path) -> dict[str, object]:
-    """Load just the ``META`` dict from a saved reproducer (to read its op-config and effort without replaying)."""
+    """Load just the `META` dict from a saved reproducer (to read its op-config and effort without replaying)."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(path.stem, path)

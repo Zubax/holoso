@@ -1,8 +1,8 @@
 """
 Static import-layering analysis for architectural guards.
 
-Computes the transitive closure of ``holoso.*`` modules a root module imports, by parsing source (not by importing,
-which would pull the whole package via its ``__init__``). Lets a test assert a forbidden layering edge -- e.g. the LIR
+Computes the transitive closure of `holoso.*` modules a root module imports, by parsing source (not by importing,
+which would pull the whole package via its `__init__`). Lets a test assert a forbidden layering edge -- e.g. the LIR
 never reaches HIR, the oracle never reaches the layer it verifies -- holds across the WHOLE dependency subtree, not just
 one module's direct imports.
 """
@@ -14,9 +14,9 @@ from pathlib import Path
 
 def transitive_holoso_imports(root_module: str) -> set[str]:
     """
-    Every ``holoso.*`` module reachable from ``root_module`` through static imports (the AST, resolving relative
-    imports to absolute names), excluding the root itself. A module whose source is not a ``.py`` file contributes no
-    edges. Raises ``ValueError`` if ``root_module`` itself does not resolve, so a typo'd guard root fails loudly rather
+    Every `holoso.*` module reachable from `root_module` through static imports (the AST, resolving relative
+    imports to absolute names), excluding the root itself. A module whose source is not a `.py` file contributes no
+    edges. Raises `ValueError` if `root_module` itself does not resolve, so a typo'd guard root fails loudly rather
     than passing vacuously on an empty closure.
     """
     if _source_and_anchor(root_module)[0] is None:
@@ -58,7 +58,7 @@ def _source_and_anchor(module: str) -> tuple[Path | None, str]:
 
 
 def _imported_modules(tree: ast.Module, anchor: str) -> list[str]:
-    """Absolute module names imported in ``tree``; ``anchor`` is the package its relative imports resolve against."""
+    """Absolute module names imported in `tree`; `anchor` is the package its relative imports resolve against."""
     names: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

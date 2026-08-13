@@ -4,12 +4,12 @@ The ANF transformer: whitelisted CPython AST -> Eel, materializing evaluation or
 Every non-atomic subexpression is hoisted to a fresh temp in CPython evaluation order; operands are atoms.
 Conditionally-evaluated positions (conditional-expression arms, comparison-chain suffixes) become real guarded
 branches assigning a result temp — never eager hoists, so a loop or non-speculatable operation in an untaken
-arm cannot execute. ``and``/``or`` stay eager binary gates, which is a deliberate deviation from Python.
+arm cannot execute. `and`/`or` stay eager binary gates, which is a deliberate deviation from Python.
 
 Atom embedding is sound because constants are immutable, aggregate contents are only read through hoisted
 non-atomic expressions and written by store statements, and the one intra-statement rebinder — the walrus — is
 rejected whenever the same expression region also reads its target name (the augmented-assignment target
-counts as a read: ``x += (x := 2)`` reads the old x in CPython).
+counts as a read: `x += (x := 2)` reads the old x in CPython).
 """
 
 import ast

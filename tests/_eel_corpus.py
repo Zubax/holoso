@@ -1,8 +1,8 @@
 """
 The integer corpus: the small stateful kernels of the integer acceptance matrix, plus the residual-loop exit
-kernels. The UART rows drive ``examples/uart.py`` itself over framings the example catalogue does not carry
+kernels. The UART rows drive `examples/uart.py` itself over framings the example catalogue does not carry
 (8N1 and 8O1 beside its 8E1). This module is the single owner of the integer acceptance matrix
-(``INT_CASES`` with its vectors and ``int_corpus_options``); the public model-vs-CPython acceptance, the retained
+(`INT_CASES` with its vectors and `int_corpus_options`); the public model-vs-CPython acceptance, the retained
 UART HIR-oracle rows, the MIR-interpreter qualification, and the cosim subset all feed off it.
 """
 
@@ -36,7 +36,7 @@ class Crc8:
 
 
 class Lfsr16:
-    """Galois LFSR with taps 0xB400 (maximal 16-bit); ``advance`` gates the shift."""
+    """Galois LFSR with taps 0xB400 (maximal 16-bit); `advance` gates the shift."""
 
     def __init__(self) -> None:
         self.state = 0xACE1
@@ -182,8 +182,8 @@ INT_CASES: list[tuple[str, Callable[[], Callable[..., object]], list[InputRow]]]
 
 def int_corpus_options() -> holoso.Options:
     """
-    ``NcoPhase`` masks with ``0xFFFFFFFF`` and adds a ``2**30`` increment to a value already that wide, so the word
-    must hold ``2**33`` for the sum to stay exact -- anything narrower saturates and a comparison against CPython's
+    `NcoPhase` masks with `0xFFFFFFFF` and adds a `2**30` increment to a value already that wide, so the word
+    must hold `2**33` for the sum to stay exact -- anything narrower saturates and a comparison against CPython's
     arithmetic becomes a comparison against the rails.
     """
     return holoso.Options(

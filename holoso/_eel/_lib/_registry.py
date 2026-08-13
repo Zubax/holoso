@@ -1,14 +1,14 @@
 """
 The library registry: a single `resolve(callee)` dispatch boundary over object identity. A class-member
-descriptor is a key like any other (``np.ndarray.T`` IS an object): the caller resolves a method read by
-looking up the descriptor on the owning class, and ``inspect.isdatadescriptor`` on that same object decides
+descriptor is a key like any other (`np.ndarray.T` IS an object): the caller resolves a method read by
+looking up the descriptor on the owning class, and `inspect.isdatadescriptor` on that same object decides
 whether the read already is the call. Only pure readers and derivations may bind members: a stub cannot
-express receiver mutation, so a mutating method (``.fill``, ``.sort``) must stay unregistered and draw the
+express receiver mutation, so a mutating method (`.fill`, `.sort`) must stay unregistered and draw the
 no-supported-attribute rejection.
 
-A scalar callee resolves to a group of typed lowerings: ``min`` is a hardware operator over floats and a
+A scalar callee resolves to a group of typed lowerings: `min` is a hardware operator over floats and a
 compare-and-select composite over integers. A lowering's domain is its stub's own annotations.
-A domain is per operand position and may carry a refinement (``StaticNegative[int]``) --
+A domain is per operand position and may carry a refinement (`StaticNegative[int]`) --
 which a subset operator reaches as a key like any other, so an operator and its spellings cannot part.
 """
 
@@ -64,7 +64,7 @@ _DEMANDS: dict[Refinement, _Demand] = {
 }
 
 # They erase to their argument for the type checker; the alias object itself is the marker, read back through
-# ``typing.get_origin``.
+# `typing.get_origin`.
 type StaticNonNegative[T] = T
 type StaticNegative[T] = T
 
@@ -76,7 +76,7 @@ _REFINEMENTS: dict[object, Refinement] = {
 
 @dataclass(frozen=True, slots=True)
 class Operand:
-    """A null ``const`` is a runtime operand, not an absent one."""
+    """A null `const` is a runtime operand, not an absent one."""
 
     stype: ScalarType
     const: bool | int | float | None = None
@@ -122,7 +122,7 @@ def _annotation_domain(annotation: object) -> Domain | None:
 
 @dataclass(frozen=True, slots=True)
 class ScalarLowering:
-    """A single HIR operation, or -- where ``operator`` is None -- the stub inlined as ordinary user code."""
+    """A single HIR operation, or -- where `operator` is None -- the stub inlined as ordinary user code."""
 
     stub: types.FunctionType
     operator: Operator | None
@@ -164,8 +164,8 @@ class ScalarFunction:
 @dataclass(frozen=True, slots=True)
 class Array:
     """
-    An inlined composite whose meaning is rank and shape, so it declares no scalar domain. ``derives`` marks a
-    non-copying derivation on the host (``.T``, ``flatten``): the result carries the source's Allocation as its
+    An inlined composite whose meaning is rank and shape, so it declares no scalar domain. `derives` marks a
+    non-copying derivation on the host (`.T`, `flatten`): the result carries the source's Allocation as its
     storage-equivalence token.
     """
 
@@ -187,7 +187,7 @@ class Factory:
 class Conversion:
     """
     A call the partial evaluator lowers as a structural to-array conversion of its single argument.
-    ``copies`` distinguishes np.array (an independent copy -- the A5 escape hatch) from np.asarray (which
+    `copies` distinguishes np.array (an independent copy -- the A5 escape hatch) from np.asarray (which
     returns the argument itself for an array input, so source and result share).
     """
 

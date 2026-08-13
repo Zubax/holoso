@@ -1,7 +1,7 @@
 """
 Desugarer behavior pins: name classification, evaluation-order materialization, guarded conditional shapes, and the
 dead-arm narrowing. Assertions are on the canonical printed Eel text — the desugarer's public contract — observed
-through the public ``frontend_ir[0]`` artifact wherever the kernel synthesizes; kernels the pipeline refuses for
+through the public `frontend_ir[0]` artifact wherever the kernel synthesizes; kernels the pipeline refuses for
 reasons unrelated to the printed shape under test (sequence parameter annotations, data-dependent raises,
 out-of-word literals) pin the same text on the direct desugar dump.
 """

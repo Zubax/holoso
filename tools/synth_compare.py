@@ -2,10 +2,10 @@
 """
 Before/after synthesis comparison for the bundled example matrix.
 
-``capture`` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency, f_max,
+`capture` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency, f_max,
 slack, fabric area, and pass/fail.
 
-``render`` reads a BEFORE and an AFTER JSON and emits a side-by-side HTML report with deltas and a flag on every
+`render` reads a BEFORE and an AFTER JSON and emits a side-by-side HTML report with deltas and a flag on every
 target whose operator stage knobs were retuned.
 
 Report-only tooling -- not part of the compiler, no tests, no design-doc coupling.

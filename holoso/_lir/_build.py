@@ -1,5 +1,5 @@
 """
-Build a finished :class:`Lir` from MIR: the top-level orchestration that schedules and lays out the blocks, allocates
+Build a finished Lir from MIR: the top-level orchestration that schedules and lays out the blocks, allocates
 both register banks (coalescing phi arms), constructs the per-block LIR, and assembles the final program.
 """
 
@@ -38,7 +38,7 @@ _logger = logging.getLogger(__name__)
 def build(mir: Mir, module_name: str, fetch_stages: int, tuning: RegallocTuning) -> Lir:
     """
     Schedule, bind, and register-allocate selected MIR into a pipelined microprogram. A straight-line kernel is the
-    degenerate single-``Ret``-block control-flow graph, so there is one build path for every kernel. ``fetch_stages``
+    degenerate single-`Ret`-block control-flow graph, so there is one build path for every kernel. `fetch_stages`
     is the control-fetch pipeline depth; the datapath lags the fetch by one less than it, the lag threaded throughout.
     """
     if fetch_stages != 3:
@@ -57,8 +57,8 @@ def _drop_redundant_state_slots(mir: Mir) -> Mir:
     """
     Drop a state slot that is a redundant alias of another: same reset, live-out value id, and conditioner, so by
     induction always equal. The kept representative commits the value; each dropped attribute is write-only as state and
-    its ``state_<attr>`` port already taps the shared value, so the duplicate register and its install copy vanish (e.g.
-    a phase/frequency detector's public ``up`` aliasing its internal pending latch). A class is left intact when its
+    its `state_<attr>` port already taps the shared value, so the duplicate register and its install copy vanish (e.g.
+    a phase/frequency detector's public `up` aliasing its internal pending latch). A class is left intact when its
     live-out is a phi (a drop would perturb the phi-install placement) or when two members are read at entry (their
     distinct live-ins would need substitution).
     """
@@ -92,9 +92,9 @@ def _has_state_copy(
     """
     Whether the single Ret block's state live-out does NOT coalesce onto its slot register. A non-coalesced slot
     installs by a read-first boundary copy that lands a fetch-pipeline past the live-out, so the Ret block's drain must
-    reach it (``boundary_step(makespan)``, bank-independent). A coalesced slot writes its register in place and needs no
+    reach it (`boundary_step(makespan)`, bank-independent). A coalesced slot writes its register in place and needs no
     copy (no charge). True iff any slot, wide or boolean, is non-coalesced. Recomputed from the allocation each
-    coalescing-fixpoint round through the same ``*_liveout_coalesced`` predicates ``build`` applies when it emits the
+    coalescing-fixpoint round through the same `*_liveout_coalesced` predicates `build` applies when it emits the
     install, so the drain charge and the emitted install cannot drift.
     """
     return any(
@@ -114,10 +114,10 @@ def _has_state_copy(
 
 def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocTuning) -> Lir:
     """
-    Build the microprogram for any kernel (a straight-line kernel is the degenerate single-``Ret``-block graph):
+    Build the microprogram for any kernel (a straight-line kernel is the degenerate single-`Ret`-block graph):
     schedule each block independently, pool operator instances across the mutually-exclusive blocks, color both register
     banks by hardware-frame liveness (reusing registers, coalescing state live-outs), install non-coalesced phi and slot
-    live-outs by pc-gated copy, and lay the blocks out in the ROM with the single ``Ret`` as the out_valid boundary.
+    live-outs by pc-gated copy, and lay the blocks out in the ROM with the single `Ret` as the out_valid boundary.
     """
     mir = _drop_redundant_state_slots(mir)
     wide_mir = MirWideView.from_mir(mir)
@@ -136,7 +136,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
                     f"block {mir_block.id} branches on a phi that takes an arm from the same block; the install "
                     f"would overwrite the condition before the branch reads it"
                 )
-    # The phi-residency classification (``value_resident_at_entry``) rests on every phi-bearing block being
+    # The phi-residency classification (`value_resident_at_entry`) rests on every phi-bearing block being
     # multi-predecessor, which is what keeps overlap spills out of phi registers; a future pass emitting a phi into a
     # single-predecessor block would silently void that argument (the sibling-install tripwire does not read-gate
     # installs against in-flight landings), so the reliance is machine-checked here.
@@ -151,22 +151,22 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     # shrinks its terminator below the drained boundary and spills its in-flight results into the successor, which
     # inherits the busy/landing residue. The +1-install drain keeps install-bearing blocks unshrunk, matching makespan.
     #
-    # The install set is computed to a fixpoint. ``block_has_install`` marks a block install-bearing from the CFG shape
+    # The install set is computed to a fixpoint. `block_has_install` marks a block install-bearing from the CFG shape
     # (any phi arm originates in it), but a block whose every arm COALESCES onto the merged register installs nothing,
     # so that +1 drain (and overlap-ineligibility) is spurious. So: lay out and allocate with the conservative CFG
     # seed, recompute the classification from the ACTUAL coalesced copies, and re-run to a fixed point. The movement is
     # TWO-SIDED: a classification mostly narrows (dropping a spurious drain), but the shortened boundary feeds a greedy
     # coalescing that is not monotone in the interference, so a narrowed classification can have to grow back -- and
     # every regrowth is pinned (see the loop body), so each block moves a bounded number of times and the composition
-    # with the inner per-bank ``coalesce_and_color`` fixpoint (its forbidden-merge set non-decreasing) terminates.
+    # with the inner per-bank `coalesce_and_color` fixpoint (its forbidden-merge set non-decreasing) terminates.
     # Determinism is preserved: the allocator is seed-fixed and the classification is rebuilt the same way each pass.
     #
-    # The same fixpoint also drives the state slot's read-first boundary-copy drain charge: ``has_state_copy`` starts
+    # The same fixpoint also drives the state slot's read-first boundary-copy drain charge: `has_state_copy` starts
     # conservative (a state slot needs a copy), usually clears as coalescing removes the copy, and latches back on the
     # regrowth channel noted in the loop. It is a single bool: the MIR has one Ret, so the charge is op-wide there.
     has_install_blocks = block_has_install(mir, wide_mir, bool_mir)
     ret_block = mir.ret_block
-    # Conservative seed for the state-copy fixpoint -- the pre-allocation form of ``_has_state_copy``: assume every
+    # Conservative seed for the state-copy fixpoint -- the pre-allocation form of `_has_state_copy`: assume every
     # state slot needs a boundary copy.
     has_state_copy = bool(wide_mir.state_slots or bool_mir.state_slots)
     # Iteration bound. Every non-final round makes one of the bounded monotone moves per block -- a push-bit narrowing,
@@ -183,7 +183,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         )
         raw = actual_install_blocks(result.alloc, wide_mir, bool_mir, result.overlap.block_sched)
         # The two derivations of install-bearing -- the CFG-shape seed and the post-allocation copies -- must agree on
-        # the key universe: a block outside the seed can never install, so a wider ``raw`` means the derivations
+        # the key universe: a block outside the seed can never install, so a wider `raw` means the derivations
         # drifted, which must fail loudly rather than be absorbed as a silent permanent pin. On the FIRST round the
         # bits must agree too: nothing has narrowed yet, so a push the conservative seed missed is the same drift,
         # not legitimate regrowth.
@@ -214,13 +214,13 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         actual_state = raw_state or state_copy_latched
         # The moves are monotone and the fixed point is sound. MONOTONE: a block leaves the install set only by
         # coalescing away its phi-arm install, but a phi arm makes its merge successor multi-predecessor, so such a
-        # block can never satisfy ``overlaps`` and never spills -- before or after it leaves -- so no block becomes
+        # block can never satisfy `overlaps` and never spills -- before or after it leaves -- so no block becomes
         # overlap-eligible across rounds and every schedule is round-invariant; keys only shrink except through the
         # growing pin set, and the state latch has height one. SOUND: a converged classification
-        # (actual == has_install_blocks) is self-consistent, and ``landing <= term_offset`` then holds by the drain
+        # (actual == has_install_blocks) is self-consistent, and `landing <= term_offset` then holds by the drain
         # math, so the layout is correct even under -O; every widening is legitimized by the unconditional pin/latch
         # merges above (an assert here would be tautological), and a never-converging run -- unreachable -- falls to
-        # the ``else``, which RAISES.
+        # the `else`, which RAISES.
         if actual == has_install_blocks and actual_state == has_state_copy:
             _logger.info(
                 "Install fixpoint converged after %d round(s): %d install-bearing block(s), %d pinned, "
@@ -262,8 +262,8 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             )
         ]
         work_makespan = sched.makespan
-        # A None commit from ``install_source_commit`` is a block-entry-resident source needing no read-first
-        # sampling. The placement (``install_issue_cycle``) charges the +1 only for a computed source committing at
+        # A None commit from `install_source_commit` is a block-entry-resident source needing no read-first
+        # sampling. The placement (`install_issue_cycle`) charges the +1 only for a computed source committing at
         # the makespan; a resident or earlier-committing computed source pays none.
         wide_copies = []
         for c in alloc.wide_copies.get(block.id, []):
@@ -279,7 +279,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
                 BoolWrite(BoolRegRef(w.dst), bsrc, install_issue_cycle(work_makespan, commit), commit is None)
             )
         # The block makespan carries the install +1 only when some install lands past the work makespan (a computed
-        # source that is the block's own last work); ``has_install_blocks`` maps each install-bearing block to that bit.
+        # source that is the block's own last work); `has_install_blocks` maps each install-bearing block to that bit.
         block_makespan = install_inclusive_makespan(work_makespan, has_install_blocks.get(block.id, False))
         # A branch condition gets exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by
@@ -302,7 +302,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             landing <= term_offset for landing in install_landings
         ), f"block {block.id}: a phi-arm install lands at {max(install_landings)} past the terminator {term_offset}"
         # A tail install must read its source register strictly before a sibling install's write to that register
-        # lands (see ``value_resident_at_entry`` for why placement guarantees this): the structural tripwire for a
+        # lands (see `value_resident_at_entry` for why placement guarantees this): the structural tripwire for a
         # placement regression, which the value cosim shares with the model and cannot see. Cross-bank pairs are inert
         # (RegRef never equals BoolRegRef), so one check serves both banks.
         for writer in installs:
@@ -331,8 +331,8 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     flat_ops = [rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].ops]
 
     # A coalesced slot's live-out tap resolves to the slot register itself (its operator wrote it directly, no copy); a
-    # non-coalesced slot taps the live-out's own register, installed at ``install_cycle`` -- absolutized here by adding
-    # the Ret block's base, since the install fires inside the (last-laid-out) Ret block (``ret_block`` above).
+    # non-coalesced slot taps the live-out's own register, installed at `install_cycle` -- absolutized here by adding
+    # the Ret block's base, since the install fires inside the (last-laid-out) Ret block (`ret_block` above).
     def encoded_reset(slot_name: str, scalar_type: FloatType | IntType, raw: float | int | bool) -> WideValue:
         value = coerce_scalar(scalar_type, raw, f"state slot {slot_name!r} reset")
         assert isinstance(value, (FloatValue, IntValue))
@@ -383,9 +383,9 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         bool_state_slots=bool_state_slots,
         fetch_lag=fetch_lag,
     )
-    # A non-coalesced wide slot's writeback fires read-first at ``state_copy_step``, at last_pc for a boundary install
+    # A non-coalesced wide slot's writeback fires read-first at `state_copy_step`, at last_pc for a boundary install
     # or below it for an early one. A boundary that collapsed below the install would drop the writeback and freeze the
-    # persistent state; the per-block ``term_offset <= drained boundary`` invariant in ``schedule_with_overlap`` is the
+    # persistent state; the per-block `term_offset <= drained boundary` invariant in `schedule_with_overlap` is the
     # matching guard for the opposite slip (a boundary install degrading into an early one). Backstop, not a live
     # failure.
     for slot in lir.wide_state_slots:

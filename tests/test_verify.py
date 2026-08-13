@@ -1,6 +1,6 @@
 """
 Black-box verification of the numerical model against plain-Python references, driven through the public
-``synthesize`` entry point, plus a white-box remnant at the bottom (in-place state-commit coalescing, register-file
+`synthesize` entry point, plus a white-box remnant at the bottom (in-place state-commit coalescing, register-file
 layout, and the merged-slots interpreter differential) that has no public spelling.
 """
 
@@ -75,7 +75,7 @@ def _model(target: Callable[..., object], name: str, fmt: FloatFormat = FMT) -> 
 
 
 def _state_slots(result: SynthesisResult) -> set[str]:
-    """The persistent-state slot names as declared by the residual front-end IR (the last ``frontend_ir`` pass)."""
+    """The persistent-state slot names as declared by the residual front-end IR (the last `frontend_ir` pass)."""
     return {
         line.split()[1].removesuffix(":")
         for line in result.frontend_ir[-1].splitlines()
@@ -166,10 +166,10 @@ def test_tuple_unpacking_matches_python_reference() -> None:
 
 
 def test_for_counter_reassigned_to_runtime_clears_static_binding() -> None:
-    # Regression: a static ``for`` counter later reassigned to a RUNTIME value must lose its compile-time-integer
+    # Regression: a static `for` counter later reassigned to a RUNTIME value must lose its compile-time-integer
     # binding, so a subsequent branch on that name is a real runtime branch -- not folded with the stale counter value.
-    # With the defect, the loop-counter's static-int binding survived the reassignment and ``1.0 >= i`` was folded as
-    # ``1.0 >= 0`` (the counter), silently taking the wrong arm and miscompiling the output for any ``i`` above 1.
+    # With the defect, the loop-counter's static-int binding survived the reassignment and `1.0 >= i` was folded as
+    # `1.0 >= 0` (the counter), silently taking the wrong arm and miscompiling the output for any `i` above 1.
     def f(a: float) -> float:
         for i in range(1):
             i = a  # type: ignore[assignment]  # reassign the loop variable to a runtime value (single-trip body)
@@ -186,7 +186,7 @@ def test_for_counter_reassigned_to_runtime_clears_static_binding() -> None:
 
 def test_for_counter_reassigned_after_loop_clears_static_binding() -> None:
     # The same hazard when the counter (leaked after the loop) is reassigned to a runtime value past the loop: the
-    # stale static-int binding must not fold a later branch. Without the fix, ``1.0 >= i`` folds with the counter's
+    # stale static-int binding must not fold a later branch. Without the fix, `1.0 >= i` folds with the counter's
     # final value (2) and the conditional state update is dropped on every call.
     def f(a: float) -> float:
         acc = 0.0
@@ -203,8 +203,8 @@ def test_for_counter_reassigned_after_loop_clears_static_binding() -> None:
 
 
 def test_runtime_reassigned_for_counter_is_not_a_static_index() -> None:
-    # A static ``for`` counter reassigned to a runtime value is no longer a compile-time integer, so using it as an
-    # array index must be REJECTED (it is out-of-subset -- plain Python raises ``TypeError`` indexing with a float).
+    # A static `for` counter reassigned to a runtime value is no longer a compile-time integer, so using it as an
+    # array index must be REJECTED (it is out-of-subset -- plain Python raises `TypeError` indexing with a float).
     # With the defect, the stale static-int binding let the index silently resolve to the counter value, miscompiling
     # an invalid kernel into a constant element selection.
     def f(a: float, b: float, c: float) -> float:
@@ -219,12 +219,12 @@ def test_runtime_reassigned_for_counter_is_not_a_static_index() -> None:
 
 
 def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
-    # Regression: the persistent-state reachability scan must demote a runtime-reassigned ``for`` counter exactly as
-    # lowering does. Here ``t`` (the counter) is reassigned to a runtime value, so ``if t >= ...`` is a real branch and
-    # its else arm (a ``while`` writing ``self.s``) IS reachable. If the scan still folded the branch with the stale
-    # counter (0), it would either drop ``self.s`` from the persistent-state set (a silent miscompile) or, once
+    # Regression: the persistent-state reachability scan must demote a runtime-reassigned `for` counter exactly as
+    # lowering does. Here `t` (the counter) is reassigned to a runtime value, so `if t >= ...` is a real branch and
+    # its else arm (a `while` writing `self.s`) IS reachable. If the scan still folded the branch with the stale
+    # counter (0), it would either drop `self.s` from the persistent-state set (a silent miscompile) or, once
     # lowering treats the branch as runtime, open a header phi for an attribute the scan never registered -- a
-    # ``KeyError`` crash while lowering the loop. The state set and the emitted phis must agree.
+    # `KeyError` crash while lowering the loop. The state set and the emitted phis must agree.
     class K:
         def __init__(self) -> None:
             self.s = 4.0
@@ -233,8 +233,8 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
             for t in range(1):
                 t = a  # type: ignore[assignment]  # reassign the counter to a runtime value -> a dynamic branch
             # Both sides are otherwise compile-time (the counter and a literal), so if the scan failed to demote the
-            # reassigned counter it would fold ``0 < 1.0`` to True and never scan the else arm. With the counter
-            # correctly demoted, this is a real runtime branch and the else arm's ``self.s`` write is reachable.
+            # reassigned counter it would fold `0 < 1.0` to True and never scan the else arm. With the counter
+            # correctly demoted, this is a real runtime branch and the else arm's `self.s` write is reachable.
             if t < 1.0:
                 pass
             else:
@@ -254,11 +254,11 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
 
 
 def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
-    # Regression: a walrus that rebinds a leaked ``for`` counter to a runtime value must demote it in the reachability
+    # Regression: a walrus that rebinds a leaked `for` counter to a runtime value must demote it in the reachability
     # scan exactly as lowering does -- the scan invalidates a static int on a walrus target just as on a plain
-    # reassignment. Here ``t`` (the counter, 0) is rebound by ``(t := a)`` in the ``if`` test, so the branch is dynamic
-    # and its else arm (a ``while`` writing ``self.s``) IS reachable. A scan that failed to invalidate the walrus target
-    # would fold ``0 < 1.0`` to True, drop ``self.s`` from the state set, then crash when lowering
+    # reassignment. Here `t` (the counter, 0) is rebound by `(t := a)` in the `if` test, so the branch is dynamic
+    # and its else arm (a `while` writing `self.s`) IS reachable. A scan that failed to invalidate the walrus target
+    # would fold `0 < 1.0` to True, drop `self.s` from the state set, then crash when lowering
     # (which does invalidate) opens a header phi for the unregistered attribute. The state set and the phis must agree.
     class K:
         def __init__(self) -> None:
@@ -286,10 +286,10 @@ def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
 
 
 def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None:
-    # Regression (differential fuzzer): a leaked ``for`` counter reassigned to a runtime value INSIDE a ``while`` body
+    # Regression (differential fuzzer): a leaked `for` counter reassigned to a runtime value INSIDE a `while` body
     # must stay demoted after the loop. Restoring the preheader static-int map verbatim on exit resurrected the stale
     # compile-time counter value, undoing the body's demotion. A later
-    # comparison ``if i < 0.0`` was then folded against the stale counter (0) instead of the runtime value -- a SILENT
+    # comparison `if i < 0.0` was then folded against the stale counter (0) instead of the runtime value -- a SILENT
     # miscompile that took the wrong arm. The post-loop fold must follow the runtime value, matching plain Python.
     def kernel(a: float) -> float:
         for i in range(1):  # leaks i == 0 (a compile-time integer) into the enclosing scope
@@ -305,7 +305,7 @@ def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None
             r = 200.0
         return r
 
-    # With the stale binding resurrected, ``i`` folds to 0 -> ``0 < 0.0`` is always False -> r is always 200.0.
+    # With the stale binding resurrected, `i` folds to 0 -> `0 < 0.0` is always False -> r is always 200.0.
     model = _model(kernel, "k")
     for a in (-5.0, -0.5, 0.5, 7.0):
         assert float(model.run(a)[0]) == float(kernel(a)), f"mismatch at a={a}"
@@ -497,7 +497,7 @@ def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
 
 def test_model_walrus_binds_once_and_stays_visible_after_the_test() -> None:
     def walrus(x: float) -> float:
-        # ``(t := x*2)`` evaluates the subexpression once, binds ``t``, and yields it to the comparison; ``t`` then
+        # `(t := x*2)` evaluates the subexpression once, binds `t`, and yields it to the comparison; `t` then
         # stays visible to both arms (it is bound in the test, before the branch), as in Python.
         if (t := x * 2.0) > 4.0:
             r = t + 1.0
@@ -850,8 +850,8 @@ def test_model_for_counter_inside_while_is_loop_carried() -> None:
 def test_a_counter_assigned_only_on_an_unreachable_loop_path_is_still_carried() -> None:
     """
     RECORDED CONSERVATISM: a data-dependent loop's carried set is the SYNTACTIC set of names its body assigns,
-    fixed before the body is interpreted because the header phis must exist first. A leaked ``for`` counter that the
-    body assigns only on a statically-dead path -- or through a zero-trip inner ``for``, which Python never binds --
+    fixed before the body is interpreted because the header phis must exist first. A leaked `for` counter that the
+    body assigns only on a statically-dead path -- or through a zero-trip inner `for`, which Python never binds --
     is therefore carried anyway and stops being a compile-time integer, so a later STATIC index over it is refused.
     The loop itself still computes correctly; only the compile-time index is lost. Lifting this needs the carried set
     to become fold-aware, which the loop setup cannot be without interpreting the body first.
@@ -1104,7 +1104,7 @@ def test_model_bool_cast_of_underflowing_constant_folds_at_host_precision() -> N
 
 def test_statically_folded_branch_does_not_create_a_phantom_state_slot() -> None:
     # A condition the partial evaluator can EVALUATE folds to its live arm, and the dead arm's attribute write must not
-    # reach the state model -- the slot set follows the interpretation, so a dead ``self.y`` is never seeded at all.
+    # reach the state model -- the slot set follows the interpretation, so a dead `self.y` is never seeded at all.
     ENABLED = True
 
     class K:
@@ -1131,8 +1131,8 @@ def test_a_connective_guard_over_a_runtime_operand_keeps_its_dead_arm_alive() ->
     """
     RECORDED CONSERVATISM, the exact counterpart of the test above. The partial evaluator decides a condition by
     EVALUATING it and does no boolean algebra over a residual operand -- that identity belongs to the graph -- so
-    ``u > 0.0 or FORCED`` stays a real branch even though its value is constant. Both arms are therefore interpreted,
-    and the else arm's ``self.y`` becomes a genuine slot: an unreachable register and its ``state_y`` port, which HIR
+    `u > 0.0 or FORCED` stays a real branch even though its value is constant. Both arms are therefore interpreted,
+    and the else arm's `self.y` becomes a genuine slot: an unreachable register and its `state_y` port, which HIR
     strength reduction cannot remove because a slot is part of the module's interface. Behaviour is unaffected -- the
     slot simply holds its live-in forever. Lifting this would mean teaching the front end an algebra the design
     deliberately keeps in the graph.
@@ -1161,7 +1161,7 @@ def test_a_connective_guard_over_a_runtime_operand_keeps_its_dead_arm_alive() ->
 
 
 def test_folded_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -> None:
-    # The same rule inside a loop body: a folded ``if`` must not open a loop-header phi (nor a slot) for an attribute
+    # The same rule inside a loop body: a folded `if` must not open a loop-header phi (nor a slot) for an attribute
     # the surviving arm never writes.
     ENABLED = True
 
@@ -1205,7 +1205,7 @@ def test_polar_example_round_trip_and_native_reference() -> None:
 
 
 # --- White-box remnant: claims with no public spelling. The register-file layout probe, the in-place persistent-state
-# commit (``needs_copy``) coalescing group, and the merged/aliased-slot interpreter differentials drive the internal
+# commit (`needs_copy`) coalescing group, and the merged/aliased-slot interpreter differentials drive the internal
 # pipeline directly.
 
 OPS = mir_options(
@@ -1240,7 +1240,7 @@ def test_model_handles_unused_input_ports() -> None:
 # --- In-place persistent-state commit: a state slot's live-out written directly into its slot register, no copy-back.
 # Both banks, operator and conditional (phi/select) live-outs. Each test drives the cycle model against a fresh Python
 # reference across a multi-transaction sequence (the carried state must stay correct) AND asserts the copy was actually
-# elided (``not needs_copy``) -- a correctness and a tightness guard, so a regression back to the copy-back fails here.
+# elided (`not needs_copy`) -- a correctness and a tightness guard, so a regression back to the copy-back fails here.
 
 
 def _bool_slot(lir: Lir, name: str) -> BoolStateSlot:
@@ -1295,8 +1295,8 @@ def test_inplace_bool_unconditional_self_update() -> None:
 
 def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
     class LoopPreheaderArmInPlace:
-        # A loop-carried bool state whose loop phi coalesces onto the slot register. The preheader update ``self._s or
-        # a`` is the phi's ENTRY arm, computed in the entry block from resident values only, and it coalesces onto the
+        # A loop-carried bool state whose loop phi coalesces onto the slot register. The preheader update `self._s or
+        # a` is the phi's ENTRY arm, computed in the entry block from resident values only, and it coalesces onto the
         # slot register and issues on cycle 0. Its in-place commit lands at pc >= fetch_lag, never the held pc 0, so it
         # is dwell-safe with no floor; this guards that the transitive phi-chain coalescing keeps carried state correct
         # across the loop.
@@ -1322,9 +1322,9 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
 
 def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
     class WriteOnlyDwellTenant:
-        # Regression (Codex): an if-converted kernel where a temporary (``y or self._x``) lands as a gap tenant on the
-        # WRITE-ONLY ``_w`` slot's free register and issues on cycle 0. The tenant is dwell-safe by construction: the
-        # gated ``transacting`` makes the idle re-fetch a NOP and the commit lands at pc >= fetch_lag, so a gap
+        # Regression (Codex): an if-converted kernel where a temporary (`y or self._x`) lands as a gap tenant on the
+        # WRITE-ONLY `_w` slot's free register and issues on cycle 0. The tenant is dwell-safe by construction: the
+        # gated `transacting` makes the idle re-fetch a NOP and the commit lands at pc >= fetch_lag, so a gap
         # tenant on a coalesced slot register cannot corrupt the carried state.
         def __init__(self) -> None:
             self._x = False
@@ -1371,7 +1371,7 @@ def test_inplace_float_conditional_accumulator() -> None:
 
 def test_chained_wide_slots_do_not_coalesce() -> None:
     class ChainedFloatSlots:
-        # A chained copy ``self.a = self.b``: a's live-out is b's live-in, so NEITHER may coalesce in place -- writing
+        # A chained copy `self.a = self.b`: a's live-out is b's live-in, so NEITHER may coalesce in place -- writing
         # b's update before a captures b's old value would corrupt a. Both keep their copy-back (tapped_by_other guard).
         def __init__(self) -> None:
             self.a = 0.0
@@ -1418,8 +1418,8 @@ def test_inplace_multiarm_float_phi() -> None:
 
 def test_state_livein_feeding_another_slot_phi_does_not_coalesce() -> None:
     class LiveInFeedsAnotherSlotPhi:
-        # Regression: slot ``x``'s live-in is the if-arm of slot ``w``'s phi. ``x``'s live-out must NOT coalesce in
-        # place -- the residual install of ``w``'s arm reads x's live-in at the predecessor tail where x's in-place
+        # Regression: slot `x`'s live-in is the if-arm of slot `w`'s phi. `x`'s live-out must NOT coalesce in
+        # place -- the residual install of `w`'s arm reads x's live-in at the predecessor tail where x's in-place
         # write would land, which the install-free oracle cannot see (it crashed the colorer with an interfering
         # co-assignment before the fix).
         def __init__(self) -> None:
@@ -1448,7 +1448,7 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce() -> None:
 
 def test_state_livein_feeding_unrelated_phi_does_not_coalesce() -> None:
     class LiveInFeedsUnrelatedPhi:
-        # Regression: slot ``x``'s live-in is an arm of an unrelated (non-state) phi. With x's live-out coalesced and
+        # Regression: slot `x`'s live-in is an arm of an unrelated (non-state) phi. With x's live-out coalesced and
         # the slot register unreserved, the unrelated phi could absorb x's live-in and inherit the slot pin, colliding
         # with x's live-out (a colorer crash before the fix). x must stay non-coalesced so its live-in register is
         # reserved.

@@ -1,15 +1,15 @@
 """
 The partial-evaluation value domain: what an environment name can hold.
 
-A static scalar carries the typed HIR ``Const``: its dataclass equality is type-discriminating where Python
-equality is not (``True == 1 == 1.0`` would silently unify a bool arm with an int arm at a join), and its
+A static scalar carries the typed HIR `Const`: its dataclass equality is type-discriminating where Python
+equality is not (`True == 1 == 1.0` would silently unify a bool arm with an int arm at a join), and its
 construction normalizes negative zero and refuses NaN, so the compiler's numeric invariants hold in the
 evaluator's own state for free. An opaque value is a captured object that is not an admitted scalar (NaN
 floats included); it is judged at its USE site, never at capture -- desugar hoists every callee through a
 temp, and binding an unused NaN default is CPython-legal.
 
 Aggregate dtype widths are not modeled: leaves live in the subset's width-less int / binary64 float value
-model, the same deliberate deviation scalars carry. The ``Allocation`` is the identity the ownership model
+model, the same deliberate deviation scalars carry. The `Allocation` is the identity the ownership model
 tracks: values are frozen and rebound while allocations persist and carry the monotone sharing state, so a
 store under a residual branch is a new value over the same allocation and joins leafwise.
 """
@@ -58,8 +58,8 @@ class AllocationState(Enum):
 class Allocation:
     """
     One runtime container's identity; the state only ever moves forward (never back toward UNIQUE), while
-    ``borrows`` is the scoped overlay counting the active loops/comprehensions iterating this allocation --
-    a counter rather than a flag because nested loops may iterate the same allocation. ``joined`` marks an
+    `borrows` is the scoped overlay counting the active loops/comprehensions iterating this allocation --
+    a counter rather than a flag because nested loops may iterate the same allocation. `joined` marks an
     allocation minted by a branch join of differing arm allocations: the value is ONE of the two runtime
     objects, so the fresh identity erases provenance -- installing such a tree into a state attribute is
     rejected, since the disjointness checks would judge the wrong object.
@@ -103,7 +103,7 @@ class BoundMethod:
 class RangeValue:
     """
     A lazy arithmetic progression: no storage, no Allocation, no ownership. Static bounds decay to a
-    ``SequenceValue`` wherever an aggregate is demanded; runtime bounds only drive a counted ``for``.
+    `SequenceValue` wherever an aggregate is demanded; runtime bounds only drive a counted `for`.
     """
 
     start: Scalar

@@ -1,7 +1,7 @@
 """
-``HolosoError`` is the root of every exception the package DEFINES, so a synthesis failure is catchable as one kind.
+`HolosoError` is the root of every exception the package DEFINES, so a synthesis failure is catchable as one kind.
 An exception that forgets to derive from it escapes such a handler as if it came from elsewhere. Ordinary misuse of
-an API still raises the builtin the situation calls for (``FloatFormat(1, 4)`` is a ``ValueError``), which is why
+an API still raises the builtin the situation calls for (`FloatFormat(1, 4)` is a `ValueError`), which is why
 this is a rule about the hierarchy rather than about everything a call can raise.
 """
 

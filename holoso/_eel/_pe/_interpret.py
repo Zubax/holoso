@@ -2,16 +2,16 @@
 The specializing interpreter: Eel -> residual Eel. Binding time is its whole product; the rest follows
 CPython or the subset's own rules, of which the non-obvious ones are recorded here.
 
-Static folds go through the selected HIR operator's own ``evaluate``, and a fold naming no number
+Static folds go through the selected HIR operator's own `evaluate`, and a fold naming no number
 residualizes with constant operands: one expression, one answer, refusal survivor-based in HIR. No algebra
 over residual operands -- that is HIR strength reduction's. Laziness is CPython's: a dead arm resolves no
 names and desugars no callees; captures are judged at use, never at capture.
 
 A name bound on only one side of a residual branch drops (CPython would raise UnboundLocalError); divergent
-unmergeable values stay bound to a marker so the read, in any spelling, rejects truthfully. ``raise`` is
+unmergeable values stay bound to a marker so the read, in any spelling, rejects truthfully. `raise` is
 judged within its own function: unconditional there is a compile-time diagnostic even under a caller's
-residual arm. Library stubs bind positionally only. An operator whose lowering the registry holds -- ``**`` and
-``@`` -- reaches it exactly as a spelled call does, so the two cannot drift; which lowering serves is the
+residual arm. Library stubs bind positionally only. An operator whose lowering the registry holds -- `**` and
+`@` -- reaches it exactly as a spelled call does, so the two cannot drift; which lowering serves is the
 registry's per-position domain rule, not a decision taken here, and the host is never consulted for a value.
 
 Ownership events ride value flow: a desugared temp is a linear conduit, so the first read of an aggregate
@@ -106,7 +106,7 @@ _RETURN_KEY = "<return>"
 class Ctx:
     """
     Where interpretation stands: a residual branch arm rejects raise; a residual loop also rejects aggregate
-    state installs. ``inline`` starts a fresh context, so the flags describe the frame's own position, never
+    state installs. `inline` starts a fresh context, so the flags describe the frame's own position, never
     the caller's.
     """
 
@@ -123,7 +123,7 @@ type Sink = list[Stmt | _OpenIf | _OpenWhile]
 @dataclass(slots=True)
 class _OpenIf:
     """
-    Arms still receiving statements while an exit lane is pending; frozen into the immutable ``If`` at
+    Arms still receiving statements while an exit lane is pending; frozen into the immutable `If` at
     publish, so the printer, pruner, and emitter never see one.
     """
 
@@ -169,9 +169,9 @@ class _ExitKind(enum.Enum):
 @dataclass(slots=True)
 class _Exit:
     """
-    A pending exit lane, joined at the one consumer its kind names. ``env`` is a SNAPSHOT: a statement-level
+    A pending exit lane, joined at the one consumer its kind names. `env` is a SNAPSHOT: a statement-level
     exit ends a lane whose frame dict a sibling lane's fold may later revive and keep mutating in place, so
-    capturing by reference would hand the consumer the survivor's values. ``crossed`` marks a return lane
+    capturing by reference would hand the consumer the survivor's values. `crossed` marks a return lane
     that left a residual loop: its arms lie inside the published loop and never reconverge with any seal
     region, so folds keep it on the union of sinks until the frame boundary wraps the region.
     """
@@ -238,8 +238,8 @@ type _Env = dict[_EnvKey, Value | _Unjoinable | _Moved | _SlotAlias]
 @dataclass(slots=True)
 class Frame:
     """
-    One function under interpretation; a non-root ``return`` rides a pending exit lane to the frame boundary.
-    ``slots`` is the environment holding the slot keys: the frame's own env for the root and its branch-arm
+    One function under interpretation; a non-root `return` rides a pending exit lane to the frame boundary.
+    `slots` is the environment holding the slot keys: the frame's own env for the root and its branch-arm
     forks, the caller's transitively for inlined helpers, so a helper reads the current post-write state.
     """
 
@@ -607,7 +607,7 @@ class Interpreter:
         """
         Intermediate merges stay on the UNION of the constituent sinks -- sealing early would place a later
         materialization flat where an unfolded lane's path could read it undefined; only the final lane,
-        which covers every path of the region, continues at ``seal``. A crossed lane never seals: its arms
+        which covers every path of the region, continues at `seal`. A crossed lane never seals: its arms
         do not reconverge with the seal region, so it stays on the union for the frame boundary to wrap.
         """
         folded = self._fold_union(origin, lanes)
@@ -892,7 +892,7 @@ class Interpreter:
         self, origin: Origin, frame: Frame, lanes: list[_Exit], fall: list[Sink] | None, seal: list[Sink] | None
     ) -> list[Sink] | None:
         """
-        The merged lane continues flat at ``seal`` only when the region has nothing pending any more --
+        The merged lane continues flat at `seal` only when the region has nothing pending any more --
         flat continuation would run on a still-pending path; otherwise it stays on the union of the
         constituent sinks and later statements broadcast.
         """
@@ -968,7 +968,7 @@ class Interpreter:
         meeting a FLOAT back value promotes and re-runs, monotone and bounded by the carried count).
 
         The loop consumes its own break and continue lanes. Continue lanes meet the fall lane at the latch,
-        so ``phi.back`` is the joined value and back-edge conversions broadcast to every back sink (a direct
+        so `phi.back` is the joined value and back-edge conversions broadcast to every back sink (a direct
         continue never reaches the flat body tail). Break lanes meet the normal exit after promotion settles;
         the normal lane's join temps land at HEADER END, the only region that runs on the normal exit path
         and on no break path (assignments on non-final tests are dead). The post-loop env is that meet -- or,

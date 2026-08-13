@@ -17,7 +17,7 @@ def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) 
     For a scheduled value, the (last in-block control WORD, result LANDING) in its block-local frame. The word is the
     latest fetch step the op still drives -- a pooled lane's write opcode on its commit step or an inline op's
     combinational fire step; the result lands later, after the fetch pipeline. Cross-block overlap may place
-    ``term_offset`` between the two: the word stays in the block, the landing spills into the (single-predecessor)
+    `term_offset` between the two: the word stays in the block, the landing spills into the (single-predecessor)
     successor frame.
     """
     operator = mir_operation(mir, vid).operator
@@ -38,9 +38,9 @@ def install_inclusive_makespan(work_makespan: int, install_pushes_makespan: bool
     The block makespan inclusive of its tail install: a block whose install lands PAST the work makespan is one higher.
     That happens only for a computed source that is the block's own last-committing work, which the install must fire
     one step after to read-first it. A tail whose every install fits at the makespan -- a block-entry-resident source,
-    or a computed source committing before the last work -- adds no step. The single owner of this ``+1`` so the overlap
+    or a computed source committing before the last work -- adds no step. The single owner of this `+1` so the overlap
     layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install
-    ``install_issue_cycle``).
+    `install_issue_cycle`).
     """
     return work_makespan + (1 if install_pushes_makespan else 0)
 
@@ -49,9 +49,9 @@ def install_inclusive_makespan(work_makespan: int, install_pushes_makespan: bool
 class _SpillCarry:
     """
     The cross-block-overlap residue a block hands each single-predecessor successor: per-instance busy windows still
-    in flight at the shrunk terminator (``entry_busy``) and the values whose write spills past it (``livein_landing``,
+    in flight at the shrunk terminator (`entry_busy`) and the values whose write spills past it (`livein_landing`,
     the value's landing cycle in the successor-local frame). Both are successor-local cycles in the
-    ``absolute_pc = block_base + cycle`` frame the scheduler uses (via ``successor_local_cycle``), so a spill can land
+    `absolute_pc = block_base + cycle` frame the scheduler uses (via `successor_local_cycle`), so a spill can land
     as early as cycle 0 -- the successor's base PC, available before its first compute cycle.
     """
 
@@ -69,21 +69,21 @@ def _issue_side_envelope(
     and the branch condition's read floor. The branch condition is the SINGLE owner of that read floor here, derived
     from where the condition becomes readable: a PRODUCED condition lands inside the block at its landing; a SPILLED-IN
     live-in condition (carried past an overlapped predecessor's shrunk terminator) lands at its carried landing cycle
-    (``livein_landing``); a RESIDENT live-in condition (an input, persistent state, or a fully-drained prior-block
+    (`livein_landing`); a RESIDENT live-in condition (an input, persistent state, or a fully-drained prior-block
     result) is available from the block's first cycle and adds nothing. The floor starts at 1 for the ENTRY block only:
-    its terminator cannot redirect at PC 0, because the sequencer's accept hold (``pc==0``) precedes the branch
+    its terminator cannot redirect at PC 0, because the sequencer's accept hold (`pc==0`) precedes the branch
     redirect, so an entry branch must settle at PC>=1. Every other block may redirect at its own base PC, so its floor
     starts at 0 -- an empty resident-condition branch then drains nothing, exactly like a jump.
     """
     floor = 1 if block.id == mir.entry else 0
     for vid, issue in sched.issue_cycle.items():
         word, _landing, operator = _value_word_and_landing(mir, vid, issue, fetch_lag)
-        # The block may not end before an op reads its operands: it fires (and samples) at ``operand_read_cycle``. A
+        # The block may not end before an op reads its operands: it fires (and samples) at `operand_read_cycle`. A
         # latch-free wide read samples one step past a latency-1 pooled op's control word, so the read can exceed the
         # word -- without this floor the op would fire past the shrunk terminator and never execute.
         floor = max(floor, word, operand_read_cycle(operator, issue, fetch_lag))
         if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
-            # The err_pc diagnostic latches ``pc - fetch_lag`` when this op's write-enable executes, which is
+            # The err_pc diagnostic latches `pc - fetch_lag` when this op's write-enable executes, which is
             # fetch_lag fetch steps after its write word. If the terminator redirected by then, err_pc would
             # capture the successor frame's PC instead of this op's step. Keep the latch inside the block: the
             # data write still lands correctly, but the diagnostic needs the live PC in-frame.
@@ -100,8 +100,8 @@ def _issue_side_envelope(
 
 def _spill_local_cycle(bid: int, block_local_cycle: int, term_offset: int) -> int:
     """
-    The successor-local cycle of a value spilling past block ``bid``'s shrunk terminator. The callers gate on
-    ``block_local_cycle > term_offset``, so a real spill is non-negative (cycle 0 at the successor base is legal).
+    The successor-local cycle of a value spilling past block `bid`'s shrunk terminator. The callers gate on
+    `block_local_cycle > term_offset`, so a real spill is non-negative (cycle 0 at the successor base is legal).
     """
     local = successor_local_cycle(block_local_cycle, term_offset)
     assert local >= 0, f"block {bid}: spilled landing PC {local} precedes the successor base"
@@ -124,8 +124,8 @@ def schedule_with_overlap(
     latest cycle it still drives a control word, plus the branch condition's read floor. The drained boundary is the
     latest cycle a value LANDS in the block's frame, taken per op (a pooled result and an inline result land at the same
     bank-independent cycle, the combinational landing). Its in-flight results then land
-    past the terminator, in the uniquely-reached successor frame; the successor inherits that as ``entry_busy`` (the
-    predecessor's per-instance busy residue) and ``livein_landing`` (the cycle each spilled value lands), so its
+    past the terminator, in the uniquely-reached successor frame; the successor inherits that as `entry_busy` (the
+    predecessor's per-instance busy residue) and `livein_landing` (the cycle each spilled value lands), so its
     schedule neither reads a still-in-flight operand nor double-drives a busy instance. Back-edge targets and merge
     blocks are multi-predecessor, so no overlap crosses them: the forward-DAG carry converges in this single pass with
     no fixpoint. Under draining (every block multi-pred-bound or install-bearing) every offset equals its own max op
@@ -164,12 +164,12 @@ def schedule_with_overlap(
         # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op -- a pooled result
         # and an inline result both write the array combinationally and land at the same bank-independent cycle. Three
         # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- one whose source
-        # is the block's own LAST work lands a step past it at the drain boundary ``boundary_step(makespan)`` (the
+        # is the block's own LAST work lands a step past it at the drain boundary `boundary_step(makespan)` (the
         # makespan install-inclusive), while an install fitting at the makespan (a resident source, or a computed
-        # source committing before the last work) lands at ``landing_cycle(sched.makespan)`` within the work
+        # source committing before the last work) lands at `landing_cycle(sched.makespan)` within the work
         # boundary, paying neither the +1 step nor the later drain; (2) a NON-coalesced state slot's read-first boundary
-        # copy lands at ``boundary_step(sched.makespan)`` -- its source is among the op landings, but the copy adds the
-        # fetch-pipeline; ``has_state_copy`` flags whether the lone Ret block has one, decided by the coalescing
+        # copy lands at `boundary_step(sched.makespan)` -- its source is among the op landings, but the copy adds the
+        # fetch-pipeline; `has_state_copy` flags whether the lone Ret block has one, decided by the coalescing
         # fixpoint -- a coalesced slot writes its register in place and needs no copy, so the charge usually clears
         # (the fixpoint may latch it back on); (3) the entry's input loads land on cycle 1.
         work_drain = max(
@@ -197,7 +197,7 @@ def schedule_with_overlap(
         block_term_offset[bid] = term_offset
         if overlaps:  # hand the spill residue to the (single-predecessor) successors this block uniquely reaches
             # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
-            # frame, so both translate through the SAME coordinate map (``successor_local_cycle``) that _trace_landing /
+            # frame, so both translate through the SAME coordinate map (`successor_local_cycle`) that _trace_landing /
             # Lir.write_landing_pcs and the model's redirect re-keying use -- the scheduler reserves and read-gates each
             # register/instance at the cycle the pipeline truly frees/writes it, on one coordinate contract.
             busy = {
@@ -231,10 +231,10 @@ class _BlockLayout:
 def layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     """
     Lay blocks out in the ROM in reverse-postorder, returning their per-block base PCs, the out_valid PC, and the
-    shortest-path initiation interval. Each block spans ``term_offset + 1`` fetch steps (its body up to and including
-    the terminator step; the successor frame begins at ``term_pc + 1``); the single Ret block's boundary is the
+    shortest-path initiation interval. Each block spans `term_offset + 1` fetch steps (its body up to and including
+    the terminator step; the successor frame begins at `term_pc + 1`); the single Ret block's boundary is the
     out_valid PC.
-    ``min_initiation_interval`` is the shortest root-to-Ret path's traversed length.
+    `min_initiation_interval` is the shortest root-to-Ret path's traversed length.
     """
     successors: dict[int, list[int]] = {b.index: terminator_arms(b.terminator) for b in blocks}
     # Blocks are laid out linearly in reverse-postorder, but the single Ret block is forced last so its boundary is the

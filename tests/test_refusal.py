@@ -3,13 +3,13 @@ Refusal is SURVIVOR-BASED: an expression that names no number is refused only on
 
 The fold itself only signals -- the passes that fold speculatively catch the signal and leave the operation as it
 stands -- because unrolling and inlining SUBSTITUTE values and so manufacture expressions the kernel never wrote
-(``for w in [1.0, 0.0]: if w > 0.0: x / w`` becomes ``x / 0.0``). Refusing at the fold convicts the compiler of its own
+(`for w in [1.0, 0.0]: if w > 0.0: x / w` becomes `x / 0.0`). Refusing at the fold convicts the compiler of its own
 transformation; refusing the survivors convicts only what is left after every deletion has run, which is the program.
 
 The charter's license makes this sound: a refusal is a liberty the compiler takes, never a guarantee, so a MISSED
 refusal is not a defect while a WRONG answer always is.
 
-The divisions are exercised in ``test_arithmetic_behavior``, which owns that operator's behaviour. What is here is
+The divisions are exercised in `test_arithmetic_behavior`, which owns that operator's behaviour. What is here is
 what those do not reach: a dead constant expression, a guard only HIR can prove, and the two survivor shapes that are
 not divisions at all.
 """
@@ -44,8 +44,8 @@ def _deleted_as_a_dead_constant(x: float) -> float:
 
 
 def _excluded_by_a_guard_only_hir_can_prove(x: float) -> float:
-    # The front end cannot see that ``gate`` is zero -- it is an operation over a parameter -- while HIR proves it from
-    # ``x*0 == 0`` and resolves the guard. Which pass excludes the arm is not what decides whether the kernel builds.
+    # The front end cannot see that `gate` is zero -- it is an operation over a parameter -- while HIR proves it from
+    # `x*0 == 0` and resolves the guard. Which pass excludes the arm is not what decides whether the kernel builds.
     # The reciprocal has a CONSTANT numerator on purpose: a fold names a quotient only where it knows both operands, so
     # an unknown one would go unconvicted wherever it sat and the witness would say nothing about enterability.
     gate = x * 0.0
@@ -80,7 +80,7 @@ def _a_constant_a_further_round_deletes(c: bool, x: float) -> float:
 
 
 def test_a_constant_a_further_round_deletes_is_not_judged() -> None:
-    # The guards are all decidable, so ``flag`` is always false and the degrading constant is dead -- but only after
+    # The guards are all decidable, so `flag` is always false and the degrading constant is dead -- but only after
     # the round that threading and pruning open up. Judging a graph the optimizer has not finished with refuses a
     # kernel over a value its own next round erases.
     sim = _sim(_a_constant_a_further_round_deletes, "further_round")
@@ -94,7 +94,7 @@ def _a_constant_only_dead_code_removal_uncovers(c: bool, x: float) -> float:
         if (x * 0.0) > 1.0:
             flag = True
         dead = x + 7.0
-        zero = dead * 0.0  # nothing reads ``dead`` once this absorbs it, and until it goes the merges cannot thread
+        zero = dead * 0.0  # nothing reads `dead` once this absorbs it, and until it goes the merges cannot thread
     else:
         flag = c
         zero = 0.0

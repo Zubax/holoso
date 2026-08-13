@@ -9,7 +9,7 @@ import holoso
 
 class PID:
     """
-    The controller computes ``u = kp*e + (integral + ki*e*dt) + kd*(e - e_prev)/dt`` for positive ``dt`` and saturates
+    The controller computes `u = kp*e + (integral + ki*e*dt) + kd*(e - e_prev)/dt` for positive `dt` and saturates
     it to +-limit. The very first update is treated specially to avoid the initial spike.
     """
 

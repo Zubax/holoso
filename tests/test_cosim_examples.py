@@ -5,25 +5,25 @@ optional stages) and a deeply pipelined operator configuration at each spec's da
 e6m18 for the kernels that build no float operator at all (where the format is inert, this being the one their own
 scripts generate), and octave_index at both.
 
-This proves ``RTL == embedded numerical model``; it does NOT prove ``model == Python semantics`` (both descend from the
-same lowering). ``test_example_reference.py`` covers that second half, driving the same example specs against a fresh
+This proves `RTL == embedded numerical model`; it does NOT prove `model == Python semantics` (both descend from the
+same lowering). `test_example_reference.py` covers that second half, driving the same example specs against a fresh
 plain-Python instance of each kernel.
 
-``iir1_lpf`` exercises real control flow: a boolean first-sample state and a data-dependent if/else, synthesized
-through the CFG/branch backend (the first sample takes ``y = x``, every later sample the IIR update). ``pid`` and
-``schmitt_trigger`` exercise float comparisons (``holoso_fcmp``) driving branches: a PID with three-way saturation +
-anti-windup, a derivative-on-error channel, and a boolean ``_started`` state that suppresses the first-update
+`iir1_lpf` exercises real control flow: a boolean first-sample state and a data-dependent if/else, synthesized
+through the CFG/branch backend (the first sample takes `y = x`, every later sample the IIR update). `pid` and
+`schmitt_trigger` exercise float comparisons (`holoso_fcmp`) driving branches: a PID with three-way saturation +
+anti-windup, a derivative-on-error channel, and a boolean `_started` state that suppresses the first-update
 derivative spike; and two-threshold hysteresis (a state held untouched across the deadband).
 
-``signal_window`` exercises the Phase 1 expression forms: boolean connectives, a chained comparison, nested
+`signal_window` exercises the Phase 1 expression forms: boolean connectives, a chained comparison, nested
 conditional (ternary) expressions (branch + phi), and both float<->bool casts, including a cross-domain
-comparison -> bool -> float-cast -> float-multiply chain. ``remainder`` is a pure function computing the IEEE 754
+comparison -> bool -> float-cast -> float-multiply chain. `remainder` is a pure function computing the IEEE 754
 remainder by data-dependent iterative reduction (two magnitude-ratio-bounded back-edge loops, no division).
 
 Non-catalogue examples are frontend feature gaps or non-scalar interfaces, not verification scope:
-  - iir1_hpf: ``UnsupportedConstruct: cannot call 'self.lpf': it is a separate component instance (IIR1LPF);
-    hierarchical state is not supported yet``.
-  - finite_set_current_controller: ``UnsupportedConstruct: the annotation of parameter 'kin' is not supported yet``
+  - iir1_hpf: `UnsupportedConstruct: cannot call 'self.lpf': it is a separate component instance (IIR1LPF);
+    hierarchical state is not supported yet`.
+  - finite_set_current_controller: `UnsupportedConstruct: the annotation of parameter 'kin' is not supported yet`
     (a dataclass-typed parameter).
   - imu_frame_transform: ndarray-typed inputs, driven by the oracle and metrics layers instead.
 """

@@ -8,19 +8,19 @@ arithmetic, because all of those compute cycle offsets (term_offset, spill landi
 from operator latencies -- a mis-timed schedule, overlap, or spill at the LONGER latency would diverge from the short
 one, and the divergence is caught here without any reference model at all.
 
-Every test drives the compiler ONLY through the public API (``holoso.synthesize(fn, ops).numerical_model.elaborate()``
-and the resulting simulator's ``run`` / ``set_inputs`` / ``tick`` / handshake surface) and asserts on observable output
-BITS and on publicly observable timing (``SynthesisResult.initiation_interval`` and handshake cycle counts) -- never on
+Every test drives the compiler ONLY through the public API (`holoso.synthesize(fn, ops).numerical_model.elaborate()`
+and the resulting simulator's `run` / `set_inputs` / `tick` / handshake surface) and asserts on observable output
+BITS and on publicly observable timing (`SynthesisResult.initiation_interval` and handshake cycle counts) -- never on
 any internal schedule, register, or cycle structure. The two configurations are the no-optional-
-stage baseline and a deeply-pipelined fixture (both shared from ``_modelref`` so they track the operator-knob surface):
-``default_options`` has every ``stage_*`` knob at zero; ``staged_options`` enables them across fadd / fmul / fdiv /
+stage baseline and a deeply-pipelined fixture (both shared from `_modelref` so they track the operator-knob surface):
+`default_options` has every `stage_*` knob at zero; `staged_options` enables them across fadd / fmul / fdiv /
 fmul_ilog2 / fcmp. The kernels span the four shapes that exercise distinct timing paths:
 
   - a branchy diamond (a real, division-bearing branch with a long commit chain),
   - a back-edge while loop (a Newton-Raphson reciprocal with a data-dependent trip count, so the back edge is genuine),
   - a stateful streaming kernel (a persistent accumulator threaded across a multi-transaction sequence, run on the SAME
-    sequence under both latencies including a ``reset``),
-  - an overlap-spilling kernel (the shared ``overlap_spill_kernel``, whose wide chain spills past a shrunk terminator
+    sequence under both latencies including a `reset`),
+  - an overlap-spilling kernel (the shared `overlap_spill_kernel`, whose wide chain spills past a shrunk terminator
     into both arms -- the spill landing frame is latency-derived, so the two staging depths must still agree bit-exact).
 
 The stateful kernel is additionally driven tick-by-tick under sustained back-pressure at BOTH latencies, confirming the
@@ -91,7 +91,7 @@ def test_branchy_diamond_timing_invariant() -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Shape 2: a back-edge while loop -- a Newton-Raphson reciprocal whose trip count is the data-dependent input ``n``, so
+# Shape 2: a back-edge while loop -- a Newton-Raphson reciprocal whose trip count is the data-dependent input `n`, so
 # the loop is unambiguously a genuine back edge (not a constant-trip loop that would fully unroll). The loop-header phi
 # merge and the back-edge recurrence are scheduled at the operator latency; the two depths must agree on every (a, n).
 # --------------------------------------------------------------------------------------------------------------------
@@ -128,7 +128,7 @@ def _cycles_to_out_valid(simulator: holoso.NumericalSimulator, *inputs: float) -
 
 def test_staged_configuration_is_genuinely_deeper() -> None:
     # This guards the WHOLE axis from passing vacuously: the bit-identity tests above only mean something if the two
-    # configurations actually differ in latency. If a future change neutralized ``staged_mir`` (or a kernel stopped
+    # configurations actually differ in latency. If a future change neutralized `staged_mir` (or a kernel stopped
     # using any staged operator), the equivalence tests would still pass trivially -- this catches that by requiring
     # the deeply-staged pipeline to take strictly more cycles than the minimum-latency one on a representative kernel.
     short, long = _pair(_newton_reciprocal, "newton_depth")
@@ -139,7 +139,7 @@ def test_staged_configuration_is_genuinely_deeper() -> None:
 
 # --------------------------------------------------------------------------------------------------------------------
 # Shape 3: a stateful streaming kernel -- a persistent leaky accumulator threaded across a multi-transaction sequence.
-# Both latencies are driven on the SAME sequence (state is carried, so the comparison is order-sensitive); a ``reset``
+# Both latencies are driven on the SAME sequence (state is carried, so the comparison is order-sensitive); a `reset`
 # partway must restore both to the same snapshot, after which they must continue to agree. The state-install boundary
 # is latency-derived, so the longer pipeline installing the carry on the same logical edge is exactly what is proved.
 # --------------------------------------------------------------------------------------------------------------------
@@ -207,7 +207,7 @@ def test_stateful_backpressure_timing_invariant() -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Shape 4: an overlap-spilling kernel -- the shared ``overlap_spill_kernel`` whose early branch condition lets the
+# Shape 4: an overlap-spilling kernel -- the shared `overlap_spill_kernel` whose early branch condition lets the
 # block terminator shrink, while a wide chain commits late and SPILLS past the shrunk terminator into BOTH arms. The
 # spill's landing frame is computed from operator latency, so the same spill landing on the same logical value under
 # two different staging depths (bit-identical across both polarities and at x == y) is precisely what is proved here.

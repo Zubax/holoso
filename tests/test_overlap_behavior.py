@@ -1,10 +1,10 @@
 """
 Public-API, black-box behavioral tests for the cross-block-overlap / cycle-model surface.
 
-Every test here drives the compiler ONLY through the public API: ``holoso.synthesize(fn, ops) -> SynthesisResult``,
-then ``result.numerical_model.elaborate() -> NumericalSimulator``, then exercises the simulator
-(``run`` / ``reset`` / ``set_inputs`` / ``tick`` / ``in_ready`` / ``out_valid`` / ``output_values`` and the typed
-``inputs`` / ``outputs`` metadata). Assertions are on OBSERVABLE behavior only -- output values against a Python
+Every test here drives the compiler ONLY through the public API: `holoso.synthesize(fn, ops) -> SynthesisResult`,
+then `result.numerical_model.elaborate() -> NumericalSimulator`, then exercises the simulator
+(`run` / `reset` / `set_inputs` / `tick` / `in_ready` / `out_valid` / `output_values` and the typed
+`inputs` / `outputs` metadata). Assertions are on OBSERVABLE behavior only -- output values against a Python
 reference (floats within a reduced-precision tolerance, bools exact), multi-transaction persistent-state correctness,
 and the in_ready/out_valid handshake under back-pressure. No internal LIR structure is inspected, so these survive a
 deep refactor of the schedule, register allocation, or block layout. The white-box twins that pin the corners actually
@@ -12,8 +12,8 @@ trigger live in test_schedule.py / test_cosim.py; this is the complementary blac
 
 The genuine gaps these fill (the white-box twins and the stateless overlap kernels are covered elsewhere):
   - cross-block software pipelining carrying PERSISTENT STATE across many transactions, including back-pressure;
-  - the model-level handshake under sustained back-pressure (the cosim has it; nothing exercised it via ``tick`` alone);
-  - a two-deep shift register (non-coalesced copy slots) over many transactions plus ``reset`` (model path; cosim-only
+  - the model-level handshake under sustained back-pressure (the cosim has it; nothing exercised it via `tick` alone);
+  - a two-deep shift register (non-coalesced copy slots) over many transactions plus `reset` (model path; cosim-only
     before);
   - nested diamonds (pure -> select, and division-bearing -> real branch) and a mixed select+branch kernel, checked by
     output value rather than by HIR block counts;
@@ -58,7 +58,7 @@ def _ops() -> Options:
 
 
 def _close(got: float, want: float, op_count: int = 12) -> bool:
-    """Reduced-precision agreement for a kernel of about ``op_count`` ZKF ops over operands of order unity-to-ten."""
+    """Reduced-precision agreement for a kernel of about `op_count` ZKF ops over operands of order unity-to-ten."""
     rtol, atol = default_tolerance(FMT, op_count, magnitude=max(1.0, abs(want)))
     return within(got, want, rtol, atol)
 
@@ -69,7 +69,7 @@ def _close(got: float, want: float, op_count: int = 12) -> bool:
 
 class _OverlapAccumulator:
     """
-    A spilling-chain branch whose result feeds a private LEAKY accumulator carried across transactions (-> ``out_0``).
+    A spilling-chain branch whose result feeds a private LEAKY accumulator carried across transactions (-> `out_0`).
     The accumulator is leaky (a power-of-two decay, which adds essentially no rounding) so its error stays bounded
     across a long stream rather than accumulating without limit -- the tolerance is then a true per-step bound and the
     test stays robust to a value-preserving operator-selection refactor. The overlap still engages: the shrink depends
@@ -123,8 +123,8 @@ def test_overlap_kernel_reset_restores_initial_state() -> None:
 
 def _drive_with_stall(simulator: holoso.NumericalSimulator, inputs: tuple[float, ...], stall: int) -> float:
     """
-    Drive one transaction tick-by-tick: present inputs, accept, advance to out_valid, then HOLD with ``out_ready``
-    low for ``stall`` cycles (asserting the output is stable and in_ready stays low), then release to accept it.
+    Drive one transaction tick-by-tick: present inputs, accept, advance to out_valid, then HOLD with `out_ready`
+    low for `stall` cycles (asserting the output is stable and in_ready stays low), then release to accept it.
     """
     simulator.set_inputs(*inputs)
     while not simulator.in_ready:
@@ -155,7 +155,7 @@ def test_backpressure_holds_output_and_advances_state_once_through_overlap() -> 
 
 def test_run_drains_partial_overlap_transaction_before_presenting_new_inputs() -> None:
     # The drain-before-present ordering on the overlapping stateful kernel: a transaction accepted by a partial manual
-    # ``tick`` must complete with its OWN latched inputs (advancing state) before ``run`` presents the next inputs, so
+    # `tick` must complete with its OWN latched inputs (advancing state) before `run` presents the next inputs, so
     # the carried accumulator must reflect BOTH the drained transaction and the freshly-run one.
     simulator = holoso.synthesize(
         _OverlapAccumulator().__call__, _ops(), name="overlap_drain"
@@ -218,7 +218,7 @@ def test_nested_pure_diamond_output_matches_reference() -> None:
 def test_nested_division_branch_output_matches_reference() -> None:
     def nested_div(x: float, y: float) -> float:
         # A nested diamond whose inner arm divides: the division is unspeculatable, so the inner diamond stays a REAL
-        # branch (it cannot if-convert). The divisor ``y*y + 1`` is structurally nonzero, so the path is always valid.
+        # branch (it cannot if-convert). The divisor `y*y + 1` is structurally nonzero, so the path is always valid.
         if x > 0.0:
             if y > 0.0:
                 r = (x + y) / (y * y + 1.0)
@@ -387,19 +387,19 @@ def test_multi_output_mixed_io_metadata_and_values() -> None:
 
 
 def test_latching_fault_register_streams_and_resets() -> None:
-    # Each channel latches on its first trip and HOLDS until reset; ``any_fault`` summarizes the just-updated channels.
+    # Each channel latches on its first trip and HOLDS until reset; `any_fault` summarizes the just-updated channels.
     # Demonstrates the edge guard (a): on the FIRST-TRIP vector (True, False, False) the correct summary is
     # True -- it ORs the channel just latched THIS transaction. A wrong edge that read the channel's stale (pre-update)
     # value would yield False there, which the assertion below would catch. Persistent state across many transactions
-    # plus a mid-stream ``reset()`` clearing every sticky latch is the load-bearing observable.
+    # plus a mid-stream `reset()` clearing every sticky latch is the load-bearing observable.
     class LatchingFaultRegister:
         """
-        Three independent sticky OR-latches plus a combinational ``any_fault`` summary -- a multi-channel boolean state
-        kernel whose new-state producers (``self._x = self._x or x``) read only resident values and so are the entry
+        Three independent sticky OR-latches plus a combinational `any_fault` summary -- a multi-channel boolean state
+        kernel whose new-state producers (`self._x = self._x or x`) read only resident values and so are the entry
         block's cycle-0-eligible inline ops. The summary ORs the THREE freshly-latched channels in the same block, so
         its value depends on the commit ordering being right: a stale read of any channel would drop a just-latched
         fault. Multi-channel bool state with a same-block summary is a shape no other black-box test exercises
-        (``_BoolStateMachine`` in test_public_api_behavior is single-channel). A local copy
+        (`_BoolStateMachine` in test_public_api_behavior is single-channel). A local copy
         rather than examples/latching_fault_register, so the pinned same-block-summary shape stays decoupled from it.
         """
 
@@ -460,9 +460,9 @@ def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value(config: Op
 
 
 def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None:
-    # The resident-output drain-only Ret shape: the loop body produces the float ``octaves``, which the exit Ret reads
-    # resident at its base PC with no boundary drain. Exact ``==`` guards the over-aggressive direction -- a reclaim
-    # pushing the boundary BELOW the resident landing would sample ``octaves`` before the loop's final write lands, an
+    # The resident-output drain-only Ret shape: the loop body produces the float `octaves`, which the exit Ret reads
+    # resident at its base PC with no boundary drain. Exact `==` guards the over-aggressive direction -- a reclaim
+    # pushing the boundary BELOW the resident landing would sample `octaves` before the loop's final write lands, an
     # off-by-one octave count.
     #
     # The trip count is data-dependent, so the value is the loop's correctness. Inputs are FROZEN to a verified set:
@@ -472,7 +472,7 @@ def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None
     def octave_index(x: float) -> float:
         # The order of magnitude of x in octaves: halvings (or doublings, for |x| < 1) to bring |x| into (0.5, 1]. The
         # division-bearing magnitude diamond stays a real branch; its merge is an empty pass-through threaded into the
-        # halving loop, whose Ret is a resident-output drain (the float ``octaves`` is produced in the loop body and
+        # halving loop, whose Ret is a resident-output drain (the float `octaves` is produced in the loop body and
         # read combinationally at the Ret's own base PC). A local copy of examples/octave_index (the test must not
         # couple to examples/, and a local kernel preserves the diamond -> merge -> loop -> drain-Ret shape).
         magnitude = abs(x)
@@ -496,17 +496,17 @@ def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None
 def test_cross_bank_chain_edges_match_reference() -> None:
     # Could-have-failed (a, reasoned): an off-by-one in the inline read step or a dependency edge would let a consumer
     # in this chain read before its producer's value lands, so the model (which commits each PC's landings before its
-    # reads) would sample a stale operand -- the boolean ``r``/``t`` would flip and the float ``out`` would diverge from
+    # reads) would sample a stale operand -- the boolean `r`/`t` would flip and the float `out` would diverge from
     # the float64 reference. The chain has no black-box twin (test_arithmetic_behavior's cross-domain test is a single
     # cast; the deep same-bank reduction at test_schedule is white-box and float-only).
     #
-    # Inputs are FROZEN to a verified set: ``r`` and ``t`` are comparisons of ROUNDED intermediates (``t = s > 0`` with
-    # ``s`` a rounded sum), so a value near a comparison boundary could round differently than float64. The reference
+    # Inputs are FROZEN to a verified set: `r` and `t` are comparisons of ROUNDED intermediates (`t = s > 0` with
+    # `s` a rounded sum), so a value near a comparison boundary could round differently than float64. The reference
     # bools are derived from the SAME Python expression, and the operands are kept clear of those boundaries.
     import itertools  # noqa: PLC0415
 
     def cross_bank_chain(a: float, b: float, c: float, d: float) -> tuple[float, bool, bool]:
-        # A deep cross-bank chain on the tight same-bank edge: back-to-back inline ``band``/``bor`` over comparisons, a
+        # A deep cross-bank chain on the tight same-bank edge: back-to-back inline `band`/`bor` over comparisons, a
         # bool->float cast, a float op consuming the cast, and a float->bool reduction folded into a select. Inline ops
         # are latency 0 and the dependency edge is the unclamped landing-vs-read spacing, so this chain is the most
         # direct exercise of those cross-bank edges through the public API.
@@ -516,7 +516,7 @@ def test_cross_bank_chain_edges_match_reference() -> None:
         gate = 1.0 if r else 0.0  # bool -> float cast
         s = gate * (a + b) + c  # a float op consuming the cast result
         t = s > 0.0  # float -> bool reduction
-        out = (s - d) if t else (d - s)  # the select consumes ``t`` and ``s``
+        out = (s - d) if t else (d - s)  # the select consumes `t` and `s`
         return out, r, t
 
     simulator = holoso.synthesize(cross_bank_chain, _ops(), name="cross_bank").numerical_model.elaborate()

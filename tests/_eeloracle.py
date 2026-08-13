@@ -1,7 +1,7 @@
 """
-The front-end differential oracle: CPython executing the original kernel against ``HirEvaluator`` running the
+The front-end differential oracle: CPython executing the original kernel against `HirEvaluator` running the
 unoptimized HIR lowered from it -- upstream of HIR optimization, so fastmath rewrites cannot muddy the verdict.
-The harness is frontend-agnostic: it takes a lowered ``Hir`` and an identically constructed reference callable.
+The harness is frontend-agnostic: it takes a lowered `Hir` and an identically constructed reference callable.
 
 Protocol, per transaction of the ordered vector sequence:
 
@@ -11,17 +11,17 @@ Protocol, per transaction of the ordered vector sequence:
   represent, lies outside the comparable domain and is discarded; a stateful kernel's remaining sequence goes with
   it, since the instance is no longer trustworthy. At least one transaction must survive comparison.
 - The module interface itself is checked: input ports must mirror the reference's parameters name-for-name in
-  order, output port names must be unique, every public slot must be observable through its ``state_<slot>`` port
+  order, output port names must be unique, every public slot must be observable through its `state_<slot>` port
   -- whose produced value is compared against the post-call attribute leaf, so a mis-wired port diverges from its
   own slot -- and no state port may expose a private slot.
-- ``out_<path>`` ports are compared against the flattened return leaves by name (a ``None`` return has no leaves).
+- `out_<path>` ports are compared against the flattened return leaves by name (a `None` return has no leaves).
   Bools and ints are exact -- a bool port demands a genuine bool -- while a float port coerces the reference's
-  ints to their float image (a float-typed counter written as ``0``; a C-promotion join rounding a large int) and
-  matches to ``ulps`` ULPs with zeros and infinities exact: binary64 against binary64 in identical operation order
+  ints to their float image (a float-typed counter written as `0`; a C-promotion join rounding a large int) and
+  matches to `ulps` ULPs with zeros and infinities exact: binary64 against binary64 in identical operation order
   leaves libm-level slack only.
 - A return leaf with NO out port must exactly equal (reference against reference) some public slot's post-call
   value: the emitter elides a returned leaf that carries the same VALUE ID as a public state live-out, since that
-  wire is already observable through the ``state_<slot>`` port. An emitter eliding an unrelated leaf fails here;
+  wire is already observable through the `state_<slot>` port. An emitter eliding an unrelated leaf fails here;
   an elision whose value coincides with a public slot by accident rather than by identity is the one blind spot,
   accepted because no information is lost through it.
 - Every evaluator slot is compared against the instance-attribute leaf of the same name (row-major decomposition,
@@ -29,10 +29,10 @@ Protocol, per transaction of the ordered vector sequence:
   leaves that changed -- a missed state write and an invented one both surface.
 
 Comparable-domain edges, accepted: the evaluator has no negative zero, so a kernel observing the sign of zero
-(``atan2(-0.0, x)``) diverges; a NaN the reference computes and consumes WITHOUT surfacing it in any leaf (say, a
-comparison against ``inf - inf``) is undetectable host-side and fails loudly for eye triage. An array kernel
+(`atan2(-0.0, x)`) diverges; a NaN the reference computes and consumes WITHOUT surfacing it in any leaf (say, a
+comparison against `inf - inf`) is undetectable host-side and fails loudly for eye triage. An array kernel
 parameter is driven through its decomposed scalar leaves: the vector row stays name -> value with the leaf names
-(``v_0``, ``v_1``), the expected port set derives from the reference's own jaxtyping annotation (read
+(`v_0`, `v_1`), the expected port set derives from the reference's own jaxtyping annotation (read
 structurally, exactly as the frontend reads it), and the binder reassembles the ndarray argument for CPython.
 """
 
@@ -54,7 +54,7 @@ _STATE_PREFIX = "state_"
 
 
 def floats_match(actual: float, expected: float, ulps: int) -> bool:
-    """Exact for zeros and infinities; otherwise within ``ulps`` ULPs of the larger magnitude."""
+    """Exact for zeros and infinities; otherwise within `ulps` ULPs of the larger magnitude."""
     if actual == expected:
         return True
     if math.isinf(actual) or math.isinf(expected) or actual == 0.0 or expected == 0.0:
@@ -172,7 +172,7 @@ def _kind(value: object) -> type:
 def _elidable_eq(leaf: object, slot_value: object) -> bool:
     """
     Genuine ValueId elision relates one CPython value to itself, so the kinds agree; without this, a dropped bool
-    or int leaf could hide behind an equal-comparing float slot (``False == 0.0`` and ``1 == 1.0`` in Python).
+    or int leaf could hide behind an equal-comparing float slot (`False == 0.0` and `1 == 1.0` in Python).
     """
     return _kind(leaf) is _kind(slot_value) and _raw_eq(leaf, slot_value)
 
@@ -185,7 +185,7 @@ def assert_hir_matches_reference(
     label: str,
     ulps: int = 16,
 ) -> int:
-    """Drive the ordered ``vectors`` through both sides; returns the number of compared transactions."""
+    """Drive the ordered `vectors` through both sides; returns the number of compared transactions."""
     evaluator = HirEvaluator(hir)
     input_names = hir.input_names()
     parameter_names = expected_input_names(reference)

@@ -1,15 +1,15 @@
 """
-Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module that instantiates the shared support library
-(assembled by :mod:`._support`).
+Render a scheduled Lir into a synthesizable Verilog ZISC module that instantiates the shared support library
+(assembled by ._support).
 
-The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, written as a
-synchronous ``case`` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
+The controller is a microcode ROM (see ._microcode): one pre-decoded VLIW control word per step, written as a
+synchronous `case` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
 fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
 which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
-routing is uniform: each operand port's read mux is a ``case`` over that port's read codebook (its registers and the
-constants it reads), and each register's write is a ``case`` over that register's write codebook selected by a tiny
+routing is uniform: each operand port's read mux is a `case` over that port's read codebook (its registers and the
+constants it reads), and each register's write is a `case` over that register's write codebook selected by a tiny
 per-register opcode (code 0 == NOP hold). PC drives only the sequencer; it never gates a datapath read or write.
 """
 
@@ -38,7 +38,7 @@ class VerilogOutput:
 
 
 class _Writer:
-    """Accumulates 4-space-indented lines; ``w(...)`` accepts single lines or dedented multiline blocks."""
+    """Accumulates 4-space-indented lines; `w(...)` accepts single lines or dedented multiline blocks."""
 
     def __init__(self) -> None:
         self._lines: list[str] = []
@@ -76,7 +76,7 @@ def _lit(width: int, value: int) -> str:
 
 
 def _wire(width: int) -> str:
-    """Aligned ``wire`` declaration prefix so field names line up regardless of bus width."""
+    """Aligned `wire` declaration prefix so field names line up regardless of bus width."""
     return f"wire [{width - 1:2}:0] " if width > 1 else "wire        "
 
 
@@ -108,7 +108,7 @@ class _WideRenderer:
     """
     The sole owner of the WREG-vs-WFLT extension policy. Only a float leaves WREG-WFLT high bits without meaning
     (an integer fills the register exactly, a boolean has its own bank), so a float view narrows to WFLT and a float
-    write spells the high bits ``1'bx`` -- don't-care beats a materialized zero fill on Diamond LSE and is measured
+    write spells the high bits `1'bx` -- don't-care beats a materialized zero fill on Diamond LSE and is measured
     neutral on Vivado and Yosys, which sweep the dead bits under either spelling (DESIGN.md, Fabric-area exploration).
     Engages only at gap > 0: a zero replication count would be illegal Verilog, and a kernel whose word is narrower
     than the float format -- which one carrying no float may be -- has no float to render in the first place.
@@ -154,7 +154,7 @@ class _WideRenderer:
     ) -> str:
         """
         An inline firing's combinational RHS: the operator's own expression over its operand nets (a float operand's
-        folded sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds
+        folded sign applies inline via `holoso_fsgnop`), with the result conditioner applied -- an inversion folds
         into the expression; conditioned wide inline results have no producer yet.
         """
         nets = [self.operand_rhs(operand) for operand in operands]
@@ -171,7 +171,7 @@ class _WideRenderer:
                 assert_never(conditioner)
 
     def write_rhs(self, dst: RegRef | BoolRegRef, source: WriteSource) -> str:
-        """One write-codebook source as the RHS for ``dst`` -- the dual of the microcode's structured source key."""
+        """One write-codebook source as the RHS for `dst` -- the dual of the microcode's structured source key."""
         match source:
             case OpWriteSource(inst=inst, port=port, invert=invert):
                 net = f"{_sig(inst)}_y{port}"  # wide: sign rode the wrapper; bool: fabric inversion folds here
@@ -215,7 +215,7 @@ def generate(lir: Lir) -> VerilogOutput:
 
     # The two dual codebooks, built once and threaded to both the microcode packer and the emitters so the
     # code<->source mapping cannot drift: per operand port (read) and per register (write). The write side derives from
-    # a single ``write_events`` traversal, shared by the codebook, the packer, and the ROM-comment landings.
+    # a single `write_events` traversal, shared by the codebook, the packer, and the ROM-comment landings.
     read_books = read_codebook(lir)
     events = write_events(lir)
     write_books = write_codebook(events)
@@ -538,10 +538,10 @@ always @* begin
 
 def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
     """
-    The non-fall-through fetch-PC redirects, one per block whose terminator is not a plain advance: a ``Jump`` to a
-    non-adjacent block, or a ``Branch`` selecting a target by its boolean register. Each is keyed by the block's
-    terminator fetch step (its boundary). A ``Ret`` block is the out_valid boundary and needs no redirect; a ``Jump``
-    to the next-laid-out block falls through on ``pc + 1`` and needs no case arm.
+    The non-fall-through fetch-PC redirects, one per block whose terminator is not a plain advance: a `Jump` to a
+    non-adjacent block, or a `Branch` selecting a target by its boolean register. Each is keyed by the block's
+    terminator fetch step (its boundary). A `Ret` block is the out_valid boundary and needs no redirect; a `Jump`
+    to the next-laid-out block falls through on `pc + 1` and needs no case arm.
     """
     redirects: list[tuple[int, str]] = []
     for block in lir.blocks:
@@ -563,8 +563,8 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
 
 def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> None:
     """
-    Emit one operand's combinational read mux: a direct assign for a single source, else a ``case`` over the port's
-    read opcode selecting a register or a constant directly. The last entry is the ``default`` arm so the case is full
+    Emit one operand's combinational read mux: a direct assign for a single source, else a `case` over the port's
+    read opcode selecting a register or a constant directly. The last entry is the `default` arm so the case is full
     (no inferred latch on this combinational path); unused high codes fall there too and are don't-cares on idle steps.
     The mux carries no indexed part-select, so there is no offset multiply for synthesis to (mis)infer as a DSP.
     """
@@ -590,7 +590,7 @@ def _emit_read_muxes(
     """
     Emit the combinational operand read muxes driving each wrapper directly, so regfile-read -> operator is
     combinational and the operand is sampled FETCH_LAG after its read-opcode word. A pure-inline kernel has no pooled
-    instances, so this would be empty -- skip it rather than emit a bare ``always @* begin end``.
+    instances, so this would be empty -- skip it rather than emit a bare `always @* begin end`.
     """
     if not lir.instances:
         return
@@ -617,10 +617,10 @@ def _emit_reg_write(
 ) -> None:
     """
     One segregated write statement per register (the multi-assign rule): the handshake-gated special arms first (an
-    input load, a boundary state install), then the opcode ``case`` over the register's write codebook as the final
-    ``else``. Code 0 is the NOP hold -- an unlisted code in this clocked ``case`` retains the flop -- so the
+    input load, a boundary state install), then the opcode `case` over the register's write codebook as the final
+    `else`. Code 0 is the NOP hold -- an unlisted code in this clocked `case` retains the flop -- so the
     write-enable is folded into the opcode with no extra logic level. A single-source register degenerates to
-    ``if (opcode)``.
+    `if (opcode)`.
     """
     clause = "if"
     for cond, rhs in special_arms:
@@ -720,7 +720,7 @@ always @(posedge clk) begin
         arms = load_arm(wide_loads, reg)
         if slot.needs_copy and lir.wide_state_install_is_boundary(slot):
             # This arm outranks the opcode case below it and must not shadow it, here or in the boolean bank below.
-            # It cannot: the install executes at ``present_step``, and ``build_microcode`` -- already run, over every
+            # It cannot: the install executes at `present_step`, and `build_microcode` -- already run, over every
             # write event -- asserts each rides a strictly earlier step, so the word presented alongside the install
             # holds the write NOP. That is what lets a slot register which also carries opcode writes, the shape a
             # live-out coalesced into another slot's register leaves behind, be emitted rather than refused.

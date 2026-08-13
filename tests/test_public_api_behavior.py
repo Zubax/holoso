@@ -2,12 +2,12 @@
 Public-API, black-box behavioral tests for if-conversion and select forms, NOT-folding in every consumer position,
 phi-arm coalescing, typed ports and multi-output kernels, and persistent boolean state.
 
-Every test drives the compiler ONLY through the public API: ``holoso.synthesize(fn, ops) -> SynthesisResult``, then
-``result.numerical_model.elaborate() -> NumericalSimulator``, and exercises the simulator (``run`` / ``reset`` /
-typed ``inputs`` / ``outputs`` metadata). Assertions are on OBSERVABLE behavior only: output values against an
+Every test drives the compiler ONLY through the public API: `holoso.synthesize(fn, ops) -> SynthesisResult`, then
+`result.numerical_model.elaborate() -> NumericalSimulator`, and exercises the simulator (`run` / `reset` /
+typed `inputs` / `outputs` metadata). Assertions are on OBSERVABLE behavior only: output values against an
 INDEPENDENT reference (the same kernel evaluated in Python float64 within the format tolerance, two mathematically-
 equivalent formulations that must agree, or a hand-computed exact value), persistent state across transactions
-including a ``reset`` partway, and the typed-port metadata. No internal LIR / schedule / register / cycle-count
+including a `reset` partway, and the typed-port metadata. No internal LIR / schedule / register / cycle-count
 structure is inspected, so these survive a deep refactor of any mid/back-end pass. Complements
 test_overlap_behavior.py (the cross-block-overlap surface) and test_arithmetic_behavior.py (numerical behavior and
 constant folding).
@@ -54,7 +54,7 @@ def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
 
 
 def _close(got: float, want: float, op_count: int = 12) -> bool:
-    """Reduced-precision agreement for a kernel of about ``op_count`` ZKF ops over operands of order unity-to-ten."""
+    """Reduced-precision agreement for a kernel of about `op_count` ZKF ops over operands of order unity-to-ten."""
     rtol, atol = default_tolerance(FMT, op_count, magnitude=max(1.0, abs(want)))
     return within(got, want, rtol, atol)
 
@@ -71,12 +71,12 @@ def _neg_abs_via_select(x: float, c: float) -> float:
 
 
 def test_sign_folds_into_select_both_orientations() -> None:
-    # Both outputs are sign-selected copies of a representable input, so the comparison: exact ``==`` on both sides of
-    # the boundary and AT the boundary (c == 0.0 takes the else arm, matching Python's ``> 0.0``).
+    # Both outputs are sign-selected copies of a representable input, so the comparison: exact `==` on both sides of
+    # the boundary and AT the boundary (c == 0.0 takes the else arm, matching Python's `> 0.0`).
     sim_a = _sim(_abs_via_select, "sel_abs")
     sim_b = _sim(_neg_abs_via_select, "sel_neg_abs")
     for x in (-2.0, -0.5, 0.0, 0.5, 2.0):
-        for c in (-1.0, 0.0, 0.5, 2.0):  # 0.0 is the exact decision boundary of ``c > 0.0``
+        for c in (-1.0, 0.0, 0.5, 2.0):  # 0.0 is the exact decision boundary of `c > 0.0`
             assert float(sim_a.run(x, c)[0]) == _abs_via_select(x, c), f"abs x={x} c={c}"
             assert float(sim_b.run(x, c)[0]) == _neg_abs_via_select(x, c), f"neg_abs x={x} c={c}"
 
@@ -149,7 +149,7 @@ def _real_branch_division_form(x: float, y: float, c: float) -> float:
 def test_ifconvertible_and_real_branch_forms_agree() -> None:
     # Same operands and the same single division on each path: the if-converted (select) form and the real-branch form
     # must agree on both polarities and at the boundary. They additionally happen to be bit-identical here, which we
-    # assert as a stronger bonus check; if a future heuristic change broke that, the ``_close`` agreement still stands.
+    # assert as a stronger bonus check; if a future heuristic change broke that, the `_close` agreement still stands.
     # The structural difference is compile-time, so a directed set suffices: both branch polarities, the c == 0
     # boundary, both signs of each operand, and a nontrivial (non-power-of-two) divisor via y.
     sim_ifc = _sim(_ifconv_division_form, "ifc_div")
@@ -174,7 +174,7 @@ def test_ifconvertible_and_real_branch_forms_agree() -> None:
         assert a == b, f"forms disagree x={x} y={y} c={c}: ifc={a} branch={b}"
 
 
-# ``not`` never materializes hardware -- it folds into the consumer's sideband on the CONSUMER side.
+# `not` never materializes hardware -- it folds into the consumer's sideband on the CONSUMER side.
 
 
 def _not_in_branch_condition(c: bool, x: float, y: float) -> float:
@@ -218,7 +218,7 @@ def test_not_as_boolean_output() -> None:
 
 
 class _BoolNotState:
-    """A boolean state slot driven by ``not``: ``self.flag = not self.flag`` (the phi/state-slot inversion)."""
+    """A boolean state slot driven by `not`: `self.flag = not self.flag` (the phi/state-slot inversion)."""
 
     def __init__(self) -> None:
         self.flag = False
@@ -249,7 +249,7 @@ def test_not_in_boolean_phi_arm() -> None:
 
 
 def _double_negation(c: bool) -> bool:
-    # ``not not c`` must fold to the identity (two consumer-side inversions cancel).
+    # `not not c` must fold to the identity (two consumer-side inversions cancel).
     return not not c
 
 
@@ -260,7 +260,7 @@ def test_double_negation_is_identity() -> None:
 
 
 def _comparison_both_polarities(x: float, y: float) -> tuple[bool, float]:
-    # ONE comparison consumed in BOTH polarities: ``x > y`` drives a boolean output directly, and ``not (x > y)`` (the
+    # ONE comparison consumed in BOTH polarities: `x > y` drives a boolean output directly, and `not (x > y)` (the
     # complement) gates a float select. One comparator tap must serve both -- the polarities must stay consistent.
     gt = x > y
     sel = 10.0 if gt else 20.0
@@ -272,7 +272,7 @@ def test_comparison_in_both_polarities() -> None:
     sim = _sim(_comparison_both_polarities, "both_pol")
     for x in (-1.0, 0.0, 1.0, 2.0):
         for y in (-1.0, 0.0, 1.0):
-            for xy in ((x, y), (x, x)):  # include x == y, where ``x > y`` is False and ``not`` is True
+            for xy in ((x, y), (x, x)):  # include x == y, where `x > y` is False and `not` is True
                 got = sim.run(*xy)
                 want_gt, want_val = _comparison_both_polarities(*xy)
                 assert got[0] is want_gt, f"xy={xy}: bool {got[0]} vs {want_gt}"
@@ -281,7 +281,7 @@ def test_comparison_in_both_polarities() -> None:
 
 def _pure_recurrence(x: float, n: float) -> float:
     # A PURE loop-carried recurrence (no division -- the existing in-loop test is division-bearing): a Horner-like
-    # multiply-accumulate over a data-dependent trip count. The header phi for ``acc`` is loop-carried; its live-in
+    # multiply-accumulate over a data-dependent trip count. The header phi for `acc` is loop-carried; its live-in
     # overlaps its back-edge arm, so the coalescer must judge it correctly (it keeps a copy where it must, coalesces
     # where it can) without changing the value.
     acc = 0.0
@@ -302,13 +302,13 @@ def test_pure_loop_carried_recurrence_matches_reference() -> None:
 
 
 def _soundness_corner(x: float, n: float) -> float:
-    # The coalescing soundness corner: a REAL diamond INSIDE a loop whose arms reuse an input (``x``) that is ALSO the
-    # seed of the phi result (``acc`` is seeded from x and is the loop-carried header phi), branching ON that phi
-    # result (``acc > 0.0``). The else arm divides (structurally-nonzero, non-power-of-two divisor) so the diamond
+    # The coalescing soundness corner: a REAL diamond INSIDE a loop whose arms reuse an input (`x`) that is ALSO the
+    # seed of the phi result (`acc` is seeded from x and is the loop-carried header phi), branching ON that phi
+    # result (`acc > 0.0`). The else arm divides (structurally-nonzero, non-power-of-two divisor) so the diamond
     # CANNOT if-convert and stays a genuine branch with phi arms and install copies -- the corner where a wrong
-    # coalesce would clobber a value (the carry / input ``x``) still live in a sibling arm. Output must follow the
+    # coalesce would clobber a value (the carry / input `x`) still live in a sibling arm. Output must follow the
     # source semantics, not whatever the allocator chose. Unlike the overlap file's in-loop diamond (whose condition
-    # is the loop-invariant ``x > 1.0``), the condition here is the loop-carried phi itself.
+    # is the loop-invariant `x > 1.0`), the condition here is the loop-carried phi itself.
     acc = x
     i = n
     while i > 0.0:
@@ -400,7 +400,7 @@ class _BoolStateMachine:
         self.armed = False
 
     def __call__(self, x: float) -> tuple[float, bool]:
-        # latch ``armed`` once x crosses 1.0, and keep it latched; the float output is gated on the PREVIOUS armed.
+        # latch `armed` once x crosses 1.0, and keep it latched; the float output is gated on the PREVIOUS armed.
         gated = 100.0 if self.armed else x
         if x > 1.0:
             self.armed = True
@@ -414,7 +414,7 @@ def test_boolean_state_slot_stream_and_reset() -> None:
     for x in stream:
         got = sim.run(x)
         want_gated, want_armed = reference(x)
-        # The gated value is either a passed-through input (rounded to ZKF) or the exact constant 100.0; ``_close``
+        # The gated value is either a passed-through input (rounded to ZKF) or the exact constant 100.0; `_close`
         # covers both. The armed bool is the load-bearing state assertion and stays exact.
         assert _close(float(got[0]), want_gated, op_count=2), f"gated at x={x}: {float(got[0])} vs {want_gated}"
         assert got[1] is want_armed, f"armed at x={x}: {got[1]} vs {want_armed}"
@@ -436,7 +436,7 @@ def _gt_swapped_kernel(x: float, y: float) -> bool:
 
 
 def test_commuted_comparisons_agree_bool_exact() -> None:
-    # ``x < y`` and ``y > x`` are the same predicate; the comparator's gt/lt flags transpose under operand swap, so a
+    # `x < y` and `y > x` are the same predicate; the comparator's gt/lt flags transpose under operand swap, so a
     # commutative orientation that reorders the operands must keep the result bit-identical. Bool-exact, including the
     # equality boundary where both are False.
     sim_lt = _sim(_lt_kernel, "lt_kernel")
@@ -452,7 +452,7 @@ def test_commuted_comparisons_agree_bool_exact() -> None:
 
 def test_out_of_range_operator_stage_knob_is_rejected_at_synthesis() -> None:
     # Stage knobs are public, documented configuration, so an out-of-range value must surface as a diagnostic through
-    # ``synthesize`` itself rather than deep in operator construction.
+    # `synthesize` itself rather than deep in operator construction.
     def add(a: float, b: float) -> float:
         return a + b
 

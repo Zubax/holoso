@@ -1,9 +1,9 @@
 """
 The cocotb backend: a self-contained, self-checking testbench for a generated module.
 
-``generate`` embeds the module's :class:`NumericalModel` handle into a standalone cocotb test. The bench unpickles the
-handle, elaborates a :class:`NumericalSimulator`, and ticks it in cycle-by-cycle lockstep with the DUT: each clock it
-asserts that ``out_valid``/``in_ready`` agree (so the model reaches ``out_valid`` on exactly the DUT's cycle -- the
+`generate` embeds the module's NumericalModel handle into a standalone cocotb test. The bench unpickles the
+handle, elaborates a NumericalSimulator, and ticks it in cycle-by-cycle lockstep with the DUT: each clock it
+asserts that `out_valid`/`in_ready` agree (so the model reaches `out_valid` on exactly the DUT's cycle -- the
 data-dependent latency check) and that the output bits match when valid, back-pressure included. The model is bit-exact
 to the RTL, so the output check needs no tolerance.
 
@@ -177,7 +177,7 @@ class CocotbOutput:
 
 
 def _embed_vectors(inputs: list[LogicalPort], vectors: Sequence[Mapping[str, ScalarLike]] | None) -> str:
-    """Render the explicit input sequence as a Python literal of input-ordered port-bit rows, or ``None``."""
+    """Render the explicit input sequence as a Python literal of input-ordered port-bit rows, or `None`."""
     if vectors is None:
         return "None"
     rows: list[list[int]] = []
@@ -195,8 +195,8 @@ def _embed_vectors(inputs: list[LogicalPort], vectors: Sequence[Mapping[str, Sca
 def generate(model: NumericalModel, vectors: Sequence[Mapping[str, ScalarLike]] | None = None) -> CocotbOutput:
     """
     Build a self-contained cocotb testbench that checks the DUT against the embedded bit-exact model. Each vector
-    maps an input-port name to a typed scalar (a plain float/int/bool, or a :class:`FloatValue`/:class:`IntValue`
-    for an exact bit pattern), encoded here against the port metadata and replayed verbatim; ``None`` draws a
+    maps an input-port name to a typed scalar (a plain float/int/bool, or a FloatValue/IntValue
+    for an exact bit pattern), encoded here against the port metadata and replayed verbatim; `None` draws a
     fixed-seed bounded random sweep instead. Either way the run is fully reproducible.
     """
     blob = base64.b64encode(zlib.compress(pickle.dumps(model, pickle.HIGHEST_PROTOCOL))).decode("ascii")

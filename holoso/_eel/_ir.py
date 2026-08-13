@@ -7,7 +7,7 @@ evaluation order. Temps are anonymous locals, not SSA values: a guarded construc
 expression or comparison chain) assigns its result temp in both arms.
 
 The tree is pure syntax: no numpy, no function objects, and no HIR beyond one opacity -- a residual
-``IntrinsicCall`` carries the operator the partial evaluator selected, typed ``object`` here and downcast only by
+`IntrinsicCall` carries the operator the partial evaluator selected, typed `object` here and downcast only by
 emit, so the boundary is an IMPORT boundary rather than a representational one.
 The partial evaluator keeps the pairing between an EelFunction and its FunctionType on the side. Every node carries
 an Origin — a source location plus the inline frame chain, which is empty at desugar and grows as the partial
@@ -235,7 +235,7 @@ class SliceSel:
 @dataclass(frozen=True, slots=True)
 class MultiIndexRead:
     """
-    A tuple subscript ``m[i, j]`` / ``m[:, k]``: one selector per axis, in source order. Tensor-only — the
+    A tuple subscript `m[i, j]` / `m[:, k]`: one selector per axis, in source order. Tensor-only — the
     partial evaluator rejects it on sequences. Stores never use this form: slice assignment is banned, and a
     pure-index tuple store rides an ordinary IndexSel with a tuple-valued atom.
     """
@@ -363,7 +363,7 @@ class AugStore:
 @dataclass(frozen=True, slots=True)
 class AugAssign:
     """
-    Kept as a distinct node because the desugarer has no types: on a list or tensor, ``x += e`` is an in-place
+    Kept as a distinct node because the desugarer has no types: on a list or tensor, `x += e` is an in-place
     mutation under the ownership model, while on a scalar or tuple it is a rebind; the partial evaluator decides
     by kind.
     """
@@ -402,7 +402,7 @@ class For:
 
 @dataclass(frozen=True, slots=True)
 class LoopPhi:
-    """``index`` is the phi's own temp, ``entry`` its value on loop entry, ``back`` its per-iteration value."""
+    """`index` is the phi's own temp, `entry` its value on loop entry, `back` its per-iteration value."""
 
     origin: Origin
     index: int
@@ -459,7 +459,7 @@ class Continue:
 @dataclass(frozen=True, slots=True)
 class ResidualBreak:
     """
-    Residual-only terminator: the edge from a ``ResidualWhile`` body to the loop exit. Values leaving on this
+    Residual-only terminator: the edge from a `ResidualWhile` body to the loop exit. Values leaving on this
     edge ride ordinary join temps the partial evaluator assigns in the break arm and at header end, so the
     emitter's loop-exit join stays mechanical.
     """
@@ -469,14 +469,14 @@ class ResidualBreak:
 
 @dataclass(frozen=True, slots=True)
 class ResidualContinue:
-    """Residual-only terminator: the edge from a ``ResidualWhile`` body to the back edge (the next test)."""
+    """Residual-only terminator: the edge from a `ResidualWhile` body to the back edge (the next test)."""
 
     origin: Origin
 
 
 @dataclass(frozen=True, slots=True)
 class FrameRow:
-    """One residual result column of a ``ResidualFrame``; ``index`` is the temp the caller reads."""
+    """One residual result column of a `ResidualFrame`; `index` is the temp the caller reads."""
 
     origin: Origin
     index: int
@@ -488,7 +488,7 @@ class ResidualFrame:
     """
     Residual-only: an inlined callee whose return sites include one inside the callee's own residual loop,
     so the sites cannot rejoin as sibling arms and instead converge at the frame exit. Each
-    ``ResidualFrameReturn`` carries one atom per row, in row order; statically uniform result leaves never
+    `ResidualFrameReturn` carries one atom per row, in row order; statically uniform result leaves never
     enter the rows -- they stay in the caller's value model.
     """
 
@@ -499,7 +499,7 @@ class ResidualFrame:
 
 @dataclass(frozen=True, slots=True)
 class ResidualFrameReturn:
-    """Residual-only terminator: one return site of a ``ResidualFrame``, one atom per frame row."""
+    """Residual-only terminator: one return site of a `ResidualFrame`, one atom per frame row."""
 
     origin: Origin
     values: tuple[Atom, ...]
@@ -567,7 +567,7 @@ class Param:
 class EelFunction:
     """
     Defaults and annotations are data, read from the function object by the partial evaluator, never syntax.
-    ``slots`` and ``outputs`` are empty from the desugarer and populated on the residual function.
+    `slots` and `outputs` are empty from the desugarer and populated on the residual function.
     """
 
     origin: Origin

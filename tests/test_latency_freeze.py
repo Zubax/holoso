@@ -11,11 +11,11 @@ kernel's (min initiation interval, last microcode PC). The min II is the through
 last PC is the out_valid boundary PC -- the end of the static schedule across every block (a zero-based PC, not a
 word count) -- so the full schedule is pinned even for a data-dependent branch/loop kernel whose public max II is
 reported as None (its loop body would otherwise be unguarded). Both are fixed by the scheduler before register-
-allocation annealing, so they are independent of ``HOLOSO_REGALLOC_EFFORT``. A deliberate schedule change is
+allocation annealing, so they are independent of `HOLOSO_REGALLOC_EFFORT`. A deliberate schedule change is
 expected to update the frozen value in the same commit.
 
-It also folds in the chained-copy kernel shape -- a state assignment ``self.a = self.b`` where both sides are
-slots, so one slot's live-out reads another slot's live-in (the register allocator's ``tapped_by_other`` path). No
+It also folds in the chained-copy kernel shape -- a state assignment `self.a = self.b` where both sides are
+slots, so one slot's live-out reads another slot's live-in (the register allocator's `tapped_by_other` path). No
 committed example exercises it. Two purpose-built kernels (a float delay line and a boolean shift register) pin it in
 both banks, and a behavioral check confirms the chained copy still captures each old value before it is overwritten --
 which the value-blind schedule freeze cannot.
@@ -106,7 +106,7 @@ def test_every_example_is_frozen() -> None:
 
 @pytest.mark.parametrize("spec,fmt", [pytest.param(s, f, id=_label(s, f)) for s, f in _CASES])
 def test_schedule_length_is_frozen(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    # The min II column is the public ``SynthesisResult.initiation_interval[0]``; the last PC has no public spelling
+    # The min II column is the public `SynthesisResult.initiation_interval[0]`; the last PC has no public spelling
     # (the public tuple reports None past a surviving branch), so it stays pinned on the LIR. Each spec is driven at
     # its OWN configuration, since an integer-heavy kernel needs a word the shared default does not supply.
     label = _label(spec, fmt)
