@@ -47,6 +47,8 @@ from phase_frequency_detector import PhaseFrequencyDetector as PhaseFrequencyDet
 from quadrature_encoder import QuadratureEncoder  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
 from remainder import remainder as remainder  # noqa: E402
+import rigid_body_rates as rigid_body_rates  # noqa: E402  # synth matrix; scalar-driven via the wrapper below
+from rigid_body_rates import update as rigid_body_update  # noqa: E402  # bare name so the frontend inlines it
 from schmitt_trigger import SchmittTrigger as SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
@@ -348,6 +350,57 @@ def polar_to(x: float, y: float) -> tuple[float, float]:
 def polar_from(magnitude: float, angle: float) -> tuple[float, float]:
     v = from_polar(np.array([magnitude, angle]))
     return v[0], v[1]
+
+
+def rigid_body_scalar(
+    i00: float, i01: float, i02: float,
+    i10: float, i11: float, i12: float,
+    i20: float, i21: float, i22: float,
+    w0: float, w1: float, w2: float,
+    t0: float, t1: float, t2: float,
+    dt: float,
+) -> tuple[float, float, float, float, float, float]:  # fmt: skip
+    omega_next, momentum = rigid_body_update(
+        np.array([[i00, i01, i02], [i10, i11, i12], [i20, i21, i22]]),
+        np.array([w0, w1, w2]),
+        np.array([t0, t1, t2]),
+        dt,
+    )
+    return omega_next[0], omega_next[1], omega_next[2], momentum[0], momentum[1], momentum[2]
+
+
+_RIGID_BODY_INPUTS = (
+    "i00", "i01", "i02", "i10", "i11", "i12", "i20", "i21", "i22",
+    "w0", "w1", "w2", "t0", "t1", "t2", "dt",
+)  # fmt: skip
+
+
+def _rigid_body_row(inertia: np.ndarray, omega: tuple[float, ...], tau: tuple[float, ...], dt: float) -> InputVector:
+    row: InputVector = {f"i{i}{j}": float(inertia[i, j]) for i in range(3) for j in range(3)}
+    row |= {f"w{k}": omega[k] for k in range(3)}
+    row |= {f"t{k}": tau[k] for k in range(3)}
+    row["dt"] = dt
+    return row
+
+
+def _draw_rigid_body(rng: np.random.Generator) -> InputVector:
+    # Eigenvalue-controlled SPD inertia (eigenvalues in [0.5, 2], so cond <= 4 and the determinant stays far from
+    # zero); spd_matrix is unsuitable here because its bounds constrain the Cholesky diagonal, not the spectrum.
+    # Redrawn until every output lane sits well above cancellation scale: the eel oracle compares the lanes
+    # floorless at 16 ULPs against LAPACK/BLAS operation order, so a momentum dot that cancels toward zero would
+    # convict the benign algorithm mismatch rather than a defect, and would do so only at a raised
+    # HOLOSO_TEST_RANDOM_COUNT.
+    while True:
+        basis, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        inertia = basis @ np.diag(rng.uniform(0.5, 2.0, 3)) @ basis.T
+        omega = np.array([bounded(rng, -1.0, 1.0) for _ in range(3)])
+        if min(abs(float(w)) for w in omega) >= 0.05 and min(abs(float(l)) for l in inertia @ omega) >= 0.05:
+            return _rigid_body_row(
+                inertia,
+                (float(omega[0]), float(omega[1]), float(omega[2])),
+                tuple(bounded(rng, -1.0, 1.0) for _ in range(3)),
+                bounded(rng, 1e-3, 1e-2),
+            )
 
 
 SPECS = [
@@ -806,6 +859,49 @@ SPECS = [
         ],
         draw_random=lambda rng: {"magnitude": bounded(rng, -4.0, 4.0), "angle": bounded(rng, -math.pi, math.pi)},
         edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="rigid_body_scalar",  # pivoted Gauss-Jordan inversion: data-dependent swap branches feeding one fdiv
+        inputs=_RIGID_BODY_INPUTS,
+        make_kernel=lambda: rigid_body_scalar,
+        # omega' lanes: the inversion's forward error over the driven domain (cond <= ~4) enters scaled by dt <= 1e-2
+        # on top of |omega| <= 1, well inside the budget at the |omega_dot| <= ~9 operand scale. L lanes: one 3-term
+        # dot per lane (the model's left fold vs the host's BLAS order) with operands <= ~6.
+        reference={
+            "out_0": OutputTolerance(ulps=64, floor=2.0),
+            "out_1": OutputTolerance(ulps=64, floor=2.0),
+            "out_2": OutputTolerance(ulps=64, floor=2.0),
+            "out_3": OutputTolerance(ulps=16, floor=8.0),
+            "out_4": OutputTolerance(ulps=16, floor=8.0),
+            "out_5": OutputTolerance(ulps=16, floor=8.0),
+        },
+        nominal=_rigid_body_row(np.diag([2.0, 3.0, 4.0]), (0.5, -0.3, 0.8), (0.1, 0.0, -0.2), 0.005),
+        manual=[
+            # A permutation inertia takes the swap branch at every pivot column; all arithmetic stays exact.
+            _rigid_body_row(
+                np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]), (0.5, -0.3, 0.8), (0.1, 0.0, -0.2), 0.005
+            ),
+            # An SPD matrix whose leading column is off-diagonal-dominant, so exactly the first column swaps.
+            _rigid_body_row(
+                np.array([[1.0, 2.0, 0.0], [2.0, 5.0, 1.0], [0.0, 1.0, 3.0]]), (-0.6, 0.4, 0.9), (0.3, -0.1, 0.2), 0.008
+            ),
+            # Diagonally dominant and asymmetric: no swaps, exercising the fall-through pivot path.
+            _rigid_body_row(
+                np.array([[3.0, 0.5, -0.2], [0.1, 2.5, 0.4], [-0.3, 0.2, 3.5]]),
+                (0.9, -0.7, 0.2),
+                (-0.2, 0.4, 0.0),
+                0.001,
+            ),
+        ],
+        draw_random=_draw_rigid_body,
+        edge_values=_WIDE_EDGES,
+        # With the diagonal nominal, a single perturbed off-diagonal leaf cannot change the determinant (its cofactor
+        # is zero), so only the diagonal leaves must stay positive to keep every elimination pivot away from zero.
+        edge_overrides={
+            "i00": _POSITIVE_DIVISOR_EDGES,
+            "i11": _POSITIVE_DIVISOR_EDGES,
+            "i22": _POSITIVE_DIVISOR_EDGES,
+        },
     ),
     ExampleSpec(
         name="kepler",  # Newton loop; sin(E)+cos(E) coalesce into one fsincos per iteration

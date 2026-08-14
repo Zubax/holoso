@@ -92,3 +92,41 @@ def outer(u: np.ndarray, v: np.ndarray) -> Any:
     if u.ndim != 1 or v.ndim != 1:
         raise ValueError(f"outer requires 1-D operands, got {u.ndim}-D and {v.ndim}-D")
     return np.array([[u[i] * v[j] for j in range(len(v))] for i in range(len(u))])
+
+
+@array(np.linalg.inv)
+def inv(m: np.ndarray) -> Any:
+    """
+    Gauss-Jordan inversion with partial pivoting; a singular pivot follows the division-by-zero contract
+    instead of raising `numpy.linalg.LinAlgError`.
+    """
+    if m.ndim != 2:
+        raise ValueError(f"inv requires a matrix, got a {m.ndim}-D value")
+    if m.shape[0] != m.shape[1]:
+        raise ValueError(f"inv requires a square matrix, got {m.shape[0]}×{m.shape[1]}")
+    n = len(m)
+    a = m + 0.0  # Fresh owned float working copy: promotes int elements and never mutates the caller's array.
+    r = np.eye(n)
+    for k in range(n):
+        for p in range(k + 1, n):  # Bubble the largest |pivot| onto the diagonal via conditional swaps at
+            if abs(a[p, k]) > abs(a[k, k]):  # static indices, since a runtime-selected index cannot be spelled.
+                for j in range(n):
+                    t = a[k, j]
+                    a[k, j] = a[p, j]
+                    a[p, j] = t
+                    s = r[k, j]
+                    r[k, j] = r[p, j]
+                    r[p, j] = s
+        piv = a[k, k]
+        # Natural divisions, not a minted reciprocal: 1/piv can rail near the format's magnitude limits while
+        # every quotient is ordinary (the constant-divisor strength reduction guards the same hazard).
+        for j in range(n):
+            a[k, j] = a[k, j] / piv
+            r[k, j] = r[k, j] / piv
+        for i in range(n):
+            if i != k:
+                f = a[i, k]
+                for j in range(n):
+                    a[i, j] = a[i, j] - f * a[k, j]
+                    r[i, j] = r[i, j] - f * r[k, j]
+    return r

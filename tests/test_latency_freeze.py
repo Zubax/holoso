@@ -81,6 +81,9 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "cordic_sincos-e8m36": (104, 104),
     "polar_to-e8m36": (63, 63),
     "polar_from-e8m36": (38, 38),
+    # The three pivot-swap diamonds of the 3x3 Gauss-Jordan inversion if-convert into selects, so the whole
+    # kernel is one straight-line block serialized on the pooled divider.
+    "rigid_body_scalar-e8m36": (126, 126),
     "kepler-e8m36": (80, 155),
     "integrator-e8m36": (16, 16),
     "ekf1_stateless-e8m36": (125, 125),

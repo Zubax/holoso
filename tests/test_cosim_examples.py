@@ -26,6 +26,8 @@ Non-catalogue examples are frontend feature gaps or non-scalar interfaces, not v
   - finite_set_current_controller: `UnsupportedConstruct: the annotation of parameter 'kin' is not supported yet`
     (a dataclass-typed parameter).
   - imu_frame_transform: ndarray-typed inputs, driven by the oracle and metrics layers instead.
+  - rigid_body_rates: ndarray-typed inputs; its arithmetic (including the pivoted matrix inversion) is catalogued
+    through the `rigid_body_scalar` wrapper instead, like polar's.
 """
 
 import pytest

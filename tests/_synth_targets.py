@@ -32,7 +32,7 @@ from holoso import (
 )
 from synth.flows import FlowId
 
-from ._examples import SPECS, ekf1_stateful, imu_frame_transform, polar
+from ._examples import SPECS, ekf1_stateful, imu_frame_transform, polar, rigid_body_rates
 
 F_e6m18 = FloatFormat(6, 18)
 F_e8m36 = FloatFormat(8, 36)
@@ -132,6 +132,12 @@ def _imu_frame_transform_kernel() -> Callable[..., object]:
     # Off-catalogue: the shaped matrix/vector ports have no scalar-lane SPEC, so this stateless kernel is referenced
     # directly rather than through the cosim registry.
     return imu_frame_transform.transform
+
+
+def _rigid_body_rates_kernel() -> Callable[..., object]:
+    # Off-catalogue: the shaped matrix/vector ports have no scalar-lane SPEC (the cosim registry drives the
+    # rigid_body_scalar wrapper instead); the matrix synthesizes the shipped example circuit directly.
+    return rigid_body_rates.update
 
 
 def _to_polar_kernel() -> Callable[..., object]:
@@ -559,6 +565,38 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=150,
         ops=op_config(F_e6m18, fmul=FMulOptions(stage_input=1), fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
+    ),
+    # rigid_body_rates: the pivoted 3x3 Gauss-Jordan inversion -- conditional-swap select networks feeding one pooled
+    # divider. Lean start per the closure procedure; stage knobs appear only where measured closure needs them.
+    SynthTarget(
+        kernel=_rigid_body_rates_kernel,
+        flow=FlowId.YOSYS_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+        ),
+        name="rigid_body_rates_e6m18",
+    ),
+    SynthTarget(
+        kernel=_rigid_body_rates_kernel,
+        flow=FlowId.DIAMOND_ECP5,
+        target_frequency_MHz=100,
+        ops=op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fmul=FMulOptions(stage_output=1),
+            fdiv=FDivOptions(stage_input=1),
+        ),
+        name="rigid_body_rates_e6m18",
+    ),
+    SynthTarget(
+        kernel=_rigid_body_rates_kernel,
+        flow=FlowId.VIVADO_ARTIX7,
+        target_frequency_MHz=150,
+        ops=op_config(F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_input=1)),
+        name="rigid_body_rates_e6m18",
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
     for_example("kepler", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),

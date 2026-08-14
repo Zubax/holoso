@@ -19,10 +19,10 @@ from holoso import FAddOptions, OperatorOptions, Options, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._eel._lib import Array, ScalarFunction, resolve
 from holoso._eel._ir import BinaryOp, ScalarType
-from holoso._eel._lib._linalg import matmul, transpose
+from holoso._eel._lib._linalg import inv, matmul, transpose
 
 from ._eeloracle import assert_hir_matches_reference
-from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS, spd_matrix
 from holoso._eel._lib._intrinsics import (
     abs_float,
     atan2,
@@ -71,7 +71,7 @@ _INF = float("inf")
 
 
 def test_registry_resolves_the_expected_externals() -> None:
-    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer):
+    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.linalg.inv):
         assert isinstance(resolve(external), Array), external
     # An operator is a key like any callee object, so `**` and its every spelling are ONE four-lowering entry.
     power_entry = resolve(BinaryOp.POW)
@@ -89,15 +89,11 @@ def test_unregistered_calls_refuse_through_public_synthesis() -> None:
     def erf_kernel(x: float) -> float:
         return math.erf(x)
 
-    def inv_kernel(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
-        return np.linalg.inv(m)
-
     def inner_kernel(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "2"]) -> float:
         return np.inner(v, w)  # type: ignore[no-any-return]
 
     for kernel, match in (
         (erf_kernel, r"calls to 'math\.erf' are not supported yet"),
-        (inv_kernel, r"calls to 'np\.linalg\.inv' are not supported yet"),  # deliberately not implemented yet
         (inner_kernel, r"calls to 'np\.inner' are not supported yet"),
     ):
         with pytest.raises(UnsupportedConstruct, match=match):
@@ -142,7 +138,7 @@ def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
         match = resolve(external)
         assert isinstance(match, ScalarFunction), external
         assert match.domains == [ScalarType.INT], external
-    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.matmul, BinaryOp.MATMUL):
+    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.matmul, BinaryOp.MATMUL, np.linalg.inv):
         assert isinstance(resolve(external), Array), external
     for member in (np.ndarray.T, np.ndarray.dot, np.ndarray.flatten, np.ndarray.ravel, np.ndarray.transpose):
         assert isinstance(resolve(member), Array), member
@@ -297,6 +293,28 @@ def test_degrees_radians() -> None:
     for x in (-3.14, -1.0, 0.0, 1.0, 90.0):
         assert degrees(x) == pytest.approx(math.degrees(x), rel=1e-12, abs=1e-15), x
         assert radians(x) == pytest.approx(math.radians(x), rel=1e-12, abs=1e-15), x
+
+
+def test_inv_stub_matches_numpy() -> None:
+    rng = np.random.default_rng(1234)
+    cases: list[np.ndarray] = [np.eye(n) for n in range(1, 5)]
+    cases.append(np.array([[0.0, 1.0], [1.0, 0.0]]))  # a zero leading pivot: unpivoted elimination would divide by 0
+    cases.append(np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]))  # cyclic: pivots at every column
+    for n in (2, 3, 4):
+        cases.append(rng.uniform(-1.0, 1.0, (n, n)) + np.eye(n) * n)  # diagonally dominant
+        cases.append(spd_matrix(rng, n))
+    cases.append(np.array([[1.0, 1.0], [1.0, 1.004]]))  # cond ~ 1e3
+    cases.append(np.array([[3e5, -1e5], [2e5, 7e5]]))  # large-magnitude elements
+    for m in cases:
+        original = m.copy()
+        assert np.allclose(inv(m), np.linalg.inv(m), rtol=1e-11, atol=1e-13), m
+        assert np.array_equal(m, original)  # the argument is never mutated
+    promoted = inv(np.array([[2, 0], [0, 4]]))  # an int matrix promotes to a float inverse, as numpy's does
+    assert promoted.dtype == np.float64 and np.allclose(promoted, [[0.5, 0.0], [0.0, 0.25]], rtol=1e-15)
+    with pytest.raises(ValueError, match="matrix"):
+        inv(np.array([1.0, 2.0]))
+    with pytest.raises(ValueError, match="square"):
+        inv(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
 
 
 def test_composite_stub_inlining_matches_the_host_at_binary64() -> None:

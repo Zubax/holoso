@@ -21,6 +21,7 @@ from ._examples import SPECS, ExampleSpec
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import imu_frame_transform  # noqa: E402
 import polar  # noqa: E402
+import rigid_body_rates  # noqa: E402
 
 
 def _polar_vectors() -> list[InputRow]:
@@ -63,10 +64,43 @@ def _imu_vectors() -> list[InputRow]:
     return rows
 
 
+def _rigid_body_vectors() -> list[InputRow]:
+    """
+    A diagonal-inertia landmark, then eigenvalue-controlled SPD draws (the HIR side runs the library's pivoted
+    Gauss-Jordan while CPython runs LAPACK, so the vectors keep the inversion mismatch far below the oracle's
+    ulp budget: cond(inertia) ≤ 4, every omega component away from zero, and dt small).
+    """
+    landmark: dict[str, float] = {
+        "inertia_0_0": 2.0, "inertia_0_1": 0.0, "inertia_0_2": 0.0,
+        "inertia_1_0": 0.0, "inertia_1_1": 3.0, "inertia_1_2": 0.0,
+        "inertia_2_0": 0.0, "inertia_2_1": 0.0, "inertia_2_2": 4.0,
+        "omega_0": 0.5, "omega_1": -0.3, "omega_2": 0.8,
+        "tau_0": 0.1, "tau_1": 0.0, "tau_2": -0.2,
+        "dt": 0.005,
+    }  # fmt: skip
+    rows: list[InputRow] = [landmark]
+    rng = np.random.default_rng(1687)
+    for _ in range(12):
+        while True:
+            basis, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+            inertia = basis @ np.diag(rng.uniform(0.5, 2.0, 3)) @ basis.T
+            omega = np.array([float(rng.uniform(0.2, 1.0)) * float(rng.choice([-1.0, 1.0])) for _ in range(3)])
+            if min(abs(float(l)) for l in inertia @ omega) >= 0.05:  # keep the momentum lanes off cancellation
+                break
+        row: dict[str, float] = {f"inertia_{i}_{j}": float(inertia[i, j]) for i in range(3) for j in range(3)}
+        for k in range(3):
+            row[f"omega_{k}"] = float(omega[k])
+            row[f"tau_{k}"] = float(rng.uniform(-1.0, 1.0))
+        row["dt"] = float(rng.uniform(1e-3, 1e-2))
+        rows.append(row)
+    return rows
+
+
 _VECTOR_KERNELS: list[tuple[str, object, list[InputRow]]] = [
     ("to_polar", polar.to_polar, _polar_vectors()),
     ("from_polar", polar.from_polar, _polar_vectors()),
     ("imu_frame_transform", imu_frame_transform.transform, _imu_vectors()),
+    ("rigid_body_rates", rigid_body_rates.update, _rigid_body_vectors()),
 ]
 
 

@@ -32,10 +32,11 @@ GAIN = np.array([[0.5, -0.25], [0.125, 1.0]])
 COEFFS = np.array([2.0, -1.0, 0.5])
 INT_TAPS = np.array([1, 2, 3])
 
-# ndarray module constants for the self-contained stateful filter kernel below.
+# ndarray module constants for the self-contained stateful filter kernels below.
 PROC_NOISE = np.array([[1.0e-4, 0.0], [0.0, 1.0e-2]])
 OBS = np.eye(2)
 MEAS_VAR = np.array([4.0e-2, 2.5e-1])
+MEAS_COV = np.diag(MEAS_VAR)
 
 
 class TrackingFilter:
@@ -792,6 +793,136 @@ def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
         return np.transpose(a)  # type: ignore[return-value]
 
     _refused(bad_t, r"in np\.transpose\(\).*transpose a scalar")
+
+
+# ---------------------------------------------------------------- matrix inversion
+
+
+class VectorMeasurementFilter:
+    """
+    A 2-state filter with a genuinely 2-D measurement, so the Kalman gain needs the inverse of a runtime 2x2
+    innovation covariance: persistent matrix state composed with `np.linalg.inv` across transactions.
+    """
+
+    x: Float64[np.ndarray, "2"]
+    P: Float64[np.ndarray, "2 2"]
+
+    def __init__(self) -> None:
+        self.x = np.zeros(2)
+        self.P = np.eye(2) * 10.0
+
+    def update(self, F: Float64[np.ndarray, "2 2"], z: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        x = F @ self.x
+        P = F @ self.P @ F.T + PROC_NOISE
+        prediction: Float64[np.ndarray, "2"] = x
+        S = OBS @ P @ OBS.T + MEAS_COV
+        K = P @ OBS.T @ np.linalg.inv(S)
+        self.x = x + K @ (z - OBS @ x)
+        self.P = (np.eye(2) - K @ OBS) @ P
+        return prediction
+
+
+def test_np_linalg_inv_matches_numpy() -> None:
+    def inv2(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.linalg.inv(m)
+
+    def inv3(m: Float64[np.ndarray, "3 3"]) -> Float64[np.ndarray, "3 3"]:
+        return np.linalg.inv(m)
+
+    # Permutation matrices: a zero leading pivot, so the runtime compare-and-swap network is exercised in the
+    # datapath and unpivoted elimination would divide by zero.
+    _assert_python_matches_holoso(inv2, np.array([[0.0, 1.0], [1.0, 0.0]]))
+    _assert_python_matches_holoso(inv3, np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]))
+    _assert_python_matches_holoso(inv3, np.eye(3))
+    rng = np.random.default_rng(0x1481)
+    for n, kernel in ((2, inv2), (3, inv3)):
+        _assert_python_matches_holoso(kernel, rng.uniform(-1.0, 1.0, (n, n)) + np.eye(n) * n)
+        factor = np.tril(rng.uniform(-1.0, 1.0, (n, n)), -1) + np.diag(rng.uniform(1.0, 2.0, n))
+        _assert_python_matches_holoso(kernel, factor @ factor.T)  # SPD
+
+
+def test_np_linalg_inv_1x1_is_the_reciprocal() -> None:
+    def inv1(m: Float64[np.ndarray, "1 1"]) -> Float64[np.ndarray, "1 1"]:
+        return np.linalg.inv(m)
+
+    assert _run(_sim(inv1), np.array([[4.0]]))[0] == 0.25
+
+
+def test_np_linalg_inv_solve_composition() -> None:
+    def solve(a: Float64[np.ndarray, "3 3"], b: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.linalg.inv(a) @ b  # type: ignore[no-any-return]
+
+    a = np.array([[4.0, 1.0, 0.0], [1.0, 3.0, -1.0], [0.0, -1.0, 5.0]])
+    _assert_python_matches_holoso(solve, a, np.array([1.0, -2.0, 0.5]))
+
+
+def test_np_linalg_inv_structure() -> None:
+    def inv3(m: Float64[np.ndarray, "3 3"]) -> Float64[np.ndarray, "3 3"]:
+        return np.linalg.inv(m)
+
+    verilog = _synth(inv3).verilog_output.verilog
+    assert "holoso_fdiv #(" in verilog and "holoso_fcmp #(" in verilog  # pivot compares are not folded away
+
+
+def test_np_linalg_inv_rejections() -> None:
+    def rect(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "2 3"]:
+        return np.linalg.inv(m)
+
+    _refused(rect, r"square matrix, got 2×3")
+
+    def vec(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.linalg.inv(v)
+
+    with pytest.raises(UnsupportedConstruct, match=r"inv requires a matrix, got a 1-D value") as excinfo:
+        _synth(vec)
+    assert excinfo.value.location is not None
+    assert excinfo.value.location.line is not None and "np.linalg.inv(v)" in excinfo.value.location.line
+
+
+def test_np_linalg_inv_argument_shares_like_any_array_call() -> None:
+    # The inverse is a fresh array, but the ARGUMENT is shared by the call like for every array composite, so a
+    # later store into it is refused; recorded here so the behavior is a ruling rather than an accident.
+    def store_after_inv(v: float) -> float:
+        m = np.zeros((2, 2))
+        m[0, 0] = v + 1.0
+        m[1, 1] = 2.0
+        y = np.linalg.inv(m)
+        m[0, 1] = y[0, 0]
+        return m[0, 1]  # type: ignore[no-any-return]
+
+    _refused(store_after_inv, "shared")
+
+
+def test_np_linalg_inv_of_a_statically_singular_constant_refuses_the_build() -> None:
+    # [[1,2],[2,4]] eliminates in binary-exact steps: swap (|2| > |1|), normalize by 2, f = 1, 2 - 1*2 = 0, so the
+    # k=1 pivot is exactly 0.0. The a-side 0/0 divisions are erased by the 0/x == 0 rule, but the r-side 1/0 and
+    # -0.5/0 feed the returned inverse leaves, so a live all-constant divide-by-zero survives optimization and is
+    # convicted at the MIR final gate. A rounding-residue singular constant folds to a huge inverse instead, same
+    # as LAPACK, which also raises only on exactly-zero pivots.
+    def singular(x: float) -> float:
+        return np.linalg.inv(np.array([[1.0, 2.0], [2.0, 4.0]]))[0, 0] + x  # type: ignore[no-any-return]
+
+    with pytest.raises(holoso.SynthesisError):
+        _synth(singular)
+
+
+def test_stateful_filter_with_matrix_inversion_matches_numpy_across_transactions() -> None:
+    sim = holoso.synthesize(
+        VectorMeasurementFilter().update, default_options(_FMT), name="vector_tracker"
+    ).numerical_model.elaborate()
+    assert [p.name for p in sim.outputs] == [
+        "out_0", "out_1", "state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1", "state_x_0", "state_x_1",
+    ]  # fmt: skip
+    reference = VectorMeasurementFilter()
+    rng = np.random.default_rng(0x2D2D)
+    F = np.array([[1.0, 0.1], [0.0, 1.0]])
+    for step in range(6):
+        z = np.array([float(rng.uniform(-1.0, 1.0)), float(rng.uniform(-1.0, 1.0))])
+        got = _run(sim, F, z)
+        prediction = reference.update(F, z)
+        want = np.array([float(v) for v in (*prediction, *reference.P.flatten(), *reference.x)])
+        assert np.all(np.isfinite(want))
+        assert np.allclose(got, want, rtol=1e-9, atol=1e-12), step
 
 
 def test_matrix_state_transposed_under_a_shape_guard_across_transactions() -> None:
