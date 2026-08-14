@@ -113,6 +113,20 @@ def maximum(a: np.ndarray, b: np.ndarray) -> Any:
     return _elementwise(max, a, b)
 
 
+@array(np.clip, np.ndarray.clip)
+def clip(x: np.ndarray, lo: Any = None, hi: Any = None) -> Any:
+    """
+    Saturation as the maximum/minimum composition, following numpy: the lower bound applies first, so an inverted
+    pair answers `hi`, and a None bound skips that side. Bounds broadcast per the elementwise rules.
+    """
+    r = x
+    if lo is not None:
+        r = maximum(r, lo)
+    if hi is not None:
+        r = minimum(r, hi)
+    return r
+
+
 @lib(np.sign)
 def sign_int(x: int) -> int:
     if x > 0:

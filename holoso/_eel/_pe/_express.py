@@ -497,9 +497,11 @@ def _bound_method(interp: Interpreter, node: Call, method: BoundMethod, frame: F
         found = resolve(getattr(np.ndarray, method.name))
         assert isinstance(found, Array), "a minted method stays resolvable"
         values = _positional_arguments(interp, node, display, frame, sink)
-        arity = found.stub.__code__.co_argcount - 1
-        if len(values) != arity:
-            reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
+        high = found.stub.__code__.co_argcount - 1
+        low = high - len(found.stub.__defaults__ or ())
+        if not low <= len(values) <= high:
+            expected = str(low) if low == high else f"{low} to {high}"
+            reject(node.origin, f"{display}() takes {expected} argument(s), got {len(values)}")
         return _array_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
     scalar_found = resolve(getattr(host_type(receiver.stype), method.name))
     assert isinstance(scalar_found, ScalarFunction), "a minted method stays resolvable"

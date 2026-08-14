@@ -54,6 +54,7 @@ from holoso._eel._lib._numpy import (
     atan,
     atanh,
     cbrt,
+    clip,
     cosh,
     degrees,
     exp,
@@ -78,6 +79,7 @@ def test_registry_resolves_the_expected_externals() -> None:
         assert isinstance(resolve(external), Array), external
     assert resolve(np.minimum) == Array(minimum) == resolve(np.fmin)  # type: ignore[arg-type]
     assert resolve(np.maximum) == Array(maximum) == resolve(np.fmax)  # type: ignore[arg-type]
+    assert resolve(np.clip) == Array(clip) == resolve(np.ndarray.clip)  # type: ignore[arg-type]
     # An operator is a key like any callee object, so `**` and its every spelling are ONE four-lowering entry.
     power_entry = resolve(BinaryOp.POW)
     assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 4
@@ -157,9 +159,16 @@ def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
     ):
         assert isinstance(resolve(external), Array), external
     # The numpy elementwise spellings are array composites; the builtin min/max keep the scalar entries.
-    for external in (np.minimum, np.fmin, np.maximum, np.fmax):
+    for external in (np.minimum, np.fmin, np.maximum, np.fmax, np.clip):
         assert isinstance(resolve(external), Array), external
-    for member in (np.ndarray.T, np.ndarray.dot, np.ndarray.flatten, np.ndarray.ravel, np.ndarray.transpose):
+    for member in (
+        np.ndarray.T,
+        np.ndarray.dot,
+        np.ndarray.flatten,
+        np.ndarray.ravel,
+        np.ndarray.transpose,
+        np.ndarray.clip,
+    ):
         assert isinstance(resolve(member), Array), member
 
 
@@ -505,6 +514,53 @@ def test_minimum_maximum_inlining_matches_the_host() -> None:
     int_vectors = [{"a": a, "b": b} for a, b in [(0, 0), (5, -7), (-20, 4), (3, -2)]]
     assert assert_hir_matches_reference(
         lower(int_extrema, DEFAULT_UNROLL_MAX_TRIPS).hir, int_extrema, int_vectors, label="int_extrema"
+    ) == len(int_vectors)
+
+
+def test_clip_stub_matches_numpy() -> None:
+    rng = np.random.default_rng(9090)
+    vec = rng.uniform(-4.0, 4.0, 3)
+    mat = rng.uniform(-4.0, 4.0, (2, 3))
+    cases: list[tuple[Any, Any, Any]] = [
+        (np.float64(2.5), np.float64(-1.0), np.float64(1.0)),
+        (vec, np.float64(-1.0), np.float64(1.0)),
+        (mat, np.float64(-0.5), np.float64(0.5)),
+        (vec, rng.uniform(-2.0, 0.0, 3), rng.uniform(0.0, 2.0, 3)),
+        (np.float64(0.0), np.float64(2.0), np.float64(1.0)),  # inverted bounds answer the upper one, as numpy's
+        (vec, None, np.float64(0.5)),
+        (vec, np.float64(-0.5), None),
+        (vec, None, None),
+    ]
+    for x, lo, hi in cases:
+        assert np.array_equal(clip(x, lo, hi), np.clip(x, lo, hi)), (x, lo, hi)
+    ints = np.array([1, 5, -3])
+    got = clip(ints, np.int64(-2), np.int64(2))
+    assert got.dtype == np.int64 and np.array_equal(got, np.clip(ints, -2, 2))
+    with pytest.raises(ValueError, match="shape mismatch"):
+        clip(vec, rng.uniform(-1.0, 1.0, 4), None)
+
+
+def test_clip_inlining_matches_the_host() -> None:
+    def kernel(
+        v: Float64[np.ndarray, "2"], c: float
+    ) -> tuple[Float64[np.ndarray, "2"], float, Float64[np.ndarray, "2"]]:
+        return np.clip(v, -c, c), float(np.clip(v[0], -1.0, 1.0)), v.clip(0.0)  # the omitted bound skips its side
+
+    vectors = [
+        {"v_0": a, "v_1": b, "c": c}
+        for a, b, c in [(0.0, 2.0, 1.0), (-3.0, 1.5, 2.0), (1.5, -1.0, 0.5), (7.0, -7.0, 0.0)]
+    ]
+    assert assert_hir_matches_reference(
+        lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, kernel, vectors, label="clip"
+    ) == len(vectors)
+
+    def int_kernel(a: int, b: int) -> int:
+        w = np.clip(np.array([a, b]), -10, np.array([3, -2]))
+        return w[0] * 100 + w[1]  # type: ignore[no-any-return]
+
+    int_vectors = [{"a": a, "b": b} for a, b in [(0, 0), (5, -7), (-20, 4), (3, -2)]]
+    assert assert_hir_matches_reference(
+        lower(int_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, int_kernel, int_vectors, label="int_clip"
     ) == len(int_vectors)
 
 
