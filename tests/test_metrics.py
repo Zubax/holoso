@@ -223,7 +223,7 @@ BASELINE: dict[str, Metrics] = {
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
     # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.
     "imu_fusion": Metrics(
-        False, nreg=50, bnreg=4, steering=119, copies=13, min_ii=252, last_pc=439, max_block_span=129
+        False, nreg=48, bnreg=5, steering=117, copies=14, min_ii=252, last_pc=439, max_block_span=129
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's.
     "fir": Metrics(True, nreg=8, bnreg=0, steering=5, copies=0, min_ii=20, last_pc=20, max_block_span=20),

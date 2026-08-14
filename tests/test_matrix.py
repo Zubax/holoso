@@ -809,11 +809,10 @@ def test_imu_fusion_static_tilt_converges_toward_the_analytic_attitude() -> None
     assert angle_error < 0.1 * pitch, angle_error
 
 
-def test_imu_fusion_coarse_alignment_runs_only_on_an_accepted_upright_first_sample() -> None:
-    # The guarded arms of the coarse alignment: an antipodal first sample is accepted for the output but must not
-    # align (the shortest arc degenerates), and a rejected first sample forfeits alignment entirely, so a later
-    # accepted sample takes the fine-correction arm and creeps instead of snapping. The unguarded arm snaps the
-    # analytic tilt quaternion in a single transaction.
+def test_imu_fusion_coarse_alignment_waits_for_the_first_accepted_upright_sample() -> None:
+    # Alignment is gated on its own state, not on the sample count: it snaps the analytic tilt quaternion in one
+    # transaction whenever the first usable sample arrives, however many rejected (out-of-band) or antipodal
+    # (shortest-arc-degenerate) samples precede it. Only the antipodal sample itself leaves the attitude alone.
     fmt = FloatFormat(8, 36)
     shipped = ImuFusion()
     design = holoso.synthesize(shipped.update, _fusion_options(fmt, False), name="imu_fusion_align")
@@ -842,19 +841,21 @@ def test_imu_fusion_coarse_alignment_runs_only_on_an_accepted_upright_first_samp
     identity = np.array([1.0, 0.0, 0.0, 0.0])
     q_true = np.array([np.cos(pitch / 2.0), 0.0, np.sin(pitch / 2.0), 0.0])
 
-    got = _drive_fusion(design.numerical_model.elaborate(), row_of(np.array([0.0, 0.0, -9.80665])))
-    assert bool(got["out_1"]) and float(np.linalg.norm(attitude_of(got) - identity)) < 1e-9
+    def snap_of(got: dict[str, float]) -> float:
+        return float(2.0 * np.arccos(min(1.0, abs(float(attitude_of(got) @ q_true)))))
+
+    got = _drive_fusion(design.numerical_model.elaborate(), row_of(tilted))
+    assert snap_of(got) < 1e-6
 
     model = design.numerical_model.elaborate()
     got = _drive_fusion(model, row_of(np.array([0.0, 0.0, 4.0 * 9.80665])))
     assert not bool(got["out_1"]) and float(np.linalg.norm(attitude_of(got) - identity)) < 1e-9
-    got = _drive_fusion(model, row_of(tilted))
-    creep = 2.0 * np.arccos(min(1.0, abs(float(attitude_of(got) @ identity))))
-    assert 0.0 < creep < 0.05 * pitch, creep
+    assert snap_of(_drive_fusion(model, row_of(tilted))) < 1e-6
 
-    got = _drive_fusion(design.numerical_model.elaborate(), row_of(tilted))
-    snap = 2.0 * np.arccos(min(1.0, abs(float(attitude_of(got) @ q_true))))
-    assert snap < 1e-6, snap
+    model = design.numerical_model.elaborate()
+    got = _drive_fusion(model, row_of(np.array([0.0, 0.0, -9.80665])))
+    assert bool(got["out_1"]) and float(np.linalg.norm(attitude_of(got) - identity)) < 1e-9
+    assert snap_of(_drive_fusion(model, row_of(tilted))) < 1e-6
 
 
 def test_imu_fusion_lever_arm_compensation_cancels_the_centripetal_signal() -> None:

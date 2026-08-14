@@ -117,7 +117,8 @@ def maximum(a: np.ndarray, b: np.ndarray) -> Any:
 def clip(x: np.ndarray, lo: Any = None, hi: Any = None) -> Any:
     """
     Saturation as the maximum/minimum composition, following numpy: the lower bound applies first, so an inverted
-    pair answers `hi`, and a None bound skips that side. Bounds broadcast per the elementwise rules.
+    pair answers `hi`, and an omitted bound skips that side (the subset admits no `None` argument, so one-sided
+    saturation from above is spelled `np.minimum`). Bounds broadcast per the elementwise rules.
     """
     r = x
     if lo is not None:

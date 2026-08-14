@@ -24,8 +24,8 @@ Processing chain:
 - tilt correction runs only when the compensated magnitude is close to one g (dynamic maneuvers and freefall
   are rejected), and a sticky flag latches if the gyro ever nears its full-scale range;
 
-- the attitude coarse-aligns from the accelerometer when the first sample is accepted (accelerometer leveling
-  with zero initial yaw), as a production INS does before fine alignment takes over.
+- the attitude coarse-aligns from the first accepted accelerometer sample (accelerometer leveling with zero
+  initial yaw), as a production INS does before fine alignment takes over.
 """
 
 from pathlib import Path
@@ -47,7 +47,7 @@ class ImuFusion:
     """
     The persisted public `attitude` (body-to-world unit quaternion [w, x, y, z]) and `bias` (in-run gyro bias)
     become observable ports, and the sticky `gyro_clip` reports a ranged-out gyro until reset.
-    The attitude starts at identity and coarse-aligns from the accelerometer when the first sample is accepted.
+    The attitude starts at identity and coarse-aligns from the first accepted accelerometer sample.
     """
 
     def __init__(
@@ -81,6 +81,7 @@ class ImuFusion:
         self.gyro_clip = False
         self._w_prev = np.zeros(3)  # [rad/s]
         self._started = False
+        self._aligned = False
 
     def update(
         self,
@@ -123,7 +124,7 @@ class ImuFusion:
         valid = ACCEL_BAND[0] < f_norm < ACCEL_BAND[1]
         if valid:
             a_n = f_cm * (1.0 / f_norm)
-            if started:
+            if self._aligned:
                 # The tilt error against the attitude's own gravity direction feeds the clamped bias integrator
                 # and the proportional rate correction.
                 qw, qx, qy, qz = self.attitude[0], self.attitude[1], self.attitude[2], self.attitude[3]
@@ -136,10 +137,11 @@ class ImuFusion:
                 w = w + self.kp * e
             elif a_n[2] > -0.99:
                 # Coarse-align on the first accepted sample: the shortest arc taking the measured gravity direction
-                # onto world up. Yaw is unobservable so it starts at zero, and near the antipode the arc degenerates,
-                # so an upside-down start keeps the identity.
+                # onto world up. Yaw is unobservable so it starts at zero. The arc degenerates near the antipode,
+                # where the alignment defers to a later accepted sample rather than committing to a singular one.
                 qa = np.array([1.0 + a_n[2], a_n[1], -a_n[0], 0.0])
                 self.attitude = qa * (1.0 / np.linalg.norm(qa))
+                self._aligned = True
 
         # Propagate the attitude by one explicit-Euler step of q' = Omega(w)/2 @ q and renormalize.
         rate = np.array(

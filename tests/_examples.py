@@ -631,7 +631,7 @@ _FUSION_ACCEL_DIR = np.array([0.5431691419956042, -0.6765799876735006, 0.4971989
 def _draw_imu_fusion(rng: np.random.Generator) -> InputVector:
     """
     Every random row is DECISIVELY below the acceptance band (0.50..0.85 g near the frozen direction): the gate
-    rejects it, freezing `b` bit-exactly, and every output lane stays proportionate to its operand scale, which is
+    rejects it, freezing `bias` bit-exactly, and every output lane stays proportionate to its operand scale, which is
     what keeps the eel oracle's relative budget satisfied even at a raised HOLOSO_TEST_RANDOM_COUNT (validated to
     x10; far beyond that, the slow attitude creep can still push a lane over -- the same documented residual
     fragility as rigid_body's). The valid arm's coverage lives in the manual prefix. The raw samples are generated
