@@ -149,6 +149,8 @@ def _expr(expr: Expr) -> str:
             return f"{_atom(left)} {op.value} {_atom(right)}"
         case Compare(op=op, left=left, right=right):
             return f"{_atom(left)} {op.value} {_atom(right)}"
+        case IsNone(operand=operand, negated=negated):
+            return f"{_atom(operand)} {'is not' if negated else 'is'} None"
         case Call(callee=callee, args=args):
             return f"call {_atom(callee)}({', '.join(_argument(a) for a in args)})"
         case AttrRead(base=base, attr=attr):

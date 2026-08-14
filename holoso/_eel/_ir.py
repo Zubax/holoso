@@ -190,6 +190,18 @@ class Compare:
 
 
 @dataclass(frozen=True, slots=True)
+class IsNone:
+    """
+    `x is None` / `x is not None`. Always decided at partial evaluation: a binding-time value answers by host
+    identity and a residual runtime value is never None, so the node cannot survive into the residual program.
+    """
+
+    origin: Origin
+    operand: Atom
+    negated: bool
+
+
+@dataclass(frozen=True, slots=True)
 class Call:
     """
     Arguments keep the syntactic form (positional/starred/keyword) for signature binding at the partial
@@ -308,6 +320,7 @@ type Expr = (
     | Unary
     | Binary
     | Compare
+    | IsNone
     | Call
     | AttrRead
     | IndexRead

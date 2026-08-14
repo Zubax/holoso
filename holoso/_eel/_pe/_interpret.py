@@ -1364,6 +1364,10 @@ class Interpreter:
                 lv = self.expr(left, frame, sink)
                 rv = self.expr(right, frame, sink)
                 return _express.compare(self, origin, op, lv, rv, sink)
+            case IsNone(operand=operand, negated=negated):
+                probed = self.expr(operand, frame, sink)
+                answer = isinstance(probed, Opaque) and probed.value is None
+                return StaticScalar(_ops.make_const(answer != negated))
             case Call():
                 return _express.call(self, expr, frame, sink)
             case TupleExpr(origin=origin, items=items):
@@ -1528,11 +1532,12 @@ class Interpreter:
         assert isinstance(callee, EelFunction)
         if positional_only:
             assert not keywords
-            if len(positional) != len(callee.params):
-                reject(site, f"{display}() takes {len(callee.params)} argument(s), got {len(positional)}")
-            bindings = {param.name: value for param, value in zip(callee.params, positional, strict=True)}
-        else:
-            bindings = _express.bind_signature(self, site, fn, callee.params, positional, keywords)
+            assert not getattr(fn, "__kwdefaults__", None), "registry stubs bind positionally"
+            low = len(callee.params) - len(fn.__defaults__ or ())
+            if not low <= len(positional) <= len(callee.params):
+                expected = str(low) if low == len(callee.params) else f"{low} to {len(callee.params)}"
+                reject(site, f"{display}() takes {expected} argument(s), got {len(positional)}")
+        bindings = _express.bind_signature(self, site, fn, callee.params, positional, keywords)
         env: _Env = {}
         for param in callee.params:
             value = bindings[param.name]

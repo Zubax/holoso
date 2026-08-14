@@ -24,16 +24,18 @@ monotonicity guard.
 
 import sys
 from collections.abc import Callable
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from holoso import FloatFormat
+from holoso import FloatFormat, FSortOptions, OperatorOptions
 from holoso._eel import lower
 from holoso._lir import Lir
+from holoso._mir import MirOptions
 from holoso._mir import lower as lower_to_mir
-from ._modelref import build_lir, default_mir, DEFAULT_UNROLL_MAX_TRIPS, SHIPPED_TUNING
+from ._modelref import build_lir, default_mir, default_options, mir_options, DEFAULT_UNROLL_MAX_TRIPS, SHIPPED_TUNING
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -42,7 +44,7 @@ from cordic_sincos import CordicSinCos  # noqa: E402
 from ekf1_stateful import Ekf1  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
-import imu_frame_transform  # noqa: E402
+from imu_fusion import ImuFusion  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
@@ -58,6 +60,11 @@ from biquad import Biquad  # noqa: E402
 from fir import Fir4  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
+
+# Kernels the shared default operator set cannot lower take their spec-style adjustment here.
+_EXTRA_OPERATORS: dict[str, Callable[[OperatorOptions], OperatorOptions]] = {
+    "imu_fusion": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+}
 
 _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "madd": lambda: madd.madd,
@@ -75,7 +82,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "octave_index": lambda: octave_index,
     "cordic_sincos": lambda: CordicSinCos().__call__,
     "integrator": lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-    "imu_frame_transform": lambda: imu_frame_transform.transform,
+    "imu_fusion": lambda: ImuFusion().update,
     "fir": lambda: Fir4().__call__,
     "biquad": lambda: Biquad().__call__,
     "ekf1_stateless": lambda: update_x_P,
@@ -113,9 +120,18 @@ class Metrics:
 
 # The baselines are frozen against the shipped allocator defaults, passed explicitly so no environment speed-up can
 # leak in here; changing a default deliberately re-freezes them.
+def _mir_for(name: str) -> MirOptions:
+    """The shared default, adjusted per kernel where the default operator set cannot lower it (min/max needs fsort)."""
+    if name in _EXTRA_OPERATORS:
+        options = default_options(_FMT)
+        options = dataclasses.replace(options, operator=_EXTRA_OPERATORS[name](options.operator))
+        return mir_options(options)
+    return default_mir(_FMT)
+
+
 def _measure(name: str) -> Metrics:
     lir: Lir = build_lir(
-        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
+        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, _mir_for(name)),
         name,
         SHIPPED_TUNING,
     )
@@ -204,11 +220,9 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=104, last_pc=104, max_block_span=104
     ),
     "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=16, last_pc=16, max_block_span=16),
-    # The only example whose datapath is built entirely from the matrix product and transpose, so it is the gate that
-    # would catch a linear-algebra library stub expanding into more hardware than the operators it replaced.
-    "imu_frame_transform": Metrics(
-        True, nreg=20, bnreg=0, steering=35, copies=0, min_ii=42, last_pc=42, max_block_span=42
-    ),
+    # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
+    # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.
+    "imu_fusion": Metrics(False, nreg=31, bnreg=4, steering=94, copies=6, min_ii=252, last_pc=338, max_block_span=129),
     # The two graduated filter examples: both straight-line, so every figure is one block's.
     "fir": Metrics(True, nreg=8, bnreg=0, steering=5, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "biquad": Metrics(True, nreg=6, bnreg=0, steering=5, copies=0, min_ii=21, last_pc=21, max_block_span=21),

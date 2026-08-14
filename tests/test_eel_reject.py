@@ -191,8 +191,8 @@ def _k_for_unpack(ps: tuple[tuple[float, float], ...]) -> float:
     return acc
 
 
-def _k_is(x: object) -> bool:
-    return x is None
+def _k_is(x: object, y: object) -> bool:
+    return x is y
 
 
 def _k_in(x: float, vs: tuple[float, ...]) -> bool:
@@ -370,7 +370,7 @@ _CASES: list[tuple[object, str]] = [
     (_k_varargs, r"\*args parameters"),
     (_k_kwargs, r"\*\*kwargs parameters"),
     (_k_for_unpack, "for-loop target unpacking"),
-    (_k_is, "comparison operator `is`"),
+    (_k_is, "`is` is only supported with None"),
     (_k_in, "comparison operator `in`"),
     (_k_mangled_local, "name mangling"),
     (_k_mangled_trailing, "name mangling"),

@@ -20,7 +20,7 @@ from holoso import FAddOptions, OperatorOptions, Options, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._eel._lib import Array, ScalarFunction, resolve
 from holoso._eel._ir import BinaryOp, ScalarType
-from holoso._eel._lib._linalg import inv, matmul, transpose
+from holoso._eel._lib._linalg import cross, inv, matmul, norm, transpose
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS, spd_matrix
@@ -74,7 +74,7 @@ _INF = float("inf")
 
 
 def test_registry_resolves_the_expected_externals() -> None:
-    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.linalg.inv):
+    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.cross, np.linalg.norm, np.linalg.inv):
         assert isinstance(resolve(external), Array), external
     assert resolve(np.minimum) == Array(minimum) == resolve(np.fmin)  # type: ignore[arg-type]
     assert resolve(np.maximum) == Array(maximum) == resolve(np.fmax)  # type: ignore[arg-type]
@@ -143,7 +143,18 @@ def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
         match = resolve(external)
         assert isinstance(match, ScalarFunction), external
         assert match.domains == [ScalarType.INT], external
-    for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.matmul, BinaryOp.MATMUL, np.linalg.inv):
+    for external in (
+        np.transpose,
+        np.ravel,
+        np.dot,
+        np.trace,
+        np.outer,
+        np.cross,
+        np.matmul,
+        BinaryOp.MATMUL,
+        np.linalg.norm,
+        np.linalg.inv,
+    ):
         assert isinstance(resolve(external), Array), external
     # The numpy elementwise spellings are array composites; the builtin min/max keep the scalar entries.
     for external in (np.minimum, np.fmin, np.maximum, np.fmax):
@@ -323,6 +334,110 @@ def test_inv_stub_matches_numpy() -> None:
         inv(np.array([1.0, 2.0]))
     with pytest.raises(ValueError, match="square"):
         inv(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+
+
+def test_cross_stub_matches_numpy() -> None:
+    rng = np.random.default_rng(3141)
+    for _ in range(8):
+        u, v = rng.uniform(-4.0, 4.0, 3), rng.uniform(-4.0, 4.0, 3)
+        assert np.allclose(cross(u, v), np.cross(u, v), rtol=1e-15, atol=0.0)
+    # numpy >= 2 removed the 2-vector form, so the stub's 1-element-array answer has no external reference.
+    for _ in range(4):
+        pq = rng.uniform(-4.0, 4.0, 4)
+        got = cross(pq[:2], pq[2:])
+        assert got.shape == (1,) and float(got[0]) == float(pq[0] * pq[3] - pq[1] * pq[2])
+    ints = cross(np.array([1, 0, 0]), np.array([0, 1, 0]))  # an int pair keeps the int elements, as numpy's does
+    assert ints.dtype == np.int64 and np.array_equal(ints, [0, 0, 1])
+    with pytest.raises(ValueError, match="1-D"):
+        cross(np.array([[1.0, 0.0, 0.0]]), np.array([0.0, 1.0, 0.0]))
+    with pytest.raises(ValueError, match="unsupported cross"):
+        cross(np.array([1.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+    with pytest.raises(ValueError, match="unsupported cross"):
+        cross(np.array([1.0, 0.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0, 0.0]))
+
+
+def test_cross_inlining_matches_the_host() -> None:
+    def kernel(u: Float64[np.ndarray, "3"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.cross(u, v)
+
+    rng = np.random.default_rng(2718)
+    vectors = [
+        {"u_0": 1.0, "u_1": 0.0, "u_2": 0.0, "v_0": 0.0, "v_1": 1.0, "v_2": 0.0},
+        *(
+            {
+                name: float(value)
+                for name, value in zip(("u_0", "u_1", "u_2", "v_0", "v_1", "v_2"), rng.uniform(-3, 3, 6))
+            }
+            for _ in range(6)
+        ),
+    ]
+    assert assert_hir_matches_reference(
+        lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, kernel, vectors, label="cross"
+    ) == len(vectors)
+
+    def kernel2(u: Float64[np.ndarray, "2"], v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "1"]:
+        return np.cross(u, v)
+
+    def reference2(u: Float64[np.ndarray, "2"], v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "1"]:
+        # numpy >= 2 removed the 2-vector form, so the stub's own Python is the reference.
+        return cross(u, v)  # type: ignore[no-any-return]
+
+    vectors2 = [
+        {"u_0": 1.0, "u_1": 0.0, "v_0": 0.0, "v_1": 1.0},
+        {"u_0": 2.0, "u_1": -3.0, "v_0": 0.5, "v_1": 1.25},
+        {"u_0": -1.5, "u_1": -1.5, "v_0": -1.5, "v_1": -1.5},
+    ]
+    assert assert_hir_matches_reference(
+        lower(kernel2, DEFAULT_UNROLL_MAX_TRIPS).hir, reference2, vectors2, label="cross2"
+    ) == len(vectors2)
+
+
+def test_norm_stub_matches_numpy() -> None:
+    rng = np.random.default_rng(2020)
+    for n in (1, 2, 3, 5):
+        v = rng.uniform(-4.0, 4.0, n)
+        assert np.isclose(norm(v), np.linalg.norm(v), rtol=1e-14, atol=0.0)
+        for order in (2, 1, math.inf, -math.inf):
+            assert np.isclose(norm(v, order), np.linalg.norm(v, order), rtol=1e-14, atol=0.0), (n, order)
+    ints = np.array([10000, 10000, 10000])  # int elements promote to float, so nothing saturates on the way
+    assert np.isclose(norm(ints), np.linalg.norm(ints), rtol=1e-14, atol=0.0)
+    assert np.isclose(norm(ints, 1), np.linalg.norm(ints, 1), rtol=1e-14, atol=0.0)
+    m = rng.uniform(-4.0, 4.0, (2, 3))
+    assert np.isclose(norm(m), np.linalg.norm(m), rtol=1e-14, atol=0.0)  # the default answers Frobenius, as numpy's
+    with pytest.raises(ValueError, match="unsupported matrix norm"):
+        norm(m, 2)
+    with pytest.raises(ValueError, match="unsupported vector norm"):
+        norm(rng.uniform(-1.0, 1.0, 3), 3)
+    with pytest.raises(ValueError, match="1-D or 2-D"):
+        norm(np.float64(1.0))  # type: ignore[arg-type]
+
+
+def test_norm_inlining_matches_the_host() -> None:
+    def kernel(v: Float64[np.ndarray, "3"]) -> tuple[float, float, float, float]:
+        return (
+            np.linalg.norm(v),
+            np.linalg.norm(v, 1),
+            np.linalg.norm(v, np.inf),
+            np.linalg.norm(v, -np.inf),
+        )
+
+    rng = np.random.default_rng(1616)
+    vectors = [
+        {"v_0": 3.0, "v_1": -4.0, "v_2": 12.0},
+        {"v_0": 0.0, "v_1": 0.0, "v_2": 0.0},
+        *({name: float(value) for name, value in zip(("v_0", "v_1", "v_2"), rng.uniform(-5, 5, 3))} for _ in range(5)),
+    ]
+    assert assert_hir_matches_reference(
+        lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, kernel, vectors, label="norm"
+    ) == len(vectors)
+
+    def int_kernel(a: int, b: int) -> float:
+        return np.linalg.norm(np.array([a, b]))  # type: ignore[no-any-return]  # int elements answer a float norm
+
+    int_vectors = [{"a": a, "b": b} for a, b in [(3, 4), (0, 0), (-5, 12), (10000, 10000)]]
+    assert assert_hir_matches_reference(
+        lower(int_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, int_kernel, int_vectors, label="int_norm"
+    ) == len(int_vectors)
 
 
 def test_minimum_maximum_stubs_match_numpy() -> None:

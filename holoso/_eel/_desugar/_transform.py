@@ -454,7 +454,10 @@ class _Transformer:
         if isinstance(value, str):
             self._reject(node, "string literals are only supported as raise messages")
         if value is None:
-            self._reject(node, "`None` is only supported as a bare return value")
+            self._reject(
+                node,
+                "`None` is only supported as a bare return value, an omitted parameter default, or an `is` comparand",
+            )
         self._reject(node, f"unsupported constant: {value!r}")
 
     def _name(self, node: ast.Name, name: str) -> Expr:
@@ -481,6 +484,8 @@ class _Transformer:
         raise AssertionError("ast guarantees at least two operands")
 
     def _compare(self, node: ast.Compare, sink: list[Stmt]) -> Expr:
+        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot)):
+            return self._is_none(node, sink)
         for op in node.ops:
             if type(op) not in _CMP_OPS:
                 spelled = {ast.Is: "is", ast.IsNot: "is not", ast.In: "in", ast.NotIn: "not in"}
@@ -489,6 +494,18 @@ class _Transformer:
         self._reject_walrus_in(node.comparators[1:], "a comparison-chain comparator after the first")
         left = self._atom(node.left, sink)
         return self._chain(node, left, list(node.ops), list(node.comparators), sink)
+
+    def _is_none(self, node: ast.Compare, sink: list[Stmt]) -> Expr:
+        """`is` compares only against None; no residual runtime value is None, so the answer is always static."""
+        negated = isinstance(node.ops[0], ast.IsNot)
+        sides = [node.left, node.comparators[0]]
+        nones = [isinstance(side, ast.Constant) and side.value is None for side in sides]
+        if not any(nones):
+            spelled = "is not" if negated else "is"
+            self._reject(node, f"the comparison operator `{spelled}` is only supported with None as one operand")
+        if all(nones):
+            return Const(self._origin(node), not negated)
+        return IsNone(self._origin(node), self._atom(sides[nones.index(False)], sink), negated)
 
     def _chain(
         self, node: ast.Compare, left: Atom, ops: list[ast.cmpop], comparators: list[ast.expr], sink: list[Stmt]

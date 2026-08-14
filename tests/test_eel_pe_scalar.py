@@ -852,3 +852,40 @@ def test_a_symbol_with_no_integer_entry_promotes_rather_than_asking_the_host() -
     for kernel, want in ((_log2_of_an_integer_zero, -math.inf), (_exp2_of_an_integer_overflow, math.inf)):
         result = holoso.synthesize(kernel, _FADD, name="k")
         assert [float(v) for v in result.numerical_model.elaborate().run(0.0)] == [want], kernel.__name__
+
+
+def test_is_none_always_folds_statically() -> None:
+    """
+    `is None` is decided entirely at partial evaluation: a residual runtime scalar is never None, a binding-time
+    None (an inlined helper's default) answers by host identity, and `None is None` folds outright -- so the
+    residual program carries the settled branch and no comparison hardware.
+    """
+
+    def scaled(x: float, gain: object = None) -> float:
+        if gain is None:
+            return x * 2.0
+        return x * gain  # type: ignore[operator]
+
+    def kernel(x: float) -> tuple[float, float, bool, bool]:
+        defaulted = scaled(x)
+        explicit = scaled(x, 4.0)
+        runtime_never_none = x is None
+        return defaulted, explicit, runtime_never_none, None is None
+
+    vectors = [{"x": v} for v in (0.0, 1.5, -2.25, 8.0)]
+    hir = lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
+    assert assert_hir_matches_reference(hir, kernel, vectors, label="is_none") == len(vectors)
+
+
+def test_is_not_none_selects_the_configured_arm() -> None:
+    def biased(x: float, offset: object = None) -> float:
+        if offset is not None:
+            return x + offset  # type: ignore[operator]
+        return x
+
+    def kernel(x: float) -> tuple[float, float]:
+        return biased(x), biased(x, 3.0)
+
+    vectors = [{"x": v} for v in (0.0, -1.0, 2.5)]
+    hir = lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
+    assert assert_hir_matches_reference(hir, kernel, vectors, label="is_not_none") == len(vectors)
