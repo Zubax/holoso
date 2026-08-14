@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso import FFromIntOptions, FloatFormat, FToIntOptions, OperatorOptions, Options
+from holoso import FFromIntOptions, FloatFormat, FSortOptions, FToIntOptions, OperatorOptions, Options
 from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -34,6 +34,7 @@ from crc32 import POLY_IEEE8023, Crc32  # noqa: E402
 from debouncer import Debouncer  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
 from fir import Fir4  # noqa: E402
+from flux_observer import FluxObserver  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
 from iq_oscillator import IqOscillator  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
@@ -320,6 +321,13 @@ def _uart_rx_frame(
     return [{"rx": level} for level in levels for _ in range(OVERSAMPLE)]
 
 
+def _fresh_flux_observer() -> Callable[..., object]:
+    # The shipped instance: R/L_d/flux_linkage and the flux-linkage-aligned reset snapshot match
+    # examples/flux_observer.py, so every layer -- cosim, oracle, synthesis matrix -- exercises the same circuit
+    # the bundled example writes.
+    return FluxObserver(R=0.05, L_d=2e-5, flux_linkage=0.005, flux=np.array([0.005, 0.0])).tick
+
+
 def _fresh_stateful_ekf() -> Callable[..., object]:
     # An explicit divisor-safe reset (large, equal measurement noise keeps the 1/x21 divisor anchored), independent of
     # the filter's real-application default reset; a fresh instance per compile so the model's reset snapshot starts
@@ -367,6 +375,42 @@ def rigid_body_scalar(
         dt,
     )
     return omega_next[0], omega_next[1], omega_next[2], momentum[0], momentum[1], momentum[2]
+
+
+_FLUX_OBSERVER_INPUTS = ("dt", "u_ab_0", "u_ab_1", "i_ab_0", "i_ab_1")
+
+
+def _flux_row(dt: float, u: tuple[float, float], i: tuple[float, float]) -> InputVector:
+    return {"dt": dt, "u_ab_0": u[0], "u_ab_1": u[1], "i_ab_0": i[0], "i_ab_1": i[1]}
+
+
+_FLUX_OBSERVER_MANUAL = [  # a hand-steered spin: the carried flux vector visits all four atan2 quadrants in order
+    _flux_row(1e-3, (50.0, 20.0), (5.0, -3.0)),
+    _flux_row(1e-3, (-120.0, 10.0), (-10.0, 0.0)),
+    _flux_row(1e-3, (0.0, -80.0), (0.0, 0.0)),
+    _flux_row(1e-3, (130.0, 0.0), (8.0, 8.0)),
+    _flux_row(0.0, (7.0, 7.0), (5.0, 5.0)),  # dt=0: the voltage term vanishes, isolating the L_d*di path
+    _flux_row(1e-3, (0.0, 0.0), (5.0, 5.0)),  # repeated current: di=0, pure resistive-drop drift
+    _flux_row(1e-3, (0.0, 90.0), (-20.0, 15.0)),
+    _flux_row(1e-4, (1.0, 1.0), (0.0, 0.0)),
+    # Steps off the rails: the quadrant rows above drive lanes onto both clamp rails (one lane railed while the
+    # other is interior around rows 4-5); these final rows move both lanes back inside the box, so the clamp's
+    # pass-through side is also observed against carried state.
+    _flux_row(1e-3, (-2.5, -7.0), (0.0, 0.0)),
+    _flux_row(1e-3, (0.0, 6.0), (1.0, -1.0)),
+]
+
+
+def _draw_flux_observer(rng: np.random.Generator) -> InputVector:
+    # The voltage scale straddles the clamp box: a large draw at a long dt rails a flux lane, a small draw at a
+    # short dt moves it inside the linear region, so the sweep keeps exercising both sides of the clamp.
+    return {
+        "dt": log_uniform_positive(rng, 2e-5, 2e-3),
+        "u_ab_0": bounded(rng, -12.0, 12.0),
+        "u_ab_1": bounded(rng, -12.0, 12.0),
+        "i_ab_0": bounded(rng, -20.0, 20.0),
+        "i_ab_1": bounded(rng, -20.0, 20.0),
+    }
 
 
 _RIGID_BODY_INPUTS = (
@@ -1030,5 +1074,19 @@ SPECS = [
             "di_dt": bounded(rng, -1.0, 1.0),
         },
         edge_values=_EKF_EDGES,  # only dt reaches the divisor, and the folded R_diag keeps it anchored
+    ),
+    ExampleSpec(
+        name="flux_observer",  # stateful 2-vector I/O driven through its decomposed scalar port lanes
+        inputs=_FLUX_OBSERVER_INPUTS,
+        make_kernel=_fresh_flux_observer,
+        reference=None,  # carried flux/i_last VECTOR state has no per-element scalar attribute the harness could read
+        nominal=_flux_row(1e-4, (1.0, 0.5), (2.0, -1.0)),
+        manual=_FLUX_OBSERVER_MANUAL,
+        draw_random=_draw_flux_observer,
+        # The full format-edge sweep is safe on this accumulator because the clamp bounds the carried flux every
+        # row: an infinite update lands as a railed ±flux_linkage, never as an infinity a later opposite-signed row
+        # could cancel into inf - inf.
+        edge_values=_WIDE_EDGES,
+        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
 ]

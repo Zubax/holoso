@@ -92,6 +92,9 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "fir-e8m36": (20, 20),
     "biquad-e8m36": (21, 21),
     "ekf1_stateful-e8m36": (125, 125),
+    # Straight-line: the clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC
+    # atan2 tail.
+    "flux_observer-e8m36": (87, 87),
 }
 
 

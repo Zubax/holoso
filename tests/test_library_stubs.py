@@ -9,6 +9,7 @@ test_matrix / test_cosim.
 """
 
 import math
+from typing import Any
 
 import numpy as np
 import pytest
@@ -60,6 +61,8 @@ from holoso._eel._lib._numpy import (
     log10,
     log1p,
     log,
+    maximum,
+    minimum,
     radians,
     sign_float,
     sinh,
@@ -73,6 +76,8 @@ _INF = float("inf")
 def test_registry_resolves_the_expected_externals() -> None:
     for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.linalg.inv):
         assert isinstance(resolve(external), Array), external
+    assert resolve(np.minimum) == Array(minimum) == resolve(np.fmin)  # type: ignore[arg-type]
+    assert resolve(np.maximum) == Array(maximum) == resolve(np.fmax)  # type: ignore[arg-type]
     # An operator is a key like any callee object, so `**` and its every spelling are ONE four-lowering entry.
     power_entry = resolve(BinaryOp.POW)
     assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 4
@@ -114,7 +119,7 @@ _FLOAT_ONLY: list[object] = [
     np.rint,  # the one rounding spelling whose own answer on an integer is a float
 ]  # fmt: skip
 _INT_AND_FLOAT: list[object] = [
-    abs, np.abs, np.absolute, min, np.minimum, np.fmin, max, np.maximum, np.fmax, np.sign,
+    abs, np.abs, np.absolute, min, max, np.sign,
     round, np.round, np.around, math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix,
     pow, math.pow, np.power, np.float_power, BinaryOp.POW,
 ]  # fmt: skip
@@ -139,6 +144,9 @@ def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
         assert isinstance(match, ScalarFunction), external
         assert match.domains == [ScalarType.INT], external
     for external in (np.transpose, np.ravel, np.dot, np.trace, np.outer, np.matmul, BinaryOp.MATMUL, np.linalg.inv):
+        assert isinstance(resolve(external), Array), external
+    # The numpy elementwise spellings are array composites; the builtin min/max keep the scalar entries.
+    for external in (np.minimum, np.fmin, np.maximum, np.fmax):
         assert isinstance(resolve(external), Array), external
     for member in (np.ndarray.T, np.ndarray.dot, np.ndarray.flatten, np.ndarray.ravel, np.ndarray.transpose):
         assert isinstance(resolve(member), Array), member
@@ -315,6 +323,74 @@ def test_inv_stub_matches_numpy() -> None:
         inv(np.array([1.0, 2.0]))
     with pytest.raises(ValueError, match="square"):
         inv(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+
+
+def test_minimum_maximum_stubs_match_numpy() -> None:
+    rng = np.random.default_rng(4321)
+    vec = rng.uniform(-4.0, 4.0, 3)
+    mat = rng.uniform(-4.0, 4.0, (2, 3))
+    pairs: list[tuple[Any, Any]] = [
+        (np.float64(2.5), np.float64(-1.0)),
+        (vec, np.float64(0.5)),
+        (np.float64(0.5), vec),
+        (mat, np.float64(-0.25)),
+        (np.float64(-0.25), mat),
+        (vec, rng.uniform(-4.0, 4.0, 3)),
+        (mat, rng.uniform(-4.0, 4.0, (2, 3))),
+    ]
+    for stub, reference in ((minimum, np.minimum), (maximum, np.maximum)):
+        for a, b in pairs:
+            assert np.array_equal(stub(a, b), reference(a, b)), (stub.__name__, a, b)
+    ints = np.array([3, -5, 7])
+    got = minimum(ints, np.array([1, 9, -7]))
+    assert got.dtype == np.int64 and np.array_equal(got, [1, -5, -7])
+    # Mixed dtypes: the values match numpy's promoted result even though the stub's dtype may not promote...
+    assert np.array_equal(maximum(ints, np.array([2.5, -6.0, 8.0])), np.maximum(ints, [2.5, -6.0, 8.0]))
+    # ...until the float's exact-integer range: the stub compares exactly where numpy promotes first, so it keeps
+    # the true maximum that promotion rounds away (the documented divergence, pinned in both directions).
+    assert maximum(np.array([2**53 + 1]), np.array([float(2**53)]))[0] == 2**53 + 1
+    assert np.maximum(np.array([2**53 + 1]), np.array([float(2**53)]))[0] == float(2**53)
+    with pytest.raises(ValueError, match="shape mismatch"):
+        minimum(vec, rng.uniform(-1.0, 1.0, 4))
+    with pytest.raises(ValueError, match="shape mismatch"):
+        maximum(vec, mat)
+    with pytest.raises(ValueError, match="rows of length"):
+        minimum(mat, rng.uniform(-4.0, 4.0, (2, 2)))
+    with pytest.raises(ValueError, match="at most 2-D"):
+        minimum(rng.uniform(-1.0, 1.0, (2, 2, 2)), np.float64(0.0))  # type: ignore[arg-type]
+
+
+def test_minimum_maximum_inlining_matches_the_host() -> None:
+    """The array-composite route: scalar broadcast on either side over floats, and the int lowering per element."""
+
+    def clamp2(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.minimum(np.maximum(v, -1.0), 1.5)  # type: ignore[no-any-return]
+
+    vectors = [{"v_0": a, "v_1": b} for a, b in [(0.0, 2.0), (-3.0, 1.5), (1.5, -1.0), (7.0, -7.0)]]
+    assert assert_hir_matches_reference(
+        lower(clamp2, DEFAULT_UNROLL_MAX_TRIPS).hir, clamp2, vectors, label="clamp2"
+    ) == len(vectors)
+
+    def clamp22(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.minimum(np.maximum(m, -1.0), 1.5)  # type: ignore[no-any-return]
+
+    matrix_vectors = [
+        {"m_0_0": 0.0, "m_0_1": 2.0, "m_1_0": -3.0, "m_1_1": 1.5},
+        {"m_0_0": 7.0, "m_0_1": -7.0, "m_1_0": 0.5, "m_1_1": -0.5},
+    ]
+    assert assert_hir_matches_reference(
+        lower(clamp22, DEFAULT_UNROLL_MAX_TRIPS).hir, clamp22, matrix_vectors, label="clamp22"
+    ) == len(matrix_vectors)
+
+    def int_extrema(a: int, b: int) -> int:
+        v = np.minimum(np.array([a, b]), np.array([3, -2]))
+        w = np.maximum(v, -10)
+        return w[0] * 100 + w[1]  # type: ignore[no-any-return]
+
+    int_vectors = [{"a": a, "b": b} for a, b in [(0, 0), (5, -7), (-20, 4), (3, -2)]]
+    assert assert_hir_matches_reference(
+        lower(int_extrema, DEFAULT_UNROLL_MAX_TRIPS).hir, int_extrema, int_vectors, label="int_extrema"
+    ) == len(int_vectors)
 
 
 def test_composite_stub_inlining_matches_the_host_at_binary64() -> None:

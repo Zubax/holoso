@@ -42,6 +42,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from holoso._eel._annotations import unaliased
 from holoso._eel._names import indexed_names
 from holoso._hir import Hir, HirEvaluator, NoNumber
 
@@ -105,6 +106,7 @@ def instance_leaves(instance: object) -> dict[str, object]:
 
 def _annotation_shape(annotation: object) -> tuple[int, ...] | None:
     """A jaxtyping-style fixed shape, read structurally like the frontend reads it; None for scalars."""
+    annotation = unaliased(annotation)
     dims = getattr(annotation, "dims", None) if isinstance(annotation, type) else None
     if not isinstance(dims, tuple):
         return None

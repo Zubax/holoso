@@ -103,6 +103,43 @@ def _assert_python_matches_holoso(fn: Callable[..., object], *inputs: np.ndarray
 # ---------------------------------------------------------------- structure
 
 
+def test_pep695_type_aliases_in_boundary_annotations() -> None:
+    """Aliases unwrap everywhere an annotation is classified: scalar, array, alias-of-alias, nested in a tuple."""
+    type Vec2 = Float64[np.ndarray, "2"]
+    type Pair = tuple[Vec2, Vec2]
+    type Gain = float
+    type Renamed = Vec2
+
+    def kernel(v: Renamed, g: Gain) -> Pair:
+        return v * g, np.array([v[1], v[0]])
+
+    result = _synth(kernel)
+    assert [p.name for p in result.numerical_model.elaborate().inputs] == ["v_0", "v_1", "g"]
+    _assert_python_matches_holoso(kernel, np.array([1.5, -2.0]), 3.0)
+
+
+def test_pep695_alias_void_return_and_self_reference() -> None:
+    type Unit = None
+
+    class Counter:
+        def __init__(self) -> None:
+            self.n = 0.0
+
+        def step(self, x: float) -> Unit:
+            self.n = self.n + x
+
+    sim = _sim(Counter().step)
+    assert [p.name for p in sim.outputs] == ["state_n"]
+    assert float(sim.run(2.5)[0]) == 2.5
+
+    type Loop = Loop  # type: ignore[misc]  # laziness lets an alias name itself, which must refuse rather than hang
+
+    def kernel(x: Loop) -> float:
+        return x  # type: ignore[no-any-return]
+
+    _refused(kernel, "reference cycle")
+
+
 def test_matmul_shapes_and_port_layout() -> None:
     def mat_vec(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]

@@ -136,6 +136,50 @@ def test_example_matches_python_reference(spec: ExampleSpec, fmt: FloatFormat) -
     )
 
 
+def test_flux_observer_matches_python_reference() -> None:
+    """
+    The generic suite skips flux_observer (`reference=None`: its carried flux/i_last are VECTOR state the scalar
+    attribute reader cannot address), so this bespoke twin maps each `state_<attr>_<k>` port onto the reference
+    instance's array element. The `i_last` lanes are an identity install of the quantized input, so they must match
+    bit-for-bit; the rounded lanes carry explicit budgets (the atan2 CORDIC is faithful rather than exact, and the
+    flux recurrence accumulates rounding through carried state at the flux-linkage scale).
+    """
+    spec = next(spec for spec in SPECS if spec.name == "flux_observer")
+    fmt = spec.formats[0]
+    model = holoso.synthesize(spec.make_kernel(), spec.options(fmt), name=spec.name).numerical_model.elaborate()
+    reference = spec.make_kernel()
+    instance = reference.__self__  # type: ignore[attr-defined]
+    budgets = {
+        "out_0": OutputTolerance(ulps=64),
+        "state_flux_0": OutputTolerance(ulps=64, growth_ulps=1, floor=0.005),
+        "state_flux_1": OutputTolerance(ulps=64, growth_ulps=1, floor=0.005),
+    }
+    for age, row in enumerate(spec.reference_vectors()):
+        quantized = {name: _quantize(value, fmt) for name, value in row.items()}
+        got = {
+            port.name: float(value)
+            for port, value in zip(model.outputs, model.run(*[quantized[port.name] for port in model.inputs]))
+        }
+        theta = reference(
+            quantized["dt"],
+            np.array([quantized["u_ab_0"], quantized["u_ab_1"]]),
+            np.array([quantized["i_ab_0"], quantized["i_ab_1"]]),
+        )
+        assert isinstance(theta, float)
+        expected = {
+            "out_0": theta,
+            "state_flux_0": float(instance.flux[0]),
+            "state_flux_1": float(instance.flux[1]),
+            "state_i_last_0": float(instance.i_last[0]),
+            "state_i_last_1": float(instance.i_last[1]),
+        }
+        assert got.keys() == expected.keys()
+        for name, want in expected.items():
+            budget = budgets.get(name)
+            atol = 0.0 if budget is None else budget.allowance(fmt, want, age)
+            assert within(got[name], want, 0.0, atol), f"flux_observer[{age}] {name}: {got[name]} vs {want} ({atol=:g})"
+
+
 class _StateLeafAheadOfComputed:
     def __init__(self) -> None:
         self.acc = 0.0

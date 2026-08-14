@@ -51,7 +51,7 @@ import typing
 from dataclasses import dataclass
 
 from ..._errors import HolosoError, SynthesisError
-from .._annotations import accepted_stypes, annotation_stype
+from .._annotations import accepted_stypes, annotation_stype, unaliased
 from .._desugar import desugar
 from .._ir import *
 from .._names import indexed_names, public_slot, state_port_name
@@ -145,6 +145,13 @@ class _OpenWhile:
     header: Sink
     cond: Atom
     body: Sink
+
+
+def _unaliased(annotation: object, origin: Origin, what: str) -> object:
+    try:
+        return unaliased(annotation)
+    except Exception as error:
+        reject(origin, f"{what}: the type alias cannot be evaluated: {error}")
 
 
 def _frozen(sink: Sink) -> tuple[Stmt, ...]:
@@ -408,9 +415,13 @@ class Interpreter:
         found = self._meta.get(fn)
         if found is None:
             try:
-                # eval_str accepts quoted annotations; lazy PEP 649 annotations execute user expressions
-                # here, so any exception is the user's, and containing it is the only way to locate it.
-                found = inspect.get_annotations(fn, eval_str=True)
+                # eval_str accepts quoted annotations; lazy PEP 649 annotations and PEP 695 alias bodies execute
+                # user expressions here, so any exception is the user's, and containing it is the only way to
+                # locate it. Unaliasing here means every consumer of these annotations sees the named annotation.
+                found = {
+                    name: unaliased(annotation)
+                    for name, annotation in inspect.get_annotations(fn, eval_str=True).items()
+                }
             except Exception as error:
                 reject(origin, f"the type annotations cannot be evaluated: {error}")
             self._meta[fn] = found
@@ -1269,6 +1280,7 @@ class Interpreter:
         recognized annotation, while an inlined frame skips unrecognized ones (library stubs annotate with
         shapeless types the subset cannot check).
         """
+        annotation = _unaliased(annotation, origin, what)
         stype = annotation_stype(annotation)
         if stype is not None:
             return self.conform(value, stype, origin, sink, what)

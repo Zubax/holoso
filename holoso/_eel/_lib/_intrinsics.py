@@ -48,14 +48,14 @@ def popcount(x: int) -> int:
     return x.bit_count()
 
 
-# np.minimum/maximum (and NaN-suppressing np.fmin/fmax) are the binary elementwise forms; np.min/np.max are reductions.
-# NaN-propagation differences between the spellings are moot under the fast-math / no-NaN policy.
-@intrinsic(FloatMin, min, np.minimum, np.fmin)
+# The numpy binary elementwise spellings (np.minimum/np.maximum and the NaN-suppressing np.fmin/np.fmax) are array
+# composites that delegate each element pair back to these scalar entries; np.min/np.max are reductions.
+@intrinsic(FloatMin, min)
 def min_float(a: float, b: float) -> float:
     return min(a, b)
 
 
-@intrinsic(FloatMax, max, np.maximum, np.fmax)
+@intrinsic(FloatMax, max)
 def max_float(a: float, b: float) -> float:
     return max(a, b)
 

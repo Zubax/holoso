@@ -16,11 +16,13 @@ Stub names are irrelevant to dispatch.
 """
 
 import math
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
 from ._intrinsics import atan2, ceil, cos, exp2, floor, isinf, log2, round_, sin, sqrt
-from ._registry import lib
+from ._registry import array, lib
 
 _LOG2E = math.log2(math.e)
 _LN2 = math.log(2.0)
@@ -58,15 +60,57 @@ def round_to_int(x: float) -> int:
     return int(round_(x))
 
 
-@lib(min, np.minimum, np.fmin)
+@lib(min)
 def min_int(a: int, b: int) -> int:
     """There is no hardware min/max operator for integers."""
     return a if a <= b else b  # the tie answers a, as CPython's min does
 
 
-@lib(max, np.maximum, np.fmax)
+@lib(max)
 def max_int(a: int, b: int) -> int:
     return a if b <= a else b
+
+
+def _elementwise(f: Callable[[Any, Any], Any], a: np.ndarray, b: np.ndarray) -> Any:
+    """
+    Rank <= 2 with scalar broadcast against either side; the general vector-against-matrix broadcast is not
+    supported. Operands are numpy-typed, as everywhere in this library: a scalar answers ndim 0, which a native
+    Python number does not. A mixed-dtype result carries the winning elements' own types, and each comparison is
+    exact where numpy compares after promotion -- so past the float's exact-integer range a mixed pair can answer
+    the unpromoted neighbor of numpy's value. The compiled path conforms mixed operands C-style and follows numpy.
+    """
+    if a.ndim > 2 or b.ndim > 2:
+        raise ValueError(f"elementwise operands must be at most 2-D, got {a.ndim}-D and {b.ndim}-D")
+    if a.ndim == 0 and b.ndim == 0:
+        return f(a, b)
+    if b.ndim == 0:
+        if a.ndim == 1:
+            return np.array([f(a[i], b) for i in range(len(a))])
+        return np.array([[f(a[i][j], b) for j in range(len(a[0]))] for i in range(len(a))])
+    if a.ndim == 0:
+        if b.ndim == 1:
+            return np.array([f(a, b[j]) for j in range(len(b))])
+        return np.array([[f(a, b[i][j]) for j in range(len(b[0]))] for i in range(len(b))])
+    if a.ndim != b.ndim:
+        raise ValueError(f"elementwise shape mismatch: {a.ndim}-D against {b.ndim}-D; broadcasting is not supported")
+    if len(a) != len(b):
+        raise ValueError(f"elementwise shape mismatch: length {len(a)} against {len(b)}")
+    if a.ndim == 1:
+        return np.array([f(a[i], b[i]) for i in range(len(a))])
+    if len(a[0]) != len(b[0]):
+        raise ValueError(f"elementwise shape mismatch: rows of length {len(a[0])} against {len(b[0])}")
+    return np.array([[f(a[i][j], b[i][j]) for j in range(len(a[0]))] for i in range(len(a))])
+
+
+# The NaN-propagation difference between np.minimum/np.fmin (and np.maximum/np.fmax) is moot under the no-NaN policy.
+@array(np.minimum, np.fmin)
+def minimum(a: np.ndarray, b: np.ndarray) -> Any:
+    return _elementwise(min, a, b)
+
+
+@array(np.maximum, np.fmax)
+def maximum(a: np.ndarray, b: np.ndarray) -> Any:
+    return _elementwise(max, a, b)
 
 
 @lib(np.sign)

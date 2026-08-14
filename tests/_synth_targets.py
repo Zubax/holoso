@@ -27,6 +27,7 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FSincosOptions,
+    FSortOptions,
     OperatorOptions,
     Options,
 )
@@ -52,11 +53,12 @@ def op_config(
     flog2: FLog2Options | None = None,
     fsincos: FSincosOptions | None = None,
     fatan2: FAtan2Options | None = None,
+    fsort: FSortOptions | None = None,
 ) -> Options:
     """
     The Options for fmt; pass an options object to give an operator stage knobs, else that operator is lean.
-    ffma/fexp2/flog2/fsincos/fatan2 are absent unless supplied, so MAC chains stay expanded (fmul + fadd) and a
-    kernel that uses no transcendental needs no such module.
+    ffma/fexp2/flog2/fsincos/fatan2/fsort are absent unless supplied, so MAC chains stay expanded (fmul + fadd) and a
+    kernel that uses no transcendental or min/max needs no such module.
     """
     return Options(
         OperatorOptions(
@@ -70,6 +72,7 @@ def op_config(
             flog2=flog2,
             fsincos=fsincos,
             fatan2=fatan2,
+            fsort=fsort,
         ),
         ffmt=fmt,
     )
@@ -597,6 +600,32 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=150,
         ops=op_config(F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_input=1)),
         name="rigid_body_rates_e6m18",
+    ),
+    # flux_observer: a short stateful clamped fadd/fmul/fsort integrator feeding the same CORDIC atan2 as to_polar,
+    # so the rows start from that operator's one measured configuration; the surrounding datapath is lean.
+    for_example(
+        "flux_observer",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1),
+            fmul=FMulOptions(stage_input=1),
+            fatan2=_TO_POLAR_FATAN2,
+            fsort=FSortOptions(),
+        ),
+    ),
+    for_example(
+        "flux_observer",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(F_e6m18, fadd=FAddOptions(stage_input=1), fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions()),
+    ),
+    for_example(
+        "flux_observer",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions()),
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
     for_example("kepler", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
