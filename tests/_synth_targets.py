@@ -566,8 +566,10 @@ TARGETS: list[SynthTarget] = [
     # unregistered fabric adder -- flog2 stage_product=2 registers that partial-product reduction (the sanctioned
     # wide-multiplicand grid split; MULT18 rises 15 -> ~20 of 28 and stays routable). Deepening normshift splits
     # past 1 consistently loses on both ECP5 tools (the front level is a fanout-~50 select cone a register cannot
-    # shorten); output-side decoupling wins instead -- flog2 stage_normalize_output on diamond-plain, fadd/ffma
-    # stage_output where the terminal cone runs into the register-file steering.
+    # shorten); output-side decoupling wins instead -- flog2 stage_normalize_output on diamond-plain, fadd
+    # stage_output where the terminal cone runs into the register-file steering. With the DSP columns that full, the
+    # yosys rows are congestion-bound rather than deep: their last stretch came from REMOVING a stage (flog2
+    # stage_input, ffma stage_output), freeing the flip-flops that crowd the flog2 normshift cone.
     for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
@@ -578,8 +580,8 @@ TARGETS: list[SynthTarget] = [
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
             fexp2=FExp2Options(stage_product=2),
-            flog2=FLog2Options(stage_input=1, stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
-            fsort=FSortOptions(),
+            flog2=FLog2Options(stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
+            fsort=FSortOptions(stage_input=1),
         ),
         kernel=_imu_fusion_kernel,
     ),
@@ -591,6 +593,7 @@ TARGETS: list[SynthTarget] = [
             F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
             fexp2=FExp2Options(stage_product=2),
             flog2=FLog2Options(stage_normalize=1, stage_normalize_output=1, stage_pack=1, stage_product_final=1),
             fsort=FSortOptions(),
@@ -623,9 +626,7 @@ TARGETS: list[SynthTarget] = [
             fexp2=FExp2Options(stage_product=2),
             flog2=FLog2Options(stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
             fsort=FSortOptions(),
-            ffma=FFmaOptions(
-                stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
-            ),
+            ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
         ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
@@ -636,13 +637,13 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fexp2=FExp2Options(stage_product=2),
             flog2=FLog2Options(stage_normalize=1, stage_pack=1, stage_product_final=1),
             fsort=FSortOptions(),
-            ffma=FFmaOptions(stage_decode=1, stage_normalize=1, stage_pack=1),
+            ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
         ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
@@ -653,11 +654,12 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e6m18,
+            fadd=FAddOptions(stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fexp2=FExp2Options(),
             flog2=FLog2Options(stage_normalize=1, stage_product_final=1),
             fsort=FSortOptions(),
-            ffma=FFmaOptions(stage_input=1, stage_align=1, stage_normalize=1, stage_pack=1),
+            ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
         ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
