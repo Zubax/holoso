@@ -33,7 +33,7 @@ from holoso import (
 )
 from synth.flows import FlowId
 
-from ._examples import SPECS, ekf1_stateful, imu_frame_transform, polar, rigid_body_rates
+from ._examples import SPECS, ekf1_stateful, imu_fusion, polar, rigid_body_rates
 
 F_e6m18 = FloatFormat(6, 18)
 F_e8m36 = FloatFormat(8, 36)
@@ -131,16 +131,17 @@ def _ekf1_stateful_kernel() -> Callable[..., object]:
     return ekf1_stateful.Ekf1().update
 
 
-def _imu_frame_transform_kernel() -> Callable[..., object]:
-    # Off-catalogue: the shaped matrix/vector ports have no scalar-lane SPEC, so this stateless kernel is referenced
-    # directly rather than through the cosim registry.
-    return imu_frame_transform.transform
-
-
 def _rigid_body_rates_kernel() -> Callable[..., object]:
     # Off-catalogue: the shaped matrix/vector ports have no scalar-lane SPEC (the cosim registry drives the
     # rigid_body_scalar wrapper instead); the matrix synthesizes the shipped example circuit directly.
     return rigid_body_rates.update
+
+
+def _imu_fusion_kernel() -> Callable[..., object]:
+    # The bundled example's realistic-config kernel -- what examples/imu_fusion.py ships. SPEC.make_kernel instead
+    # uses an oracle-safe reset and clamp/clip overrides that fold different constants into different RTL, so the
+    # rows pass this explicitly.
+    return imu_fusion.ImuFusion().update
 
 
 def _to_polar_kernel() -> Callable[..., object]:
@@ -456,75 +457,6 @@ TARGETS: list[SynthTarget] = [
         ),
         kernel=_ekf1_stateful_kernel,
     ),
-    # imu_frame_transform: a stack of static 3x3 matrix products -- the widest, most multiply-heavy datapath in the
-    # suite -- off-catalogue (matrix/vector ports have no scalar-lane SPEC). Two datapaths per flow: the plain
-    # fmul+fadd expansion, and the ffma-contracted form where each dot-product multiply-accumulate fuses into a single
-    # rounding. Stage knobs are the measured lean-start closure per (flow, datapath).
-    SynthTarget(
-        kernel=_imu_frame_transform_kernel,
-        flow=FlowId.YOSYS_ECP5,
-        target_frequency_MHz=100,
-        ops=op_config(
-            F_e6m18,
-            fadd=FAddOptions(stage_decode=1),
-            fmul=FMulOptions(stage_product=1),
-            fmul_ilog2=FMulILog2Options(stage_decode=1),
-        ),
-        name="imu_frame_transform_e6m18",
-    ),
-    SynthTarget(
-        kernel=_imu_frame_transform_kernel,
-        flow=FlowId.DIAMOND_ECP5,
-        target_frequency_MHz=100,
-        ops=op_config(F_e6m18, fadd=FAddOptions(stage_input=1)),
-        name="imu_frame_transform_e6m18",
-    ),
-    SynthTarget(
-        kernel=_imu_frame_transform_kernel,
-        flow=FlowId.VIVADO_ARTIX7,
-        target_frequency_MHz=150,
-        ops=op_config(
-            F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOptions(stage_input=1),
-        ),
-        name="imu_frame_transform_e6m18",
-    ),
-    SynthTarget(
-        kernel=_imu_frame_transform_kernel,
-        flow=FlowId.YOSYS_ECP5,
-        target_frequency_MHz=100,
-        ops=op_config(
-            F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_pack=1),
-            fmul=FMulOptions(stage_product=1),
-            ffma=FFmaOptions(stage_product=1, stage_decode=1, stage_normalize=1, stage_pack=1),
-        ),
-        name="imu_frame_transform_e6m18_fma",
-    ),
-    SynthTarget(
-        kernel=_imu_frame_transform_kernel,
-        flow=FlowId.DIAMOND_ECP5,
-        target_frequency_MHz=100,
-        ops=op_config(
-            F_e6m18,
-            fadd=FAddOptions(stage_normalize=1),
-            fmul=FMulOptions(stage_output=1),
-            ffma=FFmaOptions(stage_product=1, stage_normalize=1, stage_pack=1),
-        ),
-        name="imu_frame_transform_e6m18_fma",
-    ),
-    SynthTarget(
-        kernel=_imu_frame_transform_kernel,
-        flow=FlowId.VIVADO_ARTIX7,
-        target_frequency_MHz=150,
-        ops=op_config(
-            F_e6m18,
-            fmul=FMulOptions(stage_product=1),
-            ffma=FFmaOptions(stage_product=1, stage_normalize=1),
-        ),
-        name="imu_frame_transform_e6m18_fma",
-    ),
     # polar: two off-catalogue 2-vector CORDIC kernels (no scalar-lane SPEC). to_polar fuses atan2+hypot into one
     # CORDIC; from_polar coalesces sin+cos.
     SynthTarget(
@@ -626,6 +558,109 @@ TARGETS: list[SynthTarget] = [
         FlowId.VIVADO_ARTIX7,
         150,
         op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions()),
+    ),
+    # imu_fusion: the fusion capstone -- three norm/rsqrt chains (flog2/fexp2/fdiv, one feeding the coarse
+    # alignment), the sorter-backed clamp, and real gate branches over the heaviest register pressure in the
+    # matrix, in the plain and the ffma-contracted datapaths. Measured lean-start closure per flow. On yosys both
+    # rows share one wall: the flog2 Horner pmul, whose >18-bit operands auto-tile into DSP slices combined by an
+    # unregistered fabric adder -- flog2 stage_product=2 registers that partial-product reduction (the sanctioned
+    # wide-multiplicand grid split; MULT18 rises 15 -> ~20 of 28 and stays routable). Deepening normshift splits
+    # past 1 consistently loses on both ECP5 tools (the front level is a fanout-~50 select cone a register cannot
+    # shorten); output-side decoupling wins instead -- flog2 stage_normalize_output on diamond-plain, fadd/ffma
+    # stage_output where the terminal cone runs into the register-file steering.
+    for_example(
+        "imu_fusion",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
+            fexp2=FExp2Options(stage_product=2),
+            flog2=FLog2Options(stage_input=1, stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
+            fsort=FSortOptions(),
+        ),
+        kernel=_imu_fusion_kernel,
+    ),
+    for_example(
+        "imu_fusion",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fexp2=FExp2Options(stage_product=2),
+            flog2=FLog2Options(stage_normalize=1, stage_normalize_output=1, stage_pack=1, stage_product_final=1),
+            fsort=FSortOptions(),
+        ),
+        kernel=_imu_fusion_kernel,
+    ),
+    for_example(
+        "imu_fusion",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fexp2=FExp2Options(),
+            flog2=FLog2Options(stage_normalize=1, stage_product_final=1),
+            fsort=FSortOptions(),
+        ),
+        kernel=_imu_fusion_kernel,
+    ),
+    for_example(
+        "imu_fusion",
+        FlowId.YOSYS_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_pack=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
+            fexp2=FExp2Options(stage_product=2),
+            flog2=FLog2Options(stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
+            fsort=FSortOptions(),
+            ffma=FFmaOptions(
+                stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+            ),
+        ),
+        kernel=_imu_fusion_kernel,
+        name="imu_fusion_e6m18_fma",
+    ),
+    for_example(
+        "imu_fusion",
+        FlowId.DIAMOND_ECP5,
+        100,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
+            fexp2=FExp2Options(stage_product=2),
+            flog2=FLog2Options(stage_normalize=1, stage_pack=1, stage_product_final=1),
+            fsort=FSortOptions(),
+            ffma=FFmaOptions(stage_decode=1, stage_normalize=1, stage_pack=1),
+        ),
+        kernel=_imu_fusion_kernel,
+        name="imu_fusion_e6m18_fma",
+    ),
+    for_example(
+        "imu_fusion",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(
+            F_e6m18,
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fexp2=FExp2Options(),
+            flog2=FLog2Options(stage_normalize=1, stage_product_final=1),
+            fsort=FSortOptions(),
+            ffma=FFmaOptions(stage_input=1, stage_align=1, stage_normalize=1, stage_pack=1),
+        ),
+        kernel=_imu_fusion_kernel,
+        name="imu_fusion_e6m18_fma",
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
     for_example("kepler", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),

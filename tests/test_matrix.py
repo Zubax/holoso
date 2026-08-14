@@ -20,7 +20,7 @@ from holoso import FFmaOptions, FloatFormat, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._mir import lower as lower_to_mir
 
-from ._examples import ImuFusion, imu_fusion
+from ._examples import _FUSION_ACCEL_CAL, _FUSION_GYRO_CAL, ImuFusion
 from ._modelref import default_mir, default_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude, strip_locations
 
@@ -743,9 +743,10 @@ def test_imu_fusion_example_matches_python(contract_fma: bool) -> None:
         ImuFusion().update, _fusion_options(fmt, contract_fma), name="imu_fusion_lockstep"
     ).numerical_model.elaborate()
     reference = ImuFusion()
-    inv_g = np.linalg.inv(imu_fusion.GYRO_CAL)
-    inv_a = np.linalg.inv(imu_fusion.ACCEL_CAL)
-    temp_bias = imu_fusion.TEMP_MODEL @ np.array([1.0, 25.0, 625.0])
+    inv_g = np.linalg.inv(_FUSION_GYRO_CAL)
+    inv_a = np.linalg.inv(_FUSION_ACCEL_CAL)
+    cal = [float(v) for v in (*_FUSION_GYRO_CAL.flatten(), *_FUSION_ACCEL_CAL.flatten())]
+    temp_bias = reference.temp_model @ np.array([1.0, 25.0, 625.0])
     rng = np.random.default_rng(0xF0510)
     for age in range(60):
         rate = rng.uniform(-1.0, 1.0, 3)
@@ -756,15 +757,22 @@ def test_imu_fusion_example_matches_python(contract_fma: bool) -> None:
             rate = np.array([40.0, 0.0, 0.0])  # trips the sticky clip latch for the rest of the run
         row = [
             float(fmt.decode(fmt.encode(float(v))))
-            for v in (*(inv_g @ (rate + temp_bias)), *(inv_a @ accel), 25.0, 0.05)
+            for v in (*(inv_g @ (rate + temp_bias)), *(inv_a @ accel), *cal, 25.0, 0.05)
         ]
         got = _drive_fusion(model, row)
-        want, want_valid = reference.update(*row)
+        want, want_valid = reference.update(
+            np.array(row[:3]),
+            np.array(row[3:6]),
+            np.array(row[6:15]).reshape(3, 3),
+            np.array(row[15:24]).reshape(3, 3),
+            row[24],
+            row[25],
+        )
         assert bool(got["out_1"]) == bool(want_valid) and bool(got["state_gyro_clip"]) == reference.gyro_clip, age
         for name, value in (
             *((f"out_0_{k}", want[k]) for k in range(3)),
-            *((f"state_b_{k}", reference.b[k]) for k in range(3)),
-            *((f"state_q_{k}", reference.q[k]) for k in range(4)),
+            *((f"state_bias_{k}", reference.bias[k]) for k in range(3)),
+            *((f"state_attitude_{k}", reference.attitude[k]) for k in range(4)),
         ):
             assert abs(got[name] - float(value)) < 1e-8, (age, name, got[name], value)
     assert bool(got["state_gyro_clip"])
@@ -772,20 +780,22 @@ def test_imu_fusion_example_matches_python(contract_fma: bool) -> None:
 
 def test_imu_fusion_static_tilt_converges_toward_the_analytic_attitude() -> None:
     # An independent landmark, not a lockstep: consistent static samples of a 10-degree pitch (generated through
-    # the inverse sensor model) must pull the shipped identity reset toward the analytic tilt quaternion. The
-    # complementary filter's bias channel makes the tail decay slow (time constant kp/ki), so the pin is
-    # substantial progress plus a residual bound, never exact convergence.
+    # the inverse sensor model) coarse-align the estimate on the first update, and over a long run the fine
+    # correction must hold it near the analytic tilt quaternion instead of drifting away.
     fmt = FloatFormat(8, 36)
+    shipped = ImuFusion()
     model = holoso.synthesize(
-        ImuFusion().update, _fusion_options(fmt, False), name="imu_fusion_tilt"
+        shipped.update, _fusion_options(fmt, False), name="imu_fusion_tilt"
     ).numerical_model.elaborate()
     pitch = np.deg2rad(10.0)
     f_body = np.array([-np.sin(pitch), 0.0, np.cos(pitch)]) * 9.80665
     row = [
         float(v)
         for v in (
-            *(np.linalg.inv(imu_fusion.GYRO_CAL) @ (imu_fusion.TEMP_MODEL @ np.array([1.0, 25.0, 625.0]))),
-            *(np.linalg.inv(imu_fusion.ACCEL_CAL) @ f_body),
+            *(np.linalg.inv(_FUSION_GYRO_CAL) @ (shipped.temp_model @ np.array([1.0, 25.0, 625.0]))),
+            *(np.linalg.inv(_FUSION_ACCEL_CAL) @ f_body),
+            *_FUSION_GYRO_CAL.flatten(),
+            *_FUSION_ACCEL_CAL.flatten(),
             25.0,
             0.02,
         )
@@ -793,10 +803,58 @@ def test_imu_fusion_static_tilt_converges_toward_the_analytic_attitude() -> None
     for _ in range(600):
         got = _drive_fusion(model, row)
     q_true = np.array([np.cos(pitch / 2.0), 0.0, np.sin(pitch / 2.0), 0.0])
-    q_est = np.array([got[f"state_q_{k}"] for k in range(4)])
+    q_est = np.array([got[f"state_attitude_{k}"] for k in range(4)])
     assert abs(float(np.linalg.norm(q_est)) - 1.0) < 1e-9  # the clipped dot below would hide a non-unit estimate
     angle_error = 2.0 * np.arccos(min(1.0, abs(float(q_est @ q_true))))
     assert angle_error < 0.1 * pitch, angle_error
+
+
+def test_imu_fusion_coarse_alignment_runs_only_on_an_accepted_upright_first_sample() -> None:
+    # The guarded arms of the coarse alignment: an antipodal first sample is accepted for the output but must not
+    # align (the shortest arc degenerates), and a rejected first sample forfeits alignment entirely, so a later
+    # accepted sample takes the fine-correction arm and creeps instead of snapping. The unguarded arm snaps the
+    # analytic tilt quaternion in a single transaction.
+    fmt = FloatFormat(8, 36)
+    shipped = ImuFusion()
+    design = holoso.synthesize(shipped.update, _fusion_options(fmt, False), name="imu_fusion_align")
+    inv_g = np.linalg.inv(_FUSION_GYRO_CAL)
+    inv_a = np.linalg.inv(_FUSION_ACCEL_CAL)
+    temp_bias = shipped.temp_model @ np.array([1.0, 25.0, 625.0])
+
+    def row_of(f_body: np.ndarray) -> list[float]:
+        return [
+            float(v)
+            for v in (
+                *(inv_g @ temp_bias),
+                *(inv_a @ f_body),
+                *_FUSION_GYRO_CAL.flatten(),
+                *_FUSION_ACCEL_CAL.flatten(),
+                25.0,
+                0.02,
+            )
+        ]
+
+    def attitude_of(got: dict[str, float]) -> np.ndarray:
+        return np.array([got[f"state_attitude_{k}"] for k in range(4)])
+
+    pitch = np.deg2rad(10.0)
+    tilted = np.array([-np.sin(pitch), 0.0, np.cos(pitch)]) * 9.80665
+    identity = np.array([1.0, 0.0, 0.0, 0.0])
+    q_true = np.array([np.cos(pitch / 2.0), 0.0, np.sin(pitch / 2.0), 0.0])
+
+    got = _drive_fusion(design.numerical_model.elaborate(), row_of(np.array([0.0, 0.0, -9.80665])))
+    assert bool(got["out_1"]) and float(np.linalg.norm(attitude_of(got) - identity)) < 1e-9
+
+    model = design.numerical_model.elaborate()
+    got = _drive_fusion(model, row_of(np.array([0.0, 0.0, 4.0 * 9.80665])))
+    assert not bool(got["out_1"]) and float(np.linalg.norm(attitude_of(got) - identity)) < 1e-9
+    got = _drive_fusion(model, row_of(tilted))
+    creep = 2.0 * np.arccos(min(1.0, abs(float(attitude_of(got) @ identity))))
+    assert 0.0 < creep < 0.05 * pitch, creep
+
+    got = _drive_fusion(design.numerical_model.elaborate(), row_of(tilted))
+    snap = 2.0 * np.arccos(min(1.0, abs(float(attitude_of(got) @ q_true))))
+    assert snap < 1e-6, snap
 
 
 def test_imu_fusion_lever_arm_compensation_cancels_the_centripetal_signal() -> None:
@@ -809,13 +867,15 @@ def test_imu_fusion_lever_arm_compensation_cancels_the_centripetal_signal() -> N
     ).numerical_model.elaborate()
     shipped = ImuFusion()
     w = np.array([0.0, 0.0, 2.0])
-    centripetal = np.cross(w, np.cross(w, shipped.lever_arm_m))
+    centripetal = np.cross(w, np.cross(w, shipped.lever_arm))
     f_body = np.array([0.0, 0.0, 9.80665]) + centripetal
     row = [
         float(v)
         for v in (
-            *(np.linalg.inv(imu_fusion.GYRO_CAL) @ (w + imu_fusion.TEMP_MODEL @ np.array([1.0, 25.0, 625.0]))),
-            *(np.linalg.inv(imu_fusion.ACCEL_CAL) @ f_body),
+            *(np.linalg.inv(_FUSION_GYRO_CAL) @ (w + shipped.temp_model @ np.array([1.0, 25.0, 625.0]))),
+            *(np.linalg.inv(_FUSION_ACCEL_CAL) @ f_body),
+            *_FUSION_GYRO_CAL.flatten(),
+            *_FUSION_ACCEL_CAL.flatten(),
             25.0,
             0.02,
         )

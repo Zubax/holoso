@@ -21,7 +21,6 @@ from ._modelref import bounded, default_options, format_edge_bits, log_uniform_p
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
 import ekf1_stateless as ekf1_stateless  # noqa: E402
-import imu_frame_transform as imu_frame_transform  # noqa: E402  # synth matrix only; matrix/vector I/O has no scalar SPEC
 import kepler  # noqa: E402
 import madd  # noqa: E402
 from nco import Nco  # noqa: E402
@@ -36,6 +35,8 @@ from equal_temperament import equal_temperament as equal_temperament  # noqa: E4
 from fir import Fir4  # noqa: E402
 from flux_observer import FluxObserver  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
+import imu_fusion as imu_fusion  # noqa: E402  # synth matrix; it synthesizes the shipped realistic-config kernel
+from imu_fusion import ImuFusion as ImuFusion  # noqa: E402
 from iq_oscillator import IqOscillator  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from lfsr16 import Lfsr16  # noqa: E402
@@ -228,8 +229,7 @@ class ExampleSpec:
     operators: Callable[[OperatorOptions], OperatorOptions] = lambda ops: ops
     # The Python-reference accuracy contract, keyed by output port name (`out_*`/`state_*`): a listed float lane
     # is compared within its OutputTolerance allowance; an absent lane (and every bool lane) must match the float64
-    # reference bit-for-bit. `None` excludes the kernel from the generic scalar reference harness: public VECTOR
-    # state cannot be read back through per-element scalar attributes.
+    # reference bit-for-bit. `None` excludes the kernel from the generic reference harness.
     reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -445,6 +445,216 @@ def _draw_rigid_body(rng: np.random.Generator) -> InputVector:
                 tuple(bounded(rng, -1.0, 1.0) for _ in range(3)),
                 bounded(rng, 1e-3, 1e-2),
             )
+
+
+_IMU_FUSION_MEAS = ("gyro_0", "gyro_1", "gyro_2", "accel_0", "accel_1", "accel_2")
+_IMU_FUSION_CAL = tuple(f"{m}_{i}_{j}" for m in ("gyro_cal", "accel_cal") for i in range(3) for j in range(3))
+_IMU_FUSION_INPUTS = (*_IMU_FUSION_MEAS, *_IMU_FUSION_CAL, "temperature", "dt")
+# The catalogue's own demonstration calibration (a 90-degree-yaw mounting rotation composed with scale and
+# misalignment corrections), matching main()'s local demo values. Every driven row carries it verbatim; the
+# matrices are runtime inputs of the kernel, but sweeping them off nominal is only done by the pinned edge sets
+# below (a format-rail element would overflow the state exactly like a rail rate).
+_FUSION_GYRO_CAL = np.array([[0.002, -1.002, 0.001], [0.998, 0.001, -0.002], [0.001, 0.002, 1.001]])
+_FUSION_ACCEL_CAL = np.array([[-0.001, -0.999, 0.002], [1.003, -0.002, 0.001], [-0.002, 0.001, 0.997]])
+_IMU_FUSION_CAL_LANES = dict(
+    zip(_IMU_FUSION_CAL, [float(v) for v in (*_FUSION_GYRO_CAL.flatten(), *_FUSION_ACCEL_CAL.flatten())])
+)
+_IMU_FUSION_G = 9.80665
+
+
+def _fresh_imu_fusion() -> Callable[..., object]:
+    """
+    The oracle-safe catalogue configuration, distinct from the shipped realistic defaults (the synth rows pass the
+    shipped kernel explicitly): a tiny bias clamp so every valid row's bias step overshoots rail to rail and the
+    clamp resynchronizes `bias` bit-exactly, and a small clip threshold so the clip row latches on tame dynamics
+    (a full-scale rate would make the backward-difference angular acceleration amplify the benign host-vs-model
+    summation-order noise past the oracle budgets). The attitude needs no override: the manual sequence opens
+    with an accepted coarse-alignment row whose strong rates twist the estimate straight off the near-zero lanes.
+    """
+    return ImuFusion(bias_limit=0.0005, gyro_limit=3.0).update
+
+
+# One continuous history crafted offline by simulating the reference and frozen as literals (the generator lives
+# in the design history): an accepted coarse-alignment row first (in-band accel off unit magnitude with strong
+# sub-clip rates, so the aligned attitude immediately twists and every lane stays away from zero), three freefall
+# rows walking the attitude further, eight in-band rows alternating between two world-frame gravity targets (the
+# filter keeps chasing, so every output lane stays far from zero while the bias rails on every row and both clamp
+# arms fire), then the high-magnitude reject, the clip latch, a hot row, and a cold row. Every in-band row keeps
+# all |out| lanes above ~0.6 m/s^2 -- below that, the benign BLAS-vs-left-fold summation difference outgrows the
+# eel oracle's relative budget on the g-scale operands.
+_IMU_FUSION_MANUAL = [
+    {**dict(zip((*_IMU_FUSION_MEAS, "temperature", "dt"), values)), **_IMU_FUSION_CAL_LANES}
+    for values in [
+        (
+            -2.61717584486634,
+            -2.0522804524157405,
+            -2.4716780098458457,
+            -5.598102556376175,
+            -4.81866182149115,
+            6.022439209791113,
+            25.0,
+            0.125,
+        ),
+        (-0.3162390153313255, -0.297270259847738, 0.35823635333586945, 0.0, 0.0, 0.0, 25.0, 0.3),
+        (-0.3162390153313255, -0.297270259847738, 0.35823635333586945, 0.0, 0.0, 0.0, 25.0, 0.3),
+        (-0.3162390153313255, -0.297270259847738, 0.35823635333586945, 0.0, 0.0, 0.0, 25.0, 0.3),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.00151356541689,
+            -5.044460882024048,
+            -2.559792077992834,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            2.957177211541472,
+            -6.035906761547455,
+            7.158172840906673,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.00843360157175,
+            -5.131970618841172,
+            -2.3543281285198994,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            3.081717836542828,
+            -5.892084096288197,
+            7.2252006509938385,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.011592919771621,
+            -5.212948280506902,
+            -2.1557009490155705,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            3.2067913012550733,
+            -5.746619593474721,
+            7.287686484093886,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.011588072182313,
+            -5.290627337884657,
+            -1.9555565219149302,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            3.332351581738178,
+            -5.599558970526353,
+            7.345606512118715,
+            25.0,
+            0.125,
+        ),
+        (
+            0.00488170800417128,
+            -0.006294822056824952,
+            -0.004675116946943577,
+            -16.01679690978565,
+            -10.729956984022571,
+            -3.5080056067154195,
+            25.0,
+            0.01,
+        ),
+        (
+            0.001489072441967786,
+            -3.594112805498327,
+            0.008490745792761925,
+            1.9330238899639955,
+            -1.6755254550131902,
+            2.9789982682069183,
+            25.0,
+            0.25,
+        ),
+        (
+            -0.011339616787281058,
+            -0.020480427369373753,
+            0.03379100946206396,
+            4.368418274251716,
+            -2.1018157900454635,
+            0.6502566518220327,
+            85.0,
+            0.25,
+        ),
+        (
+            -0.011223811824432859,
+            -0.019673619295098217,
+            0.029481089960454177,
+            -3.3150183899305126,
+            -2.6585436891322347,
+            2.4408521380638146,
+            -40.0,
+            0.01,
+        ),
+    ]
+]
+
+_FUSION_CONFIG = ImuFusion()  # only the shipped temperature-model default is read, never mutated
+_FUSION_INV_GYRO_CAL = np.linalg.inv(_FUSION_GYRO_CAL)
+_FUSION_INV_ACCEL_CAL = np.linalg.inv(_FUSION_ACCEL_CAL)
+# The frozen post-manual attitude's body-frame image of the world direction the random rows aim near.
+_FUSION_ACCEL_DIR = np.array([0.5431691419956042, -0.6765799876735006, 0.497198957625099])
+
+
+def _draw_imu_fusion(rng: np.random.Generator) -> InputVector:
+    """
+    Every random row is DECISIVELY below the acceptance band (0.50..0.85 g near the frozen direction): the gate
+    rejects it, freezing `b` bit-exactly, and every output lane stays proportionate to its operand scale, which is
+    what keeps the eel oracle's relative budget satisfied even at a raised HOLOSO_TEST_RANDOM_COUNT (validated to
+    x10; far beyond that, the slow attitude creep can still push a lane over -- the same documented residual
+    fragility as rigid_body's). The valid arm's coverage lives in the manual prefix. The raw samples are generated
+    through the inverse sensor model so the rates stay tiny and the temperature term stays exactly compensated.
+    """
+    w = rng.uniform(0.003, 0.01, 3) * rng.choice([-1.0, 1.0], 3)
+    angle = rng.uniform(-0.05, 0.05)
+    c, sn = math.cos(angle), math.sin(angle)
+    d = np.array(
+        [
+            c * _FUSION_ACCEL_DIR[0] - sn * _FUSION_ACCEL_DIR[1],
+            sn * _FUSION_ACCEL_DIR[0] + c * _FUSION_ACCEL_DIR[1],
+            _FUSION_ACCEL_DIR[2],
+        ]
+    )
+    f = d * (rng.uniform(0.50, 0.85) * _IMU_FUSION_G)
+    temperature = rng.uniform(15.0, 45.0)
+    dt = float(np.exp(rng.uniform(np.log(0.02), np.log(0.08))))
+    t_powers = np.array([1.0, temperature, temperature * temperature])
+    g_s = _FUSION_INV_GYRO_CAL @ (w + _FUSION_CONFIG.temp_model @ t_powers)
+    f_s = _FUSION_INV_ACCEL_CAL @ f
+    row = dict(zip((*_IMU_FUSION_MEAS, "temperature", "dt"), [float(v) for v in (*g_s, *f_s, temperature, dt)]))
+    return {**row, **_IMU_FUSION_CAL_LANES}
 
 
 SPECS = [
@@ -1057,10 +1267,41 @@ SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
+        name="imu_fusion",
+        inputs=_IMU_FUSION_INPUTS,
+        make_kernel=_fresh_imu_fusion,
+        # The gyro/accel 3-vector parameters decompose into scalar leaf ports the catalogue drives directly,
+        # but the generic reference harness binds its reference positionally with scalars, which a vector-parameter
+        # kernel cannot accept -- the bespoke twin in test_example_reference carries the budgets instead
+        # (the flux_observer pattern).
+        reference=None,
+        nominal=_IMU_FUSION_MANUAL[4],  # the first bias-railing in-band row
+        manual=_IMU_FUSION_MANUAL,
+        draw_random=_draw_imu_fusion,
+        # The accelerometer lanes take the full format rails: an overflowed magnitude compares as infinity, the
+        # gate rejects the row, and the ZKF infinity identities keep every flag clear. The gyro, temperature, and
+        # dt lanes are pinned instead: a rail rate or temperature would overflow the state through the rate matrix
+        # or the T^2 bias term and silently zero the quaternion (inf * 0 == +0), after which the renormalization
+        # divides by zero on every later row; dt also divides the backward difference, so it must stay positive.
+        edge_overrides={
+            "gyro_0": (0.0, 0.25, -0.25, 3.5, -3.5),
+            "gyro_1": (0.0, 0.25, -0.25, 3.5, -3.5),
+            "gyro_2": (0.0, 0.25, -0.25, 3.5, -3.5),
+            **{lane: (0.0, 1.0, -1.0, 0.5, -0.5) for lane in _IMU_FUSION_CAL},
+            "temperature": (-40.0, 0.0, 25.0, 85.0, 125.0),
+            "dt": (1e-3, 1e-2, 0.25),
+        },
+        edge_values=_WIDE_EDGES,
+        formats=(_FMT, FloatFormat(6, 18)),  # the deep datapath, and the narrow one the synth matrix ships
+        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    ),
+    ExampleSpec(
         name="ekf1_stateful",
         inputs=("dt", "u_shunt", "di_dt"),
         make_kernel=_fresh_stateful_ekf,
-        reference=None,  # carried x/P_urt VECTOR state has no per-element scalar attribute the harness could read
+        # No spec-owned error budget has been derived for the carried covariance recurrence (cancellation-prone
+        # P products through 1/S), so the generic reference harness is not driven; test_verify pins one step.
+        reference=None,
         nominal={"dt": 1e-2, "u_shunt": 0.5, "di_dt": 0.5},
         manual=[  # a short measurement sequence threaded through the carried state
             {"dt": 1e-2, "u_shunt": 0.0, "di_dt": 0.0},
@@ -1079,7 +1320,7 @@ SPECS = [
         name="flux_observer",  # stateful 2-vector I/O driven through its decomposed scalar port lanes
         inputs=_FLUX_OBSERVER_INPUTS,
         make_kernel=_fresh_flux_observer,
-        reference=None,  # carried flux/i_last VECTOR state has no per-element scalar attribute the harness could read
+        reference=None,  # the ndarray u_ab/i_ab parameters cannot bind from scalar rows; a bespoke twin covers it
         nominal=_flux_row(1e-4, (1.0, 0.5), (2.0, -1.0)),
         manual=_FLUX_OBSERVER_MANUAL,
         draw_random=_draw_flux_observer,

@@ -21,6 +21,7 @@ The example specs are shared with the cosimulation suite via `_examples`: the co
 import dataclasses
 import itertools
 from collections.abc import Callable, Mapping
+from typing import Any
 
 import numpy as np
 import pytest
@@ -66,6 +67,30 @@ def _family_of(value: object) -> type:
     return float
 
 
+def _state_leaves(instance: object) -> dict[str, Any]:
+    """
+    Public attribute leaves named exactly as the compiler decomposes state slots (a scalar keeps its name, an
+    aggregate flattens row-major) -- the forward direction of `_eeloracle.instance_leaves`. The name alone cannot
+    prove which attribute a port belongs to (aggregate `q` and scalar `q_0` both mint `q_0`), so a name minted
+    twice is dropped and its lookup fails loudly instead of comparing against a guess.
+    """
+    leaves: dict[str, Any] = {}
+    ambiguous: set[str] = set()
+    for attr, value in vars(instance).items():
+        if attr.startswith("_"):
+            continue
+        pairs = (
+            [(attr + "".join(f"_{key}" for key in path), leaf) for path, leaf in flatten_value(value)]
+            if isinstance(value, (list, tuple, np.ndarray))
+            else [(attr, value)]
+        )
+        for name, leaf in pairs:
+            if name in leaves:
+                ambiguous.add(name)
+            leaves[name] = leaf
+    return {name: leaf for name, leaf in leaves.items() if name not in ambiguous}
+
+
 def _assert_model_matches_reference(
     label: str,
     model: holoso.NumericalSimulator,
@@ -89,13 +114,14 @@ def _assert_model_matches_reference(
         quantized = {name: _quantize(value, fmt) for name, value in row.items()}
         got = model.run(*[quantized[port.name] for port in model.inputs])
         result = reference(*[quantized[name] for name in inputs])
-        return_leaves = {port_name(path): leaf for path, leaf in flatten_value(result)}
+        return_leaves = {} if result is None else {port_name(path): leaf for path, leaf in flatten_value(result)}
+        state_leaves = {} if instance is None else _state_leaves(instance)
         expected: dict[str, float | bool | int] = {}
         for port in model.outputs:
             if port.name.startswith(_STATE_PREFIX):
-                value = getattr(instance, port.name[len(_STATE_PREFIX) :])
-                assert not isinstance(value, (list, tuple, np.ndarray)), f"{label}: unexpected vector public state"
-                expected[port.name] = value
+                name = port.name[len(_STATE_PREFIX) :]
+                assert name in state_leaves, f"{label}: port {port.name} matches no unambiguous public state leaf"
+                expected[port.name] = state_leaves[name]
             else:
                 assert port.name in return_leaves, f"{label}: port {port.name} has no leaf in {sorted(return_leaves)}"
                 expected[port.name] = return_leaves[port.name]
@@ -117,8 +143,8 @@ def _assert_model_matches_reference(
             if family is bool:
                 assert bool(got_value) == bool(want), f"{label} {row} {port.name}: {bool(got_value)} != {bool(want)}"
             elif family is int:
-                assert isinstance(got_value, holoso.IntValue) and isinstance(want, int)
-                assert int(got_value) == want, f"{label} {row} {port.name}: {int(got_value)} != {want}"
+                assert isinstance(got_value, holoso.IntValue) and isinstance(want, (int, np.integer))
+                assert int(got_value) == int(want), f"{label} {row} {port.name}: {int(got_value)} != {int(want)}"
             else:
                 budget = tolerances.get(port.name)
                 atol = 0.0 if budget is None else budget.allowance(fmt, float(want), age)
@@ -178,6 +204,62 @@ def test_flux_observer_matches_python_reference() -> None:
             budget = budgets.get(name)
             atol = 0.0 if budget is None else budget.allowance(fmt, want, age)
             assert within(got[name], want, 0.0, atol), f"flux_observer[{age}] {name}: {got[name]} vs {want} ({atol=:g})"
+
+
+def test_imu_fusion_matches_python_reference() -> None:
+    """
+    The generic suite skips imu_fusion (`reference=None`: its gyro/accel VECTOR parameters cannot bind from scalar
+    rows), so this bespoke twin reconstructs the vectors and maps every port onto the reference instance over the
+    full catalogue sequence. Budgets: the q lanes are an isometric recurrence (linear growth at the per-step
+    rounding count, unit-norm floor); the b lanes are bounded absolutely by the catalogue clamp, whose rails
+    resynchronize them bit-exactly (floor = the clamp); the out lanes inherit the carried q error at the ~1 g
+    operand scale. The valid and gyro_clip bool lanes must match bit-for-bit.
+    """
+    spec = next(spec for spec in SPECS if spec.name == "imu_fusion")
+    fmt = spec.formats[0]
+    model = holoso.synthesize(spec.make_kernel(), spec.options(fmt), name=spec.name).numerical_model.elaborate()
+    reference = spec.make_kernel()
+    instance = reference.__self__  # type: ignore[attr-defined]
+    budgets = {
+        **{f"state_attitude_{i}": OutputTolerance(ulps=64, growth_ulps=32, floor=1.0) for i in range(4)},
+        **{f"state_bias_{i}": OutputTolerance(ulps=16, growth_ulps=4, floor=instance.bias_limit) for i in range(3)},
+        **{f"out_0_{i}": OutputTolerance(ulps=64, growth_ulps=16, floor=10.0) for i in range(3)},
+    }
+    for age, row in enumerate(spec.reference_vectors()):
+        quantized = {name: _quantize(value, fmt) for name, value in row.items()}
+        got = {
+            port.name: value
+            for port, value in zip(model.outputs, model.run(*[quantized[port.name] for port in model.inputs]))
+        }
+        result = reference(
+            np.array([quantized[f"gyro_{k}"] for k in range(3)]),
+            np.array([quantized[f"accel_{k}"] for k in range(3)]),
+            np.array([[quantized[f"gyro_cal_{i}_{j}"] for j in range(3)] for i in range(3)]),
+            np.array([[quantized[f"accel_cal_{i}_{j}"] for j in range(3)] for i in range(3)]),
+            quantized["temperature"],
+            quantized["dt"],
+        )
+        assert isinstance(result, tuple)
+        out, valid = result
+        assert bool(got["out_1"]) == bool(valid) and bool(got["state_gyro_clip"]) == bool(instance.gyro_clip), age
+        if age == 0:
+            # The catalogue opens with an accepted coarse-alignment row -- the property the frozen sequence exists
+            # to cover. Acceptance takes the first-sample arm (the bias integrator must not run), and the attitude
+            # must snap to the measured gravity direction: with these rates one propagation step from identity can
+            # reach at most |w|*dt < 0.6 rad, so a larger angle proves the alignment arm fired.
+            assert bool(valid), "the opening catalogue row must be accepted"
+            assert all(b == 0.0 for b in instance.bias)
+            assert 2.0 * np.arccos(min(1.0, abs(float(instance.attitude[0])))) > 0.7
+        expected = {
+            **{f"out_0_{k}": float(out[k]) for k in range(3)},
+            **{f"state_bias_{k}": float(instance.bias[k]) for k in range(3)},
+            **{f"state_attitude_{k}": float(instance.attitude[k]) for k in range(4)},
+        }
+        for name, want in expected.items():
+            atol = budgets[name].allowance(fmt, want, age)
+            assert within(
+                float(got[name]), want, 0.0, atol
+            ), f"imu_fusion[{age}] {name}: {float(got[name])} vs {want} ({atol=:g})"
 
 
 class _StateLeafAheadOfComputed:
