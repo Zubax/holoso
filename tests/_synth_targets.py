@@ -54,6 +54,7 @@ def op_config(
     fsincos: FSincosOptions | None = None,
     fatan2: FAtan2Options | None = None,
     fsort: FSortOptions | None = None,
+    wmultiplier: int | None = None,
 ) -> Options:
     """
     The Options for fmt; pass an options object to give an operator stage knobs, else that operator is lean.
@@ -75,6 +76,7 @@ def op_config(
             fsort=fsort,
         ),
         ffmt=fmt,
+        wmultiplier=wmultiplier,
     )
 
 
@@ -512,7 +514,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
         ),
         name="rigid_body_rates_e6m18",
@@ -626,10 +628,11 @@ TARGETS: list[SynthTarget] = [
             fadd=FAddOptions(stage_input=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
-            fexp2=FExp2Options(stage_product=2),
+            fexp2=FExp2Options(stage_product=3),
             flog2=FLog2Options(stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
             fsort=FSortOptions(),
             ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+            wmultiplier=18,
         ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
