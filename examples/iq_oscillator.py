@@ -6,6 +6,7 @@ accumulator, as in `nco.py`, while its outputs are the float pair I = cos(phase)
 
 import math
 from pathlib import Path
+from nco import Nco
 import holoso
 
 
@@ -15,23 +16,21 @@ class IqOscillator:
     and drifts. The finest frequency step is one unit per tick, 1/(dt*2**wphase): 233 nHz at a 1 ms tick.
 
     The conversion of frequency*dt into accumulator units saturates at the integer rail rather than at the phase
-    modulus, so the aliasing below is faithful only while |frequency*dt| stays inside the native word.
+    modulus, so the aliasing is faithful only while |frequency*dt| stays inside the native word.
     """
 
     def __init__(self, *, wphase: int = 32) -> None:
-        self._mask = (1 << wphase) - 1
         self._lsb_per_turn = float(1 << wphase)
         self._radians_per_lsb = math.tau / self._lsb_per_turn
-        self.phase: int = 0
+        self.nco = Nco(wphase=wphase, wout=wphase)
 
     def tick(self, frequency: float, dt: float, phase_offset: float, /) -> tuple[float, float]:
         assert frequency * dt < self._lsb_per_turn
-        # Masking a signed increment is what a sampled oscillator does: negative runs backwards, past-Nyquist folds.
-        increment = round(frequency * dt * self._lsb_per_turn) & self._mask
-        self.phase = (self.phase + increment) & self._mask
+        # A signed increment is what a sampled oscillator wants: negative runs backwards, past-Nyquist folds.
+        increment = round(frequency * dt * self._lsb_per_turn)
         # In turns, and added on the way out: the phase control word of a classic NCO.
-        offset = round(phase_offset * self._lsb_per_turn) & self._mask
-        angle = float((self.phase + offset) & self._mask) * self._radians_per_lsb
+        offset = round(phase_offset * self._lsb_per_turn)
+        angle = float(self.nco.tick(increment, offset)) * self._radians_per_lsb
         return math.cos(angle), math.sin(angle)  # one sincos firing computes both, so Q rides along free
 
 
