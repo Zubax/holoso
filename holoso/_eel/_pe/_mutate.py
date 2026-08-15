@@ -25,6 +25,7 @@ from ._values import (
     AllocationState,
     BoundMethod,
     Opaque,
+    RecordValue,
     ResidualScalar,
     SequenceValue,
     StaticScalar,
@@ -37,7 +38,7 @@ from ._values import (
 if TYPE_CHECKING:
     from ._interpret import Ctx, Frame, Interpreter, Sink
 
-_AGGREGATE = (SequenceValue, TensorValue)
+_CONTAINERS = (SequenceValue, TensorValue)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +77,9 @@ def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: Sink,
         if prefix is not None:
             _state_store(interp, stmt, prefix, rhs, frame, sink, ctx)
             return
-    if not isinstance(root_value, _AGGREGATE):
+    if isinstance(root_value, RecordValue):
+        reject(origin, "a record is immutable and its fields share its storage; rebind a fresh value instead")
+    if not isinstance(root_value, _CONTAINERS):
         if isinstance(stmt.path[0], AttrSel):
             reject(origin, "an attribute store is only supported on the kernel's own component objects")
         reject(origin, f"{_aggregate.a_kind(root_value)} does not support item assignment")
@@ -148,7 +151,7 @@ def _state_store(
         interp.check_mark(frame, stmt.mark, origin)
     slot_value = interp.readable(frame.env[key], origin)
     if rest:
-        if not isinstance(slot_value, _AGGREGATE):
+        if not isinstance(slot_value, _CONTAINERS):
             reject(origin, f"{spell_state(key)} is a scalar state attribute; it has no elements")
         frame.env[key] = _element_store(interp, stmt, spell_state(key), slot_value, rest, rhs, frame, sink)
         interp.note_state_write()
@@ -158,7 +161,7 @@ def _state_store(
     if isinstance(stmt, AugStore):
         if isinstance(slot_value, Opaque):
             reject(origin, _describe_opaque(slot_value))
-        if isinstance(slot_value, _AGGREGATE):
+        if isinstance(slot_value, _CONTAINERS):
             frame.env[key] = aug_aggregate(interp, origin, spell_state(key), slot_value, stmt.op, rhs, frame, sink)
             interp.note_state_write()
             interp.bump_root_epoch(key)
@@ -169,6 +172,8 @@ def _state_store(
     match value:
         case BoundMethod():
             reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
+        case RecordValue():
+            reject(origin, f"a record cannot be installed into {spell_state(key)}; store its fields separately")
         case SequenceValue() | TensorValue():
             if same(value, slot_value):
                 return  # rebinding the attribute to its own current tree is Python's no-op
@@ -292,7 +297,7 @@ def _element_store(
         value = rhs
     if isinstance(value, BoundMethod):
         reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
-    if isinstance(value, (SequenceValue, TensorValue)):
+    if isinstance(value, (SequenceValue, TensorValue, RecordValue)):
         reject(origin, "storing an aggregate into a container is not supported; rebind or build with a comprehension")
     assert isinstance(value, (StaticScalar, ResidualScalar, Opaque))
     leaf = _express.tensor_leaf(interp, origin, site.holder.family, value, sink)
@@ -393,7 +398,7 @@ def aug_aggregate(
     interp: Interpreter,
     origin: Origin,
     name: str,
-    current: SequenceValue | TensorValue,
+    current: SequenceValue | TensorValue | RecordValue,
     op: BinaryOp,
     rhs: Value,
     frame: Frame,
@@ -402,6 +407,8 @@ def aug_aggregate(
     match current:
         case SequenceValue():
             reject(origin, f"the operator `{op.value}=` is not supported on a sequence; build a numpy array instead")
+        case RecordValue():
+            reject(origin, f"the operator `{op.value}=` is not supported on a record")
         case TensorValue():
             if op not in (BinaryOp.ADD, BinaryOp.SUB, BinaryOp.MUL, BinaryOp.DIV):
                 reject(origin, f"the operator `{op.value}=` is not supported on arrays yet")

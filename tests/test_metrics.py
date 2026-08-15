@@ -1,8 +1,8 @@
 """
 Steering/area non-regression gate for the LIR build.
 
-Every currently-synthesizing example (all except `finite_set_current_controller`, which the
-frontend cannot yet lower) is built to LIR and measured on the metrics that bound the synthesized fabric (here
+Every currently-synthesizing example is built to LIR and measured on the metrics that bound the synthesized
+fabric (here
 "straight-line" means the pure-float flat path: single block, no boolean fabric -- an if-converted kernel can be
 single-block without being straight-line in this sense): the wide and
 boolean register counts, the per-port read-mux fan-in and per-register write-select fan-in (the steering cost that
@@ -58,6 +58,7 @@ from schmitt_trigger import SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 from biquad import Biquad  # noqa: E402
+from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
@@ -65,6 +66,7 @@ _FMT = FloatFormat(8, 36)
 # Kernels the shared default operator set cannot lower take their spec-style adjustment here.
 _EXTRA_OPERATORS: dict[str, Callable[[OperatorOptions], OperatorOptions]] = {
     "imu_fusion": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    "finite_set_current_controller": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
 }
 
 _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
@@ -88,6 +90,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "fir": lambda: Fir4().__call__,
     "biquad": lambda: Biquad().__call__,
     "ekf1_stateless": lambda: update_x_P,
+    "finite_set_current_controller": lambda: FiniteSetCurrentController().__call__,
     "ekf1_stateful": lambda: Ekf1().update,
 }
 
@@ -223,6 +226,11 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=104, last_pc=104, max_block_span=104
     ),
     "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=16, last_pc=16, max_block_span=16),
+    # The capability-probe controller: records, reductions, reshape, dtype conversions, and a branchy scan in one
+    # kernel, so it gates the whole new-frontend surface against fabric regressions.
+    "finite_set_current_controller": Metrics(
+        False, nreg=23, bnreg=4, steering=68, copies=12, min_ii=160, last_pc=204, max_block_span=108
+    ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
     # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.
     "imu_fusion": Metrics(

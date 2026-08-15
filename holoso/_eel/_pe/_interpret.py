@@ -18,8 +18,9 @@ Ownership events ride value flow: a desugared temp is a linear conduit, so the f
 temp MOVES it and any re-read is the second handle, judged at the read itself regardless of where the value
 lands; local-name reads stay innocent, their events firing where the value gains a persistent place.
 Sequence-to-tensor conversions and sequence slices copy scalar leaves (exact); tensor-to-tensor derivations
-conservatively share over the SOURCE allocation (a storage-equivalence token) -- except np.array of an
-array, an independent copy on the host and the A5 explicit-copy spelling, which stays unique. A scalar
+(slices, transposes, reshapes, family-preserving asarray) conservatively share over the SOURCE allocation
+(a storage-equivalence token) -- except np.array of an array (an independent copy on the host and the A5
+explicit-copy spelling) and any family-CHANGING dtype conversion (the host copies), which mint fresh. A scalar
 answers rank zero so library stubs can interrogate rank. An annotation never converts an array family: the
 runtime object would keep its dtype, so a mismatch rejects rather than modeling a fiction.
 
@@ -54,7 +55,7 @@ from ..._errors import HolosoError, SynthesisError
 from .._annotations import accepted_stypes, annotation_stype, unaliased
 from .._desugar import desugar
 from .._ir import *
-from .._names import indexed_names, public_slot, state_port_name
+from .._names import indexed_names, port_name, public_slot, state_port_name
 from . import _aggregate, _express, _mutate, _ops
 from ._ownership import allocations, borrow, escape, release, share
 from ._reject import reattribute, reject
@@ -78,12 +79,15 @@ from ._state import (
     spec_leaves,
     spell_state,
 )
+from ._record import field_annotations, inadmissible_reason
 from ._values import (
+    AGGREGATES,
     Allocation,
     AllocationState,
     ExpansionBudget,
     Opaque,
     RangeValue,
+    RecordValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
@@ -103,7 +107,7 @@ type _EnvKey = str | int | StateKey
 
 type _LoopKey = tuple[Origin, int]
 
-_AGGREGATE = (SequenceValue, TensorValue)
+_AGGREGATE = AGGREGATES
 
 _RETURN_KEY = "<return>"
 
@@ -251,7 +255,7 @@ class _Unjoinable:
 class _Moved:
     """A spent temp conduit: the value went on to a persistent place, so a re-read is a second handle."""
 
-    value: SequenceValue | TensorValue
+    value: SequenceValue | TensorValue | RecordValue
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,7 +267,7 @@ class _SlotAlias:
     are the ones CPython's live handle no longer shows.
     """
 
-    value: SequenceValue | TensorValue
+    value: SequenceValue | TensorValue | RecordValue
     root: StateKey
     epoch: int
 
@@ -295,7 +299,7 @@ _MISSING = object()
 
 
 def _rewrap(
-    value: SequenceValue | TensorValue,
+    value: SequenceValue | TensorValue | RecordValue,
     moved: bool,
     a_alias: _SlotAlias | None,
     b_alias: _SlotAlias | None,
@@ -522,18 +526,66 @@ class Interpreter:
         annotation = frame.annotations.get(param.name, _MISSING)
         if annotation is _MISSING:
             reject(param.origin, f"the parameter {param.name!r} requires a type annotation")
+        params, value = self._decompose(param, param.name, annotation, [], f"parameter {param.name!r}")
+        frame.env[param.name] = value
+        return params
+
+    def _decompose(
+        self, param: Param, name: str, annotation: object, stack: list[type], what: str
+    ) -> tuple[list[Param], Value]:
+        """One classification order shared with _conform_value: scalar, tuple, record, then array."""
+        annotation = _unaliased(annotation, param.origin, what)
         stype = annotation_stype(annotation)
         if stype is not None:
-            frame.env[param.name] = ResidualScalar(stype, LocalRef(param.origin, param.name))
-            return [Param(param.origin, param.name, param.kind, stype)]
-        annotated = _aggregate.array_annotation_shape(annotation, param.origin, f"parameter {param.name!r}")
+            return [Param(param.origin, name, param.kind, stype)], ResidualScalar(stype, LocalRef(param.origin, name))
+        if typing.get_origin(annotation) is tuple:
+            args = typing.get_args(annotation)
+            if len(args) == 2 and args[1] is Ellipsis:
+                reject(param.origin, f"{what}: a variadic tuple[X, ...] has no fixed arity to decompose into ports")
+            if not args:
+                reject(param.origin, f"{what}: an empty annotation decomposes to no ports")
+            params: list[Param] = []
+            items: list[Value] = []
+            for position, arg in enumerate(args):
+                arg_params, item = self._decompose(param, f"{name}_{position}", arg, stack, what)
+                params.extend(arg_params)
+                items.append(item)
+            return params, SequenceValue(tuple(items), Allocation(AllocationState.ESCAPED))
+        if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+            reason = inadmissible_reason(annotation)
+            if reason is not None:
+                reject(param.origin, f"{what}: {reason}")
+            if any(annotation is seen for seen in stack):
+                reject(param.origin, f"{what}: the record annotation {annotation.__name__} is recursive")
+            annotations = self.record_annotations(annotation, param.origin)
+            if not annotations:
+                reject(param.origin, f"{what}: an empty annotation decomposes to no ports")
+            params = []
+            fields: list[Value] = []
+            for field_name, field_annotation in annotations.items():
+                field_params, item = self._decompose(
+                    param, f"{name}_{field_name}", field_annotation, [*stack, annotation], what
+                )
+                params.extend(field_params)
+                fields.append(item)
+            return params, RecordValue(annotation, tuple(fields), Allocation(AllocationState.ESCAPED))
+        annotated = _aggregate.array_annotation_shape(annotation, param.origin, what)
         if annotated is None:
-            reject(param.origin, f"the annotation of parameter {param.name!r} is not supported yet")
+            reject(param.origin, f"the annotation of {what} is not supported yet")
         shape, family = annotated
-        leaf_names = indexed_names(param.name, shape)
+        leaf_names = indexed_names(name, shape)
         leaves = tuple(ResidualScalar(family, LocalRef(param.origin, leaf)) for leaf in leaf_names)
-        frame.env[param.name] = TensorValue(shape, family, leaves, Allocation(AllocationState.ESCAPED))
-        return [Param(param.origin, leaf, param.kind, family) for leaf in leaf_names]
+        tensor = TensorValue(shape, family, leaves, Allocation(AllocationState.ESCAPED))
+        return [Param(param.origin, leaf, param.kind, family) for leaf in leaf_names], tensor
+
+    def record_annotations(self, cls: type, origin: Origin) -> dict[str, object]:
+        try:
+            return field_annotations(cls)
+        except Exception as error:
+            reject(origin, f"the field annotations of {cls.__name__} cannot be evaluated: {error}")
+
+    def conform_annotation(self, value: Value, annotation: object, origin: Origin, sink: Sink, what: str) -> Value:
+        return self._conform_value(value, annotation, origin, sink, what, root=True)
 
     def fresh(self) -> int:
         index = self._next_temp
@@ -644,7 +696,9 @@ class Interpreter:
                     share(result)
         frame.env[key] = result
 
-    def _alias_of(self, frame: Frame, value: Expr, result: SequenceValue | TensorValue) -> _SlotAlias | None:
+    def _alias_of(
+        self, frame: Frame, value: Expr, result: SequenceValue | TensorValue | RecordValue
+    ) -> _SlotAlias | None:
         if isinstance(value, AttrRead):
             root = self._slot_tree(frame, result)
             if root is not None:
@@ -788,6 +842,16 @@ class Interpreter:
             if isinstance(a, (StaticScalar, ResidualScalar)) and isinstance(b, (StaticScalar, ResidualScalar)):
                 joined[key] = self._join_scalars(origin, self._describe_key(key), a, b, then_sinks, else_sinks)
                 continue
+            if isinstance(a, Opaque) or isinstance(b, Opaque):
+                keep_pair = allocations_match(a, b)
+                admitted = self._merge(origin, key, a, b, then_sinks, else_sinks, keep_pair)
+                if admitted is not None:
+                    if not keep_pair and isinstance(admitted, _AGGREGATE):
+                        share(a)
+                        share(b)
+                        share(admitted)
+                    joined[key] = admitted
+                    continue
             joined[key] = _Unjoinable(self._describe_key(key))
         return joined
 
@@ -857,14 +921,53 @@ class Interpreter:
                     leaves.append(leaf)
                 family = next((leaf.stype for leaf in leaves if not isinstance(leaf, Opaque)), a.family)
                 return TensorValue(a.shape, family, tuple(leaves), a.allocation if keep else self._minted(a, b))
+            case RecordValue(), RecordValue():
+                if a.cls is not b.cls:
+                    return None
+                fields: list[Value] = []
+                for x, y in zip(a.fields, b.fields, strict=True):
+                    field = self._merge(origin, key, x, y, then_sinks, else_sinks, keep)
+                    if field is None:
+                        return None
+                    fields.append(field)
+                return RecordValue(a.cls, tuple(fields), a.allocation if keep else self._minted(a, b))
             case (StaticScalar() | ResidualScalar()), (StaticScalar() | ResidualScalar()):
                 return self._join_scalars(origin, self._describe_key(key), a, b, then_sinks, else_sinks)
             case Opaque(), Opaque():
-                return a if same(a, b) else None
+                if a.value is b.value:
+                    return a
+                left = self._admitted_record(type(a.value), a, origin, then_sinks)
+                right = self._admitted_record(type(a.value), b, origin, else_sinks)
+                if left is None or right is None:
+                    return None
+                return self._merge(origin, key, left, right, then_sinks, else_sinks, keep)
+            case RecordValue(), Opaque():
+                right = self._admitted_record(a.cls, b, origin, else_sinks)
+                return None if right is None else self._merge(origin, key, a, right, then_sinks, else_sinks, keep)
+            case Opaque(), RecordValue():
+                left = self._admitted_record(b.cls, a, origin, then_sinks)
+                return None if left is None else self._merge(origin, key, left, b, then_sinks, else_sinks, keep)
             case RangeValue(), RangeValue():
                 return a if same(a, b) else None
             case _:
                 return None
+
+    def _admitted_record(self, cls: type, opaque: Opaque, origin: Origin, sinks: list[Sink]) -> RecordValue | None:
+        """
+        A captured instance as a mergeable record, or None; an inadmissible class or FIELD stays lazily
+        poisoned like any unjoinable pair -- only a read convicts.
+        """
+        if not (type(opaque.value) is cls and dataclasses.is_dataclass(cls)):
+            return None
+        if inadmissible_reason(cls) is not None:
+            return None
+        piece = self._piece(sinks)
+        try:
+            record = self._admit_record(opaque.name, cls, opaque.value, origin, piece)
+        except SynthesisError:
+            return None
+        self._spread(sinks, piece)
+        return record
 
     def _minted(self, a: Value, b: Value) -> Allocation:
         """A keep=False merge product is ONE of the two runtime objects; state-ness rides along with it."""
@@ -887,7 +990,7 @@ class Interpreter:
             reject(
                 origin,
                 f"{binding.description} holds branch values the compiler cannot merge: scalars join freely, and "
-                "aggregates join only when every arm agrees in kind, length, and shape",
+                "aggregates join only when every arm agrees in kind, length, shape, and record class",
             )
         if isinstance(binding, _SlotAlias):
             if self.root_epochs.get(binding.root, 0) != binding.epoch:
@@ -951,6 +1054,10 @@ class Interpreter:
         finally:
             release(held)
         current = self._meet_lanes(stmt.origin, frame, breaks, current, sinks if not escaped else None)
+        if stmt.target.name.startswith("for$"):
+            # A desugared tuple target's hidden binding is dead past the loop (only the body-head unpack reads
+            # it); leaving it bound would leak the internal name into an enclosing residual loop's carried set.
+            frame.env.pop(stmt.target.name, None)
         return _Flow(escaped, current)
 
     def _counted(self, stmt: For, iterable: RangeValue, span: range | None, frame: Frame, sink: Sink) -> list[_Exit]:
@@ -1336,12 +1443,17 @@ class Interpreter:
                     self._commit_site(stmt.origin, frame, sink, [])
                     return
                 reject(stmt.origin, "the kernel returns no value (None) but its annotation declares one")
-            reject(stmt.origin, f"the captured object {value.name!r} cannot be returned")
+            declared = _unaliased(annotation, stmt.origin, "the return annotation")
+            record_like = (
+                isinstance(declared, type) and dataclasses.is_dataclass(declared) and isinstance(value.value, declared)
+            )
+            if not record_like:
+                reject(stmt.origin, f"the captured object {value.name!r} cannot be returned")
         conformed = self._conform_value(value, annotation, stmt.origin, sink, "the returned value", root=True)
         match conformed:
             case StaticScalar() | ResidualScalar():
                 self._commit_site(stmt.origin, frame, sink, [((0,), conformed)])
-            case SequenceValue() | TensorValue():
+            case SequenceValue() | TensorValue() | RecordValue():
                 for allocation in allocations(conformed):
                     owner = self.state_owners.get(allocation)
                     if owner is not None:
@@ -1371,6 +1483,15 @@ class Interpreter:
         decls = tuple(OutputDecl(path, leaf.stype) for path, leaf in rows)
         first = self._outputs is None
         if first:
+            named: dict[str, _aggregate.LeafPath] = {}
+            for path, _ in rows:
+                name = port_name(path)
+                other = named.get(name)
+                if other is not None:
+                    reject(origin, f"the returned leaves {other} and {path} decompose to the same port {name!r}")
+                if name in ("out_valid", "out_ready"):
+                    reject(origin, f"the returned leaf {path} decomposes to the reserved port name {name!r}")
+                named[name] = path
             self._outputs = decls
         elif decls != self._outputs:
             reject(origin, "this return does not match the kernel's other return sites in shape or type")
@@ -1437,6 +1558,32 @@ class Interpreter:
             return dataclasses.replace(value, items=items)
         if shaped is list:
             reject(origin, "list annotations are not supported; annotate a tuple")
+        if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+            reason = inadmissible_reason(annotation)
+            if reason is not None:
+                if not root:
+                    return value
+                reject(origin, f"{what}: {reason}")
+            if isinstance(value, RecordValue) and value.cls is annotation:
+                annotations = self.record_annotations(annotation, origin)
+                fields = tuple(
+                    self._conform_value(
+                        item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root
+                    )
+                    for (name, field_annotation), item in zip(annotations.items(), value.fields, strict=True)
+                )
+                return dataclasses.replace(value, fields=fields)
+            if isinstance(value, Opaque) and isinstance(value.value, annotation):
+                if not root:
+                    return value  # frozen-folding reads keep serving the captured instance
+                if type(value.value) is annotation:
+                    return self._admit_record(what, annotation, value.value, origin, sink)
+                reject(
+                    origin,
+                    f"{what} is a {type(value.value).__name__}, a subclass of the annotated "
+                    f"{annotation.__name__}; projecting it to the base would silently drop its extra fields",
+                )
+            reject(origin, f"{what} is not a {annotation.__name__} record")
         annotated = _aggregate.array_annotation_shape(annotation, origin, what)
         if annotated is not None:
             shape, family = annotated
@@ -1454,12 +1601,28 @@ class Interpreter:
         if not root:
             return value
         if isinstance(value, (StaticScalar, ResidualScalar)):
-            reject(origin, "the return annotation does not match the returned scalar")
+            reject(origin, f"the annotation of {what} does not match the scalar it received")
         reject(
             origin,
-            "the return annotation is not supported yet; "
-            "annotate with scalars, tuple[...], or a fixed-shape jaxtyping array",
+            f"the annotation of {what} is not supported yet; "
+            "annotate with scalars, tuple[...], a fixed-shape jaxtyping array, or a frozen dataclass",
         )
+
+    def _admit_record(self, what: str, cls: type, raw: object, origin: Origin, sink: Sink) -> RecordValue:
+        """Reads via getattr, so slots=True instances admit the same way."""
+        annotations = self.record_annotations(cls, origin)
+        fields = tuple(
+            self._conform_value(
+                self.snapshot.admit(f"{what}.{name}", getattr(raw, name), origin),
+                annotation,
+                origin,
+                sink,
+                f"the field {name!r} of {what}",
+                root=True,
+            )
+            for name, annotation in annotations.items()
+        )
+        return RecordValue(cls, fields, Allocation(AllocationState.ESCAPED))
 
     def conform(self, value: Value, declared: ScalarType, origin: Origin, sink: Sink, what: str) -> Scalar:
         if isinstance(value, Opaque):
@@ -1606,6 +1769,8 @@ class Interpreter:
                 origin, f"{base.name}.{attr}", found.fget, [base], {}, frame, sink, positional_only=False
             )
         if isinstance(found, types.MemberDescriptorType):
+            if dataclasses.is_dataclass(type(base.value)) and inadmissible_reason(type(base.value)) is None:
+                return self.snapshot.admit(f"{base.name}.{attr}", getattr(base.value, attr), origin)
             # Named apart from the general descriptor refusal: __slots__ made an ordinary attribute a descriptor
             # behind the user's back, so the generic message would name nothing they wrote.
             reject(
@@ -1722,6 +1887,11 @@ class Interpreter:
         recognized = (
             annotation_stype(declared) is not None
             or typing.get_origin(declared) in (tuple, list)
+            or (
+                isinstance(declared, type)
+                and dataclasses.is_dataclass(declared)
+                and inadmissible_reason(declared) is None
+            )
             or _aggregate.array_annotation_shape(declared, site, "the return annotation") is not None
         )
         if recognized:

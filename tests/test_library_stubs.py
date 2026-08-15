@@ -18,9 +18,10 @@ from jaxtyping import Float64
 import holoso
 from holoso import FAddOptions, OperatorOptions, Options, UnsupportedConstruct
 from holoso._eel import lower
-from holoso._eel._lib import Array, ScalarFunction, resolve
+from holoso._eel._lib import Array, Lifted, Reshape, ScalarFunction, resolve
 from holoso._eel._ir import BinaryOp, ScalarType
 from holoso._eel._lib._linalg import cross, inv, matmul, norm, transpose
+from holoso._eel._lib._reductions import amax, amin, mean, sum_
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS, spd_matrix
@@ -47,6 +48,7 @@ from holoso._eel._lib._intrinsics import (
 )
 from holoso._eel._lib._pow import pow_, pow_chain_float, pow_chain_int, pow_reciprocal
 from holoso._eel._lib._numpy import (
+    polyval,
     acos,
     acosh,
     asin,
@@ -88,6 +90,12 @@ def test_registry_resolves_the_expected_externals() -> None:
     for power in (pow, math.pow, np.power, np.pow, np.float_power):
         assert resolve(power) == power_entry, power
     assert resolve(np.matmul) == Array(matmul) == resolve(BinaryOp.MATMUL)  # type: ignore[arg-type]
+    assert resolve(np.sum) == Array(sum_) == resolve(np.ndarray.sum)  # type: ignore[arg-type]
+    assert resolve(np.mean) == Array(mean) == resolve(np.ndarray.mean)  # type: ignore[arg-type]
+    assert resolve(np.max) == Array(amax) == resolve(np.amax) == resolve(np.ndarray.max)  # type: ignore[arg-type]
+    assert resolve(np.min) == Array(amin) == resolve(np.amin) == resolve(np.ndarray.min)  # type: ignore[arg-type]
+    assert resolve(np.reshape) == Reshape() == resolve(np.ndarray.reshape)
+    assert resolve(np.polyval) == Array(polyval, sequences=frozenset({0}))  # type: ignore[arg-type]
     # A transpose is a non-copying derivation on the host, so its match carries the storage-equivalence flag.
     assert resolve(np.transpose) == Array(transpose, derives=True)  # type: ignore[arg-type]
     assert resolve(np.dot) == Array(matmul)  # type: ignore[arg-type]
@@ -123,10 +131,11 @@ _FLOAT_ONLY: list[object] = [
     np.rint,  # the one rounding spelling whose own answer on an integer is a float
 ]  # fmt: skip
 _INT_AND_FLOAT: list[object] = [
-    abs, np.abs, np.absolute, min, max, np.sign,
+    min, max, np.sign,
     round, np.round, np.around, math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix,
     pow, math.pow, np.power, np.float_power, BinaryOp.POW,
 ]  # fmt: skip
+_LIFTED: list[object] = [abs, np.abs, np.absolute]  # array-capable; math.fabs/np.fabs stay scalar-only
 _INT_ONLY: list[object] = [int.bit_count, np.bitwise_count]
 
 
@@ -147,6 +156,11 @@ def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
         match = resolve(external)
         assert isinstance(match, ScalarFunction), external
         assert match.domains == [ScalarType.INT], external
+    for external in _LIFTED:
+        match = resolve(external)
+        assert isinstance(match, Lifted), external
+        assert match.scalar.domains == [ScalarType.INT, ScalarType.FLOAT], external
+    assert isinstance(resolve(math.fabs), ScalarFunction) and isinstance(resolve(np.fabs), ScalarFunction)
     for external in (
         np.transpose,
         np.ravel,
@@ -401,6 +415,39 @@ def test_cross_inlining_matches_the_host() -> None:
     assert assert_hir_matches_reference(
         lower(kernel2, DEFAULT_UNROLL_MAX_TRIPS).hir, reference2, vectors2, label="cross2"
     ) == len(vectors2)
+
+
+def test_reduction_stubs_match_numpy() -> None:
+    rng = np.random.default_rng(2021)
+    arrays = [
+        rng.uniform(-4.0, 4.0, 1),
+        rng.uniform(-4.0, 4.0, 4),
+        rng.uniform(-4.0, 4.0, (2, 3)),
+        np.array([3]),
+        np.array([[3, -7], [5, 9]]),
+    ]
+    for a in arrays:
+        assert sum_(a) == np.sum(a) and amin(a) == np.min(a) and amax(a) == np.max(a), a
+        assert np.isclose(mean(a), np.mean(a), rtol=1e-14, atol=0.0), a
+        if a.dtype.kind in "iu":
+            assert all(isinstance(r, np.integer) for r in (sum_(a), amin(a), amax(a))), a
+    for s in (np.float64(2.5), np.int64(-3), np.True_):
+        assert sum_(s) == np.sum(s) and isinstance(sum_(s), type(np.sum(s))), s  # type: ignore[arg-type]
+        assert amin(s) == np.min(s) and type(amin(s)) is type(np.min(s)), s  # type: ignore[arg-type]
+        assert amax(s) == np.max(s) and type(amax(s)) is type(np.max(s)), s  # type: ignore[arg-type]
+        assert mean(s) == np.mean(s) and isinstance(mean(s), np.floating), s  # type: ignore[arg-type]
+
+
+def test_polyval_stub_matches_numpy() -> None:
+    cases: list[tuple[object, object]] = [
+        (np.array([2.0, -1.0, 0.5]), 1.5),
+        ((3, 0.5), 2),
+        ((), 2.0),
+        (np.array([1, 2, 3]), 2),
+        (np.array([[1.0, 2.0], [3.0, 4.0]]), 0.5),  # 2-D coefficients follow numpy's own rowwise fold
+    ]
+    for p, x in cases:
+        assert np.allclose(polyval(p, x), np.polyval(p, x), rtol=1e-14, atol=0.0), (p, x)  # type: ignore[arg-type,call-overload]
 
 
 def test_norm_stub_matches_numpy() -> None:

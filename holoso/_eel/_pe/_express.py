@@ -2,6 +2,7 @@
 
 import dataclasses
 import inspect
+import math
 import types
 from typing import TYPE_CHECKING
 
@@ -9,17 +10,20 @@ import numpy as np
 
 from .._annotations import annotation_stype, host_type
 from .._ir import *
-from .._lib import Array, Conversion, Factory, Operand, ScalarFunction, resolve
+from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, resolve
 from . import _aggregate, _ops
 from ._ownership import share
+from ._record import inadmissible_reason as record_inadmissible
 from ._reject import reject
 from ._snapshot import describe_opaque as _describe_opaque, nan_payload, tensor_of
 from ._state import mro_attr
 from ._values import (
+    AGGREGATES,
     Allocation,
     BoundMethod,
     Opaque,
     RangeValue,
+    RecordValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
@@ -32,7 +36,9 @@ if TYPE_CHECKING:
     from ._interpret import Frame, Interpreter, Sink
 
 
-_AGGREGATE = (SequenceValue, TensorValue)
+_AGGREGATE = AGGREGATES
+
+_VALUE_KINDS = (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, RecordValue, BoundMethod, RangeValue)
 
 # ------------------------------------------------------------------ attribute reads
 
@@ -41,6 +47,17 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
     match base_value:
         case TensorValue():
             return _tensor_attr(interp, origin, base_value, attr, frame, sink)
+        case RecordValue(cls=cls, fields=fields):
+            names = [field.name for field in dataclasses.fields(cls)]
+            if attr not in names:
+                if callable(getattr(cls, attr, None)):
+                    reject(origin, f"calling methods on a record value is not supported; {attr!r} is not a field")
+                reject(origin, f"the record {cls.__name__} has no field {attr!r}")
+            item = fields[names.index(attr)]
+            if isinstance(item, _AGGREGATE):
+                share(base_value)
+                share(item)
+            return item
         case SequenceValue():
             if attr in ("shape", "ndim") or resolve(getattr(np.ndarray, attr, None)) is not None:
                 reject(
@@ -85,9 +102,9 @@ def _tensor_attr(
         return SequenceValue(dims, Allocation())
     descriptor = getattr(np.ndarray, attr, None)
     found = resolve(descriptor)
-    if isinstance(found, Array):
-        if inspect.isdatadescriptor(descriptor):
-            return _array_call(interp, origin, f".{attr}", found, [tensor], frame, sink)
+    if isinstance(found, Array) and inspect.isdatadescriptor(descriptor):
+        return _array_call(interp, origin, f".{attr}", found, [tensor], frame, sink)
+    if isinstance(found, (Array, Reshape)):
         share(tensor)
         return BoundMethod(tensor, attr)
     reject(origin, f"an array has no supported attribute {attr!r}")
@@ -102,7 +119,7 @@ def scalar(value: Value, origin: Origin) -> Scalar:
             return value
         case Opaque():
             reject(origin, _describe_opaque(value))
-        case SequenceValue() | TensorValue() | RangeValue():
+        case SequenceValue() | TensorValue() | RecordValue() | RangeValue():
             reject(origin, f"{_aggregate.a_kind(value)} cannot be used as a scalar here")
         case BoundMethod():
             reject(origin, f"{_aggregate.a_kind(value)} can only be called")
@@ -306,16 +323,34 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         case ScalarFunction() as match:
             values = _operand_arguments(interp, node, callee.name, frame, sink)
             return _scalar_call(interp, node.origin, callee.name, match, values, frame, sink)
+        case Lifted(scalar=lifted):
+            values = _operand_arguments(interp, node, callee.name, frame, sink)
+            if len(values) == 1 and isinstance(values[0], TensorValue):
+                return _lifted_call(interp, node.origin, callee.name, lifted, values[0], frame, sink)
+            if any(isinstance(value, (SequenceValue, RangeValue)) for value in values):
+                reject(
+                    node.origin,
+                    "an array operation on a Python list/tuple is not supported; build one with np.array([...])",
+                )
+            return _scalar_call(interp, node.origin, callee.name, lifted, values, frame, sink)
         case Array() as match:
             values = _positional_arguments(interp, node, callee.name, frame, sink)
+            _demand_descriptor_receiver(node.origin, callee.name, raw, values)
             return _array_call(interp, node.origin, callee.name, match, values, frame, sink)
         case Factory() as match:
             return _factory(interp, node, callee.name, match, frame, sink)
         case Conversion(copies=copies):
-            values = _operand_arguments(interp, node, callee.name, frame, sink)
-            if len(values) != 1:
-                reject(node.origin, f"{callee.name}() takes a single array-like argument")
-            return _to_tensor(interp, node.origin, callee.name, values[0], sink, copies=copies)
+            source, family = _conversion_arguments(interp, node, callee.name, frame, sink)
+            return _to_tensor(interp, node.origin, callee.name, source, sink, copies=copies, family=family)
+        case Reshape():
+            if getattr(raw, "__objclass__", None) is np.ndarray:
+                values = _operand_arguments(interp, node, callee.name, frame, sink)
+                _demand_descriptor_receiver(node.origin, callee.name, raw, values)
+                return _reshape(node.origin, callee.name, values[0], values[1:])
+            base, shape = _option_arguments(interp, node, callee.name, frame, sink, option="shape")
+            if shape is None:
+                reject(node.origin, f"{callee.name}() takes an array and a shape (an int or a tuple of ints)")
+            return _reshape(node.origin, callee.name, base, [shape])
         case None:
             pass
     if raw is float or raw is int or raw is bool:
@@ -326,8 +361,12 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         return _len(interp, node, frame, sink)
     if raw is range:
         return _range(interp, node, frame, sink)
+    if raw is enumerate:
+        return _enumerate(interp, node, frame, sink)
     if raw is list or raw is tuple:
         return _rebuild_sequence(interp, node, callee.name, frame, sink)
+    if isinstance(raw, type) and dataclasses.is_dataclass(raw):
+        return _construct_record(interp, node, callee.name, raw, frame, sink)
     resolved = _inlinable(interp, node.origin, callee.name, raw)
     if resolved is not None:
         fn, leading = resolved
@@ -417,6 +456,17 @@ def _signature_arguments(
     return positional, keywords
 
 
+def _demand_descriptor_receiver(origin: Origin, display: str, raw: object, values: list[Value]) -> None:
+    """
+    CPython rejects a non-ndarray receiver on an unbound ndarray method; a spelling that could never run
+    as its own reference must refuse rather than quietly apply the stub.
+    """
+    if getattr(raw, "__objclass__", None) is not np.ndarray:
+        return
+    if not values or not isinstance(values[0], TensorValue):
+        reject(origin, f"{display} is an unbound ndarray method, so its first argument must be an array")
+
+
 def _operator_call(
     interp: Interpreter, origin: Origin, op: BinaryOp, values: list[Value], frame: Frame, sink: Sink
 ) -> Value:
@@ -463,6 +513,26 @@ def _scalar_call(
     return apply(interp, chosen.operator, conformed, origin, sink)
 
 
+def _lifted_call(
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    match: ScalarFunction,
+    tensor: TensorValue,
+    frame: Frame,
+    sink: Sink,
+) -> TensorValue:
+    leaves: list[Scalar] = []
+    for leaf in tensor.leaves:
+        result = _scalar_call(interp, origin, display, match, [_scalar_leaf(origin, leaf)], frame, sink)
+        computed = scalar(result, origin)
+        if computed.stype is ScalarType.BOOL:
+            reject(origin, "an array must hold numbers, not booleans")
+        leaves.append(computed)
+    interp.budget.spend(len(leaves), origin, "the elementwise operation")
+    return TensorValue(tensor.shape, leaves[0].stype, tuple(leaves), Allocation())
+
+
 def _operand(value: Scalar) -> Operand:
     if isinstance(value, StaticScalar):
         const = _ops.const_value(value.const)
@@ -480,7 +550,10 @@ def _array_call(
     frame: Frame,
     sink: Sink,
 ) -> Value:
-    if any(isinstance(value, (SequenceValue, RangeValue)) for value in values):
+    if any(
+        isinstance(value, RangeValue) or (isinstance(value, SequenceValue) and position not in match.sequences)
+        for position, value in enumerate(values)
+    ):
         # Before the stub, so the rejection reads the same however the operation was spelled.
         reject(origin, "an array operation on a Python list/tuple is not supported; build one with np.array([...])")
     result = interp.inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
@@ -495,6 +568,9 @@ def _bound_method(interp: Interpreter, node: Call, method: BoundMethod, frame: F
     display = f".{method.name}"
     if isinstance(receiver, TensorValue):
         found = resolve(getattr(np.ndarray, method.name))
+        if isinstance(found, Reshape):
+            values = _operand_arguments(interp, node, display, frame, sink)
+            return _reshape(node.origin, display, receiver, values)
         assert isinstance(found, Array), "a minted method stays resolvable"
         values = _positional_arguments(interp, node, display, frame, sink)
         high = found.stub.__code__.co_argcount - 1
@@ -510,6 +586,85 @@ def _bound_method(interp: Interpreter, node: Call, method: BoundMethod, frame: F
     if len(values) != arity:
         reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
     return _scalar_call(interp, node.origin, display, scalar_found, [receiver, *values], frame, sink)
+
+
+def _option_arguments(
+    interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink, *, option: str
+) -> tuple[Value, Value | None]:
+    """
+    The non-aliasing one-option binder: exactly one positional subject, plus `option` given as the second
+    positional or as its keyword -- the shape numpy's own conversion/reshape signatures share.
+    """
+    positional: list[Value] = []
+    named: Value | None = None
+    for arg in node.args:
+        match arg:
+            case PosArg(value=value):
+                positional.append(interp.expr(value, frame, sink))
+            case StarArg(value=value):
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                positional.extend(_aggregate.splice_items(node.origin, spliced))
+            case KwArg(name=name, value=value) if name == option:
+                named = interp.expr(value, frame, sink)
+            case KwArg(name=name):
+                reject(node.origin, f"{display}() takes no keyword argument {name!r} (only {option})")
+    if len(positional) == 2 and named is None:
+        named = positional.pop()
+    if len(positional) != 1:
+        reject(node.origin, f"{display}() takes one positional argument plus an optional {option}")
+    return positional[0], named
+
+
+def _reshape(origin: Origin, display: str, base: Value, dim_values: list[Value]) -> TensorValue:
+    """
+    C-order reshape preserves the flat row-major leaf sequence: the same leaves over new dims, a derivation
+    sharing the source allocation since the host MAY answer a view.
+    """
+    if isinstance(base, SequenceValue):
+        reject(origin, "an array operation on a Python list/tuple is not supported; build one with np.array([...])")
+    if not isinstance(base, TensorValue):
+        reject(origin, f"{display}() requires an array, not {_aggregate.a_kind(base)}")
+    if len(dim_values) == 1 and isinstance(dim_values[0], SequenceValue):
+        dim_values = list(dim_values[0].items)
+    if not dim_values:
+        reject(origin, f"{display}() requires a shape (an int or a tuple of ints)")
+    dims = [_aggregate.static_index(origin, value, "a reshape dimension") for value in dim_values]
+    if any(dim < 0 for dim in dims):
+        reject(origin, f"{display}() does not support dimension inference (-1); spell the dimension explicitly")
+    if len(dims) > 2 or 0 in dims:
+        reject(origin, f"{display}() supports only non-empty 1-D and 2-D shapes, got {tuple(dims)}")
+    if math.prod(dims) != len(base.leaves):
+        reject(origin, f"cannot reshape an array of size {len(base.leaves)} into shape {tuple(dims)}")
+    share(base)
+    return TensorValue(tuple(dims), base.family, base.leaves, base.allocation)
+
+
+def _construct_record(interp: Interpreter, node: Call, display: str, cls: type, frame: Frame, sink: Sink) -> Value:
+    """
+    Structural construction: the generated __init__ never runs; arguments bind by its signature and conform
+    strictly to the field annotations.
+    """
+    reason = record_inadmissible(cls)
+    if reason is not None:
+        reject(node.origin, reason)
+    positional, keywords = _signature_arguments(interp, node, frame, sink)
+    try:
+        bound = inspect.signature(cls).bind(*positional, **keywords)
+    except TypeError as error:
+        reject(node.origin, f"the arguments do not bind: {error}")
+    bound.apply_defaults()
+    annotations = interp.record_annotations(cls, node.origin)
+    fields: list[Value] = []
+    for field in dataclasses.fields(cls):
+        value = bound.arguments[field.name]
+        if not isinstance(value, _VALUE_KINDS):
+            value = interp.snapshot.admit(f"{display}.{field.name}", value, node.origin)
+        fields.append(
+            interp.conform_annotation(
+                value, annotations[field.name], node.origin, sink, f"the field {field.name!r} of {display}()"
+            )
+        )
+    return RecordValue(cls, tuple(fields), Allocation())
 
 
 def _factory(interp: Interpreter, node: Call, display: str, match: Factory, frame: Frame, sink: Sink) -> Value:
@@ -587,6 +742,25 @@ def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> RangeVa
     return RangeValue(start, stop, step)
 
 
+def _enumerate(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> SequenceValue:
+    """
+    The pairs are an eager snapshot where CPython's iterator is lazy, so the source is shared (a mid-iteration
+    store would read stale leaves -- the conservative refusal mirrors the borrow on a directly iterated
+    aggregate), and the one-shot allocation carries the exhausted-after-one-pass semantics.
+    """
+    source, start = _option_arguments(interp, node, "enumerate", frame, sink, option="start")
+    begin = 0 if start is None else _aggregate.static_index(node.origin, start, "the enumerate start")
+    decayed = _aggregate.decay(interp.budget, source, node.origin)
+    items = _aggregate.splice_items(node.origin, decayed)
+    share(decayed)
+    pairs = tuple(
+        SequenceValue((StaticScalar(_ops.make_const(begin + position)), item), Allocation())
+        for position, item in enumerate(items)
+    )
+    interp.budget.spend(max(len(pairs), 1), node.origin, "the enumerate expansion")
+    return SequenceValue(pairs, Allocation(one_shot=True))
+
+
 def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> Value:
     values = _operand_arguments(interp, node, display, frame, sink)
     if len(values) != 1:
@@ -599,12 +773,40 @@ def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Fram
     return SequenceValue(tuple(children), Allocation())
 
 
+def _conversion_arguments(
+    interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink
+) -> tuple[Value, ScalarType | None]:
+    source, dtype = _option_arguments(interp, node, display, frame, sink, option="dtype")
+    if dtype is None:
+        return source, None
+    family = annotation_stype(dtype.value) if isinstance(dtype, Opaque) else None
+    if family is ScalarType.BOOL:
+        reject(node.origin, "an array must hold numbers, not booleans")
+    if family is None:
+        reject(node.origin, f"the dtype of {display}() must be the Python type float or int")
+    return source, family
+
+
 def _to_tensor(
-    interp: Interpreter, origin: Origin, display: str, value: Value, sink: Sink, *, copies: bool
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    value: Value,
+    sink: Sink,
+    *,
+    copies: bool,
+    family: ScalarType | None = None,
 ) -> TensorValue:
     value = _aggregate.decay(interp.budget, value, origin)
     match value:
         case TensorValue():
+            if family is not None and family is not value.family:
+                # A family change copies on the host even under asarray, hence the fresh allocation.
+                converted = tuple(
+                    tensor_leaf(interp, origin, family, leaf, sink, explicit=True) for leaf in value.leaves
+                )
+                interp.budget.spend(len(converted), origin, "the array conversion")
+                return TensorValue(value.shape, family, converted, Allocation())
             if copies:
                 return TensorValue(value.shape, value.family, value.leaves, Allocation())
             # The non-copying conversion reuses the source allocation as a storage-equivalence token,
@@ -615,14 +817,17 @@ def _to_tensor(
             if not items:
                 reject(origin, f"{display}() of an empty sequence is not supported")
             shape, leaves = _tensor_rows(origin, display, items)
-            for leaf in leaves:
-                if not isinstance(leaf, Opaque) and leaf.stype is ScalarType.BOOL:
-                    reject(origin, "an array must hold numbers, not booleans")
-            if any(isinstance(leaf, Opaque) or leaf.stype is ScalarType.FLOAT for leaf in leaves):
-                family = ScalarType.FLOAT
+            if family is None:
+                for leaf in leaves:
+                    if not isinstance(leaf, Opaque) and leaf.stype is ScalarType.BOOL:
+                        reject(origin, "an array must hold numbers, not booleans")
+                if any(isinstance(leaf, Opaque) or leaf.stype is ScalarType.FLOAT for leaf in leaves):
+                    family = ScalarType.FLOAT
+                else:
+                    family = ScalarType.INT
+                conformed = [tensor_leaf(interp, origin, family, leaf, sink) for leaf in leaves]
             else:
-                family = ScalarType.INT
-            conformed = [tensor_leaf(interp, origin, family, leaf, sink) for leaf in leaves]
+                conformed = [tensor_leaf(interp, origin, family, leaf, sink, explicit=True) for leaf in leaves]
             interp.budget.spend(len(conformed), origin, "the array conversion")
             return TensorValue(shape, family, tuple(conformed), Allocation())
         case _:
@@ -657,19 +862,34 @@ def _tensor_rows(
 
 
 def tensor_leaf(
-    interp: Interpreter, origin: Origin, family: ScalarType, leaf: Scalar | Opaque, sink: Sink
+    interp: Interpreter,
+    origin: Origin,
+    family: ScalarType,
+    leaf: Scalar | Opaque,
+    sink: Sink,
+    *,
+    explicit: bool = False,
 ) -> Scalar | Opaque:
+    """
+    `explicit` marks a spelled dtype request, which converts (bool widens, float truncates, as numpy defines)
+    where the implicit paths refuse.
+    """
     if isinstance(leaf, Opaque):
         if family is not ScalarType.FLOAT or not nan_payload(leaf.value):
             reject(origin, _describe_opaque(leaf))
         return leaf
+    if leaf.stype is family:
+        return leaf
     if leaf.stype is ScalarType.BOOL:
-        reject(origin, "an array must hold numbers, not booleans")
+        if not explicit:
+            reject(origin, "an array must hold numbers, not booleans")
+        return apply(interp, _ops.CONVERT[(ScalarType.BOOL, family)], [leaf], origin, sink)
     if family is ScalarType.FLOAT:
         return interp.as_float(leaf, origin, sink)
-    if leaf.stype is ScalarType.FLOAT:
+    assert leaf.stype is ScalarType.FLOAT and family is ScalarType.INT
+    if not explicit:
         reject(origin, "storing a float into an integer array truncates on the host; rebind a float array instead")
-    return leaf
+    return apply(interp, _ops.CONVERT[(ScalarType.FLOAT, ScalarType.INT)], [leaf], origin, sink)
 
 
 def bind_signature(
@@ -689,9 +909,7 @@ def bind_signature(
     bound.apply_defaults()
     bindings: dict[str, Value] = {}
     for name, value in bound.arguments.items():
-        if isinstance(
-            value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, BoundMethod, RangeValue)
-        ):
+        if isinstance(value, _VALUE_KINDS):
             bindings[name] = value
         else:
             bindings[name] = interp.snapshot.admit(name, value, site)  # an injected default: a plain Python object

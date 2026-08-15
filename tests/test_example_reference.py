@@ -29,7 +29,8 @@ import pytest
 import holoso
 from holoso import BoolType, FloatFormat, FloatType, IntType
 from ._examples import SPECS, ExampleSpec, InputVector, OutputTolerance
-from majority_voter import MajorityVoter  # noqa: E402  # _examples put examples/ on the path
+from finite_set_current_controller import CurrentControllerDecision, Kinematics  # noqa: E402  # examples on path
+from majority_voter import MajorityVoter  # noqa: E402
 from uart import UartTx  # noqa: E402
 from ._eeloracle import walk_instance_leaves
 from ._modelref import default_options, flatten_value, port_name, within
@@ -200,6 +201,43 @@ def test_flux_observer_matches_python_reference() -> None:
             budget = budgets.get(name)
             atol = 0.0 if budget is None else budget.allowance(fmt, want, age)
             assert within(got[name], want, 0.0, atol), f"flux_observer[{age}] {name}: {got[name]} vs {want} ({atol=:g})"
+
+
+def test_finite_set_current_controller_matches_python_reference() -> None:
+    """
+    The generic suite skips the controller (`reference=None`: the Kinematics record and ndarray parameters
+    cannot bind from scalar rows), so this bespoke twin reconstructs the record and vector arguments per row.
+    The bool switch lanes must match bit-for-bit -- the driven domain keeps the drive comparisons away from
+    near-ties, and an exact symmetric tie computes bit-equal drives on both sides, so the first-wins scan
+    picks the same candidate. The balance lanes carry the zero-mean recurrence's budget with a unit floor,
+    since a true-zero lane would make a relative budget vacuous.
+    """
+    spec = next(spec for spec in SPECS if spec.name == "finite_set_current_controller")
+    fmt = spec.formats[0]
+    model = holoso.synthesize(spec.make_kernel(), spec.options(fmt), name=spec.name).numerical_model.elaborate()
+    reference = spec.make_kernel()
+    budgets = {f"out_switch_balance_{k}": OutputTolerance(ulps=64, growth_ulps=8, floor=1.0) for k in range(3)}
+    for age, row in enumerate(spec.reference_vectors()):
+        quantized = {name: _quantize(value, fmt) for name, value in row.items()}
+        got = {
+            port.name: value
+            for port, value in zip(model.outputs, model.run(*[quantized[port.name] for port in model.inputs]))
+        }
+        decision = reference(
+            Kinematics(float(quantized["kin_pos"]), float(quantized["kin_vel"]), float(quantized["kin_accel"])),
+            np.array([quantized["i_ac_0"], quantized["i_ac_1"], quantized["i_ac_2"]]),
+            np.array([quantized["di_ac_dt_0"], quantized["di_ac_dt_1"], quantized["di_ac_dt_2"]]),
+            float(quantized["u_dc"]),
+            np.array([quantized["i_dq_ref_0"], quantized["i_dq_ref_1"]]),
+        )
+        assert isinstance(decision, CurrentControllerDecision)
+        for k in range(3):
+            assert got[f"out_switch_ac_{k}"] == decision.switch_ac[k], f"fscc[{age}] switch lane {k}"
+        for k in range(3):
+            name = f"out_switch_balance_{k}"
+            want = float(decision.switch_balance[k])
+            atol = budgets[name].allowance(fmt, want, age)
+            assert within(float(got[name]), want, 0.0, atol), f"fscc[{age}] {name}: {got[name]} vs {want} ({atol=:g})"
 
 
 def test_imu_fusion_matches_python_reference() -> None:

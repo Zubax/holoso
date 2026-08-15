@@ -134,6 +134,21 @@ def clip_free(x: np.ndarray, lo: Any, hi: Any) -> Any:
     return clip(x, lo, hi)
 
 
+@array(np.polyval, sequences=(0,))
+def polyval(p: np.ndarray, x: Any) -> Any:
+    """
+    numpy's own shape: convert the coefficients first (so a heterogeneous sequence promotes BEFORE the fold,
+    never saturating an integer partial product), then Horner over a zero seed -- which also answers the
+    empty polynomial and broadcasts a short one over an array x. A 2-D p against a broadcastable array x is
+    refused where numpy row-broadcasts (a rank guard cannot be spelled over a sequence p).
+    """
+    acc = 0 * x
+    if len(p) > 0:
+        for c in np.asarray(p):
+            acc = acc * x + c
+    return acc
+
+
 @lib(np.sign)
 def sign_int(x: int) -> int:
     if x > 0:

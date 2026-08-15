@@ -184,13 +184,6 @@ def _k_kwargs(**kw: float) -> float:
     return kw["x"]
 
 
-def _k_for_unpack(ps: tuple[tuple[float, float], ...]) -> float:
-    acc = 0.0
-    for a, b in ps:
-        acc = acc + a + b
-    return acc
-
-
 def _k_is(x: object, y: object) -> bool:
     return x is y
 
@@ -369,7 +362,6 @@ _CASES: list[tuple[object, str]] = [
     (_k_double_splat, r"`\*\*` call arguments"),
     (_k_varargs, r"\*args parameters"),
     (_k_kwargs, r"\*\*kwargs parameters"),
-    (_k_for_unpack, "for-loop target unpacking"),
     (_k_is, "`is` is only supported with None"),
     (_k_in, "comparison operator `in`"),
     (_k_mangled_local, "name mangling"),
@@ -414,13 +406,6 @@ def _k_zip(a: float, b: float) -> float:
     return acc
 
 
-def _k_enumerate(a: float, b: float) -> float:
-    acc = 0.0
-    for p in enumerate((a, b)):
-        acc = acc + p[1]
-    return acc
-
-
 def _k_dynamic_index_read(i: int, x: float) -> float:
     t = (x, x + 1.0)
     return t[i]
@@ -451,7 +436,6 @@ def _k_bool_arithmetic(a: bool, x: float) -> float:
 
 _PE_CASES: list[tuple[object, str]] = [
     (_k_zip, "calls to 'zip' are not supported yet"),
-    (_k_enumerate, "calls to 'enumerate' are not supported yet"),
     (_k_dynamic_index_read, "a subscript index must be a compile-time constant int"),
     (_k_dynamic_index_store, "a subscript index must be a compile-time constant int"),
     (_k_aggregate_truthiness, "the truthiness of an aggregate is not supported"),

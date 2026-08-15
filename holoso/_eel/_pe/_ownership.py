@@ -12,10 +12,11 @@ All events that create a second handle move the state forward:
   does not share by reading `C[i]` on the way to the store);
 - embedding: an aggregate flowing into a literal shares its descendants with the result; sequence slices
   COPY the top level (a fresh allocation) and share extracted aggregate descendants;
-- derivation: ANY tensor derived from an existing one (a tensor slice, `.T`, `.flatten()`, `asarray`)
-  is shared with its source -- the compiler deliberately models no copy-vs-view distinction. A sequence
-  converted to a tensor is a leaf copy, not a derivation: the scalar leaves are values, so no handle relates
-  the two;
+- derivation: ANY tensor derived from an existing one (a tensor slice, `.T`, `.flatten()`, `reshape`, a
+  family-preserving `asarray`) is shared with its source -- the compiler deliberately models no copy-vs-view
+  or dtype-width distinction, so even a same-family host copy (float32 to float) shares. A family-CHANGING
+  dtype conversion copies on the host and mints fresh. A sequence converted to a tensor is a leaf copy, not
+  a derivation: the scalar leaves are values, so no handle relates the two;
 - escape: returning from the kernel, installing into a state path, or being stored as an element; aggregate
   ROOTS originating outside the kernel's own construction (module globals, closure cells, captured defaults,
   and the kernel's own array parameters) enter ESCAPED -- CPython would make a mutation observable outside
@@ -42,7 +43,7 @@ branch conservatively binds the whole join (a share in the then-arm blocks a sto
 per-path sound in both directions, occasionally stricter than one path alone.
 """
 
-from ._values import Allocation, AllocationState, SequenceValue, TensorValue, Value
+from ._values import Allocation, AllocationState, RecordValue, SequenceValue, TensorValue, Value
 
 
 def share(value: Value) -> None:
@@ -99,5 +100,10 @@ def allocations(value: Value) -> list[Allocation]:
             return found
         case TensorValue(allocation=allocation):
             return [allocation]
+        case RecordValue(fields=fields, allocation=allocation):
+            found = [allocation]
+            for field in fields:
+                found.extend(allocations(field))
+            return found
         case _:
             return []

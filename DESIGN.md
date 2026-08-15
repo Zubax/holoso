@@ -227,11 +227,15 @@ deliberate: mixed int/float expressions promote to float C-style, a power yields
 its exponent a compile-time nonnegative int, booleans take no part in arithmetic, and `and`/`or` are eager gates
 evaluating both operands as combinational logic does, while other conditional positions still branch. One join rule
 governs every meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only
-with identical kind and shape.
+with identical kind and shape -- for a record, identical class.
 
-Aggregates are one container of two kinds fixed by provenance, not shape: a sequence is immutable structure, an
-array the numerical kind carrying elementwise arithmetic and all mutation. Arrays never exist as hardware
-aggregates: matrices and vectors are compile-time bookkeeping over scalar wires, and only scalar leaves reach HIR.
+Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an
+array the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle
+fixed by its class -- a plain generated frozen dataclass, so construction is structural and field reads fold.
+Arrays and records never exist as hardware aggregates: they are compile-time bookkeeping over scalar wires,
+decomposed at the module boundary into indexed and field-path ports, and only scalar leaves reach HIR. Structural
+transforms (slices, transposes, reshapes) restructure the same storage; a dtype-changing conversion mints a fresh
+array exactly where the host copies.
 
 Mutation is admitted only where reference and value semantics cannot be told apart, and rejected with advice
 everywhere else, sparing the compiler a heap model and escape analysis. Persistent state is the one mutable
@@ -266,8 +270,10 @@ typed lowerings, each either a single semantic HIR operator or an inlined compos
 position and optionally a refinement demanding a compile-time value -- of known sign, or of one named value where the
 sign does not tell the lowerings apart (a one-half exponent is the square root, an integral one a multiply chain);
 selection takes the unique most refined lowering every one of whose positions accepts the operand. An array
-composite declares no scalar domain, rank and shape deciding its meaning. Every stub is ordinary Python in the
-supported subset, so each is its own numerical reference.
+composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static left
+folds, so FMA contraction stays reachable. A composite may admit a sequence at a declared argument position, and a
+scalar entry may be lifted per key to apply elementwise over an array's leaves. Every stub is ordinary Python in
+the supported subset, so each is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own

@@ -36,9 +36,11 @@ parameter is driven through its decomposed scalar leaves: the vector row stays n
 structurally, exactly as the frontend reads it), and the binder reassembles the ndarray argument for CPython.
 """
 
+import dataclasses
 import inspect
 import math
 import types
+import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -162,16 +164,57 @@ def _annotation_shape(annotation: object) -> tuple[int, ...] | None:
     return tuple(size for size in sizes if isinstance(size, int))
 
 
-def _parameter_shapes(reference: Callable[..., object]) -> dict[str, tuple[int, ...] | None]:
-    annotations = inspect.get_annotations(reference)
-    return {name: _annotation_shape(annotations.get(name)) for name in inspect.signature(reference).parameters}
+def _parameter_annotations(reference: Callable[..., object]) -> dict[str, object]:
+    annotations = inspect.get_annotations(reference, eval_str=True)
+    return {name: unaliased(annotations.get(name)) for name in inspect.signature(reference).parameters}
+
+
+def _field_hints(cls: type) -> dict[str, object]:
+    """MRO-merged child-wins, mirroring the frontend's field-annotation resolution."""
+    merged: dict[str, object] = {}
+    for base in reversed(cls.__mro__):
+        merged.update(inspect.get_annotations(base, eval_str=True))
+    return {name: unaliased(annotation) for name, annotation in merged.items()}
+
+
+def _leaf_names(name: str, annotation: object) -> list[str]:
+    """The decomposed port lanes of one parameter, mirroring the frontend's record/tuple/array decomposition."""
+    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        hints = _field_hints(annotation)
+        return [
+            leaf
+            for field in dataclasses.fields(annotation)
+            for leaf in _leaf_names(f"{name}_{field.name}", hints[field.name])
+        ]
+    if typing.get_origin(annotation) is tuple:
+        args = typing.get_args(annotation)
+        return [leaf for k, arg in enumerate(args) for leaf in _leaf_names(f"{name}_{k}", unaliased(arg))]
+    shape = _annotation_shape(annotation)
+    return [name] if shape is None else indexed_names(name, shape)
+
+
+def _leaf_value(name: str, annotation: object, row: InputRow) -> object:
+    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        hints = _field_hints(annotation)
+        return annotation(
+            **{
+                field.name: _leaf_value(f"{name}_{field.name}", hints[field.name], row)
+                for field in dataclasses.fields(annotation)
+            }
+        )
+    if typing.get_origin(annotation) is tuple:
+        args = typing.get_args(annotation)
+        return tuple(_leaf_value(f"{name}_{k}", unaliased(arg), row) for k, arg in enumerate(args))
+    shape = _annotation_shape(annotation)
+    if shape is None:
+        return row[name]
+    return np.array([row[leaf] for leaf in indexed_names(name, shape)]).reshape(shape)
 
 
 def expected_input_names(reference: Callable[..., object]) -> list[str]:
-    shapes = _parameter_shapes(reference)
     names: list[str] = []
-    for name, shape in shapes.items():
-        names.extend([name] if shape is None else indexed_names(name, shape))
+    for name, annotation in _parameter_annotations(reference).items():
+        names.extend(_leaf_names(name, annotation))
     assert len(set(names)) == len(names), f"duplicate decomposed input names in {names}"
     return names
 
@@ -181,17 +224,19 @@ def _binder(reference: Callable[..., object]) -> Callable[[InputRow], tuple[list
     parameters = list(inspect.signature(reference).parameters.values())
     kinds = {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
     assert all(parameter.kind in kinds for parameter in parameters), f"unsupported signature {parameters}"
-    shapes = _parameter_shapes(reference)
-
-    def value_of(name: str, row: InputRow) -> object:
-        shape = shapes[name]
-        if shape is None:
-            return row[name]
-        return np.array([row[leaf] for leaf in indexed_names(name, shape)]).reshape(shape)
+    annotations = _parameter_annotations(reference)
 
     def bind(row: InputRow) -> tuple[list[object], dict[str, object]]:
-        args = [value_of(p.name, row) for p in parameters if p.kind is not inspect.Parameter.KEYWORD_ONLY]
-        kwargs = {p.name: value_of(p.name, row) for p in parameters if p.kind is inspect.Parameter.KEYWORD_ONLY}
+        args = [
+            _leaf_value(p.name, annotations[p.name], row)
+            for p in parameters
+            if p.kind is not inspect.Parameter.KEYWORD_ONLY
+        ]
+        kwargs = {
+            p.name: _leaf_value(p.name, annotations[p.name], row)
+            for p in parameters
+            if p.kind is inspect.Parameter.KEYWORD_ONLY
+        }
         return args, kwargs
 
     return bind

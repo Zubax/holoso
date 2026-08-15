@@ -62,12 +62,15 @@ class Allocation:
     a counter rather than a flag because nested loops may iterate the same allocation. `joined` marks an
     allocation minted by a branch join of differing arm allocations: the value is ONE of the two runtime
     objects, so the fresh identity erases provenance -- installing such a tree into a state attribute is
-    rejected, since the disjointness checks would judge the wrong object.
+    rejected, since the disjointness checks would judge the wrong object. `one_shot`/`spent` model a
+    CPython iterator (enumerate): only iteration consumes it, and only once.
     """
 
     state: AllocationState = AllocationState.UNIQUE
     borrows: int = 0
     joined: bool = False
+    one_shot: bool = False
+    spent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +92,19 @@ class TensorValue:
         assert len(self.leaves) == math.prod(self.shape)
         assert all(isinstance(leaf, Opaque) or leaf.stype is self.family for leaf in self.leaves)
         assert self.family is ScalarType.FLOAT or not any(isinstance(leaf, Opaque) for leaf in self.leaves)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordValue:
+    """
+    An immutable typed bundle fixed by its admitted frozen-dataclass class; `fields` follow
+    `dataclasses.fields(cls)` order. Like a sequence it carries an Allocation for join identity, but no
+    mutation path exists by construction.
+    """
+
+    cls: type
+    fields: tuple["Value", ...]
+    allocation: Allocation
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +131,11 @@ class RangeValue:
         assert self.start.stype is ScalarType.INT and self.stop.stype is ScalarType.INT
 
 
-type Value = StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | BoundMethod | RangeValue
+type Value = (
+    StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | RecordValue | BoundMethod | RangeValue
+)
+
+AGGREGATES = (SequenceValue, TensorValue, RecordValue)
 
 
 def same(a: Value, b: Value) -> bool:
@@ -146,6 +166,12 @@ def same(a: Value, b: Value) -> bool:
                 and a.shape == b.shape
                 and a.family is b.family
                 and all(same(x, y) for x, y in zip(a.leaves, b.leaves))
+            )
+        case RecordValue(), RecordValue():
+            return (
+                a.allocation is b.allocation
+                and a.cls is b.cls
+                and all(same(x, y) for x, y in zip(a.fields, b.fields, strict=True))
             )
         case BoundMethod(), BoundMethod():
             return a.name == b.name and same(a.receiver, b.receiver)
@@ -204,19 +230,30 @@ def allocations_match(a: Value, b: Value) -> bool:
             )
         case TensorValue(), TensorValue():
             return a.allocation is b.allocation
-        case (SequenceValue() | TensorValue(), _) | (_, SequenceValue() | TensorValue()):
+        case RecordValue(), RecordValue():
+            return (
+                a.allocation is b.allocation
+                and a.cls is b.cls
+                and all(allocations_match(x, y) for x, y in zip(a.fields, b.fields, strict=True))
+            )
+        case (SequenceValue() | TensorValue() | RecordValue(), _) | (
+            _,
+            SequenceValue() | TensorValue() | RecordValue(),
+        ):
             return False
         case _:
             return True
 
 
 def tree_leaves(value: Value) -> list[Scalar | Opaque]:
-    """The scalar leaves of a slot tree in declaration order (depth-first, row-major)."""
+    """The scalar leaves of a structure tree in declaration order (depth-first, row-major)."""
     match value:
         case SequenceValue(items=items):
             return [leaf for item in items for leaf in tree_leaves(item)]
         case TensorValue(leaves=leaves):
             return list(leaves)
+        case RecordValue(fields=fields):
+            return [leaf for field in fields for leaf in tree_leaves(field)]
         case StaticScalar() | ResidualScalar() | Opaque():
             return [value]
         case _:
@@ -224,12 +261,14 @@ def tree_leaves(value: Value) -> list[Scalar | Opaque]:
 
 
 def tensor_occurrences(value: Value) -> list[Allocation]:
-    """Every OCCURRENCE of a tensor allocation, walking through repeated sequence nodes each time."""
+    """Every OCCURRENCE of a tensor allocation, walking through repeated container nodes each time."""
     match value:
         case SequenceValue(items=items):
             return [allocation for item in items for allocation in tensor_occurrences(item)]
         case TensorValue(allocation=allocation):
             return [allocation]
+        case RecordValue(fields=fields):
+            return [allocation for field in fields for allocation in tensor_occurrences(field)]
         case _:
             return []
 
@@ -242,6 +281,8 @@ def tree_rebuild(value: Value, leaves: Iterator[Scalar | Opaque]) -> Value:
         case TensorValue(shape=shape, family=family, allocation=allocation):
             replaced = tuple(next(leaves) for _ in value.leaves)
             return TensorValue(shape, family, replaced, allocation)
+        case RecordValue(cls=cls, fields=fields, allocation=allocation):
+            return RecordValue(cls, tuple(tree_rebuild(field, leaves) for field in fields), allocation)
         case StaticScalar() | ResidualScalar() | Opaque():
             return next(leaves)
         case _:
@@ -258,6 +299,12 @@ def same_structure(a: Value, b: Value) -> bool:
             )
         case TensorValue(), TensorValue():
             return a.allocation is b.allocation and a.shape == b.shape and a.family is b.family
+        case RecordValue(), RecordValue():
+            return (
+                a.allocation is b.allocation
+                and a.cls is b.cls
+                and all(same_structure(x, y) for x, y in zip(a.fields, b.fields, strict=True))
+            )
         case (StaticScalar() | ResidualScalar() | Opaque()), (StaticScalar() | ResidualScalar() | Opaque()):
             return True
         case _:

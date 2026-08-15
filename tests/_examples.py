@@ -32,6 +32,7 @@ from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
 from crc32 import POLY_IEEE8023, Crc32  # noqa: E402
 from debouncer import Debouncer  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
+from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
 from flux_observer import FluxObserver  # noqa: E402
 from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
@@ -327,6 +328,48 @@ def _fresh_flux_observer() -> Callable[..., object]:
     # examples/flux_observer.py, so every layer -- cosim, oracle, synthesis matrix -- exercises the same circuit
     # the bundled example writes.
     return FluxObserver(R=0.05, L_d=2e-5, flux_linkage=0.005, flux=np.array([0.005, 0.0])).tick
+
+
+def _fresh_finite_set_controller() -> Callable[..., object]:
+    return FiniteSetCurrentController().__call__
+
+
+_FSCC_INPUTS = (
+    "kin_pos", "kin_vel", "kin_accel",
+    "i_ac_0", "i_ac_1", "i_ac_2",
+    "di_ac_dt_0", "di_ac_dt_1", "di_ac_dt_2",
+    "u_dc",
+    "i_dq_ref_0", "i_dq_ref_1",
+)  # fmt: skip
+
+
+def _fscc_row(
+    pos: float, i_ac: tuple[float, float, float], di: tuple[float, float, float], u_dc: float, ref: tuple[float, float]
+) -> InputVector:
+    return {
+        "kin_pos": pos,
+        "kin_vel": 0.0,
+        "kin_accel": 0.0,
+        "i_ac_0": i_ac[0],
+        "i_ac_1": i_ac[1],
+        "i_ac_2": i_ac[2],
+        "di_ac_dt_0": di[0],
+        "di_ac_dt_1": di[1],
+        "di_ac_dt_2": di[2],
+        "u_dc": u_dc,
+        "i_dq_ref_0": ref[0],
+        "i_dq_ref_1": ref[1],
+    }
+
+
+def _draw_fscc(rng: np.random.Generator) -> InputVector:
+    return _fscc_row(
+        bounded(rng, -3.2, 3.2),
+        (bounded(rng, -10.0, 10.0), bounded(rng, -10.0, 10.0), bounded(rng, -10.0, 10.0)),
+        (bounded(rng, -1e5, 1e5), bounded(rng, -1e5, 1e5), bounded(rng, -1e5, 1e5)),
+        bounded(rng, 0.0, 400.0),
+        (bounded(rng, -10.0, 10.0), bounded(rng, -10.0, 10.0)),
+    )
 
 
 def _fresh_stateful_ekf() -> Callable[..., object]:
@@ -1335,6 +1378,25 @@ SPECS = [
             "di_dt": bounded(rng, -1.0, 1.0),
         },
         edge_values=_EKF_EDGES,  # only dt reaches the divisor, and the folded R_diag keeps it anchored
+    ),
+    ExampleSpec(
+        name="finite_set_current_controller",  # stateful; record/array parameters drive decomposed scalar lanes
+        inputs=_FSCC_INPUTS,
+        make_kernel=_fresh_finite_set_controller,
+        reference=None,  # the Kinematics record and ndarray parameters cannot bind from scalar rows
+        nominal=_fscc_row(0.5, (1.0, -0.5, -0.5), (1e4, -1e4, 0.0), 100.0, (2.0, -1.0)),
+        manual=[
+            _fscc_row(0.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.0, (0.0, 0.0)),  # quiet: the all-false arm
+            _fscc_row(0.0, (1.0, -1.0, 0.0), (0.0, 0.0, 0.0), 350.0, (5.0, 0.0)),
+            _fscc_row(2.1, (-2.0, 3.0, -1.0), (5e4, -5e4, 0.0), 200.0, (-3.0, 4.0)),
+            _fscc_row(0.0, (1.0, -1.0, 0.0), (0.0, 0.0, 0.0), 350.0, (5.0, 0.0)),  # revisit on evolved balance
+            _fscc_row(-1.5, (0.5, 0.5, -1.0), (0.0, 1e5, -1e5), 1.0, (1.0, 1.0)),  # sub-threshold drive
+        ],
+        draw_random=_draw_fscc,
+        # Finite magnitudes only: an infinity edge would send inf - inf through the zero-mean pipeline, whose
+        # defined +0 answer raises the error sideband the generic bench asserts silent.
+        edge_values=(0.0, 1.0, -1.0, 100.0, -100.0, 1e4, -1e4),
+        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
     ExampleSpec(
         name="flux_observer",  # stateful 2-vector I/O driven through its decomposed scalar port lanes

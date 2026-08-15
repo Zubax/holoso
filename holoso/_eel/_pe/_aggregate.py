@@ -7,17 +7,21 @@ multi-axis subscript validates the rank and EVERY integer axis against the full 
 so an empty slice on one axis cannot mask a bounds fault on another.
 """
 
+import dataclasses
+
 from .._ir import Origin, ScalarType
 from ._ops import const_value, make_const
 from ._ownership import share
 from ._reject import reject
 from ._snapshot import describe_opaque, ndarray_annotation
 from ._values import (
+    AGGREGATES,
     Allocation,
     BoundMethod,
     ExpansionBudget,
     Opaque,
     RangeValue,
+    RecordValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
@@ -26,7 +30,9 @@ from ._values import (
     Value,
 )
 
-type LeafPath = tuple[int, ...]
+type LeafPath = tuple[int | str, ...]
+
+_EXTRACTED = AGGREGATES
 
 type ResolvedAxis = Value | tuple[int | None, int | None]
 
@@ -42,6 +48,8 @@ def kind_label(value: Value) -> str:
             return "sequence"
         case TensorValue():
             return "array"
+        case RecordValue():
+            return "record"
         case Opaque():
             return "captured object"
         case BoundMethod(receiver=TensorValue()):
@@ -94,10 +102,12 @@ def static_index(origin: Origin, value: Value, what: str) -> int:
 
 def index_read(origin: Origin, base: Value, index: Value) -> Value:
     match base:
-        case SequenceValue(items=items):
+        case SequenceValue(items=items, allocation=allocation):
+            if allocation.one_shot:
+                reject(origin, "an enumerate iterator supports only iteration, as in Python")
             position = static_index(origin, index, "a subscript index")
             item = _select(origin, items, position, base)
-            if isinstance(item, (SequenceValue, TensorValue)):
+            if isinstance(item, _EXTRACTED):
                 share(base)
                 share(item)
             return item
@@ -116,10 +126,12 @@ def index_read(origin: Origin, base: Value, index: Value) -> Value:
 
 def slice_read(origin: Origin, base: Value, lo: int | None, hi: int | None) -> Value:
     match base:
-        case SequenceValue(items=items):
+        case SequenceValue(items=items, allocation=allocation):
+            if allocation.one_shot:
+                reject(origin, "an enumerate iterator supports only iteration, as in Python")
             taken = list(items)[lo:hi]
             for item in taken:
-                if isinstance(item, (SequenceValue, TensorValue)):
+                if isinstance(item, _EXTRACTED):
                     share(item)
             return SequenceValue(tuple(taken), Allocation())
         case TensorValue(shape=shape, leaves=leaves):
@@ -195,6 +207,11 @@ def flatten(origin: Origin, value: Value) -> list[tuple[LeafPath, Scalar]]:
                     reject(origin, "an empty aggregate cannot be returned")
                 for position, item in enumerate(items):
                     walk(item, (*path, position))
+            case RecordValue(cls=cls, fields=fields):
+                if not fields:
+                    reject(origin, "an empty aggregate cannot be returned")
+                for field, value in zip(dataclasses.fields(cls), fields, strict=True):
+                    walk(value, (*path, field.name))
             case TensorValue(shape=shape, leaves=tensor_leaves):
                 for position, leaf in enumerate(tensor_leaves):
                     if len(shape) == 1:
@@ -216,7 +233,11 @@ def _iterated(origin: Origin, value: Value) -> list[Value]:
     """Top-level items as iteration/unpacking yields them; aggregate extractions share parent and item."""
     found: list[Value]
     match value:
-        case SequenceValue(items=items):
+        case SequenceValue(items=items, allocation=allocation):
+            if allocation.one_shot:
+                if allocation.spent:
+                    reject(origin, "this enumerate iterator is already exhausted, as it would be in Python")
+                allocation.spent = True
             found = list(items)
         case TensorValue(shape=shape):
             if len(shape) == 1:
@@ -224,9 +245,9 @@ def _iterated(origin: Origin, value: Value) -> list[Value]:
             else:
                 found = [_derive_row(origin, value, row) for row in range(shape[0])]
         case _:
-            reject(origin, f"cannot unpack {a_kind(value)}: it is not an aggregate")
+            reject(origin, f"cannot unpack {a_kind(value)}: it is not iterable")
     for item in found:
-        if isinstance(item, (SequenceValue, TensorValue)):
+        if isinstance(item, _EXTRACTED):
             share(value)
             share(item)
     return found

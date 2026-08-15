@@ -76,6 +76,84 @@ def _sequence_iteration(x: float) -> float:
     return acc
 
 
+def _tuple_target(x: float) -> float:
+    acc = 0.0
+    for a, b in ((x, 2.0), (3.0, x), (0.5, 0.25)):
+        acc = acc + a * b
+    return acc
+
+
+def _enumerated_sequence(x: float) -> float:
+    acc = 0.0
+    for k, w in enumerate((0.5, 0.25, x)):
+        acc = acc + float(k) * w
+    return acc
+
+
+def _enumerated_with_start(x: float) -> float:
+    acc = 0.0
+    for k, w in enumerate((x, 2.0 * x), 1):
+        acc = acc + float(k) * w
+    for k, w in enumerate((x, -x), start=2):
+        acc = acc + float(k) * w
+    return acc
+
+
+def _enumerated_range(x: float) -> float:
+    acc = x
+    for k, n in enumerate(range(2, 5)):
+        acc = acc + float(k * n)
+    return acc
+
+
+def _enumerated_pairs_unspread(x: float) -> float:
+    acc = 0.0
+    for p in enumerate((x, 2.0)):
+        acc = acc + p[1] + float(p[0])
+    return acc
+
+
+def _enumerate_inside_residual_while(x: float) -> float:
+    while x < 8.0:
+        acc = 0.0
+        for k, w in enumerate((0.5, 0.25)):
+            acc = acc + float(k) * w
+        x = x + 1.0 + acc
+    return x
+
+
+def _mutated_while_enumerated(x: float) -> float:
+    xs = np.array([x, 2.0, 3.0])
+    acc = 0.0
+    for k, w in enumerate(xs):
+        acc = acc + w
+        xs[2] = 9.0
+    return acc + float(xs[2])
+
+
+def _reused_enumerate(x: float) -> float:
+    pairs = enumerate((x, 2.0))
+    acc = 0.0
+    for _, w in pairs:
+        acc = acc + w
+    for _, w in pairs:
+        acc = acc + w
+    return acc
+
+
+def _subscripted_enumerate(x: float) -> float:
+    return enumerate((x, 2.0))[0][1]  # type: ignore[index,no-any-return]
+
+
+def test_enumerate_is_a_one_shot_iterator() -> None:
+    # CPython's enumerate is lazy and one-shot: a mid-iteration store would read the eager snapshot stale
+    # (conservatively refused, like the borrow on a directly iterated array), a drained iterator yields
+    # nothing where the snapshot would yield again, and only iteration consumes it.
+    _rejects(_mutated_while_enumerated, "shared")
+    _rejects(_reused_enumerate, "exhausted")
+    _rejects(_subscripted_enumerate, "supports only iteration")
+
+
 def _vector_iteration(x: float) -> float:
     acc = 0.0
     for v in np.array([x, 2.0, 3.0]):
@@ -147,6 +225,12 @@ def test_static_loops_unroll_and_match_cpython() -> None:
         _range_bounds,
         _range_step,
         _sequence_iteration,
+        _tuple_target,
+        _enumerated_sequence,
+        _enumerated_with_start,
+        _enumerated_range,
+        _enumerated_pairs_unspread,
+        _enumerate_inside_residual_while,
         _vector_iteration,
         _matrix_row_iteration,
         _nested_static,

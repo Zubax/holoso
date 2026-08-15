@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""
-A complex example of a larger-scale control system for a VSI inverter operating in current control mode.
-TODO FIXME: Currently unsupported.
-"""
+"""A controller of a VSI inverter operating in current control mode."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 import numpy as np
+from jaxtyping import Float64
+import holoso
+
+type Vec2 = Float64[np.ndarray, "2"]
+type Vec3 = Float64[np.ndarray, "3"]
 
 
 @dataclass(frozen=True)
@@ -19,13 +22,13 @@ class Kinematics:
 @dataclass(frozen=True)
 class CurrentControllerDecision:
     switch_ac: tuple[bool, bool, bool]
-    switch_balance: np.ndarray  # TODO: needs some kind of static size annotation, so this one won't work as-is
+    switch_balance: Vec3
 
 
-def _dq0_to_ac(dq0: np.ndarray, theta: float) -> np.ndarray:  # Inlined at place of invocation; shape annotation needed
+def _dq0_to_ac(dq0: np.ndarray, theta: float) -> np.ndarray:
     dq0 = dq0.reshape((2, 1))
     d, q = dq0[0, 0], dq0[1, 0]
-    ct, st = np.cos(theta), np.sin(theta)  # Assume holoso_sincos is available.
+    ct, st = np.cos(theta), np.sin(theta)
     alpha = d * ct - q * st  # inverse Park
     beta = d * st + q * ct
     a = alpha  # inverse Clarke
@@ -50,20 +53,14 @@ class FiniteSetCurrentController:
         ) = self._make_active_switch_candidates()  # Evaluated at synthesis time since everything is known statically
 
     def __call__(
-        self,
-        kin: Kinematics,
-        i_ac: np.ndarray,  # these also need static shape annotations instead of np.ndarray
-        di_ac_dt: np.ndarray,
-        u_dc: float,
-        i_dq_ref: np.ndarray,
-        /,
+        self, kin: Kinematics, i_ac: Vec3, di_ac_dt: Vec3, u_dc: float, i_dq_ref: Vec2, /
     ) -> CurrentControllerDecision:
         i_ac_ref = _dq0_to_ac(i_dq_ref, kin.pos)
         switch_ac = self._select_switch(i_ac_ref, i_ac, di_ac_dt, u_dc)
         self._switch_balance = self._zero_mean(self._switch_balance + self._balance_step(switch_ac))
         return CurrentControllerDecision(
             switch_ac=switch_ac,
-            switch_balance=self._switch_balance.reshape((self._n_phases, 1)),
+            switch_balance=np.array(self._switch_balance),
         )
 
     def _select_switch(
@@ -76,14 +73,18 @@ class FiniteSetCurrentController:
         # Expanding the finite-state score leaves only the strongest phase of this vector.
         phase_drive = (u_dc * error) - ((4.0 * self._BALANCE_WEIGHT) * self._switch_balance)
         active_drive = np.array([float(phase_drive @ vector) for vector in self._active_switch_vectors])
-        best_drive = float(np.max(active_drive))  # e.g., max() by sequential application of holoso_sort, or similar
-        active = int(np.flatnonzero(active_drive >= best_drive - (1e-12 * max(abs(best_drive), 1.0)))[0])
+        best_drive = float(np.max(active_drive))
         if best_drive <= self._active_drive_threshold:
             return False, False, False
-        # We know the size statically so we can treat it as separate output registers:
-        return self._active_switch_candidates[active]
+        tolerance = best_drive - 1e-9 * max(abs(best_drive), 1.0)
+        chosen = self._active_switch_candidates[0]
+        for k, candidate in enumerate(self._active_switch_candidates):
+            if float(active_drive[k]) >= tolerance:
+                chosen = candidate
+                break
+        return chosen
 
-    def _make_active_switch_candidates(self) -> tuple[  # This one doesn't make it to the final Verilog at all
+    def _make_active_switch_candidates(self) -> tuple[
         tuple[tuple[bool, bool, bool], ...],
         tuple[np.ndarray, ...],
         float,
@@ -111,6 +112,30 @@ class FiniteSetCurrentController:
         return 2.0 * self._zero_mean(np.array(switch_ac, dtype=float))
 
     @staticmethod
-    def _zero_mean(x: np.ndarray, /) -> np.ndarray:  # As always, we need static shape annotation here
+    def _zero_mean(x: np.ndarray, /) -> np.ndarray:
         x = np.asarray(x, dtype=float)
         return x - float(np.mean(x))
+
+
+def main() -> None:
+    float_format = holoso.FloatFormat(wexp=8, wman=36)
+    options = holoso.Options(
+        holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+            fsort=holoso.FSortOptions(),
+            fsincos=holoso.FSincosOptions(),
+        ),
+        ffmt=float_format,
+    )
+    out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
+    result = holoso.synthesize(FiniteSetCurrentController().__call__, options)
+    for filename, path in result.write(out_dir).items():
+        print(f"{filename}: {path}")
+
+
+if __name__ == "__main__":
+    main()

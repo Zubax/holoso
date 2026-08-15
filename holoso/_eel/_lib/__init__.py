@@ -10,11 +10,14 @@ from . import _intrinsics as _intrinsics
 from . import _linalg as _linalg
 from . import _numpy as _numpy
 from . import _pow as _pow
+from . import _reductions as _reductions
 from ._registry import (
     Array as Array,
     Conversion as Conversion,
     Factory as Factory,
+    Lifted as Lifted,
     Operand as Operand,
+    Reshape as Reshape,
     ScalarFunction as ScalarFunction,
     resolve as resolve,
 )

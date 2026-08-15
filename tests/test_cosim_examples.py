@@ -24,8 +24,6 @@ remainder by data-dependent iterative reduction (two magnitude-ratio-bounded bac
 receiver's attributes, decomposed into nested slots (`state_lpf_y` observable, `lpf._first` register-only).
 
 Non-catalogue examples are frontend feature gaps or non-scalar interfaces, not verification scope:
-  - finite_set_current_controller: `UnsupportedConstruct: the annotation of parameter 'kin' is not supported yet`
-    (a dataclass-typed parameter).
   - rigid_body_rates: ndarray-typed inputs; its arithmetic (including the pivoted matrix inversion) is catalogued
     through the `rigid_body_scalar` wrapper instead, like polar's.
 """

@@ -645,7 +645,7 @@ _PARTIAL = functools.partial(_scale, 0.5)
 
 
 def _calls_an_unregistered_numpy_function(x: float) -> float:
-    return float(np.sum(np.array([x, x])))
+    return float(np.prod(np.array([x, x])))
 
 
 def _calls_a_partial(x: float) -> float:

@@ -560,7 +560,7 @@ def test_interface_annotation_rejections() -> None:
     _rejects(_unannotated_param, "requires a type annotation")
     _rejects(_str_param, "annotation of parameter 'x' is not supported")
     _rejects(_no_return_annotation, "return type annotation is required")
-    _rejects(_none_returns_value, "annotation does not match the returned scalar")
+    _rejects(_none_returns_value, "annotation of the returned value does not match the scalar")
     _rejects(_value_returns_none, "returns no value but its annotation declares one")
     _rejects(_int_from_float, "type float where the annotation declares int")
     _rejects(_bool_from_float, "type float where the annotation declares bool")

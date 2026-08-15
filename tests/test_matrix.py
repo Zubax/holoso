@@ -10,18 +10,19 @@ keeps a compact MIR population sentinel for the exact operator count that module
 import dataclasses
 import warnings
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
 from jaxtyping import Bool, Float, Float64, Int, Shaped
 
 import holoso
-from holoso import FFmaOptions, FloatFormat, UnsupportedConstruct
+from holoso import FFmaOptions, FFromIntOptions, FloatFormat, FSortOptions, FToIntOptions, UnsupportedConstruct
 from holoso._eel import lower
-from holoso._mir import lower as lower_to_mir
+from holoso._mir import MirOptions, lower as lower_to_mir
 
 from ._examples import _FUSION_ACCEL_CAL, _FUSION_GYRO_CAL, ImuFusion
-from ._modelref import default_mir, default_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import default_mir, default_options, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude, strip_locations
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
@@ -91,13 +92,31 @@ def _run(sim: holoso.NumericalSimulator, *arrays: np.ndarray | float) -> np.ndar
     return np.array([float(v) for v in sim.run(*flat)])
 
 
-def _assert_python_matches_holoso(fn: Callable[..., object], *inputs: np.ndarray | float) -> None:
+def _assert_python_matches_holoso(
+    fn: Callable[..., object], *inputs: np.ndarray | float, options: holoso.Options | None = None
+) -> None:
     # Runs the kernel as plain Python and asserts it agrees with Holoso; the Python call also proves the kernel is
     # genuinely valid, runnable Python, so a construct Holoso accepts but Python rejects fails here instead of passing
     # as a spurious "positive" (e.g. `mat + [1, 2]` sneaking into a success test).
     want = np.asarray(fn(*inputs)).flatten()
-    got = _run(_sim(fn), *inputs)
+    sim = holoso.synthesize(fn, options if options is not None else default_options(_FMT), name="kernel")
+    got = _run(sim.numerical_model.elaborate(), *inputs)
     assert np.allclose(got, want, rtol=1e-9, atol=1e-300), fn.__name__
+
+
+def _with_operators(options: holoso.Options, **replacements: Any) -> holoso.Options:
+    return dataclasses.replace(options, operator=dataclasses.replace(options.operator, **replacements))
+
+
+def _mnemonic_counts(fn: Callable[..., object], ops: MirOptions) -> dict[str, int]:
+    mir = lower_to_mir(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
+    counts: dict[str, int] = {}
+    for node in mir.nodes.values():
+        operator = getattr(node, "operator", None)
+        if operator is not None:
+            stem = operator.mnemonic.split("_")[0]
+            counts[stem] = counts.get(stem, 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------- structure
@@ -207,24 +226,11 @@ def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
     def dot(v: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
-    def mnemonic_counts(with_fma: bool) -> dict[str, int]:
-        ops = default_mir(_FMT)
-        if with_fma:
-            ops = dataclasses.replace(ops, operator=dataclasses.replace(ops.operator, ffma=FFmaOptions()))
-        mir = lower_to_mir(lower(dot, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
-        counts: dict[str, int] = {}
-        for node in mir.nodes.values():
-            operator = getattr(node, "operator", None)
-            if operator is not None:
-                stem = operator.mnemonic.split("_")[0]
-                counts[stem] = counts.get(stem, 0) + 1
-        return counts
+    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
+    assert _mnemonic_counts(dot, fma_mir) == {"fmul": 1, "ffma": 3}
+    assert _mnemonic_counts(dot, default_mir(_FMT)) == {"fmul": 4, "fadd": 3}
 
-    assert mnemonic_counts(with_fma=True) == {"fmul": 1, "ffma": 3}
-    assert mnemonic_counts(with_fma=False) == {"fmul": 4, "fadd": 3}
-
-    options = default_options(_FMT)
-    options = dataclasses.replace(options, operator=dataclasses.replace(options.operator, ffma=FFmaOptions()))
+    options = _with_operators(default_options(_FMT), ffma=FFmaOptions())
     result = holoso.synthesize(dot, options, name="kernel")
     verilog = result.verilog_output.verilog
     assert "holoso_ffma #(" in verilog and "holoso_fadd #(" not in verilog
@@ -967,6 +973,359 @@ def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
         return np.transpose(a)  # type: ignore[return-value]
 
     _refused(bad_t, r"in np\.transpose\(\).*transpose a scalar")
+
+
+# ---------------------------------------------------------------- whole-array reductions
+
+
+def test_float_extrema_reductions_across_spellings() -> None:
+    def extrema(v: Float64[np.ndarray, "4"]) -> tuple[float, float, float, float, float, float]:
+        return (
+            float(np.max(v)),
+            float(np.amax(v)),
+            float(v.max()),
+            float(np.min(v)),
+            float(np.amin(v)),
+            float(v.min()),
+        )
+
+    options = _with_operators(default_options(_FMT), fsort=FSortOptions())
+    for vec in (np.array([1.5, -2.0, 8.25, 0.5]), np.array([-1.0, -1.0, -3.5, -0.25])):
+        _assert_python_matches_holoso(extrema, vec, options=options)
+    # The extrema must reach the pooled sorter, not a compare/select fallback.
+    assert _mnemonic_counts(extrema, mir_options(options)).get("fsort", 0) >= 1
+
+
+def test_sum_and_mean_reductions_across_spellings() -> None:
+    def sums(m: Float64[np.ndarray, "2 3"], v: Float64[np.ndarray, "3"]) -> tuple[float, float, float, float]:
+        return float(np.sum(v)), float(m.sum()), float(np.mean(m)), float(v.mean())
+
+    _assert_python_matches_holoso(sums, np.array([[1.5, -2.0, 0.25], [4.0, 0.5, -1.0]]), np.array([0.5, -1.25, 3.0]))
+
+
+def test_reductions_of_a_single_element_array() -> None:
+    # Invisible to the plain-Python stubs: numpy permits the empty slice the compiled frontend refuses.
+    def single(v: Float64[np.ndarray, "1"]) -> tuple[float, float, float, float]:
+        return float(np.sum(v)), float(np.mean(v)), float(np.min(v)), float(np.max(v))
+
+    _assert_python_matches_holoso(single, np.array([-2.75]))
+
+
+def test_integer_reductions_preserve_the_family() -> None:
+    def kernel(a: int, b: int, c: int) -> tuple[int, int, int]:
+        v = np.array([a, b, c])
+        return np.sum(v), np.min(v), v.max()
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    for vec in ((3, -7, 5), (0, 0, 0), (-2, 9, 9)):
+        got = [value for value in sim.run(*vec) if isinstance(value, holoso.IntValue)]
+        assert len(got) == 3, "every output port carries the integer family"
+        assert [int(value) for value in got] == [sum(vec), min(vec), max(vec)]
+
+
+def test_integer_mean_promotes_before_accumulating() -> None:
+    # The elements' integer partial sum saturates the machine word, so a mean that failed to promote first
+    # would answer ~33% low.
+    def kernel(a: int, b: int, c: int) -> tuple[float, float]:
+        return float(np.mean(np.array([a, b, c]))), float(np.mean(a))
+
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
+    huge = 2**61  # in range of the settled 63-bit word, while 3*huge is not
+    got = [float(value) for value in sim.run(huge, huge, huge)]
+    assert got == [pytest.approx(float(huge), rel=1e-12), float(huge)]  # a railed accumulator would be ~33% off
+    assert [float(value) for value in sim.run(3, -7, 5)] == [pytest.approx((3 - 7 + 5) / 3, rel=1e-12), 3.0]
+
+
+def test_zero_d_reductions_follow_numpy() -> None:
+    # Free-function reductions accept scalars as numpy does; the extrema preserve even a bool operand.
+    def kernel(x: float, n: int, flag: bool) -> tuple[float, int, float, float, bool]:
+        return np.sum(x), np.sum(n), np.mean(x), np.min(x), np.max(flag)  # type: ignore[return-value]
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    got = sim.run(2.5, 7, True)
+    assert [float(got[0]), int(got[1]), float(got[2]), float(got[3]), got[4]] == [  # type: ignore[arg-type]
+        2.5,
+        7,
+        2.5,
+        2.5,
+        True,
+    ]
+
+
+def test_explicit_ndarray_descriptor_calls_demand_an_array_receiver() -> None:
+    # np.ndarray.sum(x) on a scalar is a TypeError in CPython, so the kernel could never run as its own
+    # reference; the compiled path must refuse.
+    def kernel(x: float) -> float:
+        return float(np.ndarray.sum(x))  # type: ignore[call-overload]
+
+    _refused(kernel, "unbound ndarray method")
+
+    def bound(v: Float64[np.ndarray, "3"]) -> float:  # the valid-receiver spelling CPython accepts stays legal
+        return float(np.ndarray.sum(v))
+
+    _assert_python_matches_holoso(bound, np.array([1.5, -0.25, 2.0]))
+
+
+def test_reductions_are_independent_of_the_unroll_threshold() -> None:
+    def kernel(v: Float64[np.ndarray, "3"]) -> float:
+        return float(np.sum(v))
+
+    options = dataclasses.replace(default_options(_FMT), unroll_max_trips=0)
+    _assert_python_matches_holoso(kernel, np.array([1.25, -0.5, 3.0]), options=options)
+
+
+def test_sum_of_products_contracts_to_fma_chain() -> None:
+    # A summed elementwise product must contract exactly as `v @ w` does: one fmul, then n-1 ffma.
+    def kernel(u: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
+        return float(np.sum(u * w))
+
+    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
+    assert _mnemonic_counts(kernel, fma_mir) == {"fmul": 1, "ffma": 3}
+
+
+# ---------------------------------------------------------------- reshape and dtype conversions
+
+
+def test_reshape_matches_numpy_across_spellings() -> None:
+    def shapes(
+        v: Float64[np.ndarray, "6"], m: Float64[np.ndarray, "2 3"]
+    ) -> tuple[float, float, float, float, float, float]:
+        col = v.reshape((6, 1))
+        pair = v.reshape(2, 3)
+        back = m.reshape(6)
+        free = np.reshape(m, (3, 2))  # NOT m.T: reshape keeps the row-major flat order, so free[1, 0] is m[0, 2]
+        named = np.reshape(v, shape=(3, 2))  # the canonical numpy 2.x keyword spelling
+        return (
+            float(col[4, 0]),
+            float(pair[1, 2]),
+            float(back[5]),
+            float(free[1, 0]),
+            float(np.sum(pair[0])),
+            float(named[2, 1]),
+        )
+
+    v = np.array([1.0, -2.0, 3.5, 0.25, -4.0, 6.0])
+    m = np.array([[0.5, 1.5, -2.5], [3.0, -0.5, 2.0]])
+    _assert_python_matches_holoso(shapes, v, m)
+
+
+def test_reshape_descriptor_spelling_matches_numpy() -> None:
+    def unbound(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "4"]:
+        return np.ndarray.reshape(m, 4)
+
+    _assert_python_matches_holoso(unbound, np.array([[1.0, -2.0], [0.5, 3.0]]))
+
+
+class _BalancedState:
+    def __init__(self) -> None:
+        self._balance = np.zeros(3)
+
+    def step(self, x: float) -> Float64[np.ndarray, "3 1"]:
+        self._balance = self._balance + np.array([x, -x, 2.0 * x])
+        return np.array(self._balance.reshape((3, 1)))
+
+
+def test_reshaped_state_returns_only_as_an_explicit_copy() -> None:
+    # A reshape of persistent state is a live view of its storage: returning it directly must draw the alias
+    # refusal naming the np.array rewrite, and the rewrite must work.
+    class _Aliasing:
+        def __init__(self) -> None:
+            self._balance = np.zeros(3)
+
+        def step(self, x: float) -> Float64[np.ndarray, "3 1"]:
+            self._balance = self._balance + np.array([x, -x, 2.0 * x])
+            return self._balance.reshape((3, 1))
+
+    with pytest.raises(UnsupportedConstruct, match=r"live alias.*np\.array"):
+        _synth(_Aliasing().step)
+
+    sim = _synth(_BalancedState().step).numerical_model.elaborate()
+    reference = _BalancedState()
+    for x in (1.5, -0.25, 3.0):
+        assert np.allclose(_run(sim, x), reference.step(x).flatten(), rtol=1e-9)
+
+
+def test_reshape_shares_its_source() -> None:
+    # The host MAY answer a view, so a store through either handle could diverge; the model refuses it.
+    def kernel(x: float) -> float:
+        m = np.array([[x, x], [x, x]])
+        flat = m.reshape(4)
+        m[0, 0] = 1.0
+        return float(flat[0])
+
+    _refused(kernel, "shared")
+
+    def captured(x: float) -> float:  # the un-called bound method is already a second handle
+        m = np.array([x, x])
+        f = m.reshape
+        m[0] = 1.0
+        return float(f((2, 1))[0, 0])
+
+    _refused(captured, "shared")
+
+
+def test_dtype_float_builds_a_float_vector_from_bools() -> None:
+    def kernel(a: bool, b: bool, c: bool) -> Float64[np.ndarray, "3"]:
+        return np.array((a, b, c), dtype=float)
+
+    sim = _sim(kernel)
+    for flags in ((True, False, True), (False, False, False)):
+        want = np.array(flags, dtype=float)
+        assert [float(value) for value in sim.run(*flags)] == list(want)
+
+
+def test_dtype_int_truncates_like_numpy() -> None:
+    def kernel(x: float) -> tuple[int, int]:
+        v = np.asarray(np.array([x, -x]), int)  # the positional dtype spelling
+        return v[0], v[1]
+
+    options = _with_operators(default_options(_FMT), ftoint=FToIntOptions())
+    sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
+    for x in (1.9, 0.5, 2.0):
+        got = [value for value in sim.run(x) if isinstance(value, holoso.IntValue)]
+        assert [int(value) for value in got] == [int(x), int(-x)]
+
+
+def test_dtype_changing_asarray_mints_a_fresh_array() -> None:
+    # A family-changing asarray copies on the host: the source stays mutable and the pair installs into two
+    # state slots; a family-preserving asarray shares and refuses the store.
+    def fresh(x: int) -> tuple[float, int]:
+        src = np.array([x, x + 1])
+        out = np.asarray(src, dtype=float)
+        src[0] = 7
+        return float(out[0]), src[0]
+
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim = holoso.synthesize(fresh, options, name="kernel").numerical_model.elaborate()
+    got = sim.run(3)
+    assert [float(got[0]), int(got[1])] == [3.0, 7]  # type: ignore[arg-type]
+
+    class _TwoSlots:
+        def __init__(self) -> None:
+            self.a = np.zeros(2, dtype=int)
+            self.b = np.zeros(2)
+
+        def step(self, x: int) -> float:
+            v = np.array([x, x + 1])
+            w = np.asarray(v, dtype=float)
+            self.a = v
+            self.b = w
+            return float(w[0])
+
+    sim2 = holoso.synthesize(_TwoSlots().step, options, name="kernel").numerical_model.elaborate()
+    assert float(sim2.run(4)[0]) == 4.0
+
+    def shared(x: float) -> float:
+        src = np.array([x, x])
+        out = np.asarray(src, dtype=float)
+        src[0] = 1.0
+        return float(out[0])
+
+    _refused(shared, "shared")
+
+
+def test_zero_mean_helper_compiles() -> None:
+    def zero_mean(x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        v = np.asarray(x, dtype=float)
+        return v - float(np.mean(v))
+
+    _assert_python_matches_holoso(zero_mean, np.array([1.0, 2.0, 4.0]))
+
+
+_HUGE_TABLE = np.arange(100_001)
+
+
+def test_a_dtype_conversion_charges_the_expansion_budget() -> None:
+    def kernel(x: float) -> float:
+        return x + float(np.asarray(_HUGE_TABLE, dtype=float)[0])
+
+    _refused(kernel, "budget")
+
+
+# ---------------------------------------------------------------- polyval and the lifted abs
+
+
+def test_polyval_matches_numpy_across_argument_kinds() -> None:
+    def with_array(p: Float64[np.ndarray, "4"], x: float) -> float:
+        return float(np.polyval(p, x))
+
+    _assert_python_matches_holoso(with_array, np.array([2.0, -1.0, 0.5, 3.0]), 1.5)
+
+    def with_tuple(x: float) -> float:
+        return float(np.polyval((2.0, -1.0, 3.0), x))
+
+    _assert_python_matches_holoso(with_tuple, 1.5)
+
+    def with_array_x(p: Float64[np.ndarray, "3"], v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.polyval(p, v)
+
+    _assert_python_matches_holoso(with_array_x, np.array([1.0, -2.0, 0.5]), np.array([0.5, -3.0]))
+
+    def constant_over_array(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.polyval((2.5,), v)  # the broadcast seed
+
+    _assert_python_matches_holoso(constant_over_array, np.array([1.0, 2.0, 3.0]))
+
+    def empty_over_array(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.polyval((), v)
+
+    _assert_python_matches_holoso(empty_over_array, np.array([1.0, 2.0]))
+
+
+def test_polyval_preserves_the_integer_family_and_promotes_heterogeneous_coefficients() -> None:
+    def int_poly(a: int, b: int, x: int) -> int:
+        return np.polyval(np.array([a, b]), x)  # type: ignore[return-value]
+
+    sim = _synth(int_poly).numerical_model.elaborate()
+    got = sim.run(3, -7, 5)
+    assert isinstance(got[0], holoso.IntValue) and int(got[0]) == 3 * 5 - 7
+
+    def hetero(a: int, x: int) -> float:
+        return float(np.polyval((a, 0.5), x))
+
+    # A mixed coefficient tuple converts to float BEFORE the fold, as numpy's asarray does; an integer
+    # partial product would rail the 63-bit word here and answer 4x low.
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim2 = holoso.synthesize(hetero, options, name="kernel").numerical_model.elaborate()
+    huge = 2**61
+    assert float(sim2.run(huge, 4)[0]) == pytest.approx(float(np.polyval((huge, 0.5), 4)), rel=1e-12)
+
+
+def test_polyval_contracts_to_fma_chain() -> None:
+    def kernel(p: Float64[np.ndarray, "4"], x: float) -> float:
+        return float(np.polyval(p, x))
+
+    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
+    assert _mnemonic_counts(kernel, fma_mir) == {"ffma": 3}  # Horner; the zero seed folds away entirely
+
+
+def test_abs_on_arrays_across_spellings() -> None:
+    def kernel(v: Float64[np.ndarray, "3"], m: Float64[np.ndarray, "2 2"]) -> tuple[float, float, float]:
+        return float(np.sum(np.abs(v))), float(np.sum(np.absolute(m))), float(np.sum(abs(v)))
+
+    _assert_python_matches_holoso(kernel, np.array([1.5, -2.0, -0.25]), np.array([[1.0, -3.0], [-4.0, 5.0]]))
+
+
+def test_abs_on_int_arrays_preserves_the_family() -> None:
+    def kernel(a: int, b: int) -> tuple[int, int]:
+        v = np.abs(np.array([a, b]))
+        return v[0], v[1]
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    got = [value for value in sim.run(-3, 7) if isinstance(value, holoso.IntValue)]
+    assert [int(value) for value in got] == [3, 7]
+
+
+def test_abs_answers_a_fresh_array() -> None:
+    def kernel(x: float) -> tuple[float, float]:
+        src = np.array([x, -x])
+        out = np.abs(src)
+        src[0] = 1.0
+        out[1] = 2.0
+        return float(out[0]), src[0] + out[1]
+
+    _assert_python_matches_holoso(kernel, 3.0)
 
 
 # ---------------------------------------------------------------- matrix inversion

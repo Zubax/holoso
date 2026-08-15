@@ -75,6 +75,9 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # peeled at compile time and only trips 2..N remain residual: one body's worth of extra microcode, and a realized
     # transaction that is shorter, not longer (test_cycle_model).
     "recip_newton-e8m36": (29, 46),
+    # The all-false early return and the break-terminated candidate scan survive as real branches, so the
+    # frozen last PC covers the full active path with every scan trip taken.
+    "finite_set_current_controller-e8m36": (160, 204),
     "remainder-e8m36": (37, 54),
     "octave_index-e6m18": (14, 36),
     "octave_index-e8m36": (14, 45),

@@ -196,11 +196,13 @@ class Array:
     """
     An inlined composite whose meaning is rank and shape, so it declares no scalar domain. `derives` marks a
     non-copying derivation on the host (`.T`, `flatten`): the result carries the source's Allocation as its
-    storage-equivalence token.
+    storage-equivalence token. `sequences` names the argument positions whose gate admits a Python sequence
+    (np.polyval's coefficients); everywhere else the build-an-array advice stands.
     """
 
     stub: types.FunctionType
     derives: bool = False
+    sequences: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,15 +218,35 @@ class Factory:
 @dataclass(frozen=True, slots=True)
 class Conversion:
     """
-    A call the partial evaluator lowers as a structural to-array conversion of its single argument.
-    `copies` distinguishes np.array (an independent copy -- the A5 escape hatch) from np.asarray (which
-    returns the argument itself for an array input, so source and result share).
+    A structural to-array conversion with an optional dtype (positional or keyword). `copies` distinguishes
+    np.array (always an independent copy -- the A5 escape hatch) from np.asarray, which shares a
+    family-preserving array input; a family-CHANGING dtype copies on the host, so both spellings mint fresh
+    there. Dtype widths are erased, so a same-family host copy (float32 to float) conservatively shares.
     """
 
     copies: bool
 
 
-type Match = ScalarFunction | Array | Factory | Conversion
+@dataclass(frozen=True, slots=True)
+class Reshape:
+    """
+    A compile-time restructuring of the same storage; like Conversion, the registry only decides WHICH callees
+    mean it. A marker rather than a stub: the shape's int-or-tuple polymorphism has no discriminating spelling
+    inside the subset.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class Lifted:
+    """
+    A scalar entry made array-capable for its key: a single tensor operand applies the scalar selection
+    leafwise; anything else falls through to the scalar path unchanged.
+    """
+
+    scalar: ScalarFunction
+
+
+type Match = ScalarFunction | Array | Factory | Conversion | Reshape | Lifted
 
 _REGISTRY: dict[object, Match] = {}
 
@@ -303,16 +325,27 @@ def lib[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
     return register
 
 
-def array[F: Callable[..., object]](*substituted: object, derives: bool = False) -> Callable[[F], F]:
+def array[F: Callable[..., object]](
+    *substituted: object, derives: bool = False, sequences: tuple[int, ...] = ()
+) -> Callable[[F], F]:
     assert substituted
 
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
         assert not derives or fn.__code__.co_argcount == 1, "a derivation's result tracks its sole argument"
-        _register(Array(fn, derives), (fn, *substituted))
+        _register(Array(fn, derives, frozenset(sequences)), (fn, *substituted))
         return fn
 
     return register
+
+
+def lift(*keys: object) -> None:
+    for key in keys:
+        found = _REGISTRY.get(key)
+        if isinstance(found, Lifted):
+            continue  # np.abs IS np.absolute, so one call can name a key twice
+        assert isinstance(found, ScalarFunction) and found.arity == 1, key
+        _REGISTRY[key] = Lifted(found)
 
 
 def factory[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
@@ -328,6 +361,10 @@ def factory[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
 
 def conversion(*keys: object, copies: bool) -> None:
     _register(Conversion(copies), keys)
+
+
+def reshape(*keys: object) -> None:
+    _register(Reshape(), keys)
 
 
 def resolve(callee: object) -> Match | None:

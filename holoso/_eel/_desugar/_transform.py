@@ -219,12 +219,19 @@ class _Transformer:
     def _for(self, node: ast.For, sink: list[Stmt]) -> None:
         if node.orelse:
             self._reject(node, "`for ... else` is not supported")
-        if not isinstance(node.target, ast.Name):
-            self._reject(node.target, "for-loop target unpacking is not supported; unpack inside the body")
-        target = self._local_bind(node.target)
+        prelude: list[Stmt] = []
+        if isinstance(node.target, ast.Name):
+            target = self._local_bind(node.target)
+        elif isinstance(node.target, (ast.Tuple, ast.List)):
+            # A tuple target rides a hidden per-item binding unpacked at the body head, one spelling for both.
+            hidden = f"for${self._fresh_temp()}u"
+            target = LocalBind(self._origin(node.target), hidden)
+            self._bind_target(node.target, LocalRef(self._origin(node.target), hidden), prelude)
+        else:
+            self._reject(node.target, "the for-loop target must be a name or a tuple of names")
         iterable = self._atom(node.iter, sink)  # evaluated once, before the loop, as in CPython
         self._check_region([node.iter])
-        sink.append(For(self._origin(node), target, iterable, self._suite(node.body)))
+        sink.append(For(self._origin(node), target, iterable, (*prelude, *self._suite(node.body))))
 
     def _return(self, node: ast.Return, sink: list[Stmt]) -> None:
         if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
