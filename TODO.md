@@ -1,8 +1,80 @@
 # TODO
 
-## Frontend limitations
+## Resolution: examples/finite_set_current_controller.py
 
-Valid kernels that are conservatively rejected. None is a wrong answer; each is a located refusal with a rewrite.
+The finite-set VSI current controller was lifted from a real project that knows nothing about Holoso, so it doubles
+as a capability probe. Every gap below was verified against the frontend by compilation attempts; the verdicts
+follow one rule: a feature that is easy to add is added, a hard feature that is easy to work around in the kernel is
+worked around, and a hard feature that matters for typical control/DSP targets is added regardless. The example is
+tweaked only where noted; everything else lands in the frontend.
+
+ADD to the frontend, consolidated into four workpieces:
+
+- R1, frozen records. One restricted record value kind serving all three uses the example makes of dataclasses:
+  a runtime parameter (`kin: Kinematics` decomposes to field-path scalar ports `kin_pos`, `kin_vel`, ...), in-kernel
+  construction (`CurrentControllerDecision(...)` -- structural and synthesized, admitting only plain generated
+  frozen dataclasses with no user `__init__`/`__post_init__`, whose `object.__setattr__` could not inline anyway),
+  and the return value (flattened to field-path output leaves). Needs recursive annotation conformance, field
+  reads, joins, allocation traversal through record fields, and jaxtyping shapes on array-typed fields
+  (`switch_balance: Float64[np.ndarray, "3 1"]`). Moderate cost; high value -- typed signal bundles are idiomatic
+  in control code. Attribute-held frozen dataclass instances interact cleanly with hierarchical state: they are
+  walked as components but seed nothing (generated methods do not desugar and field writes cannot exist), so they
+  stay frozen-folded.
+
+- R2, reductions: `np.mean`, `np.max`/`np.min` (with their alias and method spellings), and `np.sum` -- left folds
+  over the leaves in the `_dot` style so FMA contraction stays reachable. Whole-array only (no axis/keepdims/dtype
+  forms); integer `mean` promotes to float before accumulating (numpy semantics) while `sum`/`min`/`max` preserve
+  the array's scalar family. Float min/max lower through `fsort` (which the example's operator set must
+  configure); integer min/max keep the existing compare/select lowering. Easy once the first lands.
+
+- R3, structural transforms: `reshape` in both spellings, `a.reshape(shape)` and `np.reshape(a, shape)`, with
+  tuple shapes and the scalar `reshape(3)` form (the example uses `(2,1)`, `3`, and `(3,1)`), and the
+  `dtype=float` keyword on `np.array`/`np.asarray` (needed to build a float vector from the bool switch tuple in
+  `_balance_step`, and by `_zero_mean`). Neither is a trivial stub: `reshape` is a DERIVATION that conservatively
+  tracks argument 0's allocation (the host MAY return a view) and needs the registry to accept a tuple shape
+  argument -- today the `_array_call` sequence gate rejects it, and `derives` asserts a single argument, to be
+  replaced by the invariant that the result tracks argument 0; the gate carve-out must be a per-stub opt-in
+  sequence-argument position, not a global relaxation (the same opt-in serves `np.polyval`'s coefficient argument
+  in R4). `dtype=` needs a keyword binder on the Conversion path and conditional copy semantics: a dtype-CHANGING
+  `asarray` copies on the host, so it must mint a fresh allocation.
+
+- R4, new library stubs: `np.polyval` (Horner left fold; ndarray coefficients, sequence
+  coefficients following R3's argument-domain decision) and elementwise `np.abs` on arrays. The latter is not a
+  plain registration: `np.abs` already resolves to the scalar intrinsic entries and the registry serves one entry
+  per key, so the array form needs rank-sensitive per-key lifting (`np.abs`/`np.absolute`/builtin `abs` become
+  array-capable; `math.fabs` stays scalar-only) -- a registry extension that would incidentally serve every scalar
+  ufunc on arrays. `np.sum` folded into R2 above.
+
+TWEAK the example (minimal edits, each spelled here):
+
+- T1: the module-boundary `np.ndarray` annotations become fixed-shape jaxtyping annotations (import `Float64`;
+  `i_ac`, `di_ac_dt`: `Float64[np.ndarray, "3"]`; `i_dq_ref`: `Float64[np.ndarray, "2"]`; and under R1 the
+  OUTPUT-record field `CurrentControllerDecision.switch_balance: Float64[np.ndarray, "3 1"]` -- distinct from
+  the persistent `self._switch_balance`, which needs no annotation). Required by design -- no dynamic shapes.
+  Drop the example's stale `TODO FIXME: Currently unsupported` docstring line and the helper shape-TODO comments
+  while at it.
+  Helper annotations (`_dq0_to_ac`, `_zero_mean`) need no change: unrecognized annotations on inlined frames are
+  deliberately unchecked. The state array's shape needs no annotation either (the reset snapshot carries it);
+  the field-annotation comments inside the example are stale on this point.
+
+- T2: the argmax tail of `_select_switch` -- `active_drive >= best - eps` builds a runtime boolean array,
+  `np.flatnonzero(...)[0]` a runtime index, and `self._active_switch_candidates[active]` a runtime-indexed read
+  of a static table: three value-model concepts (boolean arrays, data-dependent search, runtime aggregate
+  indexing) serving one line. Rewrite preserving the exact tie rule (the EARLIEST candidate within tolerance of
+  the global maximum, not the first strict maximum): pass 1 computes `best = float(np.max(active_drive))` (R2);
+  pass 2 scans the static candidate list first-wins with `drive_i >= best - 1e-12 * max(abs(best), 1.0)`,
+  selecting the switch triple through conditional rebinds. The scan shape compiles today (verified); `max` and
+  `abs` on scalars resolve already.
+
+- T3: `switch_balance=self._switch_balance.reshape((self._n_phases, 1))` returns a live view of persistent state
+  once reshape is a derivation, and returning state aliases is refused (correctly -- hardware cannot honor the
+  live handle Python would return). Rewrite: `np.array(self._switch_balance.reshape((self._n_phases, 1)))`;
+  `np.array` copies, minting the fresh allocation the return gate demands.
+
+Suggested order: R2 (unblocks T2), R3 (unblocks T3), R1 (the interface), R4 alongside R2/R3, then the example
+tweaks and its catalogue registration.
+
+## Frontend limitations
 
 An empty array slice (`v[:0]`) is refused where it is taken rather than where it is used, so even `len(v[:0])` fails;
 an empty sequence slice is fine. An empty array carries no leaves, so the leaf-type and shape checks cannot run --
@@ -30,16 +102,6 @@ destination are the same slot.
 
 A tuple swap of two state attributes (`self.a, self.b = self.b, self.a + x`) is refused because an unpack target must
 be a plain name. It is the one refusal here with no one-line rewrite -- the swap needs a temporary.
-
-State is owned by exactly one object, the receiver of the traced entry method, so a component cannot hold a
-sub-component that keeps a register of its own: an oscillator built around an accumulator instance is refused with
-"an attribute store is only supported on the entry method's receiver", and inheriting the accumulator instead moves
-the refusal to "a helper method cannot write attributes of the receiver; only the entry method may". Both name the
-child's own store. Composition of behaviour is available -- a pure method on a snapshotted object inlines, so a child
-that owns the width while the register stays with whoever ticks it compiles to byte-identical hardware -- but the
-spelling a hardware engineer reaches for first, a component instantiating a stateful component, is the one that
-fails. Flattening every register into the entry object is the rewrite, and it is the reason `examples/nco.py` and
-`examples/iq_oscillator.py` each carry their own phase accumulator instead of the latter reusing the former.
 
 Also refused, each naming the construct and each with a plain rewrite: a walrus that reads the name it binds
 (`b = (a := a + x)`); a `list[...]` return annotation, in favour of `tuple[...]`, though a returned list literal stays
