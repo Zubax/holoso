@@ -3,7 +3,8 @@
 Strapdown IMU sensor fusion: a Mahony-type complementary filter with lever-arm compensation for an IMU mounted away
 from the center of mass. Each transaction takes one raw 6-axis sample with its calibration matrices plus the sensor
 temperature and the time step, and produces the world-frame linear acceleration of the center of mass together with
-a measurement-validity flag; the carried state is the attitude quaternion and the in-run gyro bias estimate.
+a flag reporting whether the accelerometer sample was accepted for tilt correction; the carried state is the attitude
+quaternion and the in-run gyro bias estimate.
 
 The example is somewhat simplified compared to actual production systems to keep it readable.
 Obviously, Holoso would have no problem expressing an actual production-grade estimator with bells and whistles,
@@ -36,7 +37,6 @@ from jaxtyping import Float64
 import holoso
 
 type Vec3 = Float64[np.ndarray, "3"]
-type Vec4 = Float64[np.ndarray, "4"]
 type Mat3x3 = Float64[np.ndarray, "3 3"]
 
 GRAVITY = np.array([0.0, 0.0, 9.80665])  # [m/s^2] world frame is z-up: at rest the specific force is +1 g along +z
@@ -97,7 +97,8 @@ class ImuFusion:
     ) -> tuple[Vec3, bool]:
         """
         Updates the IMU state estimate based on the angular rate and linear acceleration samples.
-        Returns the world-frame linear acceleration of the center of mass [m/s^2] and the sample validity.
+        Returns the world-frame linear acceleration of the center of mass [m/s^2] and whether the
+        accelerometer sample was accepted for tilt correction.
         """
         # Latch the sticky clip flag while the raw rate is near full scale.
         self.gyro_clip = self.gyro_clip or np.linalg.norm(gyro, np.inf) > self.gyro_limit
@@ -107,8 +108,7 @@ class ImuFusion:
         w = gyro_cal @ gyro - (self.temp_model @ t_powers + self.bias)
 
         # Recover the angular acceleration by backward difference; the first sample has no history, so it is zero.
-        started = self._started
-        if started:
+        if self._started:
             w_dot = (w - self._w_prev) / dt
         else:
             w_dot = np.zeros(3)
@@ -127,7 +127,7 @@ class ImuFusion:
             if self._aligned:
                 # The tilt error against the attitude's own gravity direction feeds the clamped bias integrator
                 # and the proportional rate correction.
-                qw, qx, qy, qz = self.attitude[0], self.attitude[1], self.attitude[2], self.attitude[3]
+                qw, qx, qy, qz = self.attitude
                 gravity_body = np.array(
                     [2.0 * (qx * qz - qw * qy), 2.0 * (qy * qz + qw * qx), 1.0 - 2.0 * (qx * qx + qy * qy)]
                 )
@@ -156,7 +156,7 @@ class ImuFusion:
         self.attitude = q * (1.0 / np.linalg.norm(q))
 
         # Resolve the compensated acceleration into the world frame and remove gravity.
-        qw, qx, qy, qz = self.attitude[0], self.attitude[1], self.attitude[2], self.attitude[3]
+        qw, qx, qy, qz = self.attitude
         rotation = np.array(
             [
                 [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qw * qz), 2.0 * (qx * qz + qw * qy)],

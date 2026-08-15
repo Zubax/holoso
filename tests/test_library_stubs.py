@@ -55,6 +55,7 @@ from holoso._eel._lib._numpy import (
     atanh,
     cbrt,
     clip,
+    clip_free,
     cosh,
     degrees,
     exp,
@@ -79,7 +80,8 @@ def test_registry_resolves_the_expected_externals() -> None:
         assert isinstance(resolve(external), Array), external
     assert resolve(np.minimum) == Array(minimum) == resolve(np.fmin)  # type: ignore[arg-type]
     assert resolve(np.maximum) == Array(maximum) == resolve(np.fmax)  # type: ignore[arg-type]
-    assert resolve(np.clip) == Array(clip) == resolve(np.ndarray.clip)  # type: ignore[arg-type]
+    assert resolve(np.ndarray.clip) == Array(clip)  # type: ignore[arg-type]
+    assert resolve(np.clip) == Array(clip_free)  # type: ignore[arg-type]  # the free spelling is stricter
     # An operator is a key like any callee object, so `**` and its every spelling are ONE four-lowering entry.
     power_entry = resolve(BinaryOp.POW)
     assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 4
@@ -562,6 +564,14 @@ def test_clip_inlining_matches_the_host() -> None:
     assert assert_hir_matches_reference(
         lower(int_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, int_kernel, int_vectors, label="int_clip"
     ) == len(int_vectors)
+
+    # numpy's free function rejects a lone lower bound where the method spelling takes one, so the two spellings
+    # cannot share an arity: accepting `np.clip(v, lo)` would synthesize a call that its own Python cannot run.
+    def lone_bound(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.clip(v, 0.0)  # type: ignore[no-any-return]
+
+    with pytest.raises(UnsupportedConstruct, match="takes 3 argument"):
+        holoso.synthesize(lone_bound, Options(OperatorOptions(fadd=FAddOptions())), name="k")
 
 
 def test_composite_stub_inlining_matches_the_host_at_binary64() -> None:
