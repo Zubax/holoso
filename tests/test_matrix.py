@@ -591,7 +591,7 @@ def test_ndarray_subclass_constant_and_state_are_rejected() -> None:
         P: np.ndarray
 
         def step(self, a: float) -> None:
-            self.P = self.P * a
+            self.P = np.array([[a, a], [a, a]])
 
     _refused(Stateful(_np_matrix()).step, "numpy subclass")
 

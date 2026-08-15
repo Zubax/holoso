@@ -619,6 +619,14 @@ def test_dropped_leaf_convicts_in_every_family(
         assert_hir_matches_reference(make_hir(), reference, [{"x": 2.0}], label=f"dropped_{label}")
 
 
+class _PrivateTotal:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def step(self, x: float) -> None:
+        self._s = self._s + x
+
+
 def test_state_port_exposing_private_slot_convicts() -> None:
     builder = HirBuilder()
     builder.block()
@@ -628,7 +636,7 @@ def test_state_port_exposing_private_slot_convicts() -> None:
     builder.output("state__s", total)
     builder.ret()
     with pytest.raises(AssertionError, match="private slots"):
-        assert_hir_matches_reference(builder.finish(), _Gained(1.0).step, [{"x": 1.0}], label="leaky")
+        assert_hir_matches_reference(builder.finish(), _PrivateTotal().step, [{"x": 1.0}], label="leaky")
 
 
 def test_typoed_vector_key_crashes_instead_of_discarding() -> None:

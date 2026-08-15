@@ -34,6 +34,7 @@ from debouncer import Debouncer  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
 from fir import Fir4  # noqa: E402
 from flux_observer import FluxObserver  # noqa: E402
+from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
 import imu_fusion as imu_fusion  # noqa: E402  # synth matrix; it synthesizes the shipped realistic-config kernel
 from imu_fusion import ImuFusion as ImuFusion  # noqa: E402
@@ -721,6 +722,25 @@ SPECS = [
         reference={"state_y": OutputTolerance(ulps=8, growth_ulps=1, floor=8.0)},  # 3 roundings/step at |x| <= 5
         nominal={"x": 1.0},
         manual=[  # one continuous stream: the first sample latches y=x, then the IIR settles toward the input
+            *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
+            *({"x": v} for v in (5.0, 5.0, 0.0, 0.0)),
+            *({"x": v} for v in (-2.0, 3.0, 0.5, -1.0)),
+        ],
+        draw_random=_draw_scalars(("x",), -4.0, 4.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="iir1_hpf",
+        inputs=("x",),
+        make_kernel=lambda: IIR1HPF().step,
+        # The LPF recurrence budget rides on the nested slot; the output subtracts the bias from the input, so the
+        # x-m cancellation near convergence needs the same floor as the source scale (|x| <= 5 over the domain).
+        reference={
+            "out_0": OutputTolerance(ulps=8, growth_ulps=1, floor=8.0),
+            "state_lpf_y": OutputTolerance(ulps=8, growth_ulps=1, floor=8.0),
+        },
+        nominal={"x": 1.0},
+        manual=[  # one continuous stream: the first sample latches the bias, then the HPF tracks steps off it
             *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
             *({"x": v} for v in (5.0, 5.0, 0.0, 0.0)),
             *({"x": v} for v in (-2.0, 3.0, 0.5, -1.0)),

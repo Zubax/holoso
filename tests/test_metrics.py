@@ -1,7 +1,7 @@
 """
 Steering/area non-regression gate for the LIR build.
 
-Every currently-synthesizing example (all except `iir1_hpf` and `finite_set_current_controller`, which the
+Every currently-synthesizing example (all except `finite_set_current_controller`, which the
 frontend cannot yet lower) is built to LIR and measured on the metrics that bound the synthesized fabric (here
 "straight-line" means the pure-float flat path: single block, no boolean fabric -- an if-converted kernel can be
 single-block without being straight-line in this sense): the wide and
@@ -43,6 +43,7 @@ import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from ekf1_stateful import Ekf1  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
+from iir1_hpf import IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
 from imu_fusion import ImuFusion  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
@@ -70,6 +71,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "madd": lambda: madd.madd,
     "poly3": lambda: poly3.poly3,
     "signal_window": lambda: signal_window,
+    "iir1_hpf": lambda: IIR1HPF().step,
     "iir1_lpf": lambda: IIR1LPF().__call__,
     "pid": lambda: PID().__call__,
     "schmitt_trigger": lambda: SchmittTrigger().__call__,
@@ -199,6 +201,7 @@ BASELINE: dict[str, Metrics] = {
     "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=14, last_pc=14, max_block_span=14),
     "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=23, last_pc=23, max_block_span=23),
     "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=9, last_pc=9, max_block_span=9),
+    "iir1_hpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "iir1_lpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=15, last_pc=15, max_block_span=15),
     "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=36, last_pc=68, max_block_span=31),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6),

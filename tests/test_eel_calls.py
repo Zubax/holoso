@@ -640,7 +640,8 @@ def _calls_bound_method(x: float) -> float:
 
 
 def test_a_state_writing_bound_callee_rejects_at_the_helper_write() -> None:
-    _rejects(_calls_bound_method, r"in _BOUND\(\): an attribute store is only supported on the entry method's receiver")
+    # The external accumulator instance belongs to no receiver's component tree, so its state has no home.
+    _rejects(_calls_bound_method, r"in _BOUND\(\): an attribute store is only supported on the kernel's own component")
 
 
 def _unimplemented_library(x: float) -> float:

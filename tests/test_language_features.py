@@ -331,8 +331,9 @@ def test_read_only_attr_equality_does_not_poison_later_folds() -> None:
 class _HelperGuardedStateWrite:
     """
     A called helper whose self-write hides behind a guard the reset snapshot would fold dead -- stale once the entry
-    method writes that guard at runtime. A reachability-folded self-write check prunes the dead write and wrongly
-    accepts the helper (then drops the write, diverging from Python); pure-syntactic detection must reject it.
+    method writes that guard at runtime. The syntactic seed (dead arms included) pins both attributes as state, so
+    the helper's guarded write compiles into the same latch CPython computes; a reachability-folded seed would have
+    pruned the write and silently diverged.
     """
 
     def __init__(self) -> None:
@@ -349,11 +350,13 @@ class _HelperGuardedStateWrite:
         return self._arm()
 
 
-def test_guarded_helper_state_write_is_rejected() -> None:
-    # The self-write detection on a called helper must be purely syntactic: a `self.x =` anywhere in the helper rejects
-    # it, even under a guard the snapshot would fold dead. A reachability-folded check would prune and silently accept.
-    with pytest.raises(UnsupportedConstruct, match="a helper method cannot write attributes of the receiver"):
-        holoso.synthesize(_HelperGuardedStateWrite().__call__, _ops())
+def test_guarded_helper_state_write_compiles_and_latches() -> None:
+    # The seed must stay purely syntactic even for called helpers: the guarded write pins self._x as state although
+    # the reset snapshot folds the guard dead, so the latch behaves exactly as CPython's across transactions.
+    sim = _model(_HelperGuardedStateWrite().__call__)
+    reference = _HelperGuardedStateWrite()
+    for p in (False, False, True, False, True, False):
+        assert bool(sim.run(p)[0]) == reference(p), f"p={p}"
 
 
 class _PropertyShadowsDict:

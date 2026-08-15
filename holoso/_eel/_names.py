@@ -20,9 +20,9 @@ def state_port_name(path: tuple[str | int, ...]) -> str:
 
 
 def public_slot(path: tuple[str | int, ...]) -> bool:
-    """A public attribute gets a `state_<attr>` port; an underscore-prefixed one stays register-only."""
+    """A public path gets a `state_...` port; one with any underscore-prefixed component stays register-only."""
     assert path and isinstance(path[0], str)
-    return not path[0].startswith("_")
+    return not any(isinstance(key, str) and key.startswith("_") for key in path)
 
 
 def indexed_names(base: str, shape: tuple[int, ...]) -> list[str]:

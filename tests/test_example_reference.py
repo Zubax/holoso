@@ -31,6 +31,7 @@ from holoso import BoolType, FloatFormat, FloatType, IntType
 from ._examples import SPECS, ExampleSpec, InputVector, OutputTolerance
 from majority_voter import MajorityVoter  # noqa: E402  # _examples put examples/ on the path
 from uart import UartTx  # noqa: E402
+from ._eeloracle import walk_instance_leaves
 from ._modelref import default_options, flatten_value, port_name, within
 
 _STATE_PREFIX = "state_"
@@ -70,24 +71,19 @@ def _family_of(value: object) -> type:
 def _state_leaves(instance: object) -> dict[str, Any]:
     """
     Public attribute leaves named exactly as the compiler decomposes state slots (a scalar keeps its name, an
-    aggregate flattens row-major) -- the forward direction of `_eeloracle.instance_leaves`. The name alone cannot
-    prove which attribute a port belongs to (aggregate `q` and scalar `q_0` both mint `q_0`), so a name minted
-    twice is dropped and its lookup fails loudly instead of comparing against a guess.
+    aggregate flattens row-major, a nested component prefixes its own leaves) -- the forward direction of
+    `_eeloracle.walk_instance_leaves`. The name alone cannot prove which attribute a port belongs to (aggregate
+    `q` and scalar `q_0` both mint `q_0`), so a name minted twice is dropped and its lookup fails loudly instead
+    of comparing against a guess.
     """
     leaves: dict[str, Any] = {}
     ambiguous: set[str] = set()
-    for attr, value in vars(instance).items():
-        if attr.startswith("_"):
+    for name, private, leaf in walk_instance_leaves(instance):
+        if private:
             continue
-        pairs = (
-            [(attr + "".join(f"_{key}" for key in path), leaf) for path, leaf in flatten_value(value)]
-            if isinstance(value, (list, tuple, np.ndarray))
-            else [(attr, value)]
-        )
-        for name, leaf in pairs:
-            if name in leaves:
-                ambiguous.add(name)
-            leaves[name] = leaf
+        if name in leaves:
+            ambiguous.add(name)
+        leaves[name] = leaf
     return {name: leaf for name, leaf in leaves.items() if name not in ambiguous}
 
 

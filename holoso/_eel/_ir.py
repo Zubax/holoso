@@ -359,11 +359,25 @@ class Store:
 
 
 @dataclass(frozen=True, slots=True)
+class AugMark:
+    """
+    The point where CPython loads an augmented store's old target value: after the target/index temps, before
+    the RHS hoisting. The partial evaluator records its state-write sequence number here; the paired AugStore
+    on a state-rooted target rejects if a state write landed in between, since the store-step read would then
+    answer a value CPython never loaded. Function-local mark indices are scoped per frame at interpretation.
+    """
+
+    origin: Origin
+    mark: int
+
+
+@dataclass(frozen=True, slots=True)
 class AugStore:
     """
-    The old element is read at the store step, after the value temp — CPython reads it before the RHS, but the
-    divergence is unobservable: expressions cannot mutate aggregates and a same-region walrus rebinding an index
-    or root name is rejected by the desugarer.
+    The old element is read at the store step, after the value temp — CPython reads it before the RHS. For a
+    target that cannot be reached by a state write the divergence is unobservable (expressions cannot mutate
+    aggregates and a same-region walrus rebinding an index or root name is rejected by the desugarer); a
+    state-rooted target checks the paired AugMark's sequence number instead.
     """
 
     origin: Origin
@@ -371,6 +385,7 @@ class AugStore:
     path: tuple[Selector, ...]
     op: BinaryOp
     value: Atom
+    mark: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,6 +549,7 @@ type Stmt = (
     Assign
     | Unpack
     | Store
+    | AugMark
     | AugStore
     | AugAssign
     | If

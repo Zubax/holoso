@@ -200,8 +200,8 @@ def test_aug_store_evaluates_index_before_value() -> None:
         t[i + 1] += v + 1.0
 
     lines = [line.strip() for line in _desugared_lines(kernel)]
-    assert lines.index("%0 = i + 1") < lines.index("%1 = v + 1.0")
-    assert "t[%0] += %1" in lines
+    assert lines.index("%0 = i + 1") < lines.index("mark !0") < lines.index("%1 = v + 1.0")
+    assert "t[%0] += %1 !0" in lines
 
 
 def test_attribute_aug_store() -> None:
@@ -214,7 +214,8 @@ def test_attribute_aug_store() -> None:
             return self.y
 
     lines = [line.strip() for line in _lines(C().step)]
-    assert "self.y += %0" in lines
+    assert "self.y += %0 !0" in lines
+    assert lines.index("mark !0") < lines.index("%0 = x * 2.0")
 
 
 def test_assert_is_ignored_wholesale() -> None:

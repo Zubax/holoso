@@ -74,6 +74,7 @@ class _Transformer:
         self._unit = unit
         self._classifier = classifier
         self._temp_count = 0
+        self._mark_count = 0
         self._comp_count = 0
         self._comp_renames: list[tuple[str, str]] = []
 
@@ -126,6 +127,10 @@ class _Transformer:
                 self._reject(node, "an `...` statement has no effect (a stub body cannot be synthesized)")
             case ast.Expr(value=ast.Yield() | ast.YieldFrom()):
                 self._reject(node, "generators are not supported")
+            case ast.Expr(value=ast.Call() as call):
+                # A bare call runs for its effects (a void state-writing helper).
+                self._to_temp(call, self._call(call, sink), sink)
+                self._check_region([call])
             case ast.Expr():
                 self._reject(node, "expression statement result is unused; bind it to a name or remove it")
             case ast.Assert() | ast.Pass():
@@ -195,8 +200,10 @@ class _Transformer:
                 sink.append(AugAssign(self._origin(node), target=target, op=op, value=self._atom(node.value, sink)))
             case ast.Attribute() | ast.Subscript():
                 root, path = self._store_path(node.target, sink)
+                mark = self._fresh_mark()
+                sink.append(AugMark(self._origin(node), mark))
                 value = self._atom(node.value, sink)
-                sink.append(AugStore(self._origin(node), root=root, path=path, op=op, value=value))
+                sink.append(AugStore(self._origin(node), root=root, path=path, op=op, value=value, mark=mark))
             case _:
                 self._reject(node.target, "unsupported augmented-assignment target")
         self._check_region([node.target, node.value], aug_target=aug_target)
@@ -375,6 +382,11 @@ class _Transformer:
     def _fresh_temp(self) -> int:
         index = self._temp_count
         self._temp_count += 1
+        return index
+
+    def _fresh_mark(self) -> int:
+        index = self._mark_count
+        self._mark_count += 1
         return index
 
     def _expr(self, node: ast.expr, sink: list[Stmt]) -> Expr:

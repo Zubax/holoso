@@ -77,8 +77,10 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
             put(f"{rendered or '()'} = {_atom(value)}", origin)
         case Store(origin=origin, root=root, path=path, value=value):
             put(f"{_store_path(root, path)} = {_atom(value)}", origin)
-        case AugStore(origin=origin, root=root, path=path, op=op, value=value):
-            put(f"{_store_path(root, path)} {op.value}= {_atom(value)}", origin)
+        case AugMark(origin=origin, mark=mark):
+            put(f"mark !{mark}", origin)
+        case AugStore(origin=origin, root=root, path=path, op=op, value=value, mark=mark):
+            put(f"{_store_path(root, path)} {op.value}= {_atom(value)} !{mark}", origin)
         case AugAssign(origin=origin, target=target, op=op, value=value):
             put(f"{target.name} {op.value}= {_atom(value)}", origin)
         case If(origin=origin, cond=cond, then=then, orelse=orelse):

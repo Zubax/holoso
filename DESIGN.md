@@ -236,8 +236,29 @@ aggregates: matrices and vectors are compile-time bookkeeping over scalar wires,
 Mutation is admitted only where reference and value semantics cannot be told apart, and rejected with advice
 everywhere else, sparing the compiler a heap model and escape analysis. Persistent state is the one mutable
 resident; its trees stay disjoint from each other and from everything captured, or a later transaction would write
-through an alias the flat state slots cannot represent. Whether an attribute is state is decided by running, not
-scanning, and only the entry method owns that analysis -- an inlined method may read `self` but not write it.
+through an alias the flat state slots cannot represent.
+
+State ownership spans the receiver's whole COMPONENT TREE: every plain instance reachable from the compile root
+through attribute chains gets a canonical path, so a kernel object may hold stateful sub-components and any method
+may write its own receiver's attributes; a void procedure (`reset()`) is callable as a bare statement, its
+None answering only at a use, exactly as in Python. Writes resolve by object identity, never by parameter name, so every
+alias of a component reads and writes the same slots; a component with state reachable under two distinct tree
+paths is rejected (naming would depend on traversal), while back-reference cycles are simply the same object.
+Whether an attribute is state is still decided by running: the assumed set seeds from a syntactic may-write scan
+of every desugarable method over every component class, and runs re-trim it to the writes actually reached.
+A seeded path whose snapshot cannot be state is POISONED rather than rejected -- it gets no slot,
+reads keep folding frozen, and only a reached write convicts -- so host-only utility methods cost a kernel nothing.
+
+Interpretation carries state in the frame environment beside locals and temps, under a key family nothing else
+mints, forked and joined at every control meet (branch arms, exit lanes, the inline boundary, residual-frame rows,
+loop passes) by the one join rule, so divergent helper-return state joins like any value; a callee inherits the
+caller's state entries and its return fold hands them back. Two provenance guards keep stale reads out where calls
+can now mutate state mid-statement, both conservative refusals: an augmented store into persistent state rejects
+when its right-hand side wrote state (the old-value read would postdate a write CPython reads before), and an
+aggregate state handle taken before a call that element-mutates its root rejects at consumption (a pure rebind
+keeps old handles valid, exactly as in Python).
+A residual loop carries the state roots its region syntactically writes plus whatever reached stores reveal through a
+driver-level restart -- lean-first, since carrying an untouched leaf would destroy static folds.
 
 Calls dispatch on the object identity the callee resolves to, not its spelled name, so every spelling of a symbol
 (`**` or its function form, `@` or `np.matmul`) resolves one registry entry. A scalar callee carries a group of

@@ -48,6 +48,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "signal_window-e8m36": (9, 9),
     "poly3-e8m36": (23, 23),
     "iir1_lpf-e8m36": (15, 15),
+    "iir1_hpf-e8m36": (20, 20),
     "pid-e8m36": (36, 68),
     "schmitt_trigger-e8m36": (6, 6),
     "quadrature_encoder-e8m36": (6, 6),

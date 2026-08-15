@@ -378,7 +378,7 @@ _CASES: list[tuple[object, str]] = [
     (_k_string, "string literals are only supported as raise messages"),
     (_k_none, "`None` is only supported as a bare return value"),
     (_k_fstring, "f-strings are only supported as raise messages"),
-    (_k_bare_call, "expression statement result is unused"),
+    (_k_bare_call, "calls to 'print' are not supported yet"),  # bare calls now desugar; the callee still refuses
     (_k_bare_raise, "bare `raise` is not supported"),
     (_k_raise_from, "`raise ... from` is not supported"),
     (_k_raise_no_call, "`raise` requires"),

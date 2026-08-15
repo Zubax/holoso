@@ -7,7 +7,6 @@ conservative-rejection finality, the state aliasing events, early-return joins, 
 import dataclasses
 import functools
 import math
-import types
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -75,10 +74,10 @@ class _CrossTransactionAlias:
 
 class _InternalRawAliasing:
     def __init__(self) -> None:
-        self.buf = [[0.0]] * 2
+        self.buf = [[0.0]] * 2  # the reset snapshot aliases internally; the reached write convicts it
 
     def step(self, x: float) -> float:
-        self.buf = [[x]] * 2
+        self.buf = [[x], [x]]
         return x
 
 
@@ -305,7 +304,7 @@ def test_the_a5_install_matrix_rejections() -> None:
         (_ImmutableLaundering().step, "reaches the same mutable object through more than one path within self.s"),
         (_SameBoundaryDoubleInstall().step, "backs .or backed. the state attribute self.a"),
         (_SnapshotOverlapWithCapture().step, "overlaps the environment name '_SHARED_TABLE'"),
-        (_RawViewOverlapAcrossRoots().step, "shares storage with the state attribute self.a"),
+        (_RawViewOverlapAcrossRoots().step, "shares storage with the poisoned attribute self.b"),
         (_RawViewOverlapWithinOneTree().step, "overlaps the storage of another array within self.a"),
         (_ZeroStrideSelfOverlap().step, "self-overlapping array view"),
         (_PartialByteSelfOverlap().step, "self-overlapping array view"),
@@ -514,10 +513,10 @@ class _AliasRootedReceiverStore:
 
 class _UnrepresentableStateObject:
     def __init__(self) -> None:
-        self.box = types.SimpleNamespace(y=0.0)
+        self.mode: object = "fast"
 
     def step(self, x: float) -> float:
-        self.box.y = x
+        self.mode = x
         return x
 
 
@@ -593,18 +592,18 @@ class _EmptyAggregateState:
 
 class _EmptyTensorState:
     def __init__(self) -> None:
-        self.v = np.zeros(0)
+        self.v = np.zeros(0)  # unrepresentable reset; the reached write below convicts it
 
     def step(self, x: float) -> float:
-        self.v = self.v * x
+        self.v = np.array([x])
         return x
 
 
 def test_receiver_discipline_rejections() -> None:
     for target, match in [
-        (_AliasRootedReceiverStore().step, "the receiver may only be written through its parameter name 'self'"),
+        (_AliasRootedReceiverStore().step, "was not statically visible when state was seeded"),
         (_UnrepresentableStateObject().step, "which the compiler cannot represent as state"),
-        (_NestedAttributeStore().step, "an attribute store through a nested object is not supported"),
+        (_NestedAttributeStore().step, "an attribute store through self.a is not supported: it is not a component"),
         (_MissingReset().step, "has no value on the instance at synthesis time"),
         (_ClassLevelDefaultReset().step, "has no value on the instance at synthesis time"),
         (_NaNReset().step, "the reset value of self.y is NaN"),
@@ -633,8 +632,9 @@ class _HierarchicalComponent:
         return self.inner(x)
 
 
-def test_a_component_instance_call_is_the_ruled_hierarchical_refusal() -> None:
-    _rejects(_HierarchicalComponent().step, "it is a separate component instance ._Inner.; hierarchical state")
+def test_a_component_instance_call_compiles_with_nested_state() -> None:
+    # The sub-component's own register becomes the nested slot inner.y, updated by its inlined __call__.
+    _oracle(_HierarchicalComponent().step, [{"x": 1.0}, {"x": 2.5}, {"x": -0.5}, {"x": 4.0}])
 
 
 def _scale(factor: float, x: float) -> float:
@@ -1407,7 +1407,7 @@ class _SelfInstallNoOp:
 
 
 def test_receiver_subscript_store_is_a_located_rejection() -> None:
-    _rejects(_ReceiverSubscriptStore().step, "the receiver itself does not support item assignment")
+    _rejects(_ReceiverSubscriptStore().step, "a component object does not support item assignment")
 
 
 def test_a_raise_after_a_partial_return_is_judged_data_dependent() -> None:

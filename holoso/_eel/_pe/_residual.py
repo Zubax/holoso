@@ -27,19 +27,21 @@ def rechained(node: object, frames: tuple[CallFrame, ...]) -> object:
     return node
 
 
-def assigned_names(stmts: tuple[Stmt, ...], receiver: str | None) -> tuple[set[str], set[str], dict[str, Origin]]:
+def assigned_names(
+    stmts: tuple[Stmt, ...],
+) -> tuple[set[str], set[str], dict[tuple[str, tuple[str, ...]], Origin]]:
     """
-    The syntactic (rebound, store-rooted, receiver-stored-attr) sets: the loop-carry over-approximation for
-    residualization and the seed of the assumed-state set. Rebinds and stores are kept apart because a store
-    mutates its root in place rather than rebinding it, so a non-aggregate store root is no carry at all --
-    the store step itself owns the precise rejection. A store rooted at the receiver name whose first selector
-    is an attribute is a state write; the dict keeps the FIRST such write per attribute for the pinning
-    diagnostic. Comprehension bodies bind only temps and their renamed targets never collide with user
-    locals, so the uniform walk stays exact for names.
+    The syntactic (rebound, store-rooted, attr-chain-stored) sets: the loop-carry over-approximation for
+    residualization and the raw material of the assumed-state seed. Rebinds and stores are kept apart
+    because a store mutates its root in place rather than rebinding it, so a non-aggregate store root is no
+    carry at all -- the store step itself owns the precise rejection. Attr-chain stores keep the FIRST
+    write per (root, chain) pair for the pinning diagnostic; the caller resolves roots (a method's receiver
+    at seeding, the live bindings at loop residualization). Comprehension bodies bind only temps and their
+    renamed targets never collide with user locals, so the uniform walk stays exact for names.
     """
     rebound: set[str] = set()
     stored: set[str] = set()
-    attrs: dict[str, Origin] = {}
+    attrs: dict[tuple[str, tuple[str, ...]], Origin] = {}
     for stmt in stmts:
         parts: tuple[tuple[Stmt, ...], ...] = ()
         match stmt:
@@ -48,8 +50,13 @@ def assigned_names(stmts: tuple[Stmt, ...], receiver: str | None) -> tuple[set[s
             case Unpack(targets=targets):
                 rebound |= {target.name for target in targets if isinstance(target, LocalBind)}
             case Store(root=LocalRef(name=name)) | AugStore(root=LocalRef(name=name)):
-                if name == receiver and isinstance(stmt.path[0], AttrSel):
-                    attrs.setdefault(stmt.path[0].name, stmt.origin)
+                chain: list[str] = []
+                for selector in stmt.path:
+                    if not isinstance(selector, AttrSel):
+                        break
+                    chain.append(selector.name)
+                if chain:
+                    attrs.setdefault((name, tuple(chain)), stmt.origin)
                 else:
                     stored.add(name)
             case If(then=then, orelse=orelse):
@@ -62,11 +69,11 @@ def assigned_names(stmts: tuple[Stmt, ...], receiver: str | None) -> tuple[set[s
             case _:
                 pass
         for part in parts:
-            inner_rebound, inner_stored, inner_attrs = assigned_names(part, receiver)
+            inner_rebound, inner_stored, inner_attrs = assigned_names(part)
             rebound |= inner_rebound
             stored |= inner_stored
-            for attr, origin in inner_attrs.items():
-                attrs.setdefault(attr, origin)
+            for pair, origin in inner_attrs.items():
+                attrs.setdefault(pair, origin)
     return rebound, stored, attrs
 
 

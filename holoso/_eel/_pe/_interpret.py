@@ -62,15 +62,21 @@ from ._residual import assigned_names, drop_return_rows, prune, rechained
 from ._snapshot import Snapshotter, describe_opaque as _describe_opaque
 from ._state import (
     READ_PROTOCOLS,
+    ComponentTree,
     ScalarSpec,
     SequenceSpec,
     Spec,
+    StateKey,
     StateModel,
     TensorSpec,
-    descriptor_guard,
+    build_component_tree,
     environment_aggregates,
+    mro_attr,
     overridden_protocol,
+    resolve_chain,
+    seed_state,
     spec_leaves,
+    spell_state,
 )
 from ._values import (
     Allocation,
@@ -93,9 +99,9 @@ from ._values import (
 
 _logger = logging.getLogger(__name__)
 
-type _SlotKey = tuple[str, ...]
+type _EnvKey = str | int | StateKey
 
-type _EnvKey = str | int | _SlotKey
+type _LoopKey = tuple[Origin, int]
 
 _AGGREGATE = (SequenceValue, TensorValue)
 
@@ -176,11 +182,12 @@ class _ExitKind(enum.Enum):
 @dataclass(slots=True)
 class _Exit:
     """
-    A pending exit lane, joined at the one consumer its kind names. `env` is a SNAPSHOT: a statement-level
-    exit ends a lane whose frame dict a sibling lane's fold may later revive and keep mutating in place, so
-    capturing by reference would hand the consumer the survivor's values. `crossed` marks a return lane
-    that left a residual loop: its arms lie inside the published loop and never reconverge with any seal
-    region, so folds keep it on the union of sinks until the frame boundary wraps the region.
+    A pending exit lane, joined at the one consumer its kind names. `env` and `state` are SNAPSHOTS: a
+    statement-level exit ends a lane whose frame dicts a sibling lane's fold may later revive and keep
+    mutating in place, so capturing by reference would hand the consumer the survivor's values. `crossed`
+    marks a return lane that left a residual loop: its arms lie inside the published loop and never
+    reconverge with any seal region, so folds keep it on the union of sinks until the frame boundary wraps
+    the region.
     """
 
     kind: _ExitKind
@@ -189,6 +196,12 @@ class _Exit:
     sinks: list[Sink]
     result: Value | None = None
     crossed: bool = False
+
+    @classmethod
+    def snap(
+        cls, kind: _ExitKind, origin: Origin, frame: "Frame", sinks: list[Sink], result: "Value | None" = None
+    ) -> "_Exit":
+        return cls(kind, origin, dict(frame.env), sinks, result)
 
 
 @dataclass(slots=True)
@@ -208,6 +221,18 @@ class _PromoteRun(HolosoError):
     def __init__(self, path: SlotPath) -> None:
         super().__init__(path)
         self.path = path
+
+
+class _CarryGrow(HolosoError):
+    """
+    Internal driver signal: a state store was reached inside a residual loop pass whose carried set lacks
+    the key, paired with every such enclosing loop. Lean-first is safe where maximal-first is not, since
+    residualization only grows with the carried set.
+    """
+
+    def __init__(self, pairs: list[tuple[_LoopKey, StateKey]]) -> None:
+        super().__init__(pairs)
+        self.pairs = pairs
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,11 +257,15 @@ class _Moved:
 @dataclass(frozen=True, slots=True)
 class _SlotAlias:
     """
-    A temp holding an aggregate state read: the tree's persistent home is the slot environment, so unlike an
-    ordinary linear conduit the landing site must fire the aliasing share; reads are innocent like a local's.
+    A temp holding an aggregate state read: the tree's persistent home is the state environment, so unlike
+    an ordinary linear conduit the landing site must fire the aliasing share; reads are innocent like a
+    local's. Consuming it after an element mutation of the root's tree rejects, since the leaves it holds
+    are the ones CPython's live handle no longer shows.
     """
 
     value: SequenceValue | TensorValue
+    root: StateKey
+    epoch: int
 
 
 type _Env = dict[_EnvKey, Value | _Unjoinable | _Moved | _SlotAlias]
@@ -246,53 +275,87 @@ type _Env = dict[_EnvKey, Value | _Unjoinable | _Moved | _SlotAlias]
 class Frame:
     """
     One function under interpretation; a non-root `return` rides a pending exit lane to the frame boundary.
-    `slots` is the environment holding the slot keys: the frame's own env for the root and its branch-arm
-    forks, the caller's transitively for inlined helpers, so a helper reads the current post-write state.
+    The environment holds locals and temps beside the persistent-state bindings, keyed by state root path --
+    a key family nothing else mints; an inlined helper's fresh environment inherits the caller's state
+    entries, and the return fold hands the joined state back.
     """
 
     fn: types.FunctionType
     annotations: dict[str, object]
     env: _Env
     root: bool
-    slots: _Env
+    marks: dict[int, int] = dataclasses.field(default_factory=dict)
+
+    def fork(self) -> "Frame":
+        """Marks are shared, not copied: an AugMark/AugStore pair is suite-local to one function."""
+        return Frame(self.fn, self.annotations, dict(self.env), self.root, marks=self.marks)
 
 
 _MISSING = object()
+
+
+def _rewrap(
+    value: SequenceValue | TensorValue,
+    moved: bool,
+    a_alias: _SlotAlias | None,
+    b_alias: _SlotAlias | None,
+    shares: tuple[Value, ...],
+) -> Value | _Moved | _SlotAlias:
+    """
+    A same-root alias pair keeps the older (min) epoch, the conservative one; a mismatched alias provenance
+    shares instead, so a later mutation through the join refuses.
+    """
+    if moved:
+        return _Moved(value)
+    if a_alias is not None and b_alias is not None and a_alias.root == b_alias.root:
+        return _SlotAlias(value, a_alias.root, min(a_alias.epoch, b_alias.epoch))
+    if a_alias is not None or b_alias is not None:
+        for tree in shares:
+            share(tree)
+    return value
+
+
+def _state_view(env: _Env) -> _Env:
+    """The persistent-state projection of an environment: what survives a return fold into the caller."""
+    return {key: value for key, value in env.items() if isinstance(key, tuple)}
 
 
 def partial_evaluate(
     eel: EelFunction, fn: types.FunctionType, instance: object | None, unroll_max_trips: int
 ) -> EelFunction:
     """
-    The A2 trim driver: run with the seeded assumed-state set, shrink to the attributes whose write was
-    actually reached, promote an INT slot that met a FLOAT live-out, and re-run until stable -- each run a
-    fresh interpreter over the same immutable tree. A rejection under the conservative assumption is final,
-    annotated with the pinning writes.
+    The A2 trim driver: run with the seeded assumed-state set (the syntactic may-write scan over the whole
+    component tree), shrink it to the paths whose write was actually reached, and re-run on every other
+    repair a run signals, until stable -- each run a fresh interpreter over the same immutable tree. A
+    rejection under the conservative assumption is final, annotated with the pinning writes.
     """
     if instance is None:
-        return Interpreter(fn, None, None, unroll_max_trips).run(eel)
+        return Interpreter(fn, None, unroll_max_trips).run(eel)
     assert eel.params, "a bound method always has a receiver parameter"
-    seed = assigned_names(eel.body, eel.params[0].name)[2]
-    if not seed:
-        return Interpreter(fn, instance, None, unroll_max_trips).run(eel)
-    descriptor_guard(instance, seed)
-    model = StateModel(instance, seed, environment_aggregates(fn))
-    while True:  # terminates: each pass either finishes, strictly shrinks S, or promotes a fresh leaf
-        interpreter = Interpreter(fn, instance, model, unroll_max_trips)
+    tree = build_component_tree(instance)
+    model = StateModel(tree, seed_state(tree, eel), environment_aggregates(fn))
+    extra_carries: dict[_LoopKey, frozenset[StateKey]] = {}
+    while True:  # terminates: each pass finishes, strictly shrinks S, promotes a leaf, or grows a carry set
+        interpreter = Interpreter(fn, model, unroll_max_trips, extra_carries)
         try:
             residual = interpreter.run(eel)
         except _PromoteRun as promotion:
             model.promote(promotion.path)
             _logger.info("%s: the state leaf %s promotes to float; re-running", eel.name, promotion.path)
             continue
+        except _CarryGrow as grow:
+            for loop_key, state_key in grow.pairs:
+                extra_carries[loop_key] = extra_carries.get(loop_key, frozenset()) | {state_key}
+            _logger.info("%s: a residual loop's carried set grows by %s; re-running", eel.name, grow.pairs)
+            continue
         except SynthesisError as error:
             raise type(error)(error.message + model.note(), error.location) from None
         if model.trim(interpreter.written_attrs):
             _logger.info(
-                "%s: the assumed-state set shrinks to {%s}; re-running", eel.name, ", ".join(sorted(model.assumed))
+                "%s: the assumed-state set shrinks to {%s}; re-running",
+                eel.name,
+                ", ".join(str(key) for key in sorted(model.assumed)),
             )
-            if not model.assumed:
-                return Interpreter(fn, instance, None, unroll_max_trips).run(eel)
             continue
         return residual
 
@@ -303,39 +366,70 @@ def _key_order(key: _EnvKey) -> tuple[int, str]:
 
 class Interpreter:
     def __init__(
-        self, fn: types.FunctionType, instance: object | None, state: StateModel | None, unroll_max_trips: int
+        self,
+        fn: types.FunctionType,
+        state: StateModel | None,
+        unroll_max_trips: int,
+        extra_carries: dict[_LoopKey, frozenset[StateKey]] | None = None,
     ) -> None:
         self._fn = fn
-        self.instance = instance
+        self.tree = state.tree if state is not None else None
+        self.instance = self.tree.objects[()] if self.tree is not None else None
         self.state = state
         self.unroll_max_trips = unroll_max_trips
+        self.extra_carries = extra_carries or {}
         self.budget = ExpansionBudget()
         self._next_temp = 0
         self._outputs: tuple[OutputDecl, ...] | None = None
         self._elide: list[SlotPath | None] = []
-        self.specs: dict[str, Spec] = {}
+        self.specs: dict[StateKey, Spec] = {}
         self._decls: tuple[SlotDecl, ...] = ()
-        self._slot_keys: list[_SlotKey] = []
-        self.receiver_name: str | None = None
-        self.state_owners: dict[Allocation, str] = {}
-        self.written_attrs: set[str] = set()
+        self.state_owners: dict[Allocation, StateKey] = {}
+        self.written_attrs: set[StateKey] = set()
+        self.state_writes = 0
+        self.root_epochs: dict[StateKey, int] = {}
+        self.active_loops: list[tuple[_LoopKey, frozenset[StateKey]]] = []
+        self._loop_occurrences: dict[Origin, int] = {}
         self._eels: dict[types.FunctionType, EelFunction] = {}
         self._meta: dict[types.FunctionType, dict[str, object]] = {}
         self._inlining: set[types.FunctionType] = {fn}
         self.snapshot = Snapshotter(state.check_capture if state is not None else None)
 
+    def state_prefix(self, raw: object) -> StateKey | None:
+        return self.tree.prefix_of(raw) if self.tree is not None else None
+
+    def carry_gate(self, key: StateKey) -> None:
+        """A state store inside a residual loop pass must find its key carried at EVERY crossed back edge."""
+        missing = [(loop_key, key) for loop_key, carried in self.active_loops if key not in carried]
+        if missing:
+            raise _CarryGrow(missing)
+
+    def check_mark(self, frame: Frame, mark: int, origin: Origin) -> None:
+        recorded = frame.marks.get(mark)
+        assert recorded is not None, "desugar pairs every AugStore with a preceding AugMark in the same suite"
+        if recorded != self.state_writes:
+            reject(
+                origin,
+                "the right-hand side of this augmented assignment writes persistent state, so the target's "
+                "old value may be read after a write CPython reads it before (the check does not track which "
+                "slot was written); split into an explicit read and store",
+            )
+
+    def note_state_write(self) -> None:
+        self.state_writes += 1
+
+    def bump_root_epoch(self, key: StateKey) -> None:
+        self.root_epochs[key] = self.root_epochs.get(key, 0) + 1
+
     def run(self, eel: EelFunction) -> EelFunction:
         env: _Env = {}
-        frame = Frame(
-            fn=self._fn, annotations=self._annotations_of(eel.origin, self._fn), env=env, root=True, slots=env
-        )
+        frame = Frame(fn=self._fn, annotations=self._annotations_of(eel.origin, self._fn), env=env, root=True)
         remaining = eel.params
         if self.instance is not None:
             # The bound receiver is a snapshot root: frozen-attribute reads fold, state attributes read and
             # write their slot bindings, and calling its methods inlines them over the same receiver.
             assert remaining, "a bound method always has a receiver parameter"
             receiver = remaining[0]
-            self.receiver_name = receiver.name
             frame.env[receiver.name] = self.snapshot.admit(receiver.name, self.instance, eel.origin)
             remaining = remaining[1:]
         params: list[Param] = []
@@ -349,12 +443,9 @@ class Interpreter:
         if self.state is not None:
             self.specs = self.state.prepare()
             self._decls = self.state.decls()
-            self._slot_keys = [(attr,) for attr in sorted(self.specs)]
-            for attr in sorted(self.specs):
-                frame.env[(attr,)] = self._init_slot(attr, self.specs[attr], eel.origin, sink)
-            ports = names + [
-                state_port_name(decl.slot) for decl in self._decls if not str(decl.slot[0]).startswith("_")
-            ]
+            for key in sorted(self.specs):
+                frame.env[key] = self._init_slot(key, self.specs[key], eel.origin, sink)
+            ports = names + [state_port_name(decl.slot) for decl in self._decls if public_slot(decl.slot)]
             if len(set(ports)) != len(ports):
                 collision = next(name for name in ports if ports.count(name) > 1)
                 reject(eel.origin, f"a state port collides with a parameter on {collision!r}; rename one of them")
@@ -382,7 +473,7 @@ class Interpreter:
         )
         return residual
 
-    def _init_slot(self, attr: str, spec: Spec, origin: Origin, sink: Sink) -> Value:
+    def _init_slot(self, key: StateKey, spec: Spec, origin: Origin, sink: Sink) -> Value:
         match spec:
             case ScalarSpec(path=path, stype=stype):
                 index = self.fresh()
@@ -390,9 +481,9 @@ class Interpreter:
                 return ResidualScalar(stype, TempRef(origin, index))
             case SequenceSpec(items=items):
                 sequence = SequenceValue(
-                    tuple(self._init_slot(attr, item, origin, sink) for item in items), Allocation()
+                    tuple(self._init_slot(key, item, origin, sink) for item in items), Allocation()
                 )
-                self.state_owners[sequence.allocation] = attr
+                self.state_owners[sequence.allocation] = key
                 return sequence
             case TensorSpec(shape=shape, family=family, leaves=leaves):
                 scalars: list[Scalar | Opaque] = []
@@ -401,7 +492,7 @@ class Interpreter:
                     sink.append(Assign(origin, TempBind(origin, index), SlotRead(origin, leaf.path), leaf.stype))
                     scalars.append(ResidualScalar(leaf.stype, TempRef(origin, index)))
                 tensor = TensorValue(shape, family, tuple(scalars), Allocation())
-                self.state_owners[tensor.allocation] = attr
+                self.state_owners[tensor.allocation] = key
                 return tensor
 
     def _desugared(self, fn: types.FunctionType) -> EelFunction:
@@ -498,7 +589,7 @@ class Interpreter:
                         if isinstance(result, _AGGREGATE) and self.alias_conduit(frame, stmt.value):
                             share(result)
                     self._spread(current, piece)
-                    exits.append(_Exit(_ExitKind.RETURN, origin, dict(frame.env), current, result))
+                    exits.append(_Exit.snap(_ExitKind.RETURN, origin, frame, current, result))
                     current = None
                     continue
                 case Raise():
@@ -514,13 +605,15 @@ class Interpreter:
                     current = flow.fall
                     continue
                 case Break(origin=origin):
-                    exits.append(_Exit(_ExitKind.BREAK, origin, dict(frame.env), current))
+                    exits.append(_Exit.snap(_ExitKind.BREAK, origin, frame, current))
                     current = None
                     continue
                 case Continue(origin=origin):
-                    exits.append(_Exit(_ExitKind.CONTINUE, origin, dict(frame.env), current))
+                    exits.append(_Exit.snap(_ExitKind.CONTINUE, origin, frame, current))
                     current = None
                     continue
+                case AugMark(mark=mark):
+                    frame.marks[mark] = self.state_writes
                 case Store() | AugStore():
                     _mutate.store(self, stmt, frame, piece, ctx)
                 case _:
@@ -542,15 +635,28 @@ class Interpreter:
         if isinstance(result, _AGGREGATE):
             if isinstance(value, LocalRef) and value.name != key:
                 share(result)
-            elif (isinstance(value, AttrRead) and self._slot_tree(frame, result)) or self.alias_conduit(frame, value):
-                if isinstance(target, TempBind):
-                    frame.env[key] = _SlotAlias(result)
-                    return
-                share(result)
+            else:
+                alias = self._alias_of(frame, value, result)
+                if alias is not None:
+                    if isinstance(target, TempBind):
+                        frame.env[key] = alias
+                        return
+                    share(result)
         frame.env[key] = result
 
-    def _slot_tree(self, frame: Frame, value: Value) -> bool:
-        return any(frame.slots.get(key) is value for key in self._slot_keys)
+    def _alias_of(self, frame: Frame, value: Expr, result: SequenceValue | TensorValue) -> _SlotAlias | None:
+        if isinstance(value, AttrRead):
+            root = self._slot_tree(frame, result)
+            if root is not None:
+                return _SlotAlias(result, root, self.root_epochs.get(root, 0))
+        if isinstance(value, TempRef):
+            bound = frame.env.get(value.index)
+            if isinstance(bound, _SlotAlias):
+                return _SlotAlias(result, bound.root, bound.epoch)
+        return None
+
+    def _slot_tree(self, frame: Frame, value: Value) -> StateKey | None:
+        return next((key for key in self.specs if frame.env.get(key) is value), None)
 
     def alias_conduit(self, frame: Frame, atom: Expr) -> bool:
         return isinstance(atom, TempRef) and isinstance(frame.env.get(atom.index), _SlotAlias)
@@ -575,14 +681,8 @@ class Interpreter:
             assert isinstance(decided, bool)
             taken = stmt.then if decided else stmt.orelse
             return self._block(taken, frame, sinks, ctx)
-        then_env: _Env = dict(frame.env)
-        else_env: _Env = dict(frame.env)
-        then_frame = Frame(
-            frame.fn, frame.annotations, then_env, frame.root, slots=then_env if frame.root else frame.slots
-        )
-        else_frame = Frame(
-            frame.fn, frame.annotations, else_env, frame.root, slots=else_env if frame.root else frame.slots
-        )
+        then_frame = frame.fork()
+        else_frame = frame.fork()
         then_sink: Sink = []
         else_sink: Sink = []
         then_flow = self._block(stmt.then, then_frame, [then_sink], ctx.arm())
@@ -590,7 +690,7 @@ class Interpreter:
         pending = then_flow.exits + else_flow.exits
         joined: _Env | None = None
         if then_flow.fall is not None and else_flow.fall is not None:
-            joined = self._join(stmt.origin, then_env, then_flow.fall, else_env, else_flow.fall)
+            joined = self._join(stmt.origin, then_frame.env, then_flow.fall, else_frame.env, else_flow.fall)
         cond_atom = _express.materialize(cond, stmt.origin)
         if not pending:
             node: Stmt | _OpenIf = If(stmt.origin, cond_atom, _frozen(then_sink), _frozen(else_sink))
@@ -608,7 +708,7 @@ class Interpreter:
                 return _Flow([self._fold_returns(stmt.origin, arms, sinks)], None)
             return _Flow(pending, None)
         frame.env.clear()
-        frame.env.update(joined if joined is not None else else_env if then_flow.fall is None else then_env)
+        frame.env.update(joined if joined is not None else else_frame.env if then_flow.fall is None else then_frame.env)
         if not pending:
             return _Flow([], sinks)
         falls = [arm_fall for arm_fall in (then_flow.fall, else_flow.fall) if arm_fall is not None]
@@ -631,10 +731,11 @@ class Interpreter:
         folded = lanes[0]
         for lane in lanes[1:]:
             merged = self._join_results(origin, folded.result, lane.result, folded.sinks, lane.sinks)
+            merged_env = self._join(origin, _state_view(folded.env), folded.sinks, _state_view(lane.env), lane.sinks)
             folded = _Exit(
                 _ExitKind.RETURN,
                 origin,
-                folded.env,
+                merged_env,
                 folded.sinks + lane.sinks,
                 merged,
                 crossed=folded.crossed or lane.crossed,
@@ -664,21 +765,25 @@ class Interpreter:
         for key in sorted(set(then_env) & set(else_env), key=_key_order):
             a_bound, b_bound = then_env[key], else_env[key]
             moved = isinstance(a_bound, _Moved) or isinstance(b_bound, _Moved)
-            aliased = isinstance(a_bound, _SlotAlias) and isinstance(b_bound, _SlotAlias)
+            a_alias = a_bound if isinstance(a_bound, _SlotAlias) else None
+            b_alias = b_bound if isinstance(b_bound, _SlotAlias) else None
             a = a_bound.value if isinstance(a_bound, (_Moved, _SlotAlias)) else a_bound
             b = b_bound.value if isinstance(b_bound, (_Moved, _SlotAlias)) else b_bound
             if isinstance(a, _Unjoinable) or isinstance(b, _Unjoinable):
                 joined[key] = _Unjoinable(self._describe_key(key))
                 continue
             if same(a, b):
-                if isinstance(a, _AGGREGATE) and (moved or aliased):
-                    joined[key] = _Moved(a) if moved else _SlotAlias(a)
+                if isinstance(a, _AGGREGATE):
+                    joined[key] = _rewrap(a, moved, a_alias, b_alias, (a,))
                 else:
                     joined[key] = a
                 continue
             if isinstance(a, _AGGREGATE) and isinstance(b, _AGGREGATE):
                 merged = self._join_aggregates(origin, key, a, b, then_sinks, else_sinks)
-                joined[key] = _Moved(merged) if moved and isinstance(merged, _AGGREGATE) else merged
+                if isinstance(merged, _AGGREGATE):
+                    joined[key] = _rewrap(merged, moved, a_alias, b_alias, (a, b, merged))
+                else:
+                    joined[key] = merged
                 continue
             if isinstance(a, (StaticScalar, ResidualScalar)) and isinstance(b, (StaticScalar, ResidualScalar)):
                 joined[key] = self._join_scalars(origin, self._describe_key(key), a, b, then_sinks, else_sinks)
@@ -774,7 +879,7 @@ class Interpreter:
         if key == _RETURN_KEY:
             return "the returned value"
         if isinstance(key, tuple):
-            return f"the state attribute self.{key[0]}"
+            return f"the state attribute {spell_state(key)}"
         return f"the local {key!r}" if isinstance(key, str) else "the conditional result"
 
     def readable(self, binding: Value | _Unjoinable | _Moved | _SlotAlias, origin: Origin) -> Value:
@@ -785,6 +890,13 @@ class Interpreter:
                 "aggregates join only when every arm agrees in kind, length, and shape",
             )
         if isinstance(binding, _SlotAlias):
+            if self.root_epochs.get(binding.root, 0) != binding.epoch:
+                reject(
+                    origin,
+                    f"this handle of the state attribute {spell_state(binding.root)} was taken before a call "
+                    "that mutated its elements, so it no longer shows what Python's live handle shows; "
+                    "reload the handle after the call",
+                )
             return binding.value
         if isinstance(binding, _Moved):
             share(binding.value)
@@ -987,9 +1099,12 @@ class Interpreter:
         its bindings survive the loop, while body-only names drop (a zero-trip loop never binds them).
         """
         origin = stmt.origin
+        occurrence = self._loop_occurrences.get(origin, 0)
+        self._loop_occurrences[origin] = occurrence + 1
+        loop_key: _LoopKey = (origin, occurrence)
         carried: list[tuple[_EnvKey, list[int]]] = []
         stypes: dict[tuple[_EnvKey, int], ScalarType] = {}
-        rebound, stored, loop_attrs = assigned_names((*stmt.header, *stmt.body), self.receiver_name)
+        rebound, stored, attr_writes = assigned_names((*stmt.header, *stmt.body))
         for name in sorted(rebound | stored):
             bound = frame.env.get(name)
             if bound is None:
@@ -1009,24 +1124,30 @@ class Interpreter:
                 )
             # A store through a non-aggregate root can never be admitted; the body pass draws the precise
             # rejection at the store itself (an attribute store on a snapshot, an item store on a scalar).
-        if frame.root:
-            for attr in sorted(set(loop_attrs) & set(self.specs)):
-                slot_key: _SlotKey = (attr,)
-                entry_tree = self.readable(frame.env[slot_key], origin)
-                leaves = tree_leaves(entry_tree)
-                for position, leaf in enumerate(leaves):
-                    if isinstance(leaf, Opaque):
-                        reject(origin, _describe_opaque(leaf))
-                    stypes[(slot_key, position)] = leaf.stype
-                carried.append((slot_key, [self.fresh() for _ in leaves]))
+        # Lean-first is deliberate: carrying an untouched leaf residualizes reads that may be static (a
+        # constant written before the loop), and a maximal pass can reject before any repair could run.
+        carried_keys: set[StateKey] = set(self.extra_carries.get(loop_key, frozenset())) & set(self.specs)
+        for root, chain in attr_writes:
+            bound = frame.env.get(root)
+            if isinstance(bound, Opaque) and self.tree is not None:
+                prefix = self.state_prefix(bound.value)
+                if prefix is not None:
+                    resolved = resolve_chain(self.tree, prefix, chain)
+                    if resolved is not None and resolved in self.specs:
+                        carried_keys.add(resolved)
+        for slot_key in sorted(carried_keys):
+            entry_tree = self.readable(frame.env[slot_key], origin)
+            leaves = tree_leaves(entry_tree)
+            for position, leaf in enumerate(leaves):
+                if isinstance(leaf, Opaque):
+                    reject(origin, _describe_opaque(leaf))
+                stypes[(slot_key, position)] = leaf.stype
+            carried.append((slot_key, [self.fresh() for _ in leaves]))
         while True:
             outputs_before = self._outputs
             elide_before = list(self._elide)
             budget_before = self.budget.mark()
-            loop_env: _Env = dict(frame.env)
-            loop_frame = Frame(
-                frame.fn, frame.annotations, loop_env, frame.root, slots=loop_env if frame.root else frame.slots
-            )
+            loop_frame = frame.fork()
             for key, indices in carried:
                 phi_leaves: list[Scalar] = [
                     ResidualScalar(stypes[(key, position)], TempRef(origin, index))
@@ -1040,13 +1161,17 @@ class Interpreter:
                     loop_frame.env[key] = only
             header_sink: Sink = []
             loop_ctx = Ctx(branch=True, loop=True)
-            header_flow = self._block(stmt.header, loop_frame, [header_sink], loop_ctx)
-            assert not header_flow.exits and header_flow.fall is not None, "a test expression cannot exit"
-            cond = self._condition(origin, self.expr(stmt.cond, loop_frame, header_sink))
-            assert isinstance(cond, ResidualScalar), "a residual test cannot re-fold under residual carries"
-            post_header_env = dict(loop_frame.env)
-            body_sink: Sink = []
-            body_flow = self._block(stmt.body, loop_frame, [body_sink], loop_ctx)
+            self.active_loops.append((loop_key, frozenset(carried_keys)))
+            try:
+                header_flow = self._block(stmt.header, loop_frame, [header_sink], loop_ctx)
+                assert not header_flow.exits and header_flow.fall is not None, "a test expression cannot exit"
+                cond = self._condition(origin, self.expr(stmt.cond, loop_frame, header_sink))
+                assert isinstance(cond, ResidualScalar), "a residual test cannot re-fold under residual carries"
+                post_header_env = dict(loop_frame.env)
+                body_sink: Sink = []
+                body_flow = self._block(stmt.body, loop_frame, [body_sink], loop_ctx)
+            finally:
+                self.active_loops.pop()
             returns = [exit for exit in body_flow.exits if exit.kind is _ExitKind.RETURN]
             assert not (frame.root and returns), "a root return discharges at its site"
             continues = [exit for exit in body_flow.exits if exit.kind is _ExitKind.CONTINUE]
@@ -1060,13 +1185,16 @@ class Interpreter:
                 )
             latch_sinks = self._meet_lanes(origin, loop_frame, continues, body_flow.fall, None)
             assert latch_sinks is not None, "a body with no back edge was rejected above"
+            for spec_key in self.specs:
+                if spec_key not in carried_keys:
+                    assert (
+                        loop_frame.env[spec_key] is frame.env[spec_key]
+                    ), "an uncarried slot changed across a residual loop pass; the store gate missed it"
             promoted = False
             backs: dict[tuple[_EnvKey, int], Scalar] = {}
             for key, indices in carried:
-                back_bound = loop_frame.env.get(key)
-                assert back_bound is not None, "an entry-bound key cannot vanish"
-                back_value = self.readable(back_bound, origin)
-                back_leaves = self._back_leaves(key, back_value, frame.env, origin)
+                back_value = self.readable(loop_frame.env[key], origin)
+                back_leaves = self._back_leaves(key, back_value, frame, origin)
                 assert len(back_leaves) == len(indices)
                 for position, back in enumerate(back_leaves):
                     assumed = stypes[(key, position)]
@@ -1077,7 +1205,7 @@ class Interpreter:
                     elif assumed is ScalarType.INT and back.stype is ScalarType.FLOAT:
                         if isinstance(key, tuple):
                             assert len(indices) == 1 and isinstance(
-                                self.specs[key[0]], ScalarSpec
+                                self.specs[key], ScalarSpec
                             ), "aggregate slot leaves cannot change type inside the loop"
                         stypes[(key, position)] = ScalarType.FLOAT
                         promoted = True
@@ -1121,7 +1249,8 @@ class Interpreter:
         )
         exit_env = post_header_env
         if breaks:
-            parts = [(lane.env, lane.sinks) for lane in breaks] + [(post_header_env, [header_sink])]
+            parts = [(lane.env, lane.sinks) for lane in breaks]
+            parts.append((post_header_env, [header_sink]))
             exit_env, _ = self._meet_envs(origin, parts)
         for lane in breaks:
             for arm in lane.sinks:
@@ -1140,7 +1269,7 @@ class Interpreter:
         frame.env.update(exit_env)
         return returns
 
-    def _back_leaves(self, key: _EnvKey, back_value: Value, entry_env: _Env, origin: Origin) -> list[Scalar]:
+    def _back_leaves(self, key: _EnvKey, back_value: Value, frame: Frame, origin: Origin) -> list[Scalar]:
         """The per-leaf back-edge values of one carried key; a slot tree must keep its structure and identity."""
         if isinstance(key, str):
             if not isinstance(back_value, (StaticScalar, ResidualScalar)):
@@ -1150,7 +1279,8 @@ class Interpreter:
                     "only bool, int, and float values can be carried across its iterations",
                 )
             return [back_value]
-        entry_tree = self.readable(entry_env[key], origin)
+        assert isinstance(key, tuple)
+        entry_tree = self.readable(frame.env[key], origin)
         if not same_structure(entry_tree, back_value):
             reject(
                 origin,
@@ -1200,6 +1330,12 @@ class Interpreter:
             return
         value = _aggregate.decay(self.budget, self.expr(stmt.value, frame, sink), stmt.origin)
         if isinstance(value, Opaque):
+            if value.value is None:
+                if annotation is None:
+                    # `return self.void_helper()` in a `-> None` kernel: None is the bare-return shape.
+                    self._commit_site(stmt.origin, frame, sink, [])
+                    return
+                reject(stmt.origin, "the kernel returns no value (None) but its annotation declares one")
             reject(stmt.origin, f"the captured object {value.name!r} cannot be returned")
         conformed = self._conform_value(value, annotation, stmt.origin, sink, "the returned value", root=True)
         match conformed:
@@ -1211,7 +1347,7 @@ class Interpreter:
                     if owner is not None:
                         reject(
                             stmt.origin,
-                            f"returning the state attribute self.{owner} would hand out a live alias of its "
+                            f"returning the state attribute {spell_state(owner)} would hand out a live alias of its "
                             "storage in Python, which hardware cannot honor; return an explicit copy "
                             "(np.array(...) or a fresh sequence) instead",
                         )
@@ -1239,12 +1375,12 @@ class Interpreter:
         elif decls != self._outputs:
             reject(origin, "this return does not match the kernel's other return sites in shape or type")
         slot_values: dict[SlotPath, Scalar] = {}
-        for attr in sorted(self.specs):
-            tree = self.readable(frame.slots[(attr,)], origin)
-            for spec_leaf, leaf in zip(spec_leaves(self.specs[attr]), tree_leaves(tree), strict=True):
+        for key in sorted(self.specs):
+            tree = self.readable(frame.env[key], origin)
+            for spec_leaf, leaf in zip(spec_leaves(self.specs[key]), tree_leaves(tree), strict=True):
                 if isinstance(leaf, Opaque):
                     reject(origin, _describe_opaque(leaf))
-                committed = self._slot_conform(attr, spec_leaf, leaf, origin, sink)
+                committed = self._slot_conform(key, spec_leaf, leaf, origin, sink)
                 slot_values[spec_leaf.path] = committed
                 sink.append(SlotWrite(origin, spec_leaf.path, _express.materialize(committed, origin)))
         promoted = self.state.promoted_paths() if self.state is not None else frozenset()
@@ -1259,7 +1395,7 @@ class Interpreter:
                     self._elide[position] = None
         sink.append(ResidualReturn(origin, tuple(_express.materialize(leaf, origin) for _, leaf in rows)))
 
-    def _slot_conform(self, attr: str, spec: ScalarSpec, leaf: Scalar, origin: Origin, sink: Sink) -> Scalar:
+    def _slot_conform(self, key: StateKey, spec: ScalarSpec, leaf: Scalar, origin: Origin, sink: Sink) -> Scalar:
         if leaf.stype is spec.stype:
             return leaf
         if spec.stype is ScalarType.FLOAT and leaf.stype is ScalarType.INT:
@@ -1268,8 +1404,8 @@ class Interpreter:
             raise _PromoteRun(spec.path)
         reject(
             origin,
-            f"the state attribute self.{attr} would change type from {spec.stype.value} to {leaf.stype.value}; "
-            "bool state joins only with bool",
+            f"the state attribute {spell_state(key)} would change type from {spec.stype.value} to "
+            f"{leaf.stype.value}; bool state joins only with bool",
         )
 
     def _conform_value(
@@ -1459,13 +1595,12 @@ class Interpreter:
                 f"the class {type(base.value).__name__} overrides {protocol}, so reading {attr!r} runs host "
                 "code; the compiler resolves attributes structurally and would answer past it",
             )
-        if base.value is self.instance and (attr,) in frame.slots:
-            bound = frame.slots[(attr,)]
+        prefix = self.state_prefix(base.value)
+        if prefix is not None and (*prefix, attr) in frame.env:
+            bound = frame.env[(*prefix, attr)]
             assert not isinstance(bound, (_Moved, _SlotAlias)), "slot bindings never ride the conduits"
             return self.readable(bound, origin)
-        found: object = next(
-            (klass.__dict__[attr] for klass in type(base.value).__mro__ if attr in klass.__dict__), _MISSING
-        )
+        found: object = mro_attr(type(base.value), attr, _MISSING)
         if isinstance(found, property) and isinstance(found.fget, types.FunctionType):
             return self.inline(
                 origin, f"{base.name}.{attr}", found.fget, [base], {}, frame, sink, positional_only=False
@@ -1493,6 +1628,10 @@ class Interpreter:
             return self.snapshot.admit(
                 f"{base.name}.{attr}", types.MethodType(found.__func__, type(base.value)), origin
             )
+        if hasattr(type(found), "__get__"):
+            # Any remaining descriptor kind: CPython would route the read through __get__, so admitting the
+            # raw class attribute would answer past it (and a callable one would then inline the wrong body).
+            reject(origin, f"the attribute {attr!r} is a descriptor the compiler cannot read")
         return self.snapshot.admit(f"{base.name}.{attr}", found, origin)
 
     def as_float(self, scalar: Scalar, origin: Origin, sink: Sink) -> Scalar:
@@ -1545,7 +1684,9 @@ class Interpreter:
             if declared is not _MISSING:
                 value = self._conform_value(value, declared, site, sink, f"the argument {param.name!r}")
             env[param.name] = value
-        inner = Frame(fn=fn, annotations=annotations, env=env, root=False, slots=frame.slots)
+        env.update(_state_view(frame.env))
+        inner = Frame(fn=fn, annotations=annotations, env=env, root=False)
+        entry_state = _state_view(frame.env)
         start = len(sink)
         self._inlining.add(fn)
         try:
@@ -1553,43 +1694,85 @@ class Interpreter:
         finally:
             self._inlining.discard(fn)
         assert all(exit.kind is _ExitKind.RETURN for exit in flow.exits), "loop exits cannot escape a frame"
-        if flow.fall is not None and flow.exits:
-            reject(site, "the call can complete without returning a value, so it cannot be used in an expression")
-        if flow.fall is not None or not flow.exits:
-            reject(site, "the call returns no value, so it cannot be used in an expression")
+        if flow.fall is not None:
+            if any(lane.result is not None for lane in flow.exits):
+                reject(
+                    site,
+                    "the call can complete without returning a value; give every path a return, or none at all",
+                )
+            # A void callee (a state-writing procedure): the fall lane folds like a bare return, and the
+            # call's value is Python's None, judged at use like any captured object.
+            flow.exits.append(_Exit.snap(_ExitKind.RETURN, site, inner, flow.fall))
+        if all(lane.result is None for lane in flow.exits):
+            self._void_conform(annotations, site)
         folded = self._fold_returns(site, flow.exits, [sink])
-        if folded.result is None:
-            reject(site, "the call returns no value, so it cannot be used in an expression")
         if folded.crossed:
-            return self._wrap_frame(site, folded, sink, start)
-        return folded.result
+            return self._wrap_frame(site, display, folded, frame, entry_state, sink, start)
+        frame.env.update(_state_view(folded.env))
+        return folded.result if folded.result is not None else Opaque(display, None)
 
-    def _wrap_frame(self, site: Origin, folded: _Exit, sink: Sink, start: int) -> Value:
+    def _void_conform(self, annotations: dict[str, object], site: Origin) -> None:
+        """A callee that returns no value on any path must not DECLARE one the subset recognizes."""
+        declared = annotations.get("return", _MISSING)
+        if declared is _MISSING or declared is None:
+            return
+        declared = _unaliased(declared, site, "the return annotation")
+        if declared is None:
+            return
+        recognized = (
+            annotation_stype(declared) is not None
+            or typing.get_origin(declared) in (tuple, list)
+            or _aggregate.array_annotation_shape(declared, site, "the return annotation") is not None
+        )
+        if recognized:
+            reject(site, "the call returns no value on any path, but its return annotation declares one")
+
+    def _wrap_frame(
+        self, site: Origin, display: str, folded: _Exit, frame: Frame, entry_state: _Env, sink: Sink, start: int
+    ) -> Value:
         """
         A return that crossed the callee's own residual loop cannot rejoin its siblings as arms, so the
         callee region converges at a frame exit instead: every lane's arm ends with one terminator carrying
-        the residual result leaves, and the caller reads them back through the frame rows. Statically
-        uniform leaves never leave the value model, and the rebuilt tree keeps the fold's allocations.
+        the residual result leaves AND the residual leaves of every state root the region changed, and the
+        caller reads them back through the frame rows. Statically uniform leaves never leave the value
+        model, and the rebuilt trees keep the fold's allocations.
         """
-        assert folded.result is not None
         if isinstance(folded.result, RangeValue):
             reject(site, "a range returned across a data-dependent region is not supported; build it at the use site")
         assert len({id(arm) for arm in folded.sinks}) == len(folded.sinks), "the union holds each lane region once"
         rows: list[FrameRow] = []
         atoms: list[Atom] = []
-        leaves: list[Scalar | Opaque] = []
-        for leaf in tree_leaves(folded.result):
-            if isinstance(leaf, (StaticScalar, Opaque)):
-                leaves.append(leaf)
+
+        def through_rows(value: Value) -> Value:
+            leaves: list[Scalar | Opaque] = []
+            for leaf in tree_leaves(value):
+                if isinstance(leaf, (StaticScalar, Opaque)):
+                    leaves.append(leaf)
+                    continue
+                index = self.fresh()
+                rows.append(FrameRow(site, index, leaf.stype))
+                atoms.append(_express.materialize(leaf, site))
+                leaves.append(ResidualScalar(leaf.stype, TempRef(site, index)))
+            return tree_rebuild(value, iter(leaves))
+
+        result = Opaque(display, None) if folded.result is None else through_rows(folded.result)
+        folded_state = _state_view(folded.env)
+        state_updates: dict[_EnvKey, Value | _Unjoinable | _Moved | _SlotAlias] = {}
+        for key in sorted(folded_state, key=_key_order):
+            after = folded_state[key]
+            before = entry_state.get(key)
+            if isinstance(after, _Unjoinable):
+                state_updates[key] = after
                 continue
-            index = self.fresh()
-            rows.append(FrameRow(site, index, leaf.stype))
-            atoms.append(_express.materialize(leaf, site))
-            leaves.append(ResidualScalar(leaf.stype, TempRef(site, index)))
+            assert not isinstance(after, (_Moved, _SlotAlias)), "slot bindings never ride the conduits"
+            if before is not None and not isinstance(before, (_Unjoinable, _Moved, _SlotAlias)) and same(after, before):
+                continue
+            state_updates[key] = through_rows(after)
         terminator = ResidualFrameReturn(site, tuple(atoms))
         for arm in folded.sinks:
             arm.append(terminator)
         body = _frozen(sink[start:])
         del sink[start:]
         sink.append(ResidualFrame(site, tuple(rows), body))
-        return tree_rebuild(folded.result, iter(leaves))
+        frame.env.update(state_updates)
+        return result

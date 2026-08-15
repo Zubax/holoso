@@ -20,9 +20,10 @@ conditional (ternary) expressions (branch + phi), and both float<->bool casts, i
 comparison -> bool -> float-cast -> float-multiply chain. `remainder` is a pure function computing the IEEE 754
 remainder by data-dependent iterative reduction (two magnitude-ratio-bounded back-edge loops, no division).
 
+`iir1_hpf` exercises hierarchical state: a sub-component instance whose inlined `__call__` writes its own
+receiver's attributes, decomposed into nested slots (`state_lpf_y` observable, `lpf._first` register-only).
+
 Non-catalogue examples are frontend feature gaps or non-scalar interfaces, not verification scope:
-  - iir1_hpf: `UnsupportedConstruct: cannot call 'self.lpf': it is a separate component instance (IIR1LPF);
-    hierarchical state is not supported yet`.
   - finite_set_current_controller: `UnsupportedConstruct: the annotation of parameter 'kin' is not supported yet`
     (a dataclass-typed parameter).
   - rigid_body_rates: ndarray-typed inputs; its arithmetic (including the pivoted matrix inversion) is catalogued

@@ -9,7 +9,17 @@ from . import _aggregate, _express
 from ._ownership import allocations, blame, escape, mutable
 from ._reject import reject
 from ._snapshot import describe_opaque as _describe_opaque
-from ._state import ScalarSpec, SequenceSpec, Spec, TensorSpec
+from ._state import (
+    READ_PROTOCOLS,
+    ScalarSpec,
+    SequenceSpec,
+    Spec,
+    TensorSpec,
+    attribute_dict,
+    overridden_protocol,
+    shadowed_edge,
+    spell_state,
+)
 from ._values import (
     Allocation,
     AllocationState,
@@ -44,8 +54,8 @@ def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: Sink,
     """
     The one mutation gate: resolve the target path with the store-prefix exemption (walked over the value
     tree, never through expression reads), judge admission at the store step after the RHS and index
-    temps, and rebind new frozen values along the unchanged allocation spine. A store rooted at the
-    entry method's receiver is a state write.
+    temps, and rebind new frozen values along the unchanged allocation spine. A store whose root resolves
+    by identity into the receiver's component tree is a state write, whatever name it travelled through.
     """
     origin = stmt.origin
     rhs = _aggregate.decay(interp.budget, interp.expr(stmt.value, frame, sink), origin)
@@ -61,48 +71,97 @@ def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: Sink,
             if bound is None:
                 reject(origin, f"the local name {name!r} is not bound on every path reaching this read")
             root_value = interp.readable(bound, origin)
-    if isinstance(root_value, Opaque) and interp.instance is not None and root_value.value is interp.instance:
-        _receiver_store(interp, stmt, name, rhs, frame, sink, ctx)
-        return
+    if isinstance(root_value, Opaque):
+        prefix = interp.state_prefix(root_value.value)
+        if prefix is not None:
+            _state_store(interp, stmt, prefix, rhs, frame, sink, ctx)
+            return
     if not isinstance(root_value, _AGGREGATE):
         if isinstance(stmt.path[0], AttrSel):
-            reject(origin, "an attribute store is only supported on the entry method's receiver")
+            reject(origin, "an attribute store is only supported on the kernel's own component objects")
         reject(origin, f"{_aggregate.a_kind(root_value)} does not support item assignment")
     frame.env[name] = _element_store(interp, stmt, name, root_value, stmt.path, rhs, frame, sink)
 
 
-def _receiver_store(
-    interp: Interpreter, stmt: Store | AugStore, name: str, rhs: Value, frame: Frame, sink: Sink, ctx: Ctx
+def _state_store(
+    interp: Interpreter,
+    stmt: Store | AugStore,
+    prefix: tuple[str, ...],
+    rhs: Value,
+    frame: Frame,
+    sink: Sink,
+    ctx: Ctx,
 ) -> None:
     origin = stmt.origin
-    if not frame.root:
-        reject(origin, "a helper method cannot write attributes of the receiver; only the entry method may")
-    assert interp.receiver_name is not None
-    if name != interp.receiver_name:
-        reject(origin, f"the receiver may only be written through its parameter name {interp.receiver_name!r}")
-    first = stmt.path[0]
-    if not isinstance(first, AttrSel):
-        reject(origin, "the receiver itself does not support item assignment; store into an attribute")
-    attr = first.name
-    assert interp.state is not None and attr in interp.specs, "the syntactic seed covers every receiver store"
-    interp.written_attrs.add(attr)
-    assert frame.env is frame.slots, "root and arm frames resolve slots in their own environment"
-    key = (attr,)
-    slot_value = interp.readable(frame.slots[key], origin)
-    rest = stmt.path[1:]
+    if not isinstance(stmt.path[0], AttrSel):
+        reject(origin, "a component object does not support item assignment; store into an attribute")
+    assert interp.tree is not None
+    obj = interp.tree.objects[prefix]
+    selectors = list(stmt.path)
+    key: tuple[str, ...] | None = None
+    while selectors:
+        selector = selectors[0]
+        if not isinstance(selector, AttrSel):
+            break
+        if len(selectors) > 1 and isinstance(selectors[1], AttrSel):
+            shadow = shadowed_edge(obj, selector.name)
+            if shadow is not None:
+                reject(origin, shadow)
+            protocol = overridden_protocol(obj, READ_PROTOCOLS)
+            if protocol is not None:
+                # Structural descent past a read override would diverge; refuse, as instance_attr does for reads.
+                reject(
+                    origin,
+                    f"the class {type(obj).__name__} overrides {protocol}, so reading {selector.name!r} on the "
+                    "way to this store runs host code; the compiler resolves the chain structurally and would "
+                    "answer past it",
+                )
+            child = attribute_dict(obj).get(selector.name)
+            child_prefix = interp.tree.prefix_of(child) if child is not None else None
+            if child_prefix is not None:
+                obj = child
+                prefix = child_prefix
+                selectors.pop(0)
+                continue
+        key = (*prefix, selector.name)
+        selectors.pop(0)
+        break
+    assert key is not None, "the leading selector is an attribute, so the walk names a leaf"
+    rest = tuple(selectors)
+    if rest and isinstance(rest[0], AttrSel):
+        reject(origin, f"an attribute store through {spell_state(key)} is not supported: it is not a component")
+    if rest and interp.tree.objects.get(key) is not None:
+        reject(origin, "a component object does not support item assignment; store into an attribute")
+    if key not in interp.specs:
+        poison = interp.state.poisoned.get(key) if interp.state is not None else None
+        if poison is not None:
+            reject(origin, poison)
+        reject(
+            origin,
+            f"the write to {spell_state(key)} was not statically visible when state was seeded; "
+            "spell it in a plain method of the component that owns the attribute (a property getter is "
+            "not scanned), or through the component's own attribute path",
+        )
+    interp.written_attrs.add(key)
+    interp.carry_gate(key)
+    if isinstance(stmt, AugStore):
+        interp.check_mark(frame, stmt.mark, origin)
+    slot_value = interp.readable(frame.env[key], origin)
     if rest:
-        if isinstance(rest[0], AttrSel):
-            reject(origin, "an attribute store through a nested object is not supported")
         if not isinstance(slot_value, _AGGREGATE):
-            reject(origin, f"self.{attr} is a scalar state attribute; it has no elements")
-        frame.env[key] = _element_store(interp, stmt, f"self.{attr}", slot_value, rest, rhs, frame, sink)
+            reject(origin, f"{spell_state(key)} is a scalar state attribute; it has no elements")
+        frame.env[key] = _element_store(interp, stmt, spell_state(key), slot_value, rest, rhs, frame, sink)
+        interp.note_state_write()
+        interp.bump_root_epoch(key)
         return
-    spec = interp.specs[attr]
+    spec = interp.specs[key]
     if isinstance(stmt, AugStore):
         if isinstance(slot_value, Opaque):
             reject(origin, _describe_opaque(slot_value))
         if isinstance(slot_value, _AGGREGATE):
-            frame.env[key] = aug_aggregate(interp, origin, f"self.{attr}", slot_value, stmt.op, rhs, frame, sink)
+            frame.env[key] = aug_aggregate(interp, origin, spell_state(key), slot_value, stmt.op, rhs, frame, sink)
+            interp.note_state_write()
+            interp.bump_root_epoch(key)
             return
         value = _express.binary(interp, origin, stmt.op, slot_value, rhs, frame, sink)
     else:
@@ -116,77 +175,82 @@ def _receiver_store(
             if ctx.loop:
                 reject(
                     origin,
-                    f"installing a new aggregate into the state attribute self.{attr} inside a "
+                    f"installing a new aggregate into the state attribute {spell_state(key)} inside a "
                     "data-dependent loop is not supported yet; store its elements instead",
                 )
-            _install(interp, origin, attr, spec, value)
+            _install(interp, origin, key, spec, value)
             frame.env[key] = value
+            interp.note_state_write()
         case StaticScalar() | ResidualScalar():
             if not isinstance(spec, ScalarSpec):
                 reject(
                     origin,
-                    f"self.{attr} is an aggregate state attribute; a scalar cannot replace it -- "
+                    f"{spell_state(key)} is an aggregate state attribute; a scalar cannot replace it -- "
                     "store its elements instead",
                 )
             frame.env[key] = value
+            interp.note_state_write()
         case Opaque():
             if not isinstance(spec, ScalarSpec):
                 reject(origin, _describe_opaque(value))
             frame.env[key] = value  # judged at use or at the commit, like any captured scalar
+            interp.note_state_write()
 
 
-def _install(interp: Interpreter, origin: Origin, attr: str, spec: Spec, value: SequenceValue | TensorValue) -> None:
+def _install(
+    interp: Interpreter, origin: Origin, key: tuple[str, ...], spec: Spec, value: SequenceValue | TensorValue
+) -> None:
     """The install gate: an aggregate becomes state only if nothing else can still reach its storage."""
     for allocation in allocations(value):
         if allocation.joined:
             reject(
                 origin,
-                f"cannot install this aggregate into self.{attr}: it was merged across runtime branches, "
-                "so its identity is branch-dependent; install it in each branch arm instead",
+                f"cannot install this aggregate into {spell_state(key)}: it was merged across runtime "
+                "branches, so its identity is branch-dependent; install it in each branch arm instead",
             )
         owner = interp.state_owners.get(allocation)
         if owner is not None:
             reject(
                 origin,
-                f"cannot install this aggregate into self.{attr}: it backs (or backed) the state attribute "
-                f"self.{owner}; state trees must be disjoint -- store an explicit copy "
+                f"cannot install this aggregate into {spell_state(key)}: it backs (or backed) the state "
+                f"attribute {spell_state(owner)}; state trees must be disjoint -- store an explicit copy "
                 "(list(...) or np.array(...)) instead",
             )
         if allocation.state is AllocationState.ESCAPED:
-            reject(origin, f"cannot install this aggregate into self.{attr}: {blame(allocation)}")
+            reject(origin, f"cannot install this aggregate into {spell_state(key)}: {blame(allocation)}")
     occurrences = [id(allocation) for allocation in tensor_occurrences(value)]
     if len(occurrences) != len(set(occurrences)):
         reject(
             origin,
-            f"cannot install this aggregate into self.{attr}: the same array is reachable through more "
-            "than one path within it; build independent elements (e.g. with a comprehension)",
+            f"cannot install this aggregate into {spell_state(key)}: the same array is reachable through "
+            "more than one path within it; build independent elements (e.g. with a comprehension)",
         )
-    _install_conform(origin, attr, spec, value)
+    _install_conform(origin, key, spec, value)
     escape(value)
     for allocation in allocations(value):
-        interp.state_owners.setdefault(allocation, attr)
+        interp.state_owners.setdefault(allocation, key)
 
 
-def _install_conform(origin: Origin, attr: str, spec: Spec, value: Value) -> None:
+def _install_conform(origin: Origin, key: tuple[str, ...], spec: Spec, value: Value) -> None:
     """Structure and array family; scalar leaf types are judged at the commit, like any slot value."""
     match spec, value:
         case ScalarSpec(), (StaticScalar() | ResidualScalar() | Opaque()):
             pass
         case SequenceSpec(items=items), SequenceValue(items=value_items) if len(items) == len(value_items):
             for item_spec, item in zip(items, value_items, strict=True):
-                _install_conform(origin, attr, item_spec, item)
+                _install_conform(origin, key, item_spec, item)
         case TensorSpec(shape=shape, family=family), TensorValue() if shape == value.shape:
             if value.family is not family:
                 reject(
                     origin,
-                    f"cannot install this array into self.{attr}: its element family ({value.family.value}) "
-                    f"differs from the reset value's ({family.value}), and the dtype is part of the state "
-                    "attribute's identity; build the array from matching elements",
+                    f"cannot install this array into {spell_state(key)}: its element family "
+                    f"({value.family.value}) differs from the reset value's ({family.value}), and the dtype "
+                    "is part of the state attribute's identity; build the array from matching elements",
                 )
         case _:
             reject(
                 origin,
-                f"cannot install this value into self.{attr}: its structure does not match the reset "
+                f"cannot install this value into {spell_state(key)}: its structure does not match the reset "
                 "value's (the kind, length, and shape of every node must agree)",
             )
 
@@ -210,7 +274,7 @@ def _element_store(
                 reject(
                     origin,
                     f"cannot store into {site.spelled}: it was installed into the state attribute "
-                    f"self.{owner} this transaction; construct the aggregate fully, then install it once",
+                    f"{spell_state(owner)} this transaction; construct the aggregate fully, then install it once",
                 )
             advice = (
                 "; if the sharing comes from an extracting read, the augmented (+=) and multi-index "

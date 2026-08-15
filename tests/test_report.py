@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
+from iir1_hpf import IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
 from pid import PID  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
@@ -41,6 +42,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "madd": lambda: madd.madd,
     "poly3": lambda: poly3.poly3,
     "signal_window": lambda: signal_window,
+    "iir1_hpf": lambda: IIR1HPF().step,
     "iir1_lpf": lambda: IIR1LPF().__call__,
     "pid": lambda: PID().__call__,
     "schmitt_trigger": lambda: SchmittTrigger().__call__,

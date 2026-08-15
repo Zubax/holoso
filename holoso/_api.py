@@ -24,8 +24,8 @@ type Target = Callable[..., Any]
 """
 Currently supported targets are:
 - A plain stateless function. It must be importable, so a lambda is refused: its source cannot be recovered.
-- A bound method of a class instance -- stateful. An attribute the method WRITES becomes a state register, and a
-  public one additionally gets a `state_<attr>` output port; an attribute it only reads folds to its value.
+- A bound method of a class instance -- stateful. An attribute any reachable method writes becomes a state register,
+  and a public one additionally gets a `state_...` output port; an attribute that is only read folds to its value.
 - Later on we may potentially add support for multiple methods per class, where the generated module will provide
   a selector port to choose which method to execute, all sharing the same state. In this case we would accept
   a tuple containing the class type and a list of its unbound methods. This remains to be seen.

@@ -14,6 +14,7 @@ from . import _aggregate, _ops
 from ._ownership import share
 from ._reject import reject
 from ._snapshot import describe_opaque as _describe_opaque, nan_payload, tensor_of
+from ._state import mro_attr
 from ._values import (
     Allocation,
     BoundMethod,
@@ -327,41 +328,40 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         return _range(interp, node, frame, sink)
     if raw is list or raw is tuple:
         return _rebuild_sequence(interp, node, callee.name, frame, sink)
-    if isinstance(raw, types.FunctionType):
-        # Ingested like user code wherever it lives: substitution is the registry's decision alone,
-        # and the interpreter knows no library names.
-        positional, keywords = _signature_arguments(interp, node, frame, sink)
-        return interp.inline(node.origin, callee.name, raw, positional, keywords, frame, sink, positional_only=False)
-    if inspect.ismethod(raw):
-        # A helper method of any snapshotted object: the receiver rides as the first argument, sharing
-        # the memoized identity, so its frozen attributes fold and its state reads see the current slots;
-        # a receiver write inside the helper draws the helper-write rejection.
-        inner = raw.__func__
-        if not isinstance(inner, types.FunctionType):
-            reject(node.origin, f"calls to {callee.name!r} are not supported yet")
-        receiver = interp.snapshot.admit(callee.name, raw.__self__, node.origin)
+    resolved = _inlinable(interp, node.origin, callee.name, raw)
+    if resolved is not None:
+        fn, leading = resolved
         positional, keywords = _signature_arguments(interp, node, frame, sink)
         return interp.inline(
-            node.origin,
-            callee.name,
-            inner,
-            [receiver, *positional],
-            keywords,
-            frame,
-            sink,
-            positional_only=False,
+            node.origin, callee.name, fn, [*leading, *positional], keywords, frame, sink, positional_only=False
         )
     if callable(raw):
-        # A component instance defines __call__ as a plain Python function; a C-level one (a numpy dispatcher or
-        # ufunc, a partial) is simply a callee the registry does not carry.
-        if isinstance(getattr(type(raw), "__call__", None), types.FunctionType):
-            reject(
-                node.origin,
-                f"cannot call {callee.name!r}: it is a separate component instance "
-                f"({type(raw).__name__}); hierarchical state is not supported yet",
-            )
         reject(node.origin, f"calls to {callee.name!r} are not supported yet")
     reject(node.origin, f"the captured object {callee.name!r} is not callable")
+
+
+def _inlinable(
+    interp: Interpreter, origin: Origin, display: str, raw: object
+) -> tuple[types.FunctionType, list[Value]] | None:
+    """
+    The plain-Python callee behind any calling spelling, with the receiver arguments CPython's descriptor
+    protocol would prepend; an admitted receiver's frozen attributes fold and its state reads see the current
+    slots. A C-level callable (a numpy dispatcher or ufunc, a partial) resolves to None: a callee the
+    registry does not carry.
+    """
+    if isinstance(raw, types.FunctionType):
+        return raw, []
+    if inspect.ismethod(raw):
+        if not isinstance(raw.__func__, types.FunctionType):
+            return None
+        return raw.__func__, [interp.snapshot.admit(display, raw.__self__, origin)]
+    if callable(raw):
+        call_attr = mro_attr(type(raw), "__call__")
+        if isinstance(call_attr, staticmethod) and isinstance(call_attr.__func__, types.FunctionType):
+            return call_attr.__func__, []
+        if isinstance(call_attr, types.FunctionType):
+            return call_attr, [interp.snapshot.admit(display, raw, origin)]
+    return None
 
 
 def _argument(interp: Interpreter, atom: Atom, frame: Frame, sink: Sink) -> Value:

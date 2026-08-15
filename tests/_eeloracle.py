@@ -38,6 +38,7 @@ structurally, exactly as the frontend reads it), and the binder reassembles the 
 
 import inspect
 import math
+import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -92,16 +93,62 @@ def _compare(context: str, actual: Scalar, expected: object, ulps: int) -> None:
         assert floats_match(actual, reference, ulps), f"{context}: {actual!r} != {reference!r} beyond {ulps} ULPs"
 
 
+def _plain_component(value: object) -> bool:
+    """A nested component instance whose attributes decompose into the parent's slot namespace."""
+    if isinstance(value, (bool, int, float, complex, str, bytes, list, tuple, dict, set, frozenset)):
+        return False
+    if isinstance(value, (np.ndarray, np.generic)) or value is None:
+        return False
+    if isinstance(value, (types.ModuleType, type, types.FunctionType, types.MethodType, types.BuiltinFunctionType)):
+        return False
+    return isinstance(getattr(value, "__dict__", None), dict)
+
+
+def walk_instance_leaves(instance: object) -> list[tuple[str, bool, object]]:
+    """
+    Every attribute leaf reachable through component instances, as (flattened slot name, private, value):
+    scalars keep the dotted-to-underscore name, arrays go row-major, and a leaf is private when any path
+    component is underscore-prefixed -- mirroring the compiler's decomposition and privacy exactly.
+    """
+    found: list[tuple[str, bool, object]] = []
+    seen: set[int] = set()
+
+    def walk(obj: object, prefix: str, private: bool) -> None:
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+        for attr, value in vars(obj).items():
+            name = prefix + attr
+            hidden = private or attr.startswith("_")
+            if isinstance(value, (list, tuple, np.ndarray)):
+                for path, leaf in flatten_value(value):
+                    found.append((name + "".join(f"_{key}" for key in path), hidden, leaf))
+            elif _plain_component(value):
+                walk(value, name + "_", hidden)
+            else:
+                found.append((name, hidden, value))
+
+    walk(instance, "", False)
+    return found
+
+
 def instance_leaves(instance: object) -> dict[str, object]:
-    """Attribute leaves named exactly like decomposed state slots: scalars keep the name, arrays go row-major."""
+    """
+    Attribute leaves named exactly like decomposed state slots: scalars keep the name, arrays go row-major.
+    A name minted twice (nested `child.y` vs flat `child_y`) is dropped rather than silently overwritten, so
+    a slot comparison against it fails loudly instead of accepting whichever leaf won the dict race.
+    """
     leaves: dict[str, object] = {}
-    for attr, value in vars(instance).items():
-        if isinstance(value, (list, tuple, np.ndarray)):
-            for path, leaf in flatten_value(value):
-                leaves[attr + "".join(f"_{key}" for key in path)] = leaf
-        else:
-            leaves[attr] = value
-    return leaves
+    ambiguous: set[str] = set()
+    for name, _, value in walk_instance_leaves(instance):
+        if name in leaves:
+            ambiguous.add(name)
+        leaves[name] = value
+    return {name: value for name, value in leaves.items() if name not in ambiguous}
+
+
+def private_leaf_names(instance: object) -> set[str]:
+    return {name for name, private, _ in walk_instance_leaves(instance) if private}
 
 
 def _annotation_shape(annotation: object) -> tuple[int, ...] | None:
@@ -195,11 +242,12 @@ def assert_hir_matches_reference(
     out_ports = [out.name for out in hir.outputs]
     assert len(set(out_ports)) == len(out_ports), f"{label}: duplicate output port names in {out_ports}"
     public_slots = {name[len(_STATE_PREFIX) :] for name in out_ports if name.startswith(_STATE_PREFIX)}
-    private_ported = sorted(slot for slot in public_slots if slot.startswith("_"))
-    assert not private_ported, f"{label}: state ports exposing private slots: {private_ported}"
-    portless = [slot for slot in evaluator.state if not slot.startswith("_") and slot not in public_slots]
-    assert not portless, f"{label}: public slots without state_ ports: {portless}"
     instance = getattr(reference, "__self__", None) if inspect.ismethod(reference) else None
+    private_names = private_leaf_names(instance) if instance is not None else set()
+    private_ported = sorted(slot for slot in public_slots if slot in private_names)
+    assert not private_ported, f"{label}: state ports exposing private slots: {private_ported}"
+    portless = [slot for slot in evaluator.state if slot not in private_names and slot not in public_slots]
+    assert not portless, f"{label}: public slots without state_ ports: {portless}"
     bind = _binder(reference)
     compared = 0
     for index, row in enumerate(vectors):
