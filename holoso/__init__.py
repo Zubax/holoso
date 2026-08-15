@@ -52,6 +52,7 @@ FMulOptions = _operators.FMulOperator.Options
 FRoundOptions = _operators.FRoundOperator.Options
 FSincosOptions = _operators.FSincosOperator.Options
 FSortOptions = _operators.FSortOperator.Options
+FSqrtOptions = _operators.FSqrtOperator.Options
 FToIntOptions = _operators.FToIntOperator.Options
 IMulOptions = _operators.IMulOperator.Options
 

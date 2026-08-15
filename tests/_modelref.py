@@ -20,6 +20,7 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FSincosOptions,
+    FSqrtOptions,
     OperatorOptions,
     Options,
 )
@@ -262,6 +263,7 @@ def default_options(fmt: FloatFormat) -> Options:
             fcmp=FCmpOptions(),
             fexp2=_if_supported(FExp2Operator, fmt, FExp2Options()),
             flog2=_if_supported(FLog2Operator, fmt, FLog2Options()),
+            fsqrt=FSqrtOptions(),  # no tables, hence no format that leaves it unsupported
             fsincos=_if_supported(FSincosOperator, fmt, FSincosOptions()),
             fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options()),
         ),
@@ -426,6 +428,7 @@ def staged_options(fmt: FloatFormat) -> Options:
                     stage_output=1,
                 ),
             ),
+            fsqrt=FSqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
             fsincos=_if_supported(FSincosOperator, fmt, sincos),
             fatan2=_if_supported(FAtan2Operator, fmt, atan2),
         ),

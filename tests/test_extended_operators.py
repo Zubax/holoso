@@ -24,6 +24,7 @@ from holoso import (
     FRoundOptions,
     FSincosOptions,
     FSortOptions,
+    FSqrtOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
@@ -32,7 +33,7 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._value import ScalarValue
-from ._modelref import instantiated_modules as _modules
+from ._modelref import instantiated_modules as _modules, random_legal_bits
 
 # Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -54,6 +55,7 @@ def _ops(
     with_sort: bool = True,
     with_exp2: bool = True,
     with_log2: bool = True,
+    with_sqrt: bool = True,
     with_sincos: bool = True,
     with_atan2: bool = True,
 ) -> Options:
@@ -69,6 +71,7 @@ def _ops(
             fsort=FSortOptions() if with_sort else None,
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
+            fsqrt=FSqrtOptions() if with_sqrt else None,
             fsincos=FSincosOptions() if with_sincos else None,
             fatan2=FAtan2Options() if with_atan2 else None,
         ),
@@ -911,50 +914,55 @@ def test_hypot_sign_flipped_still_fuses_with_atan2() -> None:
 
 
 def test_hypot_lone_decomposition_is_approximate() -> None:
-    # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fexp2/flog2); approximate
-    # on ordinary finite nonzero inputs.
+    # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fsqrt); the root is
+    # exact but the scaling divisions and squares are not, so the composite stays approximate on finite nonzero inputs.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
     sim = _sim(kernel, "hypot_lone")
     assert _bits(sim.run(0.0, 0.0)[0]) == _v(0.0).bits
-    assert _bits(sim.run(float("inf"), 2.0)[0]) == _v(float("inf")).bits
+    assert _bits(sim.run(_POS_INF, 2.0)[0]) == _v(_POS_INF).bits
+    assert _bits(sim.run(_POS_INF, _POS_INF)[0]) == _v(_POS_INF).bits  # the only pair that could divide inf by inf
     rng = np.random.default_rng(0x4F0)
     for _ in range(200):
-        y, x = (float(np.float32(rng.standard_normal() * 8)) for _ in range(2))
+        # Spread over ±20 decades, which is what the magnitude scaling is FOR: the naive sqrt(y*y + x*x) overflows
+        # above 1e19 and flushes below 1e-19 at this format, while the scaled form stays exact to a few ULP.
+        decades = rng.uniform(-20.0, 20.0, size=2)
+        y, x = (float(np.float32(rng.standard_normal() * 10.0**d)) for d in decades)
         native = math.hypot(y, x)
-        if native < 1e-3:
+        if native == 0.0 or math.isinf(native):
             continue
         assert abs(float(sim.run(y, x)[0]) - native) <= 64 * _ulp32(native), f"lone hypot y={y} x={x}"
 
 
 def test_hypot_lone_missing_primitive_is_rejected() -> None:
-    # The decomposition needs fsort/fexp2/flog2; absent any of them, a lone hypot is a clear configuration error.
+    # The decomposition needs fsort/fsqrt; absent either, a lone hypot is a clear configuration error.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
-    for ops in (_ops(with_sort=False), _ops(with_exp2=False), _ops(with_log2=False)):
+    for ops in (_ops(with_sort=False), _ops(with_sqrt=False)):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(kernel, ops, name="hypot_lone_reject")
 
 
 def _sqrt_ref(x: float) -> int:
-    if x == 0.0:
-        return _v(0.0).bits
-    return _v(x).log2().scale_pow2(-1).exp2().bits
+    """
+    binary32's root is correctly rounded, so the host's own sqrt is an exact reference for the native operator --
+    taken over the QUANTIZED operand, which is the number the datapath actually receives.
+    """
+    return _v(math.sqrt(float(_v(x)))).bits
 
 
-def test_sqrt_matches_decomposition_and_native() -> None:
+def test_sqrt_is_the_correctly_rounded_native_root() -> None:
     def kernel(x: float) -> float:
         return math.sqrt(x)
 
     sim = _sim(kernel, "sqrt_basic")
     assert _bits(sim.run(0.0)[0]) == _v(0.0).bits
+    assert _bits(sim.run(float("inf"))[0]) == _v(float("inf")).bits
+    assert _bits(sim.run(-4.0)[0]) == _v(float("-inf")).bits  # off the domain: the poison value, flagged in hardware
     for x in [0.25, 0.5, 1.0, 2.0, 4.0, 9.0, 100.0, 1e-3, 1e6, math.pi]:
-        out = sim.run(x)[0]
-        assert _bits(out) == _sqrt_ref(x), f"sqrt bit-exact x={x}"
-        native = math.sqrt(x)
-        assert abs(float(out) - native) <= 32 * _ulp32(native), f"sqrt accuracy x={x}"
+        assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"sqrt bit-exact x={x}"
     rng = np.random.default_rng(0x59A)
     for _ in range(200):
         x = float(np.float32(abs(rng.standard_normal()) * 100 + 1e-6))
@@ -970,13 +978,21 @@ def test_sqrt_dispatch_numpy() -> None:
         assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"np.sqrt x={x}"
 
 
+def test_sqrt_without_its_operator_is_refused() -> None:
+    def kernel(x: float) -> float:
+        return math.sqrt(x)
+
+    with pytest.raises(UnsupportedConstruct, match="needs the 'fsqrt' operator"):
+        holoso.synthesize(kernel, _ops(with_sqrt=False), name="sqrt_reject")
+
+
 def test_trig_of_constants_fold() -> None:
     # Trig of literal operands folds in the format-agnostic HIR, so a kernel of only constant trig needs no CORDIC:
     # synthesizing with fsincos/fatan2 unconfigured proves the fold.
     def kernel(x: float) -> tuple[float, float, float, float, float]:
         return (math.sin(0.5), math.cos(0.5), math.atan2(1.0, 2.0), math.hypot(3.0, 4.0), math.sqrt(2.0))
 
-    ops = _ops(with_sincos=False, with_atan2=False, with_exp2=False, with_log2=False, with_sort=False)
+    ops = _ops(with_sincos=False, with_atan2=False, with_exp2=False, with_log2=False, with_sort=False, with_sqrt=False)
     sim = holoso.synthesize(kernel, ops, name="trig_fold").numerical_model.elaborate()
     out = sim.run(0.0)
     for index, ref in enumerate(
@@ -1286,3 +1302,68 @@ def test_new_composite_and_binary_numpy_spellings() -> None:
         assert float(out[1]) == pytest.approx(math.asinh(x), rel=1e-5, abs=1e-5)
         assert float(out[2]) == min(x, y) and float(out[3]) == max(x, y)
         assert float(out[4]) == math.trunc(x)
+
+
+def test_sqrt_over_the_whole_format_matches_binary32_sqrt() -> None:
+    """
+    The breadth sweep behind the directed root test: every operand class the format admits, driven as exact bits so
+    the extremes stay exact. binary32's root is correctly rounded, so numpy is an exact oracle; a negative operand
+    has no root and answers with the -inf poison value the hardware raises domain_error alongside.
+    """
+
+    def kernel(x: float) -> float:
+        return math.sqrt(x)
+
+    sim = _sim(kernel, "sqrt_sweep")
+    rng = np.random.default_rng(0x5EED)
+    directed = (
+        0,
+        FMT.encode(1e-30),
+        FMT.encode(-1e30),
+        FMT.encode(_POS_INF),
+        FMT.encode(_NEG_INF),
+        FMT.encode(float(np.finfo(np.float32).tiny)),
+        FMT.encode(float(np.finfo(np.float32).max)),
+    )
+    for bits in (*directed, *(random_legal_bits(FMT, rng) for _ in range(2000))):
+        x = np.uint32(bits).view(np.float32)
+        # Compared on bits, not on the decoded value: a float compare reads +0 and -0 as one number, and the sign of
+        # a zero root is exactly what the packer's masking decides.
+        expected = _v(_NEG_INF).bits if x < 0 else _v(float(np.sqrt(x))).bits
+        assert _bits(sim.run(FloatValue.from_bits(FMT, bits))[0]) == expected, f"sqrt(0x{bits:08x})"
+
+
+def test_a_static_one_half_exponent_is_the_native_root() -> None:
+    """
+    `x ** 0.5` denotes the square root, so it takes the root operator alone -- not the exp2/log2 pair with the
+    guards the general power needs, and not the general power's rounding error either.
+    """
+
+    def kernel(x: float) -> float:
+        return x**0.5  # type: ignore[no-any-return]
+
+    result = holoso.synthesize(kernel, _ops(), name="pow_one_half")
+    assert _modules(result) == {"holoso_fsqrt"}
+    sim = result.numerical_model.elaborate()
+    for x in (0.0, 0.25, 1.0, 2.0, 9.0, 1e6, _POS_INF):
+        assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"x**0.5 x={x}"
+
+    with pytest.raises(UnsupportedConstruct, match="needs the 'fsqrt' operator"):
+        holoso.synthesize(kernel, _ops(with_sqrt=False), name="pow_one_half_reject")
+
+
+def test_other_exponents_keep_the_general_power() -> None:
+    # The one-half rung must not swallow its neighbours: a different constant and a runtime exponent both stay on
+    # the exp2/log2 path, and a static integer stays on the multiply chain.
+    def fourth_root(x: float) -> float:
+        return x**0.25  # type: ignore[no-any-return]
+
+    def runtime_exponent(b: float, e: float) -> float:
+        return b**e  # type: ignore[no-any-return]
+
+    def cube(x: float) -> float:
+        return x**3
+
+    assert "holoso_fsqrt" not in _modules(holoso.synthesize(fourth_root, _ops(), name="pow_quarter"))
+    assert "holoso_fsqrt" not in _modules(holoso.synthesize(runtime_exponent, _ops(), name="pow_runtime_e"))
+    assert _modules(holoso.synthesize(cube, _ops(), name="pow_cube")) == {"holoso_fmul"}

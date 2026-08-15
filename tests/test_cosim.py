@@ -15,6 +15,7 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
+    FSqrtOptions,
     FloatFormat,
     OperatorOptions,
     Options,
@@ -615,6 +616,28 @@ def test_cosim_atan2_hypot_fused(sim: str) -> None:
         return math.hypot(y, x), math.atan2(y, x)
 
     run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="cs_atan2_hypot"))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_root_and_lone_hypot(sim: str) -> None:
+    # The native root inside a real design, and the lone hypot's composite around it (sorter, scaling divisions,
+    # sum of squares) -- the wrapper bench proves the module, this proves the machine built around it.
+    def kernel(x: float, y: float) -> tuple[float, float]:
+        return math.sqrt(abs(x)), math.hypot(x, y)
+
+    options = Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fdiv=FDivOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            fcmp=FCmpOptions(),
+            fsort=FSortOptions(),
+            fsqrt=FSqrtOptions(),
+        ),
+        ffmt=FloatFormat(8, 24),
+    )
+    run_cosim(sim, holoso.synthesize(kernel, options, name="cs_root_hypot"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

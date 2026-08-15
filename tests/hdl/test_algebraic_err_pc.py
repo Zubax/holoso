@@ -14,11 +14,10 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FDivOptions,
-    FExp2Options,
-    FLog2Options,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
+    FSqrtOptions,
     FloatFormat,
     OperatorOptions,
     Options,
@@ -43,8 +42,7 @@ def _ops() -> MirOptions:
                 fmul_ilog2=FMulILog2Options(),
                 fcmp=FCmpOptions(),
                 fsort=FSortOptions(),
-                fexp2=FExp2Options(),
-                flog2=FLog2Options(),
+                fsqrt=FSqrtOptions(),
             ),
             ffmt=FMT,
         )
@@ -102,7 +100,7 @@ async def _settle(dut: Any) -> None:
 
 
 @cocotb.test()
-async def err_pc_safe_transcendentals(dut: Any) -> None:
+async def err_pc_safe_algebraics(dut: Any) -> None:
     config = json.loads(os.environ["HOLOSO_ERR_CASE"])
 
     await start_clock(dut)
@@ -133,7 +131,7 @@ async def err_pc_safe_transcendentals(dut: Any) -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_safe_transcendental_err_pc(sim: str, case: _Case) -> None:
+def test_safe_algebraic_err_pc(sim: str, case: _Case) -> None:
     lir = build_lir(
         lower_to_mir(lower(case.fn, DEFAULT_UNROLL_MAX_TRIPS).hir, _ops()),
         f"err_{case.name}",
@@ -164,7 +162,7 @@ def test_safe_transcendental_err_pc(sim: str, case: _Case) -> None:
     )
     runner.test(
         hdl_toplevel=f"err_{case.name}",
-        test_module="tests.hdl.test_transcendental_err_pc",
+        test_module="tests.hdl.test_algebraic_err_pc",
         test_dir=str(REPO_ROOT),
         build_dir=str(build_dir),
         extra_env={"HOLOSO_ERR_CASE": json.dumps({"inputs": case.inputs, "vectors": vectors})},

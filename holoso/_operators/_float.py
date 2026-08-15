@@ -491,6 +491,44 @@ class FLog2Operator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class FSqrtOperator(FloatHardwareOperator):
+    """Correctly-rounded square root; a negative operand yields -inf and raises `domain_error` (as log2's does)."""
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+        stage_pack: int = 0
+        stage_output: int = 0
+
+    mnemonic: ClassVar[str] = "fsqrt"
+    operand_hdl_ports: ClassVar[list[str]] = ["a"]
+    output_hdl_ports: ClassVar[list[str]] = ["y"]
+    error_ports: ClassVar[list[str]] = ["domain_error"]
+    opt: Options
+
+    def __post_init__(self) -> None:
+        model = zkf.SqrtModel(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman),
+            stage_input=self.opt.stage_input,
+            stage_pack=self.opt.stage_pack,
+            stage_output=self.opt.stage_output,
+        )
+        object.__setattr__(self, "_model", model)
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands)
+        return (a.sqrt(),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"√{a}"
+
+
+@dataclass(frozen=True, slots=True)
 class FSincosOperator(FloatHardwareOperator):
     """NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring."""
 

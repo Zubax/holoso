@@ -1,7 +1,7 @@
 """
-The four lowerings of a power, under one entry keyed by `**` and by every spelling of it; the exponent's binding
-time and sign, declared on the stubs, are what select between them. There is no integer power hardware, so only a
-compile-time base stays integral.
+The five lowerings of a power, under one entry keyed by `**` and by every spelling of it; the exponent's binding
+time, sign and -- for the root -- value, declared on the stubs, are what select between them. There is no integer
+power hardware, so only a compile-time base stays integral.
 
 Exponentiation is square-and-multiply rather than a linear chain: shorter, and free of any residual branch, at an
 accuracy cost the chain did not pay -- reassociating the products drifts to tens of ULP around `n = 100`, which
@@ -15,8 +15,8 @@ from typing import TypeVar
 import numpy as np
 
 from .._ir import BinaryOp
-from ._registry import StaticNegative, StaticNonNegative, lib
-from ._intrinsics import exp2, isinf, log2, round_
+from ._registry import StaticNegative, StaticNonNegative, StaticOneHalf, lib
+from ._intrinsics import exp2, isinf, log2, round_, sqrt
 
 _INF = math.inf
 _N = TypeVar("_N", int, float)
@@ -51,6 +51,15 @@ def pow_chain_float(b: float, n: StaticNonNegative[int]) -> float:
 @lib(*_POW)
 def pow_reciprocal(b: float, n: StaticNegative[int]) -> float:
     return 1.0 / pow_chain_float(b, -n)
+
+
+@lib(*_POW)
+def pow_root(b: float, e: StaticOneHalf[float]) -> float:
+    """
+    One correctly-rounded root instead of the general path's exp2/log2 pair, and none of its guards: the root
+    answers zero and infinity itself, and a negative base is off its domain as it is off the power's.
+    """
+    return sqrt(b)
 
 
 @lib(*_POW)

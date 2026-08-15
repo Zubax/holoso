@@ -2212,7 +2212,7 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
 # CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing -- the first operators with
 # initiation_interval > 1, so the scheduler's busy_until spacing is exercised here for the first time.
 
-# default_mir already carries fexp2/flog2/fsincos/fatan2; the lone-hypot decomposition also needs fsort.
+# default_mir already carries fexp2/flog2/fsqrt/fsincos/fatan2; the lone-hypot decomposition also needs fsort.
 _CORDIC_OPS = replace(default_mir(FMT), operator=replace(default_mir(FMT).operator, fsort=FSortOptions()))
 
 
@@ -2269,9 +2269,13 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
-    counts = _instance_counts(build_lir(_run(kernel, _CORDIC_OPS), "lone_hypot"))
+    lir = build_lir(_run(kernel, _CORDIC_OPS), "lone_hypot")
+    counts = _instance_counts(lir)
     assert "fatan2" not in counts
-    assert counts.get("flog2") == 1 and counts.get("fexp2") == 1  # the exp2(log2/2) sqrt stopgap
+    assert counts.get("fsqrt") == 1 and counts.get("fsort") == 1  # the scaled sum of squares under the native root
+    # One sorter firing hands over both magnitudes, and only the smaller one is divided down: the larger one's own
+    # quotient is exactly 1 and is written into the sum instead.
+    assert len(_firings(lir, "fsort")) == 1 and len(_firings(lir, "fdiv")) == 1
 
 
 def test_independent_sincos_share_one_instance_spaced_by_ii() -> None:

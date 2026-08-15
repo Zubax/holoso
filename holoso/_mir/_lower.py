@@ -812,8 +812,7 @@ class _FloatLowerer:
             case Operation(operator=(FloatSinTurns() | FloatCosTurns()) as semantic, operands=(a,)):
                 return self._lower_sincos(semantic, a)
             case Operation(operator=FloatSqrt() as semantic, operands=(a,)):
-                base, sign = _collapse_signs(self.context.hir.nodes, a)
-                return self._sqrt_via_exp2_log2(semantic, self.context.remap[base], sign)
+                return self._lower_unary_pooled(semantic, require(self.context.ops.fsqrt, "fsqrt"), a)
             case Operation(operator=FloatAtan2Turns() as semantic, operands=(y, x)):
                 return self._lower_atan2(semantic, y, x)
             case Operation(operator=FloatHypot2() as semantic, operands=(y, x)):
@@ -944,53 +943,38 @@ class _FloatLowerer:
 
     def _lower_hypot2_naive(self, semantic: FloatHypot2, y: ValueId, x: ValueId) -> ValueId:
         """
-        Standalone hypot has no dedicated primitive, so it uses h*sqrt((x/h)^2 + (y/h)^2), h=max(|x|,|y|).
-        The h==0 and h==inf cases are semantically valid but would feed 0/0 or inf/inf into fdiv causing err latch.
-        The mux keeps those internal divisions finite while the surrounding formula still returns 0 or inf.
+        Standalone hypot has no dedicated primitive, so it uses h*sqrt(1 + (l/h)^2), where the sorter hands over
+        l=min(|x|,|y|) and h=max(|x|,|y|) in one firing. Scaling by the larger magnitude is what keeps the square
+        in range; the larger one's own quotient is exactly 1, so it is written rather than divided for.
+        Both extremes of h are semantically valid but neither may reach the divider: h==0 means 0/0, which latches
+        div0, and h==inf leans on zkf_div's unstated inf/inf. The mux keeps the division away from both while the
+        surrounding formula still returns 0 or inf.
         """
         ops = self.context.ops
         fsort = require(ops.fsort, "fsort")
         fmul = require(ops.fmul, "fmul")
-        base_y, sign_y = _collapse_signs(self.context.hir.nodes, y)
-        base_x, sign_x = _collapse_signs(self.context.hir.nodes, x)
+        # Both operands reach the sorter under an absolute conditioner and leave it as magnitudes, so a folded sign
+        # chain has nothing to change here and is dropped rather than carried through the decomposition.
+        base_y, _ = _collapse_signs(self.context.hir.nodes, y)
+        base_x, _ = _collapse_signs(self.context.hir.nodes, x)
         my, mx = self.context.remap[base_y], self.context.remap[base_x]
         absolute = FloatSignControl(absolute=True)
-        h = self.context.builder.operation(
-            _select_hardware(semantic, fsort), [mx, my], [absolute, absolute], output_port=1
-        )
-        bypass = self._bool_or(self._float_eq_zero(h, FloatSignControl()), self._float_isinf(h))
-        safe_h = self._float_select(bypass, self._lower_float_const(1.0), h)
-        xn = self.context.builder.operation(
-            _select_hardware(semantic, require(ops.fdiv, "fdiv")), [mx, safe_h], [sign_x, FloatSignControl()]
-        )
-        yn = self.context.builder.operation(
-            _select_hardware(semantic, require(ops.fdiv, "fdiv")), [my, safe_h], [sign_y, FloatSignControl()]
-        )
+        low, high = [
+            self.context.builder.operation(
+                _select_hardware(semantic, fsort), [mx, my], [absolute, absolute], output_port=port
+            )
+            for port in (0, 1)
+        ]
+        bypass = self._bool_or(self._float_eq_zero(high), self._float_isinf(high))
+        safe_high = self._float_select(bypass, self._lower_float_const(1.0), high)
+        scaled = self._mir_op(semantic, require(ops.fdiv, "fdiv"), [low, safe_high])
         squares = self._mir_op(
             semantic,
             require(ops.fadd, "fadd"),
-            [self._mir_op(semantic, fmul, [xn, xn]), self._mir_op(semantic, fmul, [yn, yn])],
+            [self._lower_float_const(1.0), self._mir_op(semantic, fmul, [scaled, scaled])],
         )
-        return self._mir_op(semantic, fmul, [h, self._sqrt_via_exp2_log2(semantic, squares, FloatSignControl())])
-
-    def _sqrt_via_exp2_log2(self, semantic: Operator, operand: ValueId, conditioner: FloatSignControl) -> ValueId:
-        """
-        sqrt is expanded as exp2(log2(x)*0.5) until a native sqrt primitive exists.
-        Zero is a valid sqrt input but a pole for log2, so the log sees 1.0 and the result is muxed back to 0.0.
-        Negative nonzero inputs are not sanitized, so they still reach log2 and report the domain error.
-        """
-        ops = self.context.ops
-        is_zero = self._float_eq_zero(operand, conditioner)
-        zero = self._lower_float_const(0.0)
-        safe_operand = self._float_select(is_zero, self._lower_float_const(1.0), operand, sign_b=conditioner)
-        log = self.context.builder.operation(
-            _select_hardware(semantic, require(ops.flog2, "flog2")),
-            [safe_operand],
-            [FloatSignControl()],
-        )
-        half = self._emit_scale_pow2(semantic, log, FloatSignControl(), -1)
-        sqrt = self._mir_op(semantic, require(ops.fexp2, "fexp2"), [half])
-        return self._float_select(is_zero, zero, sqrt)
+        root = self._mir_op(semantic, require(ops.fsqrt, "fsqrt"), [squares])
+        return self._mir_op(semantic, fmul, [high, root])
 
     def classification_lowering(
         self, semantic: FloatIsFinite | FloatIsInf | FloatIsPosInf | FloatIsNegInf
@@ -1006,22 +990,22 @@ class _FloatLowerer:
             case FloatIsNegInf():
                 return FloatIsNegInfOperator(fmt), BoolInversion()
 
-    def _float_eq_zero(self, operand: ValueId, conditioner: FloatSignControl) -> ValueId:
+    def _float_eq_zero(self, operand: ValueId) -> ValueId:
         fcmp = require(self.context.ops.fcmp, "fcmp")
         port, inversion = fcmp.tap_of(_RELATION_OF[FloatEqual])
         return self.context.builder.operation(
             _select_hardware(FloatEqual(), fcmp),
             [operand, self._lower_float_const(0.0)],
-            [conditioner, FloatSignControl()],
+            [FloatSignControl(), FloatSignControl()],
             output_port=port,
             output_conditioner=inversion,
         )
 
-    def _float_isinf(self, operand: ValueId, conditioner: FloatSignControl = FloatSignControl()) -> ValueId:
+    def _float_isinf(self, operand: ValueId) -> ValueId:
         semantic = FloatIsInf()
         operator, output = self.classification_lowering(semantic)
         return self.context.builder.operation(
-            _select_hardware(semantic, operator), [operand], [conditioner], output_conditioner=output
+            _select_hardware(semantic, operator), [operand], [FloatSignControl()], output_conditioner=output
         )
 
     def _bool_or(self, a: ValueId, b: ValueId) -> ValueId:
@@ -1029,19 +1013,11 @@ class _FloatLowerer:
             _select_hardware(BoolOr(), BoolOrOperator()), [a, b], [BoolInversion(), BoolInversion()]
         )
 
-    def _float_select(
-        self,
-        cond: ValueId,
-        a: ValueId,
-        b: ValueId,
-        *,
-        sign_a: FloatSignControl = FloatSignControl(),
-        sign_b: FloatSignControl = FloatSignControl(),
-    ) -> ValueId:
+    def _float_select(self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId:
         return self.context.builder.operation(
             _select_hardware(FloatSelect(), SelectOperator(ScalarFloatType(self.context.float_format))),
             [cond, a, b],
-            [BoolInversion(), sign_a, sign_b],
+            [BoolInversion(), FloatSignControl(), FloatSignControl()],
         )
 
     def _mir_op(

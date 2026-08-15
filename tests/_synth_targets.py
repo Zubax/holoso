@@ -28,6 +28,7 @@ from holoso import (
     FMulOptions,
     FSincosOptions,
     FSortOptions,
+    FSqrtOptions,
     OperatorOptions,
     Options,
 )
@@ -51,6 +52,7 @@ def op_config(
     ffma: FFmaOptions | None = None,
     fexp2: FExp2Options | None = None,
     flog2: FLog2Options | None = None,
+    fsqrt: FSqrtOptions | None = None,
     fsincos: FSincosOptions | None = None,
     fatan2: FAtan2Options | None = None,
     fsort: FSortOptions | None = None,
@@ -58,8 +60,8 @@ def op_config(
 ) -> Options:
     """
     The Options for fmt; pass an options object to give an operator stage knobs, else that operator is lean.
-    ffma/fexp2/flog2/fsincos/fatan2/fsort are absent unless supplied, so MAC chains stay expanded (fmul + fadd) and a
-    kernel that uses no transcendental or min/max needs no such module.
+    ffma/fexp2/flog2/fsqrt/fsincos/fatan2/fsort are absent unless supplied, so MAC chains stay expanded (fmul + fadd)
+    and a kernel that uses no transcendental, root, or min/max needs no such module.
     """
     return Options(
         OperatorOptions(
@@ -71,6 +73,7 @@ def op_config(
             ffma=ffma,
             fexp2=fexp2,
             flog2=flog2,
+            fsqrt=fsqrt,
             fsincos=fsincos,
             fatan2=fatan2,
             fsort=fsort,
@@ -564,17 +567,14 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions()),
     ),
-    # imu_fusion: the fusion capstone -- three norm/rsqrt chains (flog2/fexp2/fdiv, one feeding the coarse
-    # alignment), the sorter-backed clamp, and real gate branches over the heaviest register pressure in the
-    # matrix, in the plain and the ffma-contracted datapaths. Measured lean-start closure per flow. On yosys both
-    # rows share one wall: the flog2 Horner pmul, whose >18-bit operands auto-tile into DSP slices combined by an
-    # unregistered fabric adder -- flog2 stage_product=2 registers that partial-product reduction (the sanctioned
-    # wide-multiplicand grid split; MULT18 rises 15 -> ~20 of 28 and stays routable). Deepening normshift splits
-    # past 1 consistently loses on both ECP5 tools (the front level is a fanout-~50 select cone a register cannot
-    # shorten); output-side decoupling wins instead -- flog2 stage_normalize_output on diamond-plain, fadd
-    # stage_output where the terminal cone runs into the register-file steering. With the DSP columns that full, the
-    # yosys rows are congestion-bound rather than deep: their last stretch came from REMOVING a stage (flog2
-    # stage_input, ffma stage_output), freeing the flip-flops that crowd the flog2 normshift cone.
+    # imu_fusion: the fusion capstone -- three norm/rsqrt chains (fsqrt/fdiv, one feeding the coarse alignment), the
+    # sorter-backed clamp, and real gate branches over the heaviest register pressure in the matrix, in the plain and
+    # the ffma-contracted datapaths. The native root retired the wall these rows used to close against (the flog2
+    # Horner pmul), and the three plain rows plus the ffma Vivado row keep closing on their old datapath knobs. The
+    # two ffma ECP5 rows each needed one more stage once that wall left. On yosys the deepest path is now the
+    # sorter's compare cone entered straight off the register file, which fsort stage_input splits; on diamond it is
+    # the fadd normalize/pack tail into the register file, which fadd stage_pack splits -- and that row's fadd
+    # stage_output stays, since removing it only exposes the same tail one stage earlier.
     for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
@@ -584,8 +584,7 @@ TARGETS: list[SynthTarget] = [
             fadd=FAddOptions(stage_input=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
-            fexp2=FExp2Options(stage_product=2),
-            flog2=FLog2Options(stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
+            fsqrt=FSqrtOptions(),
             fsort=FSortOptions(stage_input=1),
         ),
         kernel=_imu_fusion_kernel,
@@ -599,8 +598,7 @@ TARGETS: list[SynthTarget] = [
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
-            fexp2=FExp2Options(stage_product=2),
-            flog2=FLog2Options(stage_normalize=1, stage_normalize_output=1, stage_pack=1, stage_product_final=1),
+            fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
         ),
         kernel=_imu_fusion_kernel,
@@ -613,8 +611,7 @@ TARGETS: list[SynthTarget] = [
             F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
-            fexp2=FExp2Options(),
-            flog2=FLog2Options(stage_normalize=1, stage_product_final=1),
+            fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
         ),
         kernel=_imu_fusion_kernel,
@@ -628,9 +625,8 @@ TARGETS: list[SynthTarget] = [
             fadd=FAddOptions(stage_input=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
-            fexp2=FExp2Options(stage_product=3),
-            flog2=FLog2Options(stage_product=2, stage_normalize=1, stage_pack=1, stage_product_final=1),
-            fsort=FSortOptions(),
+            fsqrt=FSqrtOptions(),
+            fsort=FSortOptions(stage_input=1),
             ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
             wmultiplier=18,
         ),
@@ -643,11 +639,10 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
-            fexp2=FExp2Options(stage_product=2),
-            flog2=FLog2Options(stage_normalize=1, stage_pack=1, stage_product_final=1),
+            fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
             ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
         ),
@@ -662,8 +657,7 @@ TARGETS: list[SynthTarget] = [
             F_e6m18,
             fadd=FAddOptions(stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
-            fexp2=FExp2Options(),
-            flog2=FLog2Options(stage_normalize=1, stage_product_final=1),
+            fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
             ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
         ),

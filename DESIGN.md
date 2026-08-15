@@ -194,9 +194,9 @@ resource-sharing key; a machine holds one configuration per pooled class. An ope
 microcode-driven immediate inputs, and declares a per-instance initiation interval (most are II=1, fully pipelined).
 
 Every float operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA
-contraction, `fsort` enables min/max); what a kernel cannot reach through the operators it was given is refused at
-MIR lowering. An integer operator is never optional, only tuned: the vocabulary is small enough that a kernel using
-integers needs essentially all of it.
+contraction, `fsort` enables min/max, `fsqrt` enables the square root and with it the standalone hypotenuse); what a
+kernel cannot reach through the operators it was given is refused at MIR lowering. An integer operator is never
+optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
 
 ## Front-end
 
@@ -263,10 +263,11 @@ driver-level restart -- lean-first, since carrying an untouched leaf would destr
 Calls dispatch on the object identity the callee resolves to, not its spelled name, so every spelling of a symbol
 (`**` or its function form, `@` or `np.matmul`) resolves one registry entry. A scalar callee carries a group of
 typed lowerings, each either a single semantic HIR operator or an inlined composite, declaring a domain per operand
-position and optionally a refinement demanding a compile-time value of known sign; selection takes the unique most
-refined lowering every one of whose positions accepts the operand. An array composite declares no scalar domain,
-rank and shape deciding its meaning. Every stub is ordinary Python in the supported subset, so each is its own
-numerical reference.
+position and optionally a refinement demanding a compile-time value -- of known sign, or of one named value where the
+sign does not tell the lowerings apart (a one-half exponent is the square root, an integral one a multiply chain);
+selection takes the unique most refined lowering every one of whose positions accepts the operand. An array
+composite declares no scalar domain, rank and shape deciding its meaning. Every stub is ordinary Python in the
+supported subset, so each is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own

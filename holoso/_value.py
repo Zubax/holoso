@@ -148,6 +148,10 @@ class FloatValue:
         """`zkf_log2`'s domain-error/pole sidebands are intentionally not modeled (as with `zkf_div`'s div0)."""
         return FloatValue.from_bits(self.fmt, self._zval.log2().value.bits)
 
+    def sqrt(self) -> FloatValue:
+        """`zkf_sqrt`'s domain-error sideband is intentionally not modeled; a negative operand yields -inf."""
+        return FloatValue.from_bits(self.fmt, self._zval.sqrt().root.bits)
+
     def sincos(self) -> SinCos:
         """`(sin(2*pi*self), cos(2*pi*self))` -- turn-native, as `zkf_sincos`; the quadrant sideband is dropped."""
         r = self._zval.sincos()

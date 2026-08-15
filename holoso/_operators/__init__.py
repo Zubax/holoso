@@ -36,6 +36,7 @@ from ._float import (
     FRoundOperator as FRoundOperator,
     FSincosOperator as FSincosOperator,
     FSortOperator as FSortOperator,
+    FSqrtOperator as FSqrtOperator,
     FToIntOperator as FToIntOperator,
     FloatClassificationOperator as FloatClassificationOperator,
     FloatHardwareOperator as FloatHardwareOperator,

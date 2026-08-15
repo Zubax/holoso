@@ -96,10 +96,10 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # Straight-line: the clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC
     # atan2 tail.
     "flux_observer-e8m36": (87, 87),
-    # The fusion capstone: three rsqrt sites expanded through flog2/fexp2/fdiv (a native rsqrt operator is expected
-    # to shorten these rows), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
-    "imu_fusion-e8m36": (252, 439),
-    "imu_fusion-e6m18": (235, 391),
+    # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
+    # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
+    "imu_fusion-e8m36": (234, 412),
+    "imu_fusion-e6m18": (207, 349),
 }
 
 

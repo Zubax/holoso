@@ -35,6 +35,7 @@ from holoso._operators import (
     FFromIntOperator,
     FMulILog2Operator,
     FSortOperator,
+    FSqrtOperator,
     FToIntOperator,
     IAbsOperator,
     IAddOperator,
@@ -247,6 +248,20 @@ def test_mixed_format_operators_elaborate_as_they_declare_themselves(
     # Several triples because the integer side is sized independently of the float one.
     name = f"mixed_probe_e{wexp}m{wman}i{wint}"
     operators = _mixed_format_operators(FloatFormat(wexp, wman), IntFormat(wint))
+    _elaborate(name, _pooled_probe(name, operators), tmp_path)
+
+
+@requires_iverilog
+@pytest.mark.parametrize("wexp,wman", ((6, 18), (8, 24), (3, 5), (8, 37)))
+def test_fsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tmp_path: Path) -> None:
+    # Both significand parities, which the kernel-level and cocotb coverage (binary32 only) never reach: the core's
+    # rounding-guard rule and its stage count both depend on WMAN's parity.
+    name = f"fsqrt_probe_e{wexp}m{wman}"
+    fmt = FloatFormat(wexp, wman)
+    operators: list[PooledHardwareOperator] = [
+        FSqrtOperator(fmt, FSqrtOperator.Options()),
+        FSqrtOperator(fmt, FSqrtOperator.Options(stage_input=2, stage_pack=1, stage_output=1)),
+    ]
     _elaborate(name, _pooled_probe(name, operators), tmp_path)
 
 

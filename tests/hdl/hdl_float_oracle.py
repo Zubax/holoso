@@ -242,6 +242,17 @@ def log2_oracle(a_bits: int) -> tuple[int, int, int]:
     return y, domain_error, pole
 
 
+def sqrt_oracle(a_bits: int) -> tuple[int, int]:
+    """
+    Reference `(y_bits, domain_error)`. The root is correctly rounded, so numpy is a genuinely INDEPENDENT oracle
+    here (unlike the faithfully-rounded log2/sincos cores, which have to be checked against the ZKF model itself).
+    A negative operand -- a negative zero is not one -- yields the -inf poison value instead of numpy's NaN.
+    """
+    if (a_bits & F32_SIGN_MASK) and not is_zero_f32(a_bits):
+        return F32_NINF, 1
+    return _flush_to_zkf(f32_to_bits(np.sqrt(bits_to_f32(a_bits)))), 0
+
+
 def sincos_oracle(a_bits: int) -> tuple[int, int]:
     """
     Reference turn-native `(sin(2*pi*a), cos(2*pi*a))` via the exact `FloatValue.sincos`; numpy is unusable because

@@ -27,6 +27,7 @@ class OperatorOptions:
     fsort: FSortOperator.Options | None = None
     fexp2: FExp2Operator.Options | None = None
     flog2: FLog2Operator.Options | None = None
+    fsqrt: FSqrtOperator.Options | None = None
     fsincos: FSincosOperator.Options | None = None
     fatan2: FAtan2Operator.Options | None = None
     ffromint: FFromIntOperator.Options | None = None
@@ -61,6 +62,7 @@ class OpConfig:
     fsort: FSortOperator | None
     fexp2: FExp2Operator | None
     flog2: FLog2Operator | None
+    fsqrt: FSqrtOperator | None
     fsincos: FSincosOperator | None
     fatan2: FAtan2Operator | None
     ffromint: FFromIntOperator | None
@@ -84,6 +86,7 @@ class OpConfig:
             fsort=FSortOperator(fmt, opts.fsort) if opts.fsort is not None else None,
             fexp2=FExp2Operator(fmt, opts.fexp2, wmultiplier) if opts.fexp2 is not None else None,
             flog2=FLog2Operator(fmt, opts.flog2, wmultiplier) if opts.flog2 is not None else None,
+            fsqrt=FSqrtOperator(fmt, opts.fsqrt) if opts.fsqrt is not None else None,
             fsincos=FSincosOperator(fmt, opts.fsincos, wmultiplier) if opts.fsincos is not None else None,
             fatan2=FAtan2Operator(fmt, opts.fatan2, wmultiplier) if opts.fatan2 is not None else None,
             ffromint=FFromIntOperator(fmt, ifmt, opts.ffromint) if opts.ffromint is not None else None,

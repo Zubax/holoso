@@ -82,9 +82,9 @@ def test_registry_resolves_the_expected_externals() -> None:
     assert resolve(np.maximum) == Array(maximum) == resolve(np.fmax)  # type: ignore[arg-type]
     assert resolve(np.ndarray.clip) == Array(clip)  # type: ignore[arg-type]
     assert resolve(np.clip) == Array(clip_free)  # type: ignore[arg-type]  # the free spelling is stricter
-    # An operator is a key like any callee object, so `**` and its every spelling are ONE four-lowering entry.
+    # An operator is a key like any callee object, so `**` and its every spelling are ONE five-lowering entry.
     power_entry = resolve(BinaryOp.POW)
-    assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 4
+    assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 5
     for power in (pow, math.pow, np.power, np.pow, np.float_power):
         assert resolve(power) == power_entry, power
     assert resolve(np.matmul) == Array(matmul) == resolve(BinaryOp.MATMUL)  # type: ignore[arg-type]
