@@ -19,10 +19,12 @@ The timing is read off the shared LIR cycle helpers, which are in the fetch-PC f
 `landing_cycle(commit)` are the literal `pc` values at which an operand is sampled and a result becomes readable in
 the array. So the simulator needs no separate clock frame and no growing timeline. The only mutable state beyond the
 register files is `_pending`: the in-flight operator results -- the compact stand-in for the RTL operator pipeline. A
-result is computed when its operands are sampled (at its read PC) but only becomes readable at its
-landing PC; like the hardware, the register file is written at the landing, not at read time. Inputs, by contrast,
-carry no latency, so set_inputs writes the input lanes directly. A loop re-fires the same PCs on every revisit,
-and `_pending` only ever holds the handful of results in flight, so an arbitrarily deep loop runs in bounded memory.
+result is computed when its operands are sampled (at its read PC) but only becomes readable at its landing PC; like
+the hardware, the register file is written at the landing, not at read time. Inputs behave like the hardware bus:
+set_inputs only presents the values, and they are parallel-loaded into the input lanes at the accept edge
+(`in_ready && in_valid`), so a change presented while a transaction is in flight cannot disturb it. A loop re-fires
+the same PCs on every revisit, and `_pending` only ever holds the handful of results in flight, so an arbitrarily
+deep loop runs in bounded memory.
 
 The convenience NumericalSimulator.run drives `tick` over one whole transaction (inputs -> outputs); a caller
 wanting the cycle count counts its own `tick` invocations, and a cosimulator ticks the simulator in lockstep with the
@@ -108,6 +110,7 @@ class NumericalSimulator(_Kernel):
         self.regs: dict[int, WideValue] = {}  # wide register file (Verilog `regs`)
         self.bregs: dict[int, bool] = {}  # boolean register file (Verilog `bregs`)
         self.pc = 0
+        self._presented: list[ScalarValue] | None = None  # the input bus: latched into the lanes at the accept edge
         self._pending: dict[int, list[tuple[_Dst, ScalarValue]]] = {}  # landing PC -> in-flight (dest, value) writes
         self._op_events: dict[int, list[_OpEvent]] = {}  # read PC -> firings sampling their operands there
         self._installs: dict[int, list[_Install]] = {}  # fire PC -> pc-gated installs (readable one PC later)
@@ -125,26 +128,25 @@ class NumericalSimulator(_Kernel):
 
     def set_inputs(self, *inputs: ScalarLike) -> None:
         """
-        Present the input values (in module-port order) on the input lanes. Inputs carry no latency, so they are
-        written into their register lanes directly (the hardware latches them at the accept edge; nothing reads them
-        before the first executing step, so writing them when presented is observationally identical).
+        Present the input values (in module-port order) on the input lanes. Like the hardware input bus, the presented
+        values persist and are latched into the register lanes only at the accept edge (`in_ready && in_valid`), so
+        changing them while a transaction is in flight does not disturb it.
         """
         if len(inputs) != len(self._lir.inputs):
             raise ValueError(f"expected {len(self._lir.inputs)} inputs, got {len(inputs)}")
-        values = [  # coerce everything first, so a bad input leaves no lane partially written
+        self._presented = [
             coerce_scalar(load.scalar_type, raw, f"input {index}")
             for index, (load, raw) in enumerate(zip(self._lir.inputs, inputs, strict=True))
         ]
-        for load, value in zip(self._lir.inputs, values, strict=True):
-            self._write(load.dst, value)
 
     def tick(self, in_valid: bool, out_ready: bool) -> None:
         """
         Advance one `posedge clk`: compute `next_pc` from the current PC and the handshake (branches reading
         `bregs`, the present/accept holds), commit the accepted-boundary state writeback (read-first), advance the
-        PC, then apply that PC's datapath.
+        PC, latch the presented inputs on the accept edge, then apply that PC's datapath.
         """
         next_pc = self._next_pc(in_valid, out_ready)
+        accepted = self.pc == 0 and in_valid  # in_ready && in_valid: the RTL parallel-loads the input lanes here
         if self.pc in self._terminators:
             # A block whose terminator redirects earlier than its drained boundary (cross-block overlap) leaves
             # in-flight results still landing past its terminator PC; those landings belong to whichever arm the
@@ -166,6 +168,9 @@ class NumericalSimulator(_Kernel):
             for dst, value in installed:
                 self._write(dst, value)
         self.pc = next_pc
+        if accepted and self._presented is not None:
+            for load, value in zip(self._lir.inputs, self._presented, strict=True):
+                self._load(load.dst, value)
         self._apply(next_pc)
 
     def run(self, *inputs: ScalarLike, max_cycles: int = 1_000_000_000) -> list[ScalarValue]:
@@ -183,9 +188,9 @@ class NumericalSimulator(_Kernel):
             self.tick(in_valid, out_ready)
             elapsed += 1
 
+        self.set_inputs(*inputs)
         while not self.in_ready:  # drain any in-flight transaction left by a partial prior drive
             step(False, True)
-        self.set_inputs(*inputs)  # present inputs only once idle, so the drained transaction reads its own input lanes
         step(True, False)  # accept: pc 0 -> 1
         while not self.out_valid:
             step(False, False)
@@ -291,6 +296,13 @@ class NumericalSimulator(_Kernel):
         return apply_conditioner(operand.inversion, value)
 
     def _write(self, dst: _Dst, value: ScalarValue) -> None:
+        """
+        The writeback datapath (landings and installs). The accept-edge input load is the RTL's own parallel-load
+        arm rather than a writeback, so it stores through _load directly.
+        """
+        self._load(dst, value)
+
+    def _load(self, dst: _Dst, value: ScalarValue) -> None:
         if isinstance(dst, RegRef):
             assert isinstance(value, (FloatValue, IntValue))
             self.regs[dst.index] = value

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import holoso
-from holoso import BoolType, FloatFormat, NumericalSimulator, SynthesisResult
+from holoso import BoolType, FloatFormat, IntValue, NumericalSimulator, SynthesisResult
 from holoso._value import ScalarLike, ScalarValue
 
 from ._modelref import default_options
@@ -106,6 +106,31 @@ def test_loop_latency_grows_with_the_trip_count() -> None:
     latencies = {_drive(model, [x])[1] for x in (0.5, 0.9, 1.3, 1.7, 2.5, 3.5, 6.0, 12.0)}
     assert len(latencies) >= 3, f"loop latency should vary with the trip count, saw {sorted(latencies)}"
     assert min(latencies) > result.initiation_interval[0], "every realized latency exceeds the not-taken lower bound"
+
+
+def test_inputs_latch_at_the_accept_edge() -> None:
+    # The RTL parallel-loads the input registers only on the accept edge (in_ready && in_valid), so the presented
+    # values may change while a transaction is in flight without disturbing it; the model must do the same. The
+    # kernel reads `x` again after the add commits, so a mid-flight change would corrupt that late read.
+    def read_late(x: int) -> int:
+        return (x + 7) * x
+
+    model = holoso.synthesize(read_late, default_options(_FMT), name="read_late").numerical_model.elaborate()
+    model.set_inputs(1)
+    model.tick(in_valid=True, out_ready=False)  # accept x=1
+    assert not model.in_ready
+    model.set_inputs(3)  # the bus changes mid-flight; the accepted transaction must keep x=1
+    while not model.out_valid:
+        model.tick(in_valid=False, out_ready=False)
+    first = model.output_values[0]
+    assert isinstance(first, IntValue) and int(first) == (1 + 7) * 1
+    model.tick(in_valid=False, out_ready=True)  # take the output; the machine is idle again
+    # The presented values persist like an idle input bus, so the next accept latches x=3.
+    model.tick(in_valid=True, out_ready=False)
+    while not model.out_valid:
+        model.tick(in_valid=False, out_ready=False)
+    second = model.output_values[0]
+    assert isinstance(second, IntValue) and int(second) == (3 + 7) * 3
 
 
 def test_deep_loop_runs_in_bounded_memory() -> None:

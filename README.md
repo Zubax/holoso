@@ -234,8 +234,11 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
   or growing like Python's unbounded ints; the raw left shift `<<` is the one deliberate exception -- it truncates
   past the word. Mixed int/float expressions promote to float, C-style.
 
-- Dynamically-sized tensors are not supported. Dimensions must be annotated using jaxtyping
+- Negative shift amount is well-defined: `x << 3` is equivalent to `x >> -3`, and the other way around.
+
+- Dynamically-sized tensors are not supported. Dimensions of runtime tensors must be annotated using jaxtyping
   (e.g., `Float64[np.ndarray, "3 3"]`).
+  Constant tensors may not require annotations if they are visible to the optimizer, depending on context.
 
 - Augmented assignment (`+=`, `@=`, etc.) is supported only for scalars, where it simply rebinds the result.
   Tensors mutate in place, which diverges from a rebind when the tensor is aliased; supporting it correctly would

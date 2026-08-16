@@ -84,12 +84,24 @@ def test_registry_resolves_the_expected_externals() -> None:
     assert resolve(np.maximum) == Array(maximum) == resolve(np.fmax)  # type: ignore[arg-type]
     assert resolve(np.ndarray.clip) == Array(clip)  # type: ignore[arg-type]
     assert resolve(np.clip) == Array(clip_free)  # type: ignore[arg-type]  # the free spelling is stricter
-    # An operator is a key like any callee object, so `**` and its every spelling are ONE five-lowering entry.
+    # `**` and the int-preserving spellings are ONE five-lowering entry; the float-computing spellings carry the
+    # same lowerings minus the integer chain, so an integer base converts instead of saturating.
     power_entry = resolve(BinaryOp.POW)
     assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 5
-    for power in (pow, math.pow, np.power, np.pow, np.float_power):
+    for power in (pow, np.power, np.pow):
         assert resolve(power) == power_entry, power
+    float_power_entry = resolve(math.pow)
+    assert isinstance(float_power_entry, ScalarFunction) and len(float_power_entry.lowerings) == 4
+    assert resolve(np.float_power) == float_power_entry
+    assert all(lowering in power_entry.lowerings for lowering in float_power_entry.lowerings)
     assert resolve(np.matmul) == Array(matmul) == resolve(BinaryOp.MATMUL)  # type: ignore[arg-type]
+    # numpy 2's Array-API spellings are keys of the same entries as their classic aliases.
+    assert resolve(np.linalg.matmul) == resolve(np.matmul)
+    assert resolve(np.linalg.outer) == resolve(np.outer)
+    assert resolve(np.linalg.cross) == resolve(np.cross)
+    assert resolve(np.linalg.trace) == resolve(np.trace)
+    assert resolve(np.linalg.matrix_transpose) == resolve(np.matrix_transpose) == resolve(np.transpose)
+    assert resolve(np.ndarray.mT) == resolve(np.ndarray.T)
     assert resolve(np.sum) == Array(sum_) == resolve(np.ndarray.sum)  # type: ignore[arg-type]
     assert resolve(np.mean) == Array(mean) == resolve(np.ndarray.mean)  # type: ignore[arg-type]
     assert resolve(np.max) == Array(amax) == resolve(np.amax) == resolve(np.ndarray.max)  # type: ignore[arg-type]
@@ -415,6 +427,29 @@ def test_cross_inlining_matches_the_host() -> None:
     assert assert_hir_matches_reference(
         lower(kernel2, DEFAULT_UNROLL_MAX_TRIPS).hir, reference2, vectors2, label="cross2"
     ) == len(vectors2)
+
+
+def test_numpy2_linalg_spellings_match_the_host() -> None:
+    # numpy 2's Array-API spellings behave exactly as their classic aliases within the supported ranks.
+    def kernel(m: Float64[np.ndarray, "2 2"], u: Float64[np.ndarray, "3"], v: Float64[np.ndarray, "3"]) -> float:
+        w = np.linalg.cross(u, v)
+        g = np.linalg.matmul(m, m.mT)
+        return np.linalg.trace(g) + w[0] * np.linalg.outer(u, v)[2][1]  # type: ignore[no-any-return]
+
+    rng = np.random.default_rng(1234)
+    vectors = [
+        {
+            name: float(value)
+            for name, value in zip(
+                ("m_0_0", "m_0_1", "m_1_0", "m_1_1", "u_0", "u_1", "u_2", "v_0", "v_1", "v_2"),
+                rng.uniform(-2.0, 2.0, 10),
+            )
+        }
+        for _ in range(4)
+    ]
+    assert assert_hir_matches_reference(
+        lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, kernel, vectors, label="linalg_aliases"
+    ) == len(vectors)
 
 
 def test_reduction_stubs_match_numpy() -> None:

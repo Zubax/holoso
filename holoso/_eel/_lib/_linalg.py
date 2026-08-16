@@ -27,7 +27,15 @@ def _dot(u: np.ndarray, v: np.ndarray) -> Any:
     return acc
 
 
-@array(np.transpose, np.ndarray.T, np.ndarray.transpose, derives=True)
+@array(
+    np.transpose,
+    np.ndarray.T,
+    np.ndarray.transpose,
+    np.matrix_transpose,
+    np.linalg.matrix_transpose,
+    np.ndarray.mT,
+    derives=True,
+)
 def transpose(a: np.ndarray) -> Any:
     if a.ndim == 0:
         raise ValueError("cannot transpose a scalar value")
@@ -50,7 +58,7 @@ def flatten(a: np.ndarray) -> Any:
     return np.asarray([a[k // width, k % width] for k in range(len(a) * width)])
 
 
-@array(np.dot, np.ndarray.dot, np.matmul, BinaryOp.MATMUL)
+@array(np.dot, np.ndarray.dot, np.matmul, np.linalg.matmul, BinaryOp.MATMUL)
 def matmul(a: np.ndarray, b: np.ndarray) -> Any:
     """
     numpy's shape rules for 1-D and 2-D operands: inner dimensions must agree, a 1-D left operand is promoted to a row
@@ -74,7 +82,7 @@ def matmul(a: np.ndarray, b: np.ndarray) -> Any:
     return np.array([[_dot(a[i], bt[j]) for j in range(len(bt))] for i in range(len(a))])
 
 
-@array(np.trace, np.ndarray.trace)
+@array(np.trace, np.ndarray.trace, np.linalg.trace)
 def trace(a: np.ndarray) -> Any:
     """FIXME Support non-square matrices by running the shorter diagonal."""
     if a.ndim != 2:
@@ -87,7 +95,7 @@ def trace(a: np.ndarray) -> Any:
     return acc
 
 
-@array(np.outer)
+@array(np.outer, np.linalg.outer)
 def outer(u: np.ndarray, v: np.ndarray) -> Any:
     """FIXME Currently does not flatten its operands."""
     if u.ndim != 1 or v.ndim != 1:
@@ -95,7 +103,7 @@ def outer(u: np.ndarray, v: np.ndarray) -> Any:
     return np.array([[u[i] * v[j] for j in range(len(v))] for i in range(len(u))])
 
 
-@array(np.cross)
+@array(np.cross, np.linalg.cross)
 def cross(u: np.ndarray, v: np.ndarray) -> Any:
     """Currently only supports 2-vectors and 3-vectors."""
     if u.ndim != 1 or v.ndim != 1:

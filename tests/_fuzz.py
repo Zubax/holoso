@@ -614,11 +614,14 @@ def _emit_bool_logic(em: _Emitter) -> _Fragment:
     a, b = em.pick_floats(2)
     c1 = em.fresh("c")
     em.emit(f"{c1} = {a} < {b}")
+    # `other` is drawn before c1 joins the pool so it can never be c1 itself: `c1 ^ c1` is provably False, and its
+    # float cast is a constant 0.0 that can legally erase a danger shape downstream -- the same constant-relation
+    # hazard pick_floats guards against for self-comparisons.
+    other = em.pick_bool() if em.has_bool() and em.chance(0.6) else None
     em.add_bool(c1)
-    if em.has_bool() and em.chance(0.6):
+    if other is not None:
         c2 = em.fresh("c")
         connective = em.choice(["and", "or", "^"])
-        other = em.pick_bool()
         if connective == "^":
             em.emit(f"{c2} = {c1} ^ {other}")
         else:

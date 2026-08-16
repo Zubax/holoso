@@ -15,6 +15,7 @@ FORMAT's own rounding, not float64. Associativity is never asserted -- it does n
 import math
 from collections.abc import Callable
 
+import numpy as np
 import pytest
 
 import holoso
@@ -792,3 +793,24 @@ def test_a_constant_past_the_double_range_renders_exactly() -> None:
     result = holoso.synthesize(_scale_by_a_constant_past_the_double_range, ops, name="past_double")
     assert f"wire [WREG-1:0] const_0 = 30'h17fe0000;  // {2**1024}" in result.verilog_output.verilog
     assert str(2**1024) in result.html_output.html
+
+
+def _square_via_math_pow(n: int) -> float:
+    return math.pow(n, 2)
+
+
+def _square_via_float_power(n: int) -> float:
+    return np.float_power(n, 2)  # type: ignore[no-any-return]
+
+
+@pytest.mark.parametrize("kernel", [_square_via_math_pow, _square_via_float_power], ids=lambda f: f.__name__)
+def test_float_computing_power_spellings_do_not_saturate_an_int_base(kernel: Callable[[int], float]) -> None:
+    # math.pow and np.float_power convert their operands and compute in floating point on the host, so an integer
+    # base whose power exceeds the integer word must answer the float image, never the saturated integer chain.
+    # 4096**2 == 2**24 is exact at wman 18, so the comparison needs no tolerance.
+    ops = Options(
+        OperatorOptions(ffromint=holoso.FFromIntOptions(), fmul=FMulOptions()),
+        ffmt=FloatFormat(6, 18),
+    )
+    sim = holoso.synthesize(kernel, ops, name="float_power").numerical_model.elaborate()
+    assert float(sim.run(4096)[0]) == float(kernel(4096)) == 16777216.0
