@@ -43,7 +43,7 @@ branch conservatively binds the whole join (a share in the then-arm blocks a sto
 per-path sound in both directions, occasionally stricter than one path alone.
 """
 
-from ._values import Allocation, AllocationState, RecordValue, SequenceValue, TensorValue, Value
+from ._values import Allocation, AllocationState, IteratorValue, RecordValue, SequenceValue, TensorValue, Value
 
 
 def share(value: Value) -> None:
@@ -93,17 +93,14 @@ def blame(allocation: Allocation) -> str:
 
 def allocations(value: Value) -> list[Allocation]:
     match value:
-        case SequenceValue(items=items, allocation=allocation):
+        case SequenceValue(items=children, allocation=allocation) | RecordValue(fields=children, allocation=allocation):
             found = [allocation]
-            for item in items:
-                found.extend(allocations(item))
+            for child in children:
+                found.extend(allocations(child))
             return found
         case TensorValue(allocation=allocation):
             return [allocation]
-        case RecordValue(fields=fields, allocation=allocation):
-            found = [allocation]
-            for field in fields:
-                found.extend(allocations(field))
-            return found
+        case IteratorValue(items=items):
+            return [allocation for item in items for allocation in allocations(item)]
         case _:
             return []

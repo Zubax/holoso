@@ -232,6 +232,8 @@ with identical kind and shape -- for a record, identical class.
 Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an
 array the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle
 fixed by its class -- a plain generated frozen dataclass, so construction is structural and field reads fold.
+A `for` target may be a tuple of names, and `enumerate` answers a one-shot iterator exactly as in Python:
+consumed by a single iteration, refused everywhere else.
 Arrays and records never exist as hardware aggregates: they are compile-time bookkeeping over scalar wires,
 decomposed at the module boundary into indexed and field-path ports, and only scalar leaves reach HIR. Structural
 transforms (slices, transposes, reshapes) restructure the same storage; a dtype-changing conversion mints a fresh

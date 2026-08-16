@@ -24,6 +24,7 @@ from ._values import (
     Allocation,
     AllocationState,
     BoundMethod,
+    IteratorValue,
     Opaque,
     RecordValue,
     ResidualScalar,
@@ -174,6 +175,9 @@ def _state_store(
             reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
         case RecordValue():
             reject(origin, f"a record cannot be installed into {spell_state(key)}; store its fields separately")
+        case IteratorValue():
+            # Hardware state holds leaves, not exhaustion: a reloaded slot would replay what Python drained.
+            reject(origin, f"an enumerate iterator cannot be installed into {spell_state(key)}")
         case SequenceValue() | TensorValue():
             if same(value, slot_value):
                 return  # rebinding the attribute to its own current tree is Python's no-op
@@ -297,7 +301,7 @@ def _element_store(
         value = rhs
     if isinstance(value, BoundMethod):
         reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
-    if isinstance(value, (SequenceValue, TensorValue, RecordValue)):
+    if isinstance(value, (SequenceValue, TensorValue, RecordValue, IteratorValue)):
         reject(origin, "storing an aggregate into a container is not supported; rebind or build with a comprehension")
     assert isinstance(value, (StaticScalar, ResidualScalar, Opaque))
     leaf = _express.tensor_leaf(interp, origin, site.holder.family, value, sink)

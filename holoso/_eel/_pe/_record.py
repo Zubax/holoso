@@ -8,6 +8,7 @@ the `"<string>"` co_filename dataclasses exec()s its methods from; a user `__ini
 """
 
 import dataclasses
+import functools
 import inspect
 
 from .._annotations import unaliased
@@ -38,20 +39,14 @@ def inadmissible_reason(cls: type) -> str | None:
     return None
 
 
-_ANNOTATIONS: dict[type, dict[str, object]] = {}
-
-
+@functools.cache
 def field_annotations(cls: type) -> dict[str, object]:
     """
     Field name -> unaliased annotation for every dataclass field, merged over the MRO child-wins
     (`inspect.get_annotations` is own-class-only). Raises whatever a lazy annotation body raises;
     the caller owns locating it.
     """
-    found = _ANNOTATIONS.get(cls)
-    if found is None:
-        merged: dict[str, object] = {}
-        for base in reversed(cls.__mro__):
-            merged.update(inspect.get_annotations(base, eval_str=True))
-        found = {field.name: unaliased(merged[field.name]) for field in dataclasses.fields(cls)}
-        _ANNOTATIONS[cls] = found
-    return found
+    merged: dict[str, object] = {}
+    for base in reversed(cls.__mro__):
+        merged.update(inspect.get_annotations(base, eval_str=True))
+    return {field.name: unaliased(merged[field.name]) for field in dataclasses.fields(cls)}

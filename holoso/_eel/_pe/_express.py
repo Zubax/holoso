@@ -19,8 +19,10 @@ from ._snapshot import describe_opaque as _describe_opaque, nan_payload, tensor_
 from ._state import mro_attr
 from ._values import (
     AGGREGATES,
+    VALUE_KINDS,
     Allocation,
     BoundMethod,
+    IteratorValue,
     Opaque,
     RangeValue,
     RecordValue,
@@ -35,10 +37,7 @@ from ._values import (
 if TYPE_CHECKING:
     from ._interpret import Frame, Interpreter, Sink
 
-
-_AGGREGATE = AGGREGATES
-
-_VALUE_KINDS = (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, RecordValue, BoundMethod, RangeValue)
+_LIST_ADVICE = "an array operation on a Python list/tuple is not supported; build one with np.array([...])"
 
 # ------------------------------------------------------------------ attribute reads
 
@@ -54,7 +53,7 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
                     reject(origin, f"calling methods on a record value is not supported; {attr!r} is not a field")
                 reject(origin, f"the record {cls.__name__} has no field {attr!r}")
             item = fields[names.index(attr)]
-            if isinstance(item, _AGGREGATE):
+            if isinstance(item, AGGREGATES):
                 share(base_value)
                 share(item)
             return item
@@ -76,8 +75,8 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
             reject(origin, f"a scalar has no supported attribute {attr!r}")
         case BoundMethod():
             reject(origin, f"{_aggregate.a_kind(base_value)} can only be called")
-        case RangeValue():
-            reject(origin, f"a range has no supported attribute {attr!r}")
+        case IteratorValue() | RangeValue():
+            reject(origin, f"{_aggregate.a_kind(base_value)} has no supported attribute {attr!r}")
         case Opaque(name=name, value=value) if isinstance(value, (types.ModuleType, type)):
             # A module/class attribute is a metadata read (class access unwraps staticmethod and
             # plain functions); an instance never runs live descriptors, below.
@@ -119,7 +118,7 @@ def scalar(value: Value, origin: Origin) -> Scalar:
             return value
         case Opaque():
             reject(origin, _describe_opaque(value))
-        case SequenceValue() | TensorValue() | RecordValue() | RangeValue():
+        case SequenceValue() | TensorValue() | RecordValue() | IteratorValue() | RangeValue():
             reject(origin, f"{_aggregate.a_kind(value)} cannot be used as a scalar here")
         case BoundMethod():
             reject(origin, f"{_aggregate.a_kind(value)} can only be called")
@@ -152,7 +151,7 @@ def unary(interp: Interpreter, origin: Origin, op: UnaryOp, value: Value, sink: 
         leaves = tuple(_unary_leaf(interp, origin, op, leaf, sink) for leaf in value.leaves)
         interp.budget.spend(len(leaves), origin, "the elementwise operation")
         return TensorValue(value.shape, value.family, leaves, Allocation())
-    if isinstance(value, _AGGREGATE):
+    if isinstance(value, AGGREGATES):
         if op is UnaryOp.NOT:
             reject(origin, "the truthiness of an aggregate is not supported")
         reject(origin, f"`{op.value}` is not supported on {_aggregate.a_kind(value)}")
@@ -192,7 +191,7 @@ def _scalar_leaf(origin: Origin, leaf: Scalar | Opaque) -> Scalar:
 def binary(interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink) -> Value:
     if op is BinaryOp.MATMUL:
         for operand in (lv, rv):
-            if isinstance(operand, _AGGREGATE):
+            if isinstance(operand, AGGREGATES):
                 share(operand)
         return _operator_call(interp, origin, op, [lv, rv], frame, sink)
     tensors = isinstance(lv, TensorValue) or isinstance(rv, TensorValue)
@@ -289,7 +288,7 @@ def _binary_scalars(
 
 
 def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: Value, sink: Sink) -> Scalar:
-    if isinstance(lv, _AGGREGATE) or isinstance(rv, _AGGREGATE):
+    if isinstance(lv, AGGREGATES) or isinstance(rv, AGGREGATES):
         reject(origin, "aggregate comparison is not supported")
     left = scalar(lv, origin)
     right = scalar(rv, origin)
@@ -330,7 +329,7 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
             if any(isinstance(value, (SequenceValue, RangeValue)) for value in values):
                 reject(
                     node.origin,
-                    "an array operation on a Python list/tuple is not supported; build one with np.array([...])",
+                    _LIST_ADVICE,
                 )
             return _scalar_call(interp, node.origin, callee.name, lifted, values, frame, sink)
         case Array() as match:
@@ -405,7 +404,7 @@ def _inlinable(
 
 def _argument(interp: Interpreter, atom: Atom, frame: Frame, sink: Sink) -> Value:
     value = interp.expr(atom, frame, sink)
-    if isinstance(value, _AGGREGATE) and (isinstance(atom, LocalRef) or interp.alias_conduit(frame, atom)):
+    if isinstance(value, AGGREGATES) and (isinstance(atom, LocalRef) or interp.alias_conduit(frame, atom)):
         share(value)
     return value
 
@@ -419,7 +418,7 @@ def _operand_arguments(interp: Interpreter, node: Call, display: str, frame: Fra
                 values.append(interp.expr(value, frame, sink))
             case StarArg(value=value):
                 spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
-                values.extend(_aggregate.splice_items(node.origin, spliced))
+                values.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg():
                 reject(node.origin, f"{display}() takes no keyword arguments")
     return values
@@ -433,7 +432,7 @@ def _positional_arguments(interp: Interpreter, node: Call, display: str, frame: 
                 values.append(_argument(interp, value, frame, sink))
             case StarArg(value=value):
                 spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
-                values.extend(_aggregate.splice_items(node.origin, spliced))
+                values.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg():
                 reject(node.origin, f"{display}() takes no keyword arguments")
     return values
@@ -450,7 +449,7 @@ def _signature_arguments(
                 positional.append(_argument(interp, value, frame, sink))
             case StarArg(value=value):
                 spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
-                positional.extend(_aggregate.splice_items(node.origin, spliced))
+                positional.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg(name=name, value=value):
                 keywords[name] = _argument(interp, value, frame, sink)
     return positional, keywords
@@ -525,10 +524,7 @@ def _lifted_call(
     leaves: list[Scalar] = []
     for leaf in tensor.leaves:
         result = _scalar_call(interp, origin, display, match, [_scalar_leaf(origin, leaf)], frame, sink)
-        computed = scalar(result, origin)
-        if computed.stype is ScalarType.BOOL:
-            reject(origin, "an array must hold numbers, not booleans")
-        leaves.append(computed)
+        leaves.append(scalar(result, origin))
     interp.budget.spend(len(leaves), origin, "the elementwise operation")
     return TensorValue(tensor.shape, leaves[0].stype, tuple(leaves), Allocation())
 
@@ -555,7 +551,7 @@ def _array_call(
         for position, value in enumerate(values)
     ):
         # Before the stub, so the rejection reads the same however the operation was spelled.
-        reject(origin, "an array operation on a Python list/tuple is not supported; build one with np.array([...])")
+        reject(origin, _LIST_ADVICE)
     result = interp.inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
     if match.derives and isinstance(values[0], TensorValue) and isinstance(result, TensorValue):
         share(values[0])
@@ -603,7 +599,7 @@ def _option_arguments(
                 positional.append(interp.expr(value, frame, sink))
             case StarArg(value=value):
                 spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
-                positional.extend(_aggregate.splice_items(node.origin, spliced))
+                positional.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg(name=name, value=value) if name == option:
                 named = interp.expr(value, frame, sink)
             case KwArg(name=name):
@@ -621,7 +617,7 @@ def _reshape(origin: Origin, display: str, base: Value, dim_values: list[Value])
     sharing the source allocation since the host MAY answer a view.
     """
     if isinstance(base, SequenceValue):
-        reject(origin, "an array operation on a Python list/tuple is not supported; build one with np.array([...])")
+        reject(origin, _LIST_ADVICE)
     if not isinstance(base, TensorValue):
         reject(origin, f"{display}() requires an array, not {_aggregate.a_kind(base)}")
     if len(dim_values) == 1 and isinstance(dim_values[0], SequenceValue):
@@ -657,7 +653,7 @@ def _construct_record(interp: Interpreter, node: Call, display: str, cls: type, 
     fields: list[Value] = []
     for field in dataclasses.fields(cls):
         value = bound.arguments[field.name]
-        if not isinstance(value, _VALUE_KINDS):
+        if not isinstance(value, VALUE_KINDS):
             value = interp.snapshot.admit(f"{display}.{field.name}", value, node.origin)
         fields.append(
             interp.conform_annotation(
@@ -742,23 +738,23 @@ def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> RangeVa
     return RangeValue(start, stop, step)
 
 
-def _enumerate(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> SequenceValue:
+def _enumerate(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> IteratorValue:
     """
     The pairs are an eager snapshot where CPython's iterator is lazy, so the source is shared (a mid-iteration
     store would read stale leaves -- the conservative refusal mirrors the borrow on a directly iterated
-    aggregate), and the one-shot allocation carries the exhausted-after-one-pass semantics.
+    aggregate); the iterator kind itself carries the exhausted-after-one-pass semantics.
     """
     source, start = _option_arguments(interp, node, "enumerate", frame, sink, option="start")
     begin = 0 if start is None else _aggregate.static_index(node.origin, start, "the enumerate start")
     decayed = _aggregate.decay(interp.budget, source, node.origin)
-    items = _aggregate.splice_items(node.origin, decayed)
+    items = _aggregate.splice_items(node.origin, decayed, interp.loop_passes())
     share(decayed)
     pairs = tuple(
         SequenceValue((StaticScalar(_ops.make_const(begin + position)), item), Allocation())
         for position, item in enumerate(items)
     )
     interp.budget.spend(max(len(pairs), 1), node.origin, "the enumerate expansion")
-    return SequenceValue(pairs, Allocation(one_shot=True))
+    return IteratorValue(pairs, tuple(interp.loop_passes()))
 
 
 def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> Value:
@@ -766,9 +762,9 @@ def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Fram
     if len(values) != 1:
         reject(node.origin, f"{display}() takes exactly one aggregate argument here")
     source = _aggregate.decay(interp.budget, values[0], node.origin)
-    if not isinstance(source, _AGGREGATE):
+    if not isinstance(source, (*AGGREGATES, IteratorValue)):
         reject(node.origin, f"{display}() requires an aggregate argument")
-    children = _aggregate.splice_items(node.origin, source)
+    children = _aggregate.splice_items(node.origin, source, interp.loop_passes())
     interp.budget.spend(max(len(children), 1), node.origin, "the sequence conversion")
     return SequenceValue(tuple(children), Allocation())
 
@@ -817,17 +813,11 @@ def _to_tensor(
             if not items:
                 reject(origin, f"{display}() of an empty sequence is not supported")
             shape, leaves = _tensor_rows(origin, display, items)
+            explicit = family is not None
             if family is None:
-                for leaf in leaves:
-                    if not isinstance(leaf, Opaque) and leaf.stype is ScalarType.BOOL:
-                        reject(origin, "an array must hold numbers, not booleans")
-                if any(isinstance(leaf, Opaque) or leaf.stype is ScalarType.FLOAT for leaf in leaves):
-                    family = ScalarType.FLOAT
-                else:
-                    family = ScalarType.INT
-                conformed = [tensor_leaf(interp, origin, family, leaf, sink) for leaf in leaves]
-            else:
-                conformed = [tensor_leaf(interp, origin, family, leaf, sink, explicit=True) for leaf in leaves]
+                floaty = any(isinstance(leaf, Opaque) or leaf.stype is ScalarType.FLOAT for leaf in leaves)
+                family = ScalarType.FLOAT if floaty else ScalarType.INT
+            conformed = [tensor_leaf(interp, origin, family, leaf, sink, explicit=explicit) for leaf in leaves]
             interp.budget.spend(len(conformed), origin, "the array conversion")
             return TensorValue(shape, family, tuple(conformed), Allocation())
         case _:
@@ -909,7 +899,7 @@ def bind_signature(
     bound.apply_defaults()
     bindings: dict[str, Value] = {}
     for name, value in bound.arguments.items():
-        if isinstance(value, _VALUE_KINDS):
+        if isinstance(value, VALUE_KINDS):
             bindings[name] = value
         else:
             bindings[name] = interp.snapshot.admit(name, value, site)  # an injected default: a plain Python object

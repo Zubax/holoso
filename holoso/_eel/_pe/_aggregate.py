@@ -19,6 +19,8 @@ from ._values import (
     Allocation,
     BoundMethod,
     ExpansionBudget,
+    IteratorValue,
+    LoopPass,
     Opaque,
     RangeValue,
     RecordValue,
@@ -31,8 +33,6 @@ from ._values import (
 )
 
 type LeafPath = tuple[int | str, ...]
-
-_EXTRACTED = AGGREGATES
 
 type ResolvedAxis = Value | tuple[int | None, int | None]
 
@@ -50,6 +50,8 @@ def kind_label(value: Value) -> str:
             return "array"
         case RecordValue():
             return "record"
+        case IteratorValue():
+            return "enumerate iterator"
         case Opaque():
             return "captured object"
         case BoundMethod(receiver=TensorValue()):
@@ -102,12 +104,10 @@ def static_index(origin: Origin, value: Value, what: str) -> int:
 
 def index_read(origin: Origin, base: Value, index: Value) -> Value:
     match base:
-        case SequenceValue(items=items, allocation=allocation):
-            if allocation.one_shot:
-                reject(origin, "an enumerate iterator supports only iteration, as in Python")
+        case SequenceValue(items=items):
             position = static_index(origin, index, "a subscript index")
             item = _select(origin, items, position, base)
-            if isinstance(item, _EXTRACTED):
+            if isinstance(item, AGGREGATES):
                 share(base)
                 share(item)
             return item
@@ -126,12 +126,10 @@ def index_read(origin: Origin, base: Value, index: Value) -> Value:
 
 def slice_read(origin: Origin, base: Value, lo: int | None, hi: int | None) -> Value:
     match base:
-        case SequenceValue(items=items, allocation=allocation):
-            if allocation.one_shot:
-                reject(origin, "an enumerate iterator supports only iteration, as in Python")
+        case SequenceValue(items=items):
             taken = list(items)[lo:hi]
             for item in taken:
-                if isinstance(item, _EXTRACTED):
+                if isinstance(item, AGGREGATES):
                     share(item)
             return SequenceValue(tuple(taken), Allocation())
         case TensorValue(shape=shape, leaves=leaves):
@@ -184,17 +182,13 @@ def multi_index_read(origin: Origin, base: Value, axes: tuple[ResolvedAxis, ...]
     return _derived(base, kept, picked)
 
 
-def unpack_items(origin: Origin, value: Value, count: int) -> list[Value]:
-    items = _iterated(origin, value)
+def unpack_items(origin: Origin, value: Value, count: int, loops: list[LoopPass]) -> list[Value]:
+    items = splice_items(origin, value, loops)
     if len(items) > count:
         reject(origin, f"too many values to unpack (expected {count})")
     if len(items) < count:
         reject(origin, f"not enough values to unpack (expected {count}, got {len(items)})")
     return items
-
-
-def splice_items(origin: Origin, value: Value) -> list[Value]:
-    return _iterated(origin, value)
 
 
 def flatten(origin: Origin, value: Value) -> list[tuple[LeafPath, Scalar]]:
@@ -229,15 +223,22 @@ def flatten(origin: Origin, value: Value) -> list[tuple[LeafPath, Scalar]]:
     return leaves
 
 
-def _iterated(origin: Origin, value: Value) -> list[Value]:
+def splice_items(origin: Origin, value: Value, loops: list[LoopPass]) -> list[Value]:
     """Top-level items as iteration/unpacking yields them; aggregate extractions share parent and item."""
     found: list[Value]
     match value:
-        case SequenceValue(items=items, allocation=allocation):
-            if allocation.one_shot:
-                if allocation.spent:
-                    reject(origin, "this enumerate iterator is already exhausted, as it would be in Python")
-                allocation.spent = True
+        case IteratorValue(items=items, made_in=made_in):
+            if list(made_in[: len(loops)]) != loops:
+                reject(
+                    origin,
+                    "an enumerate iterator made outside this data-dependent loop would be re-consumed on "
+                    "every hardware iteration where Python drains it once; call enumerate inside the loop",
+                )
+            if value.spent:
+                reject(origin, "an enumerate iterator can only be consumed once; call enumerate again")
+            value.spent = True
+            found = list(items)
+        case SequenceValue(items=items):
             found = list(items)
         case TensorValue(shape=shape):
             if len(shape) == 1:
@@ -247,7 +248,7 @@ def _iterated(origin: Origin, value: Value) -> list[Value]:
         case _:
             reject(origin, f"cannot unpack {a_kind(value)}: it is not iterable")
     for item in found:
-        if isinstance(item, _EXTRACTED):
+        if isinstance(item, AGGREGATES):
             share(value)
             share(item)
     return found

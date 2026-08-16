@@ -113,6 +113,11 @@ def _enumerated_pairs_unspread(x: float) -> float:
     return acc
 
 
+def _materialized_enumerate(x: float) -> float:
+    pairs = tuple(enumerate((x, 2.0)))
+    return pairs[0][1] + pairs[1][1] + float(pairs[1][0])
+
+
 def _enumerate_inside_residual_while(x: float) -> float:
     while x < 8.0:
         acc = 0.0
@@ -145,13 +150,83 @@ def _subscripted_enumerate(x: float) -> float:
     return enumerate((x, 2.0))[0][1]  # type: ignore[index,no-any-return]
 
 
+def _measured_enumerate(x: float) -> float:
+    return x + float(len(enumerate((x, 2.0))))  # type: ignore[arg-type]
+
+
+def _replayed_enumerate(x: float) -> float:
+    pairs = enumerate((1.0, 2.0))
+    acc = 0.0
+    while x > 0.0:
+        for _, w in pairs:
+            acc = acc + w
+        x = x - 1.0
+    return acc
+
+
+def _sibling_replayed_enumerate(x: float) -> float:
+    acc = 0.0
+    while ((pairs := enumerate((1.0, 2.0))), x > 0.0)[1]:
+        x = x - 1.0
+    while x > -3.0:
+        for _, w in pairs:
+            acc = acc + w
+        x = x - 1.0
+    return acc
+
+
+def _joined_enumerate(x: float) -> float:
+    pairs = enumerate((1.0, 2.0)) if x > 0.0 else enumerate((3.0, 4.0))
+    acc = 0.0
+    for _, w in pairs:
+        acc = acc + w
+    for _, w in pairs:
+        acc = acc + w
+    return acc
+
+
+def _tensored_enumerate(x: float) -> float:
+    return float(np.array(enumerate((x, 2.0)))[0][1])
+
+
+def _returned_enumerate(x: float) -> tuple[tuple[int, float], tuple[int, float]]:
+    return enumerate((x, 2.0))  # type: ignore[return-value]
+
+
+class _StoredIterator:
+    def __init__(self) -> None:
+        self.pairs = ((0, 0.0), (1, 0.0))
+
+    def step(self, load: bool, x: float) -> float:
+        if load:
+            self.pairs = enumerate((x, 2.0))  # type: ignore[assignment]
+            return -1.0
+        total = 0.0
+        for _, value in self.pairs:
+            total = total + value
+        return total
+
+
 def test_enumerate_is_a_one_shot_iterator() -> None:
     # CPython's enumerate is lazy and one-shot: a mid-iteration store would read the eager snapshot stale
     # (conservatively refused, like the borrow on a directly iterated array), a drained iterator yields
     # nothing where the snapshot would yield again, and only iteration consumes it.
     _rejects(_mutated_while_enumerated, "shared")
-    _rejects(_reused_enumerate, "exhausted")
-    _rejects(_subscripted_enumerate, "supports only iteration")
+    _rejects(_reused_enumerate, "consumed once")
+    _rejects(_subscripted_enumerate, "not subscriptable")
+    _rejects(_measured_enumerate, "requires an aggregate")
+    # The residualized body replays every hardware iteration, re-consuming what Python drains once; the
+    # sibling spelling escapes one residual loop through a walrus header binding and drains in another at
+    # the same depth, so the guard must compare pass identity, not depth.
+    _rejects(_replayed_enumerate, "outside this data-dependent loop")
+    _rejects(_sibling_replayed_enumerate, "outside this data-dependent loop")
+    # No consumer may launder the one-shot into an ordinary re-iterable value: not a branch join, not an
+    # array conversion, not the module boundary, and not a persistent-state slot reloaded next transaction.
+    _rejects(_joined_enumerate, "cannot merge")
+    _rejects(_tensored_enumerate, "requires a sequence or array argument")
+    _rejects(_returned_enumerate, "is not a sequence")
+    with pytest.raises(UnsupportedConstruct, match="cannot be installed"):
+        holoso.synthesize(_StoredIterator().step, _MIN_OPTIONS, name="kernel")
 
 
 def _vector_iteration(x: float) -> float:
@@ -230,6 +305,7 @@ def test_static_loops_unroll_and_match_cpython() -> None:
         _enumerated_with_start,
         _enumerated_range,
         _enumerated_pairs_unspread,
+        _materialized_enumerate,
         _enumerate_inside_residual_while,
         _vector_iteration,
         _matrix_row_iteration,

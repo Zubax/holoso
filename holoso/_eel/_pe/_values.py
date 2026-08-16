@@ -62,15 +62,12 @@ class Allocation:
     a counter rather than a flag because nested loops may iterate the same allocation. `joined` marks an
     allocation minted by a branch join of differing arm allocations: the value is ONE of the two runtime
     objects, so the fresh identity erases provenance -- installing such a tree into a state attribute is
-    rejected, since the disjointness checks would judge the wrong object. `one_shot`/`spent` model a
-    CPython iterator (enumerate): only iteration consumes it, and only once.
+    rejected, since the disjointness checks would judge the wrong object.
     """
 
     state: AllocationState = AllocationState.UNIQUE
     borrows: int = 0
     joined: bool = False
-    one_shot: bool = False
-    spent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +112,25 @@ class BoundMethod:
     name: str
 
 
+type LoopPass = tuple[Origin, int]
+
+
+@dataclass(eq=False, slots=True)
+class IteratorValue:
+    """
+    CPython's enumerate object: an eager pair snapshot consumed by exactly one iteration. A distinct kind so
+    every structural consumer's default arm refuses it -- treating it as a plain sequence is how exhaustion
+    launders away. `made_in` is the stack of residual-loop passes active at creation: consumption is admitted
+    only while the active passes are a prefix of it, since any other pass would replay the drain in hardware
+    where Python drains once. Mutable so `spent` can record the one consumption in place; nothing ever
+    rebuilds one, so identity is the only equality that matters.
+    """
+
+    items: tuple["Value", ...]
+    made_in: tuple[LoopPass, ...]
+    spent: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class RangeValue:
     """
@@ -132,10 +148,30 @@ class RangeValue:
 
 
 type Value = (
-    StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | RecordValue | BoundMethod | RangeValue
+    StaticScalar
+    | ResidualScalar
+    | Opaque
+    | SequenceValue
+    | TensorValue
+    | RecordValue
+    | IteratorValue
+    | BoundMethod
+    | RangeValue
 )
 
 AGGREGATES = (SequenceValue, TensorValue, RecordValue)
+
+VALUE_KINDS = (
+    StaticScalar,
+    ResidualScalar,
+    Opaque,
+    SequenceValue,
+    TensorValue,
+    RecordValue,
+    IteratorValue,
+    BoundMethod,
+    RangeValue,
+)
 
 
 def same(a: Value, b: Value) -> bool:
@@ -248,12 +284,10 @@ def allocations_match(a: Value, b: Value) -> bool:
 def tree_leaves(value: Value) -> list[Scalar | Opaque]:
     """The scalar leaves of a structure tree in declaration order (depth-first, row-major)."""
     match value:
-        case SequenceValue(items=items):
-            return [leaf for item in items for leaf in tree_leaves(item)]
+        case SequenceValue(items=children) | RecordValue(fields=children):
+            return [leaf for child in children for leaf in tree_leaves(child)]
         case TensorValue(leaves=leaves):
             return list(leaves)
-        case RecordValue(fields=fields):
-            return [leaf for field in fields for leaf in tree_leaves(field)]
         case StaticScalar() | ResidualScalar() | Opaque():
             return [value]
         case _:
@@ -263,12 +297,10 @@ def tree_leaves(value: Value) -> list[Scalar | Opaque]:
 def tensor_occurrences(value: Value) -> list[Allocation]:
     """Every OCCURRENCE of a tensor allocation, walking through repeated container nodes each time."""
     match value:
-        case SequenceValue(items=items):
-            return [allocation for item in items for allocation in tensor_occurrences(item)]
+        case SequenceValue(items=children) | RecordValue(fields=children):
+            return [allocation for child in children for allocation in tensor_occurrences(child)]
         case TensorValue(allocation=allocation):
             return [allocation]
-        case RecordValue(fields=fields):
-            return [allocation for field in fields for allocation in tensor_occurrences(field)]
         case _:
             return []
 

@@ -397,7 +397,7 @@ def test_extraction_of_a_record_from_a_sequence_shares_it() -> None:
     )
 
     seq = fresh()
-    items = splice_items(origin, seq)
+    items = splice_items(origin, seq, [])
     assert all(item.allocation.state is AllocationState.SHARED for item in items if isinstance(item, RecordValue))
 
 

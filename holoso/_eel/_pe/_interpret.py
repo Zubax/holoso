@@ -85,6 +85,8 @@ from ._values import (
     Allocation,
     AllocationState,
     ExpansionBudget,
+    IteratorValue,
+    LoopPass,
     Opaque,
     RangeValue,
     RecordValue,
@@ -104,10 +106,6 @@ from ._values import (
 _logger = logging.getLogger(__name__)
 
 type _EnvKey = str | int | StateKey
-
-type _LoopKey = tuple[Origin, int]
-
-_AGGREGATE = AGGREGATES
 
 _RETURN_KEY = "<return>"
 
@@ -234,7 +232,7 @@ class _CarryGrow(HolosoError):
     residualization only grows with the carried set.
     """
 
-    def __init__(self, pairs: list[tuple[_LoopKey, StateKey]]) -> None:
+    def __init__(self, pairs: list[tuple[LoopPass, StateKey]]) -> None:
         super().__init__(pairs)
         self.pairs = pairs
 
@@ -338,7 +336,7 @@ def partial_evaluate(
     assert eel.params, "a bound method always has a receiver parameter"
     tree = build_component_tree(instance)
     model = StateModel(tree, seed_state(tree, eel), environment_aggregates(fn))
-    extra_carries: dict[_LoopKey, frozenset[StateKey]] = {}
+    extra_carries: dict[LoopPass, frozenset[StateKey]] = {}
     while True:  # terminates: each pass finishes, strictly shrinks S, promotes a leaf, or grows a carry set
         interpreter = Interpreter(fn, model, unroll_max_trips, extra_carries)
         try:
@@ -374,7 +372,7 @@ class Interpreter:
         fn: types.FunctionType,
         state: StateModel | None,
         unroll_max_trips: int,
-        extra_carries: dict[_LoopKey, frozenset[StateKey]] | None = None,
+        extra_carries: dict[LoopPass, frozenset[StateKey]] | None = None,
     ) -> None:
         self._fn = fn
         self.tree = state.tree if state is not None else None
@@ -392,7 +390,7 @@ class Interpreter:
         self.written_attrs: set[StateKey] = set()
         self.state_writes = 0
         self.root_epochs: dict[StateKey, int] = {}
-        self.active_loops: list[tuple[_LoopKey, frozenset[StateKey]]] = []
+        self.active_loops: list[tuple[LoopPass, frozenset[StateKey]]] = []
         self._loop_occurrences: dict[Origin, int] = {}
         self._eels: dict[types.FunctionType, EelFunction] = {}
         self._meta: dict[types.FunctionType, dict[str, object]] = {}
@@ -401,6 +399,9 @@ class Interpreter:
 
     def state_prefix(self, raw: object) -> StateKey | None:
         return self.tree.prefix_of(raw) if self.tree is not None else None
+
+    def loop_passes(self) -> list[LoopPass]:
+        return [key for key, _ in self.active_loops]
 
     def carry_gate(self, key: StateKey) -> None:
         """A state store inside a residual loop pass must find its key carried at EVERY crossed back edge."""
@@ -610,14 +611,14 @@ class Interpreter:
                         reject(origin, f"the local name {target.name!r} is not bound on every path reaching this read")
                     current_value = self.readable(bound, origin)
                     rhs = self.expr(value, frame, piece)
-                    if isinstance(current_value, _AGGREGATE):
+                    if isinstance(current_value, AGGREGATES):
                         updated = _mutate.aug_aggregate(self, origin, target.name, current_value, op, rhs, frame, piece)
                     else:
                         updated = _express.binary(self, origin, op, current_value, rhs, frame, piece)
                     frame.env[target.name] = updated
                 case Unpack(origin=origin, targets=targets, value=value):
                     source = _aggregate.decay(self.budget, self.expr(value, frame, piece), origin)
-                    items = _aggregate.unpack_items(origin, source, len(targets))
+                    items = _aggregate.unpack_items(origin, source, len(targets), self.loop_passes())
                     for target, item in zip(targets, items, strict=True):
                         frame.env[self._binding_key(target)] = item
                 case If():
@@ -638,7 +639,7 @@ class Interpreter:
                         if annotation is not _MISSING:
                             # At the return itself, so a mismatch points into the callee.
                             result = self._conform_value(result, annotation, origin, piece, "the returned value")
-                        if isinstance(result, _AGGREGATE) and self.alias_conduit(frame, stmt.value):
+                        if isinstance(result, AGGREGATES) and self.alias_conduit(frame, stmt.value):
                             share(result)
                     self._spread(current, piece)
                     exits.append(_Exit.snap(_ExitKind.RETURN, origin, frame, current, result))
@@ -684,7 +685,7 @@ class Interpreter:
     def _assign(self, target: Binding, value: Expr, frame: Frame, sink: Sink) -> None:
         result = self.expr(value, frame, sink)
         key = self._binding_key(target)
-        if isinstance(result, _AGGREGATE):
+        if isinstance(result, AGGREGATES):
             if isinstance(value, LocalRef) and value.name != key:
                 share(result)
             else:
@@ -806,7 +807,7 @@ class Interpreter:
         merged = self._merge(origin, _RETURN_KEY, a, b, then_sinks, else_sinks, allocations_match(a, b))
         if merged is None:
             reject(origin, "the branches return values the compiler cannot merge")
-        if not allocations_match(a, b) and isinstance(merged, _AGGREGATE):
+        if not allocations_match(a, b) and isinstance(merged, AGGREGATES):
             share(a)
             share(b)
             share(merged)
@@ -827,14 +828,14 @@ class Interpreter:
                 joined[key] = _Unjoinable(self._describe_key(key))
                 continue
             if same(a, b):
-                if isinstance(a, _AGGREGATE):
+                if isinstance(a, AGGREGATES):
                     joined[key] = _rewrap(a, moved, a_alias, b_alias, (a,))
                 else:
                     joined[key] = a
                 continue
-            if isinstance(a, _AGGREGATE) and isinstance(b, _AGGREGATE):
+            if isinstance(a, (*AGGREGATES, Opaque)) and isinstance(b, (*AGGREGATES, Opaque)):
                 merged = self._join_aggregates(origin, key, a, b, then_sinks, else_sinks)
-                if isinstance(merged, _AGGREGATE):
+                if isinstance(merged, AGGREGATES):
                     joined[key] = _rewrap(merged, moved, a_alias, b_alias, (a, b, merged))
                 else:
                     joined[key] = merged
@@ -842,16 +843,6 @@ class Interpreter:
             if isinstance(a, (StaticScalar, ResidualScalar)) and isinstance(b, (StaticScalar, ResidualScalar)):
                 joined[key] = self._join_scalars(origin, self._describe_key(key), a, b, then_sinks, else_sinks)
                 continue
-            if isinstance(a, Opaque) or isinstance(b, Opaque):
-                keep_pair = allocations_match(a, b)
-                admitted = self._merge(origin, key, a, b, then_sinks, else_sinks, keep_pair)
-                if admitted is not None:
-                    if not keep_pair and isinstance(admitted, _AGGREGATE):
-                        share(a)
-                        share(b)
-                        share(admitted)
-                    joined[key] = admitted
-                    continue
             joined[key] = _Unjoinable(self._describe_key(key))
         return joined
 
@@ -971,7 +962,7 @@ class Interpreter:
 
     def _minted(self, a: Value, b: Value) -> Allocation:
         """A keep=False merge product is ONE of the two runtime objects; state-ness rides along with it."""
-        assert isinstance(a, _AGGREGATE) and isinstance(b, _AGGREGATE)
+        assert isinstance(a, AGGREGATES) and isinstance(b, AGGREGATES)
         minted = Allocation(joined=True)
         owner = self.state_owners.get(a.allocation) or self.state_owners.get(b.allocation)
         if owner is not None:
@@ -1037,9 +1028,9 @@ class Interpreter:
                 return _Flow(crossed, sinks)
             iterable = _aggregate.decay(self.budget, iterable, stmt.origin)
         self._spread(sinks, piece)
-        if not isinstance(iterable, _AGGREGATE):
+        if not isinstance(iterable, (*AGGREGATES, IteratorValue)):
             reject(stmt.origin, f"{_aggregate.a_kind(iterable)} is not iterable")
-        items = _aggregate.splice_items(stmt.origin, iterable)
+        items = _aggregate.splice_items(stmt.origin, iterable, self.loop_passes())
         held = borrow(iterable)
         breaks: list[_Exit] = []
         escaped: list[_Exit] = []
@@ -1183,7 +1174,7 @@ class Interpreter:
         return _Flow(escaped, current)
 
     def _condition(self, origin: Origin, value: Value) -> Scalar:
-        if isinstance(value, _AGGREGATE):
+        if isinstance(value, AGGREGATES):
             reject(origin, "the truthiness of an aggregate is not supported")
         cond = _express.scalar(value, origin)
         if cond.stype is not ScalarType.BOOL:
@@ -1208,7 +1199,7 @@ class Interpreter:
         origin = stmt.origin
         occurrence = self._loop_occurrences.get(origin, 0)
         self._loop_occurrences[origin] = occurrence + 1
-        loop_key: _LoopKey = (origin, occurrence)
+        loop_key: LoopPass = (origin, occurrence)
         carried: list[tuple[_EnvKey, list[int]]] = []
         stypes: dict[tuple[_EnvKey, int], ScalarType] = {}
         rebound, stored, attr_writes = assigned_names((*stmt.header, *stmt.body))
@@ -1223,7 +1214,7 @@ class Interpreter:
                     carried.append((name, [self.fresh()]))
                     stypes[(name, 0)] = value.stype
                 continue
-            if name in rebound or isinstance(value, _AGGREGATE):
+            if name in rebound or isinstance(value, AGGREGATES):
                 reject(
                     origin,
                     f"{name!r} is {_aggregate.a_kind(value)}; only bool, int, and float values can be "
@@ -1403,9 +1394,9 @@ class Interpreter:
 
     def _comp(self, node: Comp, frame: Frame, sink: Sink) -> SequenceValue:
         iterable = _aggregate.decay(self.budget, self.expr(node.iterable, frame, sink), node.origin)
-        if not isinstance(iterable, _AGGREGATE):
+        if not isinstance(iterable, (*AGGREGATES, IteratorValue)):
             reject(node.origin, f"{_aggregate.a_kind(iterable)} is not iterable")
-        items = _aggregate.splice_items(node.origin, iterable)
+        items = _aggregate.splice_items(node.origin, iterable, self.loop_passes())
         held = borrow(iterable)
         collected: list[Value] = []
         try:
@@ -1415,7 +1406,7 @@ class Interpreter:
                 body_flow = self._block(node.body, frame, [sink], Ctx(branch=True))
                 assert not body_flow.exits and body_flow.fall is not None, "a comprehension body holds no exit"
                 value = _aggregate.decay(self.budget, self.expr(node.element, frame, sink), node.origin)
-                if isinstance(value, _AGGREGATE) and (
+                if isinstance(value, AGGREGATES) and (
                     isinstance(node.element, LocalRef) or self.alias_conduit(frame, node.element)
                 ):
                     share(value)
@@ -1643,7 +1634,7 @@ class Interpreter:
                 bound = frame.env.get(index)
                 assert bound is not None, "desugar binds every temp before its first read"
                 read = self.readable(bound, origin)
-                if isinstance(read, _AGGREGATE) and not isinstance(bound, (_Moved, _SlotAlias)):
+                if isinstance(read, AGGREGATES) and not isinstance(bound, (_Moved, _SlotAlias)):
                     frame.env[index] = _Moved(read)
                 return read
             case LocalRef(origin=origin, name=name):
@@ -1710,10 +1701,10 @@ class Interpreter:
         for item in items:
             if isinstance(item, StarArg):
                 source = _aggregate.decay(self.budget, self.expr(item.value, frame, sink), origin)
-                collected.extend(_aggregate.splice_items(origin, source))
+                collected.extend(_aggregate.splice_items(origin, source, self.loop_passes()))
             else:
                 value = _aggregate.decay(self.budget, self.expr(item, frame, sink), origin)
-                if isinstance(value, _AGGREGATE) and (isinstance(item, LocalRef) or self.alias_conduit(frame, item)):
+                if isinstance(value, AGGREGATES) and (isinstance(item, LocalRef) or self.alias_conduit(frame, item)):
                     share(value)
                 collected.append(value)
         self.budget.spend(max(len(collected), 1), origin, "the sequence display")
