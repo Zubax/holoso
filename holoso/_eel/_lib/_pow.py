@@ -1,7 +1,9 @@
 """
-The five lowerings of a power, under one entry keyed by `**` and by every spelling of it; the exponent's binding
-time, sign and -- for the root -- value, declared on the stubs, are what select between them. There is no integer
-power hardware, so only a compile-time base stays integral.
+The five lowerings of a power; the exponent's binding time, sign and -- for the root -- value, declared on the
+stubs, are what select between them. There is no integer power hardware, so only a compile-time base stays
+integral. The spellings split by what they do with an integer base: `**`, `pow`, and numpy's power keep it
+integral (so the chain saturates as any int expression does), while `math.pow` and `np.float_power` compute in
+floating point regardless and never reach the integer chain.
 
 Exponentiation is square-and-multiply rather than a linear chain: shorter, and free of any residual branch, at an
 accuracy cost the chain did not pay -- reassociating the products drifts to tens of ULP around `n = 100`, which
@@ -20,7 +22,8 @@ from ._intrinsics import exp2, isinf, log2, round_, sqrt
 
 _INF = math.inf
 _N = TypeVar("_N", int, float)
-_POW = (pow, math.pow, np.power, np.pow, np.float_power, BinaryOp.POW)
+_POW_INT_PRESERVING = (pow, np.power, np.pow, BinaryOp.POW)
+_POW = (*_POW_INT_PRESERVING, math.pow, np.float_power)
 
 
 def _chain(acc: _N, base: _N, k: int) -> _N:
@@ -37,7 +40,7 @@ def _chain(acc: _N, base: _N, k: int) -> _N:
     return acc
 
 
-@lib(*_POW)
+@lib(*_POW_INT_PRESERVING)
 def pow_chain_int(b: int, e: StaticNonNegative[int]) -> int:
     """The base's sign needs no case of its own: it rides the multiplies."""
     return _chain(1, b, e)

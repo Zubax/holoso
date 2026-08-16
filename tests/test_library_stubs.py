@@ -84,11 +84,16 @@ def test_registry_resolves_the_expected_externals() -> None:
     assert resolve(np.maximum) == Array(maximum) == resolve(np.fmax)  # type: ignore[arg-type]
     assert resolve(np.ndarray.clip) == Array(clip)  # type: ignore[arg-type]
     assert resolve(np.clip) == Array(clip_free)  # type: ignore[arg-type]  # the free spelling is stricter
-    # An operator is a key like any callee object, so `**` and its every spelling are ONE five-lowering entry.
+    # `**` and the int-preserving spellings are ONE five-lowering entry; the float-computing spellings carry the
+    # same lowerings minus the integer chain, so an integer base converts instead of saturating.
     power_entry = resolve(BinaryOp.POW)
     assert isinstance(power_entry, ScalarFunction) and len(power_entry.lowerings) == 5
-    for power in (pow, math.pow, np.power, np.pow, np.float_power):
+    for power in (pow, np.power, np.pow):
         assert resolve(power) == power_entry, power
+    float_power_entry = resolve(math.pow)
+    assert isinstance(float_power_entry, ScalarFunction) and len(float_power_entry.lowerings) == 4
+    assert resolve(np.float_power) == float_power_entry
+    assert all(lowering in power_entry.lowerings for lowering in float_power_entry.lowerings)
     assert resolve(np.matmul) == Array(matmul) == resolve(BinaryOp.MATMUL)  # type: ignore[arg-type]
     assert resolve(np.sum) == Array(sum_) == resolve(np.ndarray.sum)  # type: ignore[arg-type]
     assert resolve(np.mean) == Array(mean) == resolve(np.ndarray.mean)  # type: ignore[arg-type]

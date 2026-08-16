@@ -224,10 +224,11 @@ one graph-size budget, so an accidental blow-up is a located rejection rather th
 
 Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below. Four deviations from Python are
 deliberate: mixed int/float expressions promote to float C-style, a power yields float unless its base is an int and
-its exponent a compile-time nonnegative int, booleans take no part in arithmetic, and `and`/`or` are eager gates
-evaluating both operands as combinational logic does, while other conditional positions still branch. One join rule
-governs every meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and aggregates only
-with identical kind and shape -- for a record, identical class.
+its exponent a compile-time nonnegative int (the float-computing spellings `math.pow` and `np.float_power` convert an
+integer base as the host does), booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both
+operands as combinational logic does, while other conditional positions still branch.
+One join rule governs every meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and
+aggregates only with identical kind and shape -- for a record, identical class.
 
 Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an
 array the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle

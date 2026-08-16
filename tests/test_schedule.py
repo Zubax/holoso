@@ -397,9 +397,8 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
             self.writes: dict[tuple[str, int], set[int]] = {}
 
         def _write(self, dst: object, value: object) -> None:
-            if not self.in_ready:  # the accept dwell writes only the input lanes, which are not landings
-                key = (type(dst).__name__, dst.index)  # type: ignore[attr-defined]
-                self.writes.setdefault(key, set()).add(self.pc)
+            key = (type(dst).__name__, dst.index)  # type: ignore[attr-defined]
+            self.writes.setdefault(key, set()).add(self.pc)
             super()._write(dst, value)  # type: ignore[arg-type]
 
     vectors = [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5), (1.0, 1.0, 1.0), (0.5, 0.0, 1.5), (3.0, 1.0, 2.0), (1.0, 3.0, 0.0)]
@@ -1114,7 +1113,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         per_txn: list[list[Step]] = []
         for k in range(transactions):
             sim.set_inputs(*vectors[k % len(vectors)])
-            # set_inputs writes the input lanes directly (not via _write); model them as defs at the first step
+            # the accept-edge input load bypasses _write (it is not a writeback); model the lanes as defs at step 1
             events: list[tuple[int, str | None, str | None, int | None]] = [(1, "w", "f", i) for i in fin]
             events += [(1, "w", "b", i) for i in bin_]
 
