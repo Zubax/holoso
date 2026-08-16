@@ -1,24 +1,24 @@
 """
 Empty merge-block elimination (jump-threading).
 
-If-conversion collapses a small, speculatable diamond into an ``fselect``; a diamond whose arm holds a non-speculatable
+If-conversion collapses a small, speculatable diamond into an `fselect`; a diamond whose arm holds a non-speculatable
 operation (a variable-divisor division) stays a real branch with a separate phi merge block. When that merge feeds a
 following control structure -- a loop header, a sibling/cascade merge, another diamond -- and has no operation of its
-own to host, it is a pure pass-through: phis but no operations, a single ``Jump`` out, and (because every phi-arm
-predecessor is jump-terminated) predecessors that are all ``Jump``. Such a block contributes only a fixed per-block
+own to host, it is a pure pass-through: phis but no operations, a single `Jump` out, and (because every phi-arm
+predecessor is jump-terminated) predecessors that are all `Jump`. Such a block contributes only a fixed per-block
 boundary drain (the fetch refill plus the result-landing tail) for zero work.
 
-This pass threads such a block ``M`` onto its predecessors: each predecessor's ``Jump`` is retargeted from ``M`` to
-``M``'s successor ``S``, and ``M``'s phi arms compose into ``S``'s phis -- an arm ``(M, v)`` of an ``S`` phi becomes one
-arm per predecessor ``Q`` of ``M`` (``(Q, a_Q)`` when ``v`` is an ``M`` phi ``phi(Q: a_Q)``, else the pass-through value
-``(Q, v)``). The forbidden branch-block-arm shape cannot arise: a predecessor ``Q`` is ``Jump``-terminated, so ``Q`` is
-never the branching block ``S``.
+This pass threads such a block `M` onto its predecessors: each predecessor's `Jump` is retargeted from `M` to
+`M`'s successor `S`, and `M`'s phi arms compose into `S`'s phis -- an arm `(M, v)` of an `S` phi becomes one
+arm per predecessor `Q` of `M` (`(Q, a_Q)` when `v` is an `M` phi `phi(Q: a_Q)`, else the pass-through value
+`(Q, v)`). The forbidden branch-block-arm shape cannot arise: a predecessor `Q` is `Jump`-terminated, so `Q` is
+never the branching block `S`.
 
-Scope. The pass fires only when every ``M`` phi is consumed SOLELY as the arm an ``S`` phi takes FROM ``M`` -- the one
-arm composition rewrites -- so deleting ``M``'s phis dangles nothing. A merge phi reached any other way stays a real
-branch: notably a loop-invariant value that ``S`` (a loop header) carries on its BACK-EDGE arm (``M`` dominates the
-back-edge through ``S``, so its value reaches that arm), which composition would not rewrite. That is the deferred
-self-latch rematerialization case (see DESIGN.md). Chained merges (an ``M`` whose successor is itself an ``M``) collapse
+Scope. The pass fires only when every `M` phi is consumed SOLELY as the arm an `S` phi takes FROM `M` -- the one
+arm composition rewrites -- so deleting `M`'s phis dangles nothing. A merge phi reached any other way stays a real
+branch: notably a loop-invariant value that `S` (a loop header) carries on its BACK-EDGE arm (`M` dominates the
+back-edge through `S`, so its value reaches that arm), which composition would not rewrite. That is the deferred
+self-latch rematerialization case (see DESIGN.md). Chained merges (an `M` whose successor is itself an `M`) collapse
 by repeating to a fixpoint, innermost-reachable first.
 """
 
@@ -38,10 +38,10 @@ def _phis_consumed_only_as_successor_arms(
     hir: Hir, merge_phis: set[ValueId], merge_id: BlockId, successor: BlockId
 ) -> bool:
     """
-    Every use of every merge phi is the arm a ``successor`` phi takes FROM the merge block (the ``pred == merge_id``
+    Every use of every merge phi is the arm a `successor` phi takes FROM the merge block (the `pred == merge_id`
     arm) -- the only arm composition rewrites. Any other use is fatal to threading, because composition leaves it
     untouched yet the merge phi is deleted, so the reference would dangle: an operation operand, a branch condition, an
-    output, a state live-out, an arm of a phi outside ``successor``, OR -- the subtle one -- an arm of a successor phi
+    output, a state live-out, an arm of a phi outside `successor`, OR -- the subtle one -- an arm of a successor phi
     taken from a DIFFERENT predecessor (a loop-invariant value carried on the loop header's back-edge arm; the merge
     block dominates the back-edge through the header, so its value legitimately reaches that arm). Such a merge stays a
     real branch: it is exactly the deferred self-latch rematerialization case.
@@ -117,14 +117,15 @@ def _thread(hir: Hir, merge: Block, successor: BlockId) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
-def run(hir: Hir) -> Hir:
+def run(hir: Hir) -> Hir | None:
     threaded = 0
     while (candidate := _find_empty_merge(hir)) is not None:
         merge, successor = candidate
         hir = _thread(hir, merge, successor)
         threaded += 1
-    if threaded:
-        _logger.info("Merge threading: %d empty merge block(s) eliminated; %d blocks remain", threaded, len(hir.blocks))
-        hir = renumber(hir)
-        validate_phi_predecessors(hir)
+    if not threaded:
+        return None
+    _logger.info("Merge threading: %d empty merge block(s) eliminated; %d blocks remain", threaded, len(hir.blocks))
+    hir = renumber(hir)
+    validate_phi_predecessors(hir)
     return hir

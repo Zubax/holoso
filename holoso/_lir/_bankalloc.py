@@ -3,17 +3,17 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import ClassVar, Generic, TypeVar
+from typing import ClassVar
 
 from .._mir import (
     Mir,
     MirBoolOutput,
-    MirBoolStateSlot,
     MirBoolView,
     MirBranch,
     MirFloatInput,
     MirFloatOutput,
-    MirFloatStateSlot,
+    MirIntInput,
+    MirIntOutput,
     MirNode,
     MirOperation,
     MirPhi,
@@ -22,6 +22,7 @@ from .._mir import (
     MirWideView,
 )
 from .._operators import BoolInversion, HardwareOperator, PooledHardwareOperator
+from .._value import WideValue
 from .._util import ValueId
 from ._ir import *
 from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map, value_resident_at_entry
@@ -53,7 +54,7 @@ class _LayoutAllocation:
     overlap: OverlapLayout
     inst_of: dict[ValueId, OperatorInstance]
     instances: list[OperatorInstance]
-    consts: list[float]
+    consts: list[WideValue]
     const_pool: dict[ValueId, PooledConst]
     alloc: Allocation
 
@@ -96,7 +97,7 @@ def layout_and_allocate(
 def install_source_commit(sched: Schedule, source_node: MirNode, source: ValueId) -> int | None:
     """
     A tail install source's commit cycle in the installing block's own frame, None for a block-entry-RESIDENT source --
-    exactly ``install_issue_cycle``'s contract. The lone encoding of the residency-to-commit rule, shared by the push
+    exactly `install_issue_cycle`'s contract. The lone encoding of the residency-to-commit rule, shared by the push
     classification, the interference residence, and the LIR copy placement, so the three cannot drift apart (a drift
     here recreates the placement-disagreement class of the phi-swap miscompile).
     """
@@ -105,10 +106,10 @@ def install_source_commit(sched: Schedule, source_node: MirNode, source: ValueId
 
 def _install_pushes_makespan(sched: Schedule, source_node: MirNode, source: ValueId) -> bool:
     """
-    Whether a tail install of ``source`` lands PAST the work makespan -- the per-install +1 drain. True only for a
+    Whether a tail install of `source` lands PAST the work makespan -- the per-install +1 drain. True only for a
     COMPUTED source that is the block's own last-committing work (the install fires one step after to read-first it);
     an earlier-committing or block-entry-resident source fits at the makespan. Decided through the one
-    ``install_issue_cycle`` so this classification, the LIR placement, and the interference residence cannot drift.
+    `install_issue_cycle` so this classification, the LIR placement, and the interference residence cannot drift.
     """
     return install_issue_cycle(sched.makespan, install_source_commit(sched, source_node, source)) > sched.makespan
 
@@ -117,11 +118,11 @@ def actual_install_blocks(
     alloc: Allocation, wide_mir: MirWideView, bool_mir: MirBoolView, block_sched: Mapping[int, Schedule]
 ) -> dict[int, bool]:
     """
-    The post-coalescing install classification (the refinement ``block_has_install`` seeds): each block that actually
+    The post-coalescing install classification (the refinement `block_has_install` seeds): each block that actually
     installs at its tail, mapped to whether any of its installs lands past the work makespan -- a computed source that
-    is the block's own last work, so the install must read-first it and the block pays the +1 drain (``True``). An
-    install whose source commits earlier, or is block-entry resident per ``value_resident_at_entry`` (including the
-    const branch materialization already in ``alloc.bool_writes``), fits at the makespan (``False``). How narrowing
+    is the block's own last work, so the install must read-first it and the block pays the +1 drain (`True`). An
+    install whose source commits earlier, or is block-entry resident per `value_resident_at_entry` (including the
+    const branch materialization already in `alloc.bool_writes`), fits at the makespan (`False`). How narrowing
     and regrowth of this classification drive the layout is the caller's protocol (the install fixpoint in the
     builder).
     """
@@ -191,7 +192,7 @@ def _movable_order(
 ) -> list[ValueId]:
     """
     The deterministic coloring order shared by both banks: reverse-postorder block, then commit cycle, then value id
-    (the ``-3`` sentinel sorts a phi -- which has no commit -- ahead of the operations in its block). Value-id last
+    (the `-3` sentinel sorts a phi -- which has no commit -- ahead of the operations in its block). Value-id last
     keeps the order, and hence the coloring, seed-independent; both banks MUST use this one definition.
     """
     rpo_pos = {bid: i for i, bid in enumerate(mir_rpo(mir))}
@@ -201,12 +202,10 @@ def _movable_order(
 
 type _BankView = MirWideView | MirBoolView
 
-_SlotT = TypeVar("_SlotT", MirFloatStateSlot, MirBoolStateSlot)  # one bank's concrete state-slot type
-
 
 @dataclass(frozen=True, slots=True)
 class _ObjectiveContext:
-    """The loop-invariant inputs to a bank's coloring objective; ``movable`` is layered on per coalescing attempt."""
+    """The loop-invariant inputs to a bank's coloring objective; `movable` is layered on per coalescing attempt."""
 
     mir: Mir
     view: _BankView
@@ -243,22 +242,18 @@ class _InstallContext:
     fetch_lag: int
 
 
-class _Bank(ABC, Generic[_SlotT]):
+class _Bank(ABC):
     """
     The policy surface for one physical register bank. The liveness/coalescing/coloring skeleton in
-    :func:`_allocate_bank` is shared; each subclass supplies the wide/boolean specifics --
+    _allocate_bank is shared; each subclass supplies the wide/boolean specifics --
     slot/boundary/objective extraction and the install policy.
     """
 
     label: ClassVar[str]
 
     @abstractmethod
-    def state_slots(self, view: _BankView) -> list[_SlotT]:
+    def state_slots(self, view: _BankView) -> Sequence[MirStateSlot]:
         """This bank's state slots, narrowed from the MIR view -- the one place the concrete bank type is asserted."""
-
-    @abstractmethod
-    def slot_identity(self, slot: _SlotT) -> bool:
-        """Whether the slot folds the identity sideband, so its live-out may commit into the slot register in place."""
 
     @abstractmethod
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
@@ -278,20 +273,17 @@ class _Bank(ABC, Generic[_SlotT]):
         """
 
 
-class _WideBank(_Bank[MirFloatStateSlot]):
+class _WideBank(_Bank):
     label = "wide"
 
-    def state_slots(self, view: _BankView) -> list[MirFloatStateSlot]:
+    def state_slots(self, view: _BankView) -> Sequence[MirStateSlot]:
         assert isinstance(view, MirWideView)
         return view.state_slots
-
-    def slot_identity(self, slot: MirFloatStateSlot) -> bool:
-        return slot.sign.is_identity
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
         for out in mir.outputs:
-            if isinstance(out, MirFloatOutput) and out.value in values:
+            if isinstance(out, (MirFloatOutput, MirIntOutput)) and out.value in values:
                 boundary[ret_block].add(out.value)
         return boundary
 
@@ -321,7 +313,7 @@ class _WideBank(_Bank[MirFloatStateSlot]):
         for slot in ctx.slots:
             name, live_out, r_in = slot.name, slot.live_out, ctx.livein_of[slot.name]
             node = ctx.nodes[live_out]
-            defined_in_ret = isinstance(node, MirFloatInput) or (
+            defined_in_ret = isinstance(node, (MirFloatInput, MirIntInput)) or (
                 live_out in ctx.op_nodes and ctx.op_block.get(live_out) == ctx.ret_block
             )
             early = (
@@ -340,15 +332,12 @@ class _WideBank(_Bank[MirFloatStateSlot]):
         return install
 
 
-class _BoolBank(_Bank[MirBoolStateSlot]):
+class _BoolBank(_Bank):
     label = "bool"
 
-    def state_slots(self, view: _BankView) -> list[MirBoolStateSlot]:
+    def state_slots(self, view: _BankView) -> Sequence[MirStateSlot]:
         assert isinstance(view, MirBoolView)
         return view.state_slots
-
-    def slot_identity(self, slot: MirBoolStateSlot) -> bool:
-        return slot.inversion.is_identity
 
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
@@ -396,7 +385,7 @@ class _InterferenceBuilder:
     arm_out: dict[int, frozenset[ValueId]]
     inflight_defs: dict[int, dict[ValueId, int]]
     # block -> phi dest -> its arm source's commit cycle in THIS block's frame, None for a block-entry-resident source
-    # (``install_issue_cycle``'s contract), so the interference residence matches the LIR copy's placement and cannot
+    # (`install_issue_cycle`'s contract), so the interference residence matches the LIR copy's placement and cannot
     # drift onto a foreign block's frame.
     install_source: dict[int, dict[ValueId, int | None]]
     fetch_lag: int
@@ -408,7 +397,7 @@ class _InterferenceBuilder:
         attempt can hold a computed arm de-coalesced whose install no longer fits the shortened boundary -- the outer
         install fixpoint then re-widens (pins) the classification and re-runs, and only the converged round's
         placements are emitted (the build-side landing assert guards those). Frame confinement itself is guaranteed by
-        ``install_issue_cycle``'s own precondition, so there is nothing falsifiable to assert here.
+        `install_issue_cycle`'s own precondition, so there is nothing falsifiable to assert here.
         """
         issue = install_issue_cycle(self.work_makespan[block], self.install_source[block][vid])
         return inline_fire_cycle(issue, self.fetch_lag)
@@ -439,7 +428,7 @@ class _InterferenceBuilder:
 
 
 def _allocate_bank(
-    bank: _Bank[_SlotT],
+    bank: _Bank,
     mir: Mir,
     view: _BankView,
     block_sched: dict[int, Schedule],
@@ -451,17 +440,16 @@ def _allocate_bank(
     tuning: RegallocTuning,
 ) -> _BankAlloc:
     """
-    Color one physical register bank across the CFG. The bank descriptor supplies the conditioner,
-    boundary, objective, and install policies; the liveness/coalescing/coloring skeleton is shared.
+    Color one physical register bank across the CFG. The bank descriptor supplies the boundary, objective, and
+    install policies; the liveness/coalescing/coloring skeleton is shared.
     """
     nload = len(view.input_ids)
     slots = bank.state_slots(view)
     slot_reg = {slot.name: nload + i for i, slot in enumerate(slots)}
     fresh_start = nload + len(slots)
-    # Explicit bindings: the union-view property types are undecidable under the constrained-TypeVar reanalysis.
-    op_nodes: dict[ValueId, MirOperation] = view.operation_nodes
-    phi_nodes: dict[ValueId, MirPhi] = view.phi_nodes
-    state_read_nodes: Mapping[ValueId, MirStateRead] = view.state_read_nodes
+    op_nodes = view.operation_nodes
+    phi_nodes = view.phi_nodes
+    state_read_nodes = view.state_read_nodes
     state_read_of = {node.name: vid for vid, node in state_read_nodes.items()}
     values = {*view.input_ids, *state_read_nodes, *op_nodes, *phi_nodes}
     facts = _bank_liveness_facts(mir, block_sched, op_nodes, phi_nodes, values, fetch_lag)
@@ -497,7 +485,7 @@ def _allocate_bank(
         fetch_lag=fetch_lag,
     )
 
-    # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, ``self.a = self.b``) must keep its
+    # A slot whose live-in is consumed as ANOTHER slot's live-out (a chained copy, `self.a = self.b`) must keep its
     # live-in to the boundary, so it can neither coalesce nor early-install. The coalescing oracle reads every live-out
     # at the boundary (it must persist) and every live-in at its actual last read, so a live-out that lands after its
     # live-in is fully read shows as non-interfering and coalesces -- the interference-frame form of the WAR test.
@@ -518,7 +506,7 @@ def _allocate_bank(
     ret_present = block_makespan[ret_block] + 1
     # Last operand-read cycle of each value in the Ret block, from the shared liveness facts so read-cycle semantics
     # cannot drift; it bounds how early a slot may install over its source. Loop-invariant -- only an early install
-    # reads it, and it is keyed only by state live-ins (always in ``values``), so the facts' value filter drops nothing.
+    # reads it, and it is keyed only by state live-ins (always in `values`), so the facts' value filter drops nothing.
     last_read_in_ret: dict[ValueId, int] = {}
     for vid, rc in reads[ret_block]:
         last_read_in_ret[vid] = max(last_read_in_ret.get(vid, 0), rc)
@@ -536,7 +524,7 @@ def _allocate_bank(
             live_out = slot.live_out
             r_in = livein_of[slot.name]
             producible = live_out in op_nodes or live_out in phi_nodes
-            if not bank.slot_identity(slot) or not producible or slot.name in tapped_by_other:
+            if not slot.conditioner.is_identity or not producible or slot.name in tapped_by_other:
                 continue  # a folded sideband, a non-producible live-out, or a chained copy cannot be written in-place
             if slot.name in forced_copy:
                 continue  # demoted to copy-back by a prior retry round (its in-place commit was unsound)
@@ -651,10 +639,10 @@ def _allocate(
     Assign wide and boolean registers across the CFG. Both banks are colored by hardware-frame liveness, reusing
     registers across mutually-exclusive and non-overlapping live ranges. A phi is resolved by installing each arm's
     value into the phi's register with a copy at the predecessor's tail; copies sharing a fire step are a parallel
-    (read-then-write) bundle, and placement keeps a swap correct (see ``value_resident_at_entry``).
-    ``block_makespan`` (install-inclusive) and ``block_term_offset`` (the drained boundary, or the overlap-shrunk
+    (read-then-write) bundle, and placement keeps a swap correct (see `value_resident_at_entry`).
+    `block_makespan` (install-inclusive) and `block_term_offset` (the drained boundary, or the overlap-shrunk
     terminator) come from the overlap layout, so the liveness boundary matches the laid-out block spans exactly.
-    ``block_inflight`` carries each block's received cross-block spills (split per bank), reserving a spilled value's
+    `block_inflight` carries each block's received cross-block spills (split per bank), reserving a spilled value's
     register across every successor frame it lands in even where the value is dataflow-dead.
     """
     wide_inflight = {

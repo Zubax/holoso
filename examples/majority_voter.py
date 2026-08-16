@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
 A 3-out-of-5 (3oo5) majority voter with latched channel diagnostics -- the modular-redundancy pattern from
-safety-critical control. The voted output is the majority of five redundant boolean inputs; while ``enabled``, each
-channel that disagrees with the voted value (an exclusive-or against it) latches a sticky per-channel fault that holds
-until the synchronous reset clears it. Five-way redundancy of this flavour flew on the Space Shuttle, whose five
-general-purpose computers ran a four-way cross-voted primary avionics set alongside a dissimilarly-developed backup;
+safety-critical control. Five-way redundancy of this flavour flew on the Space Shuttle, whose five general-purpose
+computers ran a four-way cross-voted primary avionics set alongside a dissimilarly-developed backup;
 this kernel is the idealised flat 3oo5 majority rather than that exact 4-plus-1 arrangement.
 
-The diagnostic update is deliberately gated behind ``enabled`` rather than folded into the always-on vote, so it stays
-a real conditional branch: the five distinct ``channel ^ voted`` disagreements and five sticky-fault latches keep the
+The diagnostic update is deliberately gated behind `enabled` rather than folded into the always-on vote, so it stays
+a real conditional branch: the five distinct `channel ^ voted` disagreements and five sticky-fault latches keep the
 arm's work irreducible, so it survives even aggressive boolean simplification rather than collapsing into the vote.
 """
 
@@ -28,18 +26,8 @@ class MajorityVoter:
     @staticmethod
     def _majority(a: bool, b: bool, c: bool, d: bool, e: bool) -> bool:
         """True when at least three of the five redundant channels agree -- the 3-of-5 voted value."""
-        return (
-            (a and b and c)
-            or (a and b and d)
-            or (a and b and e)
-            or (a and c and d)
-            or (a and c and e)
-            or (a and d and e)
-            or (b and c and d)
-            or (b and c and e)
-            or (b and d and e)
-            or (c and d and e)
-        )
+        packed = int(a) | (int(b) << 1) | (int(c) << 2) | (int(d) << 3) | (int(e) << 4)
+        return packed.bit_count() >= 3  # Synthesized into popcount and compare
 
     def __call__(self, enabled: bool, a: bool, b: bool, c: bool, d: bool, e: bool, /) -> tuple[bool, ...]:
         voted = self._majority(a, b, c, d, e)
@@ -55,7 +43,8 @@ class MajorityVoter:
 
 
 def main() -> None:
-    options = holoso.Options(holoso.OperatorOptions())  # purely boolean: no float operator, no float format
+    # The five channels pack into as many bits, which a signed word carries one above.
+    options = holoso.Options(holoso.OperatorOptions(), wint_min=6)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(MajorityVoter().__call__, options)
     for filename, path in result.write(out_dir).items():

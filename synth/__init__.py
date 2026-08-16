@@ -2,7 +2,7 @@
 Out-of-context (OOC) synthesis-evaluation harness for Holoso-generated modules.
 
 Concrete flows are imported per tool so pulling in one does not require the others. A generated module's only
-dependency is the bundled support library, so the flow needs nothing beyond the synthesis result::
+dependency is the bundled support library, so the flow needs nothing beyond the synthesis result:
 
     from holoso import SynthesisResult
     from synth import build_compiler_ooc_design

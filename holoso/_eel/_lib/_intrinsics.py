@@ -7,7 +7,7 @@ Beware of subtle differences in return types; e.g., `round(float) -> int` while 
 import math
 import numpy as np
 from ..._hir import *
-from ._registry import intrinsic
+from ._registry import intrinsic, lift
 
 
 @intrinsic(FloatFloor, np.floor)  # math.floor() etc are excluded because they return int and require special handling.
@@ -43,14 +43,23 @@ def abs_int(x: int) -> int:
     return abs(x)
 
 
-# np.minimum/maximum (and NaN-suppressing np.fmin/fmax) are the binary elementwise forms; np.min/np.max are reductions.
-# NaN-propagation differences between the spellings are moot under the fast-math / no-NaN policy.
-@intrinsic(FloatMin, min, np.minimum, np.fmin)
+# The one array-capable scalar family; math.fabs/np.fabs stay scalar-only (their own integer answer is a float).
+lift(abs, np.abs, np.absolute)
+
+
+@intrinsic(IntPopcount, int.bit_count, np.bitwise_count)
+def popcount(x: int) -> int:
+    return x.bit_count()
+
+
+# The numpy binary elementwise spellings (np.minimum/np.maximum and the NaN-suppressing np.fmin/np.fmax) are array
+# composites that delegate each element pair back to these scalar entries; np.min/np.max are reductions.
+@intrinsic(FloatMin, min)
 def min_float(a: float, b: float) -> float:
     return min(a, b)
 
 
-@intrinsic(FloatMax, max, np.maximum, np.fmax)
+@intrinsic(FloatMax, max)
 def max_float(a: float, b: float) -> float:
     return max(a, b)
 

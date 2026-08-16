@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-A sampled phase/frequency detector. A reference edge that arrives before feedback asserts ``up``; a feedback edge that
-arrives first asserts ``down``. Once both sides have been seen, both pending latches and outputs clear, matching the
-reset action of a classic digital PFD.
-"""
+"""A sampled phase/frequency detector."""
 
 from pathlib import Path
 
@@ -11,6 +7,11 @@ import holoso
 
 
 class PhaseFrequencyDetector:
+    """
+    A reference edge that arrives before feedback asserts `up`; a feedback edge that arrives first asserts `down`.
+    Once both sides have been seen, both pending latches and outputs clear, matching the reset action of a classic PFD.
+    """
+
     def __init__(self) -> None:
         self._ref_pending: bool = False
         self._fb_pending: bool = False

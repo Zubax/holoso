@@ -1,15 +1,15 @@
 """
 The partial-evaluation value domain: what an environment name can hold.
 
-A static scalar carries the typed HIR ``Const``: its dataclass equality is type-discriminating where Python
-equality is not (``True == 1 == 1.0`` would silently unify a bool arm with an int arm at a join), and its
+A static scalar carries the typed HIR `Const`: its dataclass equality is type-discriminating where Python
+equality is not (`True == 1 == 1.0` would silently unify a bool arm with an int arm at a join), and its
 construction normalizes negative zero and refuses NaN, so the compiler's numeric invariants hold in the
 evaluator's own state for free. An opaque value is a captured object that is not an admitted scalar (NaN
 floats included); it is judged at its USE site, never at capture -- desugar hoists every callee through a
 temp, and binding an unused NaN default is CPython-legal.
 
 Aggregate dtype widths are not modeled: leaves live in the subset's width-less int / binary64 float value
-model, the same deliberate deviation scalars carry. The ``Allocation`` is the identity the ownership model
+model, the same deliberate deviation scalars carry. The `Allocation` is the identity the ownership model
 tracks: values are frozen and rebound while allocations persist and carry the monotone sharing state, so a
 store under a residual branch is a new value over the same allocation and joins leafwise.
 """
@@ -58,8 +58,8 @@ class AllocationState(Enum):
 class Allocation:
     """
     One runtime container's identity; the state only ever moves forward (never back toward UNIQUE), while
-    ``borrows`` is the scoped overlay counting the active loops/comprehensions iterating this allocation --
-    a counter rather than a flag because nested loops may iterate the same allocation. ``joined`` marks an
+    `borrows` is the scoped overlay counting the active loops/comprehensions iterating this allocation --
+    a counter rather than a flag because nested loops may iterate the same allocation. `joined` marks an
     allocation minted by a branch join of differing arm allocations: the value is ONE of the two runtime
     objects, so the fresh identity erases provenance -- installing such a tree into a state attribute is
     rejected, since the disjointness checks would judge the wrong object.
@@ -92,14 +92,86 @@ class TensorValue:
 
 
 @dataclass(frozen=True, slots=True)
-class TensorMethod:
-    """A read of a registered array method; only a call consumes it."""
+class RecordValue:
+    """
+    An immutable typed bundle fixed by its admitted frozen-dataclass class; `fields` follow
+    `dataclasses.fields(cls)` order. Like a sequence it carries an Allocation for join identity, but no
+    mutation path exists by construction.
+    """
 
-    receiver: TensorValue
+    cls: type
+    fields: tuple["Value", ...]
+    allocation: Allocation
+
+
+@dataclass(frozen=True, slots=True)
+class BoundMethod:
+    """A read of a registered method; only a call consumes it."""
+
+    receiver: Scalar | TensorValue
     name: str
 
 
-type Value = StaticScalar | ResidualScalar | Opaque | SequenceValue | TensorValue | TensorMethod
+type LoopPass = tuple[Origin, int]
+
+
+@dataclass(eq=False, slots=True)
+class IteratorValue:
+    """
+    CPython's enumerate object: an eager pair snapshot consumed by exactly one iteration. A distinct kind so
+    every structural consumer's default arm refuses it -- treating it as a plain sequence is how exhaustion
+    launders away. `made_in` is the stack of residual-loop passes active at creation: consumption is admitted
+    only while the active passes are a prefix of it, since any other pass would replay the drain in hardware
+    where Python drains once. Mutable so `spent` can record the one consumption in place; nothing ever
+    rebuilds one, so identity is the only equality that matters.
+    """
+
+    items: tuple["Value", ...]
+    made_in: tuple[LoopPass, ...]
+    spent: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RangeValue:
+    """
+    A lazy arithmetic progression: no storage, no Allocation, no ownership. Static bounds decay to a
+    `SequenceValue` wherever an aggregate is demanded; runtime bounds only drive a counted `for`.
+    """
+
+    start: Scalar
+    stop: Scalar
+    step: int
+
+    def __post_init__(self) -> None:
+        assert self.step != 0
+        assert self.start.stype is ScalarType.INT and self.stop.stype is ScalarType.INT
+
+
+type Value = (
+    StaticScalar
+    | ResidualScalar
+    | Opaque
+    | SequenceValue
+    | TensorValue
+    | RecordValue
+    | IteratorValue
+    | BoundMethod
+    | RangeValue
+)
+
+AGGREGATES = (SequenceValue, TensorValue, RecordValue)
+
+VALUE_KINDS = (
+    StaticScalar,
+    ResidualScalar,
+    Opaque,
+    SequenceValue,
+    TensorValue,
+    RecordValue,
+    IteratorValue,
+    BoundMethod,
+    RangeValue,
+)
 
 
 def same(a: Value, b: Value) -> bool:
@@ -131,8 +203,16 @@ def same(a: Value, b: Value) -> bool:
                 and a.family is b.family
                 and all(same(x, y) for x, y in zip(a.leaves, b.leaves))
             )
-        case TensorMethod(), TensorMethod():
+        case RecordValue(), RecordValue():
+            return (
+                a.allocation is b.allocation
+                and a.cls is b.cls
+                and all(same(x, y) for x, y in zip(a.fields, b.fields, strict=True))
+            )
+        case BoundMethod(), BoundMethod():
             return a.name == b.name and same(a.receiver, b.receiver)
+        case RangeValue(), RangeValue():
+            return same(a.start, b.start) and same(a.stop, b.stop) and a.step == b.step
         case _:
             return False
 
@@ -186,17 +266,26 @@ def allocations_match(a: Value, b: Value) -> bool:
             )
         case TensorValue(), TensorValue():
             return a.allocation is b.allocation
-        case (SequenceValue() | TensorValue(), _) | (_, SequenceValue() | TensorValue()):
+        case RecordValue(), RecordValue():
+            return (
+                a.allocation is b.allocation
+                and a.cls is b.cls
+                and all(allocations_match(x, y) for x, y in zip(a.fields, b.fields, strict=True))
+            )
+        case (SequenceValue() | TensorValue() | RecordValue(), _) | (
+            _,
+            SequenceValue() | TensorValue() | RecordValue(),
+        ):
             return False
         case _:
             return True
 
 
 def tree_leaves(value: Value) -> list[Scalar | Opaque]:
-    """The scalar leaves of a slot tree in declaration order (depth-first, row-major)."""
+    """The scalar leaves of a structure tree in declaration order (depth-first, row-major)."""
     match value:
-        case SequenceValue(items=items):
-            return [leaf for item in items for leaf in tree_leaves(item)]
+        case SequenceValue(items=children) | RecordValue(fields=children):
+            return [leaf for child in children for leaf in tree_leaves(child)]
         case TensorValue(leaves=leaves):
             return list(leaves)
         case StaticScalar() | ResidualScalar() | Opaque():
@@ -206,10 +295,10 @@ def tree_leaves(value: Value) -> list[Scalar | Opaque]:
 
 
 def tensor_occurrences(value: Value) -> list[Allocation]:
-    """Every OCCURRENCE of a tensor allocation, walking through repeated sequence nodes each time."""
+    """Every OCCURRENCE of a tensor allocation, walking through repeated container nodes each time."""
     match value:
-        case SequenceValue(items=items):
-            return [allocation for item in items for allocation in tensor_occurrences(item)]
+        case SequenceValue(items=children) | RecordValue(fields=children):
+            return [allocation for child in children for allocation in tensor_occurrences(child)]
         case TensorValue(allocation=allocation):
             return [allocation]
         case _:
@@ -224,6 +313,8 @@ def tree_rebuild(value: Value, leaves: Iterator[Scalar | Opaque]) -> Value:
         case TensorValue(shape=shape, family=family, allocation=allocation):
             replaced = tuple(next(leaves) for _ in value.leaves)
             return TensorValue(shape, family, replaced, allocation)
+        case RecordValue(cls=cls, fields=fields, allocation=allocation):
+            return RecordValue(cls, tuple(tree_rebuild(field, leaves) for field in fields), allocation)
         case StaticScalar() | ResidualScalar() | Opaque():
             return next(leaves)
         case _:
@@ -240,6 +331,12 @@ def same_structure(a: Value, b: Value) -> bool:
             )
         case TensorValue(), TensorValue():
             return a.allocation is b.allocation and a.shape == b.shape and a.family is b.family
+        case RecordValue(), RecordValue():
+            return (
+                a.allocation is b.allocation
+                and a.cls is b.cls
+                and all(same_structure(x, y) for x, y in zip(a.fields, b.fields, strict=True))
+            )
         case (StaticScalar() | ResidualScalar() | Opaque()), (StaticScalar() | ResidualScalar() | Opaque()):
             return True
         case _:

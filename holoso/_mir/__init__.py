@@ -14,11 +14,15 @@ from ._ir import (
     MirConst as MirConst,
     MirFloatConst as MirFloatConst,
     MirFloatInput as MirFloatInput,
-    MirFloatNode as MirFloatNode,
     MirFloatOutput as MirFloatOutput,
     MirFloatStateRead as MirFloatStateRead,
     MirFloatStateSlot as MirFloatStateSlot,
     MirInput as MirInput,
+    MirIntConst as MirIntConst,
+    MirIntInput as MirIntInput,
+    MirIntOutput as MirIntOutput,
+    MirIntStateRead as MirIntStateRead,
+    MirIntStateSlot as MirIntStateSlot,
     MirJump as MirJump,
     MirNode as MirNode,
     MirOperation as MirOperation,
@@ -31,3 +35,4 @@ from ._ir import (
 )
 from ._interpret import MirInterpreter as MirInterpreter
 from ._lower import lower as lower
+from ._options import MirOptions as MirOptions

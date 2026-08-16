@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""
-A quadrature encoder transition filter. The input pair ``(a, b)`` is expected to move through a Gray-code sequence;
-single-bit transitions emit a one-cycle ``step`` pulse with ``forward`` indicating the direction, while simultaneous
-changes are flagged as invalid. The previous sampled input pair is persistent state.
-"""
+"""A quadrature encoder transition filter."""
 
 from pathlib import Path
 import holoso
 
 
 class QuadratureEncoder:
+    """
+    The input pair `(a, b)` is expected to move through a Gray-code sequence; single-bit transitions emit a one-cycle
+    `step` pulse with `forward` indicating the direction, while simultaneous changes are flagged as invalid.
+    The previous sampled input pair is persistent state.
+    """
+
     def __init__(self, *, initial_a: bool = False, initial_b: bool = False) -> None:
         self._a: bool = initial_a
         self._b: bool = initial_b

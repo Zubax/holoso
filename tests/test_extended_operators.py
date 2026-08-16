@@ -1,6 +1,6 @@
 """
 Public-API, black-box behavioral tests for the extended float operators.
-Every test drives the compiler only through ``holoso.synthesize(fn, ops).numerical_model.elaborate()``
+Every test drives the compiler only through `holoso.synthesize(fn, ops).numerical_model.elaborate()`
 and asserts on observable output values against an INDEPENDENT reference.
 """
 
@@ -24,6 +24,7 @@ from holoso import (
     FRoundOptions,
     FSincosOptions,
     FSortOptions,
+    FSqrtOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
@@ -31,8 +32,10 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
+from holoso._value import ScalarValue
+from ._modelref import instantiated_modules as _modules, random_legal_bits
 
-# Bare-name imports so a ``from math import floor`` style kernel resolves through the test module globals.
+# Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
 
 # Aliased imports: the local name is NOT the canonical spelling, so dispatch must resolve by callee-object identity.
@@ -52,6 +55,7 @@ def _ops(
     with_sort: bool = True,
     with_exp2: bool = True,
     with_log2: bool = True,
+    with_sqrt: bool = True,
     with_sincos: bool = True,
     with_atan2: bool = True,
 ) -> Options:
@@ -67,6 +71,7 @@ def _ops(
             fsort=FSortOptions() if with_sort else None,
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
+            fsqrt=FSqrtOptions() if with_sqrt else None,
             fsincos=FSincosOptions() if with_sincos else None,
             fatan2=FAtan2Options() if with_atan2 else None,
         ),
@@ -78,7 +83,7 @@ def _sim(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
     return holoso.synthesize(fn, _ops(), name=name).numerical_model.elaborate()
 
 
-def _bits(value: FloatValue | bool) -> int:
+def _bits(value: ScalarValue) -> int:
     assert isinstance(value, FloatValue)
     return value.bits
 
@@ -187,7 +192,7 @@ def test_round_modes_match_reference() -> None:
 
 
 def test_round_dispatch_numpy_and_bare_name() -> None:
-    # numpy.<name> under an alias, and bare names imported via ``from math import ...`` must both dispatch.
+    # numpy.<name> under an alias, and bare names imported via `from math import ...` must both dispatch.
     def kernel(x: float) -> tuple[float, float, float, float, float, float]:
         return (np.floor(x), np.ceil(x), np.trunc(x), floor(x), ceil(x), trunc(x))
 
@@ -271,7 +276,7 @@ def test_fma_unconfigured_is_rejected() -> None:
 
 def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
     # An aliased import binds a non-canonical local name to the real function object; dispatch resolves by callee
-    # identity, so ``aliased_floor`` (= math.floor) lowers as floor and ``aliased_fma`` (= math.fma) as fma.
+    # identity, so `aliased_floor` (= math.floor) lowers as floor and `aliased_fma` (= math.fma) as fma.
     def kernel(a: float, b: float, c: float) -> tuple[float, float]:
         return (aliased_floor(a), aliased_fma(a, b, c))
 
@@ -284,7 +289,7 @@ def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
 
 @pytest.mark.skipif(hasattr(np, "fma"), reason="np.fma exists on this numpy and correctly dispatches to ffma")
 def test_numpy_fma_is_rejected() -> None:
-    # ``np.fma`` does not exist on this numpy, so it does not resolve to a real function and must not dispatch to ffma
+    # `np.fma` does not exist on this numpy, so it does not resolve to a real function and must not dispatch to ffma
     # by spelling alone (it would not run as plain Python either); the skip guards the numpy versions that do define it.
     def kernel(a: float, b: float, c: float) -> float:
         return np.fma(a, b, c)  # type: ignore[attr-defined, no-any-return]
@@ -298,7 +303,7 @@ def _v(x: float) -> FloatValue:
 
 
 def test_implicit_mul_add_contracts_to_fma_only_with_ffma() -> None:
-    # ``a*b + c`` with a single-use product contracts to one fma (single rounding) when ffma is configured, and stays
+    # `a*b + c` with a single-use product contracts to one fma (single rounding) when ffma is configured, and stays
     # a separate multiply-then-add (double rounding) when it is not. The two genuinely differ on many inputs, so the
     # contraction is observable; the test asserts the exact reference for each configuration and that they diverge.
     def kernel(a: float, b: float, c: float) -> float:
@@ -361,7 +366,7 @@ def test_implicit_fma_contracts_across_blocks() -> None:
 
 def test_implicit_fma_distributes_product_sign() -> None:
     # The product's folded sign distributes onto the multiplier operands: negation onto one, absolute onto both. Each
-    # variant is its OWN kernel so its product stays single-use (sharing one ``a*b`` across all three would intern to a
+    # variant is its OWN kernel so its product stays single-use (sharing one `a*b` across all three would intern to a
     # used-twice product and suppress the contraction).
     def k_neg(a: float, b: float, c: float) -> float:
         return -(a * b) + c
@@ -525,7 +530,7 @@ def test_a_cancelling_infinity_of_constants_is_refused_not_folded() -> None:
 
 
 def _ulp32(value: float) -> float:
-    """The binary32 quantum at ``value``'s magnitude, for the coarse native-accuracy guards."""
+    """The binary32 quantum at `value`'s magnitude, for the coarse native-accuracy guards."""
     if value == 0.0 or not math.isfinite(value):
         return math.ldexp(1.0, -149)
     return math.ldexp(1.0, max(math.frexp(abs(value))[1] - FMT.wman, -149))
@@ -659,7 +664,8 @@ def test_exp2_log2_unconfigured_is_rejected() -> None:
             holoso.synthesize(fn, ops, name=fn.__name__)
 
 
-# The turn<->radian scale constants MIR inserts, encoded in the format exactly as the compiler does.
+# The turn<->radian scale constants the trigonometric restatement inserts, encoded in the format exactly as the
+# compiler does. They survive as ordinary multiplies wherever the kernel offers nothing for them to fold against.
 _INV_TAU = FloatValue.from_float(FMT, 1.0 / (2.0 * math.pi))
 _TAU = FloatValue.from_float(FMT, 2.0 * math.pi)
 
@@ -668,7 +674,7 @@ _TRIG_VECTORS = [0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, math.pi / 2,
 
 
 def _sincos_ref(x: float) -> tuple[int, int]:
-    # Bit-exact reference: turn-native model of the format-scaled operand, mirroring MIR's fmul + fsincos.
+    # Bit-exact reference: turn-native model of the format-scaled operand, mirroring the restated fmul + fsincos.
     s, c = (_v(x) * _INV_TAU).sincos()
     return s.bits, c.bits
 
@@ -703,8 +709,112 @@ def test_lone_sin_value() -> None:
         assert _bits(sim.run(x)[0]) == _sincos_ref(x)[0], f"lone sin x={x}"
 
 
+def test_a_turn_scaled_angle_sheds_the_conversion() -> None:
+    # The point of restating the cores' turn ABI in HIR: a phase counted in turns scales by `tau/2**k` only so the
+    # conversion can take it back out, and the two now meet as ordinary constants whose product is an exact exponent.
+    # No general multiply survives -- the round trip that once dominated a DDS oscillator's error is gone.
+    def kernel(x: float) -> float:
+        return math.sin(x * (math.tau / 2**8))
+
+    def flipped(x: float) -> float:
+        return math.sin(x * (-math.tau / 2**8))
+
+    # The sign-flipped spelling composes to a NEGATIVE power of two, which must still ride the exponent scaler --
+    # a kernel given only that scaler and the core must build, having written no general product anywhere.
+    scaler_only = Options(OperatorOptions(fmul_ilog2=FMulILog2Options(), fsincos=FSincosOptions()), ffmt=FMT)
+    for label, turned, options in (
+        ("full", kernel, _ops()),
+        ("lean", kernel, scaler_only),
+        ("neg", flipped, scaler_only),
+    ):
+        result = holoso.synthesize(turned, options, name=f"turn_scaled_{label}")
+        assert _modules(result) == {"holoso_fmul_ilog2", "holoso_fsincos"}, label
+        sim = result.numerical_model.elaborate()
+        for x in (0.0, 1.0, -1.0, 64.0, -96.0, 128.0):
+            assert abs(float(sim.run(x)[0]) - turned(x)) <= 4 * _ulp32(1.0), f"{label} x={x}"
+
+
+def test_a_full_turn_scale_cancels_the_conversion_entirely() -> None:
+    # `tau * (1/tau)` is exactly one, so a kernel spelling a whole turn hands the core its operand untouched. The
+    # angle's own multiply is shared with a second consumer here and must survive for it, which is what shows that
+    # composing a shared scaling neither duplicates it nor blocks the fold on the path that can take it.
+    def shared(x: float) -> tuple[float, float]:
+        angle = x * math.tau
+        return angle, math.sin(angle)
+
+    result = holoso.synthesize(shared, _ops(), name="shared_turn")
+    assert _modules(result) == {"holoso_fmul", "holoso_fsincos"}
+    sim = result.numerical_model.elaborate()
+    # 0.7, 1.3, 5.9 and 0.35 do not survive a multiply by tau followed by one by its reciprocal, so they tell a
+    # cancelled conversion from a performed one; the rest are ordinary vectors.
+    for x in (0.7, 1.3, 5.9, 0.35, 0.25, -0.5, 1.0, 2.0):
+        out = sim.run(x)
+        # The sine's bits are those of the core reading x itself. Had any conversion survived, they would be the bits
+        # of a value rounded twice more, which is what this pins.
+        assert _bits(out[0]) == (_v(x) * _TAU).bits, f"angle x={x}"
+        assert _bits(out[1]) == _v(x).sincos()[0].bits, f"sin of a whole turn x={x}"
+
+
+def test_a_turn_native_fold_reduces_in_turns() -> None:
+    # The operators exist to delete the radian round trip, so their fold must not reinstate it. Reduction in turns is
+    # exact at every step, which makes a whole or quarter turn answer exactly and bounds the residual argument to an
+    # eighth of a revolution -- where reducing in radians is inexact from the first multiplication.
+    def sin_of(x: float) -> float:
+        return math.sin(x)
+
+    def cos_of(x: float) -> float:
+        return math.cos(x)
+
+    # `y - y` is folded by a value-equality identity rather than by the front end, so the phase becomes constant
+    # only inside HIR -- which is the one way a constant reaches the turn-native operator at all. Spelled as a
+    # literal it would be folded through the radian operator before the restatement ever runs.
+    def cardinal(turns: float) -> Callable[[float], float]:
+        def kernel(y: float) -> float:
+            return math.sin((y - y + turns) * math.tau)
+
+        return kernel
+
+    for index, (turns, want) in enumerate(((0.5, 0.0), (0.25, 1.0), (3.0, 0.0), (-0.75, 1.0))):
+        sim = _sim(cardinal(turns), f"cardinal_turn_{index}")
+        assert float(sim.run(1.0)[0]) == want, f"sin of {turns} turns is exactly {want}"
+    # The runtime path is unchanged: the fold speaks for what the core would have answered, not against it.
+    for kernel, ref in ((sin_of, 0), (cos_of, 1)):
+        runtime = _sim(kernel, f"turn_fold_runtime_{ref}")
+        for x in _TRIG_VECTORS:
+            assert _bits(runtime.run(x)[0]) == _sincos_ref(x)[ref], f"{kernel.__name__} x={x}"
+
+
+def test_a_negation_between_two_scalings_is_not_opaque() -> None:
+    # A negation is itself a scaling, by the cheapest constant there is, so it must not stand between the kernel's
+    # scale and the conversion and stop them meeting. Both spellings below name one value and must cost the same.
+    def outside(x: float) -> float:
+        return math.sin(-(x * math.tau))
+
+    def inside(x: float) -> float:
+        return math.sin((-x) * math.tau)
+
+    result = holoso.synthesize(outside, _ops(), name="neg_outside")
+    assert _modules(result) == {"holoso_fsincos"}
+    assert result.initiation_interval == holoso.synthesize(inside, _ops(), name="neg_inside").initiation_interval
+    sim = result.numerical_model.elaborate()
+    for x in (0.7, 1.3, 0.25, -0.5, 2.0):
+        assert _bits(sim.run(x)[0]) == _v(-x).sincos()[0].bits, f"sin of a negated whole turn x={x}"
+
+
+def test_a_turn_scaled_kernel_can_need_the_exponent_scaler() -> None:
+    # The composed constant faces operator availability on its own, so a kernel whose every written multiply is
+    # general can still be refused over the exponent scaler its folded scale selects.
+    def kernel(x: float) -> float:
+        return math.sin(x * (math.tau / 2**8))
+
+    options = Options(OperatorOptions(fmul=FMulOptions(), fsincos=FSincosOptions()), ffmt=FMT)
+    with pytest.raises(UnsupportedConstruct, match="fmul_ilog2"):
+        holoso.synthesize(kernel, options, name="turn_scaled_no_ilog2")
+
+
 def test_sincos_sign_folds_into_operand() -> None:
-    # sin(-x)/cos(-x) fold the negation onto the scaled operand (CORDIC fed -(x/tau)), so both reuse one firing.
+    # sin(-x)/cos(-x) fold the negation onto the turn-scaled operand (CORDIC fed -(x/tau)), so both reuse one
+    # firing.
     def kernel(x: float) -> tuple[float, float]:
         return (math.sin(-x), math.cos(-x))
 
@@ -738,7 +848,7 @@ _ATAN2_VECTORS = [(1.0, 1.0), (3.0, 4.0), (-3.0, 4.0), (3.0, -4.0), (-3.0, -4.0)
 
 
 def _atan2_ref(y: float, x: float) -> tuple[int, int]:
-    # theta is scaled from turns to radians by MIR's post-multiply; magnitude (hypot) is units-free and unscaled.
+    # theta is scaled from turns to radians by the restatement's post-multiply; magnitude (hypot) is unscaled.
     theta_turns, mag = FloatValue.atan2(_v(y), _v(x))
     return (theta_turns * _TAU).bits, mag.bits
 
@@ -759,7 +869,7 @@ def test_atan2_matches_model_and_native() -> None:
 
 
 def test_atan2_dispatch_numpy_arctan2() -> None:
-    # numpy spells the two-arg arctangent ``arctan2`` (== ``np.atan2`` on numpy>=2.0).
+    # numpy spells the two-arg arctangent `arctan2` (== `np.atan2` on numpy>=2.0).
     def kernel(y: float, x: float) -> float:
         return np.arctan2(y, x)  # type: ignore[no-any-return]
 
@@ -804,50 +914,55 @@ def test_hypot_sign_flipped_still_fuses_with_atan2() -> None:
 
 
 def test_hypot_lone_decomposition_is_approximate() -> None:
-    # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fexp2/flog2); approximate
-    # on ordinary finite nonzero inputs.
+    # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fsqrt); the root is
+    # exact but the scaling divisions and squares are not, so the composite stays approximate on finite nonzero inputs.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
     sim = _sim(kernel, "hypot_lone")
     assert _bits(sim.run(0.0, 0.0)[0]) == _v(0.0).bits
-    assert _bits(sim.run(float("inf"), 2.0)[0]) == _v(float("inf")).bits
+    assert _bits(sim.run(_POS_INF, 2.0)[0]) == _v(_POS_INF).bits
+    assert _bits(sim.run(_POS_INF, _POS_INF)[0]) == _v(_POS_INF).bits  # the only pair that could divide inf by inf
     rng = np.random.default_rng(0x4F0)
     for _ in range(200):
-        y, x = (float(np.float32(rng.standard_normal() * 8)) for _ in range(2))
+        # Spread over ±20 decades, which is what the magnitude scaling is FOR: the naive sqrt(y*y + x*x) overflows
+        # above 1e19 and flushes below 1e-19 at this format, while the scaled form stays exact to a few ULP.
+        decades = rng.uniform(-20.0, 20.0, size=2)
+        y, x = (float(np.float32(rng.standard_normal() * 10.0**d)) for d in decades)
         native = math.hypot(y, x)
-        if native < 1e-3:
+        if native == 0.0 or math.isinf(native):
             continue
         assert abs(float(sim.run(y, x)[0]) - native) <= 64 * _ulp32(native), f"lone hypot y={y} x={x}"
 
 
 def test_hypot_lone_missing_primitive_is_rejected() -> None:
-    # The decomposition needs fsort/fexp2/flog2; absent any of them, a lone hypot is a clear configuration error.
+    # The decomposition needs fsort/fsqrt; absent either, a lone hypot is a clear configuration error.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
-    for ops in (_ops(with_sort=False), _ops(with_exp2=False), _ops(with_log2=False)):
+    for ops in (_ops(with_sort=False), _ops(with_sqrt=False)):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(kernel, ops, name="hypot_lone_reject")
 
 
 def _sqrt_ref(x: float) -> int:
-    if x == 0.0:
-        return _v(0.0).bits
-    return _v(x).log2().scale_pow2(-1).exp2().bits
+    """
+    binary32's root is correctly rounded, so the host's own sqrt is an exact reference for the native operator --
+    taken over the QUANTIZED operand, which is the number the datapath actually receives.
+    """
+    return _v(math.sqrt(float(_v(x)))).bits
 
 
-def test_sqrt_matches_decomposition_and_native() -> None:
+def test_sqrt_is_the_correctly_rounded_native_root() -> None:
     def kernel(x: float) -> float:
         return math.sqrt(x)
 
     sim = _sim(kernel, "sqrt_basic")
     assert _bits(sim.run(0.0)[0]) == _v(0.0).bits
+    assert _bits(sim.run(float("inf"))[0]) == _v(float("inf")).bits
+    assert _bits(sim.run(-4.0)[0]) == _v(float("-inf")).bits  # off the domain: the poison value, flagged in hardware
     for x in [0.25, 0.5, 1.0, 2.0, 4.0, 9.0, 100.0, 1e-3, 1e6, math.pi]:
-        out = sim.run(x)[0]
-        assert _bits(out) == _sqrt_ref(x), f"sqrt bit-exact x={x}"
-        native = math.sqrt(x)
-        assert abs(float(out) - native) <= 32 * _ulp32(native), f"sqrt accuracy x={x}"
+        assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"sqrt bit-exact x={x}"
     rng = np.random.default_rng(0x59A)
     for _ in range(200):
         x = float(np.float32(abs(rng.standard_normal()) * 100 + 1e-6))
@@ -863,13 +978,21 @@ def test_sqrt_dispatch_numpy() -> None:
         assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"np.sqrt x={x}"
 
 
+def test_sqrt_without_its_operator_is_refused() -> None:
+    def kernel(x: float) -> float:
+        return math.sqrt(x)
+
+    with pytest.raises(UnsupportedConstruct, match="needs the 'fsqrt' operator"):
+        holoso.synthesize(kernel, _ops(with_sqrt=False), name="sqrt_reject")
+
+
 def test_trig_of_constants_fold() -> None:
     # Trig of literal operands folds in the format-agnostic HIR, so a kernel of only constant trig needs no CORDIC:
     # synthesizing with fsincos/fatan2 unconfigured proves the fold.
     def kernel(x: float) -> tuple[float, float, float, float, float]:
         return (math.sin(0.5), math.cos(0.5), math.atan2(1.0, 2.0), math.hypot(3.0, 4.0), math.sqrt(2.0))
 
-    ops = _ops(with_sincos=False, with_atan2=False, with_exp2=False, with_log2=False, with_sort=False)
+    ops = _ops(with_sincos=False, with_atan2=False, with_exp2=False, with_log2=False, with_sort=False, with_sqrt=False)
     sim = holoso.synthesize(kernel, ops, name="trig_fold").numerical_model.elaborate()
     out = sim.run(0.0)
     for index, ref in enumerate(
@@ -897,7 +1020,7 @@ def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None
 
 
 def test_a_constant_zero_base_computes_its_poles_through_the_composite() -> None:
-    # ``0.0 ** e`` denotes a number for every e except a negative one. The general path is ``exp2(e * log2(b))``,
+    # `0.0 ** e` denotes a number for every e except a negative one. The general path is `exp2(e * log2(b))`,
     # and log2's evaluate answers the np reference's -inf at the folded zero base, so the
     # build no longer refuses: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
     # e==0 rung, 0.0 for a positive exponent, +inf past the negative pole (np.power semantics; math.pow raises
@@ -921,7 +1044,7 @@ def test_a_circular_function_of_a_constant_infinity_is_refused() -> None:
         holoso.synthesize(sin_of_a_constant_infinity, _ops(), name="sin_of_const_inf")
 
     def circular_of_a_runtime_value(x: float) -> tuple[float, float]:
-        scaled = x * 1e300
+        scaled = x * 1e30  # a magnitude the format holds, unlike the constant infinity above
         return math.sin(scaled), math.cos(scaled)
 
     holoso.synthesize(circular_of_a_runtime_value, _ops(), name="sin_of_runtime").numerical_model.elaborate()
@@ -1179,3 +1302,68 @@ def test_new_composite_and_binary_numpy_spellings() -> None:
         assert float(out[1]) == pytest.approx(math.asinh(x), rel=1e-5, abs=1e-5)
         assert float(out[2]) == min(x, y) and float(out[3]) == max(x, y)
         assert float(out[4]) == math.trunc(x)
+
+
+def test_sqrt_over_the_whole_format_matches_binary32_sqrt() -> None:
+    """
+    The breadth sweep behind the directed root test: every operand class the format admits, driven as exact bits so
+    the extremes stay exact. binary32's root is correctly rounded, so numpy is an exact oracle; a negative operand
+    has no root and answers with the -inf poison value the hardware raises domain_error alongside.
+    """
+
+    def kernel(x: float) -> float:
+        return math.sqrt(x)
+
+    sim = _sim(kernel, "sqrt_sweep")
+    rng = np.random.default_rng(0x5EED)
+    directed = (
+        0,
+        FMT.encode(1e-30),
+        FMT.encode(-1e30),
+        FMT.encode(_POS_INF),
+        FMT.encode(_NEG_INF),
+        FMT.encode(float(np.finfo(np.float32).tiny)),
+        FMT.encode(float(np.finfo(np.float32).max)),
+    )
+    for bits in (*directed, *(random_legal_bits(FMT, rng) for _ in range(2000))):
+        x = np.uint32(bits).view(np.float32)
+        # Compared on bits, not on the decoded value: a float compare reads +0 and -0 as one number, and the sign of
+        # a zero root is exactly what the packer's masking decides.
+        expected = _v(_NEG_INF).bits if x < 0 else _v(float(np.sqrt(x))).bits
+        assert _bits(sim.run(FloatValue.from_bits(FMT, bits))[0]) == expected, f"sqrt(0x{bits:08x})"
+
+
+def test_a_static_one_half_exponent_is_the_native_root() -> None:
+    """
+    `x ** 0.5` denotes the square root, so it takes the root operator alone -- not the exp2/log2 pair with the
+    guards the general power needs, and not the general power's rounding error either.
+    """
+
+    def kernel(x: float) -> float:
+        return x**0.5  # type: ignore[no-any-return]
+
+    result = holoso.synthesize(kernel, _ops(), name="pow_one_half")
+    assert _modules(result) == {"holoso_fsqrt"}
+    sim = result.numerical_model.elaborate()
+    for x in (0.0, 0.25, 1.0, 2.0, 9.0, 1e6, _POS_INF):
+        assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"x**0.5 x={x}"
+
+    with pytest.raises(UnsupportedConstruct, match="needs the 'fsqrt' operator"):
+        holoso.synthesize(kernel, _ops(with_sqrt=False), name="pow_one_half_reject")
+
+
+def test_other_exponents_keep_the_general_power() -> None:
+    # The one-half rung must not swallow its neighbours: a different constant and a runtime exponent both stay on
+    # the exp2/log2 path, and a static integer stays on the multiply chain.
+    def fourth_root(x: float) -> float:
+        return x**0.25  # type: ignore[no-any-return]
+
+    def runtime_exponent(b: float, e: float) -> float:
+        return b**e  # type: ignore[no-any-return]
+
+    def cube(x: float) -> float:
+        return x**3
+
+    assert "holoso_fsqrt" not in _modules(holoso.synthesize(fourth_root, _ops(), name="pow_quarter"))
+    assert "holoso_fsqrt" not in _modules(holoso.synthesize(runtime_exponent, _ops(), name="pow_runtime_e"))
+    assert _modules(holoso.synthesize(cube, _ops(), name="pow_cube")) == {"holoso_fmul"}

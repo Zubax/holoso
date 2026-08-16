@@ -3,28 +3,13 @@ The vocabulary every hardware operator family shares: the port conditioners, the
 two operators that belong to no one family.
 """
 
-import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import blake2s
-from typing import ClassVar
+from typing import ClassVar, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
 from .._type import BoolType, FloatType, IntType, ScalarType
-
-
-def _instance_stem_text(text: str) -> str:
-    return re.sub(r"[^0-9a-z_]+", "_", text.lower()).strip("_") or "x"
-
-
-def _instance_stem_hash(params: dict[str, int]) -> str:
-    payload = "\n".join(f"{name}={value}" for name, value in sorted(params.items())).encode("ascii")
-    return blake2s(payload, digest_size=4).hexdigest()
-
-
-def _hashed_instance_stem(mnemonic: str, params: dict[str, int]) -> str:
-    return f"{_instance_stem_text(mnemonic)}_{_instance_stem_hash(params)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +47,7 @@ class FloatSignControl:
 class IntIdentity:
     """
     The conditioner of an integer port, which is always the identity: two's-complement negation is not free in fabric
-    the way ``holoso_fsgnop`` is, so an integer port folds nothing into a sideband.
+    the way `holoso_fsgnop` is, so an integer port folds nothing into a sideband.
     """
 
     @property
@@ -76,9 +61,9 @@ class IntIdentity:
 @dataclass(frozen=True, slots=True)
 class BoolInversion:
     """
-    A hardware-side boolean conditioner: an optional inversion, the single-bit dual of :class:`FloatSignControl`.
+    A hardware-side boolean conditioner: an optional inversion, the single-bit dual of FloatSignControl.
     Free in fabric (it folds into whatever LUT consumes or produces the bit); it is what lets one comparator output
-    port serve two relations (e.g. ``a<b`` is the ``lt`` flag, ``a>=b`` the same flag inverted).
+    port serve two relations (e.g. `a<b` is the `lt` flag, `a>=b` the same flag inverted).
     """
 
     invert: bool = False
@@ -104,6 +89,22 @@ class BoolInversion:
 # The wide bank is shared across scalar families, so what a wide port may fold depends on the family it holds.
 type WideConditioner = FloatSignControl | IntIdentity
 type PortConditioner = WideConditioner | BoolInversion
+
+
+def apply_conditioner(conditioner: PortConditioner, value: ScalarValue) -> ScalarValue:
+    """Apply a port's folded sideband: a sign control on a float value, an inversion on a boolean one."""
+    match conditioner:
+        case FloatSignControl():
+            assert isinstance(value, FloatValue), "a float sign control applies only to a FloatValue"
+            return conditioner.apply_value(value)
+        case IntIdentity():
+            assert isinstance(value, IntValue), "an integer identity applies only to an IntValue"
+            return value
+        case BoolInversion():
+            assert isinstance(value, bool), "a boolean inversion applies only to a bool"
+            return conditioner.apply(value)
+        case _:
+            assert_never(conditioner)
 
 
 class Relation(Enum):
@@ -142,6 +143,11 @@ def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
     raise TypeError(f"no conditioner is defined for ports of {scalar_type!r}")
 
 
+def has_sign_control(scalar_type: ScalarType) -> bool:
+    """Whether a port carries a sign sideband, which only a float does; read off the conditioner so the two agree."""
+    return isinstance(identity_conditioner(scalar_type), FloatSignControl)
+
+
 @dataclass(frozen=True, slots=True)
 class ScalarSignature:
     """
@@ -165,19 +171,19 @@ class HardwareOperator(ABC):
     module. Each concrete operator owns its timing, reference semantics, notation, and port types -- possibly several
     typed output ports (a comparator's three one-hot order flags, a sorter's min and max).
     Commutative operators allow port assignment orient each use's operands to shrink the per-port read muxes.
-    The two structural families are :class:`PooledHardwareOperator` (a physical streaming module) and
-    :class:`InlineHardwareOperator` (a pure expression folded into a register write).
+    The two structural families are PooledHardwareOperator (a physical streaming module) and
+    InlineHardwareOperator (a pure expression folded into a register write).
     """
 
     mnemonic: ClassVar[str]
 
-    # Per-firing immediate input ports (empty for most operators; ``fround`` declares its 2-bit ``round_mode``). The
+    # Per-firing immediate input ports (empty for most operators; `fround` declares its 2-bit `round_mode`). The
     # value rides the MIR operation, not the operator identity, so one shared instance serves every mode.
     immediate_ports: ClassVar[list[ImmediateField]] = []
 
-    # Commutation symmetry: swapping the two operands permutes the output ports through this map (``new_port =
-    # swap_output_permutation[old_port]``); ``None`` means non-commutative. Single-output commutative operators use
-    # the identity ``(0,)``; the comparator's order flags transpose (``gt`` and ``lt`` exchange, ``eq`` is fixed).
+    # Commutation symmetry: swapping the two operands permutes the output ports through this map (`new_port =
+    # swap_output_permutation[old_port]`); `None` means non-commutative. Single-output commutative operators use
+    # the identity `(0,)`; the comparator's order flags transpose (`gt` and `lt` exchange, `eq` is fixed).
     # The permutation must preserve each port's type, so a swapped firing's taps stay in their banks.
     swap_output_permutation: ClassVar[tuple[int, ...] | None] = None
 
@@ -189,7 +195,7 @@ class HardwareOperator(ABC):
     def initiation_interval(self) -> int:
         """
         Minimum cycles between successive issues on one physical instance (1 = fully pipelined) -- the per-operator
-        sense of II. Distinct from the module-level ``Lir.initiation_interval``, the whole-transaction cost, which is
+        sense of II. Distinct from the module-level `Lir.initiation_interval`, the whole-transaction cost, which is
         this project's deliberate usage (see DESIGN.md, Direction).
         """
         return 1
@@ -207,7 +213,7 @@ class HardwareOperator(ABC):
         """
         Human-friendly form of one tapped output port. The default covers single-output operators only; a
         multi-output operator must override it (silently rendering every tap as the whole-operator expression would
-        mislabel the report). ``immediates`` is forwarded so a mode-bearing operator renders the firing's actual mode.
+        mislabel the report). `immediates` is forwarded so a mode-bearing operator renders the firing's actual mode.
         """
         assert len(self.signature.result_types) == 1 and port == 0, f"{self.mnemonic} must override render_output"
         return conditioner.decorate(self.render(*operands, immediates=immediates))
@@ -236,8 +242,8 @@ class HardwareOperator(ABC):
     @abstractmethod
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[ScalarValue, ...]:
         """
-        Bit-exact reference semantics: one value per output port, aligned with ``signature.result_types``.
-        ``immediates`` carries the per-firing immediate values (empty for most operators).
+        Bit-exact reference semantics: one value per output port, aligned with `signature.result_types`.
+        `immediates` carries the per-firing immediate values (empty for most operators).
         """
 
 
@@ -258,17 +264,9 @@ class PooledHardwareOperator(HardwareOperator, ABC):
         return f"holoso_{self.mnemonic}"
 
     @property
-    def instance_stem(self) -> str:
-        """
-        Verilog-safe physical instance stem, compactly identifying this operator family and its RTL parameters.
-        Override this if the operator's hardware identity is not fully captured by its mnemonic and parameters.
-        """
-        return _hashed_instance_stem(self.mnemonic, self.params)
-
-    @property
     @abstractmethod
     def params(self) -> dict[str, int]:
-        """The complete RTL ``#(.NAME(value))`` parameter set (WEXP/WMAN, LATENCY, and every operator knob)."""
+        """The complete RTL `#(.NAME(value))` parameter set (WEXP/WMAN, LATENCY, and every operator knob)."""
 
 
 @dataclass(frozen=True)
@@ -291,16 +289,6 @@ class InlineHardwareOperator(HardwareOperator, ABC):
     def verilog_expr(self, *operand_nets: str) -> str: ...
 
 
-class ParameterizedHardwareOperator(ABC):
-    """
-    A family of hardware operators needing per-node parameters.
-    It carries only config-time values; the concrete :class:`HardwareOperator` it produces owns the hardware metadata.
-    """
-
-    @abstractmethod
-    def instantiate(self, *params: int) -> HardwareOperator: ...
-
-
 @dataclass(frozen=True, slots=True)
 class ComparatorOperator(PooledHardwareOperator, ABC):
     """
@@ -312,7 +300,7 @@ class ComparatorOperator(PooledHardwareOperator, ABC):
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["a_gt_b", "a_eq_b", "a_lt_b"]
 
-    # The single place the relation/flag mapping is defined; consumers go through ``tap_of``.
+    # The single place the relation/flag mapping is defined; consumers go through `tap_of`.
     _TAP_OF_RELATION: ClassVar[dict[Relation, tuple[int, BoolInversion]]] = {
         Relation.GT: (0, BoolInversion()),
         Relation.EQ: (1, BoolInversion()),
@@ -348,7 +336,7 @@ class ComparatorOperator(PooledHardwareOperator, ABC):
     def render_output(
         self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
     ) -> str:
-        """Recovers the tapped flag as the relation it implements, e.g. ``a≥b``."""
+        """Recovers the tapped flag as the relation it implements, e.g. `a≥b`."""
         assert isinstance(conditioner, BoolInversion)
         a, b = operands
         return f"{a}{self._RELATION_OF_TAP[(port, conditioner)].value}{b}"
@@ -357,7 +345,7 @@ class ComparatorOperator(PooledHardwareOperator, ABC):
 @dataclass(frozen=True, slots=True)
 class SelectOperator(InlineHardwareOperator):
     """
-    A data mux ``cond ? a : b`` over same-typed values, folded into the destination register write as a ternary over
+    A data mux `cond ? a : b` over same-typed values, folded into the destination register write as a ternary over
     the operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings.
     Each operand is a dedicated direct (unlatched) register read -- an area/timing characteristic of inline operators;
     the cost is one mux per merged value, the same order as the per-arm phi-copy installs the branch would otherwise

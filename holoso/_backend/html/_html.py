@@ -1,8 +1,8 @@
 """
 Render a self-contained, light-themed single-page HTML report for a synthesized module.
 
-The stylesheet and the interactive layer live alongside this module as ``html.css`` and ``html.js`` (declared as
-package data in ``pyproject.toml``); they are inlined into the self-contained report so it has no external dependency
+The stylesheet and the interactive layer live alongside this module as `html.css` and `html.js` (declared as
+package data in `pyproject.toml`); they are inlined into the self-contained report so it has no external dependency
 beyond the web font.
 
 Do not define any styles or colors here, do that in CSS.
@@ -74,7 +74,7 @@ def _metrics(lir: Lir) -> str:
         ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
         ("integer format", str(lir.int_format)),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
-        ("registers", f"{lir.regfile.nreg} × {lir.regfile.width}-bit"),
+        ("registers", f"{lir.regfile.nreg} × {lir.wide_register_width}-bit"),
         ("regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
         ("II min [cycles]", lir.initiation_interval),
     ]
@@ -93,7 +93,7 @@ def _stage_config(lir: Lir) -> str:
     rows = 0
     for op in seen:
         for param, value in op.params.items():
-            out.append(f"<tr><td>{_esc(op.instance_stem)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
+            out.append(f"<tr><td>{_esc(op.mnemonic)}</td><td>{_esc(param)}</td><td>{value}</td></tr>")
             rows += 1
     if rows == 0:
         out.append("<tr><td colspan='3'>(defaults)</td></tr>")

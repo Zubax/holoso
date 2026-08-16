@@ -1,6 +1,7 @@
 """
-The integer operators. The pooled ones each carry their own closed-form latency and their own saturating arithmetic;
-the inline ones are native Verilog over the whole wide bank, sound only under the carrier contract in DESIGN.md.
+The integer operators. The pooled ones each carry their own closed-form latency and their own reference arithmetic,
+saturating wherever the operation can leave the format; the inline ones are native Verilog over the whole wide bank,
+sound only under the carrier contract in DESIGN.md.
 """
 
 from abc import ABC
@@ -22,9 +23,9 @@ from ._common import (
 @dataclass(frozen=True, slots=True)
 class IntHardwareOperator(PooledHardwareOperator, ABC):
     """
-    The dual of :class:`FloatHardwareOperator`, each operator carries its own closed-form latency and RTL parameters.
+    The dual of FloatHardwareOperator, each operator carries its own closed-form latency and RTL parameters.
     Saturation is what the integer type does at its extremes rather than a failure, and HIR marks the saturating
-    operations speculatable, so the ``saturated`` sideband every module raises stays unconnected and unmodeled -- an
+    operations speculatable, so the `saturated` sideband every module raises stays unconnected and unmodeled -- an
     if-converted arm that saturates must not raise the machine's error flag.
     """
 
@@ -73,7 +74,7 @@ class IAddOperator(IntHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class ISubOperator(IntHardwareOperator):
-    """Also serves negation as ``0-x``: there is no negation module, and this one saturates ``-MIN`` correctly."""
+    """Also serves negation as `0-x`: there is no negation module, and this one saturates `-MIN` correctly."""
 
     mnemonic: ClassVar[str] = "isubs"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
@@ -145,7 +146,7 @@ class IDivOperator(IntHardwareOperator):
 
     @property
     def params(self) -> dict[str, int]:
-        # Floor, because that is what Python's ``//`` and ``%`` mean and HIR has no other division; the core's
+        # Floor, because that is what Python's `//` and `%` mean and HIR has no other division; the core's
         # truncating mode is unreachable from a kernel.
         return {"W": self.fmt.width, "QUOTIENT_FLOOR": 1, "LATENCY": self.latency}
 
@@ -189,14 +190,14 @@ class IAbsOperator(IntHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
-class IShiftOperator(IntHardwareOperator):
+class IShlOperator(IntHardwareOperator):
     """
     An arithmetic shift by a signed amount, left when positive. It emits both readings of a left shift at once:
-    ``shft`` lets the high bits fall off the word, while ``prod`` is the multiplication by a power of two, saturating
+    `shft` lets the high bits fall off the word, while `prod` is the multiplication by a power of two, saturating
     instead. Which one a shift wants is a lowering decision, so the operator commits to neither.
     """
 
-    mnemonic: ClassVar[str] = "ishift"
+    mnemonic: ClassVar[str] = "ishl"
     operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
     output_hdl_ports: ClassVar[list[str]] = ["shft", "prod"]
 
@@ -206,7 +207,7 @@ class IShiftOperator(IntHardwareOperator):
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
-        return a.shift(b)
+        return a.shift_left(b)
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         a, b = operands
@@ -217,6 +218,70 @@ class IShiftOperator(IntHardwareOperator):
     ) -> str:
         assert isinstance(conditioner, IntIdentity)
         return f"{self.output_hdl_ports[port]}({', '.join(operands)})"
+
+
+@dataclass(frozen=True, slots=True)
+class IShrOperator(IntHardwareOperator):
+    """
+    The mirror of IShlOperator, right when positive.
+    Neither direction can rail, so it emits one raw reading and no saturation.
+    """
+
+    mnemonic: ClassVar[str] = "ishr"
+    operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
+    output_hdl_ports: ClassVar[list[str]] = ["shft"]
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        a, b = self._validated_operands(operands)
+        return (a.shift_right(b),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        a, b = operands
+        return f"{a}>>{b}"
+
+
+@dataclass(frozen=True, slots=True)
+class IPopcntOperator(IntHardwareOperator):
+    """
+    The population count of the magnitude, as Python's `int.bit_count()`, so a negative operand counts the ones of `-x`.
+    The negation that overflows a signed word is exactly the magnitude `2**(W-1)` read unsigned, so unlike
+    IAbsOperator nothing saturates and the count never reaches the width. The module answers on a port only
+    as wide as that count needs, which the reader widens; a count is never negative, so the widening is a zero fill.
+    """
+
+    mnemonic: ClassVar[str] = "ipopcnt"
+    operand_hdl_ports: ClassVar[list[str]] = ["x"]
+    output_hdl_ports: ClassVar[list[str]] = ["y"]
+
+    @property
+    def count_width(self) -> int:
+        """The narrowest unsigned port holding a count of the magnitude; the RTL derives it again as `$clog2(W)`."""
+        width = (self.fmt.width - 1).bit_length()
+        assert self.fmt.width - 1 < (1 << width)
+        assert self.fmt.width - 1 >= (1 << (width - 1))
+        return width
+
+    @property
+    def params(self) -> dict[str, int]:
+        return {"W": self.fmt.width, "WY": self.count_width, "LATENCY": self.latency}
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((self.scalar_type,), (self.scalar_type,))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        (a,) = self._validated_operands(operands)
+        count = abs(a.value).bit_count()
+        assert 0 <= count < self.fmt.width
+        return (IntValue.from_int(self.fmt, count),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"popcnt({a})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +298,7 @@ class ICmpOperator(IntHardwareOperator, ComparatorOperator):
 
 @dataclass(frozen=True, slots=True)
 class IntInlineOperator(InlineHardwareOperator, ABC):
-    """The inline dual of :class:`IntHardwareOperator`."""
+    """The inline dual of IntHardwareOperator."""
 
     fmt: IntFormat
 
@@ -316,7 +381,7 @@ class IntBwNotOperator(IntInlineOperator):
 class IntShiftConstOperator(IntInlineOperator):
     """
     An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
-    drops what leaves the word rather than saturating as the pooled ``holoso_ishift`` also offers.
+    drops what leaves the word rather than saturating as the pooled `holoso_ishl` also offers.
     Shift by 0 or by an amount exceeding the operand width is a compile-time error (must fold/reject before LIR).
     """
 
@@ -348,7 +413,7 @@ class IntShiftConstOperator(IntInlineOperator):
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
-        return (a.shift(IntValue.from_int(self.fmt, self.shamt)).shft,)
+        return (a.shift_left(IntValue.from_int(self.fmt, self.shamt)).shft,)
 
 
 @dataclass(frozen=True, slots=True)

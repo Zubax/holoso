@@ -1,7 +1,7 @@
 """
-Directed cosim: a divide-by-zero latches ``err_pc`` to the fdiv's write step, and it resets each run.
+Directed cosim: a divide-by-zero latches `err_pc` to the fdiv's write step, and it resets each run.
 
-Builds the tiny module ``a / b``, then drives three back-to-back invocations: a normal one (err_pc stays 0), a
+Builds the tiny module `a / b`, then drives three back-to-back invocations: a normal one (err_pc stays 0), a
 zero-divisor one (err_pc latches the executing step on which the fdiv result is written back -- the commit step
 itself -- which is nonzero), and a normal one again (the per-initiation reset
 must have cleared the prior error). Parametrized over the fdiv output stage so the err flag and the result are shown
@@ -27,21 +27,20 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._operators import FDivOperator, OpConfig
+from holoso._operators import FDivOperator
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import pooled_write_word
-from holoso._mir import lower as lower_to_mir
+from holoso._mir import MirOptions, lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
-from .._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_ops
+from .._modelref import build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 
 FMT = FloatFormat(6, 18)
 
 
-def _ops(stage_output: int) -> OpConfig:
-    return build_ops(
+def _ops(stage_output: int) -> MirOptions:
+    return mir_options(
         Options(
             OperatorOptions(
                 fadd=FAddOptions(),
@@ -97,7 +96,7 @@ async def err_pc_latches_div0(dut: Any) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_err_pc(sim: str, stage_output: int) -> None:
     lir = build_lir(
-        lower_to_mir(optimize(lower(_divide).hir, DEFAULT_IFCONV_MAX_OPS), _ops(stage_output), FMT, default_ifmt(FMT)),
+        lower_to_mir(lower(_divide, DEFAULT_UNROLL_MAX_TRIPS).hir, _ops(stage_output)),
         "divide",
     )
     # The fdiv asserts div0 at its commit; err_pc latches the write word -- the

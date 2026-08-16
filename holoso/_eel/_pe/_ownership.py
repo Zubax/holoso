@@ -1,6 +1,6 @@
 """
 The mutation/ownership model. The rules below are normative here, alongside the state-install disjointness
-rules enforced in ``_state``.
+rules enforced in `_state`.
 
 Every aggregate value is an allocation with a MONOTONE state: unique, then shared or escaped -- never back.
 All events that create a second handle move the state forward:
@@ -8,14 +8,15 @@ All events that create a second handle move the state forward:
 - binding the same allocation to another name (aliasing, multi-target assignment, caller-argument to
   callee-parameter at inlining, unpacking targets receiving aggregates);
 - aggregate-valued reads: an index, slice, iteration item, or unpacked element that IS an aggregate marks
-  parent and extracted allocation shared -- except the syntactic prefix of a store-target path (``C[i][j] = s``
-  does not share by reading ``C[i]`` on the way to the store);
+  parent and extracted allocation shared -- except the syntactic prefix of a store-target path (`C[i][j] = s`
+  does not share by reading `C[i]` on the way to the store);
 - embedding: an aggregate flowing into a literal shares its descendants with the result; sequence slices
   COPY the top level (a fresh allocation) and share extracted aggregate descendants;
-- derivation: ANY tensor derived from an existing one (a tensor slice, ``.T``, ``.flatten()``, ``asarray``)
-  is shared with its source -- the compiler deliberately models no copy-vs-view distinction. A sequence
-  converted to a tensor is a leaf copy, not a derivation: the scalar leaves are values, so no handle relates
-  the two;
+- derivation: ANY tensor derived from an existing one (a tensor slice, `.T`, `.flatten()`, `reshape`, a
+  family-preserving `asarray`) is shared with its source -- the compiler deliberately models no copy-vs-view
+  or dtype-width distinction, so even a same-family host copy (float32 to float) shares. A family-CHANGING
+  dtype conversion copies on the host and mints fresh. A sequence converted to a tensor is a leaf copy, not
+  a derivation: the scalar leaves are values, so no handle relates the two;
 - escape: returning from the kernel, installing into a state path, or being stored as an element; aggregate
   ROOTS originating outside the kernel's own construction (module globals, closure cells, captured defaults,
   and the kernel's own array parameters) enter ESCAPED -- CPython would make a mutation observable outside
@@ -42,7 +43,7 @@ branch conservatively binds the whole join (a share in the then-arm blocks a sto
 per-path sound in both directions, occasionally stricter than one path alone.
 """
 
-from ._values import Allocation, AllocationState, SequenceValue, TensorValue, Value
+from ._values import Allocation, AllocationState, IteratorValue, RecordValue, SequenceValue, TensorValue, Value
 
 
 def share(value: Value) -> None:
@@ -92,12 +93,14 @@ def blame(allocation: Allocation) -> str:
 
 def allocations(value: Value) -> list[Allocation]:
     match value:
-        case SequenceValue(items=items, allocation=allocation):
+        case SequenceValue(items=children, allocation=allocation) | RecordValue(fields=children, allocation=allocation):
             found = [allocation]
-            for item in items:
-                found.extend(allocations(item))
+            for child in children:
+                found.extend(allocations(child))
             return found
         case TensorValue(allocation=allocation):
             return [allocation]
+        case IteratorValue(items=items):
+            return [allocation for item in items for allocation in allocations(item)]
         case _:
             return []

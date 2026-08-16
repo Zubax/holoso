@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Stateful wrapper around the pure stateless EKF demo kernel.
-This is the same extended-Kalman-filter covariance update as ``ekf1_stateless``, but packaged as a stateful resettable
-filter module. The persisted ``x`` and ``P_urt`` are public, so they become observable ports as
-``state_x_*`` and ``state_P_urt_*``; ``R_diag`` and ``Q_diag`` are read-only configuration folded into the design at
-construction time.
+This is the same extended-Kalman-filter covariance update as `ekf1_stateless`, but packaged as a stateful resettable
+filter module. The persisted `x` and `P_urt` are public, so they become observable ports as `state_x_*` and
+`state_P_urt_*`; `R_diag` and `Q_diag` are read-only configuration folded into the design at construction time.
 """
 
 import dataclasses
@@ -26,7 +25,7 @@ class Ekf1:
     RTL output ports.
 
     An aggregate field may be a Python list, whose length holoso reads from the reset value, or a numpy array whose
-    shape is stated explicitly with jaxtyping; ``Q_diag`` exercises the latter and the rest the former.
+    shape is stated explicitly with jaxtyping; `Q_diag` exercises the latter and the rest the former.
     This can be a dataclass or an ordinary class -- Holoso supports both.
     """
 

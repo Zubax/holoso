@@ -12,7 +12,9 @@ from holoso._operators import (
     IAbsOperator,
     IAddOperator,
     ICmpOperator,
-    IShiftOperator,
+    IPopcntOperator,
+    IShlOperator,
+    IShrOperator,
     ISubOperator,
     IntHardwareOperator,
 )
@@ -31,7 +33,7 @@ from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, expected_simp
 
 # The operator model is the source of the module name, its RTL parameters, its port names and its latency, so a
 # declaration that drifted from the hardware fails right here, across every width the sweep covers.
-_OPERATORS = (IAddOperator, ISubOperator, IAbsOperator, ICmpOperator, IShiftOperator)
+_OPERATORS = (IAddOperator, ISubOperator, IAbsOperator, ICmpOperator, IShlOperator, IShrOperator, IPopcntOperator)
 
 
 @cocotb.test()
@@ -41,7 +43,10 @@ async def integer_operator_cocotb(dut: Any) -> None:
     operands = os.environ["HOLOSO_INTEGER_OPERANDS"].split(",")
     results = os.environ["HOLOSO_INTEGER_RESULTS"].split(",")
     unary = len(operands) == 1
-    outputs = [(port, port) for port in results + (["saturated"] if operator != "holoso_icmp" else [])]
+    # Value ports from the model, so a name it declares and the RTL lacks fails here; sidebands from the oracle,
+    # which is what knows whether this module raises one.
+    sidebands = sorted(set(expected_simple(operator, 0, 0, width)) - set(results))
+    outputs = [(port, port) for port in results + sidebands]
     scoreboard = PipelineScoreboard(dut, outputs, latency=int(os.environ["HOLOSO_EXPECTED_LATENCY"]))
     await start_clock(dut)
     await drive_reset(dut)
@@ -75,14 +80,20 @@ async def integer_operator_cocotb(dut: Any) -> None:
                 await step(a)
             else:
                 operands_b = directed
-                if operator == "holoso_ishift":
+                if "shamt" in operands:
+                    # The last four are past the word yet still inside the shifter's low count field,
+                    # a band every other corner here misses.
+                    field = 1 << (width - 1).bit_length()
                     operands_b = [
                         value & mask
-                        for value in (0, 1, -1, width - 1, 1 - width, width, -width, width + 1, -width - 1, -minimum)
+                        for value in (
+                            *(0, 1, -1, width - 1, 1 - width, width, -width, width + 1, -width - 1, -minimum),
+                            *(field - 1, 1 - field, field, -field),
+                        )
                     ]
                 for b in operands_b:
                     await step(a, b)
-        if operator == "holoso_ishift":
+        if operator == "holoso_ishl":
             # Straddle the exact/overflow boundary of every left shift amount, which is what the overflow mask
             # actually decides. The boundary is asymmetric by one -- -2**k shifts exactly where +2**k already
             # overflows -- so both signs are driven on both sides of it; the trailing corners pin the two operands
@@ -96,7 +107,7 @@ async def integer_operator_cocotb(dut: Any) -> None:
         rng = np.random.default_rng(int(os.environ.get("HOLOSO_TEST_SEED", "12345")))
         for _ in range(int(os.environ.get("HOLOSO_INTEGER_RANDOM", "1000"))):
             b = int(rng.integers(0, 1 << width, dtype=np.uint64))
-            if operator == "holoso_ishift" and rng.random() < 0.5:
+            if "shamt" in operands and rng.random() < 0.5:
                 b = int(rng.integers(-width - 2, width + 3)) & mask
             await step(int(rng.integers(0, 1 << width, dtype=np.uint64)), b, bool(rng.random() >= 0.2))
 

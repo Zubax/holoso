@@ -1,14 +1,14 @@
 """
-Acceptance gate + independence guard for the MIR interpreter (``holoso._mir.MirInterpreter``).
+Acceptance gate + independence guard for the MIR interpreter (`holoso._mir.MirInterpreter`).
 
 The interpreter is the schedule-independent bit-exact oracle: it evaluates the MIR dataflow graph directly, sharing the
-front/mid-end and ``operator.evaluate`` with the numerical model but NONE of the LIR scheduling/binding/regalloc/overlap
+front/mid-end and `operator.evaluate` with the numerical model but NONE of the LIR scheduling/binding/regalloc/overlap
 machinery. Before it can be trusted as an oracle it must agree bit-for-bit with the numerical model on kernels that are
-already known correct -- every bundled example (validated against Python in ``test_example_reference``) and every
+already known correct -- every bundled example (validated against Python in `test_example_reference`) and every
 scheduling corner kernel (validated against RTL in the cosim suite). A disagreement here means the interpreter is wrong,
 not the compiler; only once this gate is green does an interpreter-vs-model divergence elsewhere indict the LIR layer.
 
-The independence guard asserts the interpreter's TRANSITIVE import closure excludes ``holoso._lir`` -- the layer it
+The independence guard asserts the interpreter's TRANSITIVE import closure excludes `holoso._lir` -- the layer it
 exists to verify -- so the oracle can never silently re-couple to the artifact under test, even through an intermediary.
 """
 
@@ -18,25 +18,27 @@ import numpy as np
 import pytest
 
 from holoso._backend.numerical import NumericalSimulator
-from holoso._mir import MirInterpreter
-from holoso._operators import OpConfig
-from holoso._type import BoolType, FloatFormat
-from holoso._value import FloatValue
+from holoso._eel import lower as lower_frontend
+from holoso._mir import MirOptions, MirInterpreter, MirPhi, lower as lower_to_mir
+from holoso._type import BoolType, FloatFormat, IntType
+from holoso._value import FloatValue, coerce_scalar
 
+from ._eel_corpus import INT_CASES, int_corpus_options
+from ._eeloracle import InputRow
 from ._examples import SPECS, ExampleSpec
 from ._importguard import forbidden_imports
 from ._modelref import (
-    ChainedSlots,
-    SelectHold,
-    SlotSwap,
-    Vector,
+    as_float,
     assert_model_equals_interpreter,
     bool_phi_swap_computed_loop,
     branch_boundary_kernel,
     branchy_swap_mixed_arm_loop,
     build_model_and_interpreter,
+    mir_options,
+    ChainedSlots,
     const_branch_kernel,
-    default_ops,
+    default_mir,
+    DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
@@ -46,16 +48,15 @@ from ._modelref import (
     phi_swap_computed_loop,
     phi_swap_loop,
     random_legal_bits,
-    staged_ops,
+    SelectHold,
+    SlotSwap,
+    staged_mir,
+    Vector,
 )
 
 
-def _decode_spec_vector(model: NumericalSimulator, fmt: FloatFormat, row: dict[str, int]) -> Vector:
-    vector: Vector = []
-    for port in model.inputs:
-        bits = row[port.name]
-        vector.append(bool(bits) if isinstance(port.scalar_type, BoolType) else FloatValue.from_bits(fmt, bits))
-    return vector
+def _spec_vector(model: NumericalSimulator, row: dict[str, float | bool]) -> Vector:
+    return [coerce_scalar(port.scalar_type, row[port.name], port.name) for port in model.inputs]
 
 
 _EXAMPLE_CASES = [
@@ -65,8 +66,8 @@ _EXAMPLE_CASES = [
 
 @pytest.mark.parametrize("spec,fmt", _EXAMPLE_CASES)
 def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    model, interpreter = build_model_and_interpreter(spec.make_kernel(), default_ops(fmt), spec.name, fmt)
-    vectors = [_decode_spec_vector(model, fmt, row) for row in spec.vectors(fmt)]
+    model, interpreter = build_model_and_interpreter(spec.make_kernel(), mir_options(spec.options(fmt)), spec.name, fmt)
+    vectors = [_spec_vector(model, row) for row in spec.raw_vectors()]
     assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
 
 
@@ -101,10 +102,10 @@ def _bounded_vectors(model: NumericalSimulator, fmt: FloatFormat, rng: np.random
     return vectors
 
 
-@pytest.mark.parametrize("ops_factory", [default_ops, staged_ops], ids=["default", "staged"])
+@pytest.mark.parametrize("ops_factory", [default_mir, staged_mir], ids=["default", "staged"])
 @pytest.mark.parametrize("label,make_kernel", _CORNER_KERNELS, ids=[name for name, _ in _CORNER_KERNELS])
 def test_interpreter_matches_model_on_corners(
-    label: str, make_kernel: Callable[[], Callable[..., object]], ops_factory: Callable[[FloatFormat], OpConfig]
+    label: str, make_kernel: Callable[[], Callable[..., object]], ops_factory: Callable[[FloatFormat], MirOptions]
 ) -> None:
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(make_kernel(), ops_factory(fmt), label, fmt)
@@ -115,7 +116,7 @@ def test_interpreter_matches_model_on_corners(
 
 def test_interpreter_matches_model_on_edge_bits() -> None:
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_ops(fmt), "branch_boundary", fmt)
+    model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_mir(fmt), "branch_boundary", fmt)
     rng = np.random.default_rng(0x5EED)
     vectors: list[Vector] = [
         [FloatValue.from_bits(fmt, random_legal_bits(fmt, rng)) for _ in model.inputs] for _ in range(256)
@@ -125,12 +126,12 @@ def test_interpreter_matches_model_on_edge_bits() -> None:
 
 def test_loop_header_phi_swap_resolves_in_parallel() -> None:
     """
-    A loop-header phi swap (``a, b = b, a``) must resolve its cross-referencing phis as a parallel snapshot. Checked
+    A loop-header phi swap (`a, b = b, a`) must resolve its cross-referencing phis as a parallel snapshot. Checked
     against the float64 Python reference (which swaps correctly) AND interp==model, so a sequential-phi regression in
     either oracle -- or one shared by both -- surfaces as a divergence. Integer-valued inputs keep every output exact.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(phi_swap_loop, default_ops(fmt), "phi_swap_loop", fmt)
+    model, interpreter = build_model_and_interpreter(phi_swap_loop, default_mir(fmt), "phi_swap_loop", fmt)
     for x in (2.0, -3.0, 0.5, 5.0):
         for n in (1.0, 2.0, 3.0, 4.0):
             vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
@@ -145,13 +146,13 @@ def test_loop_header_phi_swap_resolves_in_parallel() -> None:
 
 def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
     """
-    The computed-arm swap (``a, b = b, a + x``): the latch mixes a phi-sourced install with a computed-source install,
+    The computed-arm swap (`a, b = b, a + x`): the latch mixes a phi-sourced install with a computed-source install,
     so a placement that fires one tail install after a sibling has overwritten its source register miscompiles even
     though the pure swap (same-placement installs) stays correct. Python is the oracle; the model and the RTL replay
     the same LIR, and interp==model is asserted so a divergence localizes the guilty layer.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_ops(fmt), "phi_swap_computed", fmt)
+    model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_mir(fmt), "phi_swap_computed", fmt)
     for x in (1.0, 2.0, -1.5):
         for n in (1.0, 2.0, 3.0, 4.0):
             vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
@@ -159,8 +160,8 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
             interp_out = interpreter.run(*vector)
             reference = phi_swap_computed_loop(x, n)
             assert (
-                float(interp_out[0]) == reference
-            ), f"interp != python at x={x} n={n}: {float(interp_out[0])} vs {reference}"
+                as_float(interp_out[0]) == reference
+            ), f"interp != python at x={x} n={n}: {as_float(interp_out[0])} vs {reference}"
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
@@ -168,7 +169,7 @@ def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> N
     """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not WideCopys."""
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(
-        bool_phi_swap_computed_loop, default_ops(fmt), "bool_phi_swap_computed", fmt
+        bool_phi_swap_computed_loop, default_mir(fmt), "bool_phi_swap_computed", fmt
     )
     for x in (False, True):
         for n in (1.0, 2.0, 3.0, 4.0):
@@ -191,7 +192,7 @@ def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
     """
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(
-        branchy_swap_mixed_arm_loop, default_ops(fmt), "mixed_arm_swap", fmt
+        branchy_swap_mixed_arm_loop, default_mir(fmt), "mixed_arm_swap", fmt
     )
     for x in (1.0, -1.0):
         for n in (1.0, 2.0, 3.0):
@@ -199,19 +200,19 @@ def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
             model_out = model.run(*vector)
             interp_out = interpreter.run(*vector)
             reference = branchy_swap_mixed_arm_loop(x, 4.0, n)
-            assert (float(interp_out[0]), float(interp_out[1])) == reference, f"interp != python at x={x} n={n}"
+            assert (as_float(interp_out[0]), as_float(interp_out[1])) == reference, f"interp != python at x={x} n={n}"
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
 
 
 def test_state_slot_swap_writeback_is_parallel() -> None:
     """
-    Two persistent slots that swap (``self._a, self._b = self._b, self._a``) force the parallel, read-first state
+    Two persistent slots that swap (`self._a, self._b = self._b, self._a`) force the parallel, read-first state
     writeback to exchange their registers from OLD values. Checked against the float64 Python reference (which swaps
     correctly) AND interp==model, so a sequential-writeback regression in either oracle -- or one shared by both --
     surfaces. Integer inputs keep the output exact.
     """
     fmt = FloatFormat(6, 18)
-    model, interpreter = build_model_and_interpreter(SlotSwap().step, default_ops(fmt), "slot_swap", fmt)
+    model, interpreter = build_model_and_interpreter(SlotSwap().step, default_mir(fmt), "slot_swap", fmt)
     reference = SlotSwap()
     for x in (0.0, 1.0, -2.0, 3.0, -4.0, 5.0):
         vector = [FloatValue.from_float(fmt, x)]
@@ -222,9 +223,37 @@ def test_state_slot_swap_writeback_is_parallel() -> None:
         assert float(model_out[0]) == expected, f"model != python at x={x}: {float(model_out[0])} vs {expected}"
 
 
+@pytest.mark.parametrize("name,make,vectors", INT_CASES, ids=[name for name, _, _ in INT_CASES])
+def test_interpreter_matches_model_on_the_integer_corpus(
+    name: str, make: Callable[[], Callable[..., object]], vectors: list[InputRow]
+) -> None:
+    """
+    The schedule-independent LIR-fault oracle for the integer corpus: the interpreter runs the MIR directly, the
+    model runs the scheduled/allocated LIR built from it, so a divergence indicts the LIR layer alone.
+    """
+    options = int_corpus_options()
+    model, interpreter = build_model_and_interpreter(make(), mir_options(options), name, options.ffmt)
+    input_vectors: list[Vector] = [
+        [coerce_scalar(port.scalar_type, row[port.name], port.name) for port in model.inputs] for row in vectors
+    ]
+    assert_model_equals_interpreter(model, interpreter, input_vectors, name)
+
+
+def test_the_integer_corpus_reaches_an_integer_phi() -> None:
+    """The non-vacuity witness: at least one corpus kernel lowers to a MIR carrying an integer phi."""
+    options = int_corpus_options()
+    ops = mir_options(options)
+
+    def has_int_phi(make: Callable[[], Callable[..., object]]) -> bool:
+        mir = lower_to_mir(lower_frontend(make(), DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
+        return any(isinstance(node, MirPhi) and isinstance(node.scalar_type, IntType) for node in mir.nodes.values())
+
+    assert any(has_int_phi(make) for _, make, _ in INT_CASES)
+
+
 def test_interpreter_imports_nothing_from_lir() -> None:
     """
-    The oracle must never re-couple to the layer it verifies: its TRANSITIVE import closure excludes ``holoso._lir``.
+    The oracle must never re-couple to the layer it verifies: its TRANSITIVE import closure excludes `holoso._lir`.
     """
     offenders = forbidden_imports(MirInterpreter.__module__, "holoso._lir")
     assert not offenders, f"interpreter transitively imports the LIR layer it verifies: {offenders}"

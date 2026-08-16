@@ -10,7 +10,6 @@ Subnormals, NaN, and -0 are excluded from stimulus because ZKF does not define t
 those classes are mapped through ZKF's zero/MIN_NORMAL boundary rule and canonical-zero rule.
 """
 
-import math
 import os
 import tempfile
 from collections import deque
@@ -24,18 +23,9 @@ from holoso._backend.verilog._support import support_files
 from cocotb.clock import Clock
 from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
-
-def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
-    """Whether ``actual`` is within ``atol + rtol*|expected|`` of ``expected`` (infinities must match exactly)."""
-    if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
-        return actual == expected
-    return abs(actual - expected) <= atol + rtol * abs(expected)
-
-
 BENCH_DIR = Path(__file__).resolve().parent  # tests/hdl -- the cocotb test_dir for the benches and cosim driver
 REPO_ROOT = BENCH_DIR.parents[1]
 HDL_DIR = Path(holoso.__file__).resolve().parent / "_backend" / "verilog"
-TESTS_DIR = REPO_ROOT / "tests"
 SUPPORT_BUILD_DIR = REPO_ROOT / "build" / "holoso_support"  # where the assembled support library is materialized
 
 SIMULATORS = (os.environ["SIM"],) if "SIM" in os.environ else ("icarus", "verilator")
@@ -68,7 +58,7 @@ def sources() -> list[Path]:
 
 def _atomic_write(path: Path, content: str) -> None:
     """
-    Write ``content`` to the shared support path atomically (write-temp + replace). Every holoso_f* bench rewrites
+    Write `content` to the shared support path atomically (write-temp + replace). Every holoso_f* bench rewrites
     this same file, and a simulator build may read it while the next bench is rewriting it; a plain truncating write
     is observed torn (iverilog fails to find the top module in a half-written file), so the swap must be atomic.
     """
@@ -188,14 +178,6 @@ def add_oracle_bits(a_bits: int, b_bits: int) -> int | None:
     return _flush_to_zkf(yb)
 
 
-def sub_oracle_bits(a_bits: int, b_bits: int) -> int | None:
-    y = bits_to_f32(a_bits) - bits_to_f32(b_bits)
-    yb = f32_to_bits(y)
-    if is_nan_f32(yb):
-        return None
-    return _flush_to_zkf(yb)
-
-
 def mul_oracle_bits(a_bits: int, b_bits: int) -> int | None:
     y = bits_to_f32(a_bits) * bits_to_f32(b_bits)
     yb = f32_to_bits(y)
@@ -231,7 +213,7 @@ _ZKF_F32 = holoso.FloatFormat(8, 24)
 def fma_oracle_bits(a_bits: int, b_bits: int, c_bits: int) -> int:
     """
     Reference fused multiply-add a*b + c (single rounding) for ZKF-legal float32 inputs, via the exact
-    ``FloatValue.fma``. The packaged zkf_fma RTL is the independent hardware anchor; this bench proves the two agree
+    `FloatValue.fma`. The packaged zkf_fma RTL is the independent hardware anchor; this bench proves the two agree
     bit-for-bit. No None case: ZKF has no NaN, so fma of legal inputs is always a legal value.
     """
     a = holoso.FloatValue.from_bits(_ZKF_F32, a_bits)
@@ -242,7 +224,7 @@ def fma_oracle_bits(a_bits: int, b_bits: int, c_bits: int) -> int:
 
 def exp2_oracle_bits(a_bits: int) -> int:
     """
-    Reference ``2**a`` via the exact ``FloatValue.exp2``; numpy is not usable as it is correctly rounded while zkf_exp2
+    Reference `2**a` via the exact `FloatValue.exp2`; numpy is not usable as it is correctly rounded while zkf_exp2
     is faithfully rounded (within 1 ULP).
     """
     return holoso.FloatValue.from_bits(_ZKF_F32, a_bits).exp2().bits
@@ -250,9 +232,9 @@ def exp2_oracle_bits(a_bits: int) -> int:
 
 def log2_oracle(a_bits: int) -> tuple[int, int, int]:
     """
-    Reference ``(y_bits, domain_error, pole)``. The value is the exact ``FloatValue.log2`` (numpy is not usable: it
+    Reference `(y_bits, domain_error, pole)`. The value is the exact `FloatValue.log2` (numpy is not usable: it
     rounds the true value, which the zkf table+polynomial core need not match to the last bit). The flags are an
-    independent classification: ``pole`` when the operand is zero, ``domain_error`` when it is negative and nonzero.
+    independent classification: `pole` when the operand is zero, `domain_error` when it is negative and nonzero.
     """
     y = holoso.FloatValue.from_bits(_ZKF_F32, a_bits).log2().bits
     pole = 1 if is_zero_f32(a_bits) else 0
@@ -260,9 +242,20 @@ def log2_oracle(a_bits: int) -> tuple[int, int, int]:
     return y, domain_error, pole
 
 
+def sqrt_oracle(a_bits: int) -> tuple[int, int]:
+    """
+    Reference `(y_bits, domain_error)`. The root is correctly rounded, so numpy is a genuinely INDEPENDENT oracle
+    here (unlike the faithfully-rounded log2/sincos cores, which have to be checked against the ZKF model itself).
+    A negative operand -- a negative zero is not one -- yields the -inf poison value instead of numpy's NaN.
+    """
+    if (a_bits & F32_SIGN_MASK) and not is_zero_f32(a_bits):
+        return F32_NINF, 1
+    return _flush_to_zkf(f32_to_bits(np.sqrt(bits_to_f32(a_bits)))), 0
+
+
 def sincos_oracle(a_bits: int) -> tuple[int, int]:
     """
-    Reference turn-native ``(sin(2*pi*a), cos(2*pi*a))`` via the exact ``FloatValue.sincos``; numpy is unusable because
+    Reference turn-native `(sin(2*pi*a), cos(2*pi*a))` via the exact `FloatValue.sincos`; numpy is unusable because
     the CORDIC is faithfully rounded, not correctly rounded.
     """
     s, c = holoso.FloatValue.from_bits(_ZKF_F32, a_bits).sincos()
@@ -270,7 +263,7 @@ def sincos_oracle(a_bits: int) -> tuple[int, int]:
 
 
 def atan2_oracle(y_bits: int, x_bits: int) -> tuple[int, int]:
-    """Reference turn-native ``(theta, magnitude)`` of ``atan2(y, x)`` via the exact ``FloatValue.atan2``."""
+    """Reference turn-native `(theta, magnitude)` of `atan2(y, x)` via the exact `FloatValue.atan2`."""
     th, mag = holoso.FloatValue.atan2(
         holoso.FloatValue.from_bits(_ZKF_F32, y_bits), holoso.FloatValue.from_bits(_ZKF_F32, x_bits)
     )
@@ -293,16 +286,6 @@ def cmp_oracle(a_bits: int, b_bits: int) -> tuple[int, int, int]:
     return int(a > b), int(a == b), int(a < b)
 
 
-def mul_ilog2_oracle_bits(a_bits: int, k: int) -> int | None:
-    """y = a * 2^k, exactly (when in-range). Returns None on NaN."""
-    a = bits_to_f32(a_bits)
-    y = np.float32(np.ldexp(float(a), k))
-    yb = f32_to_bits(y)
-    if is_nan_f32(yb):
-        return None
-    return _flush_to_zkf(yb)
-
-
 # Round-mode opcodes -- must match zkf_round's round_mode encoding and FRoundOperator's immediate values.
 ROUND_NEAREST_EVEN = 0
 ROUND_FLOOR = 1
@@ -314,7 +297,7 @@ ROUND_MODES: tuple[int, ...] = (ROUND_NEAREST_EVEN, ROUND_FLOOR, ROUND_CEIL, ROU
 def round_oracle_bits(a_bits: int, mode: int) -> int | None:
     """
     Round a ZKF-legal float32 to an integral float per the zkf_round mode, using numpy as an INDEPENDENT reference
-    (rint is round-half-to-even). Integral float32 results are exact; ``_flush_to_zkf`` canonicalizes a -0 result
+    (rint is round-half-to-even). Integral float32 results are exact; `_flush_to_zkf` canonicalizes a -0 result
     (e.g. ceil(-0.3)) to +0. Returns None on NaN (an inf input rounds to itself, never NaN, so None never occurs here).
     """
     a = bits_to_f32(a_bits)

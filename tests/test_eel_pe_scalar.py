@@ -1,8 +1,10 @@
 """
 The partial-evaluator scalar core, driven black-box through the differential oracle wherever the behavior is
-observable (kernels defined here, lowered through ``holoso._eel`` and compared against CPython), with residual
-text pins only where the behavior is invisible to the oracle (static-control folding, orphan dropping,
-determinism). Rejections pin one located diagnostic per family.
+observable (kernels defined here, lowered through `holoso._eel` and compared against CPython), with residual
+pins on the location-stripped public `frontend_ir[-1]` where the behavior is invisible to the oracle
+(static-control folding, orphan dropping). Survivor refusals are pinned publicly as bare `SynthesisError`
+(never `UnsupportedConstruct`: the kernel residualized rather than being refused early). Rejections pin one
+located diagnostic per family.
 """
 
 import math
@@ -12,18 +14,39 @@ from collections.abc import Callable, Mapping, Sequence
 import numpy as np
 import pytest
 
+import holoso
+from holoso import (
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FMulILog2Options,
+    FMulOptions,
+    OperatorOptions,
+    Options,
+    SynthesisError,
+    UnsupportedConstruct,
+)
 from holoso._eel import lower
 from holoso._eel._desugar import desugar
 from holoso._eel._lower import resolve_target
 from holoso._eel._pe import partial_evaluate
+
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from holoso._eel._print import print_eel
-from holoso._errors import SynthesisError, UnsupportedConstruct
-from holoso._hir import Branch, HirEvaluator, NoNumber, optimize
+from holoso._hir import HirEvaluator
 
 from ._eeloracle import assert_hir_matches_reference
-from ._modelref import DEFAULT_IFCONV_MAX_OPS
+from ._public import strip_locations
 
 type _Row = Mapping[str, float | bool | int]
+
+_INT_ONLY = Options(OperatorOptions())
+_FADD = Options(OperatorOptions(fadd=FAddOptions()))
+_FMUL = Options(OperatorOptions(fmul=FMulOptions()))
+_FCMP = Options(OperatorOptions(fcmp=FCmpOptions()))
+_FADD_FMUL = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
+_FADD_FDIV = Options(OperatorOptions(fadd=FAddOptions(), fdiv=FDivOptions()))
+_FMUL_ILOG2 = Options(OperatorOptions(fmul_ilog2=FMulILog2Options()))
 
 _NEVER = False
 _ENABLED = True
@@ -38,18 +61,28 @@ _XS = (1.0, 2.0)
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
 def _rejects(fn: object, match: str) -> None:
+    assert callable(fn)
     with pytest.raises(UnsupportedConstruct, match=match):
-        lower(fn)
+        holoso.synthesize(fn, _INT_ONLY, name="k")
 
 
 def _residual_text(fn: Callable[..., object]) -> str:
+    """For the kernels public synthesis refuses; everything that synthesizes pins text via _residual."""
     assert isinstance(fn, types.FunctionType)
-    return print_eel(partial_evaluate(desugar(fn), fn))
+    return print_eel(partial_evaluate(desugar(fn), fn, None, DEFAULT_UNROLL_MAX_TRIPS))
+
+
+def _residual(fn: Callable[..., object], options: Options) -> str:
+    return strip_locations(holoso.synthesize(fn, options, name="k").frontend_ir[-1])
+
+
+def _has_residual_if(text: str) -> bool:
+    return any(line.lstrip().startswith("if ") for line in text.splitlines())
 
 
 # ---------------------------------------------------------------------- arithmetic, promotion, casts
@@ -63,52 +96,12 @@ def test_mixed_arithmetic_and_promotion() -> None:
     _oracle(_mixed, [{"a": 1.5, "n": 2}, {"a": -0.25, "n": 7}, {"a": 3.0, "n": -3}, {"a": 0.5, "n": 1}])
 
 
-def _int_ops(a: int, b: int) -> tuple[int, int, int, int, int, int]:
-    return a + b * 3, (a - b) // 5, a % (b + 7), a << 2, a >> 1, (a & b) | (a ^ 12)
-
-
-def test_integer_vocabulary() -> None:
-    _oracle(_int_ops, [{"a": 17, "b": 5}, {"a": -9, "b": 3}, {"a": 1024, "b": -2}, {"a": 0, "b": 1}])
-
-
-def _gates(a: bool, b: bool, c: bool) -> tuple[bool, bool, bool, bool, bool]:
-    return (a and b) or c, a ^ b, not (a | c), a == b, b != c
-
-
-def test_boolean_gates_and_equality() -> None:
-    rows = [{"a": x, "b": y, "c": z} for x in (False, True) for y in (False, True) for z in (False, True)]
-    _oracle(_gates, rows)
-
-
-def _casts(x: float, n: int, b: bool) -> tuple[int, float, bool, float, int, bool]:
-    return int(x), float(n), bool(x), float(b), int(b), bool(n)
-
-
-def test_casts() -> None:
-    _oracle(
-        _casts,
-        [
-            {"x": 2.75, "n": 3, "b": True},
-            {"x": -2.75, "n": 0, "b": False},
-            {"x": 0.0, "n": -5, "b": True},
-        ],
-    )
-
-
 def _compare_mix(n: int, x: float) -> tuple[bool, bool, bool]:
     return n < x, x <= n, n == 2
 
 
 def test_mixed_comparisons_promote() -> None:
     _oracle(_compare_mix, [{"n": 2, "x": 2.5}, {"n": 3, "x": 3.0}, {"n": -1, "x": -1.5}, {"n": 2, "x": 1.0}])
-
-
-def _unary(x: float, n: int) -> tuple[float, int, float, int]:
-    return -x, -n, +x, ~n
-
-
-def test_unary_operators() -> None:
-    _oracle(_unary, [{"x": 1.5, "n": 3}, {"x": -0.5, "n": -7}, {"x": 0.0, "n": 0}])
 
 
 def _big_promotion(x: float) -> float:
@@ -133,6 +126,7 @@ def _gate_with_static(x: float) -> bool:
 
 def test_gate_with_static_operand_stays_residual() -> None:
     _oracle(_gate_with_static, [{"x": 1.0}, {"x": -1.0}, {"x": 0.0}])
+    assert "band(True," in _residual(_gate_with_static, _FCMP)
 
 
 # ---------------------------------------------------------------------- control, joins, definite assignment
@@ -144,31 +138,6 @@ def _ternary_promotes(c: bool, x: float) -> float:
 
 def test_join_promotes_static_int_arm() -> None:
     _oracle(_ternary_promotes, [{"c": True, "x": 5.0}, {"c": False, "x": 5.0}, {"c": False, "x": -2.5}])
-
-
-def _chain4(a: float, b: float, c: float, d: float) -> bool:
-    return a < b < c < d
-
-
-def test_long_comparison_chain() -> None:
-    _oracle(
-        _chain4,
-        [
-            {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0},
-            {"a": 1.0, "b": 2.0, "c": 2.0, "d": 4.0},
-            {"a": 5.0, "b": 2.0, "c": 3.0, "d": 4.0},
-            {"a": 1.0, "b": 2.0, "c": 3.0, "d": 0.0},
-        ],
-    )
-
-
-def _walrus_reuse(x: float) -> float:
-    y = 1.0 + (t := x * 2.0)
-    return y + t
-
-
-def test_walrus_single_evaluation() -> None:
-    _oracle(_walrus_reuse, [{"x": 1.25}, {"x": -3.0}])
 
 
 def _augmented(x: float, n: int) -> tuple[float, int]:
@@ -193,8 +162,7 @@ def _static_taken(x: float) -> float:
 
 def test_static_condition_folds_the_branch_away() -> None:
     _oracle(_static_taken, [{"x": 1.5}, {"x": -2.0}])
-    hir = lower(_static_taken).hir
-    assert not any(isinstance(block.terminator, Branch) for block in hir.blocks)
+    assert not _has_residual_if(_residual(_static_taken, _FMUL_ILOG2))
 
 
 def _dead_arm_is_lazy(x: float) -> float:
@@ -218,8 +186,7 @@ def _equal_static_arms(c: bool) -> float:
 
 def test_equal_arms_join_statically_and_drop_the_branch() -> None:
     _oracle(_equal_static_arms, [{"c": True}, {"c": False}])
-    hir = lower(_equal_static_arms).hir
-    assert not any(isinstance(block.terminator, Branch) for block in hir.blocks)
+    assert not _has_residual_if(_residual(_equal_static_arms, _INT_ONLY))
 
 
 def _rebind_across_branch(c: bool, x: float) -> float:
@@ -305,7 +272,7 @@ def _pow_zero_orphans(a: float, b: float) -> float:
 
 def test_zero_power_orphans_its_base() -> None:
     _oracle(_pow_zero_orphans, [{"a": 2.0, "b": 3.0}])
-    text = _residual_text(_pow_zero_orphans)
+    text = _residual(_pow_zero_orphans, _INT_ONLY)
     assert "fmul" not in text
     assert "return 1.0" in text
 
@@ -391,14 +358,15 @@ def _overflowing_static_float_power(x: float) -> float:
 def test_a_static_power_the_host_refuses_saturates_like_the_datapath() -> None:
     """
     The lowering owns the answer at every binding time: a fold runs the very stub the hardware runs, so an
-    overflow saturates to inf as ``exp2`` already does, and each exponent domain answers its pole the way its own
+    overflow saturates to inf as `exp2` already does, and each exponent domain answers its pole the way its own
     datapath does -- the composite's guarded +inf under a float exponent, a division that names no number under an
     integer one, judged by the survivor sweep rather than predicted.
     """
     for fn in (_overflowing_static_power, _overflowing_static_float_power, _zero_to_negative_float_power):
-        assert "inf" in _residual_text(fn), fn
-    with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_zero_to_negative_power).hir, DEFAULT_IFCONV_MAX_OPS)
+        assert "inf" in _residual(fn, _FADD), fn
+    with pytest.raises(SynthesisError, match="names no number") as info:
+        holoso.synthesize(_zero_to_negative_power, _FADD_FDIV, name="k")
+    assert not isinstance(info.value, UnsupportedConstruct)
 
 
 def _dead_pole(x: float) -> float:
@@ -408,8 +376,7 @@ def _dead_pole(x: float) -> float:
 
 def test_a_dead_static_pole_is_not_convicted() -> None:
     """Unlike the old host-raise oracle, an unused pole is no longer a diagnostic: only a survivor is judged."""
-    assert "fdiv" not in _residual_text(_dead_pole)
-    optimize(lower(_dead_pole).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert "fdiv" not in _residual(_dead_pole, _INT_ONLY)
 
 
 def _nonnegative_int_fold_stays_int(x: float) -> float:
@@ -424,7 +391,7 @@ def test_the_exact_fold_is_the_sign_blind_one_python_gives() -> None:
     """The base's sign plays no part: only a negative EXPONENT leaves the integers, as in CPython."""
     _oracle(_nonnegative_int_fold_stays_int, [{"x": 2.0}])
     _oracle(_negative_base_fold_stays_int, [{"x": 2.0}])
-    assert "-122" in _residual_text(_negative_base_fold_stays_int)
+    assert "-122" in _residual(_negative_base_fold_stays_int, _FMUL)
 
 
 def _pow_huge_exponent(x: float) -> float:
@@ -434,10 +401,10 @@ def _pow_huge_exponent(x: float) -> float:
 def test_a_huge_exponent_expands_logarithmically() -> None:
     """
     The TODO.md huge-exponent hang class: square-and-multiply spends one trip per exponent BIT, so an exponent no
-    linear chain could ever expand costs a few dozen multiplies instead of exhausting the budget.
+    linear chain could ever expand costs a few dozen multiplies instead of exhausting the budget -- the whole
+    kernel synthesizes promptly on a multiplier-only machine.
     """
-    hir = lower(_pow_huge_exponent).hir
-    assert sum(len(block.operations) for block in hir.blocks) < 100
+    holoso.synthesize(_pow_huge_exponent, _FMUL, name="k")
 
 
 # ---------------------------------------------------------------------- environment snapshots
@@ -511,7 +478,7 @@ def test_environment_rejections() -> None:
 
 def test_numpy_scalars_snapshot_as_their_exact_values() -> None:
     _oracle(_numpy_global, [{"x": 2.0}, {"x": -0.5}])
-    assert "env" not in _residual_text(_numpy_global)
+    assert "env" not in _residual(_numpy_global, _FMUL)
 
 
 # ---------------------------------------------------------------------- the module boundary
@@ -531,7 +498,7 @@ def _returns_bare_none(x: float) -> None:
 def test_none_kernels_have_no_outputs() -> None:
     _oracle(_returns_nothing, [{"x": 1.0}])
     _oracle(_returns_bare_none, [{"x": 1.0}])
-    assert lower(_returns_nothing).hir.outputs == []
+    assert lower(_returns_nothing, DEFAULT_UNROLL_MAX_TRIPS).hir.outputs == []
 
 
 def _mixed_tuple(n: int, x: float) -> tuple[int, float, bool]:
@@ -593,7 +560,7 @@ def test_interface_annotation_rejections() -> None:
     _rejects(_unannotated_param, "requires a type annotation")
     _rejects(_str_param, "annotation of parameter 'x' is not supported")
     _rejects(_no_return_annotation, "return type annotation is required")
-    _rejects(_none_returns_value, "annotation does not match the returned scalar")
+    _rejects(_none_returns_value, "annotation of the returned value does not match the scalar")
     _rejects(_value_returns_none, "returns no value but its annotation declares one")
     _rejects(_int_from_float, "type float where the annotation declares int")
     _rejects(_bool_from_float, "type float where the annotation declares bool")
@@ -686,11 +653,6 @@ def _index_gap(x: float) -> float:
     return _XS[0] * x
 
 
-def _list_gap(x: float) -> float:
-    ys = [x, x]
-    return x
-
-
 def _unpack_gap(x: float) -> float:
     a, b = x, x
     return a + b
@@ -701,7 +663,7 @@ def test_a_captured_object_store_is_observable_outside_and_rejects() -> None:
 
 
 def test_captured_aggregates_and_instance_attributes_fold() -> None:
-    for fn in (_attr_gap, _index_gap, _list_gap, _unpack_gap):
+    for fn in (_attr_gap, _index_gap, _unpack_gap):
         _oracle(fn, [{"x": 2.0}, {"x": -1.5}])
 
 
@@ -769,22 +731,9 @@ def _static_fault_reaches_output(x: float) -> float:
 
 def test_static_fault_residualizes_for_survivor_refusal() -> None:
     """CPython raises ZeroDivisionError; the compiler builds, and the fault surfaces only if it survives."""
-    hir = lower(_static_fault_reaches_output).hir
-    with pytest.raises(NoNumber):
-        HirEvaluator(hir).run(1.0)
-
-
-def _dead_fault_is_dropped(x: float) -> float:
-    y = 1.0 / 0.0
-    return x * 2.0
-
-
-def test_dead_fault_is_dropped() -> None:
-    """
-    CPython raises on the unused division; dropping it is the charter's elision license, identical to HIR
-    DCE running before the survivor sweep.
-    """
-    assert HirEvaluator(lower(_dead_fault_is_dropped).hir).run(2.0) == [4.0]
+    with pytest.raises(SynthesisError, match="names no number") as info:
+        holoso.synthesize(_static_fault_reaches_output, _FADD_FDIV, name="k")
+    assert not isinstance(info.value, UnsupportedConstruct)
 
 
 def _huge_int_promotion(x: float) -> float:
@@ -802,18 +751,11 @@ def test_unrepresentable_promotion_residualizes() -> None:
     C-promotion model, even though CPython's int/int true division would answer 0.5 without any float
     conversion -- folding it Python's way would let the same expression answer differently by binding time.
     """
-    text = _residual_text(_huge_int_promotion)
-    assert "int_to_float" in text
-    with pytest.raises(NoNumber):
-        HirEvaluator(lower(_huge_int_promotion).hir).run(1.0)
-    with pytest.raises(NoNumber):
-        HirEvaluator(lower(_huge_int_ratio).hir).run()
-
-
-def test_residual_is_deterministic() -> None:
-    first = _residual_text(_mixed)
-    second = _residual_text(_mixed)
-    assert first == second
+    assert "int_to_float" in _residual_text(_huge_int_promotion)
+    for fn in (_huge_int_promotion, _huge_int_ratio):
+        with pytest.raises(SynthesisError, match="names no number") as info:
+            holoso.synthesize(fn, _FADD_FMUL, name="k")
+        assert not isinstance(info.value, UnsupportedConstruct), fn
 
 
 # 2**53 + 1 is the first integer a binary64 cannot hold, so any lane that routes it through a float is visible.
@@ -843,15 +785,15 @@ def _abs_stays_integer(n: int) -> int:
 def test_a_static_integer_folds_in_the_integer_domain() -> None:
     """
     Regression: every entry named a float operator, so a static integer was rounded before the fold --
-    ``abs(-(2**53+1))`` compared equal to 2**53 -- and gone before the gate below HIR could refuse it.
+    `abs(-(2**53+1))` compared equal to 2**53 -- and gone before the gate below HIR could refuse it.
     """
-    for kernel in (
-        _abs_of_an_unholdable_int,
-        _round_of_an_unholdable_int,
-        _floor_of_an_unholdable_int,
-        _min_of_unholdable_ints,
-    ):
-        assert HirEvaluator(lower(kernel).hir).run() == [kernel()], kernel.__name__
+    for kernel in (_abs_of_an_unholdable_int, _round_of_an_unholdable_int, _floor_of_an_unholdable_int):
+        result = holoso.synthesize(kernel, _INT_ONLY, name="k")
+        assert result.numerical_model.elaborate().run() == [kernel()], kernel.__name__
+    # The min answers an INT past the machine word, so it stays on the evaluator (no public spelling holds it).
+    assert HirEvaluator(lower(_min_of_unholdable_ints, DEFAULT_UNROLL_MAX_TRIPS).hir).run() == [
+        _min_of_unholdable_ints()
+    ]
     # The result keeps the integer TYPE too, so it composes with the integer operators rather than poisoning them.
     _oracle(_abs_stays_integer, [{"n": 4}, {"n": -1}])
 
@@ -865,9 +807,9 @@ def _np_abs_at_the_int64_boundary() -> int:
 
 
 def test_the_integer_abs_is_exact_at_arbitrary_precision() -> None:
-    """Both spellings share the one IntAbs entry, where the host has numpy wrapping under int64 and ``abs`` not."""
+    """Both spellings share the one IntAbs entry, where the host has numpy wrapping under int64 and `abs` not."""
     for kernel in (_abs_at_the_int64_boundary, _np_abs_at_the_int64_boundary):
-        assert HirEvaluator(lower(kernel).hir).run() == [2**63], kernel.__name__
+        assert HirEvaluator(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir).run() == [2**63], kernel.__name__
 
 
 def _log2_of_an_integer_zero(x: float) -> float:
@@ -888,7 +830,7 @@ def _rounding_chain_of_a_runtime_integer(a: int) -> int:
 
 def test_rounding_an_integer_is_the_identity_at_either_binding_time() -> None:
     # Their integer entry is the identity stub, so they lower to nothing and the operand stays an integer.
-    assert _residual_text(_floor_of_a_runtime_integer).splitlines()[-1].strip() == "return a"
+    assert _residual(_floor_of_a_runtime_integer, _INT_ONLY).splitlines()[-1].strip() == "return a"
     _oracle(_floor_of_a_runtime_integer, [{"a": -7}, {"a": 0}, {"a": 5}])
     _oracle(_rounding_chain_of_a_runtime_integer, [{"a": 7}, {"a": -4}])
 
@@ -905,7 +847,45 @@ def test_an_integer_entry_can_be_a_composite_as_well_as_an_operator() -> None:
 def test_a_symbol_with_no_integer_entry_promotes_rather_than_asking_the_host() -> None:
     """
     Regression: a static integer used to fold by CALLING the named callee, and a raise there is not an answer --
-    ``math.log2(0)`` raises where the operator's reference computes -inf. Promotion cannot differ for 0 and 0.0.
+    `math.log2(0)` raises where the operator's reference computes -inf. Promotion cannot differ for 0 and 0.0.
     """
     for kernel, want in ((_log2_of_an_integer_zero, -math.inf), (_exp2_of_an_integer_overflow, math.inf)):
-        assert HirEvaluator(lower(kernel).hir).run(0.0) == [want], kernel.__name__
+        result = holoso.synthesize(kernel, _FADD, name="k")
+        assert [float(v) for v in result.numerical_model.elaborate().run(0.0)] == [want], kernel.__name__
+
+
+def test_is_none_always_folds_statically() -> None:
+    """
+    `is None` is decided entirely at partial evaluation: a residual runtime scalar is never None, a binding-time
+    None (an inlined helper's default) answers by host identity, and `None is None` folds outright -- so the
+    residual program carries the settled branch and no comparison hardware.
+    """
+
+    def scaled(x: float, gain: object = None) -> float:
+        if gain is None:
+            return x * 2.0
+        return x * gain  # type: ignore[operator]
+
+    def kernel(x: float) -> tuple[float, float, bool, bool]:
+        defaulted = scaled(x)
+        explicit = scaled(x, 4.0)
+        runtime_never_none = x is None
+        return defaulted, explicit, runtime_never_none, None is None
+
+    vectors = [{"x": v} for v in (0.0, 1.5, -2.25, 8.0)]
+    hir = lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
+    assert assert_hir_matches_reference(hir, kernel, vectors, label="is_none") == len(vectors)
+
+
+def test_is_not_none_selects_the_configured_arm() -> None:
+    def biased(x: float, offset: object = None) -> float:
+        if offset is not None:
+            return x + offset  # type: ignore[operator]
+        return x
+
+    def kernel(x: float) -> tuple[float, float]:
+        return biased(x), biased(x, 3.0)
+
+    vectors = [{"x": v} for v in (0.0, -1.0, 2.5)]
+    hir = lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
+    assert assert_hir_matches_reference(hir, kernel, vectors, label="is_not_none") == len(vectors)

@@ -7,12 +7,13 @@ from ._common import (
     HardwareOperator as HardwareOperator,
     InlineHardwareOperator as InlineHardwareOperator,
     IntIdentity as IntIdentity,
-    ParameterizedHardwareOperator as ParameterizedHardwareOperator,
     PooledHardwareOperator as PooledHardwareOperator,
     PortConditioner as PortConditioner,
     Relation as Relation,
     SelectOperator as SelectOperator,
     WideConditioner as WideConditioner,
+    apply_conditioner as apply_conditioner,
+    has_sign_control as has_sign_control,
     identity_conditioner as identity_conditioner,
 )
 from ._bool import (
@@ -31,12 +32,11 @@ from ._float import (
     FFromIntOperator as FFromIntOperator,
     FLog2Operator as FLog2Operator,
     FMulILog2Operator as FMulILog2Operator,
-    FMulILog2VarOperator as FMulILog2VarOperator,
-    FMulILog2OperatorFamily as FMulILog2OperatorFamily,
     FMulOperator as FMulOperator,
     FRoundOperator as FRoundOperator,
     FSincosOperator as FSincosOperator,
     FSortOperator as FSortOperator,
+    FSqrtOperator as FSqrtOperator,
     FToIntOperator as FToIntOperator,
     FloatClassificationOperator as FloatClassificationOperator,
     FloatHardwareOperator as FloatHardwareOperator,
@@ -52,7 +52,9 @@ from ._int import (
     ICmpOperator as ICmpOperator,
     IDivOperator as IDivOperator,
     IMulOperator as IMulOperator,
-    IShiftOperator as IShiftOperator,
+    IPopcntOperator as IPopcntOperator,
+    IShlOperator as IShlOperator,
+    IShrOperator as IShrOperator,
     ISubOperator as ISubOperator,
     IntBwAndOperator as IntBwAndOperator,
     IntBwNotOperator as IntBwNotOperator,
@@ -63,4 +65,4 @@ from ._int import (
     IntShiftConstOperator as IntShiftConstOperator,
     IntToBoolOperator as IntToBoolOperator,
 )
-from ._config import OpConfig as OpConfig
+from ._config import OpConfig as OpConfig, OperatorOptions as OperatorOptions, require as require

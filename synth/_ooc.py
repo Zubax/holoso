@@ -60,8 +60,8 @@ def _decl(width: int) -> str:
 def _bus(width: int) -> str:
     """
     Declaration prefix for a primary IO word that is always bit-sliced (io_in): force a vector even at width 1, so a
-    1-bit slice ``io_in[0:0]`` is legal. A scalar ``wire`` collapsed by ``_decl`` is not indexable under strict
-    elaborators (Diamond/Vivado reject ``cannot index into non-array``), only under lenient Yosys.
+    1-bit slice `io_in[0:0]` is legal. A scalar `wire` collapsed by `_decl` is not indexable under strict
+    elaborators (Diamond/Vivado reject `cannot index into non-array`), only under lenient Yosys.
     """
     return f"[{width - 1}:0] "
 

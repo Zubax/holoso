@@ -30,7 +30,7 @@ _REPO = Path(__file__).resolve().parent.parent
 
 class TwoCarried:
     """
-    Two persistent attributes first WRITTEN inside a ``while``: materializing their live-ins creates StateRead nodes
+    Two persistent attributes first WRITTEN inside a `while`: materializing their live-ins creates StateRead nodes
     whose creation order is decided by the carried-attribute iteration -- the second historical hash-order leak.
     """
 
@@ -51,7 +51,7 @@ class TwoCarried:
 
 def coalesce_conflict(x: float, b: float, cc: float) -> tuple[float, float, float]:
     """
-    The phi-coalescing residual-install hazard: ``a`` coalesces onto ``x`` while ``x`` is still live as ``z``'s arm,
+    The phi-coalescing residual-install hazard: `a` coalesces onto `x` while `x` is still live as `z`'s arm,
     so the soundness fixpoint must de-coalesce. The fixpoint's de-coalescing is set-driven, so this exercises that its
     iteration order -- and the resulting register assignment -- is seed-independent. The division keeps the diamond a
     real branch (un-if-converted), which is what creates the phi merge.
@@ -95,10 +95,30 @@ def _dump(result: SynthesisResult) -> None:
     sys.stdout.writelines(result.frontend_ir)
 
 
+def counted_hash_order(n: int, m: int) -> tuple[int, int]:
+    s = 0
+    t = 0
+    for i in range(n, m):
+        s = s + i
+        t = t ^ i
+    return s, t
+
+
+def emit_counted() -> None:
+    from holoso import FloatFormat, synthesize
+
+    from ._modelref import default_options
+
+    result = synthesize(counted_hash_order, default_options(FloatFormat(6, 18)))
+    _dump(result)
+
+
 def dump_two_carried_hir() -> None:
     from holoso._eel import lower
 
-    hir = lower(TwoCarried().step).hir
+    from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
+
+    hir = lower(TwoCarried().step, DEFAULT_UNROLL_MAX_TRIPS).hir
     for vid in sorted(hir.nodes):
         print(vid, repr(hir.nodes[vid]))
 
@@ -138,3 +158,8 @@ def test_loop_carried_state_numbering_is_identical_across_hash_seeds(other_seed:
     # or more persistent attributes.
     reference = _entry_output_under_seed("dump_two_carried_hir", "0")
     assert reference == _entry_output_under_seed("dump_two_carried_hir", other_seed)
+
+
+@pytest.mark.parametrize("other_seed", ["3", "31337"])
+def test_counted_loop_lowering_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
+    assert _entry_output_under_seed("emit_counted", "0") == _entry_output_under_seed("emit_counted", other_seed)

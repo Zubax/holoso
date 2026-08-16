@@ -34,7 +34,7 @@ def find_tool(name: str) -> Path | None:
 
 
 def require_tool(name: str) -> Path:
-    """Like :func:`find_tool` but raise ``FileNotFoundError`` when the tool is absent."""
+    """Like find_tool but raise `FileNotFoundError` when the tool is absent."""
     path = find_tool(name)
     if path is None:
         raise FileNotFoundError(f"required executable {name!r} was not found on PATH, /opt, /usr, or /home")

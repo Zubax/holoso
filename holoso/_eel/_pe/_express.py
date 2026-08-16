@@ -2,26 +2,34 @@
 
 import dataclasses
 import inspect
+import math
 import types
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .._annotations import annotation_stype
+from .._annotations import annotation_stype, host_type
 from .._ir import *
-from .._lib import Array, Conversion, Factory, Operand, ScalarFunction, resolve
+from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, resolve
 from . import _aggregate, _ops
 from ._ownership import share
+from ._record import inadmissible_reason as record_inadmissible
 from ._reject import reject
 from ._snapshot import describe_opaque as _describe_opaque, nan_payload, tensor_of
+from ._state import mro_attr
 from ._values import (
+    AGGREGATES,
+    VALUE_KINDS,
     Allocation,
+    BoundMethod,
+    IteratorValue,
     Opaque,
+    RangeValue,
+    RecordValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
     StaticScalar,
-    TensorMethod,
     TensorValue,
     Value,
 )
@@ -29,7 +37,7 @@ from ._values import (
 if TYPE_CHECKING:
     from ._interpret import Frame, Interpreter, Sink
 
-_AGGREGATE = (SequenceValue, TensorValue)
+_LIST_ADVICE = "an array operation on a Python list/tuple is not supported; build one with np.array([...])"
 
 # ------------------------------------------------------------------ attribute reads
 
@@ -38,6 +46,17 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
     match base_value:
         case TensorValue():
             return _tensor_attr(interp, origin, base_value, attr, frame, sink)
+        case RecordValue(cls=cls, fields=fields):
+            names = [field.name for field in dataclasses.fields(cls)]
+            if attr not in names:
+                if callable(getattr(cls, attr, None)):
+                    reject(origin, f"calling methods on a record value is not supported; {attr!r} is not a field")
+                reject(origin, f"the record {cls.__name__} has no field {attr!r}")
+            item = fields[names.index(attr)]
+            if isinstance(item, AGGREGATES):
+                share(base_value)
+                share(item)
+            return item
         case SequenceValue():
             if attr in ("shape", "ndim") or resolve(getattr(np.ndarray, attr, None)) is not None:
                 reject(
@@ -50,9 +69,14 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
                 return StaticScalar(_ops.make_const(0))
             if attr == "shape":
                 return SequenceValue((), Allocation())
+            found = resolve(getattr(host_type(base_value.stype), attr, None))
+            if isinstance(found, ScalarFunction):
+                return BoundMethod(base_value, attr)
             reject(origin, f"a scalar has no supported attribute {attr!r}")
-        case TensorMethod():
-            reject(origin, "a bound array method can only be called")
+        case BoundMethod():
+            reject(origin, f"{_aggregate.a_kind(base_value)} can only be called")
+        case IteratorValue() | RangeValue():
+            reject(origin, f"{_aggregate.a_kind(base_value)} has no supported attribute {attr!r}")
         case Opaque(name=name, value=value) if isinstance(value, (types.ModuleType, type)):
             # A module/class attribute is a metadata read (class access unwraps staticmethod and
             # plain functions); an instance never runs live descriptors, below.
@@ -77,11 +101,11 @@ def _tensor_attr(
         return SequenceValue(dims, Allocation())
     descriptor = getattr(np.ndarray, attr, None)
     found = resolve(descriptor)
-    if isinstance(found, Array):
-        if inspect.isdatadescriptor(descriptor):
-            return _array_call(interp, origin, f".{attr}", found, [tensor], frame, sink)
+    if isinstance(found, Array) and inspect.isdatadescriptor(descriptor):
+        return _array_call(interp, origin, f".{attr}", found, [tensor], frame, sink)
+    if isinstance(found, (Array, Reshape)):
         share(tensor)
-        return TensorMethod(tensor, attr)
+        return BoundMethod(tensor, attr)
     reject(origin, f"an array has no supported attribute {attr!r}")
 
 
@@ -94,10 +118,10 @@ def scalar(value: Value, origin: Origin) -> Scalar:
             return value
         case Opaque():
             reject(origin, _describe_opaque(value))
-        case SequenceValue() | TensorValue():
+        case SequenceValue() | TensorValue() | RecordValue() | IteratorValue() | RangeValue():
             reject(origin, f"{_aggregate.a_kind(value)} cannot be used as a scalar here")
-        case TensorMethod():
-            reject(origin, "a bound array method can only be called")
+        case BoundMethod():
+            reject(origin, f"{_aggregate.a_kind(value)} can only be called")
 
 
 def materialize(scalar: Scalar, origin: Origin) -> Atom:
@@ -114,7 +138,7 @@ def apply(interp: Interpreter, operator: _ops.Operator, operands: list[Scalar], 
         try:
             return StaticScalar(operator.evaluate(consts))
         except _ops.NoNumber:
-            pass  # the graph re-derives the fault and the survivor sweep judges it; never convict here
+            pass  # the graph re-derives the fault and the refusal gate judges it; never convict here
     stype = _ops.result_stype(operator)
     atoms = tuple(materialize(operand, origin) for operand in operands)
     index = interp.fresh()
@@ -127,7 +151,7 @@ def unary(interp: Interpreter, origin: Origin, op: UnaryOp, value: Value, sink: 
         leaves = tuple(_unary_leaf(interp, origin, op, leaf, sink) for leaf in value.leaves)
         interp.budget.spend(len(leaves), origin, "the elementwise operation")
         return TensorValue(value.shape, value.family, leaves, Allocation())
-    if isinstance(value, _AGGREGATE):
+    if isinstance(value, AGGREGATES):
         if op is UnaryOp.NOT:
             reject(origin, "the truthiness of an aggregate is not supported")
         reject(origin, f"`{op.value}` is not supported on {_aggregate.a_kind(value)}")
@@ -167,7 +191,7 @@ def _scalar_leaf(origin: Origin, leaf: Scalar | Opaque) -> Scalar:
 def binary(interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink) -> Value:
     if op is BinaryOp.MATMUL:
         for operand in (lv, rv):
-            if isinstance(operand, _AGGREGATE):
+            if isinstance(operand, AGGREGATES):
                 share(operand)
         return _operator_call(interp, origin, op, [lv, rv], frame, sink)
     tensors = isinstance(lv, TensorValue) or isinstance(rv, TensorValue)
@@ -264,7 +288,7 @@ def _binary_scalars(
 
 
 def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: Value, sink: Sink) -> Scalar:
-    if isinstance(lv, _AGGREGATE) or isinstance(rv, _AGGREGATE):
+    if isinstance(lv, AGGREGATES) or isinstance(rv, AGGREGATES):
         reject(origin, "aggregate comparison is not supported")
     left = scalar(lv, origin)
     right = scalar(rv, origin)
@@ -289,8 +313,8 @@ def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: V
 
 def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     callee = interp.expr(node.callee, frame, sink)
-    if isinstance(callee, TensorMethod):
-        return _tensor_method(interp, node, callee, frame, sink)
+    if isinstance(callee, BoundMethod):
+        return _bound_method(interp, node, callee, frame, sink)
     if not isinstance(callee, Opaque):
         reject(node.origin, "the callee is not a callable object")
     raw = callee.value
@@ -298,16 +322,34 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         case ScalarFunction() as match:
             values = _operand_arguments(interp, node, callee.name, frame, sink)
             return _scalar_call(interp, node.origin, callee.name, match, values, frame, sink)
+        case Lifted(scalar=lifted):
+            values = _operand_arguments(interp, node, callee.name, frame, sink)
+            if len(values) == 1 and isinstance(values[0], TensorValue):
+                return _lifted_call(interp, node.origin, callee.name, lifted, values[0], frame, sink)
+            if any(isinstance(value, (SequenceValue, RangeValue)) for value in values):
+                reject(
+                    node.origin,
+                    _LIST_ADVICE,
+                )
+            return _scalar_call(interp, node.origin, callee.name, lifted, values, frame, sink)
         case Array() as match:
             values = _positional_arguments(interp, node, callee.name, frame, sink)
+            _demand_descriptor_receiver(node.origin, callee.name, raw, values)
             return _array_call(interp, node.origin, callee.name, match, values, frame, sink)
         case Factory() as match:
             return _factory(interp, node, callee.name, match, frame, sink)
         case Conversion(copies=copies):
-            values = _operand_arguments(interp, node, callee.name, frame, sink)
-            if len(values) != 1:
-                reject(node.origin, f"{callee.name}() takes a single array-like argument")
-            return _to_tensor(interp, node.origin, callee.name, values[0], sink, copies=copies)
+            source, family = _conversion_arguments(interp, node, callee.name, frame, sink)
+            return _to_tensor(interp, node.origin, callee.name, source, sink, copies=copies, family=family)
+        case Reshape():
+            if getattr(raw, "__objclass__", None) is np.ndarray:
+                values = _operand_arguments(interp, node, callee.name, frame, sink)
+                _demand_descriptor_receiver(node.origin, callee.name, raw, values)
+                return _reshape(node.origin, callee.name, values[0], values[1:])
+            base, shape = _option_arguments(interp, node, callee.name, frame, sink, option="shape")
+            if shape is None:
+                reject(node.origin, f"{callee.name}() takes an array and a shape (an int or a tuple of ints)")
+            return _reshape(node.origin, callee.name, base, [shape])
         case None:
             pass
     if raw is float or raw is int or raw is bool:
@@ -318,48 +360,51 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         return _len(interp, node, frame, sink)
     if raw is range:
         return _range(interp, node, frame, sink)
+    if raw is enumerate:
+        return _enumerate(interp, node, frame, sink)
     if raw is list or raw is tuple:
         return _rebuild_sequence(interp, node, callee.name, frame, sink)
-    if isinstance(raw, types.FunctionType):
-        # Ingested like user code wherever it lives: substitution is the registry's decision alone,
-        # and the interpreter knows no library names.
-        positional, keywords = _signature_arguments(interp, node, frame, sink)
-        return interp.inline(node.origin, callee.name, raw, positional, keywords, frame, sink, positional_only=False)
-    if inspect.ismethod(raw):
-        # A helper method of any snapshotted object: the receiver rides as the first argument, sharing
-        # the memoized identity, so its frozen attributes fold and its state reads see the current slots;
-        # a receiver write inside the helper draws the helper-write rejection.
-        inner = raw.__func__
-        if not isinstance(inner, types.FunctionType):
-            reject(node.origin, f"calls to {callee.name!r} are not supported yet")
-        receiver = interp.snapshot.admit(callee.name, raw.__self__, node.origin)
+    if isinstance(raw, type) and dataclasses.is_dataclass(raw):
+        return _construct_record(interp, node, callee.name, raw, frame, sink)
+    resolved = _inlinable(interp, node.origin, callee.name, raw)
+    if resolved is not None:
+        fn, leading = resolved
         positional, keywords = _signature_arguments(interp, node, frame, sink)
         return interp.inline(
-            node.origin,
-            callee.name,
-            inner,
-            [receiver, *positional],
-            keywords,
-            frame,
-            sink,
-            positional_only=False,
+            node.origin, callee.name, fn, [*leading, *positional], keywords, frame, sink, positional_only=False
         )
     if callable(raw):
-        # A component instance defines __call__ as a plain Python function; a C-level one (a numpy dispatcher or
-        # ufunc, a partial) is simply a callee the registry does not carry.
-        if isinstance(getattr(type(raw), "__call__", None), types.FunctionType):
-            reject(
-                node.origin,
-                f"cannot call {callee.name!r}: it is a separate component instance "
-                f"({type(raw).__name__}); hierarchical state is not supported yet",
-            )
         reject(node.origin, f"calls to {callee.name!r} are not supported yet")
     reject(node.origin, f"the captured object {callee.name!r} is not callable")
 
 
+def _inlinable(
+    interp: Interpreter, origin: Origin, display: str, raw: object
+) -> tuple[types.FunctionType, list[Value]] | None:
+    """
+    The plain-Python callee behind any calling spelling, with the receiver arguments CPython's descriptor
+    protocol would prepend; an admitted receiver's frozen attributes fold and its state reads see the current
+    slots. A C-level callable (a numpy dispatcher or ufunc, a partial) resolves to None: a callee the
+    registry does not carry.
+    """
+    if isinstance(raw, types.FunctionType):
+        return raw, []
+    if inspect.ismethod(raw):
+        if not isinstance(raw.__func__, types.FunctionType):
+            return None
+        return raw.__func__, [interp.snapshot.admit(display, raw.__self__, origin)]
+    if callable(raw):
+        call_attr = mro_attr(type(raw), "__call__")
+        if isinstance(call_attr, staticmethod) and isinstance(call_attr.__func__, types.FunctionType):
+            return call_attr.__func__, []
+        if isinstance(call_attr, types.FunctionType):
+            return call_attr, [interp.snapshot.admit(display, raw, origin)]
+    return None
+
+
 def _argument(interp: Interpreter, atom: Atom, frame: Frame, sink: Sink) -> Value:
     value = interp.expr(atom, frame, sink)
-    if isinstance(value, _AGGREGATE) and (isinstance(atom, LocalRef) or interp.alias_conduit(frame, atom)):
+    if isinstance(value, AGGREGATES) and (isinstance(atom, LocalRef) or interp.alias_conduit(frame, atom)):
         share(value)
     return value
 
@@ -372,7 +417,8 @@ def _operand_arguments(interp: Interpreter, node: Call, display: str, frame: Fra
             case PosArg(value=value):
                 values.append(interp.expr(value, frame, sink))
             case StarArg(value=value):
-                values.extend(_aggregate.splice_items(node.origin, interp.expr(value, frame, sink)))
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                values.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg():
                 reject(node.origin, f"{display}() takes no keyword arguments")
     return values
@@ -385,7 +431,8 @@ def _positional_arguments(interp: Interpreter, node: Call, display: str, frame: 
             case PosArg(value=value):
                 values.append(_argument(interp, value, frame, sink))
             case StarArg(value=value):
-                values.extend(_aggregate.splice_items(node.origin, interp.expr(value, frame, sink)))
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                values.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg():
                 reject(node.origin, f"{display}() takes no keyword arguments")
     return values
@@ -401,10 +448,22 @@ def _signature_arguments(
             case PosArg(value=value):
                 positional.append(_argument(interp, value, frame, sink))
             case StarArg(value=value):
-                positional.extend(_aggregate.splice_items(node.origin, interp.expr(value, frame, sink)))
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                positional.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg(name=name, value=value):
                 keywords[name] = _argument(interp, value, frame, sink)
     return positional, keywords
+
+
+def _demand_descriptor_receiver(origin: Origin, display: str, raw: object, values: list[Value]) -> None:
+    """
+    CPython rejects a non-ndarray receiver on an unbound ndarray method; a spelling that could never run
+    as its own reference must refuse rather than quietly apply the stub.
+    """
+    if getattr(raw, "__objclass__", None) is not np.ndarray:
+        return
+    if not values or not isinstance(values[0], TensorValue):
+        reject(origin, f"{display} is an unbound ndarray method, so its first argument must be an array")
 
 
 def _operator_call(
@@ -453,6 +512,23 @@ def _scalar_call(
     return apply(interp, chosen.operator, conformed, origin, sink)
 
 
+def _lifted_call(
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    match: ScalarFunction,
+    tensor: TensorValue,
+    frame: Frame,
+    sink: Sink,
+) -> TensorValue:
+    leaves: list[Scalar] = []
+    for leaf in tensor.leaves:
+        result = _scalar_call(interp, origin, display, match, [_scalar_leaf(origin, leaf)], frame, sink)
+        leaves.append(scalar(result, origin))
+    interp.budget.spend(len(leaves), origin, "the elementwise operation")
+    return TensorValue(tensor.shape, leaves[0].stype, tuple(leaves), Allocation())
+
+
 def _operand(value: Scalar) -> Operand:
     if isinstance(value, StaticScalar):
         const = _ops.const_value(value.const)
@@ -470,9 +546,12 @@ def _array_call(
     frame: Frame,
     sink: Sink,
 ) -> Value:
-    if any(isinstance(value, SequenceValue) for value in values):
+    if any(
+        isinstance(value, RangeValue) or (isinstance(value, SequenceValue) and position not in match.sequences)
+        for position, value in enumerate(values)
+    ):
         # Before the stub, so the rejection reads the same however the operation was spelled.
-        reject(origin, "an array operation on a Python list/tuple is not supported; build one with np.array([...])")
+        reject(origin, _LIST_ADVICE)
     result = interp.inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
     if match.derives and isinstance(values[0], TensorValue) and isinstance(result, TensorValue):
         share(values[0])
@@ -480,15 +559,108 @@ def _array_call(
     return result
 
 
-def _tensor_method(interp: Interpreter, node: Call, method: TensorMethod, frame: Frame, sink: Sink) -> Value:
-    found = resolve(getattr(np.ndarray, method.name))
-    assert isinstance(found, Array), "a minted method stays resolvable"
+def _bound_method(interp: Interpreter, node: Call, method: BoundMethod, frame: Frame, sink: Sink) -> Value:
+    receiver = method.receiver
     display = f".{method.name}"
-    values = _positional_arguments(interp, node, display, frame, sink)
-    arity = found.stub.__code__.co_argcount - 1
+    if isinstance(receiver, TensorValue):
+        found = resolve(getattr(np.ndarray, method.name))
+        if isinstance(found, Reshape):
+            values = _operand_arguments(interp, node, display, frame, sink)
+            return _reshape(node.origin, display, receiver, values)
+        assert isinstance(found, Array), "a minted method stays resolvable"
+        values = _positional_arguments(interp, node, display, frame, sink)
+        high = found.stub.__code__.co_argcount - 1
+        low = high - len(found.stub.__defaults__ or ())
+        if not low <= len(values) <= high:
+            expected = str(low) if low == high else f"{low} to {high}"
+            reject(node.origin, f"{display}() takes {expected} argument(s), got {len(values)}")
+        return _array_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
+    scalar_found = resolve(getattr(host_type(receiver.stype), method.name))
+    assert isinstance(scalar_found, ScalarFunction), "a minted method stays resolvable"
+    values = _operand_arguments(interp, node, display, frame, sink)
+    arity = scalar_found.arity - 1
     if len(values) != arity:
         reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
-    return _array_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
+    return _scalar_call(interp, node.origin, display, scalar_found, [receiver, *values], frame, sink)
+
+
+def _option_arguments(
+    interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink, *, option: str
+) -> tuple[Value, Value | None]:
+    """
+    The non-aliasing one-option binder: exactly one positional subject, plus `option` given as the second
+    positional or as its keyword -- the shape numpy's own conversion/reshape signatures share.
+    """
+    positional: list[Value] = []
+    named: Value | None = None
+    for arg in node.args:
+        match arg:
+            case PosArg(value=value):
+                positional.append(interp.expr(value, frame, sink))
+            case StarArg(value=value):
+                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
+                positional.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
+            case KwArg(name=name, value=value) if name == option:
+                named = interp.expr(value, frame, sink)
+            case KwArg(name=name):
+                reject(node.origin, f"{display}() takes no keyword argument {name!r} (only {option})")
+    if len(positional) == 2 and named is None:
+        named = positional.pop()
+    if len(positional) != 1:
+        reject(node.origin, f"{display}() takes one positional argument plus an optional {option}")
+    return positional[0], named
+
+
+def _reshape(origin: Origin, display: str, base: Value, dim_values: list[Value]) -> TensorValue:
+    """
+    C-order reshape preserves the flat row-major leaf sequence: the same leaves over new dims, a derivation
+    sharing the source allocation since the host MAY answer a view.
+    """
+    if isinstance(base, SequenceValue):
+        reject(origin, _LIST_ADVICE)
+    if not isinstance(base, TensorValue):
+        reject(origin, f"{display}() requires an array, not {_aggregate.a_kind(base)}")
+    if len(dim_values) == 1 and isinstance(dim_values[0], SequenceValue):
+        dim_values = list(dim_values[0].items)
+    if not dim_values:
+        reject(origin, f"{display}() requires a shape (an int or a tuple of ints)")
+    dims = [_aggregate.static_index(origin, value, "a reshape dimension") for value in dim_values]
+    if any(dim < 0 for dim in dims):
+        reject(origin, f"{display}() does not support dimension inference (-1); spell the dimension explicitly")
+    if len(dims) > 2 or 0 in dims:
+        reject(origin, f"{display}() supports only non-empty 1-D and 2-D shapes, got {tuple(dims)}")
+    if math.prod(dims) != len(base.leaves):
+        reject(origin, f"cannot reshape an array of size {len(base.leaves)} into shape {tuple(dims)}")
+    share(base)
+    return TensorValue(tuple(dims), base.family, base.leaves, base.allocation)
+
+
+def _construct_record(interp: Interpreter, node: Call, display: str, cls: type, frame: Frame, sink: Sink) -> Value:
+    """
+    Structural construction: the generated __init__ never runs; arguments bind by its signature and conform
+    strictly to the field annotations.
+    """
+    reason = record_inadmissible(cls)
+    if reason is not None:
+        reject(node.origin, reason)
+    positional, keywords = _signature_arguments(interp, node, frame, sink)
+    try:
+        bound = inspect.signature(cls).bind(*positional, **keywords)
+    except TypeError as error:
+        reject(node.origin, f"the arguments do not bind: {error}")
+    bound.apply_defaults()
+    annotations = interp.record_annotations(cls, node.origin)
+    fields: list[Value] = []
+    for field in dataclasses.fields(cls):
+        value = bound.arguments[field.name]
+        if not isinstance(value, VALUE_KINDS):
+            value = interp.snapshot.admit(f"{display}.{field.name}", value, node.origin)
+        fields.append(
+            interp.conform_annotation(
+                value, annotations[field.name], node.origin, sink, f"the field {field.name!r} of {display}()"
+            )
+        )
+    return RecordValue(cls, tuple(fields), Allocation())
 
 
 def _factory(interp: Interpreter, node: Call, display: str, match: Factory, frame: Frame, sink: Sink) -> Value:
@@ -524,43 +696,113 @@ def _len(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
             return StaticScalar(_ops.make_const(len(items)))
         case TensorValue(shape=shape):
             return StaticScalar(_ops.make_const(shape[0]))
+        case RangeValue() as found:
+            span = _aggregate.static_range(found)
+            if span is None:
+                reject(node.origin, "len() of a range with a runtime bound is not supported")
+            try:
+                return StaticScalar(_ops.make_const(len(span)))
+            except OverflowError:
+                reject(node.origin, "len() of this range overflows, exactly as it does in CPython")
         case _:
             reject(node.origin, f"len() requires an aggregate, not {_aggregate.a_kind(values[0])}")
 
 
-def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> SequenceValue:
+def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> RangeValue:
     values = _operand_arguments(interp, node, "range", frame, sink)
     if not 1 <= len(values) <= 3:
         reject(node.origin, f"range() takes 1 to 3 arguments, got {len(values)}")
-    bounds = [_aggregate.static_index(node.origin, value, "a range argument") for value in values]
-    try:
-        span = range(*bounds)
-    except ValueError as error:
-        reject(node.origin, f"range() rejects its arguments: {error}")
-    # The length in exact arithmetic: len() of a huge range overflows Py_ssize_t, and the charge must
-    # land as the located budget rejection before any materialization.
-    length = max(0, (span.stop - span.start + span.step - (1 if span.step > 0 else -1)) // span.step)
-    interp.budget.spend(max(length, 1), node.origin, "the range materialization")
-    return SequenceValue(tuple(StaticScalar(_ops.make_const(i)) for i in span), Allocation())
+    bounds: list[Scalar] = []
+    for value in values:
+        match value:
+            case StaticScalar() | ResidualScalar() if value.stype is ScalarType.INT:
+                bounds.append(value)
+            case StaticScalar() | ResidualScalar():
+                reject(node.origin, f"a range argument must be an int, not a {value.stype.value}")
+            case _:
+                reject(node.origin, f"a range argument must be an int, not {_aggregate.a_kind(value)}")
+    start = bounds[0] if len(bounds) >= 2 else StaticScalar(_ops.make_const(0))
+    stop = bounds[1] if len(bounds) >= 2 else bounds[0]
+    match bounds[2] if len(bounds) == 3 else StaticScalar(_ops.make_const(1)):
+        case StaticScalar(const=const):
+            step = _ops.const_value(const)
+            assert isinstance(step, int)
+        case ResidualScalar():
+            reject(
+                node.origin,
+                "the range step must be a compile-time constant int: its sign selects the loop "
+                "direction, and a zero step is a ValueError at range() construction",
+            )
+    if step == 0:
+        reject(node.origin, "range() rejects its arguments: range() arg 3 must not be zero")
+    return RangeValue(start, stop, step)
+
+
+def _enumerate(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> IteratorValue:
+    """
+    The pairs are an eager snapshot where CPython's iterator is lazy, so the source is shared (a mid-iteration
+    store would read stale leaves -- the conservative refusal mirrors the borrow on a directly iterated
+    aggregate); the iterator kind itself carries the exhausted-after-one-pass semantics.
+    """
+    source, start = _option_arguments(interp, node, "enumerate", frame, sink, option="start")
+    begin = 0 if start is None else _aggregate.static_index(node.origin, start, "the enumerate start")
+    decayed = _aggregate.decay(interp.budget, source, node.origin)
+    items = _aggregate.splice_items(node.origin, decayed, interp.loop_passes())
+    share(decayed)
+    pairs = tuple(
+        SequenceValue((StaticScalar(_ops.make_const(begin + position)), item), Allocation())
+        for position, item in enumerate(items)
+    )
+    interp.budget.spend(max(len(pairs), 1), node.origin, "the enumerate expansion")
+    return IteratorValue(pairs, tuple(interp.loop_passes()))
 
 
 def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> Value:
     values = _operand_arguments(interp, node, display, frame, sink)
     if len(values) != 1:
         reject(node.origin, f"{display}() takes exactly one aggregate argument here")
-    source = values[0]
-    if not isinstance(source, _AGGREGATE):
+    source = _aggregate.decay(interp.budget, values[0], node.origin)
+    if not isinstance(source, (*AGGREGATES, IteratorValue)):
         reject(node.origin, f"{display}() requires an aggregate argument")
-    children = _aggregate.splice_items(node.origin, source)
+    children = _aggregate.splice_items(node.origin, source, interp.loop_passes())
     interp.budget.spend(max(len(children), 1), node.origin, "the sequence conversion")
     return SequenceValue(tuple(children), Allocation())
 
 
+def _conversion_arguments(
+    interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink
+) -> tuple[Value, ScalarType | None]:
+    source, dtype = _option_arguments(interp, node, display, frame, sink, option="dtype")
+    if dtype is None:
+        return source, None
+    family = annotation_stype(dtype.value) if isinstance(dtype, Opaque) else None
+    if family is ScalarType.BOOL:
+        reject(node.origin, "an array must hold numbers, not booleans")
+    if family is None:
+        reject(node.origin, f"the dtype of {display}() must be the Python type float or int")
+    return source, family
+
+
 def _to_tensor(
-    interp: Interpreter, origin: Origin, display: str, value: Value, sink: Sink, *, copies: bool
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    value: Value,
+    sink: Sink,
+    *,
+    copies: bool,
+    family: ScalarType | None = None,
 ) -> TensorValue:
+    value = _aggregate.decay(interp.budget, value, origin)
     match value:
         case TensorValue():
+            if family is not None and family is not value.family:
+                # A family change copies on the host even under asarray, hence the fresh allocation.
+                converted = tuple(
+                    tensor_leaf(interp, origin, family, leaf, sink, explicit=True) for leaf in value.leaves
+                )
+                interp.budget.spend(len(converted), origin, "the array conversion")
+                return TensorValue(value.shape, family, converted, Allocation())
             if copies:
                 return TensorValue(value.shape, value.family, value.leaves, Allocation())
             # The non-copying conversion reuses the source allocation as a storage-equivalence token,
@@ -571,14 +813,11 @@ def _to_tensor(
             if not items:
                 reject(origin, f"{display}() of an empty sequence is not supported")
             shape, leaves = _tensor_rows(origin, display, items)
-            for leaf in leaves:
-                if not isinstance(leaf, Opaque) and leaf.stype is ScalarType.BOOL:
-                    reject(origin, "an array must hold numbers, not booleans")
-            if any(isinstance(leaf, Opaque) or leaf.stype is ScalarType.FLOAT for leaf in leaves):
-                family = ScalarType.FLOAT
-            else:
-                family = ScalarType.INT
-            conformed = [tensor_leaf(interp, origin, family, leaf, sink) for leaf in leaves]
+            explicit = family is not None
+            if family is None:
+                floaty = any(isinstance(leaf, Opaque) or leaf.stype is ScalarType.FLOAT for leaf in leaves)
+                family = ScalarType.FLOAT if floaty else ScalarType.INT
+            conformed = [tensor_leaf(interp, origin, family, leaf, sink, explicit=explicit) for leaf in leaves]
             interp.budget.spend(len(conformed), origin, "the array conversion")
             return TensorValue(shape, family, tuple(conformed), Allocation())
         case _:
@@ -613,19 +852,34 @@ def _tensor_rows(
 
 
 def tensor_leaf(
-    interp: Interpreter, origin: Origin, family: ScalarType, leaf: Scalar | Opaque, sink: Sink
+    interp: Interpreter,
+    origin: Origin,
+    family: ScalarType,
+    leaf: Scalar | Opaque,
+    sink: Sink,
+    *,
+    explicit: bool = False,
 ) -> Scalar | Opaque:
+    """
+    `explicit` marks a spelled dtype request, which converts (bool widens, float truncates, as numpy defines)
+    where the implicit paths refuse.
+    """
     if isinstance(leaf, Opaque):
         if family is not ScalarType.FLOAT or not nan_payload(leaf.value):
             reject(origin, _describe_opaque(leaf))
         return leaf
+    if leaf.stype is family:
+        return leaf
     if leaf.stype is ScalarType.BOOL:
-        reject(origin, "an array must hold numbers, not booleans")
+        if not explicit:
+            reject(origin, "an array must hold numbers, not booleans")
+        return apply(interp, _ops.CONVERT[(ScalarType.BOOL, family)], [leaf], origin, sink)
     if family is ScalarType.FLOAT:
         return interp.as_float(leaf, origin, sink)
-    if leaf.stype is ScalarType.FLOAT:
+    assert leaf.stype is ScalarType.FLOAT and family is ScalarType.INT
+    if not explicit:
         reject(origin, "storing a float into an integer array truncates on the host; rebind a float array instead")
-    return leaf
+    return apply(interp, _ops.CONVERT[(ScalarType.FLOAT, ScalarType.INT)], [leaf], origin, sink)
 
 
 def bind_signature(
@@ -645,7 +899,7 @@ def bind_signature(
     bound.apply_defaults()
     bindings: dict[str, Value] = {}
     for name, value in bound.arguments.items():
-        if isinstance(value, (StaticScalar, ResidualScalar, Opaque, SequenceValue, TensorValue, TensorMethod)):
+        if isinstance(value, VALUE_KINDS):
             bindings[name] = value
         else:
             bindings[name] = interp.snapshot.admit(name, value, site)  # an injected default: a plain Python object

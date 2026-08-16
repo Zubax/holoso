@@ -2,24 +2,24 @@
 Reach-aware register coloring over an explicit interference graph.
 
 The engine is bank- and timeline-agnostic: register sharing is decided entirely by the symmetric interference graph the
-caller supplies (built in :mod:`._liveness` from per-block hardware-frame residence, the same executing-step frame as
-``Lir.reg_liveness``), so the one ``color`` routine colors a straight-line block or a whole control-flow graph, and
-either the wide or the boolean bank. The interference graph already encodes the read-first ``R(a) < W(b)`` rule and the
+caller supplies (built in ._liveness from per-block hardware-frame residence, the same executing-step frame as
+`Lir.reg_liveness`), so the one `color` routine colors a straight-line block or a whole control-flow graph, and
+either the wide or the boolean bank. The interference graph already encodes the read-first `R(a) < W(b)` rule and the
 path-awareness of mutually-exclusive arms; this module only places values onto registers given those constraints.
 
 Unlike a CPU register allocator, the primary objective is NOT to minimize the register count: flip-flops are abundant on
 an FPGA and interconnect is scarce, so the cost that matters most is *steering* -- the fan-in of the per-port read muxes
 and the per-register write selects of the sparse register file synthesized in the backend. The primary objective is
-therefore total mux fan-in: ``sum_p max(0, |read-set(p)| - 1) + sum_r max(0, |writers(r)| - 1)``, where a read port
-``p`` is one operator ``(instance, operand-position)`` and ``writers(r)`` are the distinct producers of the values
-placed in register ``r``. Two values read by the same port that do not interfere are best placed in the same register so
+therefore total mux fan-in: `sum_p max(0, |read-set(p)| - 1) + sum_r max(0, |writers(r)| - 1)`, where a read port
+`p` is one operator `(instance, operand-position)` and `writers(r)` are the distinct producers of the values
+placed in register `r`. Two values read by the same port that do not interfere are best placed in the same register so
 that port reaches one register, not two; values produced by the same instance likewise want to share a register so its
 write port fans into one place.
 
 Register count is a bounded *secondary* objective. A register costs flip-flops but no steering, so it is worth shedding
 only when doing so widens a write select modestly: the allocator colors twice -- once reach-minimal, once compacting
-into shared registers up to a write-select cap -- and keeps whichever minimizes ``reach + price * registers`` (see
-:class:`RegallocTuning`). The reach-minimal coloring is always a candidate, so trading for fewer registers never raises
+into shared registers up to a write-select cap -- and keeps whichever minimizes `reach + price * registers` (see
+RegallocTuning). The reach-minimal coloring is always a candidate, so trading for fewer registers never raises
 steering by more than the price paid per register freed.
 
 The allocator is a port-affinity-biased graph coloring (each value takes the same-interference-free register of least
@@ -39,7 +39,7 @@ from .._util import ValueId
 from ._ir import OperatorInstance, ReadPort
 
 # Write-source identity: an operator instance, the input load, or a per-slot state writer -- opaque keys for grouping
-# the write-select fan-in objective. The read-port identity ``ReadPort`` lives in ``_ir`` beside its enumerator.
+# the write-select fan-in objective. The read-port identity `ReadPort` lives in `_ir` beside its enumerator.
 type Producer = OperatorInstance | str
 
 _NO_CAP = 1 << 30  # an effectively unbounded write-select budget, used for the reach-minimal coloring
@@ -49,9 +49,9 @@ _INFEASIBLE_COST = 1e18  # annealing penalty for an undecodable point (far above
 @dataclass(frozen=True, slots=True)
 class RegallocTuning:
     """
-    ``effort`` is the annealing function-evaluation budget, ``reuse_write_cap`` bounds the per-register write select
-    the compaction may build, and ``register_price`` is what one freed register is worth in mux-arm units: the
-    allocator minimizes ``reach + register_price * registers``.
+    `effort` is the annealing function-evaluation budget, `reuse_write_cap` bounds the per-register write select
+    the compaction may build, and `register_price` is what one freed register is worth in mux-arm units: the
+    allocator minimizes `reach + register_price * registers`.
     """
 
     effort: int
@@ -63,22 +63,22 @@ class RegallocTuning:
 class ColoringProblem:
     """
     A register-coloring instance decoupled from any single timeline: register sharing is decided by an explicit
-    interference graph (see :mod:`._liveness`), so the same engine colors a straight-line block or a whole CFG, and
+    interference graph (see ._liveness), so the same engine colors a straight-line block or a whole CFG, and
     either register bank.
 
-    ``movable`` are the values to place (in a stable order); ``pinned`` fixes inputs and state live-ins to their
-    registers; ``interferes`` is the symmetric adjacency; ``consumer_ports`` and ``producer_key`` drive the mux-fan-in
-    objective; ``fresh_start`` is the first register index above the pinned block. There is no write-path restriction:
+    `movable` are the values to place (in a stable order); `pinned` fixes inputs and state live-ins to their
+    registers; `interferes` is the symmetric adjacency; `consumer_ports` and `producer_key` drive the mux-fan-in
+    objective; `fresh_start` is the first register index above the pinned block. There is no write-path restriction:
     the emitter drives every register with a single write opcode selecting among all its writers, so any two
     non-interfering values may share a register regardless of whether they are produced by an operator, a phi-arm copy,
     or a cast.
 
-    ``producer_key`` is a SET of producers per value, not a single one: a coalesced phi class is one ``movable`` entry
+    `producer_key` is a SET of producers per value, not a single one: a coalesced phi class is one `movable` entry
     backed by every arm operator that writes its register, so the write-select fan-in counts the union of those
     producers. A non-coalesced value carries a singleton set, recovering the one-producer-per-value objective exactly.
-    A phi contributes a single placeholder producer (``phi:<vid>``) rather than one key per residual arm copy; this is a
+    A phi contributes a single placeholder producer (`phi:<vid>`) rather than one key per residual arm copy; this is a
     deliberate approximation that the annealer tolerates (it may miscount a phi register's fan-in by a copy or two, and
-    never affects coloring validity) -- the honest steering cost is the ground-truth ``Lir.write_select_fanin``.
+    never affects coloring validity) -- the honest steering cost is the ground-truth `Lir.write_select_fanin`.
     """
 
     movable: list[ValueId]
@@ -93,7 +93,7 @@ class ColoringProblem:
 def color(problem: ColoringProblem) -> tuple[dict[ValueId, int], int]:
     """
     Color one bank by the reach-aware objective: a port-affinity greedy seed (reach-minimal and cap-compacted), the
-    cheaper of the two by ``reach + price * registers``, refined by simulated annealing. Reduces to the straight-line
+    cheaper of the two by `reach + price * registers`, refined by simulated annealing. Reduces to the straight-line
     coloring on a single block because the interference graph there is exactly the interval-overlap graph.
     """
     cap, price = problem.tuning.reuse_write_cap, problem.tuning.register_price
@@ -120,7 +120,7 @@ def color(problem: ColoringProblem) -> tuple[dict[ValueId, int], int]:
 def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[ValueId, int]:
     """
     Port-affinity-biased graph coloring. Each value takes a register whose occupants it does not interfere with, of
-    least marginal mux growth (``compact`` ranks any admissible reused register ahead of a fresh one); a fresh register
+    least marginal mux growth (`compact` ranks any admissible reused register ahead of a fresh one); a fresh register
     is the fallback. With one block this reproduces the straight-line linear scan exactly.
     """
     assign: dict[ValueId, int] = {}
@@ -182,8 +182,8 @@ def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[Val
 
 def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int, cap: int) -> dict[ValueId, int]:
     """
-    Refine the greedy coloring with ``scipy.optimize.dual_annealing``. Each movable value gets a continuous coordinate
-    in ``[0, nreg)``; a decode repairs it to the nearest same-pool register free of interference and within the
+    Refine the greedy coloring with `scipy.optimize.dual_annealing`. Each movable value gets a continuous coordinate
+    in `[0, nreg)`; a decode repairs it to the nearest same-pool register free of interference and within the
     write-select budget. Every evaluated point is a valid coloring and the seed is the start, so the pass only improves.
     """
     order = problem.movable

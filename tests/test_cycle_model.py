@@ -1,10 +1,10 @@
 """
-Tests for the cycle-accurate :class:`NumericalSimulator`: the per-clock ``tick`` interface, the data-dependent latency
+Tests for the cycle-accurate NumericalSimulator: the per-clock `tick` interface, the data-dependent latency
 a caller recovers by counting ticks, and bounded-memory execution of an arbitrarily deep loop.
 
 The bit-exactness of the outputs themselves is covered by the broad model-equivalence suites (which call the model
-transaction-level via ``run``) and, against the RTL, by the cycle-accurate cosim lockstep. Here we exercise the
-cycle-level behaviour: that ``tick`` reaches ``out_valid`` on the cycle the RTL would, that the count is data-dependent
+transaction-level via `run`) and, against the RTL, by the cycle-accurate cosim lockstep. Here we exercise the
+cycle-level behaviour: that `tick` reaches `out_valid` on the cycle the RTL would, that the count is data-dependent
 on a branchy/looping kernel, and that a hard loop does not blow up state.
 """
 
@@ -15,14 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from holoso import FloatFormat
-from holoso._backend.numerical import ModelInput, ModelOutput, NumericalSimulator
-from holoso._eel import lower
-from holoso._hir import optimize
-from holoso._lir import Lir
-from holoso._mir import lower as lower_to_mir
+import holoso
+from holoso import BoolType, FloatFormat, NumericalSimulator, SynthesisResult
+from holoso._value import ScalarLike, ScalarValue
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops
+from ._modelref import default_options
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -41,14 +38,18 @@ from schmitt_trigger import SchmittTrigger  # noqa: E402
 _FMT = FloatFormat(8, 36)
 
 
-def _random_inputs(lir: Lir, rng: random.Random) -> list[ModelInput]:
+def _synthesize(factory: Callable[[], Callable[..., object]], name: str) -> SynthesisResult:
+    return holoso.synthesize(factory(), default_options(_FMT), name=name)
+
+
+def _random_inputs(model: NumericalSimulator, rng: random.Random) -> list[ScalarLike]:
     return [
-        bool(rng.randint(0, 1)) if type(load).__name__ == "BoolInputLoad" else rng.uniform(-3.0, 3.0)
-        for load in lir.inputs
+        bool(rng.randint(0, 1)) if isinstance(port.scalar_type, BoolType) else rng.uniform(-3.0, 3.0)
+        for port in model.inputs
     ]
 
 
-def _drive(model: NumericalSimulator, inputs: list[ModelInput]) -> tuple[list[ModelOutput], int]:
+def _drive(model: NumericalSimulator, inputs: list[ScalarLike]) -> tuple[list[ScalarValue], int]:
     model.set_inputs(*inputs)
     while not model.in_ready:
         model.tick(in_valid=False, out_ready=True)
@@ -66,17 +67,12 @@ def _drive(model: NumericalSimulator, inputs: list[ModelInput]) -> tuple[list[Mo
 def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., object]]) -> None:
     # The hand-driven tick loop and the run() convenience must produce the same outputs: run() is just a tick
     # driver, and the cycle count it would observe is the loop count below.
-    lir = build_lir(
-        lower_to_mir(
-            optimize(lower(factory()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
-        name,
-    )
-    by_tick = NumericalSimulator(lir)
-    by_call = NumericalSimulator(lir)
+    result = _synthesize(factory, name)
+    by_tick = result.numerical_model.elaborate()
+    by_call = result.numerical_model.elaborate()
     rng = random.Random(1)
     for _ in range(8):
-        inputs = _random_inputs(lir, rng)
+        inputs = _random_inputs(by_tick, rng)
         ticked_out, _cycles = _drive(by_tick, inputs)
         called_out = by_call.run(*inputs)
         assert [v.bits for v in ticked_out] == [v.bits for v in called_out]  # type: ignore[union-attr]
@@ -84,7 +80,7 @@ def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., obje
 
 @pytest.mark.parametrize("name", ["madd", "poly3", "cordic_sincos", "ekf1_stateless"])
 def test_single_path_latency_is_the_static_initiation_interval(name: str) -> None:
-    # A kernel with one forward path takes exactly ``initiation_interval - 1`` cycles from the accept edge (pc==1) to
+    # A kernel with one forward path takes exactly `initiation_interval - 1` cycles from the accept edge (pc==1) to
     # out_valid (pc==LASTPC) -- the cycle count a caller recovers by counting ticks, here the static lower bound.
     factories: dict[str, Callable[[], Callable[..., object]]] = {
         "madd": lambda: madd.madd,
@@ -92,50 +88,33 @@ def test_single_path_latency_is_the_static_initiation_interval(name: str) -> Non
         "cordic_sincos": lambda: CordicSinCos().__call__,
         "ekf1_stateless": lambda: update_x_P,
     }
-    factory = factories[name]
-    lir = build_lir(
-        lower_to_mir(
-            optimize(lower(factory()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
-        name,
-    )
-    model = NumericalSimulator(lir)
+    result = _synthesize(factories[name], name)
+    ii_min, ii_max = result.initiation_interval
+    assert ii_max == ii_min, "a single forward path has an exact public latency"
+    model = result.numerical_model.elaborate()
     rng = random.Random(7)
     for _ in range(8):
-        _outputs, cycles = _drive(model, _random_inputs(lir, rng))
-        assert cycles == lir.initiation_interval - 1
+        _outputs, cycles = _drive(model, _random_inputs(model, rng))
+        assert cycles == ii_min - 1
 
 
 def test_loop_latency_grows_with_the_trip_count() -> None:
     # Newton's reciprocal iterates until convergence, so a harder input runs more loop trips and a strictly longer
-    # transaction -- the data-dependent latency a fixed ``initiation_interval`` cannot express.
-    lir = build_lir(
-        lower_to_mir(
-            optimize(lower(NewtonReciprocal().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
-            default_ops(_FMT),
-            _FMT,
-            default_ifmt(_FMT),
-        ),
-        "recip",
-    )
-    model = NumericalSimulator(lir)
+    # transaction -- the data-dependent latency a fixed `initiation_interval` cannot express.
+    result = _synthesize(lambda: NewtonReciprocal().__call__, "recip")
+    model = result.numerical_model.elaborate()
     latencies = {_drive(model, [x])[1] for x in (0.5, 0.9, 1.3, 1.7, 2.5, 3.5, 6.0, 12.0)}
     assert len(latencies) >= 3, f"loop latency should vary with the trip count, saw {sorted(latencies)}"
-    assert min(latencies) > lir.min_initiation_interval, "every realized latency exceeds the not-taken lower bound"
+    assert min(latencies) > result.initiation_interval[0], "every realized latency exceeds the not-taken lower bound"
 
 
 def test_deep_loop_runs_in_bounded_memory() -> None:
     # The per-clock model holds only the register files and a small in-flight buffer, so a loop with a very high trip
-    # count executes without unbounded growth. ``count_down`` runs ``n`` iterations; at n=20000 that is hundreds of
+    # count executes without unbounded growth. `count_down` runs `n` iterations; at n=20000 that is hundreds of
     # thousands of ticks completing in bounded memory and time -- a global-timeline design would be O(trips^2).
-    lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_count_down).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
-        "count_down",
-    )
-    shallow_cycles = _drive(NumericalSimulator(lir), [10.0])[1]
-    model = NumericalSimulator(lir)
+    result = _synthesize(lambda: _count_down, "count_down")
+    shallow_cycles = _drive(result.numerical_model.elaborate(), [10.0])[1]
+    model = result.numerical_model.elaborate()
     out, deep_cycles = _drive(model, [20000.0])
     assert abs(float(out[0])) <= 1e-3
     assert deep_cycles > shallow_cycles * 100, "the deep run must genuinely iterate thousands of times"
@@ -158,14 +137,14 @@ def _count_down(n: float) -> float:
 # the loop trip count (recip_newton, remainder), and a branchy kernel's worst arm may not be its longest static path.
 # Each tuple is (factory, input vectors, frozen worst-case waited). The vectors are chosen to hit the draining/long
 # paths (schmitt's deadband, quadrature's simultaneous-change fault, pfd's both-pending, the loops' high-trip inputs).
-# The bound is ``<=`` so a future optimization may lower it; a regression that re-inflates a per-block drain trips it.
+# The bound is `<=` so a future optimization may lower it; a regression that re-inflates a per-block drain trips it.
 # If-conversion collapsed schmitt, pfd, and iir1_lpf to a single block (a fixed-latency transaction, down from tens of
 # cycles of branch-block drain); quadrature/recip/remainder stay multi-block and data-dependent. iir1_lpf is the
 # canonical "if-conversion RAISES min_ii but LOWERS realized latency" case (min_ii 15->21 as its rare cheap first-sample
 # path is unified away, yet every realized transaction is the steady-state 20 cycles, which only this guard pins -- the
 # static metrics gate sees only the raised min_ii).
 _T, _F = True, False
-_WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[ModelInput]], int]] = {
+_WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[ScalarLike]], int]] = {
     "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 5),
     "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 14),
     "quadrature_encoder": (
@@ -195,17 +174,11 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
 
 @pytest.mark.parametrize("name", list(_WORST_CASE_LATENCY))
 def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
-    # The realized per-transaction latency (the cosim bench's ``waited``) over a fixed adversarial input set must not
+    # The realized per-transaction latency (the cosim bench's `waited`) over a fixed adversarial input set must not
     # exceed its frozen worst case. This is the teeth behind the latency-reduction work: a per-block drain regression
     # re-inflates the count, amplified across loop trips. Freezing the post-optimization figure makes the gate fail on
-    # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is ``<=``).
+    # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is `<=`).
     factory, vectors, worst = _WORST_CASE_LATENCY[name]
-    lir = build_lir(
-        lower_to_mir(
-            optimize(lower(factory()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
-        name,
-    )
-    model = NumericalSimulator(lir)
+    model = _synthesize(factory, name).numerical_model.elaborate()
     waited = [_drive(model, inputs)[1] for inputs in vectors]
     assert max(waited) <= worst, f"{name}: realized worst-case latency regressed {worst} -> {max(waited)} ({waited})"

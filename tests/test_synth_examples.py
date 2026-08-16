@@ -1,12 +1,12 @@
 """
-End-to-end out-of-context synthesis of the example matrix: every ``SynthTarget`` is synthesized in-process and its
+End-to-end out-of-context synthesis of the example matrix: every `SynthTarget` is synthesized in-process and its
 achieved f_max is asserted to meet the target frequency on its tool. This is the timing-closure regression guard for
 RTL-generation changes -- the functional guarantee (RTL == model) lives in the cosimulation suite, and the
-deterministic scheduling guard in ``test_latency_freeze``; this layer owns the physical timing only.
+deterministic scheduling guard in `test_latency_freeze`; this layer owns the physical timing only.
 
-The whole module is ``synth``-marked (it needs an FPGA toolchain): ``nox -s synth_examples`` runs it and the normal
+The whole module is `synth`-marked (it needs an FPGA toolchain): `nox -s synth_examples` runs it and the normal
 suite skips it. A target whose flow's tool is absent skips individually, so a Yosys-only CI still exercises every Yosys
-row and the on-prem Diamond/Vivado rows skip cleanly, while ``test_some_target_flow_is_available`` fails loudly if no
+row and the on-prem Diamond/Vivado rows skip cleanly, while `test_some_target_flow_is_available` fails loudly if no
 tool is present at all, so a fully-missing toolchain cannot pass green.
 """
 
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.synth
 
 
 def test_some_target_flow_is_available() -> None:
-    # A safety net for the safety net: under ``-m synth`` an absent tool skips its targets, so with NO tool installed
+    # A safety net for the safety net: under `-m synth` an absent tool skips its targets, so with NO tool installed
     # every parametrized case would skip and the session would pass while verifying nothing. Fail loudly instead, so a
     # misconfigured CI (a lost toolchain) is caught rather than reported green.
     flows = {target.flow for target in TARGETS}

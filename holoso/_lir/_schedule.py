@@ -6,12 +6,12 @@ time and the backend controller is just a cycle counter replaying it. The schedu
 sharing one block, operator, operands, and operand conditioners while tapping distinct output ports fuse into a
 single firing (a multi-output module computes all its results at once), so each member value gets the same issue
 cycle and bound instance. Pooled operators contend for physical instances through per-instance busy windows (an
-instance accepts a new firing every ``initiation_interval`` cycles); inline operators are independent gates.
+instance accepts a new firing every `initiation_interval` cycles); inline operators are independent gates.
 
 Every firing issues from cycle 0, reclaiming each block's first control word: inputs and other block-resident operands
 load into the register array before that word reaches the datapath, so a consumer reads them from the first cycle.
-The entry block is no different -- the sequencer dwells at pc 0 while awaiting ``in_valid`` and re-fetches ``ucode[0]``
-each idle cycle, but the backend gates every operator's ``in_valid`` with ``transacting`` (see ``_emit``), so that
+The entry block is no different -- the sequencer dwells at pc 0 while awaiting `in_valid` and re-fetches `ucode[0]`
+each idle cycle, but the backend gates every operator's `in_valid` with `transacting` (see `_emit`), so that
 re-fetched word commits nothing and a cycle-0 issue is safe regardless of operator kind.
 """
 
@@ -46,7 +46,7 @@ class Schedule:
     # than being recomputed by every consumer of the schedule.
     latency: dict[ValueId, int]
     # Per pooled instance slot, the first cycle it is free again (last firing's issue + initiation_interval). An
-    # overlapping successor inherits this residue as its ``entry_busy`` so a firing bound to the same physical slot
+    # overlapping successor inherits this residue as its `entry_busy` so a firing bound to the same physical slot
     # waits out the predecessor's in-flight activation instead of double-driving it across the overlapped boundary.
     busy_until: dict[tuple[PooledHardwareOperator, int], int]
 
@@ -55,7 +55,7 @@ class Schedule:
 
     def commit_or_makespan(self, vid: ValueId) -> int:
         """
-        A tail install's source commit as seen from the install's own (predecessor) block: ``vid``'s commit if it is
+        A tail install's source commit as seen from the install's own (predecessor) block: `vid`'s commit if it is
         scheduled here, else this block's makespan. A source with no local commit -- a block-entry-resident value, a
         phi, or a value computed in another block -- falls back to the makespan; a resident install then stays at the
         makespan while a computed one (coincident with the makespan) is pushed one step past it. The single rule the
@@ -72,7 +72,7 @@ def _op(nodes: dict[ValueId, MirNode], vid: ValueId) -> MirOperation:
 
 
 def _operator_operands(nodes: dict[ValueId, MirNode], vid: ValueId, schedulable: set[ValueId]) -> list[ValueId]:
-    """Operand values scheduled alongside ``vid`` (same block); all other operands are resident at block start."""
+    """Operand values scheduled alongside `vid` (same block); all other operands are resident at block start."""
     return [operand for operand in _op(nodes, vid).operands if operand in schedulable]
 
 
@@ -80,10 +80,7 @@ def resolve_pool(nodes: dict[ValueId, MirNode]) -> dict[type[HardwareOperator], 
     """
     The per-class instance budget over the FULL node table: at least one of every pooled operator class present in
     the graph, whichever bank its taps land in (a comparator whose every tap is boolean still needs its instance).
-
-    The budget is applied per distinct hardware operator, so ``fmul_ilog2_const`` gets the requested number of
-    instances for each distinct ``K``. Only pooled (module-backed) operators are budgeted; inline operators carry no
-    physical instance.
+    Only pooled (module-backed) operators are budgeted; inline operators carry no physical instance.
     """
     pool: dict[type[HardwareOperator], int] = {}
     for node in nodes.values():
@@ -156,16 +153,16 @@ def schedule_ops(
     livein_landing: Mapping[ValueId, int] | None = None,
 ) -> Schedule:
     """
-    Place every firing of ``schedulable`` (one block's operations, across both register banks) on the earliest cycle
+    Place every firing of `schedulable` (one block's operations, across both register banks) on the earliest cycle
     its operands are ready and -- for a pooled firing -- a free instance exists. A single dependency-aware pass spans
     wide and boolean-result operations, so cross-bank chains (a value feeding a comparison feeding a cast) schedule
-    correctly without a barrier. Operands outside ``schedulable`` are block live-ins; under per-block draining each is
+    correctly without a barrier. Operands outside `schedulable` are block live-ins; under per-block draining each is
     resident at the block start (a prior block's drained result, a state read, an input, or a phi), but a predecessor
-    result spilled past an OVERLAPPED boundary lands mid-block instead -- ``livein_landing`` carries its block-local
+    result spilled past an OVERLAPPED boundary lands mid-block instead -- `livein_landing` carries its block-local
     landing cycle, and a consumer's operand read must not precede it. A pooled instance accepts a new firing every
-    ``initiation_interval`` cycles; ``entry_busy`` seeds each instance's busy window with the residue inherited from an
+    `initiation_interval` cycles; `entry_busy` seeds each instance's busy window with the residue inherited from an
     overlapping predecessor (empty under draining, where an instance is necessarily idle by the boundary for every
-    operator whose initiation interval stays within ``Lir.__post_init__``'s bound). Both carries are empty
+    operator whose initiation interval stays within `Lir.__post_init__`'s bound). Both carries are empty
     for a fully-drained block, leaving the schedule identical to an isolated per-block pass.
     """
     entry_busy = entry_busy or {}
@@ -190,7 +187,7 @@ def schedule_ops(
         return issue_cycle[vid] + _op(nodes, vid).operator.latency
 
     def is_ready(leader: ValueId, cycle: int) -> bool:
-        # A consumer may issue only ``dependency_edge`` cycles after a same-block operator producer commits -- the
+        # A consumer may issue only `dependency_edge` cycles after a same-block operator producer commits -- the
         # edge derives from the producer's result landing and the consumer's read mechanism (see _ir). Every
         # other operand -- a state read, an input, a phi, or a result drained in from a prior block -- is resident at
         # the block start (constants are immediates with no read constraint), so nothing else delays the firing.

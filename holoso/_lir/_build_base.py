@@ -7,7 +7,7 @@ here) to keep those stage modules acyclic.
 
 from dataclasses import dataclass
 
-from .._operators import BoolInversion, FloatSignControl, WideConditioner
+from .._operators import BoolInversion, WideConditioner
 from .._util import ValueId
 from ._ir import ReadPort
 from ._schedule import Schedule
@@ -17,13 +17,13 @@ from ._regalloc import Producer, RegallocTuning
 @dataclass(frozen=True, slots=True)
 class PooledConst:
     """
-    A constant's place in the pool. The conditioner stays a float sign control rather than widening with the other
-    wide-bank carriers because the pool folds sign into a free ``holoso_fsgnop`` sideband, which two's complement
-    cannot do; an integer pool needs a different scheme, not a wider field.
+    A constant's place in the pool, with the conditioner its consumers compose onto. Only the float half folds
+    anything there -- the magnitude/sign split rides the free `holoso_fsgnop` sideband, which two's complement has
+    no counterpart for -- so an integer entry is stored whole and carries the identity.
     """
 
     index: int
-    conditioner: FloatSignControl
+    conditioner: WideConditioner
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +63,7 @@ class OverlapLayout:
     The per-block schedule plus the install-inclusive makespan, the (possibly overlap-shrunk) terminator offset, and
     the spills each block receives -- the predecessor values landing in it past an overlapped terminator, mapped to
     their block-local landing cycle (fed to the allocator's liveness so a spilled register stays reserved in the
-    block, and identical to the scheduler's ``livein_landing`` so the two cannot drift). Empty under draining.
+    block, and identical to the scheduler's `livein_landing` so the two cannot drift). Empty under draining.
     """
 
     block_sched: dict[int, Schedule]

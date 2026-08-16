@@ -41,7 +41,7 @@ class StateRead:
 @dataclass(frozen=True, slots=True)
 class Phi:
     """
-    An SSA merge at a block's entry: one ``(predecessor_block, value)`` arm per incoming control edge. A phi is the one
+    An SSA merge at a block's entry: one `(predecessor_block, value)` arm per incoming control edge. A phi is the one
     node permitted to reference values that do not dominate its own block -- each arm value is live-out of its
     predecessor. Phis are never interned; each merge is a distinct value.
     """
@@ -96,8 +96,8 @@ def predecessors(blocks: list[Block]) -> dict[BlockId, set[BlockId]]:
 @dataclass(frozen=True, slots=True)
 class Block:
     """
-    Inputs, constants, and state reads are entry-global pure values and do not appear in any block's ``operations``
-    list; ``operations`` holds only the block's straight-line operations in evaluation order.
+    Inputs, constants, and state reads are entry-global pure values and do not appear in any block's `operations`
+    list; `operations` holds only the block's straight-line operations in evaluation order.
     """
 
     id: BlockId
@@ -166,11 +166,11 @@ class OutputPort:
 @dataclass(frozen=True, slots=True)
 class StateSlot:
     """
-    A persistent state register backing a written instance attribute. ``reset_value`` is the typed snapshot taken from
-    the instance at synthesis time and loaded at module reset; ``live_out`` is the value the attribute holds at the
+    A persistent state register backing a written instance attribute. `reset_value` is the typed snapshot taken from
+    the instance at synthesis time and loaded at module reset; `live_out` is the value the attribute holds at the
     function exit (often a phi merging the value across paths) and that must reside in the slot's register at the
     initiation boundary. Observability is not a slot property: a public attribute is exposed by a separate
-    ``state_<attr>`` output port that the frontend emits alongside the slot.
+    `state_<attr>` output port that the frontend emits alongside the slot.
     """
 
     name: str
@@ -181,7 +181,7 @@ class StateSlot:
 @dataclass(frozen=True, slots=True)
 class Hir:
     """
-    A complete HIR: the value DAG, the CFG of basic blocks (``blocks[0]`` is the entry), ordered inputs, named
+    A complete HIR: the value DAG, the CFG of basic blocks (`blocks[0]` is the entry), ordered inputs, named
     outputs, and persistent state slots. The frontend emits structured, reducible control flow with a single exit.
     """
 
@@ -206,6 +206,15 @@ class Hir:
                 refs.append(block.terminator.cond)
         return refs
 
+    def value_types(self) -> frozenset[Type]:
+        """
+        What sizes the machine word: a family absent from the graph needs no room in the wide register, however the
+        machine is configured. Node types alone are complete -- every operand is itself a node, so a comparison's
+        boolean result cannot hide its integer operands, and a slot's reset shares its live-out's type by the
+        selection gate's own rule.
+        """
+        return frozenset(node.type for node in self.nodes.values())
+
     def input_names(self) -> list[str]:
         names: list[str] = []
         for vid in self.input_ids:
@@ -224,10 +233,10 @@ class _BlockUnderConstruction:
 
 class HirBuilder:
     """
-    Builds an :class:`Hir`. The first :meth:`block` is the entry. Inputs, constants, and state reads are entry-global
+    Builds an Hir. The first block is the entry. Inputs, constants, and state reads are entry-global
     (constants and state reads are interned so identical ones share an id); operations are interned within their block,
     so an identical expression evaluated in two sibling arms stays two distinct values (only the taken arm runs).
-    Phis are never interned. A block is sealed by :meth:`jump` / :meth:`branch` / :meth:`ret`.
+    Phis are never interned. A block is sealed by jump / branch / ret.
     """
 
     def __init__(self) -> None:
@@ -360,13 +369,13 @@ class HirBuilder:
     def open_phi(self, type: Type, entry_arm: tuple[BlockId, ValueId]) -> ValueId:
         """
         Create a loop-header phi carrying only its entry (preheader) arm; the latch (back-edge) arm is supplied later
-        by :meth:`set_phi_arms`, once the loop body -- which references this phi as the loop-carried value -- has been
-        lowered. This is the one forward reference in HIR construction; ``finish`` validates that the phi was closed.
+        by set_phi_arms, once the loop body -- which references this phi as the loop-carried value -- has been
+        lowered. This is the one forward reference in HIR construction; `finish` validates that the phi was closed.
         """
         return self.phi(type, [entry_arm])
 
     def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId]]) -> None:
-        """Closes a loop-header phi opened by :meth:`open_phi`, once the latch (back-edge) arm is known."""
+        """Closes a loop-header phi opened by open_phi, once the latch (back-edge) arm is known."""
         node = self._nodes[phi]
         if not isinstance(node, Phi):
             raise ValueError(f"value {phi} is not a phi")

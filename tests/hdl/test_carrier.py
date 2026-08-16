@@ -1,6 +1,6 @@
 """
 The one property no model can observe: a float occupies only the low bits of the wide register, so nothing ever SETS
-a bit above ``WFLT`` (an unwritten datapath register reads X, being outside the reset cone). Both oracles store typed
+a bit above `WFLT` (an unwritten datapath register reads X, being outside the reset cone). Both oracles store typed
 values rather than register words, so this is checkable only against the RTL, and only where the integer is wider.
 """
 
@@ -15,11 +15,10 @@ from cocotb_tools.runner import get_runner
 from holoso import FAddOptions, FCmpOptions, FMulILog2Options, FMulOptions, FloatFormat, OperatorOptions, Options
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._mir import lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, drive_reset, sources, start_clock
-from .._modelref import DEFAULT_IFCONV_MAX_OPS, build_lir, build_ops
+from .._modelref import build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 
 FMT = FloatFormat(6, 18)
 WINT_MIN = 33
@@ -84,15 +83,10 @@ async def float_leaves_the_upper_carrier_bits_clear(dut: Any) -> None:
 def test_float_leaves_the_upper_carrier_bits_clear(sim: str) -> None:
     options = _options()
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_Accumulate().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
-            build_ops(options),
-            options.ffmt,
-            options.ifmt,
-        ),
+        lower_to_mir(lower(_Accumulate().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         "carrier",
     )
-    assert lir.regfile.width == WINT_MIN > options.ffmt.width
+    assert lir.int_format.width == WINT_MIN > options.ffmt.width
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / "carrier"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "carrier.v"

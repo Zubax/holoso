@@ -4,12 +4,12 @@ The ANF transformer: whitelisted CPython AST -> Eel, materializing evaluation or
 Every non-atomic subexpression is hoisted to a fresh temp in CPython evaluation order; operands are atoms.
 Conditionally-evaluated positions (conditional-expression arms, comparison-chain suffixes) become real guarded
 branches assigning a result temp — never eager hoists, so a loop or non-speculatable operation in an untaken
-arm cannot execute. ``and``/``or`` stay eager binary gates, which is a deliberate deviation from Python.
+arm cannot execute. `and`/`or` stay eager binary gates, which is a deliberate deviation from Python.
 
 Atom embedding is sound because constants are immutable, aggregate contents are only read through hoisted
 non-atomic expressions and written by store statements, and the one intra-statement rebinder — the walrus — is
 rejected whenever the same expression region also reads its target name (the augmented-assignment target
-counts as a read: ``x += (x := 2)`` reads the old x in CPython).
+counts as a read: `x += (x := 2)` reads the old x in CPython).
 """
 
 import ast
@@ -74,6 +74,7 @@ class _Transformer:
         self._unit = unit
         self._classifier = classifier
         self._temp_count = 0
+        self._mark_count = 0
         self._comp_count = 0
         self._comp_renames: list[tuple[str, str]] = []
 
@@ -126,6 +127,10 @@ class _Transformer:
                 self._reject(node, "an `...` statement has no effect (a stub body cannot be synthesized)")
             case ast.Expr(value=ast.Yield() | ast.YieldFrom()):
                 self._reject(node, "generators are not supported")
+            case ast.Expr(value=ast.Call() as call):
+                # A bare call runs for its effects (a void state-writing helper).
+                self._to_temp(call, self._call(call, sink), sink)
+                self._check_region([call])
             case ast.Expr():
                 self._reject(node, "expression statement result is unused; bind it to a name or remove it")
             case ast.Assert() | ast.Pass():
@@ -195,8 +200,10 @@ class _Transformer:
                 sink.append(AugAssign(self._origin(node), target=target, op=op, value=self._atom(node.value, sink)))
             case ast.Attribute() | ast.Subscript():
                 root, path = self._store_path(node.target, sink)
+                mark = self._fresh_mark()
+                sink.append(AugMark(self._origin(node), mark))
                 value = self._atom(node.value, sink)
-                sink.append(AugStore(self._origin(node), root=root, path=path, op=op, value=value))
+                sink.append(AugStore(self._origin(node), root=root, path=path, op=op, value=value, mark=mark))
             case _:
                 self._reject(node.target, "unsupported augmented-assignment target")
         self._check_region([node.target, node.value], aug_target=aug_target)
@@ -212,12 +219,19 @@ class _Transformer:
     def _for(self, node: ast.For, sink: list[Stmt]) -> None:
         if node.orelse:
             self._reject(node, "`for ... else` is not supported")
-        if not isinstance(node.target, ast.Name):
-            self._reject(node.target, "for-loop target unpacking is not supported; unpack inside the body")
-        target = self._local_bind(node.target)
+        prelude: list[Stmt] = []
+        if isinstance(node.target, ast.Name):
+            target = self._local_bind(node.target)
+        elif isinstance(node.target, (ast.Tuple, ast.List)):
+            # A tuple target rides a hidden per-item binding unpacked at the body head, one spelling for both.
+            hidden = f"for${self._fresh_temp()}u"
+            target = LocalBind(self._origin(node.target), hidden)
+            self._bind_target(node.target, LocalRef(self._origin(node.target), hidden), prelude)
+        else:
+            self._reject(node.target, "the for-loop target must be a name or a tuple of names")
         iterable = self._atom(node.iter, sink)  # evaluated once, before the loop, as in CPython
         self._check_region([node.iter])
-        sink.append(For(self._origin(node), target, iterable, self._suite(node.body)))
+        sink.append(For(self._origin(node), target, iterable, (*prelude, *self._suite(node.body))))
 
     def _return(self, node: ast.Return, sink: list[Stmt]) -> None:
         if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
@@ -377,6 +391,11 @@ class _Transformer:
         self._temp_count += 1
         return index
 
+    def _fresh_mark(self) -> int:
+        index = self._mark_count
+        self._mark_count += 1
+        return index
+
     def _expr(self, node: ast.expr, sink: list[Stmt]) -> Expr:
         match node:
             case ast.Constant():
@@ -454,7 +473,10 @@ class _Transformer:
         if isinstance(value, str):
             self._reject(node, "string literals are only supported as raise messages")
         if value is None:
-            self._reject(node, "`None` is only supported as a bare return value")
+            self._reject(
+                node,
+                "`None` is only supported as a bare return value, an omitted parameter default, or an `is` comparand",
+            )
         self._reject(node, f"unsupported constant: {value!r}")
 
     def _name(self, node: ast.Name, name: str) -> Expr:
@@ -481,6 +503,8 @@ class _Transformer:
         raise AssertionError("ast guarantees at least two operands")
 
     def _compare(self, node: ast.Compare, sink: list[Stmt]) -> Expr:
+        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot)):
+            return self._is_none(node, sink)
         for op in node.ops:
             if type(op) not in _CMP_OPS:
                 spelled = {ast.Is: "is", ast.IsNot: "is not", ast.In: "in", ast.NotIn: "not in"}
@@ -489,6 +513,18 @@ class _Transformer:
         self._reject_walrus_in(node.comparators[1:], "a comparison-chain comparator after the first")
         left = self._atom(node.left, sink)
         return self._chain(node, left, list(node.ops), list(node.comparators), sink)
+
+    def _is_none(self, node: ast.Compare, sink: list[Stmt]) -> Expr:
+        """`is` compares only against None; no residual runtime value is None, so the answer is always static."""
+        negated = isinstance(node.ops[0], ast.IsNot)
+        sides = [node.left, node.comparators[0]]
+        nones = [isinstance(side, ast.Constant) and side.value is None for side in sides]
+        if not any(nones):
+            spelled = "is not" if negated else "is"
+            self._reject(node, f"the comparison operator `{spelled}` is only supported with None as one operand")
+        if all(nones):
+            return Const(self._origin(node), not negated)
+        return IsNone(self._origin(node), self._atom(sides[nones.index(False)], sink), negated)
 
     def _chain(
         self, node: ast.Compare, left: Atom, ops: list[ast.cmpop], comparators: list[ast.expr], sink: list[Stmt]

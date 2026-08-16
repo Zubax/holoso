@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-A second-order IIR section in the transposed direct form II.
-"""
+"""A second-order IIR section in the transposed direct form II."""
 
 from pathlib import Path
 
@@ -10,11 +8,9 @@ import holoso
 
 class Biquad:
     """
-    A biquad in transposed direct form II: ``y = b0*x + s1``, then ``s1 <- b1*x - a1*y + s2`` and
-    ``s2 <- b2*x - a2*y``. The form is chosen for hardware: the two accumulators are the whole state, each new value
-    depends only on the current sample and the previous accumulators, and no feedback path is longer than one
-    addition. The frozen coefficients put the difference equation's five multiplies above what is emitted -- equal
-    ones share a multiply, and a power of two becomes a shift.
+    A biquad in transposed direct form II: `y = b0*x + s1`, then `s1 <- b1*x - a1*y + s2` and `s2 <- b2*x - a2*y`.
+    The two accumulators are the whole state, each new value depends only on the current sample and the previous
+    accumulators, and no feedback path is longer than one addition.
     """
 
     def __init__(self, b: tuple[float, float, float] = (0.2, 0.4, 0.2), a: tuple[float, float] = (-0.5, 0.25)) -> None:

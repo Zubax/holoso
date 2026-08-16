@@ -1,29 +1,29 @@
 """
-Statically-shaped matrix/vector support: the ``@`` operator, elementwise aggregate arithmetic, transpose, numpy-style
-subscripts, jaxtyping-annotated parameters/returns, matrix state, and ndarray module constants. Structure and
-diagnostics are checked on the lowered HIR; numerical behavior is checked black-box through the public API against
-numpy executing the very same kernel.
+Statically-shaped matrix/vector support: the `@` operator, elementwise aggregate arithmetic, transpose, numpy-style
+subscripts, jaxtyping-annotated parameters/returns, matrix state, and ndarray module constants. Diagnostics and
+structure are checked through the public synthesis artifacts (ports, initiation interval, emitted Verilog, residual
+`frontend_ir`); numerical behavior is checked black-box through the public API against numpy executing the very
+same kernel. The binding-time tests pinning what folds statically stay on the lowered HIR, and the FMA-chain test
+keeps a compact MIR population sentinel for the exact operator count that module pooling erases from the Verilog.
 """
 
 import dataclasses
-import sys
 import warnings
 from collections.abc import Callable
-from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
-from numpy import matmul as _matmul
 from jaxtyping import Bool, Float, Float64, Int, Shaped
 
 import holoso
-from holoso._operators import FFmaOperator
-from holoso import FFmaOptions, FloatFormat, UnsupportedConstruct
+from holoso import FFmaOptions, FFromIntOptions, FloatFormat, FSortOptions, FToIntOptions, UnsupportedConstruct
 from holoso._eel import lower
-from holoso._hir import FloatAdd, FloatMul, optimize
-from holoso._mir import lower as lower_to_mir
+from holoso._mir import MirOptions, lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, arith_count as _arith_count, default_ops, default_options
+from ._examples import _FUSION_ACCEL_CAL, _FUSION_GYRO_CAL, ImuFusion
+from ._modelref import default_mir, default_options, mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._public import strip_inline_prelude, strip_locations
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
 # against their own native numpy execution with a tight tolerance.
@@ -33,16 +33,17 @@ GAIN = np.array([[0.5, -0.25], [0.125, 1.0]])
 COEFFS = np.array([2.0, -1.0, 0.5])
 INT_TAPS = np.array([1, 2, 3])
 
-# ndarray module constants for the self-contained stateful filter kernel below.
+# ndarray module constants for the self-contained stateful filter kernels below.
 PROC_NOISE = np.array([[1.0e-4, 0.0], [0.0, 1.0e-2]])
 OBS = np.eye(2)
 MEAS_VAR = np.array([4.0e-2, 2.5e-1])
+MEAS_COV = np.diag(MEAS_VAR)
 
 
 class TrackingFilter:
     """
     A self-contained 2-state Kalman-style filter exercising the full matrix feature surface in one stateful kernel:
-    matrix/vector parameters and state, ndarray module constants, ``@`` in every shape, transpose, elementwise scalar
+    matrix/vector parameters and state, ndarray module constants, `@` in every shape, transpose, elementwise scalar
     broadcast, an annotated local, a static row loop, and a shaped return. It is ordinary executable numpy, so its own
     native execution is the reference.
     """
@@ -71,8 +72,17 @@ class TrackingFilter:
         return prediction
 
 
+def _synth(fn: Callable[..., object]) -> holoso.SynthesisResult:
+    return holoso.synthesize(fn, default_options(_FMT), name="kernel")
+
+
+def _refused(fn: Callable[..., object], match: str) -> None:
+    with pytest.raises(UnsupportedConstruct, match=match):
+        _synth(fn)
+
+
 def _sim(fn: Callable[..., object]) -> holoso.NumericalSimulator:
-    return holoso.synthesize(fn, default_options(_FMT), name="kernel").numerical_model.elaborate()
+    return _synth(fn).numerical_model.elaborate()
 
 
 def _run(sim: holoso.NumericalSimulator, *arrays: np.ndarray | float) -> np.ndarray:
@@ -82,142 +92,159 @@ def _run(sim: holoso.NumericalSimulator, *arrays: np.ndarray | float) -> np.ndar
     return np.array([float(v) for v in sim.run(*flat)])
 
 
-def _assert_python_matches_holoso(fn: Callable[..., object], *inputs: np.ndarray | float) -> None:
+def _assert_python_matches_holoso(
+    fn: Callable[..., object], *inputs: np.ndarray | float, options: holoso.Options | None = None
+) -> None:
     # Runs the kernel as plain Python and asserts it agrees with Holoso; the Python call also proves the kernel is
     # genuinely valid, runnable Python, so a construct Holoso accepts but Python rejects fails here instead of passing
-    # as a spurious "positive" (e.g. ``mat + [1, 2]`` sneaking into a success test).
+    # as a spurious "positive" (e.g. `mat + [1, 2]` sneaking into a success test).
     want = np.asarray(fn(*inputs)).flatten()
-    got = _run(_sim(fn), *inputs)
+    sim = holoso.synthesize(fn, options if options is not None else default_options(_FMT), name="kernel")
+    got = _run(sim.numerical_model.elaborate(), *inputs)
     assert np.allclose(got, want, rtol=1e-9, atol=1e-300), fn.__name__
 
 
+def _with_operators(options: holoso.Options, **replacements: Any) -> holoso.Options:
+    return dataclasses.replace(options, operator=dataclasses.replace(options.operator, **replacements))
+
+
+def _mnemonic_counts(fn: Callable[..., object], ops: MirOptions) -> dict[str, int]:
+    mir = lower_to_mir(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
+    counts: dict[str, int] = {}
+    for node in mir.nodes.values():
+        operator = getattr(node, "operator", None)
+        if operator is not None:
+            stem = operator.mnemonic.split("_")[0]
+            counts[stem] = counts.get(stem, 0) + 1
+    return counts
+
+
 # ---------------------------------------------------------------- structure
+
+
+def test_pep695_type_aliases_in_boundary_annotations() -> None:
+    """Aliases unwrap everywhere an annotation is classified: scalar, array, alias-of-alias, nested in a tuple."""
+    type Vec2 = Float64[np.ndarray, "2"]
+    type Pair = tuple[Vec2, Vec2]
+    type Gain = float
+    type Renamed = Vec2
+
+    def kernel(v: Renamed, g: Gain) -> Pair:
+        return v * g, np.array([v[1], v[0]])
+
+    result = _synth(kernel)
+    assert [p.name for p in result.numerical_model.elaborate().inputs] == ["v_0", "v_1", "g"]
+    _assert_python_matches_holoso(kernel, np.array([1.5, -2.0]), 3.0)
+
+
+def test_pep695_alias_void_return_and_self_reference() -> None:
+    type Unit = None
+
+    class Counter:
+        def __init__(self) -> None:
+            self.n = 0.0
+
+        def step(self, x: float) -> Unit:
+            self.n = self.n + x
+
+    sim = _sim(Counter().step)
+    assert [p.name for p in sim.outputs] == ["state_n"]
+    assert float(sim.run(2.5)[0]) == 2.5
+
+    type Loop = Loop  # type: ignore[misc]  # laziness lets an alias name itself, which must refuse rather than hang
+
+    def kernel(x: Loop) -> float:
+        return x  # type: ignore[no-any-return]
+
+    _refused(kernel, "reference cycle")
 
 
 def test_matmul_shapes_and_port_layout() -> None:
     def mat_vec(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
 
-    hir = lower(mat_vec).hir
-    assert hir.input_names() == ["a_0_0", "a_0_1", "a_0_2", "a_1_0", "a_1_1", "a_1_2", "x_0", "x_1", "x_2"]
-    assert [o.name for o in hir.outputs] == ["out_0", "out_1"]
-    assert _arith_count(hir, FloatMul) == 6 and _arith_count(hir, FloatAdd) == 4
-    _assert_python_matches_holoso(mat_vec, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([1.0, 0.0, -1.0]))
-    _assert_python_matches_holoso(mat_vec, np.array([[0.5, -1.0, 2.0], [3.0, -2.0, 0.25]]), np.array([2.0, -1.0, 0.5]))
+    result = _synth(mat_vec)
+    assert [p.name for p in result.input_ports] == [
+        "in_a_0_0", "in_a_0_1", "in_a_0_2", "in_a_1_0", "in_a_1_1", "in_a_1_2", "in_x_0", "in_x_1", "in_x_2",
+    ]  # fmt: skip
+    assert [p.name for p in result.output_ports] == ["out_0", "out_1"]
+    a, x = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([1.0, 0.0, -1.0])
+    got = _run(result.numerical_model.elaborate(), a, x)
+    assert np.allclose(got, a @ x, rtol=1e-12, atol=1e-300)
 
     def vec_mat(x: Float64[np.ndarray, "2"], a: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3"]:
         return x @ a  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(vec_mat).hir.outputs] == ["out_0", "out_1", "out_2"]
-    _assert_python_matches_holoso(vec_mat, np.array([1.0, -2.0]), np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
-    _assert_python_matches_holoso(vec_mat, np.array([0.5, 2.0]), np.array([[-1.0, 0.25, 3.0], [2.0, -2.0, 1.0]]))
+    assert [p.name for p in _synth(vec_mat).output_ports] == ["out_0", "out_1", "out_2"]
 
     def dot(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(dot).hir.outputs] == ["out_0"]
-    _assert_python_matches_holoso(dot, np.array([1.0, 2.0, 3.0]), np.array([4.0, -5.0, 6.0]))
-    _assert_python_matches_holoso(dot, np.array([0.5, -1.0, 2.0]), np.array([2.0, 3.0, -1.0]))
+    assert [p.name for p in _synth(dot).output_ports] == ["out_0"]
 
     def mat_mat(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "3 2"]) -> Float64[np.ndarray, "2 2"]:
         return a @ b  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(mat_mat).hir.outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1"]
-    _assert_python_matches_holoso(
-        mat_mat, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
-    )
-    _assert_python_matches_holoso(
-        mat_mat, np.array([[0.5, -1.0, 2.0], [3.0, -2.0, 0.25]]), np.array([[2.0, -1.0], [0.5, 3.0], [-2.0, 1.0]])
-    )
+    assert [p.name for p in _synth(mat_mat).output_ports] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1"]
 
 
 def test_matmul_rejections() -> None:
     def scalar_operand(a: float, x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[operator, unused-ignore]
 
-    with pytest.raises(UnsupportedConstruct, match="scalar"):
-        lower(scalar_operand)
+    _refused(scalar_operand, "scalar")
 
     def dim_mismatch(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="mismatch"):
-        lower(dim_mismatch)
+    _refused(dim_mismatch, "mismatch")
 
     def ragged(a: float, b: float) -> float:
-        # A bare Python list has no ``@`` (a TypeError in Python), so the matrix product is rejected as a list operation
+        # A bare Python list has no `@` (a TypeError in Python), so the matrix product is rejected as a list operation
         # before rectangularity is even considered; the ragged literal cannot be wrapped in np.array either.
         return [[a, b], [a]] @ [a, b]  # type: ignore[operator, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="Python list/tuple"):
-        lower(ragged)
+    _refused(ragged, "Python list/tuple")
 
     def three_dee(a: float) -> float:
         return np.array([[[a]]]) @ np.array([a])  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="1-D and 2-D"):
-        lower(three_dee)
+    _refused(three_dee, "1-D and 2-D")
 
     def boolean(v: Float64[np.ndarray, "2"], flag: bool) -> float:
         return v @ np.array([flag, flag])  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="must hold numbers, not booleans"):
-        lower(boolean)
+    _refused(boolean, "must hold numbers, not booleans")
 
 
 def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
     # The documented reason for the left-fold dot expansion: with ffma configured, an n-element dot must lower to one
-    # fmul plus n-1 ffma (each running-sum add fuses the next single-use product). A balanced tree or product reuse
-    # would silently void this, so pin the exact MIR operator population in both configurations.
-    def dot(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> float:
+    # fmul plus n-1 ffma (each running-sum add fuses the next single-use product). At n=4 any balanced tree must keep a
+    # real fadd (its final add sums two ffma results), so the pooled module set pins the chain publicly, and the
+    # residual text pins the left-fold association; the MIR population sentinel keeps the exact count that module
+    # pooling erases from the Verilog.
+    def dot(v: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
-    def mnemonic_counts(with_fma: bool) -> dict[str, int]:
-        ops = default_ops(_FMT)
-        if with_fma:
-            ops = dataclasses.replace(ops, ffma=FFmaOperator(_FMT, FFmaOptions(), 0))
-        mir = lower_to_mir(optimize(lower(dot).hir, DEFAULT_IFCONV_MAX_OPS), ops, _FMT, default_ifmt(_FMT))
-        counts: dict[str, int] = {}
-        for node in mir.nodes.values():
-            operator = getattr(node, "operator", None)
-            if operator is not None:
-                stem = operator.mnemonic.split("_")[0]
-                counts[stem] = counts.get(stem, 0) + 1
-        return counts
+    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
+    assert _mnemonic_counts(dot, fma_mir) == {"fmul": 1, "ffma": 3}
+    assert _mnemonic_counts(dot, default_mir(_FMT)) == {"fmul": 4, "fadd": 3}
 
-    assert mnemonic_counts(with_fma=True) == {"fmul": 1, "ffma": 2}
-    assert mnemonic_counts(with_fma=False) == {"fmul": 3, "fadd": 2}
-    _assert_python_matches_holoso(dot, np.array([1.0, 2.0, 3.0]), np.array([4.0, -5.0, 6.0]))
-    _assert_python_matches_holoso(dot, np.array([0.5, -1.0, 2.0]), np.array([2.0, 3.0, -1.0]))
+    options = _with_operators(default_options(_FMT), ffma=FFmaOptions())
+    result = holoso.synthesize(dot, options, name="kernel")
+    verilog = result.verilog_output.verilog
+    assert "holoso_ffma #(" in verilog and "holoso_fadd #(" not in verilog
+    residual = strip_locations(result.frontend_ir[-1])
+    assert "    %2: float = intrinsic fadd(%0, %1)\n" in residual
+    assert "    %4: float = intrinsic fadd(%2, %3)\n" in residual
+    assert "    %6: float = intrinsic fadd(%4, %5)\n" in residual
 
 
-def test_np_matmul_call_is_the_operator() -> None:
-    def with_operator(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        return a @ x  # type: ignore[no-any-return]
-
-    def with_call(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        return np.matmul(a, x)  # type: ignore[no-any-return]
-
-    ops = (_arith_count(lower(with_operator).hir, FloatMul), _arith_count(lower(with_operator).hir, FloatAdd))
-    assert ops == (_arith_count(lower(with_call).hir, FloatMul), _arith_count(lower(with_call).hir, FloatAdd))
-    for kernel in (with_operator, with_call):
-        _assert_python_matches_holoso(kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
-        _assert_python_matches_holoso(kernel, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
-
+def test_np_matmul_keyword_arguments_are_rejected() -> None:
     def keywords(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return np.matmul(a, x, subok=True)  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="keyword"):
-        lower(keywords)
-
-
-def test_np_matmul_bare_name_import_resolves() -> None:
-    def with_bare_name(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        return _matmul(a, x)  # type: ignore[no-any-return]
-
-    assert [o.name for o in lower(with_bare_name).hir.outputs] == ["out_0", "out_1"]
-    _assert_python_matches_holoso(with_bare_name, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
-    _assert_python_matches_holoso(with_bare_name, np.array([[0.5, -1.0], [2.0, 0.25]]), np.array([2.0, 3.0]))
+    _refused(keywords, "keyword")
 
 
 def test_augmented_assignment_to_array_is_rejected() -> None:
@@ -227,8 +254,7 @@ def test_augmented_assignment_to_array_is_rejected() -> None:
         v += s
         return v
 
-    with pytest.raises(UnsupportedConstruct, match="cannot update 'v' in place"):
-        lower(name_target)
+    _refused(name_target, "cannot update 'v' in place")
 
     @dataclasses.dataclass
     class State:
@@ -237,14 +263,13 @@ def test_augmented_assignment_to_array_is_rejected() -> None:
         def step(self, f: Float64[np.ndarray, "2 2"]) -> None:
             self.P @= f
 
-    with pytest.raises(UnsupportedConstruct, match="`@=` is not supported on arrays"):
-        lower(State(np.eye(2)).step)
+    _refused(State(np.eye(2)).step, "`@=` is not supported on arrays")
 
     def scalar_ok(a: float, s: float) -> float:
         a += s
         return a
 
-    assert [o.name for o in lower(scalar_ok).hir.outputs] == ["out_0"]
+    assert [p.name for p in _synth(scalar_ok).output_ports] == ["out_0"]
 
 
 def test_unary_minus_on_boolean_aggregate_is_rejected_with_location() -> None:
@@ -252,137 +277,7 @@ def test_unary_minus_on_boolean_aggregate_is_rejected_with_location() -> None:
         v = np.array([a, b])
         return (-v)[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
-        lower(f)
-
-
-def test_elementwise_arithmetic_and_broadcast() -> None:
-    def combos(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "2"], s: float) -> Float64[np.ndarray, "2"]:
-        return (v + w) * s - w / 2.0 + (s - v) * w  # type: ignore[no-any-return]
-
-    assert [o.name for o in lower(combos).hir.outputs] == ["out_0", "out_1"]
-
-    def length_mismatch(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
-        return v + w  # type: ignore[no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="broadcasting is not supported"):
-        lower(length_mismatch)
-
-    def structure_mismatch(v: Float64[np.ndarray, "2"], m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2"]:
-        return v + m  # type: ignore[no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="broadcasting is not supported"):
-        lower(structure_mismatch)
-
-
-def test_python_list_arithmetic_is_rejected() -> None:
-    # A Python list/tuple is never given numpy semantics: list ``+``/``*`` mean concatenation/repetition (not the
-    # intended elementwise math) and list ``-`` is a TypeError, so arithmetic on a bare list/tuple is rejected rather
-    # than silently reinterpreted. The idiomatic fix is np.array([...]).
-    def list_add(a: float, b: float, c: float, d: float) -> float:
-        return ([a, b] + [c, d])[0]  # a valid Python list concatenation; Holoso rejects it as list arithmetic
-
-    def list_sub(a: float, b: float, c: float, d: float) -> float:
-        return ([a, b] - [c, d])[0]  # type: ignore[operator, no-any-return]
-
-    def list_scale(a: float, b: float, s: float) -> float:
-        return ([a, b] * s)[0]  # type: ignore[operator]
-
-    for kernel in (list_add, list_sub, list_scale):
-        with pytest.raises(UnsupportedConstruct, match="not supported on a sequence"):
-            lower(kernel)
-
-
-def test_np_array_of_ragged_list_is_rejected() -> None:
-    # The np.array/asarray/asanyarray factory mirrors numpy, which rejects a ragged array literal.
-    def ragged(a: float, b: float) -> float:
-        return np.array([[a, b], [a]])[0, 0]  # type: ignore[no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="rectangular"):
-        lower(ragged)
-
-
-def test_numpy_only_methods_on_a_list_are_rejected() -> None:
-    # `.T`, `.flatten()`, and multi-axis indexing are numpy-array operations undefined on a Python list, so they are
-    # rejected on a list literal; wrapping in np.array([...]) makes them valid.
-    def transpose(a: float, b: float) -> float:
-        return ([a, b].T)[0]  # type: ignore[attr-defined, no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="`.T` on a Python sequence"):
-        lower(transpose)
-
-    def flatten(a: float, b: float) -> float:
-        return ([[a, b]].flatten())[0]  # type: ignore[attr-defined, no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="`.flatten` on a Python sequence"):
-        lower(flatten)
-
-    def multi_axis(a: float, b: float) -> float:
-        m = [[a, b], [b, a]]
-        return m[0, 1]  # type: ignore[call-overload, no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="multi-axis"):
-        lower(multi_axis)
-
-
-def test_list_of_array_demotes_to_sequence_for_arithmetic() -> None:
-    # list(arr)/tuple(arr) produce Python sequences (as in Python), so arithmetic on the result is rejected even though
-    # the argument was an array -- guards against the builtins accidentally keeping array semantics.
-    def via_list(v: Float64[np.ndarray, "2"], s: float) -> float:
-        return (list(v) * s)[0]  # type: ignore[operator, no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="not supported on a sequence"):
-        lower(via_list)
-
-
-def test_star_unpack_remainder_is_a_python_list() -> None:
-    # Regression: a starred target binds a plain list even when unpacking an array (PEP 3132), so arithmetic on the
-    # remainder must be rejected -- it must not inherit the source array's semantics.
-    def spread(v: Float64[np.ndarray, "3"]) -> float:
-        first, *rest = v
-        return (rest + rest)[0]  # type: ignore[no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="starred assignment targets"):
-        lower(spread)
-
-
-def test_mismatched_branch_flavor_merge_rejects_array_ops() -> None:
-    # Only bool, int, and float values join branches, so a value that is an array in one arm and a sequence in the
-    # other cannot merge at all -- neither for arithmetic nor for structural use, and regardless of arm order.
-    def arithmetic(c: bool, a: float, b: float) -> Float64[np.ndarray, "2"]:
-        if c:
-            v = np.array([a, b])
-        else:
-            v = [a, b]  # type: ignore[assignment]
-        return v * 2.0
-
-    with pytest.raises(UnsupportedConstruct, match="aggregates join only when every arm agrees"):
-        lower(arithmetic)
-
-    def structural(c: bool, a: float, b: float) -> float:
-        if c:
-            v = np.array([a, b])
-        else:
-            v = [a, b]  # type: ignore[assignment]
-        return v[0]  # type: ignore[no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="aggregates join only when every arm agrees"):
-        lower(structural)
-
-
-def test_state_assignment_flavor_must_match_reset() -> None:
-    # Regression: the reset snapshot fixes an attribute's read-back flavor, so storing the other flavor (a list into an
-    # ndarray-reset slot) is rejected -- otherwise it would round-trip back as an array and diverge from Python.
-    @dataclasses.dataclass
-    class ListIntoArray:
-        v: np.ndarray
-
-        def step(self, s: float) -> None:
-            w = self.v * s
-            self.v = [w[0], w[1]]  # type: ignore[assignment]
-
-    with pytest.raises(UnsupportedConstruct, match="structure does not match"):
-        lower(ListIntoArray(np.array([1.0, 2.0])).step)
+    _refused(f, "boolean")
 
 
 def test_unsupported_operator_diagnostic_names_the_operator() -> None:
@@ -391,49 +286,37 @@ def test_unsupported_operator_diagnostic_names_the_operator() -> None:
     def modulo(v: Float64[np.ndarray, "2"], w: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2"]:
         return v % w  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="`%` is not supported on arrays"):
-        lower(modulo)
+    _refused(modulo, "`%` is not supported on arrays")
 
 
 def test_transpose_structure() -> None:
     def t(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3 2"]:
         return m.T
 
-    hir = lower(t).hir
-    assert [o.name for o in hir.outputs] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1", "out_2_0", "out_2_1"]
-    assert _arith_count(hir, FloatMul) == 0  # a pure reindexing, no hardware
-    _assert_python_matches_holoso(t, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
-    _assert_python_matches_holoso(t, np.array([[-1.0, 0.5, 2.0], [3.0, -2.0, 0.25]]))
+    result = _synth(t)
+    assert [p.name for p in result.output_ports] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1", "out_2_0", "out_2_1"]
+    # A pure reindexing: no hardware at all -- no pooled operator instantiations and no inline call sites remain after
+    # stripping the unconditional support prelude -- at the combinational II.
+    assert result.initiation_interval == (1, 1)
+    assert "holoso_" not in strip_inline_prelude(result.verilog_output.verilog)
+    m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    assert np.array_equal(_run(result.numerical_model.elaborate(), m), m.T.flatten())
 
     def vector_identity(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v.T
 
-    assert [o.name for o in lower(vector_identity).hir.outputs] == ["out_0", "out_1"]
-    _assert_python_matches_holoso(vector_identity, np.array([1.0, -2.0]))
-    _assert_python_matches_holoso(vector_identity, np.array([0.5, 3.0]))
+    result_v = _synth(vector_identity)
+    assert [p.name for p in result_v.output_ports] == ["out_0", "out_1"]
+    assert np.array_equal(_run(result_v.numerical_model.elaborate(), np.array([1.0, -2.0])), [1.0, -2.0])
 
     def scalar_t(a: float) -> float:
         return a.T  # type: ignore[attr-defined, no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="a scalar has no supported attribute"):
-        lower(scalar_t)
-
-
-def test_state_attribute_named_t_shadows_transpose() -> None:
-    @dataclasses.dataclass
-    class Holder:
-        T: float
-
-        def step(self, a: float) -> float:
-            self.T = self.T + a
-            return self.T
-
-    hir = lower(Holder(0.0).step).hir
-    assert [s.name for s in hir.state_slots] == ["T"]
+    _refused(scalar_t, "a scalar has no supported attribute")
 
 
 def test_state_attributes_named_shape_and_ndim_shadow_the_shape_queries() -> None:
-    # ``.shape``/``.ndim`` on the instance keep Python's own attribute-resolution priority, exactly as ``.T`` does:
+    # `.shape`/`.ndim` on the instance keep Python's own attribute-resolution priority, exactly as `.T` does:
     # they are state reads, not compile-time shape queries.
     @dataclasses.dataclass
     class Holder:
@@ -447,11 +330,9 @@ def test_state_attributes_named_shape_and_ndim_shadow_the_shape_queries() -> Non
             self.T = self.T - a
             return self.shape + self.ndim + self.T
 
-    hir = lower(Holder(0.0, 1.0, 2.0).step).hir
-    assert [s.name for s in hir.state_slots] == ["T", "ndim", "shape"]
-
     # The reset snapshot is read at synthesis time, so the reference instance must stay untouched until then.
     sim = _sim(Holder(0.5, 1.0, 2.0).step)
+    assert [p.name for p in sim.outputs] == ["out_0", "state_T", "state_ndim", "state_shape"]
     reference = Holder(0.5, 1.0, 2.0)
     for a in (0.25, -1.5, 3.0):
         want = reference.step(a)
@@ -465,206 +346,95 @@ def test_numpy_subscripts() -> None:
         column = m[:, 2]
         return m[0, 1], m[1][2], column[0], m[1:, 0][0]
 
-    assert [o.name for o in lower(picks).hir.outputs] == ["out_0", "out_1", "out_2", "out_3"]
-    _assert_python_matches_holoso(picks, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
-    _assert_python_matches_holoso(picks, np.array([[-1.0, 0.5, 2.0], [3.0, -2.0, 0.25]]))
+    result = _synth(picks)
+    assert [p.name for p in result.output_ports] == ["out_0", "out_1", "out_2", "out_3"]
+    m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    assert np.array_equal(_run(result.numerical_model.elaborate(), m), np.asarray(picks(m)))
 
     def too_many(m: Float64[np.ndarray, "2 2"]) -> float:
         return m[0, 1, 0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="must name every axis"):
-        lower(too_many)
-
-
-def test_multi_axis_index_on_list_is_rejected() -> None:
-    # Multi-axis m[i, j] is a numpy-array operation with no meaning on a Python list (list[i, j] is a tuple key, a
-    # TypeError), so it must be rejected as a list operation rather than silently indexed. Chained m[i][j] on the same
-    # (even ragged) list stays valid (plain list indexing).
-    def list_multi_axis(a: float, b: float) -> float:
-        m = [[a, b], [a]]
-        return m[0, 1]  # type: ignore[call-overload,no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="works only on an array, not a sequence"):
-        lower(list_multi_axis)
-
-    def ragged_chained(a: float, b: float) -> float:
-        m = [[a, b], [a]]
-        return m[0][1]
-
-    assert [o.name for o in lower(ragged_chained).hir.outputs] == ["out_0"]
+    _refused(too_many, "must name every axis")
 
 
 def test_shaped_parameter_annotation_rejections() -> None:
     def symbolic(v: Float64[np.ndarray, "n"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="fixed"):
-        lower(symbolic)
+    _refused(symbolic, "fixed")
 
     def broadcastable(v: Float64[np.ndarray, "#3"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="fixed"):
-        lower(broadcastable)
+    _refused(broadcastable, "fixed")
 
     def three_dee(v: Float64[np.ndarray, "2 2 2"]) -> float:
         return v[0, 0, 0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="1-D and 2-D"):
-        lower(three_dee)
+    _refused(three_dee, "1-D and 2-D")
 
     def boolean(v: Bool[np.ndarray, "2"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="float or integer family"):
-        lower(boolean)
+    _refused(boolean, "float or integer family")
 
-    def integer(v: Int[np.ndarray, "2"]) -> float:
+    def integer(v: Int[np.ndarray, "2"]) -> int:
         return v[0]  # type: ignore[no-any-return]
 
-    assert lower(integer).hir.input_names() == ["v_0", "v_1"]  # the integer family is supported alongside the float one
+    # The integer family is supported alongside the float one.
+    assert [p.name for p in _synth(integer).input_ports] == ["in_v_0", "in_v_1"]
 
     def shape_only(v: Shaped[np.ndarray, "2"]) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="float or integer family"):
-        lower(shape_only)
+    _refused(shape_only, "float or integer family")
 
     def shapeless(v: np.ndarray) -> float:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="annotation of parameter 'v' is not supported"):
-        lower(shapeless)
+    _refused(shapeless, "annotation of parameter 'v' is not supported")
 
-    class _FakeArray:  # structurally array-like (has ``dims``) but its dims is not a real jaxtyping tuple
+    class _FakeArray:  # structurally array-like (has `dims`) but its dims is not a real jaxtyping tuple
         dims = None
 
     def fake(v: _FakeArray) -> float:
         return 1.0
 
-    with pytest.raises(UnsupportedConstruct, match="only numpy array containers are supported"):
-        lower(fake)
+    _refused(fake, "only numpy array containers are supported")
 
 
 def test_wide_float_dtype_annotation_is_accepted() -> None:
     def f(v: Float[np.ndarray, "2"]) -> float:
         return v[0] + v[1]  # type: ignore[no-any-return]
 
-    assert lower(f).hir.input_names() == ["v_0", "v_1"]
-
-
-def test_decomposed_parameter_port_collision_is_rejected() -> None:
-    def collides(v: Float64[np.ndarray, "2"], v_0: float) -> float:
-        return v[1] * v_0  # type: ignore[no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="collides"):
-        lower(collides)
+    assert [p.name for p in _synth(f).input_ports] == ["in_v_0", "in_v_1"]
 
 
 def test_array_return_annotation_is_validated() -> None:
     def good(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v * 2.0
 
-    assert [o.name for o in lower(good).hir.outputs] == ["out_0", "out_1"]
+    assert [p.name for p in _synth(good).output_ports] == ["out_0", "out_1"]
 
     def nested(v: Float64[np.ndarray, "2"], flag: bool) -> tuple[Float64[np.ndarray, "2"], bool]:
         return v * 2.0, flag
 
-    assert [o.name for o in lower(nested).hir.outputs] == ["out_0_0", "out_0_1", "out_1"]
+    assert [p.name for p in _synth(nested).output_ports] == ["out_0_0", "out_0_1", "out_1"]
 
     def wrong_shape(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "3"]:
         return v * 2.0
 
-    with pytest.raises(UnsupportedConstruct, match="the annotation declares"):
-        lower(wrong_shape)
+    _refused(wrong_shape, "the annotation declares")
 
     def scalar_returned(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return v[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="the returned value is not an array"):
-        lower(scalar_returned)
+    _refused(scalar_returned, "the returned value is not an array")
 
     def boolean_leaves(flag: bool) -> Float64[np.ndarray, "1"]:
         return [flag]  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match="the returned value is not an array"):
-        lower(boolean_leaves)
-
-
-def test_matrix_state_annotation_and_assignment_validation() -> None:
-    # A state array's shape comes from the reset snapshot, not from the field annotation, so only installs are judged.
-    @dataclasses.dataclass
-    class Reshaped:
-        P: Float64[np.ndarray, "2 2"]
-
-        def step(self, a: float) -> None:
-            self.P = self.P[0] * a
-
-    with pytest.raises(UnsupportedConstruct, match="structure does not match"):
-        lower(Reshaped(np.zeros((2, 2))).step)
-
-    @dataclasses.dataclass
-    class Empty:
-        v: np.ndarray
-
-        def step(self, a: float) -> None:
-            self.v = self.v * a
-
-    with pytest.raises(UnsupportedConstruct, match="empty"):
-        lower(Empty(np.zeros(0)).step)
-
-
-def test_state_assignment_element_type_mismatch_is_rejected() -> None:
-    # Regression: a bool-leaved value assigned to a float attribute must be rejected, not stored as a float-reset slot
-    # whose live-out is a boolean -- which would leave the slot's live-in and live-out at different types.
-    @dataclasses.dataclass
-    class FloatMatrix:
-        P: Float64[np.ndarray, "2 2"]
-
-        def step(self, flag: bool) -> None:
-            # A bool-valued array (flavor matches the ndarray slot) so the check reached is the leaf-type one.
-            self.P = np.array([[flag, flag], [flag, flag]])
-
-    with pytest.raises(UnsupportedConstruct, match="must hold numbers, not booleans"):
-        lower(FloatMatrix(np.zeros((2, 2))).step)
-
-    @dataclasses.dataclass
-    class FloatScalar:
-        y: float
-
-        def step(self, flag: bool) -> None:
-            self.y = flag
-
-    with pytest.raises(UnsupportedConstruct, match="would change type from float to bool"):
-        lower(FloatScalar(0.0).step)
-
-
-def test_arithmetic_on_boolean_operands_is_rejected_with_location() -> None:
-    # Regression: bool arithmetic reached HIR construction and raised a bare, location-less ValueError; it must be a
-    # source-located UnsupportedConstruct, in both scalar and elementwise-aggregate positions.
-    def scalar(a: bool, b: bool) -> float:
-        return a + b
-
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
-        lower(scalar)
-
-    def aggregate(v: Float64[np.ndarray, "2"], flag: bool) -> Float64[np.ndarray, "2"]:
-        return v + np.array([flag, flag])  # type: ignore[no-any-return]
-
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
-        lower(aggregate)
-
-
-def test_matrix_carried_across_while_loop_is_rejected() -> None:
-    def f(m: Float64[np.ndarray, "2 2"], n: float) -> Float64[np.ndarray, "2 2"]:
-        x = n
-        while x > 0.0:
-            m = m * 0.5
-            x = x - 1.0
-        return m
-
-    with pytest.raises(UnsupportedConstruct, match="can be carried across the iterations"):
-        lower(f)
+    _refused(boolean_leaves, "the returned value is not an array")
 
 
 def test_ndarray_constant_element_folds_in_static_position() -> None:
@@ -682,7 +452,8 @@ def test_ndarray_constant_element_folds_in_static_position() -> None:
     def indexed(v: Float64[np.ndarray, "3"]) -> float:
         return v[_INDEX_CONST[0]]  # type: ignore[no-any-return]  # constant int-array element as a static index
 
-    assert [o.name for o in lower(indexed).hir.outputs] == ["out_0"]
+    assert [o.name for o in lower(indexed, DEFAULT_UNROLL_MAX_TRIPS).hir.outputs] == ["out_0"]
+    assert float(_sim(indexed).run(1.0, 2.0, 3.0)[0]) == 3.0  # _INDEX_CONST[0] == 2, so the pick is v[2]
 
     def chained(a: float) -> float:
         if _GATE_CONST2[0][1] > 0.0:  # chained indexing of a 2-D constant, statically true
@@ -706,7 +477,7 @@ def test_readonly_ndarray_attribute_element_folds_a_branch() -> None:
                 out = a * 2.0  # statically dead
             return out
 
-    hir = lower(Filter(np.array([[0.0, 1.0]])).step).hir
+    hir = lower(Filter(np.array([[0.0, 1.0]])).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir.state_slots] == []  # no spurious state from the statically-dead write
     assert [o.name for o in hir.outputs] == ["out_0"]
 
@@ -724,7 +495,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_slice = lower(WithSlice(0.0).step).hir
+    hir_slice = lower(WithSlice(0.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir_slice.state_slots] == []
     assert [o.name for o in hir_slice.outputs] == ["out_0"]
 
@@ -737,7 +508,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
                 self.y = a  # statically dead
             return a
 
-    hir_t = lower(WithTranspose(0.0).step).hir
+    hir_t = lower(WithTranspose(0.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir_t.state_slots] == []
     assert [o.name for o in hir_t.outputs] == ["out_0"]
 
@@ -751,7 +522,7 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
             self.y = a  # statically dead
             return self.y
 
-    hir_f = lower(WithFlatten(0.0).step).hir
+    hir_f = lower(WithFlatten(0.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     assert [s.name for s in hir_f.state_slots] == []
     assert [o.name for o in hir_f.outputs] == ["out_0"]
 
@@ -764,8 +535,8 @@ def test_sliced_and_transposed_constant_folds_in_static_position() -> None:
 
 
 def test_transpose_of_matrix_state_attribute() -> None:
-    # Coverage: ``self.P.T`` transposes state (the chained case of the ``.T``-vs-``self.T`` resolution), distinct from
-    # the ``self.T`` state-read carve-out.
+    # Coverage: `self.P.T` transposes state (the chained case of the `.T`-vs-`self.T` resolution), distinct from
+    # the `self.T` state-read carve-out.
     @dataclasses.dataclass
     class Holder:
         P: Float64[np.ndarray, "2 2"]
@@ -786,90 +557,58 @@ def test_unary_plus_rejects_boolean_but_is_identity_on_floats() -> None:
     def scalar(flag: bool) -> float:
         return +flag
 
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
-        lower(scalar)
+    _refused(scalar, "boolean")
 
     def aggregate(a: bool, b: bool) -> Float64[np.ndarray, "2"]:
         return +np.array([a, b])
 
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
-        lower(aggregate)
+    _refused(aggregate, "boolean")
 
     def floats(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return +v
 
-    assert [o.name for o in lower(floats).hir.outputs] == ["out_0", "out_1"]
+    result = _synth(floats)
+    assert [p.name for p in result.output_ports] == ["out_0", "out_1"]
+    assert np.array_equal(_run(result.numerical_model.elaborate(), np.array([1.5, -2.0])), [1.5, -2.0])
 
 
 def test_ndarray_module_constant_rejections() -> None:
     def boolean(a: float) -> float:
         return _BOOL_CONST[0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="not a supported aggregate"):
-        lower(boolean)
+    _refused(boolean, "not a supported aggregate")
 
     def three_dee(a: float) -> float:
         return _CUBE_CONST[0, 0, 0]  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="works only on an array"):
-        lower(three_dee)
+    _refused(three_dee, "works only on an array")
 
 
 def test_ndarray_subclass_constant_and_state_are_rejected() -> None:
-    # Regression: an ndarray subclass (np.matrix) redefines operators (``*`` is matmul), so folding it as a plain array
+    # Regression: an ndarray subclass (np.matrix) redefines operators (`*` is matmul), so folding it as a plain array
     # would silently diverge from its own Python semantics; it must be rejected, both as a module constant and a reset.
     def constant(a: float) -> float:
         return _MATRIX_CONST[0, 1] + a  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="not a captured object"):
-        lower(constant)
+    _refused(constant, "not a captured object")
 
     @dataclasses.dataclass
     class Stateful:
         P: np.ndarray
 
         def step(self, a: float) -> None:
-            self.P = self.P * a
+            self.P = np.array([[a, a], [a, a]])
 
-    with pytest.raises(UnsupportedConstruct, match="numpy subclass"):
-        lower(Stateful(_np_matrix()).step)
+    _refused(Stateful(_np_matrix()).step, "numpy subclass")
 
 
 def test_power_of_boolean_is_rejected_with_location() -> None:
-    # Regression: '**' bypassed the boolean-operand guard applied to the other arithmetic operators, raising a bare
-    # ValueError (flag**2) or silently returning the bool (flag**1) instead of a source-located UnsupportedConstruct.
-    def squared(flag: bool) -> float:
-        return flag**2
-
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
-        lower(squared)
-
+    # Regression: 'flag**1' bypassed the boolean-operand guard applied to the other arithmetic operators, silently
+    # returning the bool instead of a source-located UnsupportedConstruct.
     def first_power(flag: bool) -> float:
         return flag**1
 
-    with pytest.raises(UnsupportedConstruct, match="boolean"):
-        lower(first_power)
-
-
-def test_boolean_operand_to_float_builtin_or_intrinsic_is_rejected_with_location() -> None:
-    # Regression: abs/min/max/round and the math/numpy intrinsics passed a boolean operand straight to HIR
-    # construction, raising a bare location-less ValueError; each must reject it with a source-located error.
-    # No entry serves booleans, so the rejection names the domains the callee does serve.
-    def with_abs(flag: bool) -> float:
-        return abs(flag)
-
-    def with_min(flag: bool, x: float) -> float:
-        return min(flag, x)
-
-    def with_round(flag: bool) -> float:
-        return round(flag)
-
-    def with_floor(flag: bool) -> float:
-        return np.floor(flag)  # type: ignore[no-any-return]
-
-    for kernel in (with_abs, with_min, with_round, with_floor):
-        with pytest.raises(UnsupportedConstruct, match=r"takes .*float operands, got .*bool"):
-            lower(kernel)
+    _refused(first_power, "boolean")
 
 
 def _np_matrix() -> np.ndarray:
@@ -968,67 +707,9 @@ def test_integer_dtype_module_constant_folds_to_floats() -> None:
     assert got[0] == float(v @ INT_TAPS)
 
 
-def test_matrix_state_update_matches_numpy_across_transactions() -> None:
-    @dataclasses.dataclass
-    class Decay:
-        P: Float64[np.ndarray, "2 2"]
-
-        def step(self, f: Float64[np.ndarray, "2 2"]) -> None:
-            self.P = f @ self.P @ f.T
-
-    sim = holoso.synthesize(Decay(np.eye(2)).step, default_options(_FMT), name="decay").numerical_model.elaborate()
-    assert [p.name for p in sim.outputs] == ["state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1"]
-    reference = Decay(np.eye(2))
-    f = np.array([[1.0, 0.125], [-0.25, 0.9375]])
-    for _ in range(4):
-        got = _run(sim, f)
-        reference.step(f)
-        assert np.allclose(got, reference.P.flatten(), rtol=1e-12, atol=1e-300)
-
-
-def test_annotated_local_assignment_matches_numpy() -> None:
-    # Locks in the annotated local-assignment statement ``name: T = value`` (both array- and scalar-annotated forms) --
-    # the annotation is decorative and the value binds like a plain assignment; a frontend branch no other kernel hits.
-    def kernel(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        y: Float64[np.ndarray, "2"] = a @ x  # array-annotated local bound to an expression
-        t: float = y[0] - y[1]  # scalar-annotated local
-        return y * t
-
-    rng = np.random.default_rng(0xDEC1)
-    a, x = rng.normal(size=(2, 2)), rng.normal(size=2)
-    got = _run(_sim(kernel), a, x)
-    assert np.allclose(got, np.asarray(kernel(a, x)), rtol=1e-12, atol=1e-300)
-
-
-def test_runtime_divisor_division_matches_numpy() -> None:
-    # Locks in float division by a RUNTIME divisor -- the strength reducer's fallthrough to a real FloatDiv, the fdiv
-    # operator's execution, and the value model's exact divide -- none of which a constant/power-of-two divisor reaches.
-    def scalar_div(a: float, b: float) -> float:
-        return a / b
-
-    def vector_over_scalar(v: Float64[np.ndarray, "3"], s: float) -> Float64[np.ndarray, "3"]:
-        return v / s
-
-    def kalman_gain(P: Float64[np.ndarray, "2 2"], h: Float64[np.ndarray, "2"], s: float) -> Float64[np.ndarray, "2"]:
-        return (P @ h) / s  # type: ignore[no-any-return]  # matrix-vector product over a runtime scalar
-
-    scalar_cases = [(6.0, 3.0), (1.0, -4.0), (2.5, 0.5), (0.0, 7.0)]  # each divides exactly in both formats; last: 0/b
-    for fmt in (_FMT, FloatFormat(6, 18)):  # a second, narrower datapath width also exercises the divide
-        sim = holoso.synthesize(scalar_div, default_options(fmt), name="div").numerical_model.elaborate()
-        for a, b in scalar_cases:
-            assert np.allclose(_run(sim, a, b), a / b, rtol=1e-12, atol=1e-300), (fmt, a, b)
-
-    rng = np.random.default_rng(0x0D17)
-    v, s = rng.normal(size=3), float(rng.uniform(0.5, 2.0))
-    assert np.allclose(_run(_sim(vector_over_scalar), v, s), v / s, rtol=1e-12, atol=1e-300)
-
-    P, h, s = rng.normal(size=(2, 2)), rng.normal(size=2), float(rng.uniform(0.5, 2.0))
-    assert np.allclose(_run(_sim(kalman_gain), P, h, s), (P @ h) / s, rtol=1e-12, atol=1e-300)
-
-
 def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> None:
     # Locks in the whole matrix feature surface composed in one stateful kernel across transactions: matrix/vector
-    # parameters and carried state, ndarray module constants, ``@`` in every shape with transpose, elementwise scalar
+    # parameters and carried state, ndarray module constants, `@` in every shape with transpose, elementwise scalar
     # broadcast, an annotated local, a static row loop, a shaped return, and the runtime-divisor Kalman gain.
     sim = holoso.synthesize(TrackingFilter().update, default_options(_FMT), name="tracker").numerical_model.elaborate()
     assert [p.name for p in sim.outputs] == [
@@ -1046,104 +727,226 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
         assert np.allclose(got, want, rtol=1e-9, atol=1e-12), step
 
 
-def test_imu_frame_transform_example_matches_numpy() -> None:
-    # The bundled 3D rigid-body / IMU frame transform example must lower and agree with its own plain-numpy execution,
-    # confirming the matmul/transpose/broadcast composition it demonstrates is valid, runnable Python.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import imu_frame_transform
+def _fusion_options(fmt: FloatFormat, contract_fma: bool) -> holoso.Options:
+    options = default_options(fmt)
+    operator = dataclasses.replace(
+        options.operator, fsort=holoso.FSortOptions(), ffma=FFmaOptions() if contract_fma else None
+    )
+    return dataclasses.replace(options, operator=operator)
 
-    yaw90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-    roll90 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
-    for rotation in (yaw90, roll90):
-        _assert_python_matches_holoso(
-            imu_frame_transform.transform,
-            rotation,
-            np.array([1.0, 2.0, 3.0]),
-            np.array([0.1, -0.2, 9.9]),
-            np.array([2.0, 0.0, -1.0]),
+
+def _drive_fusion(model: holoso.NumericalSimulator, row: list[float]) -> dict[str, float]:
+    return {port.name: float(value) for port, value in zip(model.outputs, model.run(*row), strict=True)}
+
+
+@pytest.mark.parametrize("contract_fma", [False, True], ids=["plain", "ffma"])
+def test_imu_fusion_example_matches_python(contract_fma: bool) -> None:
+    # The bundled fusion example must agree with its own plain-numpy execution across carried-state transactions,
+    # on both datapaths the synth matrix ships: the fmul+fadd expansion and the ffma-contracted one (contraction
+    # changes only the rounding). Rows exercise both gate arms, the clip latch, and the first-sample branch.
+    fmt = FloatFormat(8, 36)
+    model = holoso.synthesize(
+        ImuFusion().update, _fusion_options(fmt, contract_fma), name="imu_fusion_lockstep"
+    ).numerical_model.elaborate()
+    reference = ImuFusion()
+    inv_g = np.linalg.inv(_FUSION_GYRO_CAL)
+    inv_a = np.linalg.inv(_FUSION_ACCEL_CAL)
+    cal = [float(v) for v in (*_FUSION_GYRO_CAL.flatten(), *_FUSION_ACCEL_CAL.flatten())]
+    temp_bias = reference.temp_model @ np.array([1.0, 25.0, 625.0])
+    rng = np.random.default_rng(0xF0510)
+    for age in range(60):
+        rate = rng.uniform(-1.0, 1.0, 3)
+        accel = np.array([0.0, 0.0, 9.80665]) + rng.uniform(-0.3, 0.3, 3)
+        if age % 9 == 4:
+            accel = accel * 4.0  # decisively out of band: the reject arm must track too
+        if age == 30:
+            rate = np.array([40.0, 0.0, 0.0])  # trips the sticky clip latch for the rest of the run
+        row = [
+            float(fmt.decode(fmt.encode(float(v))))
+            for v in (*(inv_g @ (rate + temp_bias)), *(inv_a @ accel), *cal, 25.0, 0.05)
+        ]
+        got = _drive_fusion(model, row)
+        want, want_valid = reference.update(
+            np.array(row[:3]),
+            np.array(row[3:6]),
+            np.array(row[6:15]).reshape(3, 3),
+            np.array(row[15:24]).reshape(3, 3),
+            row[24],
+            row[25],
         )
+        assert bool(got["out_1"]) == bool(want_valid) and bool(got["state_gyro_clip"]) == reference.gyro_clip, age
+        for name, value in (
+            *((f"out_0_{k}", want[k]) for k in range(3)),
+            *((f"state_bias_{k}", reference.bias[k]) for k in range(3)),
+            *((f"state_attitude_{k}", reference.attitude[k]) for k in range(4)),
+        ):
+            assert abs(got[name] - float(value)) < 1e-8, (age, name, got[name], value)
+    assert bool(got["state_gyro_clip"])
 
 
-def test_imu_frame_transform_fma_matches_numpy() -> None:
-    # The ffma-contracted datapath the synth matrix's FMA rows exercise (each dot-product multiply-accumulate fused into
-    # a single-rounded a*b+c) must compute the same transform: FMA changes only the rounding, not the result.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-    import imu_frame_transform
+def test_imu_fusion_static_tilt_converges_toward_the_analytic_attitude() -> None:
+    # An independent landmark, not a lockstep: consistent static samples of a 10-degree pitch (generated through
+    # the inverse sensor model) coarse-align the estimate on the first update, and over a long run the fine
+    # correction must hold it near the analytic tilt quaternion instead of drifting away.
+    fmt = FloatFormat(8, 36)
+    shipped = ImuFusion()
+    model = holoso.synthesize(
+        shipped.update, _fusion_options(fmt, False), name="imu_fusion_tilt"
+    ).numerical_model.elaborate()
+    pitch = np.deg2rad(10.0)
+    f_body = np.array([-np.sin(pitch), 0.0, np.cos(pitch)]) * 9.80665
+    row = [
+        float(v)
+        for v in (
+            *(np.linalg.inv(_FUSION_GYRO_CAL) @ (shipped.temp_model @ np.array([1.0, 25.0, 625.0]))),
+            *(np.linalg.inv(_FUSION_ACCEL_CAL) @ f_body),
+            *_FUSION_GYRO_CAL.flatten(),
+            *_FUSION_ACCEL_CAL.flatten(),
+            25.0,
+            0.02,
+        )
+    ]
+    for _ in range(600):
+        got = _drive_fusion(model, row)
+    q_true = np.array([np.cos(pitch / 2.0), 0.0, np.sin(pitch / 2.0), 0.0])
+    q_est = np.array([got[f"state_attitude_{k}"] for k in range(4)])
+    assert abs(float(np.linalg.norm(q_est)) - 1.0) < 1e-9  # the clipped dot below would hide a non-unit estimate
+    angle_error = 2.0 * np.arccos(min(1.0, abs(float(q_est @ q_true))))
+    assert angle_error < 0.1 * pitch, angle_error
 
-    options = default_options(_FMT)
-    options = dataclasses.replace(options, operator=dataclasses.replace(options.operator, ffma=FFmaOptions()))
-    sim = holoso.synthesize(imu_frame_transform.transform, options, name="imu_fma").numerical_model.elaborate()
-    yaw90 = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-    roll90 = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
-    for rotation in (yaw90, roll90):
-        inputs = (rotation, np.array([1.0, 2.0, 3.0]), np.array([0.1, -0.2, 9.9]), np.array([2.0, 0.0, -1.0]))
-        want = np.asarray(imu_frame_transform.transform(*inputs)).flatten()
-        assert np.allclose(_run(sim, *inputs), want, rtol=1e-9, atol=1e-300)
+
+def test_imu_fusion_coarse_alignment_waits_for_the_first_accepted_upright_sample() -> None:
+    # Alignment is gated on its own state, not on the sample count: it snaps the analytic tilt quaternion in one
+    # transaction whenever the first usable sample arrives, however many rejected (out-of-band) or antipodal
+    # (shortest-arc-degenerate) samples precede it. Only the antipodal sample itself leaves the attitude alone.
+    fmt = FloatFormat(8, 36)
+    shipped = ImuFusion()
+    design = holoso.synthesize(shipped.update, _fusion_options(fmt, False), name="imu_fusion_align")
+    inv_g = np.linalg.inv(_FUSION_GYRO_CAL)
+    inv_a = np.linalg.inv(_FUSION_ACCEL_CAL)
+    temp_bias = shipped.temp_model @ np.array([1.0, 25.0, 625.0])
+
+    def row_of(f_body: np.ndarray) -> list[float]:
+        return [
+            float(v)
+            for v in (
+                *(inv_g @ temp_bias),
+                *(inv_a @ f_body),
+                *_FUSION_GYRO_CAL.flatten(),
+                *_FUSION_ACCEL_CAL.flatten(),
+                25.0,
+                0.02,
+            )
+        ]
+
+    def attitude_of(got: dict[str, float]) -> np.ndarray:
+        return np.array([got[f"state_attitude_{k}"] for k in range(4)])
+
+    pitch = np.deg2rad(10.0)
+    tilted = np.array([-np.sin(pitch), 0.0, np.cos(pitch)]) * 9.80665
+    identity = np.array([1.0, 0.0, 0.0, 0.0])
+    q_true = np.array([np.cos(pitch / 2.0), 0.0, np.sin(pitch / 2.0), 0.0])
+
+    def snap_of(got: dict[str, float]) -> float:
+        return float(2.0 * np.arccos(min(1.0, abs(float(attitude_of(got) @ q_true)))))
+
+    got = _drive_fusion(design.numerical_model.elaborate(), row_of(tilted))
+    assert snap_of(got) < 1e-6
+
+    model = design.numerical_model.elaborate()
+    got = _drive_fusion(model, row_of(np.array([0.0, 0.0, 4.0 * 9.80665])))
+    assert not bool(got["out_1"]) and float(np.linalg.norm(attitude_of(got) - identity)) < 1e-9
+    assert snap_of(_drive_fusion(model, row_of(tilted))) < 1e-6
+
+    model = design.numerical_model.elaborate()
+    got = _drive_fusion(model, row_of(np.array([0.0, 0.0, -9.80665])))
+    assert bool(got["out_1"]) and float(np.linalg.norm(attitude_of(got) - identity)) < 1e-9
+    assert snap_of(_drive_fusion(model, row_of(tilted))) < 1e-6
+
+
+def test_imu_fusion_lever_arm_compensation_cancels_the_centripetal_signal() -> None:
+    # The off-center kinematics landmark: under a constant spin the IMU measures the centripetal term
+    # w x (w x r) on top of gravity, and the compensation must remove it -- the reported world-frame acceleration
+    # of the center of mass settles near zero while the uncompensated signal is orders of magnitude larger.
+    fmt = FloatFormat(8, 36)
+    model = holoso.synthesize(
+        ImuFusion().update, _fusion_options(fmt, False), name="imu_fusion_spin"
+    ).numerical_model.elaborate()
+    shipped = ImuFusion()
+    w = np.array([0.0, 0.0, 2.0])
+    centripetal = np.cross(w, np.cross(w, shipped.lever_arm))
+    f_body = np.array([0.0, 0.0, 9.80665]) + centripetal
+    row = [
+        float(v)
+        for v in (
+            *(np.linalg.inv(_FUSION_GYRO_CAL) @ (w + shipped.temp_model @ np.array([1.0, 25.0, 625.0]))),
+            *(np.linalg.inv(_FUSION_ACCEL_CAL) @ f_body),
+            *_FUSION_GYRO_CAL.flatten(),
+            *_FUSION_ACCEL_CAL.flatten(),
+            25.0,
+            0.02,
+        )
+    ]
+    for _ in range(600):
+        got = _drive_fusion(model, row)
+    residual = float(np.linalg.norm([got[f"out_0_{k}"] for k in range(3)]))
+    assert residual < 0.02 < 0.1 * float(np.linalg.norm(centripetal)), residual
 
 
 # ---------------------------------------------------------------- linear algebra library functions
 
 
 def test_operators_are_the_library_functions() -> None:
-    # Two keys on one entry, so an operator and its spelled call give identical HIR, not merely identical values.
+    # Two keys on one entry, so an operator and its spelled call give byte-identical Verilog under one module name --
+    # identical RTL, not merely identical values.
     def with_operators(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "2 2"]:
         return a @ b.T  # type: ignore[no-any-return]
 
     def with_calls(a: Float64[np.ndarray, "2 3"], b: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "2 2"]:
         return np.matmul(a, np.transpose(b))  # type: ignore[no-any-return]
 
-    counts = [
-        (_arith_count(lower(k).hir, FloatMul), _arith_count(lower(k).hir, FloatAdd))
-        for k in (with_operators, with_calls)
-    ]
-    assert counts[0] == counts[1] == (12, 8)
-    for kernel in (with_operators, with_calls):
-        _assert_python_matches_holoso(
-            kernel, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([[0.5, -1.0, 2.0], [3.0, -2.0, 0.25]])
-        )
-
-
-def test_np_dot_is_the_matrix_product() -> None:
-    def dot_kernel(a: Float64[np.ndarray, "2 2"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        return np.dot(a, x)  # type: ignore[no-any-return]
-
-    assert [o.name for o in lower(dot_kernel).hir.outputs] == ["out_0", "out_1"]
-    _assert_python_matches_holoso(dot_kernel, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([1.0, -1.0]))
-
-    def scalar_dot(a: float, x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
-        return np.dot(a, x)  # type: ignore[no-any-return]
-
-    # numpy would multiply here; Holoso rejects rather than silently reinterpreting the matrix product as a broadcast.
-    with pytest.raises(UnsupportedConstruct, match="scalar"):
-        lower(scalar_dot)
+    spelled = [_synth(k).verilog_output.verilog for k in (with_operators, with_calls)]
+    assert spelled[0] == spelled[1]
+    _assert_python_matches_holoso(
+        with_operators, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), np.array([[0.5, -1.0, 2.0], [3.0, -2.0, 0.25]])
+    )
 
 
 def test_np_trace_and_np_outer() -> None:
     def tr(m: Float64[np.ndarray, "3 3"]) -> float:
         return np.trace(m)  # type: ignore[no-any-return]
 
-    assert [o.name for o in lower(tr).hir.outputs] == ["out_0"]
-    assert _arith_count(lower(tr).hir, FloatMul) == 0  # a fold of the diagonal, no multiplies
-    _assert_python_matches_holoso(tr, np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]))
+    result = _synth(tr)
+    assert [p.name for p in result.output_ports] == ["out_0"]
+    verilog = result.verilog_output.verilog
+    assert "holoso_fadd #(" in verilog and "holoso_fmul #(" not in verilog  # a fold of the diagonal, no multiplies
+    m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+    assert _run(result.numerical_model.elaborate(), m)[0] == np.trace(m)
 
     def outer(u: Float64[np.ndarray, "2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "2 3"]:
         return np.outer(u, v)
 
-    assert _arith_count(lower(outer).hir, FloatMul) == 6 and _arith_count(lower(outer).hir, FloatAdd) == 0
-    _assert_python_matches_holoso(outer, np.array([1.0, -2.0]), np.array([0.5, 3.0, -1.0]))
+    result_o = _synth(outer)
+    verilog_o = result_o.verilog_output.verilog
+    assert "holoso_fmul #(" in verilog_o and "holoso_fadd #(" not in verilog_o  # products only, no sums
+    u, w = np.array([1.0, -2.0]), np.array([0.5, 3.0, -1.0])
+    assert np.array_equal(_run(result_o.numerical_model.elaborate(), u, w), np.outer(u, w).flatten())
 
     def rect_trace(m: Float64[np.ndarray, "2 3"]) -> float:
         return np.trace(m)  # type: ignore[no-any-return]
 
     # numpy walks the shorter diagonal; Holoso rejects rather than reinterpreting.
-    with pytest.raises(UnsupportedConstruct, match="square"):
-        lower(rect_trace)
+    _refused(rect_trace, "square")
+
+    def vec_trace(v: Float64[np.ndarray, "3"]) -> float:
+        return np.trace(v)  # type: ignore[no-any-return]
+
+    _refused(vec_trace, r"in np\.trace\(\): ValueError: trace requires a matrix, got a 1-D value")
 
     def outer_of_matrix(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
         return np.outer(m, m)
 
-    with pytest.raises(UnsupportedConstruct, match="1-D"):
-        lower(outer_of_matrix)
+    _refused(outer_of_matrix, "1-D")
 
 
 def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
@@ -1152,26 +955,507 @@ def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
     def bool_trace(flag: bool) -> bool:
         return np.trace(np.array([[flag]]))  # type: ignore[no-any-return]
 
-    with pytest.raises(UnsupportedConstruct, match="must hold numbers, not booleans"):
-        lower(bool_trace)
+    _refused(bool_trace, "must hold numbers, not booleans")
 
 
 def test_library_shape_rejection_is_attributed_to_the_user_call_site() -> None:
-    # A stub validates its own operands with a ``raise`` on a statically taken path; the error must name the user's
+    # A stub validates its own operands with a `raise` on a statically taken path; the error must name the user's
     # spelling and point at the user's line, never into the stub source.
     def bad(a: Float64[np.ndarray, "2 3"], x: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
         return a @ x  # type: ignore[no-any-return]
 
     with pytest.raises(UnsupportedConstruct, match=r"in @\(\).*mismatch") as excinfo:
-        lower(bad)
+        _synth(bad)
     assert excinfo.value.location is not None
     assert excinfo.value.location.line is not None and "a @ x" in excinfo.value.location.line
 
     def bad_t(a: float) -> float:
         return np.transpose(a)  # type: ignore[return-value]
 
-    with pytest.raises(UnsupportedConstruct, match=r"in np\.transpose\(\).*transpose a scalar"):
-        lower(bad_t)
+    _refused(bad_t, r"in np\.transpose\(\).*transpose a scalar")
+
+
+# ---------------------------------------------------------------- whole-array reductions
+
+
+def test_float_extrema_reductions_across_spellings() -> None:
+    def extrema(v: Float64[np.ndarray, "4"]) -> tuple[float, float, float, float, float, float]:
+        return (
+            float(np.max(v)),
+            float(np.amax(v)),
+            float(v.max()),
+            float(np.min(v)),
+            float(np.amin(v)),
+            float(v.min()),
+        )
+
+    options = _with_operators(default_options(_FMT), fsort=FSortOptions())
+    for vec in (np.array([1.5, -2.0, 8.25, 0.5]), np.array([-1.0, -1.0, -3.5, -0.25])):
+        _assert_python_matches_holoso(extrema, vec, options=options)
+    # The extrema must reach the pooled sorter, not a compare/select fallback.
+    assert _mnemonic_counts(extrema, mir_options(options)).get("fsort", 0) >= 1
+
+
+def test_sum_and_mean_reductions_across_spellings() -> None:
+    def sums(m: Float64[np.ndarray, "2 3"], v: Float64[np.ndarray, "3"]) -> tuple[float, float, float, float]:
+        return float(np.sum(v)), float(m.sum()), float(np.mean(m)), float(v.mean())
+
+    _assert_python_matches_holoso(sums, np.array([[1.5, -2.0, 0.25], [4.0, 0.5, -1.0]]), np.array([0.5, -1.25, 3.0]))
+
+
+def test_reductions_of_a_single_element_array() -> None:
+    # Invisible to the plain-Python stubs: numpy permits the empty slice the compiled frontend refuses.
+    def single(v: Float64[np.ndarray, "1"]) -> tuple[float, float, float, float]:
+        return float(np.sum(v)), float(np.mean(v)), float(np.min(v)), float(np.max(v))
+
+    _assert_python_matches_holoso(single, np.array([-2.75]))
+
+
+def test_integer_reductions_preserve_the_family() -> None:
+    def kernel(a: int, b: int, c: int) -> tuple[int, int, int]:
+        v = np.array([a, b, c])
+        return np.sum(v), np.min(v), v.max()
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    for vec in ((3, -7, 5), (0, 0, 0), (-2, 9, 9)):
+        got = [value for value in sim.run(*vec) if isinstance(value, holoso.IntValue)]
+        assert len(got) == 3, "every output port carries the integer family"
+        assert [int(value) for value in got] == [sum(vec), min(vec), max(vec)]
+
+
+def test_integer_mean_promotes_before_accumulating() -> None:
+    # The elements' integer partial sum saturates the machine word, so a mean that failed to promote first
+    # would answer ~33% low.
+    def kernel(a: int, b: int, c: int) -> tuple[float, float]:
+        return float(np.mean(np.array([a, b, c]))), float(np.mean(a))
+
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
+    huge = 2**61  # in range of the settled 63-bit word, while 3*huge is not
+    got = [float(value) for value in sim.run(huge, huge, huge)]
+    assert got == [pytest.approx(float(huge), rel=1e-12), float(huge)]  # a railed accumulator would be ~33% off
+    assert [float(value) for value in sim.run(3, -7, 5)] == [pytest.approx((3 - 7 + 5) / 3, rel=1e-12), 3.0]
+
+
+def test_zero_d_reductions_follow_numpy() -> None:
+    # Free-function reductions accept scalars as numpy does; the extrema preserve even a bool operand.
+    def kernel(x: float, n: int, flag: bool) -> tuple[float, int, float, float, bool]:
+        return np.sum(x), np.sum(n), np.mean(x), np.min(x), np.max(flag)  # type: ignore[return-value]
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    got = sim.run(2.5, 7, True)
+    assert [float(got[0]), int(got[1]), float(got[2]), float(got[3]), got[4]] == [  # type: ignore[arg-type]
+        2.5,
+        7,
+        2.5,
+        2.5,
+        True,
+    ]
+
+
+def test_explicit_ndarray_descriptor_calls_demand_an_array_receiver() -> None:
+    # np.ndarray.sum(x) on a scalar is a TypeError in CPython, so the kernel could never run as its own
+    # reference; the compiled path must refuse.
+    def kernel(x: float) -> float:
+        return float(np.ndarray.sum(x))  # type: ignore[call-overload]
+
+    _refused(kernel, "unbound ndarray method")
+
+    def bound(v: Float64[np.ndarray, "3"]) -> float:  # the valid-receiver spelling CPython accepts stays legal
+        return float(np.ndarray.sum(v))
+
+    _assert_python_matches_holoso(bound, np.array([1.5, -0.25, 2.0]))
+
+
+def test_reductions_are_independent_of_the_unroll_threshold() -> None:
+    def kernel(v: Float64[np.ndarray, "3"]) -> float:
+        return float(np.sum(v))
+
+    options = dataclasses.replace(default_options(_FMT), unroll_max_trips=0)
+    _assert_python_matches_holoso(kernel, np.array([1.25, -0.5, 3.0]), options=options)
+
+
+def test_sum_of_products_contracts_to_fma_chain() -> None:
+    # A summed elementwise product must contract exactly as `v @ w` does: one fmul, then n-1 ffma.
+    def kernel(u: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
+        return float(np.sum(u * w))
+
+    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
+    assert _mnemonic_counts(kernel, fma_mir) == {"fmul": 1, "ffma": 3}
+
+
+# ---------------------------------------------------------------- reshape and dtype conversions
+
+
+def test_reshape_matches_numpy_across_spellings() -> None:
+    def shapes(
+        v: Float64[np.ndarray, "6"], m: Float64[np.ndarray, "2 3"]
+    ) -> tuple[float, float, float, float, float, float]:
+        col = v.reshape((6, 1))
+        pair = v.reshape(2, 3)
+        back = m.reshape(6)
+        free = np.reshape(m, (3, 2))  # NOT m.T: reshape keeps the row-major flat order, so free[1, 0] is m[0, 2]
+        named = np.reshape(v, shape=(3, 2))  # the canonical numpy 2.x keyword spelling
+        return (
+            float(col[4, 0]),
+            float(pair[1, 2]),
+            float(back[5]),
+            float(free[1, 0]),
+            float(np.sum(pair[0])),
+            float(named[2, 1]),
+        )
+
+    v = np.array([1.0, -2.0, 3.5, 0.25, -4.0, 6.0])
+    m = np.array([[0.5, 1.5, -2.5], [3.0, -0.5, 2.0]])
+    _assert_python_matches_holoso(shapes, v, m)
+
+
+def test_reshape_descriptor_spelling_matches_numpy() -> None:
+    def unbound(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "4"]:
+        return np.ndarray.reshape(m, 4)
+
+    _assert_python_matches_holoso(unbound, np.array([[1.0, -2.0], [0.5, 3.0]]))
+
+
+class _BalancedState:
+    def __init__(self) -> None:
+        self._balance = np.zeros(3)
+
+    def step(self, x: float) -> Float64[np.ndarray, "3 1"]:
+        self._balance = self._balance + np.array([x, -x, 2.0 * x])
+        return np.array(self._balance.reshape((3, 1)))
+
+
+def test_reshaped_state_returns_only_as_an_explicit_copy() -> None:
+    # A reshape of persistent state is a live view of its storage: returning it directly must draw the alias
+    # refusal naming the np.array rewrite, and the rewrite must work.
+    class _Aliasing:
+        def __init__(self) -> None:
+            self._balance = np.zeros(3)
+
+        def step(self, x: float) -> Float64[np.ndarray, "3 1"]:
+            self._balance = self._balance + np.array([x, -x, 2.0 * x])
+            return self._balance.reshape((3, 1))
+
+    with pytest.raises(UnsupportedConstruct, match=r"live alias.*np\.array"):
+        _synth(_Aliasing().step)
+
+    sim = _synth(_BalancedState().step).numerical_model.elaborate()
+    reference = _BalancedState()
+    for x in (1.5, -0.25, 3.0):
+        assert np.allclose(_run(sim, x), reference.step(x).flatten(), rtol=1e-9)
+
+
+def test_reshape_shares_its_source() -> None:
+    # The host MAY answer a view, so a store through either handle could diverge; the model refuses it.
+    def kernel(x: float) -> float:
+        m = np.array([[x, x], [x, x]])
+        flat = m.reshape(4)
+        m[0, 0] = 1.0
+        return float(flat[0])
+
+    _refused(kernel, "shared")
+
+    def captured(x: float) -> float:  # the un-called bound method is already a second handle
+        m = np.array([x, x])
+        f = m.reshape
+        m[0] = 1.0
+        return float(f((2, 1))[0, 0])
+
+    _refused(captured, "shared")
+
+
+def test_dtype_float_builds_a_float_vector_from_bools() -> None:
+    def kernel(a: bool, b: bool, c: bool) -> Float64[np.ndarray, "3"]:
+        return np.array((a, b, c), dtype=float)
+
+    sim = _sim(kernel)
+    for flags in ((True, False, True), (False, False, False)):
+        want = np.array(flags, dtype=float)
+        assert [float(value) for value in sim.run(*flags)] == list(want)
+
+
+def test_dtype_int_truncates_like_numpy() -> None:
+    def kernel(x: float) -> tuple[int, int]:
+        v = np.asarray(np.array([x, -x]), int)  # the positional dtype spelling
+        return v[0], v[1]
+
+    options = _with_operators(default_options(_FMT), ftoint=FToIntOptions())
+    sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
+    for x in (1.9, 0.5, 2.0):
+        got = [value for value in sim.run(x) if isinstance(value, holoso.IntValue)]
+        assert [int(value) for value in got] == [int(x), int(-x)]
+
+
+def test_dtype_changing_asarray_mints_a_fresh_array() -> None:
+    # A family-changing asarray copies on the host: the source stays mutable and the pair installs into two
+    # state slots; a family-preserving asarray shares and refuses the store.
+    def fresh(x: int) -> tuple[float, int]:
+        src = np.array([x, x + 1])
+        out = np.asarray(src, dtype=float)
+        src[0] = 7
+        return float(out[0]), src[0]
+
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim = holoso.synthesize(fresh, options, name="kernel").numerical_model.elaborate()
+    got = sim.run(3)
+    assert [float(got[0]), int(got[1])] == [3.0, 7]  # type: ignore[arg-type]
+
+    class _TwoSlots:
+        def __init__(self) -> None:
+            self.a = np.zeros(2, dtype=int)
+            self.b = np.zeros(2)
+
+        def step(self, x: int) -> float:
+            v = np.array([x, x + 1])
+            w = np.asarray(v, dtype=float)
+            self.a = v
+            self.b = w
+            return float(w[0])
+
+    sim2 = holoso.synthesize(_TwoSlots().step, options, name="kernel").numerical_model.elaborate()
+    assert float(sim2.run(4)[0]) == 4.0
+
+    def shared(x: float) -> float:
+        src = np.array([x, x])
+        out = np.asarray(src, dtype=float)
+        src[0] = 1.0
+        return float(out[0])
+
+    _refused(shared, "shared")
+
+
+def test_zero_mean_helper_compiles() -> None:
+    def zero_mean(x: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        v = np.asarray(x, dtype=float)
+        return v - float(np.mean(v))
+
+    _assert_python_matches_holoso(zero_mean, np.array([1.0, 2.0, 4.0]))
+
+
+_HUGE_TABLE = np.arange(100_001)
+
+
+def test_a_dtype_conversion_charges_the_expansion_budget() -> None:
+    def kernel(x: float) -> float:
+        return x + float(np.asarray(_HUGE_TABLE, dtype=float)[0])
+
+    _refused(kernel, "budget")
+
+
+# ---------------------------------------------------------------- polyval and the lifted abs
+
+
+def test_polyval_matches_numpy_across_argument_kinds() -> None:
+    def with_array(p: Float64[np.ndarray, "4"], x: float) -> float:
+        return float(np.polyval(p, x))
+
+    _assert_python_matches_holoso(with_array, np.array([2.0, -1.0, 0.5, 3.0]), 1.5)
+
+    def with_tuple(x: float) -> float:
+        return float(np.polyval((2.0, -1.0, 3.0), x))
+
+    _assert_python_matches_holoso(with_tuple, 1.5)
+
+    def with_array_x(p: Float64[np.ndarray, "3"], v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.polyval(p, v)
+
+    _assert_python_matches_holoso(with_array_x, np.array([1.0, -2.0, 0.5]), np.array([0.5, -3.0]))
+
+    def constant_over_array(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.polyval((2.5,), v)  # the broadcast seed
+
+    _assert_python_matches_holoso(constant_over_array, np.array([1.0, 2.0, 3.0]))
+
+    def empty_over_array(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.polyval((), v)
+
+    _assert_python_matches_holoso(empty_over_array, np.array([1.0, 2.0]))
+
+
+def test_polyval_preserves_the_integer_family_and_promotes_heterogeneous_coefficients() -> None:
+    def int_poly(a: int, b: int, x: int) -> int:
+        return np.polyval(np.array([a, b]), x)  # type: ignore[return-value]
+
+    sim = _synth(int_poly).numerical_model.elaborate()
+    got = sim.run(3, -7, 5)
+    assert isinstance(got[0], holoso.IntValue) and int(got[0]) == 3 * 5 - 7
+
+    def hetero(a: int, x: int) -> float:
+        return float(np.polyval((a, 0.5), x))
+
+    # A mixed coefficient tuple converts to float BEFORE the fold, as numpy's asarray does; an integer
+    # partial product would rail the 63-bit word here and answer 4x low.
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim2 = holoso.synthesize(hetero, options, name="kernel").numerical_model.elaborate()
+    huge = 2**61
+    assert float(sim2.run(huge, 4)[0]) == pytest.approx(float(np.polyval((huge, 0.5), 4)), rel=1e-12)
+
+
+def test_polyval_contracts_to_fma_chain() -> None:
+    def kernel(p: Float64[np.ndarray, "4"], x: float) -> float:
+        return float(np.polyval(p, x))
+
+    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
+    assert _mnemonic_counts(kernel, fma_mir) == {"ffma": 3}  # Horner; the zero seed folds away entirely
+
+
+def test_abs_on_arrays_across_spellings() -> None:
+    def kernel(v: Float64[np.ndarray, "3"], m: Float64[np.ndarray, "2 2"]) -> tuple[float, float, float]:
+        return float(np.sum(np.abs(v))), float(np.sum(np.absolute(m))), float(np.sum(abs(v)))
+
+    _assert_python_matches_holoso(kernel, np.array([1.5, -2.0, -0.25]), np.array([[1.0, -3.0], [-4.0, 5.0]]))
+
+
+def test_abs_on_int_arrays_preserves_the_family() -> None:
+    def kernel(a: int, b: int) -> tuple[int, int]:
+        v = np.abs(np.array([a, b]))
+        return v[0], v[1]
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    got = [value for value in sim.run(-3, 7) if isinstance(value, holoso.IntValue)]
+    assert [int(value) for value in got] == [3, 7]
+
+
+def test_abs_answers_a_fresh_array() -> None:
+    def kernel(x: float) -> tuple[float, float]:
+        src = np.array([x, -x])
+        out = np.abs(src)
+        src[0] = 1.0
+        out[1] = 2.0
+        return float(out[0]), src[0] + out[1]
+
+    _assert_python_matches_holoso(kernel, 3.0)
+
+
+# ---------------------------------------------------------------- matrix inversion
+
+
+class VectorMeasurementFilter:
+    """
+    A 2-state filter with a genuinely 2-D measurement, so the Kalman gain needs the inverse of a runtime 2x2
+    innovation covariance: persistent matrix state composed with `np.linalg.inv` across transactions.
+    """
+
+    x: Float64[np.ndarray, "2"]
+    P: Float64[np.ndarray, "2 2"]
+
+    def __init__(self) -> None:
+        self.x = np.zeros(2)
+        self.P = np.eye(2) * 10.0
+
+    def update(self, F: Float64[np.ndarray, "2 2"], z: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        x = F @ self.x
+        P = F @ self.P @ F.T + PROC_NOISE
+        prediction: Float64[np.ndarray, "2"] = x
+        S = OBS @ P @ OBS.T + MEAS_COV
+        K = P @ OBS.T @ np.linalg.inv(S)
+        self.x = x + K @ (z - OBS @ x)
+        self.P = (np.eye(2) - K @ OBS) @ P
+        return prediction
+
+
+def test_np_linalg_inv_matches_numpy() -> None:
+    def inv2(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.linalg.inv(m)
+
+    def inv3(m: Float64[np.ndarray, "3 3"]) -> Float64[np.ndarray, "3 3"]:
+        return np.linalg.inv(m)
+
+    # Permutation matrices: a zero leading pivot, so the runtime compare-and-swap network is exercised in the
+    # datapath and unpivoted elimination would divide by zero.
+    _assert_python_matches_holoso(inv2, np.array([[0.0, 1.0], [1.0, 0.0]]))
+    _assert_python_matches_holoso(inv3, np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]))
+    _assert_python_matches_holoso(inv3, np.eye(3))
+    rng = np.random.default_rng(0x1481)
+    for n, kernel in ((2, inv2), (3, inv3)):
+        _assert_python_matches_holoso(kernel, rng.uniform(-1.0, 1.0, (n, n)) + np.eye(n) * n)
+        factor = np.tril(rng.uniform(-1.0, 1.0, (n, n)), -1) + np.diag(rng.uniform(1.0, 2.0, n))
+        _assert_python_matches_holoso(kernel, factor @ factor.T)  # SPD
+
+
+def test_np_linalg_inv_1x1_is_the_reciprocal() -> None:
+    def inv1(m: Float64[np.ndarray, "1 1"]) -> Float64[np.ndarray, "1 1"]:
+        return np.linalg.inv(m)
+
+    assert _run(_sim(inv1), np.array([[4.0]]))[0] == 0.25
+
+
+def test_np_linalg_inv_solve_composition() -> None:
+    def solve(a: Float64[np.ndarray, "3 3"], b: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.linalg.inv(a) @ b  # type: ignore[no-any-return]
+
+    a = np.array([[4.0, 1.0, 0.0], [1.0, 3.0, -1.0], [0.0, -1.0, 5.0]])
+    _assert_python_matches_holoso(solve, a, np.array([1.0, -2.0, 0.5]))
+
+
+def test_np_linalg_inv_structure() -> None:
+    def inv3(m: Float64[np.ndarray, "3 3"]) -> Float64[np.ndarray, "3 3"]:
+        return np.linalg.inv(m)
+
+    verilog = _synth(inv3).verilog_output.verilog
+    assert "holoso_fdiv #(" in verilog and "holoso_fcmp #(" in verilog  # pivot compares are not folded away
+
+
+def test_np_linalg_inv_rejections() -> None:
+    def rect(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "2 3"]:
+        return np.linalg.inv(m)
+
+    _refused(rect, r"square matrix, got 2×3")
+
+    def vec(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.linalg.inv(v)
+
+    with pytest.raises(UnsupportedConstruct, match=r"inv requires a matrix, got a 1-D value") as excinfo:
+        _synth(vec)
+    assert excinfo.value.location is not None
+    assert excinfo.value.location.line is not None and "np.linalg.inv(v)" in excinfo.value.location.line
+
+
+def test_np_linalg_inv_argument_shares_like_any_array_call() -> None:
+    # The inverse is a fresh array, but the ARGUMENT is shared by the call like for every array composite, so a
+    # later store into it is refused; recorded here so the behavior is a ruling rather than an accident.
+    def store_after_inv(v: float) -> float:
+        m = np.zeros((2, 2))
+        m[0, 0] = v + 1.0
+        m[1, 1] = 2.0
+        y = np.linalg.inv(m)
+        m[0, 1] = y[0, 0]
+        return m[0, 1]  # type: ignore[no-any-return]
+
+    _refused(store_after_inv, "shared")
+
+
+def test_np_linalg_inv_of_a_statically_singular_constant_refuses_the_build() -> None:
+    # [[1,2],[2,4]] eliminates in binary-exact steps: swap (|2| > |1|), normalize by 2, f = 1, 2 - 1*2 = 0, so the
+    # k=1 pivot is exactly 0.0. The a-side 0/0 divisions are erased by the 0/x == 0 rule, but the r-side 1/0 and
+    # -0.5/0 feed the returned inverse leaves, so a live all-constant divide-by-zero survives optimization and is
+    # convicted at the MIR final gate. A rounding-residue singular constant folds to a huge inverse instead, same
+    # as LAPACK, which also raises only on exactly-zero pivots.
+    def singular(x: float) -> float:
+        return np.linalg.inv(np.array([[1.0, 2.0], [2.0, 4.0]]))[0, 0] + x  # type: ignore[no-any-return]
+
+    with pytest.raises(holoso.SynthesisError):
+        _synth(singular)
+
+
+def test_stateful_filter_with_matrix_inversion_matches_numpy_across_transactions() -> None:
+    sim = holoso.synthesize(
+        VectorMeasurementFilter().update, default_options(_FMT), name="vector_tracker"
+    ).numerical_model.elaborate()
+    assert [p.name for p in sim.outputs] == [
+        "out_0", "out_1", "state_P_0_0", "state_P_0_1", "state_P_1_0", "state_P_1_1", "state_x_0", "state_x_1",
+    ]  # fmt: skip
+    reference = VectorMeasurementFilter()
+    rng = np.random.default_rng(0x2D2D)
+    F = np.array([[1.0, 0.1], [0.0, 1.0]])
+    for step in range(6):
+        z = np.array([float(rng.uniform(-1.0, 1.0)), float(rng.uniform(-1.0, 1.0))])
+        got = _run(sim, F, z)
+        prediction = reference.update(F, z)
+        want = np.array([float(v) for v in (*prediction, *reference.P.flatten(), *reference.x)])
+        assert np.all(np.isfinite(want))
+        assert np.allclose(got, want, rtol=1e-9, atol=1e-12), step
 
 
 def test_matrix_state_transposed_under_a_shape_guard_across_transactions() -> None:

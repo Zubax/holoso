@@ -2,12 +2,14 @@
 
 import dataclasses
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+import holoso
 from holoso import (
     FAddOptions,
     FAtan2Options,
@@ -18,34 +20,41 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FSincosOptions,
+    FSqrtOptions,
     OperatorOptions,
     Options,
 )
-from holoso._api import _build_op_config
+from holoso._api import _mir_options
+from holoso._mir import MirOptions
 from holoso._lir import RegallocTuning
 from holoso._lir import build
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
-from holoso._hir import Hir, Operation, Operator, optimize
 from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat, IntFormat
-from holoso._value import FloatValue
+from holoso._value import FloatValue, ScalarValue
 from holoso._eel._names import port_name as port_name
 
 type Path = tuple[int | str, ...]
 """A leaf path into a returned value: indices for sequence elements, names for dataclass fields."""
 
-type Vector = list[FloatValue | bool]
+type Vector = list[ScalarValue]
 
 # What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
 _DEFAULTS = Options(OperatorOptions())
 DEFAULT_IFCONV_MAX_OPS: int = _DEFAULTS.ifconv_max_ops
+DEFAULT_UNROLL_MAX_TRIPS: int = _DEFAULTS.unroll_max_trips
+
+
+mir_options = _mir_options
+"""Selection's own view of the user's Options, so a white-box build settles the word exactly as synthesize does."""
 
 
 def default_ifmt(ffmt: FloatFormat) -> IntFormat:
-    return Options(OperatorOptions(), ffmt=ffmt).ifmt
+    """The word a float-carrying kernel takes at the default floor; a hand-built MIR names it rather than derives it."""
+    return IntFormat(max(Options(OperatorOptions()).wint_min, ffmt.width))
 
 
 DEFAULT_TUNING = RegallocTuning(
@@ -58,8 +67,16 @@ DEFAULT_TUNING = RegallocTuning(
 @dataclass(frozen=True, slots=True)
 class OperatorCase:
     label: str
-    make_ops: Callable[[FloatFormat], OpConfig]
+    make_mir: Callable[[FloatFormat], MirOptions]
     fcmp_latency: int
+
+
+@dataclass(frozen=True, slots=True)
+class OptionsCase:
+    """The public-Options twin of OperatorCase, for consumers that synthesize through the public API."""
+
+    label: str
+    make_options: Callable[[FloatFormat], Options]
 
 
 def build_model(lir: Lir) -> NumericalSimulator:
@@ -68,28 +85,28 @@ def build_model(lir: Lir) -> NumericalSimulator:
 
 def build_model_and_interpreter(
     kernel: Callable[..., object],
-    ops: OpConfig,
+    ops: MirOptions,
     name: str,
     fmt: FloatFormat,
-    ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS,
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
-    the single source of truth for the differential-oracle tests. The model descends through ``build`` (the
+    the single source of truth for the differential-oracle tests. The model descends through `build` (the
     scheduled/allocated LIR, where the verified bug class lives); the interpreter is taken straight off the MIR
-    (upstream of ``build``), so the two share everything except the LIR layer.
+    (upstream of `build`), so the two share everything except the LIR layer.
     """
-    mir = lower_to_mir(optimize(lower_frontend(kernel).hir, ifconv_max_ops), ops, fmt, default_ifmt(fmt))
+    mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
     return build_model(build_lir(mir, name)), MirInterpreter(mir)
 
 
-def arith_count(hir: Hir, op_type: type[Operator]) -> int:
-    """The number of HIR operations whose operator is exactly ``op_type`` -- a structural probe for lowering tests."""
-    return sum(1 for n in hir.nodes.values() if isinstance(n, Operation) and type(n.operator) is op_type)
-
-
-def show_value(value: FloatValue | bool) -> str:
+def show_value(value: ScalarValue) -> str:
     return f"{float(value):.6g}" if isinstance(value, FloatValue) else str(value)
+
+
+def as_float(value: ScalarValue) -> float:
+    """A float-only kernel's interpreter output, narrowed out of the union for comparison against a Python reference."""
+    assert isinstance(value, FloatValue)
+    return float(value)
 
 
 def assert_model_equals_interpreter(
@@ -138,10 +155,6 @@ def evaluate_reference(fn: Callable[..., object], inputs: Mapping[str, float]) -
     return [float(value) for _, value in flatten_value(result)]
 
 
-def output_names(root: object) -> list[str]:
-    return [port_name(path) for path, _ in flatten_value(root)]
-
-
 def unit_roundoff(fmt: FloatFormat) -> float:
     return 2.0 ** -(fmt.wman - 1)
 
@@ -156,10 +169,15 @@ def default_tolerance(
 
 
 def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
-    """Whether ``actual`` is within ``atol + rtol*|expected|`` of ``expected`` (infinities must match exactly)."""
+    """Whether `actual` is within `atol + rtol*|expected|` of `expected` (infinities must match exactly)."""
     if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
         return actual == expected
     return abs(actual - expected) <= atol + rtol * abs(expected)
+
+
+def instantiated_modules(result: holoso.SynthesisResult) -> set[str]:
+    """Operator modules the top module instantiates; the always-present support functions do not match."""
+    return set(re.findall(r"\b(holoso_\w+)\s+#\(", result.verilog_output.verilog))
 
 
 def bounded(rng: np.random.Generator, lo: float, hi: float) -> float:
@@ -185,10 +203,6 @@ def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: 
         for j in range(i + 1):
             lower[i, j] = rng.uniform(diag_lo, diag_hi) if i == j else rng.uniform(-1.0, 1.0)
     return lower @ lower.T
-
-
-def encode_inputs(fmt: FloatFormat, values: dict[str, float | bool]) -> dict[str, int]:
-    return {name: int(value) if type(value) is bool else fmt.encode(value) for name, value in values.items()}
 
 
 def format_edge_bits(fmt: FloatFormat) -> list[int]:
@@ -223,9 +237,9 @@ def _if_supported[O](operator: Callable[..., object], fmt: FloatFormat, opt: O) 
     return opt
 
 
-def build_ops(options: Options) -> OpConfig:
-    """For the white-box tests that drive MIR lowering directly."""
-    return _build_op_config(options)
+def build_ops(options: Options, width: int) -> OpConfig:
+    """For the few tests that inspect a built machine with no kernel to settle its word, so they name the width."""
+    return OpConfig.build(options.operator, options.ffmt, options.wmultiplier or 0, IntFormat(width))
 
 
 DEFAULT_FETCH_STAGES = 3
@@ -249,6 +263,7 @@ def default_options(fmt: FloatFormat) -> Options:
             fcmp=FCmpOptions(),
             fexp2=_if_supported(FExp2Operator, fmt, FExp2Options()),
             flog2=_if_supported(FLog2Operator, fmt, FLog2Options()),
+            fsqrt=FSqrtOptions(),  # no tables, hence no format that leaves it unsupported
             fsincos=_if_supported(FSincosOperator, fmt, FSincosOptions()),
             fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options()),
         ),
@@ -256,19 +271,19 @@ def default_options(fmt: FloatFormat) -> Options:
     )
 
 
-def default_ops(fmt: FloatFormat) -> OpConfig:
-    return build_ops(default_options(fmt))
+def default_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(default_options(fmt))
 
 
-def fcmp_staged_ops(fmt: FloatFormat, stage_input: int) -> OpConfig:
-    """The default config with only the comparator's stage knob varied (latency ``1 + stage_input``)."""
+def fcmp_s1_options(fmt: FloatFormat) -> Options:
+    """The default config with only the comparator's stage knob raised (latency 2)."""
     options = default_options(fmt)
-    operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=stage_input))
-    return build_ops(dataclasses.replace(options, operator=operator))
+    operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=1))
+    return dataclasses.replace(options, operator=operator)
 
 
-def fcmp_s1_ops(fmt: FloatFormat) -> OpConfig:
-    return fcmp_staged_ops(fmt, 1)
+def fcmp_s1_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(fcmp_s1_options(fmt))
 
 
 def branch_boundary_kernel(a: float, b: float, c: float) -> float:
@@ -290,10 +305,10 @@ def branch_boundary_kernel(a: float, b: float, c: float) -> float:
 def overlap_spill_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block software-pipelining corner shared by the cosim test and its white-box twin. The branch CONDITION
-    (``x < y``) depends only on inputs, so it commits early; a wide chain (``w``) computed in the same block commits
-    much later. The block's terminator therefore shrinks to ``w``'s write word (not the early condition), and ``w``
+    (`x < y`) depends only on inputs, so it commits early; a wide chain (`w`) computed in the same block commits
+    much later. The block's terminator therefore shrinks to `w`'s write word (not the early condition), and `w`
     SPILLS past the terminator into BOTH (single-predecessor) arms, which read it -- so a consumer in an arm must wait
-    for ``w``'s in-flight landing in the successor frame. The unspeculatable division in the else arm keeps the diamond
+    for `w`'s in-flight landing in the successor frame. The unspeculatable division in the else arm keeps the diamond
     a real branch under default if-conversion (so the spill crosses a genuine branch, replicated onto both arms).
     """
     w = (x * z + y) * z + y  # a wide chain whose result outlives the early comparison's commit
@@ -307,10 +322,10 @@ def overlap_spill_kernel(x: float, y: float, z: float) -> float:
 def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block overlap SOUNDNESS corner: a value live ONLY in one arm shares no register hazard with a value the
-    sibling arm spills onto it. ``v`` is computed in the entry block and used only in the else arm; the wide chain
-    ``w`` commits late and spills past the shrunk terminator into BOTH arms (its write-enable fires unconditionally
-    before the redirect). In the else arm ``w`` is DEAD -- if the allocator reuses ``w``'s register for ``v`` there,
-    the unconditional spill of ``w`` clobbers ``v`` before the arm reads it (a silent miscompile the cosim cannot
+    sibling arm spills onto it. `v` is computed in the entry block and used only in the else arm; the wide chain
+    `w` commits late and spills past the shrunk terminator into BOTH arms (its write-enable fires unconditionally
+    before the redirect). In the else arm `w` is DEAD -- if the allocator reuses `w`'s register for `v` there,
+    the unconditional spill of `w` clobbers `v` before the arm reads it (a silent miscompile the cosim cannot
     catch, since the numerical model shares the same register file). The else arm's value must therefore be checked
     against the source semantics, not just RTL==model. The unspeculatable division keeps this a real branch.
     """
@@ -326,17 +341,14 @@ def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
 
 def const_branch_kernel(x: float, y: float) -> float:
     """
-    Empty const-branch block corner shared by the cosim test and its white-box twin. The inner condition
-    ``(x * 0.0) > -1.0`` is constant-true, but only under the VALUE identity ``x*0 == 0`` that the graph owns and the
-    partial evaluator deliberately does not apply to a residual operand -- so it survives partial evaluation, and HIR
-    strength reduction then folds it to a BoolConst that if-conversion refuses, leaving an EMPTY const-branch block
-    (the condition install + a branch, no float content). That const materialization is a pc-gated install read AT the
-    terminator and lands at the drained boundary, so the drain must keep that boundary for it; shrinking below it made
-    the branch read the condition one PC before it landed.
+    A guard the partial evaluator cannot decide and the graph can: `(x * 0.0) > -1.0` is constant only under the
+    VALUE identity `x*0 == 0`, which partial evaluation deliberately withholds from a residual operand. Pruning
+    settles it and deletes the arm it excludes, so what the cosim checks is that the surviving path is the one the
+    source names.
     """
     r = x
     if x > y:
-        if (x * 0.0) > -1.0:  # constant-true under the graph's x*0 identity: an empty const-branch block
+        if (x * 0.0) > -1.0:  # constant-true under the graph's x*0 identity alone
             r = x + 1.0
         else:
             r = x + 2.0
@@ -365,10 +377,10 @@ def overlap_div_err_kernel(x: float, y: float, z: float) -> float:
     """
     Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the
     one error-bearing op -- commits late, so its result spills past the shrunk terminator. The data write lands in the
-    taken arm correctly, but the err_pc diagnostic latches ``pc - fetch_lag`` when the write-
+    taken arm correctly, but the err_pc diagnostic latches `pc - fetch_lag` when the write-
     enable executes, fetch_lag steps after its write word; if the terminator redirected to the NON-fall-through arm by
     then, err_pc would capture the successor frame instead of the division's step. The shrink floor must keep that
-    latch in-block. ``x < z`` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; ``y == 0``
+    latch in-block. `x < z` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; `y == 0`
     makes the division error. The else arm's division keeps this a real branch under default if-conversion.
     """
     q = x / y
@@ -416,6 +428,7 @@ def staged_options(fmt: FloatFormat) -> Options:
                     stage_output=1,
                 ),
             ),
+            fsqrt=FSqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
             fsincos=_if_supported(FSincosOperator, fmt, sincos),
             fatan2=_if_supported(FAtan2Operator, fmt, atan2),
         ),
@@ -423,25 +436,36 @@ def staged_options(fmt: FloatFormat) -> Options:
     )
 
 
-def staged_ops(fmt: FloatFormat) -> OpConfig:
-    return build_ops(staged_options(fmt))
+def staged_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(staged_options(fmt))
 
 
 PIPELINE_OP_CASES = (
-    OperatorCase("default", default_ops, 1),
-    OperatorCase("staged", staged_ops, 2),
+    OperatorCase("default", default_mir, 1),
+    OperatorCase("staged", staged_mir, 2),
 )
 
 COMPARATOR_OP_CASES = (
-    OperatorCase("default", default_ops, 1),
-    OperatorCase("fcmp_s1", fcmp_s1_ops, 2),
-    OperatorCase("staged", staged_ops, 2),
+    OperatorCase("default", default_mir, 1),
+    OperatorCase("fcmp_s1", fcmp_s1_mir, 2),
+    OperatorCase("staged", staged_mir, 2),
+)
+
+PIPELINE_OPTIONS_CASES = (
+    OptionsCase("default", default_options),
+    OptionsCase("staged", staged_options),
+)
+
+COMPARATOR_OPTIONS_CASES = (
+    OptionsCase("default", default_options),
+    OptionsCase("fcmp_s1", fcmp_s1_options),
+    OptionsCase("staged", staged_options),
 )
 
 
 class ChainedSlots:
     """
-    Chained persistent slots: ``_a`` captures ``_b``'s OLD value while ``_b`` advances, behind a long float tail.
+    Chained persistent slots: `_a` captures `_b`'s OLD value while `_b` advances, behind a long float tail.
     Shared by the schedule-level regression test and its RTL cosim twin -- the two must exercise the same kernel.
     """
 
@@ -473,11 +497,11 @@ class SelectHold:
 
 def phi_swap_loop(x: float, n: float) -> float:
     """
-    A while loop whose two carried values genuinely SWAP across the back edge (``a, b = b, a``), producing two
+    A while loop whose two carried values genuinely SWAP across the back edge (`a, b = b, a`), producing two
     loop-header phis whose back-edge arms cross-reference each other (phi_a's arm is phi_b and vice versa). The header
     must resolve its phis as a PARALLEL snapshot -- read both old values, then bind both; sequential resolution (bind
-    ``a``, then read the new ``a`` for ``b``) would collapse the swap into ``a == b`` and miscompile. A separate counter
-    ``n`` drives termination, so the swap is pure and the trip count is the integer part of ``n``. Both the numerical
+    `a`, then read the new `a` for `b`) would collapse the swap into `a == b` and miscompile. A separate counter
+    `n` drives termination, so the swap is pure and the trip count is the integer part of `n`. Both the numerical
     model and the MIR interpreter resolve phis in parallel, so this kernel is checked against the float64 Python
     reference -- which swaps correctly -- turning a sequential-phi regression in EITHER oracle into a divergence
     (interp==model alone could not catch it, since a shared sequential bug would still agree). With integer-valued
@@ -494,8 +518,8 @@ def phi_swap_loop(x: float, n: float) -> float:
 
 def phi_swap_computed_loop(x: float, n: float) -> float:
     """
-    The computed-arm variant of :func:`phi_swap_loop`: one cross-referencing back-edge arm is a value COMPUTED in the
-    body (``a + x``), not another phi. The pure swap cannot catch an install-placement (ordering) regression, because
+    The computed-arm variant of phi_swap_loop: one cross-referencing back-edge arm is a value COMPUTED in the
+    body (`a + x`), not another phi. The pure swap cannot catch an install-placement (ordering) regression, because
     both of its latch installs have phi sources and land on one placement PC, staying parallel however they are placed;
     here the latch mixes a phi-sourced install with a computed-source install, whose placements are derived differently,
     so it pins the LIR-level invariant that no tail install may fire after a sibling install has overwritten its source
@@ -513,9 +537,9 @@ def phi_swap_computed_loop(x: float, n: float) -> float:
 
 def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
     """
-    The boolean-bank twin of :func:`phi_swap_computed_loop`: the same cross-referencing loop-header phis with one
-    computed back-edge arm, carried in the 1-bit bank so the latch installs are ``BoolWrite``s rather than
-    ``WideCopy``s. The two banks derive install placement through the same helpers but emit through separate paths,
+    The boolean-bank twin of phi_swap_computed_loop: the same cross-referencing loop-header phis with one
+    computed back-edge arm, carried in the 1-bit bank so the latch installs are `BoolWrite`s rather than
+    `WideCopy`s. The two banks derive install placement through the same helpers but emit through separate paths,
     so each needs its own pin.
     """
     a = False
@@ -551,11 +575,11 @@ def branchy_swap_mixed_arm_loop(x: float, d: float, n: float) -> tuple[float, fl
 
 def overlap_drained_passthrough_kernel(x: float, y: float, z: float) -> float:
     """
-    A wide chain ``w`` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
-    does NO work and merely passes ``w`` through as the merged value, so ``w`` is the live-out of a fully-DRAINED,
-    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the ``term_offset <= drained
-    boundary`` invariant: the spill lands within the successor's drained-boundary cap because the predecessor's
-    issue-side envelope already tracks ``w``'s late write word, so the successor-local spill is only the fixed
+    A wide chain `w` computed in the overlapping entry block spills past the shrunk terminator into a then arm that
+    does NO work and merely passes `w` through as the merged value, so `w` is the live-out of a fully-DRAINED,
+    no-work arm. This exercises the drained-block-receiving-a-spill path and pins the `term_offset <= drained
+    boundary` invariant: the spill lands within the successor's drained-boundary cap because the predecessor's
+    issue-side envelope already tracks `w`'s late write word, so the successor-local spill is only the fixed
     fetch/latch gap regardless of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the
     cap; it cannot, and this kernel locks that in). The else arm's unspeculatable division keeps the diamond a real
     branch.
@@ -570,7 +594,7 @@ def overlap_drained_passthrough_kernel(x: float, y: float, z: float) -> float:
 
 def overlap_livein_branch_arm_kernel(x: float, y: float, z: float) -> float:
     """
-    The wide chain ``w`` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition ``c``
+    The wide chain `w` spills from the overlapping entry into an arm that ITSELF branches on a LIVE-IN condition `c`
     (computed in the entry block, not the arm) -- exercising the overlap interaction the plain dead-arm shape never
     reaches: a block that receives a spill and branches on a RESIDENT live-in condition shrinks its terminator to the
     issue-side envelope (the resident condition adds no read floor) rather than pinning to the drained boundary. Every
@@ -590,7 +614,7 @@ def overlap_livein_branch_arm_kernel(x: float, y: float, z: float) -> float:
 
 class SlotSwap:
     """
-    Two persistent slots that SWAP each transaction (``self._a, self._b = self._b, self._a``), forcing the parallel,
+    Two persistent slots that SWAP each transaction (`self._a, self._b = self._b, self._a`), forcing the parallel,
     read-first state writeback to exchange their two registers from old values -- the register-swap correctness the
     forward chained-slot SHIFT never exercises. Checked against the float64 reference (Python swaps correctly), so a
     shared sequential-writeback bug in BOTH oracles would still surface as a divergence.
@@ -606,3 +630,42 @@ class SlotSwap:
         self._a = old_b  # swap: a <- old b
         self._b = old_a  # swap: b <- old a
         return old_a * 2.0 + old_b * 4.0 + x  # exact for integer x; reads both OLD slot values to observe the swap
+
+
+class SharedLiveOut:
+    """
+    Two slots ending the transaction holding one value. The read-modify-write pair frees `a`'s home register
+    mid-transaction and the allocator reuses it, so a boundary-installing slot's register also carries opcode writes --
+    the shape the emitter used to refuse outright. Shared by the backend elaboration/premise test and its cosim twin.
+    """
+
+    def __init__(self) -> None:
+        self.a = 0.0
+        self.b = 1.0
+
+    def step(self, x: float) -> float:
+        self.a = x + self.a
+        self.a = x + self.a
+        self.b = self.a
+        return self.b
+
+
+class SharedLiveOutBool:
+    """
+    The boolean-bank twin (emission is bank-specific, so each bank needs its own coexistence witness): three slots
+    ending the transaction holding one value, with `d`'s early read freeing `a`'s register so the allocator lands
+    an opcode write on it -- a boundary-installing bool slot whose own register also takes one.
+    """
+
+    def __init__(self) -> None:
+        self.a = False
+        self.b = True
+        self.d = False
+
+    def step(self, x: bool, y: bool) -> tuple[bool, bool, bool]:
+        keep = self.d
+        self.d = x and self.a
+        self.a = y or self.a
+        self.a = x and self.a
+        self.b = self.a
+        return keep, self.b, self.d

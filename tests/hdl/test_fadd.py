@@ -32,6 +32,7 @@ from .hdl_float_oracle import (
     get_seed,
     random_zkf_f32,
     sources,
+    stage_tag,
     start_clock,
 )
 
@@ -108,19 +109,27 @@ async def holoso_fadd_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0, "out_valid asserted while idle after reset"
 
 
-# (stage_decode, stage_align, stage_output): base + each knob alone + all-on -- enough to verify the additive latency.
-STAGE_COMBOS = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
+# Base + every knob alone + the closure-used counts above one (stage_input=2, stage_normalize=2) + all-on.
+STAGE_COMBOS: tuple[dict[str, int], ...] = (
+    {},
+    {"stage_input": 1},
+    {"stage_decode": 1},
+    {"stage_align": 1},
+    {"stage_normalize": 1},
+    {"stage_pack": 1},
+    {"stage_output": 1},
+    {"stage_input": 2},
+    {"stage_normalize": 2},
+    {"stage_input": 1, "stage_decode": 1, "stage_align": 1, "stage_normalize": 1, "stage_pack": 1, "stage_output": 1},
+)
 
 
-@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: f"d{s[0]}a{s[1]}o{s[2]}")
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fadd(sim: str, stages: tuple[int, int, int]) -> None:
-    stage_decode, stage_align, stage_output = stages
-    operator = FAddOperator(
-        FloatFormat(8, 24), FAddOptions(stage_decode=stage_decode, stage_align=stage_align, stage_output=stage_output)
-    )
+def test_holoso_fadd(sim: str, stages: dict[str, int]) -> None:
+    operator = FAddOperator(FloatFormat(8, 24), FAddOptions(**stages))
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_d{stage_decode}a{stage_align}o{stage_output}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fadd_{stage_tag(stages)}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

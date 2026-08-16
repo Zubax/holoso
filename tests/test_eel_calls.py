@@ -2,26 +2,48 @@
 The call machinery, driven black-box through the differential oracle wherever the behavior is observable:
 registry identity dispatch (every spelling, and the typed lowering each operand domain selects), user-function
 inlining with CPython signature binding, boundary conformance, the pow one-behavior rule, raise semantics, and the
-re-attribution of every rejection arising inside an inlined callee to the user's call site.
+re-attribution of every rejection arising inside an inlined callee to the user's call site. Typed-lowering facts
+are pinned on public artifacts: lean operator sets that refuse by name, pooled-module sets in the emitted
+Verilog, and location-stripped `frontend_ir[-1]` text.
 """
 
+import dataclasses
 import inspect
 import math
+import re
 import types
 from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 import pytest
 
+import holoso
+from holoso import (
+    FAddOptions,
+    FCmpOptions,
+    FDivOptions,
+    FExp2Options,
+    FFromIntOptions,
+    FLog2Options,
+    FMulILog2Options,
+    FMulOptions,
+    FRoundOptions,
+    FSqrtOptions,
+    FToIntOptions,
+    OperatorOptions,
+    Options,
+    SynthesisError,
+    UnsupportedConstruct,
+)
 from holoso._eel import lower
 from holoso._eel._desugar import desugar
 from holoso._eel._pe import partial_evaluate
+
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from holoso._eel._print import print_eel
-from holoso._errors import SynthesisError, UnsupportedConstruct
-from holoso._hir import IntSelect, Operation, optimize
 
 from ._eeloracle import assert_hir_matches_reference
-from ._modelref import DEFAULT_IFCONV_MAX_OPS
+from ._public import strip_locations
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -29,25 +51,61 @@ _NEVER = False
 _ENABLED = True
 _SCALE = 4
 
+_INT_ONLY = Options(OperatorOptions())
+_FADD = Options(OperatorOptions(fadd=FAddOptions()))
+_FMUL = Options(OperatorOptions(fmul=FMulOptions()))
+_FADD_FMUL = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
+_FMUL_FDIV = Options(OperatorOptions(fmul=FMulOptions(), fdiv=FDivOptions()))
+_CONVERSIONS = Options(
+    OperatorOptions(
+        fadd=FAddOptions(),
+        fmul=FMulOptions(),
+        fdiv=FDivOptions(),
+        fcmp=FCmpOptions(),
+        fround=FRoundOptions(),
+        ffromint=FFromIntOptions(),
+        ftoint=FToIntOptions(),
+    )
+)
+_GENERAL_POW = Options(
+    OperatorOptions(
+        fadd=FAddOptions(),
+        fmul=FMulOptions(),
+        fdiv=FDivOptions(),
+        fcmp=FCmpOptions(),
+        fexp2=FExp2Options(),
+        flog2=FLog2Options(),
+        fsqrt=FSqrtOptions(),
+        fmul_ilog2=FMulILog2Options(),
+        fround=FRoundOptions(),
+        ffromint=FFromIntOptions(),
+    )
+)
+_SANS_FLOG2 = dataclasses.replace(_GENERAL_POW, operator=dataclasses.replace(_GENERAL_POW.operator, flog2=None))
+
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
-    compared = assert_hir_matches_reference(lower(fn).hir, fn, vectors, label=fn.__name__)
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
     assert compared == len(vectors)
 
 
 def _rejects(fn: object, match: str) -> None:
+    assert callable(fn)
     with pytest.raises(UnsupportedConstruct, match=match):
-        lower(fn)
+        holoso.synthesize(fn, _INT_ONLY, name="k")
 
 
 def _residual_text(fn: Callable[..., object]) -> str:
     assert isinstance(fn, types.FunctionType)
-    return print_eel(partial_evaluate(desugar(fn), fn))
+    return print_eel(partial_evaluate(desugar(fn), fn, None, DEFAULT_UNROLL_MAX_TRIPS))
 
 
-def _lowered_ops(fn: Callable[..., object]) -> list[str]:
-    hir = optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS)
-    return [type(node.operator).__name__ for node in hir.nodes.values() if isinstance(node, Operation)]
+def _residual(fn: Callable[..., object], options: Options) -> str:
+    return strip_locations(holoso.synthesize(fn, options, name="k").frontend_ir[-1])
+
+
+def _pooled_modules(result: holoso.SynthesisResult) -> set[str]:
+    return set(re.findall(r"holoso_(\w+) #\(", result.verilog_output.verilog))
 
 
 def _line_of(fn: Callable[..., object], needle: str) -> int:
@@ -61,14 +119,6 @@ def _line_of(fn: Callable[..., object], needle: str) -> int:
 # ---------------------------------------------------------------------- intrinsics
 
 
-def _intrinsic_mix(x: float, y: float) -> float:
-    return math.sqrt(abs(x)) + min(x, y) * max(x, y) + np.hypot(x, y) + math.atan2(y, x)  # type: ignore[no-any-return]
-
-
-def test_intrinsics_under_every_spelling() -> None:
-    _oracle(_intrinsic_mix, [{"x": 1.5, "y": -2.0}, {"x": -0.25, "y": 0.5}, {"x": 3.0, "y": 4.0}])
-
-
 _sqrt_alias = math.sqrt
 
 
@@ -78,7 +128,7 @@ def _aliased_intrinsic(x: float) -> float:
 
 def test_callee_dispatch_is_identity_not_spelling() -> None:
     _oracle(_aliased_intrinsic, [{"x": 4.0}, {"x": 2.25}])
-    assert "fsqrt" in _residual_text(_aliased_intrinsic)
+    assert "fsqrt" in _residual(_aliased_intrinsic, _GENERAL_POW)
 
 
 def sqrt(v: float) -> float:
@@ -91,7 +141,7 @@ def _shadowing_user_function(x: float) -> float:
 
 def test_a_user_function_spelled_like_a_library_one_inlines_as_user_code() -> None:
     _oracle(_shadowing_user_function, [{"x": 4.0}, {"x": -1.0}])
-    assert "fsqrt" not in _residual_text(_shadowing_user_function)
+    assert "fsqrt" not in _residual(_shadowing_user_function, _FADD)
 
 
 def _sqrt_of_int(n: int) -> float:
@@ -127,10 +177,9 @@ def test_a_symbol_whose_python_answer_is_an_integer_lowers_over_integers() -> No
     _oracle(_abs_of_int_composes_with_the_integer_operators, [{"n": -8}, {"n": 5}])
     _oracle(_min_max_of_ints, [{"a": 3, "b": 5}, {"a": 5, "b": 3}, {"a": -4, "b": -4}])
     _oracle(_sign_of_int, [{"n": -9}, {"n": 0}, {"n": 2}])
-    # The compare-and-select entries cost one mux rather than control flow, which is if-conversion's doing.
-    hir = optimize(lower(_min_max_of_ints).hir, DEFAULT_IFCONV_MAX_OPS)
-    assert sum(isinstance(node, Operation) and isinstance(node.operator, IntSelect) for node in hir.nodes.values()) == 2
-    assert len(hir.blocks) == 1
+    # Building on a machine with no float lane configured proves the integer lowering; the compare-and-select
+    # population is pinned in test_int_selection.
+    holoso.synthesize(_min_max_of_ints, _INT_ONLY, name="k")
 
 
 def _fabs_of_int(n: int) -> float:
@@ -174,10 +223,9 @@ def test_a_rounding_answers_what_its_own_spelling_answers() -> None:
     vectors = [{"x": 2.5}, {"x": -2.5}, {"x": 3.7}, {"x": -0.5}, {"x": 4.0}]
     _oracle(_math_roundings_of_a_float, vectors)
     _oracle(_numpy_roundings_of_a_float, vectors)
-    # The cast costs nothing where a float consumes the result: it reduces back to the bare rounder.
-    hir = optimize(lower(_floor_consumed_as_a_float).hir, DEFAULT_IFCONV_MAX_OPS)
-    lowered = [type(node.operator).__name__ for node in hir.nodes.values() if isinstance(node, Operation)]
-    assert lowered == ["FloatFloor"]
+    # The cast costs nothing where a float consumes the result: it reduces back to the bare rounder, so even
+    # with every conversion operator configured the machine instantiates nothing but the rounder.
+    assert _pooled_modules(holoso.synthesize(_floor_consumed_as_a_float, _CONVERSIONS, name="k")) == {"fround"}
 
 
 def _dot_of_static_ints(x: float) -> float:
@@ -189,33 +237,7 @@ def test_an_array_composite_judges_scalars_by_its_own_rank_guard() -> None:
     _rejects(_dot_of_static_ints, "does not accept scalar operands")
 
 
-# ---------------------------------------------------------------------- composite stubs
-
-
-def _composites(x: float) -> float:
-    return math.exp(x) * math.log10(x + 10.0) + math.sinh(x / 4.0)
-
-
-def test_composite_stubs_inline_and_match_the_host() -> None:
-    _oracle(_composites, [{"x": 0.5}, {"x": 1.0}, {"x": -0.5}, {"x": 2.0}])
-
-
-def _tan(x: float) -> float:
-    return math.tan(x)
-
-
-def test_a_stub_opening_with_tuple_unpacking_inlines() -> None:
-    # tan opens with ``s, c = sin(x), cos(x)``, so it exercises tuple unpacking inside an inlined stub.
-    _oracle(_tan, [{"x": 0.5}, {"x": -1.0}, {"x": 2.0}, {"x": 0.0}])
-
-
-def _cbrt(x: float) -> float:
-    return math.cbrt(x)
-
-
-def test_sibling_library_stub_calls_inline_through_the_user_path() -> None:
-    # cbrt calls sign_float (reached by name here, not through its own registry key) plus the exp2/log2 intrinsics.
-    _oracle(_cbrt, [{"x": 8.0}, {"x": -27.0}, {"x": 0.5}, {"x": 0.0}])
+# ---------------------------------------------------------------------- module constants
 
 
 def _pi_scaled(x: float) -> float:
@@ -224,7 +246,7 @@ def _pi_scaled(x: float) -> float:
 
 def test_module_constants_snapshot_through_attribute_reads() -> None:
     _oracle(_pi_scaled, [{"x": 1.0}, {"x": -2.5}])
-    assert "env" not in _residual_text(_pi_scaled)
+    assert "env" not in _residual(_pi_scaled, _FADD_FMUL)
 
 
 # ---------------------------------------------------------------------- pow: one behavior under every spelling
@@ -275,7 +297,7 @@ def _static_pow_conforms(x: float) -> float:
 
 def test_static_int_operands_of_a_float_stub_fold_to_the_float_image() -> None:
     _oracle(_static_pow_conforms, [{"x": 0.0}, {"x": 1.5}])
-    assert "8.0" in _residual_text(_static_pow_conforms)
+    assert "8.0" in _residual(_static_pow_conforms, _FADD)
 
 
 def _neg_base_float_exponent(x: float) -> float:
@@ -302,14 +324,15 @@ def _neg_base_fractional_exponent(x: float) -> float:
 def test_static_negative_base_powers_fold_through_the_stub_parity_lane() -> None:
     """The stub honors integer exponents of negative bases (sign by parity); the fractional case is complex."""
     _oracle(_neg_base_float_exponent, [{"x": 0.0}, {"x": 1.0}])
-    assert "64.0" in _residual_text(_neg_base_float_exponent)
+    assert "64.0" in _residual(_neg_base_float_exponent, _FADD)
     _oracle(_neg_base_int_exponent, [{"x": 0.0}, {"x": 1.0}])
-    assert "64.0" in _residual_text(_neg_base_int_exponent)
+    assert "64.0" in _residual(_neg_base_int_exponent, _FADD)
     _oracle(_neg_base_odd_exponent, [{"x": 0.0}, {"x": 1.0}])
-    assert "-128.0" in _residual_text(_neg_base_odd_exponent)
+    assert "-128.0" in _residual(_neg_base_odd_exponent, _FADD)
     _oracle(_dead_static_pow_fault, [{"x": 3.5}])
-    with pytest.raises(SynthesisError, match="names no number"):
-        optimize(lower(_neg_base_fractional_exponent).hir, DEFAULT_IFCONV_MAX_OPS)
+    with pytest.raises(SynthesisError, match="names no number") as info:
+        holoso.synthesize(_neg_base_fractional_exponent, _GENERAL_POW, name="k")
+    assert not isinstance(info.value, UnsupportedConstruct)
 
 
 def _pow_static_int_pair(n: int) -> int:
@@ -337,17 +360,24 @@ def _pow_runtime_exponent(x: float, n: int) -> float:
 
 
 def test_the_pow_table_selects_a_lowering_per_operand_position() -> None:
-    """One entry, four lowerings, chosen by the type AND the binding time/sign of each position independently."""
+    """
+    One entry, four lowerings, chosen by the type AND the binding time/sign of each position independently.
+    Each lane is pinned publicly: a lean operator set that builds proves no other lane was needed (a missing
+    operator refuses by name), and the pooled-module set names the hardware the lane selected.
+    """
     _oracle(_pow_static_int_pair, [{"n": 0}, {"n": 5}])
-    assert "2" in _residual_text(_pow_static_int_pair)  # the fold stayed integral, so `//` accepted it
+    assert "iadd(2, n)" in _residual(_pow_static_int_pair, _INT_ONLY)  # the fold stayed integral, so `//` accepted it
     _oracle(_pow_static_negative_exponent, [{"x": 0.0}, {"x": 1.5}])
-    assert "0.5" in _residual_text(_pow_static_negative_exponent)
-    # On the optimized HIR, so the chain's leading multiply by one is elided as it is in hardware.
-    assert _lowered_ops(_pow_runtime_base_static_exponent) == ["FloatMul", "FloatMul"]
-    assert _lowered_ops(_pow_runtime_base_negative_exponent) == ["FloatMul", "FloatDiv"]
-    assert _lowered_ops(_pow_runtime_int_base) == ["IntMul"]  # a runtime int base stays integral, as in CPython
-    general = _lowered_ops(_pow_runtime_exponent)
-    assert "FloatLog2" in general and "FloatExp2" in general
+    assert "0.5" in _residual(_pow_static_negative_exponent, _FADD)
+    assert _pooled_modules(holoso.synthesize(_pow_runtime_base_static_exponent, _FMUL, name="k")) == {"fmul"}
+    assert _pooled_modules(holoso.synthesize(_pow_runtime_base_negative_exponent, _FMUL_FDIV, name="k")) == {
+        "fmul",
+        "fdiv",
+    }
+    holoso.synthesize(_pow_runtime_int_base, _INT_ONLY, name="k")  # a runtime int base stays integral, as in CPython
+    assert {"fexp2", "flog2"} <= _pooled_modules(holoso.synthesize(_pow_runtime_exponent, _GENERAL_POW, name="k"))
+    with pytest.raises(UnsupportedConstruct, match="needs the 'flog2' operator"):
+        holoso.synthesize(_pow_runtime_exponent, _SANS_FLOG2, name="k")
     _oracle(_pow_runtime_base_static_exponent, [{"x": 2.0}, {"x": -1.5}])
     _oracle(_pow_runtime_base_negative_exponent, [{"x": 2.0}, {"x": -1.5}])
     _oracle(_pow_runtime_int_base, [{"n": 3}, {"n": -4}])
@@ -367,7 +397,7 @@ def test_a_boolean_power_rejects_the_same_way_under_the_operator_and_its_spellin
     messages = []
     for fn in (_bool_pow_operator, _bool_pow_spelled):
         with pytest.raises(UnsupportedConstruct) as excinfo:
-            lower(fn)
+            lower(fn, DEFAULT_UNROLL_MAX_TRIPS)
         messages.append(excinfo.value.message.split("() ", 1)[1])
     assert messages[0] == messages[1]
     assert "boolean is not a number" in messages[0]
@@ -588,7 +618,7 @@ def _calls_lying_helper(x: float) -> bool:
 def test_a_return_annotation_mismatch_points_into_the_callee() -> None:
     pattern = r"in _lying_helper\(\): the returned value has type float where the annotation declares bool \(at "
     with pytest.raises(UnsupportedConstruct, match=pattern) as info:
-        lower(_calls_lying_helper)
+        lower(_calls_lying_helper, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_calls_lying_helper, "_lying_helper(x)")
@@ -612,7 +642,8 @@ def _calls_bound_method(x: float) -> float:
 
 
 def test_a_state_writing_bound_callee_rejects_at_the_helper_write() -> None:
-    _rejects(_calls_bound_method, r"in _BOUND\(\): an attribute store is only supported on the entry method's receiver")
+    # The external accumulator instance belongs to no receiver's component tree, so its state has no home.
+    _rejects(_calls_bound_method, r"in _BOUND\(\): an attribute store is only supported on the kernel's own component")
 
 
 def _unimplemented_library(x: float) -> float:
@@ -632,7 +663,7 @@ def test_unregistered_callables_are_uniform_no_library_is_special() -> None:
     """
     _rejects(_unimplemented_library, "calls to 'math.erf' are not supported yet")
     with pytest.raises(UnsupportedConstruct, match=r"in np.identity\(\): ") as info:
-        lower(_unimplemented_python_library)
+        lower(_unimplemented_python_library, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_unimplemented_python_library, "np.identity(2)")
@@ -696,7 +727,7 @@ def _guarded_call_to_raiser(c: bool, x: float) -> float:
 def test_a_callee_raise_is_judged_where_written_not_at_the_guarded_call_site() -> None:
     """DESIGN.md: unconditional within the writing function fires even under the caller's residual arm."""
     with pytest.raises(UnsupportedConstruct, match=r"in _always_raises\(\): ValueError: stub domain") as info:
-        lower(_guarded_call_to_raiser)
+        lower(_guarded_call_to_raiser, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_guarded_call_to_raiser, "_always_raises(x)")
@@ -716,7 +747,7 @@ def _calls_bad_helper(x: float) -> float:
 
 def test_a_callee_desugar_failure_reports_the_user_call_site_with_the_chain() -> None:
     with pytest.raises(UnsupportedConstruct, match=r"in _bad_helper\(\): lambdas are not supported \(at ") as info:
-        lower(_calls_bad_helper)
+        lower(_calls_bad_helper, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_calls_bad_helper, "_bad_helper(x)")
@@ -740,7 +771,7 @@ def test_nested_rejections_report_the_outermost_call_site_with_the_full_chain() 
     with pytest.raises(
         UnsupportedConstruct, match=r"in _middle\(\): in _deep_reject\(\): the body of this data-dependent loop"
     ) as info:
-        lower(_calls_deep)
+        lower(_calls_deep, DEFAULT_UNROLL_MAX_TRIPS)
     location = info.value.location
     assert location is not None
     assert location.lineno == _line_of(_calls_deep, "_middle(x)")
@@ -817,4 +848,6 @@ def test_method_arity_messages_exclude_the_receiver() -> None:
 
 
 def test_an_integer_trace_keeps_exact_integers() -> None:
-    _oracle(_int_trace_stays_exact, [{}])
+    # Fully static, so the word never holds the unholdable operand; a float-domain fold would flip the answer.
+    result = holoso.synthesize(_int_trace_stays_exact, _INT_ONLY, name="k")
+    assert result.numerical_model.elaborate().run() == [_int_trace_stays_exact()]

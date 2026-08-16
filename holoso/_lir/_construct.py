@@ -1,6 +1,7 @@
 """Construct LIR operands, scheduled ops, terminators, outputs, inputs, and the constant pool from selected MIR."""
 
 import math
+from typing import assert_never
 
 from .._errors import UnsupportedConstruct
 from .._mir import (
@@ -13,6 +14,9 @@ from .._mir import (
     MirFloatConst,
     MirFloatInput,
     MirFloatOutput,
+    MirIntConst,
+    MirIntInput,
+    MirIntOutput,
     MirJump,
     MirOperation,
     MirPhi,
@@ -20,7 +24,15 @@ from .._mir import (
     MirTerminator,
     MirWideView,
 )
-from .._operators import BoolInversion, FloatSignControl, InlineHardwareOperator, PortConditioner, WideConditioner
+from .._operators import (
+    BoolInversion,
+    FloatSignControl,
+    InlineHardwareOperator,
+    IntIdentity,
+    PortConditioner,
+    WideConditioner,
+)
+from .._value import FloatValue, IntValue, WideValue
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
@@ -145,10 +157,18 @@ def wide_operand(
     pool: dict[ValueId, PooledConst],
 ) -> WideOperand:
     node = wide_mir.nodes[vid]
-    if isinstance(node, MirFloatConst):
+    if isinstance(node, (MirFloatConst, MirIntConst)):
         entry = pool[vid]
-        assert isinstance(conditioner, FloatSignControl), "the pool folds sign, so its consumers condition as floats"
-        return WideOperand(WideConstRef(entry.index), entry.conditioner.then(conditioner))
+        match entry.conditioner:
+            case FloatSignControl():
+                assert isinstance(conditioner, FloatSignControl)
+                folded: WideConditioner = entry.conditioner.then(conditioner)
+            case IntIdentity():
+                assert isinstance(conditioner, IntIdentity)
+                folded = conditioner
+            case _:
+                assert_never(entry.conditioner)
+        return WideOperand(WideConstRef(entry.index), folded)
     return WideOperand(RegRef(alloc.wide_reg[vid]), conditioner)
 
 
@@ -161,17 +181,11 @@ def build_outputs(
 ) -> list[WideOutputWire | BoolOutputWire]:
     outputs: list[WideOutputWire | BoolOutputWire] = []
     for out in mir.outputs:
-        if isinstance(out, MirFloatOutput):
-            node = wide_mir.nodes[out.value]
-            if isinstance(node, MirFloatConst):
-                entry = pool[out.value]
-                outputs.append(
-                    WideOutputWire(out.name, WideOperand(WideConstRef(entry.index), entry.conditioner.then(out.sign)))
-                )
-            else:
-                outputs.append(WideOutputWire(out.name, WideOperand(RegRef(alloc.wide_reg[out.value]), out.sign)))
+        if isinstance(out, (MirFloatOutput, MirIntOutput)):
+            tap = wide_operand(wide_mir, out.value, out.conditioner, alloc, pool)
+            outputs.append(WideOutputWire(out.name, tap, wide_mir.scalar_type_of(out.value)))
         elif isinstance(out, MirBoolOutput):
-            outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.inversion)))
+            outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.conditioner)))
         else:
             assert False, f"unhandled MIR output {out!r}"
     return outputs
@@ -202,23 +216,22 @@ def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
 
 def build_const_pool(
     mir: MirWideView, bool_operations: dict[ValueId, MirOperation] | None = None
-) -> tuple[list[float], dict[ValueId, PooledConst]]:
+) -> tuple[list[WideValue], dict[ValueId, PooledConst]]:
     """
-    Build the immediate/ROM pool keyed by magnitude: every constant is stored as a nonnegative value, and its sign is
-    folded into the consumer's (free) sign-control sideband, so a value and its negation collapse to a single entry.
-    This is value-preserving because ``encode(|c|)`` with the sign bit set equals ``encode(c)`` bit-for-bit -- except
-    for a magnitude that encodes to zero, where the sign must NOT be folded: ZKF has no negative zero, so a folded
-    negate over a zero-encoding magnitude would emit an illegal ``-0`` instead of the canonical ``+0`` that the signed
-    value itself encodes to. Such constants therefore keep an identity sign control. ``bool_operations`` (the
-    bool-result combinational ops -- comparisons, boolean logic, the float->bool cast) contribute their wide operand
-    constants too.
+    Build the immediate/ROM pool shared by both wide families, interned by the typed encoded value, so
+    encoding-equal float literals share a word and class-aware equality keeps `1` and `1.0` distinct where raw
+    Python keys would collide. A FLOAT is stored as its nonnegative magnitude, the sign folded into the consumer's
+    free sign-control sideband -- value-preserving because `encode(|c|)` with the sign bit set equals `encode(c)`,
+    and MIR normalizes `-0.0` and refuses magnitudes degrading to zero, so a folded negate can never emit the `-0`
+    ZKF has no room for. An INTEGER has no sideband and is stored whole. `bool_operations` (the bool-result
+    combinational ops) contribute their wide operand constants too.
     """
     ids: list[ValueId] = []
     seen: set[ValueId] = set()
 
     def note(vid: ValueId) -> None:
         node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the wide view; skip it
-        if isinstance(node, MirFloatConst) and vid not in seen:
+        if isinstance(node, (MirFloatConst, MirIntConst)) and vid not in seen:
             seen.add(vid)
             ids.append(vid)
 
@@ -236,21 +249,28 @@ def build_const_pool(
         note(out.value)
     for slot in mir.state_slots:
         note(slot.live_out)
-    values: list[float] = []
-    magnitude_index: dict[float, int] = {}
+    values: list[WideValue] = []
+    index_of: dict[WideValue, int] = {}
     pool: dict[ValueId, PooledConst] = {}
+
+    def intern(value: WideValue) -> int:
+        index = index_of.get(value)
+        if index is None:
+            index_of[value] = index = len(values)
+            values.append(value)
+        return index
+
     for vid in ids:
-        value = mir.const_nodes[vid].value
+        const = mir.const_nodes[vid]
+        if isinstance(const, MirIntConst):
+            pool[vid] = PooledConst(intern(IntValue.from_int(mir.int_format, const.value)), IntIdentity())
+            continue
+        value = const.value
         if math.isnan(value):
             raise UnsupportedConstruct(f"Cannot represent a NaN constant. Only [in]finite numbers are supported.")
-        magnitude = abs(value)
-        index = magnitude_index.get(magnitude)
-        if index is None:
-            index = len(values)
-            magnitude_index[magnitude] = index
-            values.append(magnitude)
-        negate = math.copysign(1.0, value) < 0.0 and mir.fmt.encode(magnitude) != 0
-        pool[vid] = PooledConst(index, FloatSignControl(negate=negate))
+        magnitude = FloatValue.from_float(mir.float_format, abs(value))
+        negate = math.copysign(1.0, value) < 0.0
+        pool[vid] = PooledConst(intern(magnitude), FloatSignControl(negate=negate))
     return values, pool
 
 
@@ -269,10 +289,10 @@ def build_inputs(
 ) -> list[WideInputLoad | BoolInputLoad]:
     loads: list[WideInputLoad | BoolInputLoad] = []
     for vid in mir.input_ids:
-        float_node = wide_mir.nodes.get(vid)
+        wide_node = wide_mir.nodes.get(vid)
         bool_node = bool_mir.nodes.get(vid)
-        if isinstance(float_node, MirFloatInput):
-            loads.append(WideInputLoad(float_node.name, RegRef(alloc.wide_reg[vid])))
+        if isinstance(wide_node, (MirFloatInput, MirIntInput)):
+            loads.append(WideInputLoad(wide_node.name, RegRef(alloc.wide_reg[vid]), wide_node.scalar_type))
         elif isinstance(bool_node, MirBoolInput):
             loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool_reg[vid])))
         else:

@@ -2,7 +2,7 @@
 Commutative operand port assignment.
 
 The per-operand read mux is the dominant fabric cost, and its fan-in is the operand's read-set: the distinct registers
-that operand position reads across the schedule. For a commutative operator (``a op b == b op a`` bit-for-bit) the two
+that operand position reads across the schedule. For a commutative operator (`a op b == b op a` bit-for-bit) the two
 operands may be freely swapped, which moves a register from one operand position's read-set to the other's. Choosing
 each use's orientation to minimise the total read-set size therefore shrinks the read muxes at zero hardware and zero
 latency cost -- it is a pure relabelling of which physical port reads which register (the Chen & Cong port-assignment
@@ -11,9 +11,9 @@ lever; ASP-DAC 2004).
 The choice is made after register allocation, over the realised register assignment. Minimising the total
 distinct-register count over operand orientations is an instance of graph bipartisation (NP-hard in general); a plain
 local search gets trapped well above the optimum (on ekf1_stateless's multiplier it stalls at 50 register-arms where the
-optimum is 46). It is solved exactly as a small MILP (HiGHS via ``scipy.optimize.milp``): orientation variables ``o_i``
-and port-reach indicators ``y_{port,reg}`` linked so ``y`` is forced on wherever an orientation places a register, with
-the objective summing ``y``. A deterministic local search seeded from the source orientation is the fallback when the
+optimum is 46). It is solved exactly as a small MILP (HiGHS via `scipy.optimize.milp`): orientation variables `o_i`
+and port-reach indicators `y_{port,reg}` linked so `y` is forced on wherever an orientation places a register, with
+the objective summing `y`. A deterministic local search seeded from the source orientation is the fallback when the
 MILP does not prove optimality in the time budget, so the result never increases read-mux fan-in.
 """
 
@@ -28,7 +28,7 @@ from .._util import ValueId
 from .._mir import MirNode, MirOperation
 from ._ir import OperatorInstance
 
-# One commutative use: its value id and the registers its two operands occupy (``None`` for a constant operand, which
+# One commutative use: its value id and the registers its two operands occupy (`None` for a constant operand, which
 # is sourced from the immediate path and never enters a read-set).
 type _Use = tuple[ValueId, int | None, int | None]
 
@@ -47,8 +47,8 @@ def assign_commutative_ports(
 ) -> dict[ValueId, bool]:
     """
     Per commutative operator instance, orient each FIRING's operands to minimise the total read-set size across its
-    two read ports. Returns ``{firing leader: swap?}`` -- ``True`` means the build exchanges the two operands and
-    permutes the firing's output-port taps through the operator's ``swap_output_permutation``. Solved exactly per
+    two read ports. Returns `{firing leader: swap?}` -- `True` means the build exchanges the two operands and
+    permutes the firing's output-port taps through the operator's `swap_output_permutation`. Solved exactly per
     instance; total read-mux fan-in is minimised (and never exceeds the source orientation). It is cycle-agnostic: it
     depends only on which wide registers each commutative firing's two operands occupy and which physical instance it
     binds, so one call orients every commutative firing across the whole flattened CFG -- the comparator's firings
@@ -70,7 +70,7 @@ def assign_commutative_ports(
         if orientation is None:
             _logger.warning(
                 "Commutative port assignment fallback: instance=%s index=%d uses=%d fan_in_before=%d",
-                inst.operator.instance_stem,
+                inst.operator.mnemonic,
                 inst.index,
                 len(uses),
                 before,
@@ -105,8 +105,8 @@ def _fan_in(uses: list[_Use], orientation: list[bool]) -> int:
 def _optimal_orientation(uses: list[_Use]) -> list[bool] | None:
     """
     Minimum-total-read-set orientation, solved exactly with a MILP. Variables: one binary orientation per use plus a
-    binary ``read[port][register]`` indicator; each use forces the indicator of whichever port its operand lands on,
-    and the objective sums the indicators. Returns the per-use swap flags, or ``None`` if optimality is not proven
+    binary `read[port][register]` indicator; each use forces the indicator of whichever port its operand lands on,
+    and the objective sums the indicators. Returns the per-use swap flags, or `None` if optimality is not proven
     within the time budget.
     """
     registers = sorted({reg for _, first, second in uses for reg in (first, second) if reg is not None})

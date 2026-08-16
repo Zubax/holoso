@@ -32,11 +32,23 @@ from .hdl_float_oracle import (
     mul_oracle_bits,
     random_zkf_f32,
     sources,
+    stage_tag,
     start_clock,
 )
 
-# (stage_input, stage_product, stage_output): base + each knob alone + all-on -- enough to verify additive latency.
-STAGE_COMBOS = ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))
+# Base + every knob alone + each split-product topology (stage_product 2/3/4 select different partial-product
+# geometry, so they carry the full numerical battery) + all-on.
+STAGE_COMBOS: tuple[dict[str, int], ...] = (
+    {},
+    {"stage_input": 1},
+    {"stage_product": 1},
+    {"stage_pack": 1},
+    {"stage_output": 1},
+    {"stage_product": 2},
+    {"stage_product": 3},
+    {"stage_product": 4},
+    {"stage_input": 1, "stage_product": 1, "stage_pack": 1, "stage_output": 1},
+)
 
 
 @cocotb.test()
@@ -108,17 +120,12 @@ async def holoso_fmul_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0
 
 
-@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=lambda s: f"i{s[0]}p{s[1]}o{s[2]}")
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fmul(sim: str, stages: tuple[int, int, int]) -> None:
-    stage_input, stage_product, stage_output = stages
-    operator = FMulOperator(
-        FloatFormat(8, 24),
-        FMulOptions(stage_input=stage_input, stage_product=stage_product, stage_output=stage_output),
-        0,
-    )
+def test_holoso_fmul(sim: str, stages: dict[str, int]) -> None:
+    operator = FMulOperator(FloatFormat(8, 24), FMulOptions(**stages), 0)
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_i{stage_input}p{stage_product}o{stage_output}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_{stage_tag(stages)}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

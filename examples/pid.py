@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
 A PID controller with output saturation, integral anti-windup (conditional integration), and a derivative channel.
-The controller computes ``u = kp*e + (integral + ki*e*dt) + kd*(e - e_prev)/dt`` for positive ``dt`` and saturates it
-to +-limit. The very first update is treated specially to avoid the initial spike.
 """
 
 from pathlib import Path
@@ -10,6 +8,11 @@ import holoso
 
 
 class PID:
+    """
+    The controller computes `u = kp*e + (integral + ki*e*dt) + kd*(e - e_prev)/dt` for positive `dt` and saturates
+    it to +-limit. The very first update is treated specially to avoid the initial spike.
+    """
+
     def __init__(self, *, kp: float = 0.5, ki: float = 0.0625, kd: float = 0.25, limit: float = 4.0) -> None:
         self.kp: float = kp
         self.ki: float = ki

@@ -1,9 +1,9 @@
 """
-Custom cocotb bench for ``test_gate_edge.py``: pin the rising edge of the ``transacting`` issue-gate qualifier.
+Custom cocotb bench for `test_gate_edge.py`: pin the rising edge of the `transacting` issue-gate qualifier.
 
-The DUT is a cycle-0-leading kernel. ``transacting`` (the qualifier AND-ed into every operator's ``in_valid``) must be
+The DUT is a cycle-0-leading kernel. `transacting` (the qualifier AND-ed into every operator's `in_valid`) must be
 LOW while the PC dwells idle at pc 0, stay LOW through the fetch_lag fetch-fill bubbles after the accept (the in-flight
-``ucode[0]`` re-fetches ahead of the genuine step-0), and rise on EXACTLY the fetch_lag-th cycle after the accept -- the
+`ucode[0]` re-fetches ahead of the genuine step-0), and rise on EXACTLY the fetch_lag-th cycle after the accept -- the
 cycle the genuine step-0 executes. A late rise drops step-0; an early rise fires a spurious issue in the fill window,
 the cosim-invisible hazard the gate exists to stop once iterative operators land. The idle length k and fetch_lag come
 from the environment so the test can sweep k and stay valid as fetch_lag is configurable.
@@ -57,8 +57,8 @@ async def transacting_edge(dut: Any) -> None:
 
 @cocotb.test()
 async def state_inert_during_dwell(dut: Any) -> None:
-    # A cycle-0 constant install to a persistent-state slot sits on ``ucode[0]``. While the PC dwells idle at pc 0 the
-    # held word re-fetches every cycle, so without the ``transacting`` gate on the install write-enable it would commit
+    # A cycle-0 constant install to a persistent-state slot sits on `ucode[0]`. While the PC dwells idle at pc 0 the
+    # held word re-fetches every cycle, so without the `transacting` gate on the install write-enable it would commit
     # to the state register before any transaction. Assert the slot keeps its reset value across the whole idle dwell.
     k = int(os.environ["HOLOSO_DWELL_K"])
     slot_idx = int(os.environ["HOLOSO_SLOT_IDX"])

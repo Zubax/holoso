@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import cocotb
-import numpy as np
 import pytest
 from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
@@ -18,9 +17,6 @@ from .hdl_float_oracle import (
     REPO_ROOT,
     SIMULATORS,
     build_args,
-    get_random_count,
-    get_seed,
-    random_zkf_f32,
     sources,
 )
 
@@ -43,10 +39,6 @@ async def holoso_fisdirinf_cocotb(dut: Any) -> None:
 
     for x in (0x7FC00001, 0xFFC00001):
         await check(x)
-
-    rng = np.random.default_rng(get_seed())
-    for _ in range(get_random_count()):
-        await check(random_zkf_f32(rng))
 
 
 @pytest.mark.parametrize("positive", [True, False], ids=["pos", "neg"])

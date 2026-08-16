@@ -1,7 +1,7 @@
 """
 Source retrieval and location mapping for the desugarer.
 
-Indented source (a method, a nested function) is parsed under a synthetic ``if 1:`` block instead of being
+Indented source (a method, a nested function) is parsed under a synthetic `if 1:` block instead of being
 dedented: dedenting rewrites content inside multi-line string literals and breaks on continuation lines that
 start at column zero, and it skews every reported column. Under the wrapper, node columns and line text index
 the ORIGINAL source exactly; only line numbers carry a constant offset.

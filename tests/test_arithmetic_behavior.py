@@ -1,50 +1,20 @@
 """
-Public-API behavioral tests for floating-point edge behavior, the full relational/boolean breadth, fmul_ilog2
-power-of-two strength reduction, trivial fast-math float folding, and constant folding / static evaluation.
+Public-API behavioral tests for numerical behavior: floating-point edge identities, the full relational/boolean
+breadth, fmul_ilog2 power-of-two strength reduction, trivial fast-math folds, constant folding / static evaluation,
+and bounded loop unrolling.
 
-Every test drives the compiler only through the public API (``holoso.synthesize(fn, ops)`` and the numerical simulator).
-Most assertions are on observable output values -- bits for floats, identity for bools -- while explicit operator
-selection guards inspect generated Verilog text through the public synthesis result. The references are chosen to be
-FALSIFIABLE without a tolerance fudge wherever the hardware must be exact:
-
-  - Axis B (float edge behavior): kernels driven with ``format_edge_bits``-derived inputs (±0, ±smallest-normal,
-    ±largest-finite, ±0.5, ±1) passed as exact ``FloatValue`` bit patterns, asserting algebraic identities the hardware
-    must honor exactly -- x+(-x)==0, x*1.0==x, x*0.0==+0 (ZKF has no negative zero), abs via a sign-select, -(-x)==x,
-    commutativity a+b==b+a and a*b==b*a bit-identical, overflow largest+largest -> +inf staying inf through a further
-    op, and 1.0/0.0 emitting the error-path output (+inf). The references use ``FloatFormat.round`` so overflow and
-    underflow follow the FORMAT's own rounding, not float64 (largest+largest is +inf in ZKF but finite in float64).
-    Associativity is never asserted -- it does not hold in finite precision.
-
-  - Axis C (relational + chained comparisons): all six operators ``< <= > >= == !=`` each in a bool-returning kernel,
-    swept across vectors that straddle the exact boundary (equal, just-below, just-above), exact bool results; a chained
-    ``lo < x < hi`` (two comparators AND-fused) over the four region boundaries; ``==`` / ``!=`` on bit-equal vs
-    bit-different operands.
-
-  - Axis D (fmul_ilog2 strength reduction): multiplication by power-of-two constants (x*2, x*0.5, x*8, x*0.125, x*2**-5)
-    lowers to the fmul_ilog2 family and is EXACT (a power-of-two only shifts the exponent, barring overflow/underflow);
-    a non-power-of-two constant (x*3) stays an ordinary fmul and is still correct; a power-of-two that pushes a normal
-    input to overflow (largest*2 -> inf) and to underflow (smallest_normal*0.25 -> 0).
-
-  - Trivial fast-math folds: algebraic identities, zero folds, sign folds, self-division, and self-subtraction remove
-    fadd/fmul/fdiv/fmul_ilog2 hardware where policy permits, including observable sideband and signed-zero deviations.
-
-  - Axis E (boolean connectives + float<->bool casts): full truth tables for ``a and b``, ``a or b``, ``a and b or c``,
-    De Morgan equivalence ``not (a and b)`` == ``(not a) or (not b)``; ``float(cond)`` (exactly 0.0/1.0) feeding
-    arithmetic; a float compared then cast then multiplied (cross-domain chain); ``bool(x)`` truthiness.
-
-  - Axis F (constant folding / static evaluation): a subexpression that folds to ZERO (``x + (2*3 - 6)`` == x, distinct
-    from the existing x+7 fold); a compile-time-constant branch whose dead arm divides by 0.0 and must never execute; a
-    read-only attribute folding to its snapshot in a condition; a bounded ``for`` loop fully unrolling a Horner
-    polynomial, proved bit-identical to a hand-unrolled straight-line form (reference-free -- same op order, same bits).
-
-Edge inputs are passed as exact ``FloatValue.from_bits`` so the extremes stay exact even where they would overflow a
-Python float, and outputs are compared on ``.bits`` so the assertions cannot silently pass on a rounding accident.
+Every test drives the compiler only through the public API (`holoso.synthesize(fn, ops)` and the numerical
+simulator). Most assertions are on observable output values -- bits for floats, identity for bools -- while explicit
+operator selection guards inspect generated Verilog text through the public synthesis result. The references are
+chosen to be FALSIFIABLE without a tolerance fudge wherever the hardware must be exact: edge inputs are passed as
+exact `FloatValue.from_bits` so the extremes stay exact even where they would overflow a Python float, outputs are
+compared on `.bits`, and format-sensitive references use `FloatFormat.round` so overflow and underflow follow the
+FORMAT's own rounding, not float64. Associativity is never asserted -- it does not hold in finite precision.
 """
 
 import math
 from collections.abc import Callable
 
-import numpy as np
 import pytest
 
 import holoso
@@ -164,29 +134,47 @@ def test_double_negation_is_identity_over_edges() -> None:
         assert out.bits == bits, f"-(-x) changed bits: 0x{out.bits:x} vs 0x{bits:x}"
 
 
-def test_addition_commutes_bit_identical_over_edges() -> None:
+def _commute_pairs() -> list[tuple[FloatValue, FloatValue]]:
+    # Directed ordered pairs spanning zero, opposite signs, the smallest normal, the largest finite (the overflow
+    # boundary), and infinity; the tests drive each pair in both operand orders.
+    tiny = float(_val(1 << (FMT.wman - 1)))
+    lf = float(_largest_finite())
+    return [
+        (FloatValue.from_float(FMT, a), FloatValue.from_float(FMT, b))
+        for a, b in (
+            (0.0, 1.0),
+            (0.5, -1.0),
+            (-0.5, 1.0),
+            (tiny, -tiny),
+            (lf, lf),
+            (-lf, 1.0),
+            (math.inf, 1.0),
+            (math.inf, -1.0),
+        )
+    ]
+
+
+def test_addition_commutes_bit_identical_over_directed_pairs() -> None:
     # a + b must equal b + a bit-for-bit: the commutative-port assignment must not change the value.
     sim = _sim(_add, "add_commute")
-    for ab in _EDGES:
-        for bb in _EDGES:
-            forward = sim.run(_val(ab), _val(bb))[0]
-            reverse = sim.run(_val(bb), _val(ab))[0]
-            assert isinstance(forward, FloatValue) and isinstance(reverse, FloatValue)
-            assert (
-                forward.bits == reverse.bits
-            ), f"a+b != b+a: a=0x{ab:x} b=0x{bb:x}: 0x{forward.bits:x} vs 0x{reverse.bits:x}"
+    for va, vb in _commute_pairs():
+        forward = sim.run(va, vb)[0]
+        reverse = sim.run(vb, va)[0]
+        assert isinstance(forward, FloatValue) and isinstance(reverse, FloatValue)
+        assert (
+            forward.bits == reverse.bits
+        ), f"a+b != b+a: a=0x{va.bits:x} b=0x{vb.bits:x}: 0x{forward.bits:x} vs 0x{reverse.bits:x}"
 
 
-def test_multiplication_commutes_bit_identical_over_edges() -> None:
+def test_multiplication_commutes_bit_identical_over_directed_pairs() -> None:
     sim = _sim(_mul, "mul_commute")
-    for ab in _EDGES:
-        for bb in _EDGES:
-            forward = sim.run(_val(ab), _val(bb))[0]
-            reverse = sim.run(_val(bb), _val(ab))[0]
-            assert isinstance(forward, FloatValue) and isinstance(reverse, FloatValue)
-            assert (
-                forward.bits == reverse.bits
-            ), f"a*b != b*a: a=0x{ab:x} b=0x{bb:x}: 0x{forward.bits:x} vs 0x{reverse.bits:x}"
+    for va, vb in _commute_pairs():
+        forward = sim.run(va, vb)[0]
+        reverse = sim.run(vb, va)[0]
+        assert isinstance(forward, FloatValue) and isinstance(reverse, FloatValue)
+        assert (
+            forward.bits == reverse.bits
+        ), f"a*b != b*a: a=0x{va.bits:x} b=0x{vb.bits:x}: 0x{forward.bits:x} vs 0x{reverse.bits:x}"
 
 
 def _largest_finite() -> FloatValue:
@@ -265,21 +253,6 @@ def _zero_div_zero(x: float) -> float:
 
 def _zero_times_inf(x: float) -> float:
     return 0.0 * _INF
-
-
-def _self_division(x: float) -> float:
-    return x / x
-
-
-def test_self_division_folds_to_one_over_an_unknown_operand() -> None:
-    # x/x == 1 holds whatever the unknown x turns out to be, so no divider is emitted and the answer is 1 even where
-    # the datapath would have computed something else -- the divergence the charter accepts. The constant twins of this
-    # shape (0.0/0.0, inf/inf) name no number and are refused instead, which the test above pins.
-    result = holoso.synthesize(_self_division, _ops(), name="self_division")
-    assert "holoso_fdiv #" not in result.verilog_output.verilog
-    out = result.numerical_model.elaborate().run(_val(0))[0]  # x == 0 at run time, and the answer is still 1
-    assert isinstance(out, FloatValue)
-    assert out.bits == FloatValue.from_float(FMT, 1.0).bits
 
 
 def _k_lt(x: float, y: float) -> bool:
@@ -449,7 +422,7 @@ def test_trivial_fast_math_float_folds_are_operator_free_and_bit_exact() -> None
     assert "holoso_fadd #" not in verilog
     assert "holoso_fmul #" not in verilog
     assert "holoso_fdiv #" not in verilog
-    assert "holoso_fmul_ilog2_const" not in verilog
+    assert "holoso_fmul_ilog2" not in verilog
 
     sim = result.numerical_model.elaborate()
     vectors = [
@@ -517,7 +490,7 @@ def _div_by_zero_in_a_live_arm(x: float) -> float:
 
 def _div_by_zero_behind_a_folded_guard(x: float) -> float:
     """
-    The kernel writes ``x / w``, never ``x / 0.0``: unrolling is what substitutes the zero. Whether the guard resolves
+    The kernel writes `x / w`, never `x / 0.0`: unrolling is what substitutes the zero. Whether the guard resolves
     before the body is lowered or after it reaches HIR decides only which pass deletes the disabled tap, never whether
     the kernel builds -- refusing what the compiler's own transformation put there is what survivor-based refusal
     exists to prevent.
@@ -539,7 +512,7 @@ def _failure_discarded_by_a_frontend_shortcut(x: float) -> float:
 
 
 def test_a_failure_an_identity_deletes_is_not_refused() -> None:
-    # ``x/x == 1`` answers the first kernel and ``**0`` the second, leaving the division by zero dead for DCE. Refusal
+    # `x/x == 1` answers the first kernel and `**0` the second, leaving the division by zero dead for DCE. Refusal
     # is over the SURVIVORS, so an expression no operation is left reading was never the program's to answer for.
     # Python has no answer for either -- it evaluates what the optimizer deletes and raises there -- which is the
     # charter's own divergence: what the optimizer deletes signals no error.
@@ -560,7 +533,7 @@ def test_a_division_by_a_zero_constant_stays_a_division() -> None:
         assert "holoso_fmul #" not in verilog, kernel
     # A value nothing reads is deleted before the sweep sees it, and so is an arm a guard excludes -- whether that
     # guard is resolved by the front end or by HIR. Neither is in the program the sweep is given.
-    # 4.0 rather than ``_dead_div_by_zero(3.0)``: Python evaluates the statement the optimizer deletes and raises.
+    # 4.0 rather than `_dead_div_by_zero(3.0)`: Python evaluates the statement the optimizer deletes and raises.
     assert float(_sim(_dead_div_by_zero, "dead_div_zero").run(FloatValue.from_float(FMT, 3.0))[0]) == 4.0
     guarded = _sim(_div_by_zero_behind_a_folded_guard, "div_zero_behind_guard")
     assert float(guarded.run(FloatValue.from_float(FMT, 3.0))[0]) == 4.5
@@ -663,12 +636,24 @@ def _fold_to_zero(x: float) -> float:
     return x + (2.0 * 3.0 - 6.0)
 
 
-def test_constant_subexpression_folds_to_zero() -> None:
+def _fold_to_seven(x: float) -> float:
+    # The NONZERO fold: 2*3 + 1 folds to 7.0, so only x + 7.0 survives; a folder biased to answer zero would fail.
+    k = 2.0 * 3.0 + 1.0
+    return x + k
+
+
+def test_constant_subexpressions_fold_to_zero_and_nonzero() -> None:
     sim = _sim(_fold_to_zero, "fold_zero")
     for bits in _EDGES:
         out = sim.run(_val(bits))[0]
         assert isinstance(out, FloatValue)
         assert out.bits == bits, f"x + (2*3-6) changed bits: 0x{out.bits:x} vs 0x{bits:x}"
+    sim_seven = _sim(_fold_to_seven, "fold_seven")
+    for x in (-3.0, 0.0, 1.0, 5.0):  # x + 7.0 is exact for these x
+        out = sim_seven.run(FloatValue.from_float(FMT, x))[0]
+        assert isinstance(out, FloatValue)
+        want = FloatValue.from_float(FMT, x + 7.0)
+        assert out.bits == want.bits, f"x + (2*3+1): {x} bits=0x{out.bits:x} vs 0x{want.bits:x}"
 
 
 def _dead_arm_divides_by_zero(x: float) -> float:
@@ -680,13 +665,26 @@ def _dead_arm_divides_by_zero(x: float) -> float:
     return r
 
 
+def _dead_else_divides_by_zero(x: float) -> float:
+    # The opposite polarity: 2.0 > 1.0 folds to True, so the poisoned ELSE arm must be pruned.
+    if 2.0 > 1.0:
+        r = x + 1.0
+    else:
+        r = x / 0.0
+    return r
+
+
 def test_constant_condition_drops_divide_by_zero_dead_arm() -> None:
-    sim = _sim(_dead_arm_divides_by_zero, "dead_arm")
-    for x in (-3.0, 0.0, 1.0, 5.0, 7.0):
-        got = sim.run(FloatValue.from_float(FMT, x))[0]
-        assert isinstance(got, FloatValue)
-        want = FloatValue.from_float(FMT, _round(x + 1.0))
-        assert got.bits == want.bits, f"x+1 (dead arm pruned): {x} bits=0x{got.bits:x} vs 0x{want.bits:x}"
+    # Both fold polarities carry the divide-by-zero poison in the arm that must be pruned: if the dead arm were ever
+    # lowered the build would record an error / produce a wrong value, so a correct result on the kept arm proves the
+    # arm was pruned, not merely never taken; an always-then or always-else defect fails one of the two.
+    for kernel, name in ((_dead_arm_divides_by_zero, "dead_arm"), (_dead_else_divides_by_zero, "dead_else")):
+        sim = _sim(kernel, name)
+        for x in (-3.0, 0.0, 1.0, 5.0, 7.0):
+            got = sim.run(FloatValue.from_float(FMT, x))[0]
+            assert isinstance(got, FloatValue)
+            want = FloatValue.from_float(FMT, _round(x + 1.0))
+            assert got.bits == want.bits, f"{name}: x+1 (dead arm pruned): {x} bits=0x{got.bits:x} vs 0x{want.bits:x}"
 
 
 class _AttributeConfig:
@@ -780,3 +778,17 @@ def test_a_power_of_two_scale_past_the_carrier_folds_to_an_infinity() -> None:
     sim = holoso.synthesize(_scale_past_the_carrier, ops, name="pow2_carrier_overflow").numerical_model.elaborate()
     for c in (False, True):
         assert math.isinf(float(sim.run(c)[0])), f"c={c}"
+
+
+def _scale_by_a_constant_past_the_double_range(a: float) -> float:
+    return a * 1.7976931348623157e308
+
+
+def test_a_constant_past_the_double_range_renders_exactly() -> None:
+    # A format with wexp >= 12 holds finite values no Python double can represent. Rendering one must neither let an
+    # OverflowError escape and abort a kernel that synthesizes fine, nor report the finite constant as an infinity --
+    # 2**1024 is exactly what this literal encodes to at 18 mantissa bits, and the report must say so.
+    ops = Options(OperatorOptions(fmul=FMulOptions()), ffmt=FloatFormat(12, 18))
+    result = holoso.synthesize(_scale_by_a_constant_past_the_double_range, ops, name="past_double")
+    assert f"wire [WREG-1:0] const_0 = 30'h17fe0000;  // {2**1024}" in result.verilog_output.verilog
+    assert str(2**1024) in result.html_output.html

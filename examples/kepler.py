@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Kepler's equation solver: given mean anomaly M and eccentricity e, find the eccentric anomaly E satisfying
-M = E - e*sin(E), by Newton-Raphson from E0 = M. Convergence is quadratic on the well-conditioned domain e <= 0.9;
-the loop runs until the Newton update falls below tolerance.
+M = E - e*sin(E), by Newton-Raphson from E0 = M.
+Convergence is quadratic on the well-conditioned domain e <= 0.9; loops until the Newton update falls below tolerance.
 """
 
 import math

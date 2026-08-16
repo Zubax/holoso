@@ -1,14 +1,14 @@
 """
 The library registry: a single `resolve(callee)` dispatch boundary over object identity. A class-member
-descriptor is a key like any other (``np.ndarray.T`` IS an object): the caller resolves a method read by
-looking up the descriptor on the owning class, and ``inspect.isdatadescriptor`` on that same object decides
+descriptor is a key like any other (`np.ndarray.T` IS an object): the caller resolves a method read by
+looking up the descriptor on the owning class, and `inspect.isdatadescriptor` on that same object decides
 whether the read already is the call. Only pure readers and derivations may bind members: a stub cannot
-express receiver mutation, so a mutating method (``.fill``, ``.sort``) must stay unregistered and draw the
+express receiver mutation, so a mutating method (`.fill`, `.sort`) must stay unregistered and draw the
 no-supported-attribute rejection.
 
-A scalar callee resolves to a group of typed lowerings: ``min`` is a hardware operator over floats and a
+A scalar callee resolves to a group of typed lowerings: `min` is a hardware operator over floats and a
 compare-and-select composite over integers. A lowering's domain is its stub's own annotations.
-A domain is per operand position and may carry a refinement (``StaticNegative[int]``) --
+A domain is per operand position and may carry a refinement (`StaticNegative[int]`) --
 which a subset operator reaches as a key like any other, so an operator and its spellings cannot part.
 """
 
@@ -39,6 +39,19 @@ class Sign(Enum):
 _EVERY_SIGN = frozenset(Sign)
 
 
+@dataclass(frozen=True, slots=True)
+class Operand:
+    """A null `const` is a runtime operand, not an absent one."""
+
+    stype: ScalarType
+    const: bool | int | float | None = None
+
+    @property
+    def sign(self) -> Sign:
+        assert self.const is not None
+        return Sign.POSITIVE if self.const > 0 else Sign.NEGATIVE if self.const < 0 else Sign.ZERO
+
+
 class Refinement(Enum):
     """
     What a declaration demands beyond a type, so one callee may carry a lowering that exists only where the
@@ -48,12 +61,24 @@ class Refinement(Enum):
     ANY = "any"
     STATIC_NONNEGATIVE = "static nonnegative"
     STATIC_NEGATIVE = "static negative"
+    STATIC_ONE_HALF = "static one half"
 
 
 @dataclass(frozen=True, slots=True)
 class _Demand:
+    """`exact` names the one constant admitted, where knowing the sign is not enough to pick the lowering."""
+
     runtime: bool
     signs: frozenset[Sign]
+    exact: float | None = None
+
+    def __post_init__(self) -> None:
+        # A demand admitting nothing would select nothing, and every lowering ordering would still hold -- so the
+        # stub would go silently unreachable instead of failing anywhere.
+        assert self.runtime or self.signs, "a demand that admits neither a runtime operand nor any sign is unusable"
+        if self.exact is not None:
+            assert not self.runtime, "a named constant is not a runtime operand"
+            assert Operand(ScalarType.FLOAT, self.exact).sign in self.signs, "the named constant's own sign is out"
 
 
 # A new refinement is one row here and nothing else.
@@ -61,30 +86,20 @@ _DEMANDS: dict[Refinement, _Demand] = {
     Refinement.ANY: _Demand(True, _EVERY_SIGN),
     Refinement.STATIC_NONNEGATIVE: _Demand(False, frozenset({Sign.ZERO, Sign.POSITIVE})),
     Refinement.STATIC_NEGATIVE: _Demand(False, frozenset({Sign.NEGATIVE})),
+    Refinement.STATIC_ONE_HALF: _Demand(False, frozenset({Sign.POSITIVE}), 0.5),
 }
 
 # They erase to their argument for the type checker; the alias object itself is the marker, read back through
-# ``typing.get_origin``.
+# `typing.get_origin`.
 type StaticNonNegative[T] = T
 type StaticNegative[T] = T
+type StaticOneHalf[T] = T
 
 _REFINEMENTS: dict[object, Refinement] = {
     StaticNonNegative: Refinement.STATIC_NONNEGATIVE,
     StaticNegative: Refinement.STATIC_NEGATIVE,
+    StaticOneHalf: Refinement.STATIC_ONE_HALF,
 }
-
-
-@dataclass(frozen=True, slots=True)
-class Operand:
-    """A null ``const`` is a runtime operand, not an absent one."""
-
-    stype: ScalarType
-    const: bool | int | float | None = None
-
-    @property
-    def sign(self) -> Sign:
-        assert self.const is not None
-        return Sign.POSITIVE if self.const > 0 else Sign.NEGATIVE if self.const < 0 else Sign.ZERO
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,20 +111,35 @@ class Domain:
         if operand.stype not in accepted_stypes(self.stype):
             return False
         demand = _DEMANDS[self.refinement]
-        return demand.runtime if operand.const is None else operand.sign in demand.signs
+        if operand.const is None:
+            return demand.runtime
+        return operand.sign in demand.signs and (demand.exact is None or operand.const == demand.exact)
+
+    def admits(self, value: float) -> bool:
+        """Whether a constant of this value satisfies the domain; an integral value can arrive as either type."""
+        stypes = (ScalarType.INT, ScalarType.FLOAT) if float(value).is_integer() else (ScalarType.FLOAT,)
+        return any(self.accepts(Operand(stype, value)) for stype in stypes)
 
     def within(self, other: Domain) -> bool:
         """Whether every operand this domain accepts the other accepts too -- the specificity order."""
         mine, theirs = _DEMANDS[self.refinement], _DEMANDS[other.refinement]
         types = accepted_stypes(self.stype) <= accepted_stypes(other.stype)
-        return types and (theirs.runtime or not mine.runtime) and mine.signs <= theirs.signs
+        exact = theirs.exact is None or mine.exact == theirs.exact
+        return types and (theirs.runtime or not mine.runtime) and mine.signs <= theirs.signs and exact
 
     def apart(self, other: Domain) -> bool:
         """Whether no operand at all satisfies both, which lets two incomparable lowerings coexist."""
         mine, theirs = _DEMANDS[self.refinement], _DEMANDS[other.refinement]
         if accepted_stypes(self.stype).isdisjoint(accepted_stypes(other.stype)):
             return True
-        return not (mine.runtime and theirs.runtime) and mine.signs.isdisjoint(theirs.signs)
+        if not (mine.runtime and theirs.runtime) and mine.signs.isdisjoint(theirs.signs):
+            return True
+        # A refinement naming its constant admits that operand and no other, so the pair separates as soon as the
+        # peer turns that one constant away -- which is what tells a one-half exponent from an integral one.
+        return any(
+            demand.exact is not None and not peer.admits(demand.exact)
+            for demand, peer in ((mine, other), (theirs, self))
+        )
 
 
 def _annotation_domain(annotation: object) -> Domain | None:
@@ -122,7 +152,7 @@ def _annotation_domain(annotation: object) -> Domain | None:
 
 @dataclass(frozen=True, slots=True)
 class ScalarLowering:
-    """A single HIR operation, or -- where ``operator`` is None -- the stub inlined as ordinary user code."""
+    """A single HIR operation, or -- where `operator` is None -- the stub inlined as ordinary user code."""
 
     stub: types.FunctionType
     operator: Operator | None
@@ -164,13 +194,15 @@ class ScalarFunction:
 @dataclass(frozen=True, slots=True)
 class Array:
     """
-    An inlined composite whose meaning is rank and shape, so it declares no scalar domain. ``derives`` marks a
-    non-copying derivation on the host (``.T``, ``flatten``): the result carries the source's Allocation as its
-    storage-equivalence token.
+    An inlined composite whose meaning is rank and shape, so it declares no scalar domain. `derives` marks a
+    non-copying derivation on the host (`.T`, `flatten`): the result carries the source's Allocation as its
+    storage-equivalence token. `sequences` names the argument positions whose gate admits a Python sequence
+    (np.polyval's coefficients); everywhere else the build-an-array advice stands.
     """
 
     stub: types.FunctionType
     derives: bool = False
+    sequences: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,15 +218,35 @@ class Factory:
 @dataclass(frozen=True, slots=True)
 class Conversion:
     """
-    A call the partial evaluator lowers as a structural to-array conversion of its single argument.
-    ``copies`` distinguishes np.array (an independent copy -- the A5 escape hatch) from np.asarray (which
-    returns the argument itself for an array input, so source and result share).
+    A structural to-array conversion with an optional dtype (positional or keyword). `copies` distinguishes
+    np.array (always an independent copy -- the A5 escape hatch) from np.asarray, which shares a
+    family-preserving array input; a family-CHANGING dtype copies on the host, so both spellings mint fresh
+    there. Dtype widths are erased, so a same-family host copy (float32 to float) conservatively shares.
     """
 
     copies: bool
 
 
-type Match = ScalarFunction | Array | Factory | Conversion
+@dataclass(frozen=True, slots=True)
+class Reshape:
+    """
+    A compile-time restructuring of the same storage; like Conversion, the registry only decides WHICH callees
+    mean it. A marker rather than a stub: the shape's int-or-tuple polymorphism has no discriminating spelling
+    inside the subset.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class Lifted:
+    """
+    A scalar entry made array-capable for its key: a single tensor operand applies the scalar selection
+    leafwise; anything else falls through to the scalar path unchanged.
+    """
+
+    scalar: ScalarFunction
+
+
+type Match = ScalarFunction | Array | Factory | Conversion | Reshape | Lifted
 
 _REGISTRY: dict[object, Match] = {}
 
@@ -273,16 +325,27 @@ def lib[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
     return register
 
 
-def array[F: Callable[..., object]](*substituted: object, derives: bool = False) -> Callable[[F], F]:
+def array[F: Callable[..., object]](
+    *substituted: object, derives: bool = False, sequences: tuple[int, ...] = ()
+) -> Callable[[F], F]:
     assert substituted
 
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
         assert not derives or fn.__code__.co_argcount == 1, "a derivation's result tracks its sole argument"
-        _register(Array(fn, derives), (fn, *substituted))
+        _register(Array(fn, derives, frozenset(sequences)), (fn, *substituted))
         return fn
 
     return register
+
+
+def lift(*keys: object) -> None:
+    for key in keys:
+        found = _REGISTRY.get(key)
+        if isinstance(found, Lifted):
+            continue  # np.abs IS np.absolute, so one call can name a key twice
+        assert isinstance(found, ScalarFunction) and found.arity == 1, key
+        _REGISTRY[key] = Lifted(found)
 
 
 def factory[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
@@ -298,6 +361,10 @@ def factory[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
 
 def conversion(*keys: object, copies: bool) -> None:
     _register(Conversion(copies), keys)
+
+
+def reshape(*keys: object) -> None:
+    _register(Reshape(), keys)
 
 
 def resolve(callee: object) -> Match | None:

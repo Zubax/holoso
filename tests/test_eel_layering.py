@@ -11,7 +11,7 @@ from ._importguard import forbidden_imports, transitive_holoso_imports
 _REPO = Path(__file__).resolve().parents[1]
 _EEL_DIR = _REPO / "holoso" / "_eel"
 
-# ``build`` is skipped: a synthesis result writes a generated cocotb testbench next to its RTL, so scanning it
+# `build` is skipped: a synthesis result writes a generated cocotb testbench next to its RTL, so scanning it
 # would read the developer's build state rather than the sources.
 _SOURCE_TREES = ("holoso", "tests", "tools", "synth", "examples", "docs", ".github")
 _SOURCE_SUFFIXES = (".py", ".md", ".toml", ".cfg", ".yml", ".yaml")

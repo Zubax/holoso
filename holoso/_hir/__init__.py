@@ -1,7 +1,8 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
 from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst, IntConst as IntConst
-from ._copy import reverse_postorder as reverse_postorder
+from ._copy import copy_node as copy_node, rebuild as rebuild, reverse_postorder as reverse_postorder
+from ._dce import eliminate_dead_code as eliminate_dead_code
 from ._evaluate import HirEvaluator as HirEvaluator
 from ._ir import (
     Branch as Branch,
@@ -17,7 +18,9 @@ from ._ir import (
     StateRead as StateRead,
     StateSlot as StateSlot,
     Terminator as Terminator,
+    successors as successors,
 )
+from ._scaling import Scaling as Scaling, scaling_of as scaling_of
 from ._operators import (
     BoolAnd as BoolAnd,
     BoolNot as BoolNot,
@@ -29,9 +32,11 @@ from ._operators import (
     FloatAbs as FloatAbs,
     FloatAdd as FloatAdd,
     FloatAtan2 as FloatAtan2,
+    FloatAtan2Turns as FloatAtan2Turns,
     FloatCeil as FloatCeil,
     FloatComparison as FloatComparison,
     FloatCos as FloatCos,
+    FloatCosTurns as FloatCosTurns,
     FloatDiv as FloatDiv,
     FloatEqual as FloatEqual,
     FloatExp2 as FloatExp2,
@@ -56,6 +61,7 @@ from ._operators import (
     FloatRound as FloatRound,
     FloatSelect as FloatSelect,
     FloatSin as FloatSin,
+    FloatSinTurns as FloatSinTurns,
     FloatSqrt as FloatSqrt,
     FloatToBool as FloatToBool,
     FloatToInt as FloatToInt,
@@ -66,6 +72,7 @@ from ._operators import (
     IntBwNot as IntBwNot,
     IntBwOr as IntBwOr,
     IntBwXor as IntBwXor,
+    IntComparison as IntComparison,
     IntDivFloor as IntDivFloor,
     IntEqual as IntEqual,
     IntGreater as IntGreater,
@@ -74,8 +81,10 @@ from ._operators import (
     IntLessOrEqual as IntLessOrEqual,
     IntMod as IntMod,
     IntMul as IntMul,
+    IntMulPow2 as IntMulPow2,
     IntNeg as IntNeg,
     IntNotEqual as IntNotEqual,
+    IntPopcount as IntPopcount,
     IntSelect as IntSelect,
     IntShiftLeft as IntShiftLeft,
     IntShiftRight as IntShiftRight,

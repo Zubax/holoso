@@ -1,14 +1,14 @@
 """
 Steering/area non-regression gate for the LIR build.
 
-Every currently-synthesizing example (all except ``iir1_hpf`` and ``finite_set_current_controller``, which the
-frontend cannot yet lower) is built to LIR and measured on the metrics that bound the synthesized fabric (here
+Every currently-synthesizing example is built to LIR and measured on the metrics that bound the synthesized
+fabric (here
 "straight-line" means the pure-float flat path: single block, no boolean fabric -- an if-converted kernel can be
 single-block without being straight-line in this sense): the wide and
 boolean register counts, the per-port read-mux fan-in and per-register write-select fan-in (the steering cost that
 dominates the LUTs), and the statically-known latency lower bound. The baseline below was re-frozen on the converged
 build with the bank-independent read/landing model, at the default register-allocation effort. Value numbering is
-seed-independent (``tests/test_determinism.py`` proves byte-identical Verilog across ``PYTHONHASHSEED`` values), so
+seed-independent (`tests/test_determinism.py` proves byte-identical Verilog across `PYTHONHASHSEED` values), so
 these figures hold in any process without pinning the hash seed.
 
 The contract: NO example may regress past its frozen baseline on any metric. A single-block (straight-line) kernel is
@@ -24,17 +24,18 @@ monotonicity guard.
 
 import sys
 from collections.abc import Callable
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from holoso import FloatFormat
+from holoso import FloatFormat, FSortOptions, OperatorOptions
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import Lir
+from holoso._mir import MirOptions
 from holoso._mir import lower as lower_to_mir
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, SHIPPED_TUNING, build_lir, default_ops
+from ._modelref import build_lir, default_mir, default_options, mir_options, DEFAULT_UNROLL_MAX_TRIPS, SHIPPED_TUNING
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -42,8 +43,9 @@ import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
 from ekf1_stateful import Ekf1  # noqa: E402
 from ekf1_stateless import update_x_P  # noqa: E402
+from iir1_hpf import IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
-import imu_frame_transform  # noqa: E402
+from imu_fusion import ImuFusion  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
@@ -56,14 +58,22 @@ from schmitt_trigger import SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 from biquad import Biquad  # noqa: E402
+from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
+
+# Kernels the shared default operator set cannot lower take their spec-style adjustment here.
+_EXTRA_OPERATORS: dict[str, Callable[[OperatorOptions], OperatorOptions]] = {
+    "imu_fusion": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    "finite_set_current_controller": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+}
 
 _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "madd": lambda: madd.madd,
     "poly3": lambda: poly3.poly3,
     "signal_window": lambda: signal_window,
+    "iir1_hpf": lambda: IIR1HPF().step,
     "iir1_lpf": lambda: IIR1LPF().__call__,
     "pid": lambda: PID().__call__,
     "schmitt_trigger": lambda: SchmittTrigger().__call__,
@@ -76,10 +86,11 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "octave_index": lambda: octave_index,
     "cordic_sincos": lambda: CordicSinCos().__call__,
     "integrator": lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-    "imu_frame_transform": lambda: imu_frame_transform.transform,
+    "imu_fusion": lambda: ImuFusion().update,
     "fir": lambda: Fir4().__call__,
     "biquad": lambda: Biquad().__call__,
     "ekf1_stateless": lambda: update_x_P,
+    "finite_set_current_controller": lambda: FiniteSetCurrentController().__call__,
     "ekf1_stateful": lambda: Ekf1().update,
 }
 
@@ -87,19 +98,19 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 @dataclass(frozen=True, slots=True)
 class Metrics:
     """
-    The non-regression figures sampled off a built :class:`Lir`.
+    The non-regression figures sampled off a built Lir.
 
-    ``steering`` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the upper-bound write-select fan-in
-    (:attr:`Lir.write_select_fanin`, which counts every write-chain driver the backend synthesizes: pooled lanes,
+    `steering` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the upper-bound write-select fan-in
+    (Lir.write_select_fanin, which counts every write-chain driver the backend synthesizes: pooled lanes,
     inline casts, phi-arm copies, and slot installs). Counting the copies matters here: phi-arm coalescing trades
     pc-gated copies for shared pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a
-    regression. ``copies`` is the total phi-arm install count (wide copies plus boolean writes), the direct measure
+    regression. `copies` is the total phi-arm install count (wide copies plus boolean writes), the direct measure
     of how many phi arms still install by copy rather than coalescing onto the merged register.
 
-    ``last_pc`` is the static ROM length (:attr:`Lir.initiation_interval`) -- the total stage count: blocks tile the
+    `last_pc` is the static ROM length (Lir.initiation_interval) -- the total stage count: blocks tile the
     ROM, so a per-block drain regression in ANY block inflates it, the primary "excessive stages" guard.
-    ``max_block_span`` is the largest per-block terminator offset (``max term_offset``), localizing a per-block drain
-    regression to one block (unlike ``last_pc``, it does not move with the number of blocks).
+    `max_block_span` is the largest per-block terminator offset (`max term_offset`), localizing a per-block drain
+    regression to one block (unlike `last_pc`, it does not move with the number of blocks).
     """
 
     straight_line: bool
@@ -114,11 +125,18 @@ class Metrics:
 
 # The baselines are frozen against the shipped allocator defaults, passed explicitly so no environment speed-up can
 # leak in here; changing a default deliberately re-freezes them.
+def _mir_for(name: str) -> MirOptions:
+    """The shared default, adjusted per kernel where the default operator set cannot lower it (min/max needs fsort)."""
+    if name in _EXTRA_OPERATORS:
+        options = default_options(_FMT)
+        options = dataclasses.replace(options, operator=_EXTRA_OPERATORS[name](options.operator))
+        return mir_options(options)
+    return default_mir(_FMT)
+
+
 def _measure(name: str) -> Metrics:
     lir: Lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
+        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, _mir_for(name)),
         name,
         SHIPPED_TUNING,
     )
@@ -173,7 +191,7 @@ def _measure(name: str) -> Metrics:
 #   coalesced-install fixpoint -- a phi-arm predecessor whose every arm coalesces installs nothing, so its
 #   +1 install drain is dropped. The drained boundary is the latest value LANDING per op: every op -- inline (a
 #   select or a bool->float cast) or pooled -- lands at the same uniform per-op landing, and an install reading a
-#   block-entry-RESIDENT source (``value_resident_at_entry``) fires at the
+#   block-entry-RESIDENT source (`value_resident_at_entry`) fires at the
 #   combinational step and drops its +1 install drain. last_pc tiles every block's span (a per-block drain regression
 #   anywhere inflates it); max_block_span localizes it to one block. These timing rules move the schedule-length
 #   guards but not nreg/bnreg/steering/copies; signal_window carries a deliberately-loosened steering arm (one freed
@@ -186,6 +204,7 @@ BASELINE: dict[str, Metrics] = {
     "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=14, last_pc=14, max_block_span=14),
     "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=23, last_pc=23, max_block_span=23),
     "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=9, last_pc=9, max_block_span=9),
+    "iir1_hpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "iir1_lpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=15, last_pc=15, max_block_span=15),
     "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=36, last_pc=68, max_block_span=31),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6),
@@ -196,7 +215,7 @@ BASELINE: dict[str, Metrics] = {
     "latching_fault_register": Metrics(
         False, nreg=0, bnreg=6, steering=2, copies=0, min_ii=5, last_pc=5, max_block_span=5
     ),
-    "majority_voter": Metrics(False, nreg=0, bnreg=21, steering=20, copies=0, min_ii=14, last_pc=19, max_block_span=12),
+    "majority_voter": Metrics(False, nreg=7, bnreg=11, steering=13, copies=0, min_ii=15, last_pc=20, max_block_span=11),
     # recip_newton's loop opens with a statically-true convergence test, so the partial evaluator peels the first
     # trip: one more live value across the loop entry (nreg, steering) and one body's worth of extra microcode, in
     # exchange for a shorter realized transaction (test_cycle_model).
@@ -207,17 +226,22 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=104, last_pc=104, max_block_span=104
     ),
     "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=16, last_pc=16, max_block_span=16),
-    # The only example whose datapath is built entirely from the matrix product and transpose, so it is the gate that
-    # would catch a linear-algebra library stub expanding into more hardware than the operators it replaced.
-    "imu_frame_transform": Metrics(
-        True, nreg=20, bnreg=0, steering=35, copies=0, min_ii=42, last_pc=42, max_block_span=42
+    # The capability-probe controller: records, reductions, reshape, dtype conversions, and a branchy scan in one
+    # kernel, so it gates the whole new-frontend surface against fabric regressions.
+    "finite_set_current_controller": Metrics(
+        False, nreg=23, bnreg=4, steering=68, copies=12, min_ii=160, last_pc=204, max_block_span=108
+    ),
+    # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
+    # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.
+    "imu_fusion": Metrics(
+        False, nreg=48, bnreg=5, steering=117, copies=14, min_ii=252, last_pc=439, max_block_span=129
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's.
     "fir": Metrics(True, nreg=8, bnreg=0, steering=5, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "biquad": Metrics(True, nreg=6, bnreg=0, steering=5, copies=0, min_ii=21, last_pc=21, max_block_span=21),
     # The two largest kernels carry slightly higher register pressure as a deliberate latency-for-area point: the
     # uniform landing keeps min_ii/last_pc tight, so a result resides a cycle longer, raising register
-    # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (``<=``) pinned
+    # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (`<=`) pinned
     # tight to the converged build, so a later improvement may sit below its bound until the next re-freeze.
     "ekf1_stateless": Metrics(
         True, nreg=41, bnreg=0, steering=100, copies=0, min_ii=125, last_pc=125, max_block_span=125
@@ -240,7 +264,7 @@ def test_metrics_do_not_regress(name: str) -> None:
 
 
 def test_build_is_deterministic() -> None:
-    """The allocator's annealing is ``seed=0``; two builds of the same kernel must agree, so the baseline is stable."""
+    """The allocator's annealing is `seed=0`; two builds of the same kernel must agree, so the baseline is stable."""
     first = _measure("ekf1_stateless")
     second = _measure("ekf1_stateless")
     assert first == second

@@ -1,7 +1,6 @@
 """Holoso: a narrow Python-to-Verilog synthesizer for numeric kernels."""
 
 from ._api import (
-    OperatorOptions as OperatorOptions,
     Options as Options,
     SynthesisResult as SynthesisResult,
     synthesize as synthesize,
@@ -21,8 +20,10 @@ from ._type import (
     FloatFormat as FloatFormat,
     FloatType as FloatType,
     IntFormat as IntFormat,
+    IntType as IntType,
 )
-from ._value import FloatValue as FloatValue
+from ._operators import OperatorOptions as OperatorOptions
+from ._value import FloatValue as FloatValue, IntValue as IntValue
 from ._errors import (
     HolosoError as HolosoError,
     SourceUnavailable as SourceUnavailable,
@@ -47,13 +48,13 @@ FFmaOptions = _operators.FFmaOperator.Options
 FFromIntOptions = _operators.FFromIntOperator.Options
 FLog2Options = _operators.FLog2Operator.Options
 FMulILog2Options = _operators.FMulILog2Operator.Options
-FMulILog2VarOptions = _operators.FMulILog2VarOperator.Options
 FMulOptions = _operators.FMulOperator.Options
 FRoundOptions = _operators.FRoundOperator.Options
 FSincosOptions = _operators.FSincosOperator.Options
 FSortOptions = _operators.FSortOperator.Options
+FSqrtOptions = _operators.FSqrtOperator.Options
 FToIntOptions = _operators.FToIntOperator.Options
 IMulOptions = _operators.IMulOperator.Options
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __url__ = "https://holoso.digital"

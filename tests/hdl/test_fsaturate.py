@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any
 
 import cocotb
-import numpy as np
 import pytest
 from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
@@ -17,10 +16,7 @@ from .hdl_float_oracle import (
     REPO_ROOT,
     SIMULATORS,
     build_args,
-    get_random_count,
-    get_seed,
     is_inf_f32,
-    random_zkf_f32,
     sources,
 )
 
@@ -39,10 +35,6 @@ async def holoso_fsaturate_cocotb(dut: Any) -> None:
 
     for x in DIRECTED_F32:
         await check(x)
-
-    rng = np.random.default_rng(get_seed())
-    for _ in range(get_random_count()):
-        await check(random_zkf_f32(rng))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

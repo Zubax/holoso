@@ -1,13 +1,14 @@
 """
 The integer operators, pooled and inline: their reference semantics, their closed-form timing, and the one knob
-among them. No lowering selects these yet, so they are driven directly.
+among them. The lowering selects these (pinned in `test_int_selection`); here they are driven directly because
+only a direct drive can sweep every operand of the narrow widths exhaustively.
 
-The sweeps score ``evaluate`` against the very oracle the HDL benches score the RTL against, so the values are
+The sweeps score `evaluate` against the very oracle the HDL benches score the RTL against, so the values are
 checked rather than merely claimed. What they do NOT check is the configuration the hardware is built in: the
 latencies, the RTL parameters and the port names are pinned elsewhere -- by the elaboration probe in
-``test_backend.py`` and by the benches, which take all three from the operator itself. A wrong ``QUOTIENT_FLOOR``
+`test_backend.py` and by the benches, which take all three from the operator itself. A wrong `QUOTIENT_FLOOR`
 would leave every assertion here passing and fail there, as would a wide-bank expression that lost its sign
-extension (``tests/hdl/test_int_inline.py``).
+extension (`tests/hdl/test_int_inline.py`).
 """
 
 from collections.abc import Callable
@@ -28,9 +29,6 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._eel import lower
-from holoso._hir import optimize
-from holoso._mir import lower as lower_to_mir
 from holoso._operators import (
     BoolToIntOperator,
     FFromIntOperator,
@@ -41,7 +39,9 @@ from holoso._operators import (
     ICmpOperator,
     IDivOperator,
     IMulOperator,
-    IShiftOperator,
+    IPopcntOperator,
+    IShlOperator,
+    IShrOperator,
     ISubOperator,
     IntBwAndOperator,
     IntBwNotOperator,
@@ -57,8 +57,8 @@ from holoso._operators import (
 from holoso._type import IntType
 from holoso._value import IntValue
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, build_ops
-from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishift, signed
+from ._modelref import build_ops
+from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishl, signed
 
 EXHAUSTIVE_WIDTHS = (2, 3, 4, 5, 6)
 PRODUCTION_WIDTHS = (24, 33, 44)
@@ -95,13 +95,15 @@ def _oracle(expected: dict[str, int], operator: IntHardwareOperator) -> dict[str
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: int) -> None:
     fmt = IntFormat(width)
-    binary = [IAddOperator(fmt), ISubOperator(fmt), ICmpOperator(fmt), IShiftOperator(fmt)]
-    idiv, iabs = IDivOperator(fmt), IAbsOperator(fmt)
+    binary = [IAddOperator(fmt), ISubOperator(fmt), ICmpOperator(fmt), IShlOperator(fmt), IShrOperator(fmt)]
+    idiv = IDivOperator(fmt)
+    unary = [IAbsOperator(fmt), IPopcntOperator(fmt)]
     # Staging is a timing knob, so every multiplier configuration must answer the one product.
     multipliers = [IMulOperator(fmt, IMulOptions(stage_product=stage)) for stage in range(5)]
     for a in range(1 << width):
-        want = expected_simple(iabs.module_name, a, 0, width)
-        assert _bits(iabs, a) == _oracle(want, iabs)
+        for operator in unary:
+            want = expected_simple(operator.module_name, a, 0, width)
+            assert _bits(operator, a) == _oracle(want, operator), (operator.mnemonic, a)
         for b in range(1 << width):
             for operator in binary:
                 want = expected_simple(operator.module_name, a, b, width)
@@ -164,7 +166,7 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
     for numerator in _corners(fmt):
         assert _evaluate(IDivOperator(fmt), numerator, 0) == [fmt.min if numerator < 0 else fmt.max, numerator]
 
-    shift = IShiftOperator(fmt)
+    shift = IShlOperator(fmt)
     for count in (0, 1, width - 1, width, width + 1, fmt.max):
         assert _evaluate(shift, 0, count) == [0, 0]
         assert _evaluate(shift, -1, -count) == [-1, -1], "sign fill makes -1 a fixed point of every right shift"
@@ -172,12 +174,45 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
     assert _evaluate(shift, fmt.min, fmt.min) == [-1, -1], "a count past the word saturates to the word itself"
     assert _evaluate(shift, fmt.max, 1) == [-2, fmt.max], "the raw shift drops the bit the saturating one clamps on"
 
+    right = IShrOperator(fmt)
+    for count in (0, 1, width - 1, width, width + 1, fmt.max):
+        assert _evaluate(right, 0, count) == [0]
+        assert _evaluate(right, -1, count) == [-1], "sign fill makes -1 a fixed point of every right shift"
+    # A negative count shifts left, and that shift is raw: the bit walks up into the sign and then off the word.
+    assert _evaluate(right, 1, 2 - width) == [1 << (width - 2)]
+    assert _evaluate(right, 1, 1 - width) == [fmt.min]
+    assert _evaluate(right, 1, -width) == [0]
+    assert _evaluate(right, fmt.min, fmt.min) == [0], "|MIN| is past the word, so the left it asks for empties it"
+    assert _evaluate(right, fmt.max, -1) == [-2], "the left shift drops what leaves the word rather than clamping"
+
+
+@pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
+def test_the_two_shifters_mirror_each_other_over_every_operand_pair(width: int) -> None:
+    # Each must be the other read backwards, or the pair is not worth two modules. MIN has no negation in the
+    # format, so it is the one count they legitimately part on.
+    fmt = IntFormat(width)
+    left, right = IShlOperator(fmt), IShrOperator(fmt)
+    for a in range(1 << width):
+        for b in range(fmt.min + 1, fmt.max + 1):
+            (mirrored,) = right.evaluate(IntValue.from_bits(fmt, a), IntValue.from_int(fmt, -b))
+            assert _bits(left, a, fmt.encode(b))["shft"] == mirrored.bits, (a, b)
+    for a in range(1 << width):
+        assert _bits(right, a, fmt.encode(fmt.min))["shft"] == 0, "a left shift past the word empties the word"
+
 
 @pytest.mark.parametrize("width", (2, 3, 24, 33, 44))
 def test_closed_form_latencies(width: int) -> None:
     fmt = IntFormat(width)
     assert IDivOperator(fmt).latency == 3 + -(-width // 2), "one radix-4 step per two quotient bits, rounded up"
-    for operator in (IAddOperator(fmt), ISubOperator(fmt), IAbsOperator(fmt), IShiftOperator(fmt), ICmpOperator(fmt)):
+    for operator in (
+        IAddOperator(fmt),
+        ISubOperator(fmt),
+        IAbsOperator(fmt),
+        IShlOperator(fmt),
+        IShrOperator(fmt),
+        ICmpOperator(fmt),
+        IPopcntOperator(fmt),
+    ):
         assert operator.latency == 2
         assert operator.initiation_interval == 1
 
@@ -191,7 +226,7 @@ def test_multiplier_staging_costs_exactly_one_cycle_each(stage_product: int) -> 
 
 def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None:
     # Saturation is the integer type's defined behaviour, and the saturating operators are speculatable, so none of
-    # them may raise the machine's error flag; MIN // -1 saturates the divider too, and must stay off ``div0``.
+    # them may raise the machine's error flag; MIN // -1 saturates the divider too, and must stay off `div0`.
     fmt = IntFormat(33)
     assert IDivOperator(fmt).error_ports == ["div0"]
     for operator in (
@@ -199,34 +234,56 @@ def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None
         ISubOperator(fmt),
         IMulOperator(fmt, IMulOptions()),
         IAbsOperator(fmt),
-        IShiftOperator(fmt),
+        IShlOperator(fmt),
+        IShrOperator(fmt),
         ICmpOperator(fmt),
+        IPopcntOperator(fmt),
     ):
         assert operator.error_ports == [], operator.mnemonic
+
+
+@pytest.mark.parametrize("width", (2, 3, *PRODUCTION_WIDTHS))
+def test_the_population_count_counts_the_magnitude_and_answers_on_a_minimal_port(width: int) -> None:
+    # Counting the magnitude is what makes -1 answer 1 rather than filling the word, and what caps the count one
+    # short of the width -- MIN counts its single bit because the negation that overflows a signed word is exactly
+    # the magnitude. WY is pinned because it sizes the RTL port, and the count that just fits it is what makes the
+    # width minimal rather than merely sufficient.
+    fmt = IntFormat(width)
+    operator = IPopcntOperator(fmt)
+    assert operator.params == {"W": width, "WY": (width - 1).bit_length(), "LATENCY": 2}
+    assert width - 1 < (1 << operator.count_width) and width - 1 >= (1 << (operator.count_width - 1))
+    assert operator.signature.result_types == (IntType(fmt),), "the count is an ordinary machine integer"
+    corners = (0, -1, fmt.min, fmt.min + 1, fmt.max)
+    assert {value: _evaluate(operator, value)[0] for value in corners} == {
+        0: 0,
+        -1: 1,
+        fmt.min: 1,
+        fmt.min + 1: width - 1,
+        fmt.max: width - 1,
+    }
 
 
 def test_multiplier_staging_is_part_of_the_hardware_identity() -> None:
     # The operator is the resource-sharing key: two differently staged multipliers must not pool onto one module.
     fmt = IntFormat(33)
     instances = [IMulOperator(fmt, IMulOptions(stage_product=stage)) for stage in range(5)]
-    assert len({operator.instance_stem for operator in instances}) == len(instances)
     assert len(set(instances)) == len(instances)
     assert IMulOperator(fmt, IMulOptions()) == IMulOperator(fmt, IMulOptions(stage_product=0))
 
 
 def test_the_multiplier_knob_reaches_the_built_machine() -> None:
     # It must arrive carrying the user's staging AND the machine's integer format, not the float one.
-    imul = build_ops(Options(OperatorOptions(imul=IMulOptions(stage_product=3)), wint_min=44)).imul
+    imul = build_ops(Options(OperatorOptions(imul=IMulOptions(stage_product=3)), wint_min=44), 44).imul
     assert imul.fmt == IntFormat(44)
     assert imul.latency == 5
     assert imul.params == {"W": 44, "STAGE_PRODUCT": 3, "LATENCY": 5}
-    assert build_ops(Options(OperatorOptions())).imul.opt == IMulOptions(stage_product=0)
+    assert build_ops(Options(OperatorOptions()), 16).imul.opt == IMulOptions(stage_product=0)
 
 
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_inline_bitwise_and_casts_answer_over_every_operand(width: int) -> None:
     # The reference works on the raw bit patterns, so it knows nothing of the operator's own sign convention. A
-    # bitwise combination never leaves the range, so a saturating implementation would answer the rail for ``~min``.
+    # bitwise combination never leaves the range, so a saturating implementation would answer the rail for `~min`.
     fmt = IntFormat(width)
     mask = (1 << width) - 1
     conjunction, disjunction, exclusive = IntBwAndOperator(fmt), IntBwOrOperator(fmt), IntBwXorOperator(fmt)
@@ -252,7 +309,7 @@ def test_constant_shift_over_every_count_and_operand(width: int) -> None:
     for count in (count for count in range(1 - width, width) if count != 0):
         operator = IntShiftConstOperator(fmt, count)
         for a in range(1 << width):
-            want = ishift(a, fmt.encode(count), width).shft
+            want = ishl(a, fmt.encode(count), width).shft
             assert operator.evaluate(IntValue.from_bits(fmt, a)) == (IntValue.from_bits(fmt, want),), (count, a)
 
     assert IntShiftConstOperator(fmt, 1).render("r0") == "r0<<1"
@@ -271,10 +328,10 @@ def test_the_constant_shift_serves_only_the_counts_that_are_shifts() -> None:
 
 
 def test_the_constant_shift_is_the_raw_shift_and_not_the_saturating_one() -> None:
-    # The inline shift drops what leaves the word; the saturating reading needs the pooled ``holoso_ishift``.
+    # The inline shift drops what leaves the word; the saturating reading needs the pooled `holoso_ishl`.
     fmt = IntFormat(33)
     assert _evaluate(IntShiftConstOperator(fmt, 1), fmt.max) == [-2]
-    assert _evaluate(IShiftOperator(fmt), fmt.max, 1) == [-2, fmt.max]
+    assert _evaluate(IShlOperator(fmt), fmt.max, 1) == [-2, fmt.max]
 
 
 @pytest.mark.parametrize("wint", (4, 17, 44))
@@ -305,9 +362,9 @@ def test_the_conversions_saturate_at_the_rails_and_round_trip_the_extremes(wint:
 
 
 def test_rounding_before_converting_is_not_the_same_as_converting_with_that_mode() -> None:
-    # The intended MIR fusion of FloatToInt(FloatRound(x)) into one ftoint(x, ROUND) is therefore conditional, not an
-    # identity: it holds only where the float rounding cannot itself overflow the float format (see TODO.md). Here
-    # 3.5 rounds to +inf, which saturates, while a direct nearest-even conversion answers 4.
+    # The MIR fusion of FloatToInt(FloatRound(x)) into one ftoint(x, ROUND) is therefore a rewrite that can change
+    # the answer, and the fastmath charter licenses it anyway (see TODO.md). Here 3.5 rounds to +inf, which
+    # saturates, while a direct nearest-even conversion answers 4.
     ffmt, ifmt = FloatFormat(2, 4), IntFormat(33)
     fround = FRoundOperator(ffmt, FRoundOptions())
     ftoint = FToIntOperator(ffmt, ifmt, FToIntOptions())
@@ -326,7 +383,8 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
             OperatorOptions(ffromint=FFromIntOptions(stage_input=1, stage_pack=1), ftoint=FToIntOptions(stage_input=2)),
             ffmt=FloatFormat(6, 18),
             wint_min=44,
-        )
+        ),
+        44,
     )
     assert ops.ffromint is not None and ops.ftoint is not None
     assert ops.ffromint.latency == 3 and ops.ftoint.latency == 6
@@ -347,16 +405,13 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
     assert ops.ftoint.signature.result_types == (IntType(IntFormat(44)),)
 
 
-def test_the_lowering_checks_every_port_format_and_not_just_the_operator_kind() -> None:
-    # A conversion operator carries one format per side, so the check that keyed on the operator's own ``fmt`` could
-    # not see a wrong ``ifmt`` at all -- it read the float side and agreed with itself.
+def test_the_configuration_checks_every_port_format_and_not_just_the_operator_kind() -> None:
+    # A conversion operator carries one format per side, so a check keyed on the operator's own `fmt` could
+    # not see a wrong `ifmt` at all -- it read the float side and agreed with itself.
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33)
-    ops = build_ops(options)
-    mismatched = replace(ops, ftoint=FToIntOperator(options.ffmt, IntFormat(17), FToIntOptions()))
-    hir = optimize(lower(_add).hir, DEFAULT_IFCONV_MAX_OPS)
-    lower_to_mir(hir, ops, options.ffmt, options.ifmt)  # the premise: the matching configuration lowers cleanly
+    ops = build_ops(options, options.wint_min)
     with pytest.raises(AssertionError, match="ftoint"):
-        lower_to_mir(hir, mismatched, options.ffmt, options.ifmt)
+        replace(ops, ftoint=FToIntOperator(options.ffmt, IntFormat(17), FToIntOptions()))
 
 
 def _add(a: float, b: float) -> float:
@@ -365,7 +420,7 @@ def _add(a: float, b: float) -> float:
 
 def test_a_float_only_build_configures_an_integer_operator_without_instantiating_it() -> None:
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=44)
-    ops = build_ops(options)
+    ops = build_ops(options, options.wint_min)
     assert ops.imul.fmt == IntFormat(44)
     assert ops.ffromint is None and ops.ftoint is None, "a conversion is optional, as every float operator is"
     verilog = holoso.synthesize(_add, options, name="ImulUnused").verilog_output.verilog

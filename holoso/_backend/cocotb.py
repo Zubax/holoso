@@ -1,9 +1,9 @@
 """
 The cocotb backend: a self-contained, self-checking testbench for a generated module.
 
-``generate`` embeds the module's :class:`NumericalModel` handle into a standalone cocotb test. The bench unpickles the
-handle, elaborates a :class:`NumericalSimulator`, and ticks it in cycle-by-cycle lockstep with the DUT: each clock it
-asserts that ``out_valid``/``in_ready`` agree (so the model reaches ``out_valid`` on exactly the DUT's cycle -- the
+`generate` embeds the module's NumericalModel handle into a standalone cocotb test. The bench unpickles the
+handle, elaborates a NumericalSimulator, and ticks it in cycle-by-cycle lockstep with the DUT: each clock it
+asserts that `out_valid`/`in_ready` agree (so the model reaches `out_valid` on exactly the DUT's cycle -- the
 data-dependent latency check) and that the output bits match when valid, back-pressure included. The model is bit-exact
 to the RTL, so the output check needs no tolerance.
 
@@ -15,10 +15,12 @@ bench is fully reproducible.
 import base64
 import pickle
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .numerical import NumericalModel
+from .._type import LogicalPort
+from .._value import ScalarLike, coerce_scalar
 
 # language=python
 _TEMPLATE = '''\
@@ -44,12 +46,13 @@ _SIM = pickle.loads(zlib.decompress(base64.b64decode("@@BLOB@@"))).elaborate()  
 _IN_PORTS = _SIM.inputs  # logical input ports (name + scalar type), in module-port order
 _OUT_PORTS = _SIM.outputs
 
-# An explicit input sequence -- rows of per-input ZKF bits ordered as the input ports -- or None to draw the default
+# An explicit input sequence -- rows of per-input port bits ordered as the input ports -- or None to draw the default
 # random sweep below. The fixed seed makes the default sweep and the back-pressure stalls reproducible.
 _VECTORS = @@VECTORS@@
 _SEED = 0x9E3779B97F4A7C15  # TODO: allow overriding the seed, count, and range via plusargs.
 _DEFAULT_COUNT = 64
-_DEFAULT_RANGE = (-4.0, +4.0)  # small bounded range keeps multi-operation kernels from overflowing into infinities
+_DEFAULT_RANGE = (-4.0, +4.0)  # small so multi-operation kernels stay clear of the infinities
+_DEFAULT_INT_RANGE = (-64, +64)  # small so a kernel whose latency scales with its input stays simulable
 _MAX_TRANSACTION_CYCLES = 1 << 20  # out_valid ceiling: well above any real transaction, tripped only by a runaway loop
 
 
@@ -57,13 +60,21 @@ def _output_bits(value):
     return int(value) if isinstance(value, bool) else value.bits
 
 
-def _input_bits(port, rng, lo, hi):
-    # Encode one random input per its scalar type: a boolean draws a single bit, a float a ZKF-encoded sample.
+def _input_bits(port, rng):
+    # Zero is the integer pole -- an input-fed divisor would raise its error sideband on a defined transaction -- so
+    # like the format rails it belongs in explicit vectors, not the default sweep.
     match port.scalar_type:
         case holoso.BoolType():
             return rng.randint(0, 1)
         case holoso.FloatType(fmt=fmt):
+            lo, hi = _DEFAULT_RANGE
             return fmt.encode(rng.uniform(lo, hi))
+        case holoso.IntType(fmt=fmt):
+            lo_i, hi_i = _DEFAULT_INT_RANGE
+            while True:
+                value = rng.randint(max(fmt.min, lo_i), min(fmt.max, hi_i))
+                if value:
+                    return fmt.encode(value)
         case other:
             raise TypeError("unsupported input scalar type: %r" % (other,))
 
@@ -74,6 +85,8 @@ def _input_value(port, bits):
             return bool(bits)
         case holoso.FloatType(fmt=fmt):
             return holoso.FloatValue.from_bits(fmt, bits)
+        case holoso.IntType(fmt=fmt):
+            return holoso.IntValue.from_bits(fmt, bits)
         case other:
             raise TypeError("unsupported input scalar type: %r" % (other,))
 
@@ -84,8 +97,7 @@ async def cosim(dut):
     if _VECTORS is not None:
         sequence = _VECTORS
     else:
-        lo, hi = _DEFAULT_RANGE
-        sequence = [[_input_bits(p, rng, lo, hi) for p in _IN_PORTS] for _ in range(_DEFAULT_COUNT)]
+        sequence = [[_input_bits(p, rng) for p in _IN_PORTS] for _ in range(_DEFAULT_COUNT)]
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await FallingEdge(dut.clk)
@@ -164,30 +176,33 @@ class CocotbOutput:
         return f"{type(self).__name__}(testbench_bytes={len(self.testbench.encode())})"
 
 
-def _embed_vectors(input_names: list[str], vectors: list[Mapping[str, int]] | None) -> str:
-    """Render the explicit input sequence as a Python literal of input-name-ordered ZKF-bit rows, or ``None``."""
+def _embed_vectors(inputs: list[LogicalPort], vectors: Sequence[Mapping[str, ScalarLike]] | None) -> str:
+    """Render the explicit input sequence as a Python literal of input-ordered port-bit rows, or `None`."""
     if vectors is None:
         return "None"
     rows: list[list[int]] = []
     for index, vector in enumerate(vectors):
-        if missing := [name for name in input_names if name not in vector]:
+        if missing := [port.name for port in inputs if port.name not in vector]:
             raise ValueError(f"cosim vector {index} is missing inputs {missing}")
-        rows.append([int(vector[name]) for name in input_names])
+        row: list[int] = []
+        for port in inputs:
+            value = coerce_scalar(port.scalar_type, vector[port.name], f"vector {index} input {port.name!r}")
+            row.append(int(value) if isinstance(value, bool) else value.bits)
+        rows.append(row)
     return repr(rows)
 
 
-def generate(model: NumericalModel, vectors: list[Mapping[str, int]] | None = None) -> CocotbOutput:
+def generate(model: NumericalModel, vectors: Sequence[Mapping[str, ScalarLike]] | None = None) -> CocotbOutput:
     """
-    Build a self-contained cocotb testbench that checks the DUT against the embedded bit-exact model.
-
-    When ``vectors`` is given, each maps an input-port name to its ZKF bits and the bench replays the sequence verbatim
-    (one accepted transaction per vector, state carried across for stateful modules). When it is ``None``, the bench
-    draws a fixed-seed random sweep over a small bounded range instead. Either way the run is fully reproducible.
+    Build a self-contained cocotb testbench that checks the DUT against the embedded bit-exact model. Each vector
+    maps an input-port name to a typed scalar (a plain float/int/bool, or a FloatValue/IntValue
+    for an exact bit pattern), encoded here against the port metadata and replayed verbatim; `None` draws a
+    fixed-seed bounded random sweep instead. Either way the run is fully reproducible.
     """
     blob = base64.b64encode(zlib.compress(pickle.dumps(model, pickle.HIGHEST_PROTOCOL))).decode("ascii")
     testbench = (
         _TEMPLATE.replace("@@MODULE@@", model.module_name)
-        .replace("@@VECTORS@@", _embed_vectors([port.name for port in model.inputs], vectors))
+        .replace("@@VECTORS@@", _embed_vectors(model.inputs, vectors))
         .replace("@@BLOB@@", blob)
     )
     return CocotbOutput(testbench=testbench)

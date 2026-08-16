@@ -2,14 +2,14 @@
 The HIR evaluator: a host-precision reference model of an unoptimized frontend-emitted HIR graph -- the compiled
 half of the front-end differential oracle, whose other half is CPython executing the original kernel.
 
-Where the MIR interpreter (``holoso._mir._interpret``) is bit-exact in the target format to isolate the LIR layer,
-this evaluator runs in the compiler's own arithmetic -- host floats, unbounded ints, each ``Operator.evaluate``
+Where the MIR interpreter (`holoso._mir._interpret`) is bit-exact in the target format to isolate the LIR layer,
+this evaluator runs in the compiler's own arithmetic -- host floats, unbounded ints, each `Operator.evaluate`
 itself -- upstream of HIR optimization, so a divergence from CPython indicts the front-end alone. It deliberately
-imports nothing from ``_mir``/``_lir``/``_eel``; a guard test enforces the independence.
+imports nothing from `_mir`/`_lir`/`_eel`; a guard test enforces the independence.
 
-``NoNumber`` is carried as a poison value rather than an abort: the front-end's ``and``/``or`` gates are eager, so
+`NoNumber` is carried as a poison value rather than an abort: the front-end's `and`/`or` gates are eager, so
 the graph computes operands CPython may short-circuit past, and convicting one of those would fail kernels CPython
-answers happily (``x > 1.0 and 1.0 / y > 0.0`` at ``y == 0``). Poison flows through consumers, except that an
+answers happily (`x > 1.0 and 1.0 / y > 0.0` at `y == 0`). Poison flows through consumers, except that an
 operator's declared absorbing element swallows it -- an AND gate with a constant-0 input outputs 0 whatever garbage
 sits on the other input -- and only a poison reaching an observable sink raises: a branch condition, an output, or
 a state live-out, the last with the whole transaction's state left uncommitted. A poisoned BRANCH CONDITION inside
@@ -17,7 +17,7 @@ a short-circuited gate operand is the one shape the absorbing rule cannot reach 
 such a kernel fails here even where CPython and the gate-level hardware would both answer through the gate;
 accepted as a documented limitation rather than speculating both arms into loops and nontermination.
 
-Values live in the environment as ``Const`` nodes, so the charter's constant arithmetic governs every intermediate
+Values live in the environment as `Const` nodes, so the charter's constant arithmetic governs every intermediate
 (no NaN, no negative zero). The SELECT operators are strict like any other operator -- they cannot ignore a
 poisoned unselected arm -- which is sound within this evaluator's charter: the frontends emit conditionals as real
 branches, and if-conversion runs only in the optimizer, downstream of the graphs evaluated here.
@@ -73,9 +73,9 @@ def _evaluate(operation: Operation, operands: list[_Value]) -> _Value:
 
 class HirEvaluator:
     """
-    A runnable reference for one HIR graph: :meth:`run` evaluates one whole transaction (inputs to outputs) and
+    A runnable reference for one HIR graph: run evaluates one whole transaction (inputs to outputs) and
     advances the persistent slots -- read-first, committed only after every sink proved to name a number -- so a
-    caller drives an ordered sequence of transactions; :meth:`reset` reloads the reset snapshot. One per kernel.
+    caller drives an ordered sequence of transactions; reset reloads the reset snapshot. One per kernel.
     """
 
     def __init__(self, hir: Hir) -> None:
@@ -93,9 +93,9 @@ class HirEvaluator:
 
     def run(self, *inputs: Scalar, max_blocks: int = 10_000_000) -> list[Scalar]:
         """
-        Evaluate one whole transaction: bind the inputs and the entry-global leaves, walk the CFG to the ``Ret``,
-        read the outputs, then advance the persistent state. ``max_blocks`` bounds a non-terminating loop. Raises
-        :class:`NoNumber` when a poison reaches a sink; the transaction then commits nothing.
+        Evaluate one whole transaction: bind the inputs and the entry-global leaves, walk the CFG to the `Ret`,
+        read the outputs, then advance the persistent state. `max_blocks` bounds a non-terminating loop. Raises
+        NoNumber when a poison reaches a sink; the transaction then commits nothing.
         """
         env = self._initial_env(inputs)
         current = self._hir.entry
@@ -161,7 +161,7 @@ class HirEvaluator:
         return env
 
     def _resolve_phis(self, block: Block, previous: BlockId | None, env: dict[ValueId, _Value]) -> None:
-        """Bind every phi as a parallel snapshot of the arm taken from ``previous`` (loop swaps need this)."""
+        """Bind every phi as a parallel snapshot of the arm taken from `previous` (loop swaps need this)."""
         if not block.phis:
             return
         assert previous is not None, f"block {block.id} reached with phis but no predecessor (entry phi?)"

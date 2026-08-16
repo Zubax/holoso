@@ -1,21 +1,41 @@
 """
-Desugarer behavior pins: name classification (the TODO.md closure-freevar defect class), evaluation-order
-materialization, guarded conditional shapes, and the dead-arm narrowing. Assertions are on the
-canonical printed Eel text — the desugarer's public contract.
+Desugarer behavior pins: name classification, evaluation-order materialization, guarded conditional shapes, and the
+dead-arm narrowing. Assertions are on the canonical printed Eel text — the desugarer's public contract — observed
+through the public `frontend_ir[0]` artifact wherever the kernel synthesizes; kernels the pipeline refuses for
+reasons unrelated to the printed shape under test (sequence parameter annotations, data-dependent raises,
+out-of-word literals) pin the same text on the direct desugar dump.
 """
 
 import inspect
 import types
 from collections.abc import Callable
 
+import numpy as np
 import pytest
+from jaxtyping import Float64
 
+import holoso
+from holoso import FAddOptions, FCmpOptions, FMulILog2Options, FMulOptions, UnsupportedConstruct
 from holoso._eel._desugar import desugar
 from holoso._eel._print import print_eel
-from holoso._errors import UnsupportedConstruct
+
+from ._public import strip_locations
 
 GAIN = 100.0
 RANGE_TABLE = (7.0, 8.0)
+
+_OPTIONS = holoso.Options(
+    holoso.OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(), fmul_ilog2=FMulILog2Options(), fcmp=FCmpOptions())
+)
+
+
+def _text(target: object) -> str:
+    assert callable(target)
+    return strip_locations(holoso.synthesize(target, _OPTIONS, name="k").frontend_ir[0])
+
+
+def _lines(target: object) -> list[str]:
+    return _text(target).splitlines()
 
 
 def _fn(target: object) -> types.FunctionType:
@@ -24,12 +44,13 @@ def _fn(target: object) -> types.FunctionType:
     return fn
 
 
-def _text(target: object) -> str:
+def _desugared_text(target: object) -> str:
+    """For the kernels the pipeline refuses for reasons unrelated to the printed shape under test."""
     return print_eel(desugar(_fn(target)))
 
 
-def _lines(target: object) -> list[str]:
-    return _text(target).splitlines()
+def _desugared_lines(target: object) -> list[str]:
+    return _desugared_text(target).splitlines()
 
 
 def test_closure_shadowed_by_module_global_is_free() -> None:
@@ -64,8 +85,8 @@ def test_captured_range_rebinding_is_free_not_builtin() -> None:
 
 
 def test_pep709_comp_iterable_reads_enclosing_scope() -> None:
-    def kernel() -> list[float]:
-        return [RANGE_TABLE * 2.0 for RANGE_TABLE in RANGE_TABLE]  # noqa: B020
+    def kernel() -> tuple[float, ...]:
+        return [RANGE_TABLE * 2.0 for RANGE_TABLE in RANGE_TABLE]  # type: ignore[return-value]  # noqa: B020
 
     text = _text(kernel)
     assert "env RANGE_TABLE" in text  # the iterable: the module global, per PEP 709
@@ -91,16 +112,16 @@ def test_assert_only_binding_is_local_not_global() -> None:
         assert (w := 1.0) > 0.0
         return w
 
-    text = _text(kernel)
+    text = _desugared_text(kernel)  # synthesize refuses the unrelated unbound read of the assert-only binding
     assert "return w" in text
     assert "env w" not in text
 
 
 def test_comp_target_shadowing_local_is_renamed() -> None:
-    def kernel(vs: tuple[float, ...], s: float) -> float:
+    def kernel(vs: Float64[np.ndarray, "2"], s: float) -> float:
         v = 3.0
         r = [v * s for v in vs]
-        return v + r[0]
+        return v + r[0]  # type: ignore[no-any-return]
 
     text = _text(kernel)
     assert "for v$0 in vs" in text
@@ -161,7 +182,7 @@ def test_mixed_multi_target_index_reads_new_binding() -> None:
     def kernel(t: list[float], i: int) -> None:
         i = t[i] = i + 1
 
-    lines = [line.strip() for line in _lines(kernel)]
+    lines = [line.strip() for line in _desugared_lines(kernel)]
     assert lines.index("i = %0") < lines.index("t[i] = %0")  # the store's index read sees the rebound i
 
 
@@ -169,7 +190,7 @@ def test_plain_store_evaluates_value_before_index() -> None:
     def kernel(t: list[float], i: int, v: float) -> None:
         t[i + 1] = v + 1.0
 
-    lines = [line.strip() for line in _lines(kernel)]
+    lines = [line.strip() for line in _desugared_lines(kernel)]
     assert lines.index("%0 = v + 1.0") < lines.index("%1 = i + 1")
     assert "t[%1] = %0" in lines
 
@@ -178,9 +199,9 @@ def test_aug_store_evaluates_index_before_value() -> None:
     def kernel(t: list[float], i: int, v: float) -> None:
         t[i + 1] += v + 1.0
 
-    lines = [line.strip() for line in _lines(kernel)]
-    assert lines.index("%0 = i + 1") < lines.index("%1 = v + 1.0")
-    assert "t[%0] += %1" in lines
+    lines = [line.strip() for line in _desugared_lines(kernel)]
+    assert lines.index("%0 = i + 1") < lines.index("mark !0") < lines.index("%1 = v + 1.0")
+    assert "t[%0] += %1 !0" in lines
 
 
 def test_attribute_aug_store() -> None:
@@ -193,7 +214,8 @@ def test_attribute_aug_store() -> None:
             return self.y
 
     lines = [line.strip() for line in _lines(C().step)]
-    assert "self.y += %0" in lines
+    assert "self.y += %0 !0" in lines
+    assert lines.index("mark !0") < lines.index("%0 = x * 2.0")
 
 
 def test_assert_is_ignored_wholesale() -> None:
@@ -213,7 +235,7 @@ def test_dead_arm_still_rejects() -> None:
         return x
 
     with pytest.raises(UnsupportedConstruct, match="unsupported statement: Import") as info:
-        desugar(_fn(kernel))
+        holoso.synthesize(kernel, _OPTIONS, name="k")
     assert info.value.location is not None
 
 
@@ -222,7 +244,7 @@ def test_rejection_reports_outer_construct_before_inner_walrus() -> None:
         return sum(w := y for y in ys)  # noqa: F841
 
     with pytest.raises(UnsupportedConstruct, match="generator expressions"):
-        desugar(_fn(kernel))
+        holoso.synthesize(kernel, _OPTIONS, name="k")
 
 
 def test_conditional_expression_guards_arms() -> None:
@@ -305,7 +327,7 @@ def test_raise_fstring_parts_are_hoisted() -> None:
             raise ValueError(f"negative input: {x}")
         return x
 
-    text = _text(kernel)
+    text = _desugared_text(kernel)  # synthesize refuses the unrelated data-dependent raise
     assert "raise ValueError 'negative input: ' x" in text
 
 
@@ -314,7 +336,7 @@ def test_multi_target_atomic_rhs_still_evaluates_once() -> None:
         t, second = out = t  # type: ignore[assignment]  # noqa: F841
         return out
 
-    lines = [line.strip() for line in _lines(kernel)]
+    lines = [line.strip() for line in _desugared_lines(kernel)]
     assert "%0 = t" in lines  # the atomic RHS is captured before the first target rebinds t
     assert "t, second = %0" in lines
     assert "out = %0" in lines
@@ -329,7 +351,7 @@ class _TripleQuotedRaise:
 
 
 def test_string_literal_content_survives_indented_source() -> None:
-    text = _text(_TripleQuotedRaise().step)
+    text = _desugared_text(_TripleQuotedRaise().step)  # synthesize refuses the unrelated data-dependent raise
     assert repr("one\n    two") in text  # dedenting the retrieved source must not reach inside the literal
 
 
@@ -355,7 +377,7 @@ class _ColumnProbe:
 
 def test_diagnostic_column_matches_original_source() -> None:
     with pytest.raises(UnsupportedConstruct, match="set displays") as info:
-        desugar(_fn(_ColumnProbe().step))
+        holoso.synthesize(_ColumnProbe().step, _OPTIONS, name="k")
     location = info.value.location
     assert location is not None
     assert location.line is not None
@@ -369,7 +391,7 @@ def test_diagnostic_column_is_character_exact_after_non_ascii() -> None:
         return y
 
     with pytest.raises(UnsupportedConstruct, match="set displays") as info:
-        desugar(_fn(kernel))
+        holoso.synthesize(kernel, _OPTIONS, name="k")
     location = info.value.location
     assert location is not None and location.line is not None
     assert location.line[location.col] == "{"  # AST columns are UTF-8 byte offsets; ours must be characters
@@ -396,7 +418,7 @@ def test_single_target_unpack_prints_distinctly() -> None:
         (x,) = t
         return x
 
-    lines = [line.strip() for line in _lines(kernel)]
+    lines = [line.strip() for line in _desugared_lines(kernel)]
     assert "x, = t" in lines  # must not print identically to the plain assignment `x = t`
 
 
@@ -404,7 +426,7 @@ def test_huge_integer_literals_print_without_a_digit_limit() -> None:
     def kernel() -> int:
         return 0x1_0000_0000_0000_0000_0000  # past 64 bits: prints hex, immune to the CPython repr digit cap
 
-    assert "0x100000000000000000000" in _text(kernel)
+    assert "0x100000000000000000000" in _desugared_text(kernel)  # synthesize refuses the out-of-word literal
 
 
 def test_nonfinite_float_literal_prints_unambiguously() -> None:
@@ -423,8 +445,8 @@ def test_negated_negative_literal_prints_readably() -> None:
 
 
 def test_multi_dimensional_subscripts_are_retained() -> None:
-    def kernel(m: object) -> tuple[float, object]:
-        return m[0, 1], m[:, 2]  # type: ignore[index]  # a surviving suite compiles both shapes (test_matrix)
+    def kernel(m: Float64[np.ndarray, "3 3"]) -> tuple[float, Float64[np.ndarray, "3"]]:
+        return m[0, 1], m[:, 2]
 
     lines = [line.strip() for line in _lines(kernel)]
     assert "%0 = m[0, 1]" in lines
@@ -432,11 +454,12 @@ def test_multi_dimensional_subscripts_are_retained() -> None:
 
 
 def test_display_splices_are_retained() -> None:
-    def kernel(a: tuple[float, ...], b: tuple[float, ...]) -> list[float]:
-        return [0.0, *a, *b]
+    def kernel(x: float) -> tuple[float, ...]:
+        a = (x, 1.0)
+        b = (2.0,)
+        return [0.0, *a, *b]  # type: ignore[return-value]
 
-    text = _text(kernel)
-    assert "[0.0, *a, *b]" in text  # a surviving behavioral suite compiles this shape (test_verify)
+    assert "[0.0, *a, *b]" in _text(kernel)
 
 
 def test_outer_genexp_rejection_precedes_walrus_collision() -> None:
@@ -445,4 +468,4 @@ def test_outer_genexp_rejection_precedes_walrus_collision() -> None:
         return sum((w := w + y) for y in ys)
 
     with pytest.raises(UnsupportedConstruct, match="generator expressions"):
-        desugar(_fn(kernel))
+        holoso.synthesize(kernel, _OPTIONS, name="k")

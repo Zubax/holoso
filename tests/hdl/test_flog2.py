@@ -43,6 +43,8 @@ STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {"stage_input": 1, "stage_output": 1},
     {"stage_decode": 1, "stage_normalize": 1, "stage_pack": 1},
     {"stage_product": 2, "stage_product_final": 1, "stage_normalize_output": 1},
+    # The equal-temperament timing-closed configuration (the target-used stage_product_final=2 / stage_normalize=2).
+    {"stage_product": 2, "stage_product_final": 2, "stage_normalize": 2, "stage_pack": 1},
 )
 
 

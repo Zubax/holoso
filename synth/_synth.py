@@ -149,7 +149,7 @@ def _validate_unique_source_paths(files: Sequence[SourceFile]) -> None:
 def build_compiler_ooc_design(result: SynthesisResult) -> OocDesign:
     """
     A generated module instantiates only support-library modules, all of which live inside the single bundled
-    ``holoso_support.v``; nothing else is needed. Everything is bundled in memory so a recipe directory is
+    `holoso_support.v`; nothing else is needed. Everything is bundled in memory so a recipe directory is
     self-contained.
     """
     wrapper = build_ooc_wrapper(result)

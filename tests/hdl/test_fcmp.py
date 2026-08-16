@@ -130,11 +130,12 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0
 
 
+@pytest.mark.parametrize("stage_input", (0, 1), ids=lambda s: f"s{s}")
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fcmp(sim: str) -> None:
-    operator = FCmpOperator(FloatFormat(8, 24), FCmpOptions())
+def test_holoso_fcmp(sim: str, stage_input: int) -> None:
+    operator = FCmpOperator(FloatFormat(8, 24), FCmpOptions(stage_input=stage_input))
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fcmp"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fcmp_s{stage_input}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

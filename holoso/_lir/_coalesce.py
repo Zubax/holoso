@@ -22,7 +22,7 @@ def coalescable_arms(
     """
     Per phi, the register-backed, identity-conditioner arms eligible to coalesce (so the arm flows into the merged
     register with no install copy). An arm that ANOTHER arm of the same phi reads under a non-identity conditioner is
-    excluded: its residual copy would become a same-step self-conditioned copy (``r <= -r`` / ``b <= ~b``) into the
+    excluded: its residual copy would become a same-step self-conditioned copy (`r <= -r` / `b <= ~b`) into the
     merged register, which the install-free oracle cannot see and which the final interference rightly flags. Each
     conditioner answers for its own identity, so this serves both banks -- and a wide bank holding more than one scalar
     family, which has no single identity to compare against.
@@ -49,19 +49,19 @@ def _coalesce_phis(
 ) -> _PhiCoalescing:
     """
     Union-find phi-arm coalescing for one bank. Each phi result and its register-backed, identity-conditioner arms
-    (``candidate_arms``) merge into one congruence class whenever the merge introduces no interference -- judged on
-    ``oracle``, the install-free interference graph, since a coalesced class carries no install copy. The arms and the
+    (`candidate_arms`) merge into one congruence class whenever the merge introduces no interference -- judged on
+    `oracle`, the install-free interference graph, since a coalesced class carries no install copy. The arms and the
     phi then share a register and the install copy vanishes. A class carries at most one pinned register; a class may
-    not land on a ``reserved`` register -- the NON-coalesced state-slot registers, whose copy-back/early-install
+    not land on a `reserved` register -- the NON-coalesced state-slot registers, whose copy-back/early-install
     machinery owns them. A COALESCED slot's register is NOT reserved: it is seeded by the slot live-out's pin, so the
-    phi live-out and the slot live-in (its "unchanged" arm) merge onto it for an in-place commit. ``phi_order`` is the
+    phi live-out and the slot live-in (its "unchanged" arm) merge onto it for an in-place commit. `phi_order` is the
     deterministic processing order (block reverse-postorder, then value id); arms are processed in their phi-arm order.
 
-    ``oracle`` is only an OVER-APPROXIMATION of coalescability: it omits the residual (non-coalesced) arms' install
+    `oracle` is only an OVER-APPROXIMATION of coalescability: it omits the residual (non-coalesced) arms' install
     writes, so it can admit a merge the final install-aware interference rejects (a coalesced phi whose residual
-    sibling arm's install lands in a register a class member is still live in). The caller (:func:`coalesce_and_color`)
-    corrects this by rebuilding the final interference and re-running with the offending arms in ``forbidden`` -- the
-    ``(pred, phi)`` arms this call must skip, never admitting them into a class. The fixpoint converges because
+    sibling arm's install lands in a register a class member is still live in). The caller (coalesce_and_color)
+    corrects this by rebuilding the final interference and re-running with the offending arms in `forbidden` -- the
+    `(pred, phi)` arms this call must skip, never admitting them into a class. The fixpoint converges because
     forbidding only ever grows.
     """
     parent: dict[ValueId, ValueId] = {}
@@ -132,7 +132,7 @@ def _color_quotient(
     Color the per-value interference graph after collapsing each coalescing class to its leader, then expand the
     leader's color back onto every member. The quotient unions each class's consumer ports and producers so the
     steering objective stays exact (a coalesced register really is read/written by every member's port/producer). A
-    class with a pinned member pins its leader. Reduces to the plain per-value coloring when ``leader`` is the identity
+    class with a pinned member pins its leader. Reduces to the plain per-value coloring when `leader` is the identity
     (every value its own singleton class, e.g. a kernel with no coalescable phi arms). The third return is the register
     of an interfering co-assignment under the FULL (residual-install) interference, or None when the coloring is sound
     -- a conflict can only come from the pins, which the caller resolves by backing the offending slot out of
@@ -146,7 +146,7 @@ def _color_quotient(
     q_pinned: dict[ValueId, int] = {}
     for vid, reg in pinned.items():
         head = lead(vid)
-        # ``setdefault`` runs outside the assert (which ``-O`` strips) so the pinned map is populated under ``-O`` too.
+        # `setdefault` runs outside the assert (which `-O` strips) so the pinned map is populated under `-O` too.
         pinned_reg = q_pinned.setdefault(head, reg)
         assert pinned_reg == reg, f"coalescing class {head} spans two pinned registers"
     q_interferes: dict[ValueId, set[ValueId]] = {head: set() for head in leaders}
@@ -209,14 +209,14 @@ def coalesce_and_color(
     objective: ColorObjective,
 ) -> tuple[dict[ValueId, int], int, _PhiCoalescing, int | None]:
     """
-    Coalesce one bank's phi arms and color it, iterated to a soundness fixpoint. ``_coalesce_phis`` judges merges on the
-    install-free oracle -- ``build_interferes({})``, the same interference graph with no residual installs -- which
+    Coalesce one bank's phi arms and color it, iterated to a soundness fixpoint. `_coalesce_phis` judges merges on the
+    install-free oracle -- `build_interferes({})`, the same interference graph with no residual installs -- which
     over-approximates coalescability (see its docstring); the final interference from the actual residual installs can
     therefore show a coalescing class interfering with itself -- a member still live where a residual sibling arm's
     install writes the merged register. When it does, every arm-merge of each offending class is FORBIDDEN and
     coalescing re-runs. Forbidding the whole class (not just the guilty merge) is an intentional sound-but-conservative
     choice: it cannot under-forbid, and the worst case (all arms forbidden) is the copy-everything baseline, which has
-    no class-internal interference -- so the loop converges. The returned coalescing is the FINAL one; its ``coalesced``
+    no class-internal interference -- so the loop converges. The returned coalescing is the FINAL one; its `coalesced`
     arms are exactly the copies the emitter elides. The fourth return is the register of an interfering co-assignment
     (from the pins) or None; the caller backs the offending slot out of in-place coalescing and recolors.
     """

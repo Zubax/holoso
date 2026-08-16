@@ -1,12 +1,12 @@
 """
 End-to-end blackbox differential fuzzing entry point.
 
-The marked campaign (``pytest -m fuzz``) generates many kernels and drives them through the differential runner; it is
-slow and excluded from the normal ``tests`` session. A tiny UNMARKED smoke campaign runs in the normal session so the
+The marked campaign (`pytest -m fuzz`) generates many kernels and drives them through the differential runner; it is
+slow and excluded from the normal `tests` session. A tiny UNMARKED smoke campaign runs in the normal session so the
 fuzzer cannot bit-rot. Both read their budget from the environment (with sane defaults), so a CI job can scale coverage
-without editing code. The regalloc effort is whatever ``HOLOSO_REGALLOC_EFFORT`` was at process import (it is frozen
-once in ``holoso._lir._regalloc`` and cannot be changed in-process), and any divergence saves a self-contained
-reproducer under ``tests/fuzz_regressions/`` before failing.
+without editing code. The regalloc effort is whatever `HOLOSO_REGALLOC_EFFORT` was at process import (it is frozen
+once in `holoso._lir._regalloc` and cannot be changed in-process), and any divergence saves a self-contained
+reproducer under `tests/fuzz_regressions/` before failing.
 """
 
 import os
@@ -18,7 +18,7 @@ import pytest
 from holoso._type import FloatFormat
 
 from . import _fuzz as fuzz_impl
-from ._fuzz import CheckKind, Divergence, run_campaign, save_reproducer
+from ._fuzz import CampaignStats, CheckKind, Divergence, Shape, run_campaign, save_reproducer
 
 # The campaign datapath: a shallow format keeps the per-kernel build fast while still exercising rounding, branches,
 # and the bool bank. The differential oracle is format-agnostic, so one well-chosen format suffices.
@@ -38,10 +38,7 @@ def _ansi(text: str, code: str) -> str:
     return f"\x1b[{code}m{text}\x1b[0m"
 
 
-def _print_summary(stats: object) -> None:
-    from ._fuzz import CampaignStats, Shape  # local import keeps the module import light
-
-    assert isinstance(stats, CampaignStats)
+def _print_summary(stats: CampaignStats) -> None:
     title = _ansi("  HOLOSO FUZZ CAMPAIGN  ", "1;97;44")
     print(f"\n{title}")
     print(
@@ -69,7 +66,7 @@ def _print_summary(stats: object) -> None:
 def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
     """
     Run a campaign, save a reproducer for every divergence, print the summary, and fail if any divergence occurred. An
-    ``interp_vs_model`` divergence is a genuine LIR-layer miscompile; a ``model_vs_float64`` divergence (only ever
+    `interp_vs_model` divergence is a genuine LIR-layer miscompile; a `model_vs_float64` divergence (only ever
     reported in EXACT mode) is a front/mid-end or operator discrepancy. Either is a real bug -- the saved reproducer is
     a permanent regression.
     """
@@ -94,10 +91,9 @@ def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
         )
 
     # A campaign that produced no branchy kernels at all would silently test nothing; guard against a timid generator.
-    from ._fuzz import Shape
-
     assert stats.shape_counts[Shape.BRANCH] > 0, "no branchy kernels generated -- the fuzzer is degenerate"
     assert stats.shape_counts[Shape.OVERBUDGET_BRANCH] > 0, "no over-budget branch kernels generated"
+    assert stats.shape_counts[Shape.NESTED_IF] > 0, "no nested-branch kernels generated"
     assert stats.shape_counts[Shape.RELATION_PAIR] > 0, "no relation-pair kernels generated"
     assert stats.shape_counts[Shape.EXACT_WIRING] >= 2, "exact wiring kernels were not both generated"
 
@@ -122,12 +118,11 @@ def _surviving_forward_branches_for_probe(name: str, emit: Callable[[fuzz_impl._
     return fuzz_impl.surviving_forward_branches(mir)
 
 
-def test_branch_claiming_inner_shapes_survive_compilation() -> None:
-    """A branch-claiming inner shape must not pass merely because an outer branch survived."""
-    assert (
-        _surviving_forward_branches_for_probe("nested_probe", lambda em: fuzz_impl._emit_diamond(em, nested=True)) >= 2
-    )
-    assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) >= 2
+def test_a_const_branch_shape_keeps_only_the_branch_that_is_not_decided() -> None:
+    # The dual pin: this shape's inner condition is constant under the graph's own `x*0 == 0` identity, so pruning
+    # must delete it and leave ONLY the outer runtime diamond. Two surviving branches would mean the decided one
+    # reached hardware after all -- the very thing the shape is generated to catch.
+    assert _surviving_forward_branches_for_probe("const_probe", fuzz_impl._emit_const_branch) == 1
 
 
 @pytest.mark.fuzz
@@ -140,8 +135,8 @@ def test_fuzz_campaign() -> None:
 
 def test_fuzz_smoke() -> None:
     """
-    A tiny fixed-budget campaign that runs in the NORMAL (unmarked) ``tests`` session so the fuzzer can never bit-rot.
+    A tiny fixed-budget campaign that runs in the NORMAL (unmarked) `tests` session so the fuzzer can never bit-rot.
     It exercises the full generator + runner end to end on a handful of kernels and asserts the differential oracle.
-    Deliberately UNMARKED, so it is collected by ``-m "not cosim and not fuzz"``.
+    Deliberately UNMARKED, so it is collected by `-m "not cosim and not fuzz"`.
     """
     _run_and_assert(n_kernels=8, n_vectors=12, seed=0x5A1ED)

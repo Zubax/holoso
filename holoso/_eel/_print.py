@@ -77,8 +77,10 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
             put(f"{rendered or '()'} = {_atom(value)}", origin)
         case Store(origin=origin, root=root, path=path, value=value):
             put(f"{_store_path(root, path)} = {_atom(value)}", origin)
-        case AugStore(origin=origin, root=root, path=path, op=op, value=value):
-            put(f"{_store_path(root, path)} {op.value}= {_atom(value)}", origin)
+        case AugMark(origin=origin, mark=mark):
+            put(f"mark !{mark}", origin)
+        case AugStore(origin=origin, root=root, path=path, op=op, value=value, mark=mark):
+            put(f"{_store_path(root, path)} {op.value}= {_atom(value)} !{mark}", origin)
         case AugAssign(origin=origin, target=target, op=op, value=value):
             put(f"{target.name} {op.value}= {_atom(value)}", origin)
         case If(origin=origin, cond=cond, then=then, orelse=orelse):
@@ -149,6 +151,8 @@ def _expr(expr: Expr) -> str:
             return f"{_atom(left)} {op.value} {_atom(right)}"
         case Compare(op=op, left=left, right=right):
             return f"{_atom(left)} {op.value} {_atom(right)}"
+        case IsNone(operand=operand, negated=negated):
+            return f"{_atom(operand)} {'is not' if negated else 'is'} None"
         case Call(callee=callee, args=args):
             return f"call {_atom(callee)}({', '.join(_argument(a) for a in args)})"
         case AttrRead(base=base, attr=attr):
@@ -179,7 +183,7 @@ def _expr(expr: Expr) -> str:
 
 def _operator(operator: object) -> str:
     """
-    The mnemonic plus any operator parameters (``fmul_pow2<3>``), duck-typed so the printer stays HIR-free;
+    The mnemonic plus any operator parameters (`fmul_pow2<3>`), duck-typed so the printer stays HIR-free;
     stable across operator-class internals, unlike the dataclass repr.
     """
     mnemonic = getattr(operator, "mnemonic", None)

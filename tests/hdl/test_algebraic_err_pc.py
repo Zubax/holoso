@@ -14,29 +14,26 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FDivOptions,
-    FExp2Options,
-    FLog2Options,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
+    FSqrtOptions,
     FloatFormat,
     OperatorOptions,
     Options,
 )
-from holoso._operators import OpConfig
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._hir import optimize
-from .._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_ops
-from holoso._mir import lower as lower_to_mir
+from .._modelref import build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from holoso._mir import MirOptions, lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
 
 FMT = FloatFormat(6, 18)
 
 
-def _ops() -> OpConfig:
-    return build_ops(
+def _ops() -> MirOptions:
+    return mir_options(
         Options(
             OperatorOptions(
                 fadd=FAddOptions(),
@@ -45,8 +42,7 @@ def _ops() -> OpConfig:
                 fmul_ilog2=FMulILog2Options(),
                 fcmp=FCmpOptions(),
                 fsort=FSortOptions(),
-                fexp2=FExp2Options(),
-                flog2=FLog2Options(),
+                fsqrt=FSqrtOptions(),
             ),
             ffmt=FMT,
         )
@@ -104,7 +100,7 @@ async def _settle(dut: Any) -> None:
 
 
 @cocotb.test()
-async def err_pc_safe_transcendentals(dut: Any) -> None:
+async def err_pc_safe_algebraics(dut: Any) -> None:
     config = json.loads(os.environ["HOLOSO_ERR_CASE"])
 
     await start_clock(dut)
@@ -135,9 +131,9 @@ async def err_pc_safe_transcendentals(dut: Any) -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_safe_transcendental_err_pc(sim: str, case: _Case) -> None:
+def test_safe_algebraic_err_pc(sim: str, case: _Case) -> None:
     lir = build_lir(
-        lower_to_mir(optimize(lower(case.fn).hir, DEFAULT_IFCONV_MAX_OPS), _ops(), FMT, default_ifmt(FMT)),
+        lower_to_mir(lower(case.fn, DEFAULT_UNROLL_MAX_TRIPS).hir, _ops()),
         f"err_{case.name}",
     )
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"err_{case.name}_w{FMT.wexp}_{FMT.wman}"
@@ -166,7 +162,7 @@ def test_safe_transcendental_err_pc(sim: str, case: _Case) -> None:
     )
     runner.test(
         hdl_toplevel=f"err_{case.name}",
-        test_module="tests.hdl.test_transcendental_err_pc",
+        test_module="tests.hdl.test_algebraic_err_pc",
         test_dir=str(REPO_ROOT),
         build_dir=str(build_dir),
         extra_env={"HOLOSO_ERR_CASE": json.dumps({"inputs": case.inputs, "vectors": vectors})},

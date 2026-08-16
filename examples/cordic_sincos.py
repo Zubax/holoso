@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Rotation-mode CORDIC computing cos(theta), sin(theta) with no multiplier on the rotation: each iteration is an
-add/subtract and a power-of-two scale ``2**-i`` (an exact shift), with a per-iteration sign decision driving the
+add/subtract and a power-of-two scale `2**-i` (an exact shift), with a per-iteration sign decision driving the
 direction of micro-rotation. The fixed arctan table and the aggregate gain fold at compile time; the loop unrolls.
+
+Note that this is illustrative; Holoso supports native trigonometry in hardware.
 """
 
 import math

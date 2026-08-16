@@ -15,15 +15,15 @@ from holoso import FloatFormat
 from holoso._backend.html import generate as generate_report
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import RegRef
 from holoso._mir import lower as lower_to_mir
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops, overlap_spill_kernel
+from ._modelref import build_lir, default_mir, DEFAULT_UNROLL_MAX_TRIPS, overlap_spill_kernel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
 import poly3  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
+from iir1_hpf import IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF  # noqa: E402
 from pid import PID  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector  # noqa: E402
@@ -42,6 +42,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "madd": lambda: madd.madd,
     "poly3": lambda: poly3.poly3,
     "signal_window": lambda: signal_window,
+    "iir1_hpf": lambda: IIR1HPF().step,
     "iir1_lpf": lambda: IIR1LPF().__call__,
     "pid": lambda: PID().__call__,
     "schmitt_trigger": lambda: SchmittTrigger().__call__,
@@ -56,9 +57,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
 
 def _report(name: str) -> str:
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
+        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
     return generate_report(lir, generate_verilog(lir)).html
@@ -67,9 +66,7 @@ def _report(name: str) -> str:
 @pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_report_renders_for_each_example(name: str) -> None:
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_EXAMPLES[name]()).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
+        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
     html = generate_report(lir, generate_verilog(lir)).html
@@ -99,7 +96,7 @@ def test_report_reveals_boolean_operators_and_casts() -> None:
 
 
 def test_report_shows_persistent_boolean_state() -> None:
-    # pid carries a boolean ``_started`` state; the report must show persistent state and a boolean register bank.
+    # pid carries a boolean `_started` state; the report must show persistent state and a boolean register bank.
     html = _report("pid")
     assert "persistent state" in html
     assert "b0" in html
@@ -116,12 +113,7 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
     from holoso._backend.html._schedule import render_schedule
 
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(overlap_spill_kernel).hir, DEFAULT_IFCONV_MAX_OPS),
-            default_ops(_FMT),
-            _FMT,
-            default_ifmt(_FMT),
-        ),
+        lower_to_mir(lower(overlap_spill_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         "overlap_spill",
     )
     html = render_schedule(lir)
@@ -143,3 +135,28 @@ def test_report_draws_per_arm_edges_for_a_multi_arm_spill() -> None:
                     assert cell in edge_sources, f"no dataflow edge anchored to the arm landing cell {cell}"
                 checked += 1
     assert checked > 0, "overlap_spill_kernel produced no multi-arm spill -- the regression is vacuous"
+
+
+def test_control_arrows_anchor_at_the_terminator_pc() -> None:
+    # Regression (HTML report exactness): the grid row axis is the model fetch PC, so a control-transfer arrow must root
+    # at the terminator PC (where the redirect mux reads the condition register and that register's residence ends) and
+    # point at the destination block's base PC -- no fetch_lag offset. Crash-before: the arrow rooted fetch_lag rows
+    # below the terminator, where the condition register is already dead, so its dotted feed pointed at a blank cell.
+    from holoso._backend.html._schedule import _control_arrows
+
+    lir = build_lir(
+        lower_to_mir(lower(overlap_spill_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
+        "overlap_spill_arrows",
+    )
+    arrows = _control_arrows(lir)
+    assert arrows, "the branchy kernel must emit at least one control-transfer arrow"
+    term_pcs = {lir.term_pc(block) for block in lir.blocks}
+    bases = set(lir.block_base)
+    bool_live = lir.bool_liveness
+    for arrow in arrows:
+        assert arrow.src_cyc in term_pcs, f"arrow root {arrow.src_cyc} is not a terminator PC"
+        assert arrow.dst_cyc in bases, f"arrow target {arrow.dst_cyc} is not a block base PC"
+        if (
+            arrow.cond is not None
+        ):  # the branch reads its condition on its terminator row, so the register is live there
+            assert arrow.src_cyc in bool_live[arrow.cond], "the condition register is dead at the arrow's root row"

@@ -1,109 +1,85 @@
-"""Tests for MIR-level composite operator recognition."""
+"""
+Directional-infinity composite recognition (`isinf(x) and x > 0` -> one classifier), asserted on public
+artifacts: classifier call sites in the emitted Verilog with the support-function prelude stripped, pooled
+`fcmp` presence/absence, and model values against CPython. The post-fusion `band` facts keep one white-box
+MIR sentinel because a boolean AND renders as an inline expression with no call-site spelling.
+"""
 
 import math
-from collections import Counter
 from collections.abc import Callable
 
-from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivOptions,
-    FMulILog2Options,
-    FMulOptions,
-    FloatFormat,
-    OperatorOptions,
-    Options,
-)
+import holoso
+from holoso import FCmpOptions, FloatFormat, OperatorOptions, Options
 from holoso._eel import lower
-from holoso._hir import optimize
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, build_ops
-from holoso._operators import OpConfig
-from holoso._mir import Mir, MirOperation
+from holoso._mir import MirOperation
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import build_model
+from ._modelref import mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._public import strip_inline_prelude
 
-FMT = FloatFormat(6, 18)
-OPS = build_ops(
-    Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdiv=FDivOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
-        ),
-        ffmt=FMT,
+_OPTIONS = Options(OperatorOptions(fcmp=FCmpOptions()), ffmt=FloatFormat(6, 18))
+
+
+def _directional(a: float, b: float, c: float, d: float) -> tuple[bool, ...]:
+    return (
+        math.isinf(a) and a > 0.0,
+        b < 0.0 and math.isinf(b),
+        math.isinf(-c) and -c > 0.0,
+        0.0 > d and math.isinf(d),
     )
-)
 
 
-def _run(target: Callable[..., object], ops: OpConfig = OPS) -> Mir:
-    return lower_to_mir(optimize(lower(target).hir, DEFAULT_IFCONV_MAX_OPS), ops, FMT, default_ifmt(FMT))
+def _reused(x: float) -> tuple[bool, ...]:
+    inf = math.isinf(x)
+    pos = x > 0.0
+    return inf and pos, inf, pos
 
 
-def _mir_operation_counts(mir: Mir) -> Counter[str]:
-    return Counter(n.operator.mnemonic for n in mir.nodes.values() if isinstance(n, MirOperation))
+def _shared(x: float) -> tuple[bool, ...]:
+    inf = math.isinf(x)
+    return inf and x > 0.0, inf and x < 0.0
+
+
+def _classified(kernel: Callable[..., tuple[bool, ...]], name: str) -> tuple[holoso.SynthesisResult, dict[str, int]]:
+    result = holoso.synthesize(kernel, _OPTIONS, name=name)
+    body = strip_inline_prelude(result.verilog_output.verilog)
+    return result, {n: body.count(f"holoso_{n}(") for n in ("fisposinf", "fisneginf", "fisfinite")}
+
+
+def _sweep(result: holoso.SynthesisResult, kernel: Callable[..., tuple[bool, ...]], values: tuple[float, ...]) -> None:
+    model = result.numerical_model.elaborate()
+    arity = len(result.input_ports)
+    for x in values:
+        args = [x] * arity
+        assert model.run(*args) == list(kernel(*args)), f"x={x}"
 
 
 def test_directional_inf_composites_lower_to_one_classifier() -> None:
-    def kernel(a: float, b: float, c: float, d: float) -> tuple[bool, ...]:
-        return (
-            math.isinf(a) and a > 0.0,
-            b < 0.0 and math.isinf(b),
-            math.isinf(-c) and -c > 0.0,
-            0.0 > d and math.isinf(d),
-        )
-
-    mir = _run(kernel)
-    counts = _mir_operation_counts(mir)
-    assert counts.get("fisposinf") == 2 and counts.get("fisneginf") == 2
-    assert "band" not in counts and "fcmp" not in counts and "fisfinite" not in counts
-
-    model = build_model(build_lir(mir, "directional_inf"))
-    for x in (float("inf"), float("-inf"), 1.0, -1.0, 0.0):
-        got = model.run(x, x, x, x)
-        want = [
-            math.isinf(x) and x > 0.0,
-            x < 0.0 and math.isinf(x),
-            math.isinf(-x) and -x > 0.0,
-            0.0 > x and math.isinf(x),
-        ]
-        assert got == want, f"x={x}: {got} vs {want}"
+    result, classifiers = _classified(_directional, "directional_inf")
+    assert classifiers == {"fisposinf": 2, "fisneginf": 2, "fisfinite": 0}
+    assert "holoso_fcmp #(" not in result.verilog_output.verilog
+    _sweep(result, _directional, (math.inf, -math.inf, 1.0, -1.0, 0.0))
 
 
 def test_directional_inf_fusion_preserves_reused_predicates() -> None:
-    def kernel(x: float) -> tuple[bool, ...]:
-        inf = math.isinf(x)
-        pos = x > 0.0
-        return inf and pos, inf, pos
-
-    mir = _run(kernel)
-    counts = _mir_operation_counts(mir)
-    assert "fisposinf" not in counts
-    assert counts.get("fisfinite") == 1
-    assert counts.get("fcmp") == 1
-    assert counts.get("band") == 1
-
-    model = build_model(build_lir(mir, "directional_inf_reused"))
-    for x in (float("inf"), float("-inf"), 1.0, -1.0):
-        inf = math.isinf(x)
-        pos = x > 0.0
-        assert model.run(x) == [inf and pos, inf, pos]
+    result, classifiers = _classified(_reused, "directional_inf_reused")
+    assert classifiers == {"fisposinf": 0, "fisneginf": 0, "fisfinite": 1}
+    assert "holoso_fcmp #(" in result.verilog_output.verilog
+    _sweep(result, _reused, (math.inf, -math.inf, 1.0, -1.0))
 
 
 def test_directional_inf_fusion_suppresses_predicate_shared_only_by_fused_ands() -> None:
-    def kernel(x: float) -> tuple[bool, ...]:
-        inf = math.isinf(x)
-        return inf and x > 0.0, inf and x < 0.0
+    result, classifiers = _classified(_shared, "directional_inf_shared")
+    assert classifiers == {"fisposinf": 1, "fisneginf": 1, "fisfinite": 0}
+    assert "holoso_fcmp #(" not in result.verilog_output.verilog
+    _sweep(result, _shared, (math.inf, -math.inf, 1.0, -1.0))
 
-    mir = _run(kernel)
-    counts = _mir_operation_counts(mir)
-    assert counts.get("fisposinf") == 1
-    assert counts.get("fisneginf") == 1
-    assert "fisfinite" not in counts and "fcmp" not in counts and "band" not in counts
 
-    model = build_model(build_lir(mir, "directional_inf_shared"))
-    for x in (float("inf"), float("-inf"), 1.0, -1.0):
-        inf = math.isinf(x)
-        assert model.run(x) == [inf and x > 0.0, inf and x < 0.0]
+def test_band_survives_only_where_fusion_leaves_a_conjunction() -> None:
+    def band_count(kernel: Callable[..., object]) -> int:
+        mir = lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(_OPTIONS))
+        return sum(1 for n in mir.nodes.values() if isinstance(n, MirOperation) and n.operator.mnemonic == "band")
+
+    assert band_count(_directional) == 0
+    assert band_count(_reused) == 1
+    assert band_count(_shared) == 0

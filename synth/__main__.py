@@ -1,11 +1,11 @@
 """
 Command-line entry point for the OOC synthesis-evaluation harness.
-Usage::
+Usage:
 
     python -m synth <kernel.py> <expression> --wexp W --wman M --flow FLOW:freq=MHz[,OP.KNOB=VALUE...]
 
-Repeat ``--flow`` to run multiple flows, each with its own target frequency.
-Each flow may override operator knobs using fields such as ``fadd.stage_decode=1``.
+Repeat `--flow` to run multiple flows, each with its own target frequency.
+Each flow may override operator knobs using fields such as `fadd.stage_decode=1`.
 Synthesis failure is recorded as a failure without stopping other tools.
 """
 
@@ -167,8 +167,8 @@ def _operator_options_classes() -> dict[str, type]:
 
 def _load_target(kernel: Path, expression: str) -> object:
     """
-    ``expression`` is evaluated in the kernel module's namespace, e.g. ``Ekf1(Q_diag=np.array([...])).update``;
-    for a bound method the ``__self__`` snapshot seeds the reset values.
+    `expression` is evaluated in the kernel module's namespace, e.g. `Ekf1(Q_diag=np.array([...])).update`;
+    for a bound method the `__self__` snapshot seeds the reset values.
     """
     sys.path.insert(0, str(kernel.resolve().parent))
     module = importlib.import_module(kernel.stem)

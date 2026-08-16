@@ -7,24 +7,32 @@ multi-axis subscript validates the rank and EVERY integer axis against the full 
 so an empty slice on one axis cannot mask a bounds fault on another.
 """
 
+import dataclasses
+
 from .._ir import Origin, ScalarType
-from ._ops import const_value
+from ._ops import const_value, make_const
 from ._ownership import share
 from ._reject import reject
 from ._snapshot import describe_opaque, ndarray_annotation
 from ._values import (
+    AGGREGATES,
     Allocation,
+    BoundMethod,
+    ExpansionBudget,
+    IteratorValue,
+    LoopPass,
     Opaque,
+    RangeValue,
+    RecordValue,
     ResidualScalar,
     Scalar,
     SequenceValue,
     StaticScalar,
-    TensorMethod,
     TensorValue,
     Value,
 )
 
-type LeafPath = tuple[int, ...]
+type LeafPath = tuple[int | str, ...]
 
 type ResolvedAxis = Value | tuple[int | None, int | None]
 
@@ -40,12 +48,46 @@ def kind_label(value: Value) -> str:
             return "sequence"
         case TensorValue():
             return "array"
+        case RecordValue():
+            return "record"
+        case IteratorValue():
+            return "enumerate iterator"
         case Opaque():
             return "captured object"
-        case TensorMethod():
+        case BoundMethod(receiver=TensorValue()):
             return "bound array method"
+        case BoundMethod():
+            return "bound scalar method"
+        case RangeValue():
+            return "range"
         case _:
             return "scalar"
+
+
+def static_range(value: RangeValue) -> range | None:
+    match value.start, value.stop:
+        case StaticScalar(const=start), StaticScalar(const=stop):
+            a, b = const_value(start), const_value(stop)
+            assert isinstance(a, int) and isinstance(b, int)
+            return range(a, b, value.step)
+        case _:
+            return None
+
+
+def range_length(span: range) -> int:
+    """Exact arithmetic: host `len()` of a huge range overflows Py_ssize_t."""
+    return max(0, (span.stop - span.start + span.step - (1 if span.step > 0 else -1)) // span.step)
+
+
+def decay(budget: ExpansionBudget, value: Value, origin: Origin) -> Value:
+    """Wherever an aggregate is demanded: a static range materializes, a runtime one drives only a counted for."""
+    if not isinstance(value, RangeValue):
+        return value
+    span = static_range(value)
+    if span is None:
+        reject(origin, "a range with a runtime bound can only drive a for loop")
+    budget.spend(max(range_length(span), 1), origin, "the range materialization")
+    return SequenceValue(tuple(StaticScalar(make_const(i)) for i in span), Allocation())
 
 
 def static_index(origin: Origin, value: Value, what: str) -> int:
@@ -65,7 +107,7 @@ def index_read(origin: Origin, base: Value, index: Value) -> Value:
         case SequenceValue(items=items):
             position = static_index(origin, index, "a subscript index")
             item = _select(origin, items, position, base)
-            if isinstance(item, (SequenceValue, TensorValue)):
+            if isinstance(item, AGGREGATES):
                 share(base)
                 share(item)
             return item
@@ -87,7 +129,7 @@ def slice_read(origin: Origin, base: Value, lo: int | None, hi: int | None) -> V
         case SequenceValue(items=items):
             taken = list(items)[lo:hi]
             for item in taken:
-                if isinstance(item, (SequenceValue, TensorValue)):
+                if isinstance(item, AGGREGATES):
                     share(item)
             return SequenceValue(tuple(taken), Allocation())
         case TensorValue(shape=shape, leaves=leaves):
@@ -105,8 +147,8 @@ def slice_read(origin: Origin, base: Value, lo: int | None, hi: int | None) -> V
 
 def multi_index_read(origin: Origin, base: Value, axes: tuple[ResolvedAxis, ...]) -> Value:
     """
-    The ``m[i, j]`` / ``m[:, k]`` / ``m[a:b, c:d]`` read; a sliced axis arrives as its resolved
-    ``(lo, hi)`` bounds pair, an indexed axis as its value.
+    The `m[i, j]` / `m[:, k]` / `m[a:b, c:d]` read; a sliced axis arrives as its resolved
+    `(lo, hi)` bounds pair, an indexed axis as its value.
     """
     if not isinstance(base, TensorValue):
         reject(origin, f"too many indices: a multi-axis subscript works only on an array, not {a_kind(base)}")
@@ -140,17 +182,13 @@ def multi_index_read(origin: Origin, base: Value, axes: tuple[ResolvedAxis, ...]
     return _derived(base, kept, picked)
 
 
-def unpack_items(origin: Origin, value: Value, count: int) -> list[Value]:
-    items = _iterated(origin, value)
+def unpack_items(origin: Origin, value: Value, count: int, loops: list[LoopPass]) -> list[Value]:
+    items = splice_items(origin, value, loops)
     if len(items) > count:
         reject(origin, f"too many values to unpack (expected {count})")
     if len(items) < count:
         reject(origin, f"not enough values to unpack (expected {count}, got {len(items)})")
     return items
-
-
-def splice_items(origin: Origin, value: Value) -> list[Value]:
-    return _iterated(origin, value)
 
 
 def flatten(origin: Origin, value: Value) -> list[tuple[LeafPath, Scalar]]:
@@ -163,6 +201,11 @@ def flatten(origin: Origin, value: Value) -> list[tuple[LeafPath, Scalar]]:
                     reject(origin, "an empty aggregate cannot be returned")
                 for position, item in enumerate(items):
                     walk(item, (*path, position))
+            case RecordValue(cls=cls, fields=fields):
+                if not fields:
+                    reject(origin, "an empty aggregate cannot be returned")
+                for field, value in zip(dataclasses.fields(cls), fields, strict=True):
+                    walk(value, (*path, field.name))
             case TensorValue(shape=shape, leaves=tensor_leaves):
                 for position, leaf in enumerate(tensor_leaves):
                     if len(shape) == 1:
@@ -180,10 +223,21 @@ def flatten(origin: Origin, value: Value) -> list[tuple[LeafPath, Scalar]]:
     return leaves
 
 
-def _iterated(origin: Origin, value: Value) -> list[Value]:
+def splice_items(origin: Origin, value: Value, loops: list[LoopPass]) -> list[Value]:
     """Top-level items as iteration/unpacking yields them; aggregate extractions share parent and item."""
     found: list[Value]
     match value:
+        case IteratorValue(items=items, made_in=made_in):
+            if list(made_in[: len(loops)]) != loops:
+                reject(
+                    origin,
+                    "an enumerate iterator made outside this data-dependent loop would be re-consumed on "
+                    "every hardware iteration where Python drains it once; call enumerate inside the loop",
+                )
+            if value.spent:
+                reject(origin, "an enumerate iterator can only be consumed once; call enumerate again")
+            value.spent = True
+            found = list(items)
         case SequenceValue(items=items):
             found = list(items)
         case TensorValue(shape=shape):
@@ -192,9 +246,9 @@ def _iterated(origin: Origin, value: Value) -> list[Value]:
             else:
                 found = [_derive_row(origin, value, row) for row in range(shape[0])]
         case _:
-            reject(origin, f"cannot unpack {a_kind(value)}: it is not an aggregate")
+            reject(origin, f"cannot unpack {a_kind(value)}: it is not iterable")
     for item in found:
-        if isinstance(item, (SequenceValue, TensorValue)):
+        if isinstance(item, AGGREGATES):
             share(value)
             share(item)
     return found
@@ -232,7 +286,7 @@ def _derived(base: TensorValue, shape: tuple[int, ...], leaves: tuple[Scalar | O
 
 def array_annotation_shape(annotation: object, origin: Origin, what: str) -> tuple[tuple[int, ...], ScalarType] | None:
     """
-    Detected structurally (a type carrying ``dims``), so the annotation library stays a dependency of the
+    Detected structurally (a type carrying `dims`), so the annotation library stays a dependency of the
     user's code only.
     """
     if not (isinstance(annotation, type) and hasattr(annotation, "dims")):

@@ -1,15 +1,15 @@
 """
-Render a scheduled :class:`Lir` into a synthesizable Verilog ZISC module that instantiates the shared support library
-(assembled by :mod:`._support`).
+Render a scheduled Lir into a synthesizable Verilog ZISC module that instantiates the shared support library
+(assembled by ._support).
 
-The controller is a microcode ROM (see :mod:`._microcode`): one pre-decoded VLIW control word per step, written as a
-synchronous ``case`` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
+The controller is a microcode ROM (see ._microcode): one pre-decoded VLIW control word per step, written as a
+synchronous `case` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
 fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
 which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
-routing is uniform: each operand port's read mux is a ``case`` over that port's read codebook (its registers and the
-constants it reads), and each register's write is a ``case`` over that register's write codebook selected by a tiny
+routing is uniform: each operand port's read mux is a `case` over that port's read codebook (its registers and the
+constants it reads), and each register's write is a `case` over that register's write codebook selected by a tiny
 per-register opcode (code 0 == NOP hold). PC drives only the sequencer; it never gates a datapath read or write.
 """
 
@@ -20,6 +20,8 @@ from typing import assert_never
 
 from ..._lir import *
 from ..._operators import *
+from ..._type import FloatType, IntType, ScalarType
+from ..._value import FloatValue
 from ..._legal import output_header
 from ._microcode import *
 from ._support import inline_support, support_files
@@ -36,7 +38,7 @@ class VerilogOutput:
 
 
 class _Writer:
-    """Accumulates 4-space-indented lines; ``w(...)`` accepts single lines or dedented multiline blocks."""
+    """Accumulates 4-space-indented lines; `w(...)` accepts single lines or dedented multiline blocks."""
 
     def __init__(self) -> None:
         self._lines: list[str] = []
@@ -66,7 +68,7 @@ class _Writer:
 
 
 def _sig(inst: OperatorInstance) -> str:
-    return f"s_{base_name(inst)}"
+    return f"s_{inst.name}"
 
 
 def _lit(width: int, value: int) -> str:
@@ -74,20 +76,23 @@ def _lit(width: int, value: int) -> str:
 
 
 def _wire(width: int) -> str:
-    """Aligned ``wire`` declaration prefix so field names line up regardless of bus width."""
+    """Aligned `wire` declaration prefix so field names line up regardless of bus width."""
     return f"wire [{width - 1:2}:0] " if width > 1 else "wire        "
+
+
+def _wide_width(scalar_type: ScalarType) -> str:
+    """The localparam naming a wide port's own width; the register holding either is WREG."""
+    match scalar_type:
+        case FloatType():
+            return "WFLT"
+        case IntType():
+            return "WINT"
+        case _:
+            raise AssertionError(f"{scalar_type} is not a wide port type")
 
 
 def _source_net(source: RegRef | WideConstRef) -> str:
     return f"const_{source.index}" if isinstance(source, WideConstRef) else f"regs[{source.index}]"
-
-
-def _wide_source_net(source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
-    """A source net with its folded conditioner applied inline; only a float one has hardware, and it is fsgnop."""
-    # Ahead of the identity shortcut, which would otherwise absorb every non-float conditioner before the check.
-    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
-    raw = _source_net(source)
-    return raw if conditioner.is_identity else f"holoso_fsgnop({raw}, 2'd{conditioner.encoded})"
 
 
 def _bool_operand_rhs(operand: BoolOperand) -> str:
@@ -98,45 +103,108 @@ def _bool_operand_rhs(operand: BoolOperand) -> str:
     return f"~{net}" if operand.inversion.invert else net
 
 
-def _operand_rhs(operand: WideOperand | BoolOperand) -> str:
-    match operand:
-        case WideOperand():
-            return _wide_source_net(operand.source, operand.conditioner)
-        case BoolOperand():
-            return _bool_operand_rhs(operand)
-        case _:
-            assert_never(operand)
-
-
-def _render_inline(
-    operator: InlineHardwareOperator, operands: tuple[WideOperand | BoolOperand, ...], conditioner: PortConditioner
-) -> str:
+@dataclass(frozen=True, slots=True)
+class _WideRenderer:
     """
-    An inline firing's combinational RHS: the operator's own expression over its operand nets (a float operand's folded
-    sign applies inline via ``holoso_fsgnop``), with the result conditioner applied -- an inversion folds into the
-    expression; conditioned wide inline results have no producer yet.
+    The sole owner of the WREG-vs-WFLT extension policy. Only a float leaves WREG-WFLT high bits without meaning
+    (an integer fills the register exactly, a boolean has its own bank), so a float view narrows to WFLT and a float
+    write spells the high bits `1'bx` -- don't-care beats a materialized zero fill on Diamond LSE and is measured
+    neutral on Vivado and Yosys, which sweep the dead bits under either spelling (DESIGN.md, Fabric-area exploration).
+    Engages only at gap > 0: a zero replication count would be illegal Verilog, and a kernel whose word is narrower
+    than the float format -- which one carrying no float may be -- has no float to render in the first place.
     """
-    nets = [_operand_rhs(operand) for operand in operands]
-    expr = operator.verilog_expr(*nets)
-    if isinstance(conditioner, BoolInversion):
-        return conditioner.decorate(f"({expr})") if conditioner.invert else expr
-    assert isinstance(conditioner, FloatSignControl), "the wide datapath is float-sized, so only a float may ride it"
-    assert conditioner.is_identity, "no pass produces conditioned wide inline results yet"
-    return expr
 
+    gap: int
 
-def _write_source_rhs(source: WriteSource) -> str:
-    """Render one write-codebook source to its Verilog RHS -- the dual of the microcode's structured source key."""
-    match source:
-        case OpWriteSource(inst=inst, port=port, invert=invert):
-            net = f"{_sig(inst)}_y{port}"  # wide: sign rode the wrapper; bool: fabric inversion folds here
-            return f"~{net}" if invert else net
-        case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
-            return _render_inline(operator, operands, conditioner)
-        case MoveWriteSource(operand=operand):
-            return _operand_rhs(operand)
-        case _:
-            assert_never(source)
+    @property
+    def _active(self) -> bool:
+        return self.gap > 0
+
+    def _fill_float(self, view: str) -> str:
+        return f"{{{{(WREG-WFLT){{1'bx}}}}, {view}}}" if self._active else view
+
+    def wide_source(self, source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
+        """A wide source's value view with its folded conditioner applied; a float view is WFLT wide at gap > 0."""
+        raw = _source_net(source)
+        match conditioner:
+            case FloatSignControl():
+                view = f"{raw}[WFLT-1:0]" if self._active else raw
+                if not conditioner.is_identity:
+                    return f"holoso_fsgnop({view}, 2'd{conditioner.encoded})"
+                return view
+            case IntIdentity():
+                return raw  # an integer port folds nothing, and an integer is WREG wide by construction
+            case _:
+                assert_never(conditioner)
+
+    def operand_rhs(self, operand: WideOperand | BoolOperand) -> str:
+        match operand:
+            case WideOperand():
+                return self.wide_source(operand.source, operand.conditioner)
+            case BoolOperand():
+                return _bool_operand_rhs(operand)
+            case _:
+                assert_never(operand)
+
+    def inline_rhs(
+        self,
+        operator: InlineHardwareOperator,
+        operands: tuple[WideOperand | BoolOperand, ...],
+        conditioner: PortConditioner,
+    ) -> str:
+        """
+        An inline firing's combinational RHS: the operator's own expression over its operand nets (a float operand's
+        folded sign applies inline via `holoso_fsgnop`), with the result conditioner applied -- an inversion folds
+        into the expression; conditioned wide inline results have no producer yet.
+        """
+        nets = [self.operand_rhs(operand) for operand in operands]
+        expr = operator.verilog_expr(*nets)
+        match conditioner:
+            case BoolInversion():
+                return conditioner.decorate(f"({expr})") if conditioner.invert else expr
+            case FloatSignControl():
+                assert conditioner.is_identity, "no pass produces conditioned wide inline results yet"
+                return expr
+            case IntIdentity():
+                return expr
+            case _:
+                assert_never(conditioner)
+
+    def write_rhs(self, dst: RegRef | BoolRegRef, source: WriteSource) -> str:
+        """One write-codebook source as the RHS for `dst` -- the dual of the microcode's structured source key."""
+        match source:
+            case OpWriteSource(inst=inst, port=port, invert=invert):
+                net = f"{_sig(inst)}_y{port}"  # wide: sign rode the wrapper; bool: fabric inversion folds here
+                if isinstance(dst, BoolRegRef):
+                    return f"~{net}" if invert else net
+                assert not invert
+                result_type = inst.operator.signature.result_types[port]
+                return self._fill_float(net) if isinstance(result_type, FloatType) else net
+            case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
+                expr = self.inline_rhs(operator, operands, conditioner)
+                if isinstance(dst, BoolRegRef):
+                    return expr
+                assert len(operator.signature.result_types) == 1
+                result_type = operator.signature.result_types[0]
+                return self._fill_float(expr) if isinstance(result_type, FloatType) else expr
+            case MoveWriteSource(operand=operand):
+                assert isinstance(operand, WideOperand) == isinstance(dst, RegRef)
+                view = self.operand_rhs(operand)
+                if isinstance(operand, WideOperand) and isinstance(operand.conditioner, FloatSignControl):
+                    return self._fill_float(view)
+                return view
+            case _:
+                assert_never(source)
+
+    def input_load_rhs(self, load: WideInputLoad | BoolInputLoad) -> str:
+        rhs = f"in_{load.name}"
+        return self._fill_float(rhs) if isinstance(load.scalar_type, FloatType) else rhs
+
+    def reset_literal(self, slot: WideStateSlot) -> str:
+        """The reset snapshot in the slot's own family width; a float image gets the don't-care high bits."""
+        value = slot.reset_value
+        literal = f"{value.fmt.width}'h{value.bits:0{(value.fmt.width + 3) // 4}x}"
+        return self._fill_float(literal) if isinstance(value, FloatValue) else literal
 
 
 def generate(lir: Lir) -> VerilogOutput:
@@ -147,7 +215,7 @@ def generate(lir: Lir) -> VerilogOutput:
 
     # The two dual codebooks, built once and threaded to both the microcode packer and the emitters so the
     # code<->source mapping cannot drift: per operand port (read) and per register (write). The write side derives from
-    # a single ``write_events`` traversal, shared by the codebook, the packer, and the ROM-comment landings.
+    # a single `write_events` traversal, shared by the codebook, the packer, and the ROM-comment landings.
     read_books = read_codebook(lir)
     events = write_events(lir)
     write_books = write_codebook(events)
@@ -161,6 +229,8 @@ def generate(lir: Lir) -> VerilogOutput:
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
+    renderer = _WideRenderer(gap=lir.wide_register_width - lir.float_format.width)
+
     _emit_header(w, lir)
     _emit_localparams(w, lir, cycw, pcw, ucw)
     _emit_inline_support(w)
@@ -171,8 +241,8 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_operators(w, lir, tapped)
     _emit_datapath_comb(w, lir, write_books)
     _emit_read_muxes(w, lir, read_books)
-    _emit_clocked(w, lir, write_books)
-    _emit_outputs(w, lir)
+    _emit_clocked(w, lir, write_books, renderer)
+    _emit_outputs(w, lir, renderer)
     w("\nendmodule\n")
     return VerilogOutput(verilog=w.render(), support_files=support_files())
 
@@ -214,9 +284,12 @@ module {lir.module_name} (
 
 def _emit_port(w: _Writer, port: Port, comma: bool) -> None:
     direction = "input " if port.direction == Direction.IN else "output"
+    # An integer port carries a signed two's-complement word, and saying so is what makes a wider signed consumer
+    # sign-extend it rather than zero-fill. A float port is a bit pattern, so it stays unsigned.
+    signed = "signed " if isinstance(port, DataPort) and isinstance(port.scalar_type, IntType) else ""
     port_range = "" if port.width == 1 else f"[{port.width - 1}:0] "
     suffix = "," if comma else ""
-    w(f"{direction} wire {port_range}{port.name}{suffix}")
+    w(f"{direction} wire {signed}{port_range}{port.name}{suffix}")
 
 
 def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
@@ -224,7 +297,7 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
-    fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.regfile.width
+    fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.wide_register_width
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     fetch_lag = lir.fetch_lag
     fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
@@ -280,14 +353,14 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
         for pos, operand_type in enumerate(inst.operator.signature.operand_types):
             assert operand_type.is_wide, "pooled operators read only wide operands today"
             letter = PORT_LETTERS[pos]
-            w(f"reg  [WFLT-1:0] {sig}_{letter};")  # combinational read-mux output (driven in the read-mux always @*)
-        # One net per TAPPED output port -- the raw operator output (wide WFLT-bit or boolean 1-bit). The in_valid and
+            w(f"reg  [{_wide_width(operand_type)}-1:0] {sig}_{letter};")  # read-mux output, driven in its always @*
+        # One net per TAPPED output port, as wide as its own family or 1 bit for a boolean. The in_valid and
         # sign-control ports bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
         for q, result_type in enumerate(inst.operator.signature.result_types):
             if (inst, q) not in tapped:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
             if result_type.is_wide:
-                w(f"wire [WFLT-1:0] {sig}_y{q};")
+                w(f"wire [{_wide_width(result_type)}-1:0] {sig}_y{q};")
             else:
                 w(f"wire            {sig}_y{q};")
         for port in inst.operator.error_ports:
@@ -296,18 +369,17 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
 
 
 def _emit_consts(w: _Writer, lir: Lir) -> None:
-    fmt = lir.float_format
-    width = fmt.width
-    digits = (width + 3) // 4
     for index, value in enumerate(lir.wide_consts):
-        w(f"wire [WREG-1:0] const_{index} = {width}'h{fmt.encode(value):0{digits}x};  // {value!r}")
+        width = value.fmt.width
+        digits = (width + 3) // 4
+        w(f"wire [WREG-1:0] const_{index} = {width}'h{value.bits:0{digits}x};  // {value!r}")
     if lir.wide_consts:
         w("")
 
 
 def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, int]]) -> None:
     for inst in lir.instances:
-        sig, base = _sig(inst), base_name(inst)
+        sig, base = _sig(inst), inst.name
         operator = inst.operator
         letters = PORT_LETTERS[: operator.signature.arity]
         # The module names its own operand ports; the nets and microcode fields they connect to stay positional.
@@ -318,12 +390,13 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
         w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")
         for imm in operator.immediate_ports:
             w(f".{imm.name}({f_imm(base, imm.name)}),")
-        for port, letter in zip(operand_ports, letters, strict=True):
-            w(f".{port}_sgnop({f_osgn(base, letter)}),")
-        # A float output port carries a hardware sign conditioner (piped inside the wrapper); an untapped one is tied
-        # to the identity. Boolean output ports have none -- their inversion conditioner is fabric-side at the write.
+        # Only a FLOAT port has a sign sideband to bind, on either side; a boolean output's inversion is fabric-side
+        # at the write, and an integer port folds nothing. An untapped float output is tied to the identity.
+        for port, letter, operand_type in zip(operand_ports, letters, operator.signature.operand_types, strict=True):
+            if has_sign_control(operand_type):
+                w(f".{port}_sgnop({f_osgn(base, letter)}),")
         for q, result_type in enumerate(operator.signature.result_types):
-            if result_type.is_wide:
+            if has_sign_control(result_type):
                 conditioner = f_ysgn(base, q) if (inst, q) in tapped else "2'd0"
                 w(f".{operator.output_hdl_ports[q]}_sgnop({conditioner}),")
         for port, letter in zip(operand_ports, letters, strict=True):
@@ -465,10 +538,10 @@ always @* begin
 
 def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
     """
-    The non-fall-through fetch-PC redirects, one per block whose terminator is not a plain advance: a ``Jump`` to a
-    non-adjacent block, or a ``Branch`` selecting a target by its boolean register. Each is keyed by the block's
-    terminator fetch step (its boundary). A ``Ret`` block is the out_valid boundary and needs no redirect; a ``Jump``
-    to the next-laid-out block falls through on ``pc + 1`` and needs no case arm.
+    The non-fall-through fetch-PC redirects, one per block whose terminator is not a plain advance: a `Jump` to a
+    non-adjacent block, or a `Branch` selecting a target by its boolean register. Each is keyed by the block's
+    terminator fetch step (its boundary). A `Ret` block is the out_valid boundary and needs no redirect; a `Jump`
+    to the next-laid-out block falls through on `pc + 1` and needs no case arm.
     """
     redirects: list[tuple[int, str]] = []
     for block in lir.blocks:
@@ -490,8 +563,8 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
 
 def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> None:
     """
-    Emit one operand's combinational read mux: a direct assign for a single source, else a ``case`` over the port's
-    read opcode selecting a register or a constant directly. The last entry is the ``default`` arm so the case is full
+    Emit one operand's combinational read mux: a direct assign for a single source, else a `case` over the port's
+    read opcode selecting a register or a constant directly. The last entry is the `default` arm so the case is full
     (no inferred latch on this combinational path); unused high codes fall there too and are don't-cares on idle steps.
     The mux carries no indexed part-select, so there is no offset multiply for synthesis to (mis)infer as a DSP.
     """
@@ -517,7 +590,7 @@ def _emit_read_muxes(
     """
     Emit the combinational operand read muxes driving each wrapper directly, so regfile-read -> operator is
     combinational and the operand is sampled FETCH_LAG after its read-opcode word. A pure-inline kernel has no pooled
-    instances, so this would be empty -- skip it rather than emit a bare ``always @* begin end``.
+    instances, so this would be empty -- skip it rather than emit a bare `always @* begin end`.
     """
     if not lir.instances:
         return
@@ -526,7 +599,7 @@ def _emit_read_muxes(
     w.push()
     for inst in lir.instances:
         sig = _sig(inst)
-        base = base_name(inst)
+        base = inst.name
         for pos in range(inst.operator.signature.arity):
             _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", f_rd(base, PORT_LETTERS[pos]), read_books[(inst, pos)])
     w.pop()
@@ -540,13 +613,14 @@ def _emit_reg_write(
     dst: RegRef | BoolRegRef,
     book: WriteCodebook | None,
     special_arms: list[tuple[str, str]],
+    renderer: _WideRenderer,
 ) -> None:
     """
     One segregated write statement per register (the multi-assign rule): the handshake-gated special arms first (an
-    input load, a boundary state install), then the opcode ``case`` over the register's write codebook as the final
-    ``else``. Code 0 is the NOP hold -- an unlisted code in this clocked ``case`` retains the flop -- so the
+    input load, a boundary state install), then the opcode `case` over the register's write codebook as the final
+    `else`. Code 0 is the NOP hold -- an unlisted code in this clocked `case` retains the flop -- so the
     write-enable is folded into the opcode with no extra logic level. A single-source register degenerates to
-    ``if (opcode)``.
+    `if (opcode)`.
     """
     clause = "if"
     for cond, rhs in special_arms:
@@ -557,17 +631,19 @@ def _emit_reg_write(
     prefix = "else " if special_arms else ""
     opcode = f_op(dst)
     if len(book.sources) == 1:
-        w(f"{prefix}if ({opcode}) {lhs} <= {_write_source_rhs(book.sources[0])};")
+        w(f"{prefix}if ({opcode}) {lhs} <= {renderer.write_rhs(dst, book.sources[0])};")
         return
     w(f"{prefix}case ({opcode})")
     w.push()
     for code, source in book.arms():
-        w(f"{_lit(book.opcode_width, code)}: {lhs} <= {_write_source_rhs(source)};")
+        w(f"{_lit(book.opcode_width, code)}: {lhs} <= {renderer.write_rhs(dst, source)};")
     w.pop()
     w("endcase")
 
 
-def _emit_clocked(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, WriteCodebook]) -> None:
+def _emit_clocked(
+    w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, WriteCodebook], renderer: _WideRenderer
+) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, register writes, and control state."""
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     wide_slots = {slot.reg.index: slot for slot in lir.wide_state_slots}
@@ -577,7 +653,7 @@ def _emit_clocked(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, W
 
     def load_arm(loads: Mapping[int, WideInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
         load = loads.get(reg)
-        return [("in_ready && in_valid", f"in_{load.name}")] if load else []
+        return [("in_ready && in_valid", renderer.input_load_rhs(load))] if load else []
 
     w("""
 // All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q, transacting_q) and the
@@ -603,18 +679,23 @@ always @(posedge clk) begin
     if nonslot_wide or nonslot_bool:
         w("// Register writes (reset-unconditional): one opcode-selected statement per register.")
         for reg in nonslot_wide:
-            _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(wide_loads, reg))
+            _emit_reg_write(
+                w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(wide_loads, reg), renderer
+            )
         for reg in nonslot_bool:
             _emit_reg_write(
-                w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), load_arm(bool_loads, reg)
+                w,
+                f"bregs[{reg}]",
+                BoolRegRef(reg),
+                write_books.get(BoolRegRef(reg)),
+                load_arm(bool_loads, reg),
+                renderer,
             )
         w("")
 
     # Control and persistent state are the reset-gated registers: the slot snapshot (under rst) and the slot's update
     # statement (its opcode-selected writes plus a boundary install arm, under the else) are the two arms of one rst
     # condition, segregating those assignments for the synthesizer.
-    fmt = lir.float_format
-    digits = (fmt.width + 3) // 4
     w("// Control and persistent state: the reset-gated registers.")
     w("if (rst) begin")
     w.push()
@@ -622,8 +703,7 @@ always @(posedge clk) begin
     w("err_pc_q      <= 0;")
     w("transacting_q <= 0;")
     for slot in lir.wide_state_slots:
-        bits = f"{fmt.width}'h{fmt.encode(slot.reset_value):0{digits}x}"
-        w(f"regs[{slot.reg.index}] <= {bits};  // {slot.name} reset snapshot")
+        w(f"regs[{slot.reg.index}] <= {renderer.reset_literal(slot)};  // {slot.name} reset snapshot")
     for bslot in lir.bool_state_slots:
         w(f"bregs[{bslot.reg.index}] <= 1'b{int(bslot.reset_value)};  // {bslot.name} reset snapshot")
     w.pop()
@@ -640,17 +720,17 @@ always @(posedge clk) begin
         arms = load_arm(wide_loads, reg)
         if slot.needs_copy and lir.wide_state_install_is_boundary(slot):
             # This arm outranks the opcode case below it and must not shadow it, here or in the boolean bank below.
-            # It cannot: the install executes at ``present_step``, and ``build_microcode`` -- already run, over every
+            # It cannot: the install executes at `present_step`, and `build_microcode` -- already run, over every
             # write event -- asserts each rides a strictly earlier step, so the word presented alongside the install
             # holds the write NOP. That is what lets a slot register which also carries opcode writes, the shape a
             # live-out coalesced into another slot's register leaves behind, be emitted rather than refused.
-            arms.append(("out_valid && out_ready", _operand_rhs(slot.tap)))
-        _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms)
+            arms.append(("out_valid && out_ready", renderer.write_rhs(slot.reg, MoveWriteSource(slot.tap))))
+        _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms, renderer)
     for reg, bslot in sorted(bool_slots.items()):
         arms = load_arm(bool_loads, reg)
         if bslot.needs_copy:
-            arms.append(("out_valid && out_ready", _operand_rhs(bslot.live_out)))
-        _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms)
+            arms.append(("out_valid && out_ready", renderer.write_rhs(bslot.reg, MoveWriteSource(bslot.live_out))))
+        _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms, renderer)
     w.pop()
     w("end")
 
@@ -658,12 +738,12 @@ always @(posedge clk) begin
     w("end", "")
 
 
-def _emit_outputs(w: _Writer, lir: Lir) -> None:
+def _emit_outputs(w: _Writer, lir: Lir, renderer: _WideRenderer) -> None:
     w("""
 assign in_ready  = (pc == 0);
 assign out_valid = (pc == LASTPC);  // result valid on PRESENT; execution lags the fetch by FETCH_LAG
 assign err_pc    = err_pc_q;
 """)
     for wire in lir.outputs:
-        w(f"assign {wire.name} = {_operand_rhs(wire.tap)};")
+        w(f"assign {wire.name} = {renderer.operand_rhs(wire.tap)};")
     w("")

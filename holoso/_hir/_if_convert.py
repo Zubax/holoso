@@ -1,19 +1,19 @@
 """
-Diamond if-conversion: a small, pure branch diamond collapses into ``fselect`` data muxes.
+Diamond if-conversion: a small, pure branch diamond collapses into `fselect` data muxes.
 
-A diamond is ``P: Branch(c, T, F)`` where both arms are single-predecessor, phi-free, operation-only blocks jumping
-to one merge block ``M`` whose only predecessors they are. When every arm operation is speculatable and each arm is
-small enough, the diamond is spliced into ``P``: both arms' operations run unconditionally,
-each of ``M``'s phis becomes a mux under its original value id -- ``fselect(c, true_arm, false_arm)``
-for a float phi, ``iselect`` for an integer one and ``bselect`` for a boolean one (so downstream references
-need no rewrite) -- and ``M``'s terminator replaces the branch. The pass repeats until no diamond converts, so nested
+A diamond is `P: Branch(c, T, F)` where both arms are single-predecessor, phi-free, operation-only blocks jumping
+to one merge block `M` whose only predecessors they are. When every arm operation is speculatable and each arm is
+small enough, the diamond is spliced into `P`: both arms' operations run unconditionally,
+each of `M`'s phis becomes a mux under its original value id -- `fselect(c, true_arm, false_arm)`
+for a float phi, `iselect` for an integer one and `bselect` for a boolean one (so downstream references
+need no rewrite) -- and `M`'s terminator replaces the branch. The pass repeats until no diamond converts, so nested
 chains collapse from the inside out; the dead branch condition (when nothing else reads it) falls to DCE, which runs
 after this pass. Conversion turns control dependence into data dependence: a diamond whose merged results are entirely
 unused frees its condition cone for DCE like any other dead code, so an error-bearing operation feeding only such a
 condition stops reporting -- consistent with the error sideband's contract (executed operators only).
 
 Both arms are computed, so conversion only pays where arms are cheap: the per-arm operation budget is
-``Options.ifconv_max_ops``. A boolean mux's constant arms (the common True/False of a state-machine merge)
+`Options.ifconv_max_ops`. A boolean mux's constant arms (the common True/False of a state-machine merge)
 reduce to and/or/not in the strength-reduction pass that re-runs after if-conversion.
 """
 
@@ -29,7 +29,7 @@ _logger = logging.getLogger(__name__)
 
 
 def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, pred: BlockId, max_ops: int) -> bool:
-    """A convertible arm: single-pred from ``pred``, phi-free, all-speculatable ops within budget, one Jump out."""
+    """A convertible arm: single-pred from `pred`, phi-free, all-speculatable ops within budget, one Jump out."""
     if preds[arm.id] != {pred} or arm.phis or not isinstance(arm.terminator, Jump):
         return False
     if len(arm.operations) > max_ops:
@@ -45,17 +45,12 @@ def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, p
 def _find_diamond(
     hir: Hir, preds: dict[BlockId, set[BlockId]], max_ops: int
 ) -> tuple[Block, Block, Block, Block] | None:
-    """The first convertible diamond ``(P, T, F, M)`` in block order, or None."""
+    """The first convertible diamond `(P, T, F, M)` in block order, or None."""
     blocks_by_id = {block.id: block for block in hir.blocks}
     for block in hir.blocks:
         if not isinstance(block.terminator, Branch):
             continue
         if block.terminator.if_true == block.terminator.if_false:
-            continue
-        if isinstance(hir.nodes[block.terminator.cond], BoolConst):
-            # The frontend folds a condition by EVALUATING it, so one constant only under a value identity this
-            # pass's own strength reduction applies (``x*0 == 0``) still arrives here constant. Converting it would
-            # pin the untaken arm live through the select forever.
             continue
         arm_t, arm_f = blocks_by_id[block.terminator.if_true], blocks_by_id[block.terminator.if_false]
         if not (
@@ -71,12 +66,13 @@ def _find_diamond(
             continue
         if not all(isinstance(hir.nodes[vid].type, (FloatType, IntType, BoolType)) for vid in merge.phis):
             continue
+        assert not isinstance(hir.nodes[block.terminator.cond], BoolConst), "pruning owns a decided diamond"
         return block, arm_t, arm_f, merge
     return None
 
 
 def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
-    """Collapse the diamond into its branching block; ``M``'s phis become selects under their original value ids."""
+    """Collapse the diamond into its branching block; `M`'s phis become selects under their original value ids."""
     pred, arm_t, arm_f, merge = diamond
     terminator = pred.terminator
     assert isinstance(terminator, Branch)
@@ -114,13 +110,13 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
     return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
 
 
-def run(hir: Hir, max_ops: int) -> Hir:
+def run(hir: Hir, max_ops: int) -> Hir | None:
     assert max_ops >= 0
     converted = 0
     while (diamond := _find_diamond(hir, predecessors(hir.blocks), max_ops)) is not None:
         hir = _splice(hir, diamond)
         converted += 1
-    if converted:
-        _logger.info("If-conversion: %d diamond(s) collapsed to selects; %d blocks remain", converted, len(hir.blocks))
-        hir = renumber(hir)
-    return hir
+    if not converted:
+        return None
+    _logger.info("If-conversion: %d diamond(s) collapsed to selects; %d blocks remain", converted, len(hir.blocks))
+    return renumber(hir)

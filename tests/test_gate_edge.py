@@ -1,15 +1,15 @@
 """
-Gate verification for the ``transacting`` issue/install qualifier.
+Gate verification for the `transacting` issue/install qualifier.
 
 Three structural guards (no simulator) keep a later refactor from silently dropping the gate: every pooled operator
-``iv``, every ucode-driven constant install, and every pooled commit write-enable must be ANDed with ``transacting``.
-Two cosims (Icarus, which exposes the internal ``transacting`` wire and the ``regs`` array; Verilator may optimize
+`iv`, every ucode-driven constant install, and every pooled commit write-enable must be ANDed with `transacting`.
+Two cosims (Icarus, which exposes the internal `transacting` wire and the `regs` array; Verilator may optimize
 them away) drive a swept idle dwell:
-``test_transacting_edge_pins_at_accept_plus_fetch_lag`` certifies the qualifier rises on exactly the genuine step-0 (a
+`test_transacting_edge_pins_at_accept_plus_fetch_lag` certifies the qualifier rises on exactly the genuine step-0 (a
 late rise drops step-0; an early rise fires a spurious fill-window issue, inert for today's feed-forward operators and
 thus cosim-invisible -- the hazard the gate exists to stop once iterative operators land), and
-``test_state_slot_inert_during_dwell`` certifies a cycle-0 constant install does not commit to its persistent-state
-register while the PC dwells idle at pc 0 (the held ``ucode[0]`` commits nothing).
+`test_state_slot_inert_during_dwell` certifies a cycle-0 constant install does not commit to its persistent-state
+register while the PC dwells idle at pc 0 (the held `ucode[0]` commits nothing).
 """
 
 import shutil
@@ -19,14 +19,14 @@ from pathlib import Path
 import pytest
 from cocotb_tools.runner import get_runner
 
+import holoso
 from holoso import FloatFormat
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
-from holoso._hir import optimize
 from holoso._lir import Lir
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import DEFAULT_IFCONV_MAX_OPS, default_ifmt, build_lir, default_ops
+from ._modelref import build_lir, default_mir, default_options, DEFAULT_UNROLL_MAX_TRIPS
 from .hdl.hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, sources
 
 _HDL_DIR = Path(__file__).resolve().parent / "hdl"
@@ -52,23 +52,18 @@ class _ConstInstallState:
 
 
 def _verilog(fn: Callable[..., object], name: str) -> str:
-    return generate_verilog(
-        build_lir(
-            lower_to_mir(optimize(lower(fn).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)),
-            name,
-        )
-    ).verilog
+    return holoso.synthesize(fn, default_options(_FMT), name=name).verilog_output.verilog
 
 
 def _assert_effect_trigger_gated(fn: Callable[..., object], name: str, prefix: str) -> None:
-    # Every decode wire for an effect-trigger field (named by ``prefix``) must AND ``transacting``, so a held ucode[0]
+    # Every decode wire for an effect-trigger field (named by `prefix`) must AND `transacting`, so a held ucode[0]
     # dwell, a fill bubble, or a stale pre-reset word triggers nothing.
     arms = [
         line.strip() for line in _verilog(fn, name).splitlines() if line.lstrip().startswith("wire") and prefix in line
     ]
     assert arms, f"kernel produced no {prefix} wires to check"
     for line in arms:
-        # A 1-bit trigger masks as ``transacting & ...``; a wider write opcode as ``{W{transacting}} & ...``.
+        # A 1-bit trigger masks as `transacting & ...`; a wider write opcode as `{W{transacting}} & ...`.
         assert "transacting" in line and " & " in line, f"{prefix} decode is not gated by transacting: {line}"
 
 
@@ -128,9 +123,7 @@ def _run_bench(name: str, lir: Lir, testcase: str, env: dict[str, int], monkeypa
 def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_edge_k{k}"
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_cycle0_kernel).hir, DEFAULT_IFCONV_MAX_OPS), default_ops(_FMT), _FMT, default_ifmt(_FMT)
-        ),
+        lower_to_mir(lower(_cycle0_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
     assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].ops), "kernel must issue a pooled op on cycle 0"
@@ -142,12 +135,7 @@ def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pyt
 def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_state_k{k}"
     lir = build_lir(
-        lower_to_mir(
-            optimize(lower(_ConstInstallState().__call__).hir, DEFAULT_IFCONV_MAX_OPS),
-            default_ops(_FMT),
-            _FMT,
-            default_ifmt(_FMT),
-        ),
+        lower_to_mir(lower(_ConstInstallState().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
     slots = lir.wide_state_slots
@@ -156,6 +144,6 @@ def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) 
     env = {
         "HOLOSO_DWELL_K": k,
         "HOLOSO_SLOT_IDX": slot.reg.index,
-        "HOLOSO_SLOT_RESET_BITS": _FMT.encode(slot.reset_value),
+        "HOLOSO_SLOT_RESET_BITS": slot.reset_value.bits,
     }
     _run_bench(name, lir, "state_inert_during_dwell", env, monkeypatch)

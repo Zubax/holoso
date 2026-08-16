@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-A single-pole low-pass IIR filter.
-"""
+"""A single-pole low-pass IIR filter."""
 
 from pathlib import Path
 import holoso

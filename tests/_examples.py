@@ -1,45 +1,58 @@
 """
 Shared example-kernel catalogue: each compilable example plus the domain knowledge needed to drive it -- a factory, a
 baseline, curated and random vector generators, and the datapath format(s). Consumed by both the cosimulation suite
-(``test_cosim_examples.py``, RTL vs the embedded model) and the Python-reference suite (``test_example_reference.py``,
+(`test_cosim_examples.py`, RTL vs the embedded model) and the Python-reference suite (`test_example_reference.py`,
 the model vs the original Python), so the two views stay in lockstep over one source of truth.
 """
 
+import dataclasses
 import math
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 
 import numpy as np
 
-from holoso import FloatFormat
-from ._modelref import bounded, encode_inputs, format_edge_bits, log_uniform_positive, spd_matrix
+from holoso import FFromIntOptions, FloatFormat, FSortOptions, FToIntOptions, OperatorOptions, Options
+from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
 import ekf1_stateless as ekf1_stateless  # noqa: E402
-import imu_frame_transform as imu_frame_transform  # noqa: E402  # synth matrix only; matrix/vector I/O has no scalar SPEC
 import kepler  # noqa: E402
 import madd  # noqa: E402
+from nco import Nco  # noqa: E402
 import polar as polar  # noqa: E402  # scalar-driven below; vector I/O pinned in test_verify
 import poly3  # noqa: E402
 from polar import from_polar, to_polar  # noqa: E402  # bare names so the frontend inlines them into the wrappers
 from biquad import Biquad  # noqa: E402
 from cordic_sincos import CordicSinCos as CordicSinCos  # noqa: E402
+from crc32 import POLY_IEEE8023, Crc32  # noqa: E402
+from debouncer import Debouncer  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
+from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
+from flux_observer import FluxObserver  # noqa: E402
+from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
+import imu_fusion as imu_fusion  # noqa: E402  # synth matrix; it synthesizes the shipped realistic-config kernel
+from imu_fusion import ImuFusion as ImuFusion  # noqa: E402
+from iq_oscillator import IqOscillator  # noqa: E402
 from latching_fault_register import LatchingFaultRegister  # noqa: E402
+from lfsr16 import Lfsr16  # noqa: E402
 from majority_voter import MajorityVoter  # noqa: E402
 from octave_index import octave_index  # noqa: E402
 from pid import PID as PID  # noqa: E402
+from priority_encoder import PriorityEncoder  # noqa: E402
+from pwm import Pwm  # noqa: E402
 from phase_frequency_detector import PhaseFrequencyDetector as PhaseFrequencyDetector  # noqa: E402
 from quadrature_encoder import QuadratureEncoder  # noqa: E402
 from recip_newton import NewtonReciprocal  # noqa: E402
 from remainder import remainder as remainder  # noqa: E402
+import rigid_body_rates as rigid_body_rates  # noqa: E402  # synth matrix; scalar-driven via the wrapper below
+from rigid_body_rates import update as rigid_body_update  # noqa: E402  # bare name so the frontend inlines it
 from schmitt_trigger import SchmittTrigger as SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
@@ -47,6 +60,8 @@ from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
 # The wide scalar datapath: the one configuration the example matrix is synthesized in.
 _FMT = FloatFormat(8, 36)
+# What a kernel that builds no float operator gets by default; it sizes nothing for them, so it only tracks main().
+_NARROW = FloatFormat(6, 18)
 # Frozen random vectors per example (over and above the manual and edge vectors); scale via the env knob to trade
 # coverage for cosimulation wall-clock.
 _RANDOM_COUNT = int(os.environ.get("HOLOSO_TEST_RANDOM_COUNT", "48"))
@@ -72,24 +87,123 @@ _PID_MANUAL = [  # first update (D suppressed), then a varying measurement (D ac
 ]
 
 
-type InputVector = dict[str, float | bool]
-"""One input vector: input-name -> scalar value (a float, or a bool for a boolean-typed port)."""
+type InputVector = dict[str, float | bool | int]
+"""One input vector: input-name -> scalar value, matching the family of its port (float, int, or bool)."""
 
 
-class ReferenceComparison(Enum):
+def _drive(name: str, values: Sequence[float | bool | int]) -> list[InputVector]:
+    """The single-input drive sequence: one vector per value, in order."""
+    return [{name: value} for value in values]
+
+
+# The published check message runs first, straight out of the all-ones reset, so the ninth row reproduces the
+# catalogue value 0xCBF43926 exactly -- the same number `zlib.crc32` reports for those bytes. The byte rails and
+# checkerboards then fold into the register that message left behind.
+_CRC32_MANUAL = _drive("byte", list(b"123456789") + [0x00, 0xFF, 0x80, 0x01, 0x7F, 0xAA, 0x55, 0x00])
+
+_LFSR_MANUAL = _drive(
+    "advance",
+    [True] * 20
+    + [False] * 3  # gated: both the register and the emitted bit must hold
+    + [True] * 8  # and resume in phase
+    + [False]
+    + [True] * 5,
+)
+
+# A clean edge, two rejected bounces, the N-1/N boundary (which discriminates >= from >), and a re-bounce one sample
+# after a flip, which must not flip back because the tally restarts on the flip.
+_DEBOUNCE_MANUAL = _drive(
+    "raw",
+    [False] * 2
+    + [True] * 5
+    + [False, False, False, True] * 2
+    + [False] * 7
+    + [True] * 3
+    + [False]
+    + [True] * 4
+    + [False, True]
+    + [False] * 4,
+)
+
+# The idle bus and its sentinel, one bit at each position, multi-bit words where the lowest wins, and words whose
+# set bits lie above the scanned range, which the scan must ignore because it reads only shifts 0..7. The port is the
+# bus carried signed, so a line above the bus is the sign bit and those words are the negative ones.
+_PRIORITY_MANUAL = _drive(
+    "request",
+    [0, 1, 2, 4, 8, 16, 32, 64, 128] + [0b1010, 0b1100_0000, 0xFF, 0x81, 0b10_1000, 0b110] + [-256, -128, -1, -2],
+)
+
+_NCO_PHASE_MASK = (1 << 32) - 1
+_NCO_MANUAL: list[InputVector] = [
+    {"increment": increment, "phase_offset": offset}
+    for increment, offset in (
+        [(1 << 31, 0)] * 6  # half the tick rate: the MSB toggles every tick
+        + [(1 << 30, 0)] * 8  # a quarter of it: a period-4 square wave, two full wraps
+        + [(0x3FFFFFFF, 0)] * 8  # one count short of a quarter turn: the one-tick edge jitter
+        + [(0xC0000000, 0)] * 8  # past Nyquist: wraps on three ticks out of four
+        + [(_NCO_PHASE_MASK, 0)] * 4  # full scale: the aliased one-LSB-per-tick backward ramp
+        + [(0, 0)] * 3  # halted: the phase holds and the output must not move
+        # The accumulator is frozen across these, so the offset alone must move the output through a whole turn.
+        + [(0, 1 << 30), (0, 1 << 31), (0, 0xC0000000), (0, _NCO_PHASE_MASK)]
+        + [(1, 0)] * 3  # the smallest tuning step, from a nonzero phase
+        + [(1 << 30, 1 << 31)] * 4  # retuning and offsetting at once
+    )
+]
+
+_PWM_TOP = 100  # the period the example ships; the vectors below are written in terms of it
+_PWM_MANUAL = _drive(
+    "duty",
+    [_PWM_TOP // 2] * (2 * _PWM_TOP)  # a full triangle period at half duty
+    + [0] * _PWM_TOP  # always off
+    + [_PWM_TOP] * (2 * _PWM_TOP)  # the fullest duty that still has an off tick
+    + [_PWM_TOP + 5] * _PWM_TOP  # above top: always on
+    + [1] * (2 * _PWM_TOP)  # the shortest pulse
+    + [3] * 5  # ends part-way up the ramp, so the next change lands mid-period
+    + [6] * 7  # retuned while counting up, and this segment ends on the way down
+    + [2] * 6,  # so this one is retuned while counting down
+)
+
+
+# The I/Q oscillator's exact grid: `frequency * dt * 2**32` must be an integer in e8m36 and in float64 alike, so the
+# float-to-int conversion rounds identically on both sides and the integer phase stays bit-identical to CPython for
+# any run length. Off the grid the two roundings disagree near a half-integer and a diverged accumulator never
+# re-converges, which no output tolerance could absorb.
+_IQ_DT = 2.0**-10  # 1024 transactions per second
+_IQ_FREQ_LSB = 2.0**-22  # exactly one accumulator unit per tick
+
+
+def _draw_iq(rng: np.random.Generator) -> InputVector:
+    return {
+        "frequency": float(rng.integers(-(1 << 31), 1 << 31)) * _IQ_FREQ_LSB,
+        "dt": _IQ_DT,
+        "phase_offset": float(rng.integers(0, 1 << 32)) / 2.0**32,
+    }
+
+
+def _iq(frequency: float, phase_offset: float = 0.0) -> InputVector:
+    return {"frequency": frequency, "dt": _IQ_DT, "phase_offset": phase_offset}
+
+
+@dataclass(frozen=True)
+class OutputTolerance:
     """
-    How the Python-reference suite (``test_example_reference``) treats a kernel's scalar outputs.
-    EXACT: every float output is exact in the format (boolean logic, integer-valued counters/bytes, or exact
-    Sterbenz reductions), so it must match the float64 reference bit-for-bit. APPROXIMATE: float outputs
-    accumulate rounding (continuous arithmetic), so the comparison allows a format-derived tolerance. EXCLUDED:
-    the generic scalar-lane harness cannot drive the kernel -- it has public VECTOR state it would read by a
-    non-existent per-element attribute -- so its aggregate-state read-back is validated against Python separately in
-    ``test_verify``.
+    The independent accuracy budget of one float output lane whose arithmetic accumulates rounding, owned by the spec
+    so a compiler defect cannot loosen its own oracle. The allowed absolute error for one transaction is
+    `(ulps + growth_ulps * age) * u * max(|reference|, floor)` with `u` the format's unit roundoff and `age` the
+    number of transactions already driven: `ulps` bounds the rounding of one pass over the source expression,
+    `growth_ulps` the error a recurrence carries forward through state, and `floor` the scale of the lane's
+    intermediate operands over the spec's driven input domain, below which a cancellation-prone reference magnitude
+    would make a purely relative budget vacuous. Every budget is derived from the source algorithm and the driven
+    domain, never calibrated against the compiler under test.
     """
 
-    EXACT = "exact"
-    APPROXIMATE = "approximate"
-    EXCLUDED = "excluded"
+    ulps: int
+    growth_ulps: int = 0
+    floor: float = 1.0
+
+    def allowance(self, fmt: FloatFormat, reference: float, age: int) -> float:
+        assert self.ulps > 0 and self.growth_ulps >= 0 and self.floor > 0.0 and age >= 0
+        return (self.ulps + self.growth_ulps * age) * unit_roundoff(fmt) * max(abs(reference), self.floor)
 
 
 @dataclass(frozen=True)
@@ -102,14 +216,23 @@ class ExampleSpec:
     nominal: InputVector  # baseline for the per-input edge sweep (each input perturbed in turn)
     manual: list[InputVector]  # sensible vectors; an ordered sequence for stateful kernels
     draw_random: Callable[[np.random.Generator], InputVector]
-    edge_values: tuple[float | bool, ...]
-    # Per-input edge-sweep overrides: a listed input is swept over its own values instead of ``edge_values`` (e.g. a
-    # divisor pinned to positive magnitudes so it never reaches zero). Inputs absent here use ``edge_values``.
-    edge_overrides: Mapping[str, tuple[float | bool, ...]] = field(default_factory=dict)
+    edge_values: tuple[float | bool | int, ...]
+    # Per-input edge-sweep overrides: a listed input is swept over its own values instead of `edge_values` (e.g. a
+    # divisor pinned to positive magnitudes so it never reaches zero). Inputs absent here use `edge_values`.
+    edge_overrides: Mapping[str, tuple[float | bool | int, ...]] = field(default_factory=dict)
     # The float format(s) to drive at. The matrix is e8m36 by plan; a kernel that wants a second datapath (e.g. a
     # shallow e6m18 alongside the deep e8m36, to exercise both pipeline depths) lists both here.
     formats: tuple[FloatFormat, ...] = (_FMT,)
-    reference: ReferenceComparison = ReferenceComparison.EXACT
+    # The native integer width the kernel needs, which for a float-free kernel is exactly the word it gets: an
+    # accumulator that must wrap at a given modulus needs the word to hold it without saturating on the way.
+    wint_min: int = Options(OperatorOptions()).wint_min
+    # How this kernel's operator set differs from the one the catalogue shares: a datapath crossing between the
+    # families needs the conversions, which no float-only kernel builds.
+    operators: Callable[[OperatorOptions], OperatorOptions] = lambda ops: ops
+    # The Python-reference accuracy contract, keyed by output port name (`out_*`/`state_*`): a listed float lane
+    # is compared within its OutputTolerance allowance; an absent lane (and every bool lane) must match the float64
+    # reference bit-for-bit. `None` excludes the kernel from the generic reference harness.
+    reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         inputs = set(self.inputs)
@@ -118,9 +241,13 @@ class ExampleSpec:
             assert set(row) == inputs, f"{self.name}: manual row keys {set(row)} != inputs {inputs}"
         assert set(self.edge_overrides) <= inputs, f"{self.name}: edge_overrides keys outside inputs {inputs}"
 
-    def vectors(self, fmt: FloatFormat) -> list[dict[str, int]]:
-        """The full reproducible input sequence as input-name -> ZKF-bits rows: manual, then random, then edges."""
-        return [encode_inputs(fmt, row) for row in self.raw_vectors()]
+    def options(self, fmt: FloatFormat) -> Options:
+        """The spec's synthesis configuration: the shared default at one format, adjusted to what the kernel needs."""
+        return self.configured(default_options(fmt))
+
+    def configured(self, options: Options) -> Options:
+        """The same adjustment over an arbitrary base, so the pipeline-depth variants stay in one place."""
+        return dataclasses.replace(options, operator=self.operators(options.operator), wint_min=self.wint_min)
 
     def reference_vectors(self) -> list[InputVector]:
         """
@@ -169,30 +296,80 @@ def _draw_scalars(names: tuple[str, ...], lo: float, hi: float) -> Callable[[np.
     return lambda rng: {name: bounded(rng, lo, hi) for name in names}
 
 
-_UART_FMT = FloatFormat(4, 8)  # the narrowest format that holds a 0..255 byte exactly (wman=8), per examples/uart.py
-
-
-def _uart_tx_drive(payload: tuple[int, ...]) -> list[dict[str, float | bool]]:
+def _uart_tx_drive(payload: tuple[int, ...]) -> list[InputVector]:
     """A transmit sequence: assert start for one tick with each byte, then idle through its whole (<= 11-bit) frame."""
-    rows: list[dict[str, float | bool]] = []
+    rows: list[InputVector] = []
     for value in payload:
-        rows.append({"start": True, "char": float(value)})
-        rows += [{"start": False, "char": 0.0}] * (OVERSAMPLE * 11)
+        rows.append({"start": True, "char": value})
+        rows += [{"start": False, "char": 0}] * (OVERSAMPLE * 11)
     return rows
 
 
 def _uart_rx_frame(
-    value: int, parity_odd: bool, *, flip_parity: bool = False, drop_stop: bool = False
-) -> list[dict[str, float | bool]]:
+    value: int, parity: bool | None, *, flip_parity: bool = False, drop_stop: bool = False
+) -> list[InputVector]:
     """
-    A receive sequence: one oversampled 8E1/8O1 serial frame -- idle, start, 8 data bits LSB first, parity, stop. With
-    ``flip_parity`` the parity bit is corrupted (the receiver must flag ``parity_error``); with ``drop_stop`` the stop
-    bit is held low (it must flag ``frame_error``) -- so the error lanes are driven to their non-default value.
+    A receive sequence: one oversampled serial frame -- idle, start, 8 data bits LSB first, the parity bit only when
+    the framing carries one, stop. With `flip_parity` the parity bit is corrupted (the receiver must flag
+    `parity_error`); with `drop_stop` the stop bit is held low (it must flag `frame_error`) -- so the error lanes
+    are driven to their non-default value. An 8N1 receiver stops one bit earlier, so feeding it a parity bit would
+    make it read that bit as the stop bit and flag a spurious framing error.
     """
     data = [(value >> i) & 1 for i in range(8)]
-    parity = (sum(data) % 2 == 1) != parity_odd  # even-parity bit, inverted for odd parity
-    levels = [True] * 4 + [False] + [bool(d) for d in data] + [parity != flip_parity] + [not drop_stop] + [True] * 4
+    levels = [True] * 4 + [False] + [bool(d) for d in data]
+    if parity is not None:
+        levels.append(((sum(data) % 2 == 1) != parity) != flip_parity)  # even-parity bit, inverted for odd parity
+    levels += [not drop_stop] + [True] * 4
     return [{"rx": level} for level in levels for _ in range(OVERSAMPLE)]
+
+
+def _fresh_flux_observer() -> Callable[..., object]:
+    # The shipped instance: R/L_d/flux_linkage and the flux-linkage-aligned reset snapshot match
+    # examples/flux_observer.py, so every layer -- cosim, oracle, synthesis matrix -- exercises the same circuit
+    # the bundled example writes.
+    return FluxObserver(R=0.05, L_d=2e-5, flux_linkage=0.005, flux=np.array([0.005, 0.0])).tick
+
+
+def _fresh_finite_set_controller() -> Callable[..., object]:
+    return FiniteSetCurrentController().__call__
+
+
+_FSCC_INPUTS = (
+    "kin_pos", "kin_vel", "kin_accel",
+    "i_ac_0", "i_ac_1", "i_ac_2",
+    "di_ac_dt_0", "di_ac_dt_1", "di_ac_dt_2",
+    "u_dc",
+    "i_dq_ref_0", "i_dq_ref_1",
+)  # fmt: skip
+
+
+def _fscc_row(
+    pos: float, i_ac: tuple[float, float, float], di: tuple[float, float, float], u_dc: float, ref: tuple[float, float]
+) -> InputVector:
+    return {
+        "kin_pos": pos,
+        "kin_vel": 0.0,
+        "kin_accel": 0.0,
+        "i_ac_0": i_ac[0],
+        "i_ac_1": i_ac[1],
+        "i_ac_2": i_ac[2],
+        "di_ac_dt_0": di[0],
+        "di_ac_dt_1": di[1],
+        "di_ac_dt_2": di[2],
+        "u_dc": u_dc,
+        "i_dq_ref_0": ref[0],
+        "i_dq_ref_1": ref[1],
+    }
+
+
+def _draw_fscc(rng: np.random.Generator) -> InputVector:
+    return _fscc_row(
+        bounded(rng, -3.2, 3.2),
+        (bounded(rng, -10.0, 10.0), bounded(rng, -10.0, 10.0), bounded(rng, -10.0, 10.0)),
+        (bounded(rng, -1e5, 1e5), bounded(rng, -1e5, 1e5), bounded(rng, -1e5, 1e5)),
+        bounded(rng, 0.0, 400.0),
+        (bounded(rng, -10.0, 10.0), bounded(rng, -10.0, 10.0)),
+    )
 
 
 def _fresh_stateful_ekf() -> Callable[..., object]:
@@ -227,12 +404,309 @@ def polar_from(magnitude: float, angle: float) -> tuple[float, float]:
     return v[0], v[1]
 
 
+def rigid_body_scalar(
+    i00: float, i01: float, i02: float,
+    i10: float, i11: float, i12: float,
+    i20: float, i21: float, i22: float,
+    w0: float, w1: float, w2: float,
+    t0: float, t1: float, t2: float,
+    dt: float,
+) -> tuple[float, float, float, float, float, float]:  # fmt: skip
+    omega_next, momentum = rigid_body_update(
+        np.array([[i00, i01, i02], [i10, i11, i12], [i20, i21, i22]]),
+        np.array([w0, w1, w2]),
+        np.array([t0, t1, t2]),
+        dt,
+    )
+    return omega_next[0], omega_next[1], omega_next[2], momentum[0], momentum[1], momentum[2]
+
+
+_FLUX_OBSERVER_INPUTS = ("dt", "u_ab_0", "u_ab_1", "i_ab_0", "i_ab_1")
+
+
+def _flux_row(dt: float, u: tuple[float, float], i: tuple[float, float]) -> InputVector:
+    return {"dt": dt, "u_ab_0": u[0], "u_ab_1": u[1], "i_ab_0": i[0], "i_ab_1": i[1]}
+
+
+_FLUX_OBSERVER_MANUAL = [  # a hand-steered spin: the carried flux vector visits all four atan2 quadrants in order
+    _flux_row(1e-3, (50.0, 20.0), (5.0, -3.0)),
+    _flux_row(1e-3, (-120.0, 10.0), (-10.0, 0.0)),
+    _flux_row(1e-3, (0.0, -80.0), (0.0, 0.0)),
+    _flux_row(1e-3, (130.0, 0.0), (8.0, 8.0)),
+    _flux_row(0.0, (7.0, 7.0), (5.0, 5.0)),  # dt=0: the voltage term vanishes, isolating the L_d*di path
+    _flux_row(1e-3, (0.0, 0.0), (5.0, 5.0)),  # repeated current: di=0, pure resistive-drop drift
+    _flux_row(1e-3, (0.0, 90.0), (-20.0, 15.0)),
+    _flux_row(1e-4, (1.0, 1.0), (0.0, 0.0)),
+    # Steps off the rails: the quadrant rows above drive lanes onto both clamp rails (one lane railed while the
+    # other is interior around rows 4-5); these final rows move both lanes back inside the box, so the clamp's
+    # pass-through side is also observed against carried state.
+    _flux_row(1e-3, (-2.5, -7.0), (0.0, 0.0)),
+    _flux_row(1e-3, (0.0, 6.0), (1.0, -1.0)),
+]
+
+
+def _draw_flux_observer(rng: np.random.Generator) -> InputVector:
+    # The voltage scale straddles the clamp box: a large draw at a long dt rails a flux lane, a small draw at a
+    # short dt moves it inside the linear region, so the sweep keeps exercising both sides of the clamp.
+    return {
+        "dt": log_uniform_positive(rng, 2e-5, 2e-3),
+        "u_ab_0": bounded(rng, -12.0, 12.0),
+        "u_ab_1": bounded(rng, -12.0, 12.0),
+        "i_ab_0": bounded(rng, -20.0, 20.0),
+        "i_ab_1": bounded(rng, -20.0, 20.0),
+    }
+
+
+_RIGID_BODY_INPUTS = (
+    "i00", "i01", "i02", "i10", "i11", "i12", "i20", "i21", "i22",
+    "w0", "w1", "w2", "t0", "t1", "t2", "dt",
+)  # fmt: skip
+
+
+def _rigid_body_row(inertia: np.ndarray, omega: tuple[float, ...], tau: tuple[float, ...], dt: float) -> InputVector:
+    row: InputVector = {f"i{i}{j}": float(inertia[i, j]) for i in range(3) for j in range(3)}
+    row |= {f"w{k}": omega[k] for k in range(3)}
+    row |= {f"t{k}": tau[k] for k in range(3)}
+    row["dt"] = dt
+    return row
+
+
+def _draw_rigid_body(rng: np.random.Generator) -> InputVector:
+    # Eigenvalue-controlled SPD inertia (eigenvalues in [0.5, 2], so cond <= 4 and the determinant stays far from
+    # zero); spd_matrix is unsuitable here because its bounds constrain the Cholesky diagonal, not the spectrum.
+    # Redrawn until every output lane sits well above cancellation scale: the eel oracle compares the lanes
+    # floorless at 16 ULPs against LAPACK/BLAS operation order, so a momentum dot that cancels toward zero would
+    # convict the benign algorithm mismatch rather than a defect, and would do so only at a raised
+    # HOLOSO_TEST_RANDOM_COUNT.
+    while True:
+        basis, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        inertia = basis @ np.diag(rng.uniform(0.5, 2.0, 3)) @ basis.T
+        omega = np.array([bounded(rng, -1.0, 1.0) for _ in range(3)])
+        if min(abs(float(w)) for w in omega) >= 0.05 and min(abs(float(l)) for l in inertia @ omega) >= 0.05:
+            return _rigid_body_row(
+                inertia,
+                (float(omega[0]), float(omega[1]), float(omega[2])),
+                tuple(bounded(rng, -1.0, 1.0) for _ in range(3)),
+                bounded(rng, 1e-3, 1e-2),
+            )
+
+
+_IMU_FUSION_MEAS = ("gyro_0", "gyro_1", "gyro_2", "accel_0", "accel_1", "accel_2")
+_IMU_FUSION_CAL = tuple(f"{m}_{i}_{j}" for m in ("gyro_cal", "accel_cal") for i in range(3) for j in range(3))
+_IMU_FUSION_INPUTS = (*_IMU_FUSION_MEAS, *_IMU_FUSION_CAL, "temperature", "dt")
+# The catalogue's own demonstration calibration (a 90-degree-yaw mounting rotation composed with scale and
+# misalignment corrections), matching main()'s local demo values. Every driven row carries it verbatim; the
+# matrices are runtime inputs of the kernel, but sweeping them off nominal is only done by the pinned edge sets
+# below (a format-rail element would overflow the state exactly like a rail rate).
+_FUSION_GYRO_CAL = np.array([[0.002, -1.002, 0.001], [0.998, 0.001, -0.002], [0.001, 0.002, 1.001]])
+_FUSION_ACCEL_CAL = np.array([[-0.001, -0.999, 0.002], [1.003, -0.002, 0.001], [-0.002, 0.001, 0.997]])
+_IMU_FUSION_CAL_LANES = dict(
+    zip(_IMU_FUSION_CAL, [float(v) for v in (*_FUSION_GYRO_CAL.flatten(), *_FUSION_ACCEL_CAL.flatten())])
+)
+_IMU_FUSION_G = 9.80665
+
+
+def _fresh_imu_fusion() -> Callable[..., object]:
+    """
+    The oracle-safe catalogue configuration, distinct from the shipped realistic defaults (the synth rows pass the
+    shipped kernel explicitly): a tiny bias clamp so every valid row's bias step overshoots rail to rail and the
+    clamp resynchronizes `bias` bit-exactly, and a small clip threshold so the clip row latches on tame dynamics
+    (a full-scale rate would make the backward-difference angular acceleration amplify the benign host-vs-model
+    summation-order noise past the oracle budgets). The attitude needs no override: the manual sequence opens
+    with an accepted coarse-alignment row whose strong rates twist the estimate straight off the near-zero lanes.
+    """
+    return ImuFusion(bias_limit=0.0005, gyro_limit=3.0).update
+
+
+# One continuous history crafted offline by simulating the reference and frozen as literals (the generator lives
+# in the design history): an accepted coarse-alignment row first (in-band accel off unit magnitude with strong
+# sub-clip rates, so the aligned attitude immediately twists and every lane stays away from zero), three freefall
+# rows walking the attitude further, eight in-band rows alternating between two world-frame gravity targets (the
+# filter keeps chasing, so every output lane stays far from zero while the bias rails on every row and both clamp
+# arms fire), then the high-magnitude reject, the clip latch, a hot row, and a cold row. Every in-band row keeps
+# all |out| lanes above ~0.6 m/s^2 -- below that, the benign BLAS-vs-left-fold summation difference outgrows the
+# eel oracle's relative budget on the g-scale operands.
+_IMU_FUSION_MANUAL = [
+    {**dict(zip((*_IMU_FUSION_MEAS, "temperature", "dt"), values)), **_IMU_FUSION_CAL_LANES}
+    for values in [
+        (
+            -2.61717584486634,
+            -2.0522804524157405,
+            -2.4716780098458457,
+            -5.598102556376175,
+            -4.81866182149115,
+            6.022439209791113,
+            25.0,
+            0.125,
+        ),
+        (-0.3162390153313255, -0.297270259847738, 0.35823635333586945, 0.0, 0.0, 0.0, 25.0, 0.3),
+        (-0.3162390153313255, -0.297270259847738, 0.35823635333586945, 0.0, 0.0, 0.0, 25.0, 0.3),
+        (-0.3162390153313255, -0.297270259847738, 0.35823635333586945, 0.0, 0.0, 0.0, 25.0, 0.3),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.00151356541689,
+            -5.044460882024048,
+            -2.559792077992834,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            2.957177211541472,
+            -6.035906761547455,
+            7.158172840906673,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.00843360157175,
+            -5.131970618841172,
+            -2.3543281285198994,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            3.081717836542828,
+            -5.892084096288197,
+            7.2252006509938385,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.011592919771621,
+            -5.212948280506902,
+            -2.1557009490155705,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            3.2067913012550733,
+            -5.746619593474721,
+            7.287686484093886,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            -8.011588072182313,
+            -5.290627337884657,
+            -1.9555565219149302,
+            25.0,
+            0.125,
+        ),
+        (
+            -0.006111273972922761,
+            -0.007300797064837048,
+            0.009323888979123474,
+            3.332351581738178,
+            -5.599558970526353,
+            7.345606512118715,
+            25.0,
+            0.125,
+        ),
+        (
+            0.00488170800417128,
+            -0.006294822056824952,
+            -0.004675116946943577,
+            -16.01679690978565,
+            -10.729956984022571,
+            -3.5080056067154195,
+            25.0,
+            0.01,
+        ),
+        (
+            0.001489072441967786,
+            -3.594112805498327,
+            0.008490745792761925,
+            1.9330238899639955,
+            -1.6755254550131902,
+            2.9789982682069183,
+            25.0,
+            0.25,
+        ),
+        (
+            -0.011339616787281058,
+            -0.020480427369373753,
+            0.03379100946206396,
+            4.368418274251716,
+            -2.1018157900454635,
+            0.6502566518220327,
+            85.0,
+            0.25,
+        ),
+        (
+            -0.011223811824432859,
+            -0.019673619295098217,
+            0.029481089960454177,
+            -3.3150183899305126,
+            -2.6585436891322347,
+            2.4408521380638146,
+            -40.0,
+            0.01,
+        ),
+    ]
+]
+
+_FUSION_CONFIG = ImuFusion()  # only the shipped temperature-model default is read, never mutated
+_FUSION_INV_GYRO_CAL = np.linalg.inv(_FUSION_GYRO_CAL)
+_FUSION_INV_ACCEL_CAL = np.linalg.inv(_FUSION_ACCEL_CAL)
+# The frozen post-manual attitude's body-frame image of the world direction the random rows aim near.
+_FUSION_ACCEL_DIR = np.array([0.5431691419956042, -0.6765799876735006, 0.497198957625099])
+
+
+def _draw_imu_fusion(rng: np.random.Generator) -> InputVector:
+    """
+    Every random row is DECISIVELY below the acceptance band (0.50..0.85 g near the frozen direction): the gate
+    rejects it, freezing `bias` bit-exactly, and every output lane stays proportionate to its operand scale, which is
+    what keeps the eel oracle's relative budget satisfied even at a raised HOLOSO_TEST_RANDOM_COUNT (validated to
+    x10; far beyond that, the slow attitude creep can still push a lane over -- the same documented residual
+    fragility as rigid_body's). The valid arm's coverage lives in the manual prefix. The raw samples are generated
+    through the inverse sensor model so the rates stay tiny and the temperature term stays exactly compensated.
+    """
+    w = rng.uniform(0.003, 0.01, 3) * rng.choice([-1.0, 1.0], 3)
+    angle = rng.uniform(-0.05, 0.05)
+    c, sn = math.cos(angle), math.sin(angle)
+    d = np.array(
+        [
+            c * _FUSION_ACCEL_DIR[0] - sn * _FUSION_ACCEL_DIR[1],
+            sn * _FUSION_ACCEL_DIR[0] + c * _FUSION_ACCEL_DIR[1],
+            _FUSION_ACCEL_DIR[2],
+        ]
+    )
+    f = d * (rng.uniform(0.50, 0.85) * _IMU_FUSION_G)
+    temperature = rng.uniform(15.0, 45.0)
+    dt = float(np.exp(rng.uniform(np.log(0.02), np.log(0.08))))
+    t_powers = np.array([1.0, temperature, temperature * temperature])
+    g_s = _FUSION_INV_GYRO_CAL @ (w + _FUSION_CONFIG.temp_model @ t_powers)
+    f_s = _FUSION_INV_ACCEL_CAL @ f
+    row = dict(zip((*_IMU_FUSION_MEAS, "temperature", "dt"), [float(v) for v in (*g_s, *f_s, temperature, dt)]))
+    return {**row, **_IMU_FUSION_CAL_LANES}
+
+
 SPECS = [
     ExampleSpec(
         name="madd",
         inputs=("a", "b", "c"),
         make_kernel=lambda: madd.madd,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=8, floor=16.0)},  # two roundings; |a*b| <= 16 over the domain
         nominal={"a": 1.0, "b": 1.0, "c": 1.0},
         manual=[
             {"a": 1.0, "b": 1.0, "c": 0.0},
@@ -270,7 +744,7 @@ SPECS = [
         name="poly3",
         inputs=("x", "c0", "c1", "c2", "c3"),
         make_kernel=lambda: poly3.poly3,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=16, floor=64.0)},  # six Horner roundings; intermediates <= ~60
         nominal={"x": 1.0, "c0": 1.0, "c1": 1.0, "c2": 1.0, "c3": 1.0},
         manual=[
             {"x": 0.0, "c0": 1.0, "c1": 2.0, "c2": 3.0, "c3": 4.0},  # evaluates to c0
@@ -288,9 +762,28 @@ SPECS = [
         name="iir1_lpf",
         inputs=("x",),
         make_kernel=lambda: IIR1LPF().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"state_y": OutputTolerance(ulps=8, growth_ulps=1, floor=8.0)},  # 3 roundings/step at |x| <= 5
         nominal={"x": 1.0},
         manual=[  # one continuous stream: the first sample latches y=x, then the IIR settles toward the input
+            *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
+            *({"x": v} for v in (5.0, 5.0, 0.0, 0.0)),
+            *({"x": v} for v in (-2.0, 3.0, 0.5, -1.0)),
+        ],
+        draw_random=_draw_scalars(("x",), -4.0, 4.0),
+        edge_values=_WIDE_EDGES,
+    ),
+    ExampleSpec(
+        name="iir1_hpf",
+        inputs=("x",),
+        make_kernel=lambda: IIR1HPF().step,
+        # The LPF recurrence budget rides on the nested slot; the output subtracts the bias from the input, so the
+        # x-m cancellation near convergence needs the same floor as the source scale (|x| <= 5 over the domain).
+        reference={
+            "out_0": OutputTolerance(ulps=8, growth_ulps=1, floor=8.0),
+            "state_lpf_y": OutputTolerance(ulps=8, growth_ulps=1, floor=8.0),
+        },
+        nominal={"x": 1.0},
+        manual=[  # one continuous stream: the first sample latches the bias, then the HPF tracks steps off it
             *({"x": v} for v in (1.0, 1.0, 1.0, 1.0)),
             *({"x": v} for v in (5.0, 5.0, 0.0, 0.0)),
             *({"x": v} for v in (-2.0, 3.0, 0.5, -1.0)),
@@ -302,7 +795,11 @@ SPECS = [
         name="pid",
         inputs=_PID_INPUTS,
         make_kernel=lambda: PID().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={
+            "out_0": OutputTolerance(ulps=8, growth_ulps=1, floor=64.0),  # pre-clamp |u| <= kd*|de|/dt_min ~ 64
+            "state_integral": OutputTolerance(ulps=8, growth_ulps=1, floor=16.0),  # per-step addend ki*e*dt <= 4
+            "state_prev_error": OutputTolerance(ulps=8, floor=16.0),  # one subtraction at the |error| scale
+        },
         nominal={"setpoint": 1.0, "measurement": 0.0, "dt": 1.0},
         manual=_PID_MANUAL,
         draw_random=lambda rng: {
@@ -396,7 +893,9 @@ SPECS = [
         name="majority_voter",
         inputs=("enabled", "a", "b", "c", "d", "e"),
         make_kernel=lambda: MajorityVoter().__call__,
-        # nominal ``enabled`` is True so the per-input edge sweep actually enters the ``if enabled:`` diagnostic block
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=6,  # the five channels pack into as many bits, which a signed word carries one above
+        # nominal `enabled` is True so the per-input edge sweep actually enters the `if enabled:` diagnostic block
         # (perturbing one channel against an all-low background flips the voted value and trips that channel's fault).
         nominal={"enabled": True, "a": False, "b": False, "c": False, "d": False, "e": False},
         manual=[
@@ -430,23 +929,133 @@ SPECS = [
         edge_values=(False, True),
     ),
     ExampleSpec(
+        name="iq_oscillator",
+        inputs=("frequency", "dt", "phase_offset"),
+        make_kernel=lambda: IqOscillator().tick,
+        # One fsincos firing serves both lanes; the budget is the source's own phase scaling plus the core, and it
+        # does not grow with age because the phase recurrence is integer and exact -- no float state drifts. It is a
+        # bound rather than a fit: the scaling now composes with the cores' turn ABI into a single exact exponent, so
+        # the realized error sits well inside it.
+        reference={"out_0": OutputTolerance(ulps=64), "out_1": OutputTolerance(ulps=64)},
+        nominal={"frequency": 64.0, "dt": _IQ_DT, "phase_offset": 0.0},
+        manual=[
+            _iq(0.0),  # DC: the phase must not move
+            *[_iq(256.0) for _ in range(4)],  # quarter rate: I/Q hit exact 0 and +-1, returning to the start phase
+            # The accumulator is frozen across these three, so the bit-exact phase lane must be identical on all of
+            # them while I/Q rotate a quarter turn each -- the offset's independence from the state, checkably.
+            _iq(0.0, 0.25),
+            _iq(0.0, 0.5),
+            _iq(0.0, 0.75),
+            _iq(-256.0),  # negative: the phase runs backwards
+            _iq(1023.99993896484375),  # just under one turn per tick
+            _iq(768.0),  # 0.75 turn/tick, which folds to -0.25
+            _iq(68.0, 0.125),  # an ordinary tone, wrapping slowly
+            _iq(68.0, 0.125),
+        ],
+        draw_random=_draw_iq,
+        # The edge sweep drives dt and frequency to the format rails, overflowing the product to infinity and taking
+        # the conversion to its own rail; those rows reach cosim only, where both sides saturate identically.
+        edge_values=_WIDE_EDGES,
+        formats=(_FMT,),  # wman >= 32: a shallower format would quantize the grid and measure itself, not the compiler
+        wint_min=34,  # a carry bit above the phase, then a sign bit
+        operators=lambda ops: dataclasses.replace(ops, ffromint=FFromIntOptions(), ftoint=FToIntOptions()),
+    ),
+    ExampleSpec(
+        name="nco",
+        inputs=("increment", "phase_offset"),
+        make_kernel=lambda: Nco().tick,
+        nominal={"increment": 1 << 30, "phase_offset": 0},
+        manual=_NCO_MANUAL,
+        # Both control words are architecturally 32 bits and the ports are wider only because the machine has one
+        # native integer width, but masking each input keeps every sum inside the word, so the kernel is total over
+        # the port and the edge sweep can leave the 32-bit range.
+        draw_random=lambda rng: {
+            "increment": int(rng.integers(0, 1 << 32)),
+            "phase_offset": int(rng.integers(0, 1 << 32)),
+        },
+        edge_values=(0, 1, 1 << 30, 1 << 31, 0xC0000000, _NCO_PHASE_MASK, 1 << 32, -1),
+        formats=(FloatFormat(6, 18),),  # float-free, so the kernel's own wint_min alone sizes the accumulator
+        wint_min=34,  # the pre-mask sum reaches 2**33 - 2: one carry bit above the accumulator, plus the sign bit
+    ),
+    ExampleSpec(
+        name="pwm",
+        inputs=("duty",),
+        make_kernel=lambda: Pwm(top=_PWM_TOP).tick,
+        nominal={"duty": _PWM_TOP // 2},
+        manual=_PWM_MANUAL,
+        draw_random=lambda rng: {"duty": int(rng.integers(0, _PWM_TOP + 2))},
+        edge_values=(0, 1, _PWM_TOP // 2, _PWM_TOP - 1, _PWM_TOP, _PWM_TOP + 5),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=8,  # a word holding _PWM_TOP, plus the sign bit
+    ),
+    ExampleSpec(
+        name="debouncer",
+        inputs=("raw",),
+        make_kernel=lambda: Debouncer(samples=4).__call__,
+        nominal={"raw": False},
+        manual=_DEBOUNCE_MANUAL,
+        draw_random=lambda rng: {"raw": bool(rng.integers(0, 2))},
+        edge_values=(False, True),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=4,  # the dwell count reaches samples, plus the sign bit
+    ),
+    ExampleSpec(
+        name="priority_encoder",
+        inputs=("request",),
+        make_kernel=lambda: PriorityEncoder(width=8).__call__,
+        nominal={"request": 0},
+        manual=_PRIORITY_MANUAL,
+        draw_random=lambda rng: {"request": int(rng.integers(0, 256))},
+        edge_values=(0, 1, 0x80, 0xFF, -256, -1),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=9,  # the request bus is width lines, carried signed
+    ),
+    ExampleSpec(
+        name="crc32",
+        inputs=("byte",),
+        make_kernel=lambda: Crc32(POLY_IEEE8023).__call__,
+        nominal={"byte": 0x00},
+        manual=_CRC32_MANUAL,
+        draw_random=lambda rng: {"byte": int(rng.integers(0, 256))},
+        edge_values=(0x00, 0x01, 0x7F, 0x80, 0xFF),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=33,  # the reversed polynomial is 32 unsigned bits, which a signed word carries one above
+    ),
+    ExampleSpec(
+        name="lfsr16",
+        inputs=("advance",),
+        make_kernel=lambda: Lfsr16().__call__,
+        nominal={"advance": True},
+        manual=_LFSR_MANUAL,
+        draw_random=lambda rng: {"advance": bool(rng.integers(0, 2))},
+        edge_values=(False, True),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=17,  # the tap mask 0xB400 does not fit a signed 16-bit word
+    ),
+    ExampleSpec(
         name="uart_tx",
         inputs=("start", "char"),
-        make_kernel=lambda: UartTx(parity=False).__call__,
-        nominal={"start": False, "char": 0.0},
-        # 0x01 and 0x7F have an ODD number of set bits, so the even-parity bit is HIGH for them: the parity XOR
-        # reduction must emit a 1, not just the 0 that every even-popcount byte (0x55/0xC3/0x00/0xFF) yields.
-        manual=_uart_tx_drive((0x55, 0xC3, 0x00, 0x01, 0x7F, 0xFF)),
-        draw_random=lambda rng: {"start": bool(rng.integers(0, 8) == 0), "char": float(rng.integers(0, 256))},
-        # The per-input edge sweep is uniform over inputs, so it cannot mix a boolean lane (start) with a float lane
-        # (char); the random draw already sweeps char across the whole 0..255 byte range, so no separate edge set.
+        make_kernel=lambda: UartTx(parity=False).tick,
+        nominal={"start": False, "char": 0},
+        # 0x01 and 0x7F have an ODD number of set bits, so the even-parity bit is HIGH for them. The
+        # trailing pair asserts start while the machine is busy: the second byte must be ignored, not latched mid-frame.
+        manual=(
+            _uart_tx_drive((0x55, 0xC3, 0x00, 0x01, 0x7F, 0xFF))
+            + [{"start": True, "char": 0x0F}, {"start": True, "char": 0xA5}]
+            + [{"start": False, "char": 0}] * (OVERSAMPLE * 11)
+        ),
+        draw_random=lambda rng: {"start": bool(rng.integers(0, 8) == 0), "char": int(rng.integers(0, 256))},
+        # The per-input sweep is uniform over the inputs, so one value set cannot serve both a boolean lane and a byte
+        # lane; and a byte only enters the machine on a latching tick, which a one-row perturbation cannot arrange.
+        # The byte edges therefore ride the manual sequence, which latches each of them.
         edge_values=(),
-        formats=(_UART_FMT,),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=9,  # the 8-bit character, which a signed word carries one bit above
     ),
     ExampleSpec(
         name="uart_rx",
         inputs=("rx",),
-        make_kernel=lambda: UartRx(parity=False).__call__,
+        make_kernel=lambda: UartRx(parity=False).tick,
         nominal={"rx": True},
         manual=(
             _uart_rx_frame(0x55, False)
@@ -455,19 +1064,21 @@ SPECS = [
             + _uart_rx_frame(
                 0x01, False
             )  # odd popcount -> true even-parity bit HIGH, so the recomputed parity must be 1
-            + _uart_rx_frame(0x7F, False)  # 7 bits set (odd) -> exercises most of the parity reduction, still no error
+            + _uart_rx_frame(0x7F, False)  # 7 bits set (odd), still no error
             + _uart_rx_frame(0x96, False, flip_parity=True)  # corrupted parity bit -> parity_error asserts
             + _uart_rx_frame(0x3C, False, drop_stop=True)  # stop bit held low -> frame_error asserts
+            + [{"rx": level} for level in [False] * 4 + [True] * 24]  # false start: recovers before the mid-bit sample
         ),
         draw_random=lambda rng: {"rx": bool(rng.integers(0, 2))},
         edge_values=(False, True),
-        formats=(_UART_FMT,),
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=9,  # the 8-bit character, which a signed word carries one bit above
     ),
     ExampleSpec(
         name="recip_newton",
         inputs=("x",),
         make_kernel=lambda: NewtonReciprocal().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=64)},  # a few same-trip Newton iterations; output in [0.5, 2]
         nominal={"x": 1.0},
         manual=[{"x": v} for v in (0.5, 0.75, 1.0, 1.3, 1.7, 2.0)],  # across the [0.5, 2.0] reciprocal domain
         draw_random=_draw_scalars(("x",), 0.5, 2.0),
@@ -509,7 +1120,10 @@ SPECS = [
         name="equal_temperament",
         inputs=("note",),
         make_kernel=lambda: equal_temperament,
-        reference=ReferenceComparison.APPROXIMATE,  # continuous transcendental arithmetic rounds each step
+        reference={
+            "out_0": OutputTolerance(ulps=32),  # hertz: the exp2 polynomial is a few-ulp-relative approximation
+            "out_1": OutputTolerance(ulps=32, floor=64.0),  # recovered note: 12*log2 cancels against the 69 offset
+        },
         nominal={"note": 69.0},
         manual=[{"note": v} for v in (69.0, 60.0, 81.0, 57.0, 69.5, 0.0, 127.0)],  # landmark notes + MIDI-range ends
         draw_random=lambda rng: {"note": bounded(rng, 0.0, 127.0)},
@@ -519,7 +1133,8 @@ SPECS = [
         name="cordic_sincos",
         inputs=("theta",),
         make_kernel=lambda: CordicSinCos().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # 12 micro-rotations of ~3 roundings each on unit-norm vectors; the same budget for both lanes.
+        reference={"out_0": OutputTolerance(ulps=64), "out_1": OutputTolerance(ulps=64)},
         nominal={"theta": 0.5},
         manual=[{"theta": v} for v in (0.0, 0.3, 0.7, -0.5, 1.0, -1.0)],  # angles within the convergence range
         draw_random=_draw_scalars(("theta",), -1.4, 1.4),
@@ -529,7 +1144,8 @@ SPECS = [
         name="polar_to",  # fused hypot+atan2 -> one fatan2
         inputs=("x", "y"),
         make_kernel=lambda: polar_to,
-        reference=ReferenceComparison.APPROXIMATE,  # the turn scale rounds; the CORDIC is faithful, not exact
+        # The CORDIC operator is faithful (few-ulp), not exact; both lanes carry the same operator-level budget.
+        reference={"out_0": OutputTolerance(ulps=64), "out_1": OutputTolerance(ulps=64)},
         nominal={"x": 1.0, "y": 1.0},
         manual=[
             {"x": 3.0, "y": 4.0},
@@ -547,7 +1163,8 @@ SPECS = [
         name="polar_from",  # coalesced cos+sin -> one fsincos
         inputs=("magnitude", "angle"),
         make_kernel=lambda: polar_from,
-        reference=ReferenceComparison.APPROXIMATE,
+        # A near-axis angle makes one lane |magnitude*eps|, so the floor is the |magnitude| <= 4 operand scale.
+        reference={"out_0": OutputTolerance(ulps=64, floor=4.0), "out_1": OutputTolerance(ulps=64, floor=4.0)},
         nominal={"magnitude": 1.0, "angle": 0.5},
         manual=[
             {"magnitude": 1.0, "angle": 0.0},
@@ -561,10 +1178,53 @@ SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
+        name="rigid_body_scalar",  # pivoted Gauss-Jordan inversion: data-dependent swap branches feeding one fdiv
+        inputs=_RIGID_BODY_INPUTS,
+        make_kernel=lambda: rigid_body_scalar,
+        # omega' lanes: the inversion's forward error over the driven domain (cond <= ~4) enters scaled by dt <= 1e-2
+        # on top of |omega| <= 1, well inside the budget at the |omega_dot| <= ~9 operand scale. L lanes: one 3-term
+        # dot per lane (the model's left fold vs the host's BLAS order) with operands <= ~6.
+        reference={
+            "out_0": OutputTolerance(ulps=64, floor=2.0),
+            "out_1": OutputTolerance(ulps=64, floor=2.0),
+            "out_2": OutputTolerance(ulps=64, floor=2.0),
+            "out_3": OutputTolerance(ulps=16, floor=8.0),
+            "out_4": OutputTolerance(ulps=16, floor=8.0),
+            "out_5": OutputTolerance(ulps=16, floor=8.0),
+        },
+        nominal=_rigid_body_row(np.diag([2.0, 3.0, 4.0]), (0.5, -0.3, 0.8), (0.1, 0.0, -0.2), 0.005),
+        manual=[
+            # A permutation inertia takes the swap branch at every pivot column; all arithmetic stays exact.
+            _rigid_body_row(
+                np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]), (0.5, -0.3, 0.8), (0.1, 0.0, -0.2), 0.005
+            ),
+            # An SPD matrix whose leading column is off-diagonal-dominant, so exactly the first column swaps.
+            _rigid_body_row(
+                np.array([[1.0, 2.0, 0.0], [2.0, 5.0, 1.0], [0.0, 1.0, 3.0]]), (-0.6, 0.4, 0.9), (0.3, -0.1, 0.2), 0.008
+            ),
+            # Diagonally dominant and asymmetric: no swaps, exercising the fall-through pivot path.
+            _rigid_body_row(
+                np.array([[3.0, 0.5, -0.2], [0.1, 2.5, 0.4], [-0.3, 0.2, 3.5]]),
+                (0.9, -0.7, 0.2),
+                (-0.2, 0.4, 0.0),
+                0.001,
+            ),
+        ],
+        draw_random=_draw_rigid_body,
+        edge_values=_WIDE_EDGES,
+        # With the diagonal nominal, a single perturbed off-diagonal leaf cannot change the determinant (its cofactor
+        # is zero), so only the diagonal leaves must stay positive to keep every elimination pivot away from zero.
+        edge_overrides={
+            "i00": _POSITIVE_DIVISOR_EDGES,
+            "i11": _POSITIVE_DIVISOR_EDGES,
+            "i22": _POSITIVE_DIVISOR_EDGES,
+        },
+    ),
+    ExampleSpec(
         name="kepler",  # Newton loop; sin(E)+cos(E) coalesce into one fsincos per iteration
         inputs=("mean_anomaly", "eccentricity"),
         make_kernel=lambda: kepler.eccentric_anomaly,
-        reference=ReferenceComparison.APPROXIMATE,
+        reference={"out_0": OutputTolerance(ulps=64, floor=4.0)},  # same-trip Newton at the |M| + e scale
         nominal={"mean_anomaly": 0.5, "eccentricity": 0.3},
         manual=[
             {"mean_anomaly": 0.8, "eccentricity": 0.3},
@@ -592,7 +1252,8 @@ SPECS = [
         name="integrator",
         inputs=("x", "dt"),
         make_kernel=lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # Four roundings/step at the per-step addend scale |x|*dt <= 0.0625; the sum carries the error forward.
+        reference={"state_y": OutputTolerance(ulps=8, growth_ulps=1, floor=0.0625)},
         nominal={"x": 1.0, "dt": 1.0e-3},
         manual=[  # one continuous stream: settle at zero, a step, an impulse, then a ramp
             *({"x": v, "dt": 1.0e-3} for v in (0.0, 0.0, 1.0, 1.0, 1.0, 1.0)),
@@ -607,7 +1268,13 @@ SPECS = [
         name="ekf1_stateless",
         inputs=_EKF_STATELESS_INPUTS,
         make_kernel=lambda: ekf1_stateless.update_x_P,
-        reference=ReferenceComparison.APPROXIMATE,
+        # The 1e3-scale measurement noise enters only through the relative error of S=P+R and 1/S, so the floors are
+        # the per-lane intermediate scales: the state block |x| + K*innovation ~ 4, the covariance block's P-products
+        # ~ 16 -- NOT the 1e3 input scale, so a small lane cannot hide a large absolute error.
+        reference={
+            **{f"out_{i}_0": OutputTolerance(ulps=64, floor=4.0) for i in range(3)},
+            **{f"out_{i}_0": OutputTolerance(ulps=64, floor=16.0) for i in range(3, 9)},
+        },
         nominal={
             "P00": 1.0, "P01": 0.0, "P02": 0.0, "P11": 1.0, "P12": 0.0, "P22": 1.0,
             "Q_R": 1e-3, "Q_g": 1e-3, "Q_i": 1e-3, "R_ct": 1e2, "R_shunt": 1e2, "dt": 1e-2,
@@ -632,7 +1299,8 @@ SPECS = [
         name="fir",
         inputs=("x",),
         make_kernel=lambda: Fir4().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # No growth: the private delay line holds verbatim samples, so only the output convolution rounds.
+        reference={"out_0": OutputTolerance(ulps=16, floor=4.0)},
         nominal={"x": 1.0},
         manual=[  # an impulse walking the whole line, then a step, then a sign flip
             *({"x": v} for v in (1.0, 0.0, 0.0, 0.0, 0.0)),
@@ -646,7 +1314,12 @@ SPECS = [
         name="biquad",
         inputs=("x",),
         make_kernel=lambda: Biquad().__call__,
-        reference=ReferenceComparison.APPROXIMATE,
+        # Stable feedback (|a1|, a2 < 1) contracts carried error, so linear growth is a conservative envelope.
+        reference={
+            "out_0": OutputTolerance(ulps=16, growth_ulps=1, floor=4.0),
+            "state_s1": OutputTolerance(ulps=16, growth_ulps=1, floor=4.0),
+            "state_s2": OutputTolerance(ulps=16, growth_ulps=1, floor=4.0),
+        },
         nominal={"x": 1.0},
         manual=[  # an impulse response, then a step the two accumulators settle through
             *({"x": v} for v in (1.0, 0.0, 0.0, 0.0, 0.0)),
@@ -657,10 +1330,41 @@ SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
+        name="imu_fusion",
+        inputs=_IMU_FUSION_INPUTS,
+        make_kernel=_fresh_imu_fusion,
+        # The gyro/accel 3-vector parameters decompose into scalar leaf ports the catalogue drives directly,
+        # but the generic reference harness binds its reference positionally with scalars, which a vector-parameter
+        # kernel cannot accept -- the bespoke twin in test_example_reference carries the budgets instead
+        # (the flux_observer pattern).
+        reference=None,
+        nominal=_IMU_FUSION_MANUAL[4],  # the first bias-railing in-band row
+        manual=_IMU_FUSION_MANUAL,
+        draw_random=_draw_imu_fusion,
+        # The accelerometer lanes take the full format rails: an overflowed magnitude compares as infinity, the
+        # gate rejects the row, and the ZKF infinity identities keep every flag clear. The gyro, temperature, and
+        # dt lanes are pinned instead: a rail rate or temperature would overflow the state through the rate matrix
+        # or the T^2 bias term and silently zero the quaternion (inf * 0 == +0), after which the renormalization
+        # divides by zero on every later row; dt also divides the backward difference, so it must stay positive.
+        edge_overrides={
+            "gyro_0": (0.0, 0.25, -0.25, 3.5, -3.5),
+            "gyro_1": (0.0, 0.25, -0.25, 3.5, -3.5),
+            "gyro_2": (0.0, 0.25, -0.25, 3.5, -3.5),
+            **{lane: (0.0, 1.0, -1.0, 0.5, -0.5) for lane in _IMU_FUSION_CAL},
+            "temperature": (-40.0, 0.0, 25.0, 85.0, 125.0),
+            "dt": (1e-3, 1e-2, 0.25),
+        },
+        edge_values=_WIDE_EDGES,
+        formats=(_FMT, FloatFormat(6, 18)),  # the deep datapath, and the narrow one the synth matrix ships
+        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    ),
+    ExampleSpec(
         name="ekf1_stateful",
         inputs=("dt", "u_shunt", "di_dt"),
         make_kernel=_fresh_stateful_ekf,
-        reference=ReferenceComparison.EXCLUDED,  # carried x/P_urt vectors only; no scalar lane for the reference harness
+        # No spec-owned error budget has been derived for the carried covariance recurrence (cancellation-prone
+        # P products through 1/S), so the generic reference harness is not driven; test_verify pins one step.
+        reference=None,
         nominal={"dt": 1e-2, "u_shunt": 0.5, "di_dt": 0.5},
         manual=[  # a short measurement sequence threaded through the carried state
             {"dt": 1e-2, "u_shunt": 0.0, "di_dt": 0.0},
@@ -674,5 +1378,38 @@ SPECS = [
             "di_dt": bounded(rng, -1.0, 1.0),
         },
         edge_values=_EKF_EDGES,  # only dt reaches the divisor, and the folded R_diag keeps it anchored
+    ),
+    ExampleSpec(
+        name="finite_set_current_controller",  # stateful; record/array parameters drive decomposed scalar lanes
+        inputs=_FSCC_INPUTS,
+        make_kernel=_fresh_finite_set_controller,
+        reference=None,  # the Kinematics record and ndarray parameters cannot bind from scalar rows
+        nominal=_fscc_row(0.5, (1.0, -0.5, -0.5), (1e4, -1e4, 0.0), 100.0, (2.0, -1.0)),
+        manual=[
+            _fscc_row(0.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.0, (0.0, 0.0)),  # quiet: the all-false arm
+            _fscc_row(0.0, (1.0, -1.0, 0.0), (0.0, 0.0, 0.0), 350.0, (5.0, 0.0)),
+            _fscc_row(2.1, (-2.0, 3.0, -1.0), (5e4, -5e4, 0.0), 200.0, (-3.0, 4.0)),
+            _fscc_row(0.0, (1.0, -1.0, 0.0), (0.0, 0.0, 0.0), 350.0, (5.0, 0.0)),  # revisit on evolved balance
+            _fscc_row(-1.5, (0.5, 0.5, -1.0), (0.0, 1e5, -1e5), 1.0, (1.0, 1.0)),  # sub-threshold drive
+        ],
+        draw_random=_draw_fscc,
+        # Finite magnitudes only: an infinity edge would send inf - inf through the zero-mean pipeline, whose
+        # defined +0 answer raises the error sideband the generic bench asserts silent.
+        edge_values=(0.0, 1.0, -1.0, 100.0, -100.0, 1e4, -1e4),
+        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    ),
+    ExampleSpec(
+        name="flux_observer",  # stateful 2-vector I/O driven through its decomposed scalar port lanes
+        inputs=_FLUX_OBSERVER_INPUTS,
+        make_kernel=_fresh_flux_observer,
+        reference=None,  # the ndarray u_ab/i_ab parameters cannot bind from scalar rows; a bespoke twin covers it
+        nominal=_flux_row(1e-4, (1.0, 0.5), (2.0, -1.0)),
+        manual=_FLUX_OBSERVER_MANUAL,
+        draw_random=_draw_flux_observer,
+        # The full format-edge sweep is safe on this accumulator because the clamp bounds the carried flux every
+        # row: an infinite update lands as a railed ±flux_linkage, never as an infinity a later opposite-signed row
+        # could cancel into inf - inf.
+        edge_values=_WIDE_EDGES,
+        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
 ]

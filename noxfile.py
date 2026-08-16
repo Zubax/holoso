@@ -83,7 +83,7 @@ def synth_examples(session: nox.Session) -> None:
     This one takes a long time.
 
     Each run is itself multithreaded, so the worker count (two-thirds of the cores) balances core utilization against
-    peak P&R memory on the wide e8m36 rows. pytest-enabler is disabled so it cannot force ``-n auto`` (the full count).
+    peak P&R memory on the wide e8m36 rows. pytest-enabler is disabled so it cannot force `-n auto` (the full count).
     """
     session.install("-e", ".[test]")
     session.run("python", "-m", "pytest", "-p", "no:enabler", "-s", "-m", "synth", "-n", str(WORKERS), "tests")

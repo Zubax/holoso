@@ -4,29 +4,20 @@ asserts the diagnostic class, a message fragment, and the presence of a source l
 """
 
 import functools
-import inspect
-import types
 from collections.abc import Callable
 
 import pytest
 
-from holoso._eel import lower
-from holoso._eel._desugar import desugar
-from holoso._errors import UnsupportedConstruct
+import holoso
+from holoso import UnsupportedConstruct
+
+_OPTIONS = holoso.Options(holoso.OperatorOptions())
 
 
 def _reject(target: object, fragment: str) -> None:
-    fn = target.__func__ if inspect.ismethod(target) else target
-    assert isinstance(fn, types.FunctionType)
+    assert callable(target)
     with pytest.raises(UnsupportedConstruct, match=fragment) as info:
-        desugar(fn)
-    assert info.value.location is not None
-    assert info.value.location.lineno > 0
-
-
-def _reject_lowering(target: object, fragment: str) -> None:
-    with pytest.raises(UnsupportedConstruct, match=fragment) as info:
-        lower(target)
+        holoso.synthesize(target, _OPTIONS, name="k")
     assert info.value.location is not None
     assert info.value.location.lineno > 0
 
@@ -193,15 +184,8 @@ def _k_kwargs(**kw: float) -> float:
     return kw["x"]
 
 
-def _k_for_unpack(ps: tuple[tuple[float, float], ...]) -> float:
-    acc = 0.0
-    for a, b in ps:
-        acc = acc + a + b
-    return acc
-
-
-def _k_is(x: object) -> bool:
-    return x is None
+def _k_is(x: object, y: object) -> bool:
+    return x is y
 
 
 def _k_in(x: float, vs: tuple[float, ...]) -> bool:
@@ -378,8 +362,7 @@ _CASES: list[tuple[object, str]] = [
     (_k_double_splat, r"`\*\*` call arguments"),
     (_k_varargs, r"\*args parameters"),
     (_k_kwargs, r"\*\*kwargs parameters"),
-    (_k_for_unpack, "for-loop target unpacking"),
-    (_k_is, "comparison operator `is`"),
+    (_k_is, "`is` is only supported with None"),
     (_k_in, "comparison operator `in`"),
     (_k_mangled_local, "name mangling"),
     (_k_mangled_trailing, "name mangling"),
@@ -387,7 +370,7 @@ _CASES: list[tuple[object, str]] = [
     (_k_string, "string literals are only supported as raise messages"),
     (_k_none, "`None` is only supported as a bare return value"),
     (_k_fstring, "f-strings are only supported as raise messages"),
-    (_k_bare_call, "expression statement result is unused"),
+    (_k_bare_call, "calls to 'print' are not supported yet"),  # bare calls now desugar; the callee still refuses
     (_k_bare_raise, "bare `raise` is not supported"),
     (_k_raise_from, "`raise ... from` is not supported"),
     (_k_raise_no_call, "`raise` requires"),
@@ -423,13 +406,6 @@ def _k_zip(a: float, b: float) -> float:
     return acc
 
 
-def _k_enumerate(a: float, b: float) -> float:
-    acc = 0.0
-    for p in enumerate((a, b)):
-        acc = acc + p[1]
-    return acc
-
-
 def _k_dynamic_index_read(i: int, x: float) -> float:
     t = (x, x + 1.0)
     return t[i]
@@ -460,7 +436,6 @@ def _k_bool_arithmetic(a: bool, x: float) -> float:
 
 _PE_CASES: list[tuple[object, str]] = [
     (_k_zip, "calls to 'zip' are not supported yet"),
-    (_k_enumerate, "calls to 'enumerate' are not supported yet"),
     (_k_dynamic_index_read, "a subscript index must be a compile-time constant int"),
     (_k_dynamic_index_store, "a subscript index must be a compile-time constant int"),
     (_k_aggregate_truthiness, "the truthiness of an aggregate is not supported"),
@@ -471,12 +446,12 @@ _PE_CASES: list[tuple[object, str]] = [
 
 @pytest.mark.parametrize("fn,fragment", _PE_CASES, ids=[getattr(fn, "__name__", "?") for fn, _ in _PE_CASES])
 def test_pe_rejection(fn: object, fragment: str) -> None:
-    _reject_lowering(fn, fragment)
+    _reject(fn, fragment)
 
 
 def test_lambda_rejection_points_at_the_lambda_token() -> None:
     with pytest.raises(UnsupportedConstruct) as info:
-        desugar(_k_lambda_target)  # type: ignore[arg-type]
+        holoso.synthesize(_k_lambda_target, _OPTIONS, name="k")
     location = info.value.location
     assert location is not None and location.line is not None
     assert location.line[location.col :].startswith("lambda")

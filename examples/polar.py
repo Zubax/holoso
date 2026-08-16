@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Cartesian <-> polar conversion as two 2-vector kernels.
-Contrast with ``cordic_sincos.py``, which computes sin/cos the hard way in software.
+Contrast with `cordic_sincos.py`, which computes sin/cos the hard way in software.
 """
 
 import math

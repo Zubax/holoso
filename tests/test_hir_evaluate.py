@@ -1,20 +1,21 @@
 """
-Acceptance gate + independence guard for the HIR evaluator (``holoso._hir.HirEvaluator``) and the front-end
-differential-oracle harness (``tests/_eeloracle.py``).
+Acceptance gate + independence guard for the HIR evaluator (`holoso._hir.HirEvaluator`) and the front-end
+differential-oracle harness (`tests/_eeloracle.py`).
 
-Before the evaluator can indict a frontend, it must agree with CPython on kernels already known correct: every
-bundled example (validated end-to-end by the reference/cosim suites) plus the scheduling corner kernels are lowered
-through the front end -- the evaluator is frontend-agnostic -- and driven through full shared vector sequences.
 Hand-built builder graphs pin the semantics no lowered kernel reaches: the poison family, the integer vocabulary,
-parallel phi snapshots, state carry/reset/commit atomicity, and the runaway bound.
+parallel phi snapshots, state carry/reset/commit atomicity, and the runaway bound. The example differential itself
+lives in test_eel_oracle and test_eel_int_corpus; the conviction pins here seed deliberately divergent
+HIR/reference pairs so the comparison paths those suites rely on cannot rot vacuous.
 """
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 
 import numpy as np
 import pytest
 
+import holoso
+from holoso import FAddOptions, FloatFormat, OperatorOptions, Options
 from holoso._eel import lower
 from holoso._hir import (
     BoolAnd,
@@ -45,93 +46,13 @@ from holoso._hir import (
 )
 
 from ._eeloracle import assert_hir_matches_reference
-from ._examples import SPECS, ExampleSpec
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from ._importguard import forbidden_imports
-from ._modelref import (
-    ChainedSlots,
-    SelectHold,
-    SlotSwap,
-    bool_phi_swap_computed_loop,
-    branch_boundary_kernel,
-    branchy_swap_mixed_arm_loop,
-    diamond_then_loop_kernel,
-    phi_swap_computed_loop,
-    phi_swap_loop,
-)
 
 
 def test_evaluator_layering() -> None:
     for forbidden in ("holoso._mir", "holoso._lir", "holoso._eel", "holoso._backend"):
         assert forbidden_imports("holoso._hir._evaluate", forbidden) == []
-
-
-def _assert_oracle(
-    make_kernel: Callable[[], Callable[..., object]], vectors: Sequence[Mapping[str, float | bool]], label: str
-) -> None:
-    hir = lower(make_kernel()).hir
-    compared = assert_hir_matches_reference(hir, make_kernel(), vectors, label=label)
-    assert compared == len(vectors)
-
-
-@pytest.mark.parametrize("spec", SPECS, ids=[spec.name for spec in SPECS])
-def test_oracle_on_examples(spec: ExampleSpec) -> None:
-    _assert_oracle(spec.make_kernel, spec.reference_vectors(), spec.name)
-
-
-_CORNERS: list[tuple[str, Callable[[], Callable[..., object]], list[dict[str, float | bool]]]] = [
-    (
-        "phi_swap",
-        lambda: phi_swap_loop,
-        [{"x": 1.5, "n": 5.0}, {"x": -2.0, "n": 0.0}, {"x": 0.25, "n": 3.0}],
-    ),
-    (
-        "phi_swap_computed",
-        lambda: phi_swap_computed_loop,
-        [{"x": 1.0, "n": 4.0}, {"x": -0.5, "n": 7.0}, {"x": 2.0, "n": 1.0}],
-    ),
-    (
-        "bool_phi_swap_computed",
-        lambda: bool_phi_swap_computed_loop,
-        [{"x": True, "n": 4.0}, {"x": False, "n": 3.0}, {"x": True, "n": 0.0}],
-    ),
-    (
-        "branchy_swap_mixed_arm",
-        lambda: branchy_swap_mixed_arm_loop,
-        [{"x": 1.0, "d": 2.0, "n": 4.0}, {"x": -1.0, "d": 0.5, "n": 3.0}, {"x": 0.5, "d": 4.0, "n": 0.0}],
-    ),
-    (
-        "branch_boundary",
-        lambda: branch_boundary_kernel,
-        [{"a": 1.0, "b": 2.0, "c": 3.0}, {"a": -1.0, "b": 0.5, "c": 2.0}, {"a": 0.0, "b": 0.0, "c": 0.0}],
-    ),
-    (
-        "diamond_then_loop",
-        lambda: diamond_then_loop_kernel,
-        [{"x": 3.0, "y": 1.5}, {"x": 1.0, "y": 4.0}, {"x": 2.0, "y": 2.0}],
-    ),
-    (
-        "slot_swap",
-        lambda: SlotSwap().step,
-        [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}, {"x": -1.0}],
-    ),
-    (
-        "chained_slots",
-        lambda: ChainedSlots().__call__,
-        [{"x": 1.0}, {"x": 2.0}, {"x": 0.75}, {"x": -3.0}],
-    ),
-    (
-        "select_hold",
-        lambda: SelectHold().step,
-        [{"x": 1.0, "c": 1.0}, {"x": 2.0, "c": -1.0}, {"x": 0.5, "c": 0.0}],
-    ),
-]
-
-
-@pytest.mark.parametrize("label,make_kernel,vectors", _CORNERS, ids=[label for label, _, _ in _CORNERS])
-def test_oracle_on_corner_kernels(
-    label: str, make_kernel: Callable[[], Callable[..., object]], vectors: list[dict[str, float | bool]]
-) -> None:
-    _assert_oracle(make_kernel, vectors, label)
 
 
 def _straight_line() -> Hir:
@@ -175,16 +96,6 @@ def test_folds_are_immune_to_the_ambient_numpy_error_state() -> None:
         with pytest.raises(NoNumber):
             FloatLog2().evaluate([FloatConst(-1.0)])
         assert FloatExp2().evaluate([FloatConst(1e30)]) == FloatConst(math.inf)
-
-
-def test_input_validation() -> None:
-    evaluator = HirEvaluator(_straight_line())
-    with pytest.raises(ValueError, match="expected 2 inputs"):
-        evaluator.run(1.0)
-    with pytest.raises(TypeError, match="input 0"):
-        evaluator.run(True, 1.0)
-    with pytest.raises(TypeError, match="input 1"):
-        evaluator.run(1.0, 1)
 
 
 def test_swap_loop_phis_resolve_in_parallel() -> None:
@@ -275,7 +186,7 @@ def test_poison_dead_operation_is_harmless() -> None:
 
 
 def _gated_poison(gate_value: bool) -> Hir:
-    """``gate and (1.0/x > 0.0)`` as the eager frontends spell it; poison appears whenever x == 0."""
+    """`gate and (1.0/x > 0.0)` as the eager frontends spell it; poison appears whenever x == 0."""
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", FloatType())
@@ -399,19 +310,19 @@ def _div_kernel(a: float, b: float) -> float:
 
 
 def test_reference_nan_discards_vector() -> None:
-    hir = lower(_sub_kernel).hir
+    hir = lower(_sub_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
     vectors = [{"a": math.inf, "b": math.inf}, {"a": 3.0, "b": 1.0}]
     assert assert_hir_matches_reference(hir, _sub_kernel, vectors, label="nan_discard") == 1
 
 
 def test_reference_raise_discards_vector() -> None:
-    hir = lower(_div_kernel).hir
+    hir = lower(_div_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
     vectors = [{"a": 1.0, "b": 0.0}, {"a": 1.0, "b": 2.0}]
     assert assert_hir_matches_reference(hir, _div_kernel, vectors, label="raise_discard") == 1
 
 
 def test_all_vectors_discarded_fails() -> None:
-    hir = lower(_div_kernel).hir
+    hir = lower(_div_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
     with pytest.raises(AssertionError, match="no transaction survived"):
         assert_hir_matches_reference(hir, _div_kernel, [{"a": 1.0, "b": 0.0}], label="vacuous")
 
@@ -460,39 +371,27 @@ class _Hold:
 
 def test_output_divergence_convicts() -> None:
     with pytest.raises(AssertionError, match="out_0"):
-        assert_hir_matches_reference(lower(_sub_kernel).hir, _add_kernel, [{"a": 3.0, "b": 1.0}], label="wrong_output")
+        assert_hir_matches_reference(
+            lower(_sub_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, _add_kernel, [{"a": 3.0, "b": 1.0}], label="wrong_output"
+        )
 
 
 def test_state_value_divergence_convicts() -> None:
-    hir = lower(_Gained(1.0).step).hir
+    hir = lower(_Gained(1.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     with pytest.raises(AssertionError, match="state _total"):
         assert_hir_matches_reference(hir, _Gained(2.0).step, [{"x": 3.0}], label="wrong_state")
 
 
 def test_missed_state_write_convicts() -> None:
-    hir = lower(_Gained(1.0).step).hir
+    hir = lower(_Gained(1.0).step, DEFAULT_UNROLL_MAX_TRIPS).hir
     with pytest.raises(AssertionError, match="changed-slot sets diverge"):
         assert_hir_matches_reference(hir, _Sneaky().step, [{"x": 3.0}], label="missed_write")
 
 
 def test_change_status_divergence_convicts_within_ulp_tolerance() -> None:
-    hir = lower(_Drift().step).hir
+    hir = lower(_Drift().step, DEFAULT_UNROLL_MAX_TRIPS).hir
     with pytest.raises(AssertionError, match="changed-slot sets diverge"):
         assert_hir_matches_reference(hir, _Hold().step, [{"x": 0.5}], label="drift")
-
-
-def _pair_kernel(x: float) -> tuple[float, float]:
-    return x + 1.0, x * 2.0
-
-
-def test_dropped_return_leaf_convicts() -> None:
-    builder = HirBuilder()
-    builder.block()
-    x = builder.input("x", FloatType())
-    builder.output("out_0", builder.operation(FloatAdd(), [x, builder.float_const(1.0)]))
-    builder.ret()
-    with pytest.raises(AssertionError, match="out_1 has no port"):
-        assert_hir_matches_reference(builder.finish(), _pair_kernel, [{"x": 2.0}], label="dropped_leaf")
 
 
 def _nan_branch_kernel(x: float) -> float:
@@ -508,9 +407,16 @@ def test_consumed_nan_fails_loudly() -> None:
     The documented comparable-domain edge: CPython consumes a NaN in a comparison without surfacing it in any leaf,
     so the discard rule cannot see it, and the evaluator's poisoned branch condition convicts for eye triage.
     """
-    hir = lower(_nan_branch_kernel).hir
+    hir = lower(_nan_branch_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir
     with pytest.raises(AssertionError, match="names no number"):
         assert_hir_matches_reference(hir, _nan_branch_kernel, [{"x": math.inf}], label="consumed_nan")
+
+
+def test_consumed_nan_poisons_the_evaluators_branch_condition() -> None:
+    evaluator = HirEvaluator(lower(_nan_branch_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir)
+    assert evaluator.run(1.0) == [2.0]
+    with pytest.raises(NoNumber, match="branch condition"):
+        evaluator.run(math.inf)
 
 
 class _Latch:
@@ -586,31 +492,16 @@ class _NanConfig:
 
 def test_nan_in_untouched_attribute_is_not_a_discard() -> None:
     """A frozen attribute the kernel never lowers may hold NaN; only the observable surface gates the discard."""
-    hir = lower(_NanConfig().step).hir
+    hir = lower(_NanConfig().step, DEFAULT_UNROLL_MAX_TRIPS).hir
     vectors: list[dict[str, float | bool]] = [{"x": 1.0}, {"x": 2.0}]
     assert assert_hir_matches_reference(hir, _NanConfig().step, vectors, label="nan_config") == 2
 
 
-class _Flagged:
-    def __init__(self) -> None:
-        self.level = 0.0
-
-    def step(self, x: float, /) -> tuple[float, bool]:
-        return x + 1.0, x > 100.0
-
-
-def test_dropped_bool_leaf_convicts_despite_zero_valued_float_slot() -> None:
-    """``False == 0.0`` in Python; the elision fallback must not let a dropped bool leaf hide behind it."""
-    builder = HirBuilder()
-    builder.block()
-    x = builder.input("x", FloatType())
-    level = builder.float_state_read("level")
-    builder.state_slot("level", FloatConst(0.0), level)
-    builder.output("out_0", builder.operation(FloatAdd(), [x, builder.float_const(1.0)]))
-    builder.output("state_level", level)
-    builder.ret()
-    with pytest.raises(AssertionError, match="out_1 has no port"):
-        assert_hir_matches_reference(builder.finish(), _Flagged().step, [{"x": 2.0}], label="dropped_bool")
+def test_nan_in_untouched_attribute_is_accepted_by_public_synthesis() -> None:
+    options = Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(8, 23))
+    model = holoso.synthesize(_NanConfig().step, options, name="nan_config").numerical_model.elaborate()
+    assert [float(v) for v in model.run(1.5)] == [1.5]
+    assert [float(v) for v in model.run(-2.0)] == [-2.0]
 
 
 class _NoneKernel:
@@ -637,7 +528,7 @@ class _SeqNan:
 
 
 def test_stateful_sequence_ends_at_first_discard() -> None:
-    hir = lower(_SeqNan().step).hir
+    hir = lower(_SeqNan().step, DEFAULT_UNROLL_MAX_TRIPS).hir
     vectors: list[dict[str, float | bool]] = [{"x": 1.0}, {"x": math.inf}, {"x": 2.0}]
     assert assert_hir_matches_reference(hir, _SeqNan().step, vectors, label="seq_nan") == 1
 
@@ -649,13 +540,25 @@ def _big_kernel() -> int:
 def test_promoted_big_integer_compares_as_its_float_image() -> None:
     """
     C-promotion at a join is a deliberate type-system deviation, so a float lane meeting an int the reference states
-    exactly carries ``float(int)`` -- rounding included -- and that is the faithful value, not a divergence.
+    exactly carries `float(int)` -- rounding included -- and that is the faithful value, not a divergence.
     """
     builder = HirBuilder()
     builder.block()
     builder.output("out_0", builder.float_const(float(2**54 + 1)))
     builder.ret()
     assert assert_hir_matches_reference(builder.finish(), _big_kernel, [{}], label="promoted_int") == 1
+
+
+def _pair_kernel(x: float) -> tuple[float, float]:
+    return x + 1.0, x * 2.0
+
+
+class _Flagged:
+    def __init__(self) -> None:
+        self.level = 0.0
+
+    def step(self, x: float, /) -> tuple[float, bool]:
+        return x + 1.0, x > 100.0
 
 
 class _IntLeaf:
@@ -666,7 +569,28 @@ class _IntLeaf:
         return 1
 
 
-def test_dropped_int_leaf_convicts_despite_equal_float_slot() -> None:
+def _dropped_float_leaf_hir() -> Hir:
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", FloatType())
+    builder.output("out_0", builder.operation(FloatAdd(), [x, builder.float_const(1.0)]))
+    builder.ret()
+    return builder.finish()
+
+
+def _dropped_bool_leaf_hir() -> Hir:
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", FloatType())
+    level = builder.float_state_read("level")
+    builder.state_slot("level", FloatConst(0.0), level)
+    builder.output("out_0", builder.operation(FloatAdd(), [x, builder.float_const(1.0)]))
+    builder.output("state_level", level)
+    builder.ret()
+    return builder.finish()
+
+
+def _dropped_int_leaf_hir() -> Hir:
     builder = HirBuilder()
     builder.block()
     builder.input("x", FloatType())
@@ -674,8 +598,33 @@ def test_dropped_int_leaf_convicts_despite_equal_float_slot() -> None:
     builder.state_slot("y", FloatConst(1.0), y)
     builder.output("state_y", y)
     builder.ret()
-    with pytest.raises(AssertionError, match="out_0 has no port"):
-        assert_hir_matches_reference(builder.finish(), _IntLeaf().step, [{"x": 0.5}], label="dropped_int")
+    return builder.finish()
+
+
+_DROPPED_LEAF_CASES: list[tuple[str, Callable[[], Hir], Callable[..., object], str]] = [
+    ("float", _dropped_float_leaf_hir, _pair_kernel, "out_1 has no port"),
+    ("bool", _dropped_bool_leaf_hir, _Flagged().step, "out_1 has no port"),
+    ("int", _dropped_int_leaf_hir, _IntLeaf().step, "out_0 has no port"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,make_hir,reference,match", _DROPPED_LEAF_CASES, ids=[case[0] for case in _DROPPED_LEAF_CASES]
+)
+def test_dropped_leaf_convicts_in_every_family(
+    label: str, make_hir: Callable[[], Hir], reference: Callable[..., object], match: str
+) -> None:
+    """`False == 0.0` and `1 == 1.0` in Python; a dropped bool/int leaf must not hide behind an equal slot."""
+    with pytest.raises(AssertionError, match=match):
+        assert_hir_matches_reference(make_hir(), reference, [{"x": 2.0}], label=f"dropped_{label}")
+
+
+class _PrivateTotal:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def step(self, x: float) -> None:
+        self._s = self._s + x
 
 
 def test_state_port_exposing_private_slot_convicts() -> None:
@@ -687,9 +636,11 @@ def test_state_port_exposing_private_slot_convicts() -> None:
     builder.output("state__s", total)
     builder.ret()
     with pytest.raises(AssertionError, match="private slots"):
-        assert_hir_matches_reference(builder.finish(), _Gained(1.0).step, [{"x": 1.0}], label="leaky")
+        assert_hir_matches_reference(builder.finish(), _PrivateTotal().step, [{"x": 1.0}], label="leaky")
 
 
 def test_typoed_vector_key_crashes_instead_of_discarding() -> None:
     with pytest.raises(KeyError):
-        assert_hir_matches_reference(lower(_add_kernel).hir, _add_kernel, [{"a": 1.0, "WRONG": 2.0}], label="typo")
+        assert_hir_matches_reference(
+            lower(_add_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, _add_kernel, [{"a": 1.0, "WRONG": 2.0}], label="typo"
+        )

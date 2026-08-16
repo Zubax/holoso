@@ -1,12 +1,10 @@
 """
-Public-API, black-box behavioral tests for the front-end language features landed alongside the UART example: the
-boolean ``^`` operator, instance/inherited method calls, ``@property`` reads, and module-level numeric/boolean
-constant resolution. Every test drives the compiler ONLY through ``holoso.synthesize(fn, ops)`` and exercises the
-elaborated numerical model, asserting on observable output values, so the tests survive a refactor of the front end.
-
-The two rejection checks (``^`` on floats, a state-writing helper) guard real soundness boundaries: without them a
-float ``^`` would silently miscompile and a state-mutating helper would be inlined past the entry method's state-slot
-analysis -- both behavioral, not mere input validation.
+Public-API, black-box behavioral tests for front-end language features: the boolean `^` operator, instance/
+inherited/static method calls, `@property` reads, descriptor and attribute-access-protocol boundaries, and
+module-level constant resolution. Every test drives the compiler ONLY through `holoso.synthesize(fn, ops)` and
+exercises the elaborated numerical model, asserting on observable output values, so the tests survive a refactor of
+the front end. The rejection checks guard soundness boundaries where a silent miscompile would otherwise diverge
+from Python -- behavioral, not mere input validation.
 """
 
 import itertools
@@ -26,8 +24,8 @@ from holoso import (
     FloatFormat,
     OperatorOptions,
     Options,
+    UnsupportedConstruct,
 )
-from holoso._errors import UnsupportedConstruct
 
 _FMT = FloatFormat(4, 8)
 
@@ -49,22 +47,12 @@ def _model(target: Callable[..., object]) -> holoso.NumericalSimulator:
     return holoso.synthesize(target, _ops()).numerical_model.elaborate()
 
 
-def _xor2(a: bool, b: bool) -> bool:
-    return a ^ b
-
-
 def _xor_chain(a: bool, b: bool, c: bool, d: bool) -> bool:
     return a ^ b ^ c ^ d
 
 
 def _float_xor(x: float, y: float) -> float:
     return x ^ y  # type: ignore[operator, no-any-return]  # deliberately ill-typed: exercises rejection of float ^
-
-
-def test_bool_xor_truth_table() -> None:
-    sim = _model(_xor2)
-    for a, b in itertools.product((False, True), repeat=2):
-        assert bool(sim.run(a, b)[0]) == (a != b), f"xor {a} {b}"
 
 
 def test_bool_xor_chain_is_parity() -> None:
@@ -74,7 +62,7 @@ def test_bool_xor_chain_is_parity() -> None:
 
 
 def test_xor_on_floats_is_rejected() -> None:
-    # ``^`` requires boolean operands; a float operand must fail loudly, not silently lower to some float op.
+    # `^` requires boolean operands; a float operand must fail loudly, not silently lower to some float op.
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_float_xor, _ops())
 
@@ -93,18 +81,6 @@ class _ParityUser(_ParityBase):
         return self._polarized_parity(a, b, c)  # an INHERITED method call, resolved through the MRO
 
 
-class _StateWriter:
-    def __init__(self) -> None:
-        self._latch = False
-
-    def _absorb(self, x: bool) -> bool:
-        self._latch = x
-        return x
-
-    def __call__(self, x: bool) -> bool:
-        return self._absorb(x)
-
-
 def test_inherited_method_call_even_and_odd() -> None:
     even = _model(_ParityUser(False).__call__)
     odd = _model(_ParityUser(True).__call__)
@@ -112,12 +88,6 @@ def test_inherited_method_call_even_and_odd() -> None:
         want_even = sum(bits) % 2 == 1
         assert bool(even.run(*bits)[0]) == want_even, f"even {bits}"
         assert bool(odd.run(*bits)[0]) == (not want_even), f"odd {bits}"
-
-
-def test_method_writing_self_state_is_rejected() -> None:
-    # A called method may read self but not write it (the entry method owns the state-slot analysis).
-    with pytest.raises(UnsupportedConstruct, match="a helper method cannot write attributes of the receiver"):
-        holoso.synthesize(_StateWriter().__call__, _ops())
 
 
 class _Thresholded:
@@ -361,8 +331,9 @@ def test_read_only_attr_equality_does_not_poison_later_folds() -> None:
 class _HelperGuardedStateWrite:
     """
     A called helper whose self-write hides behind a guard the reset snapshot would fold dead -- stale once the entry
-    method writes that guard at runtime. A reachability-folded self-write check prunes the dead write and wrongly
-    accepts the helper (then drops the write, diverging from Python); pure-syntactic detection must reject it.
+    method writes that guard at runtime. The syntactic seed (dead arms included) pins both attributes as state, so
+    the helper's guarded write compiles into the same latch CPython computes; a reachability-folded seed would have
+    pruned the write and silently diverged.
     """
 
     def __init__(self) -> None:
@@ -379,17 +350,19 @@ class _HelperGuardedStateWrite:
         return self._arm()
 
 
-def test_guarded_helper_state_write_is_rejected() -> None:
-    # The self-write detection on a called helper must be purely syntactic: a `self.x =` anywhere in the helper rejects
-    # it, even under a guard the snapshot would fold dead. A reachability-folded check would prune and silently accept.
-    with pytest.raises(UnsupportedConstruct, match="a helper method cannot write attributes of the receiver"):
-        holoso.synthesize(_HelperGuardedStateWrite().__call__, _ops())
+def test_guarded_helper_state_write_compiles_and_latches() -> None:
+    # The seed must stay purely syntactic even for called helpers: the guarded write pins self._x as state although
+    # the reset snapshot folds the guard dead, so the latch behaves exactly as CPython's across transactions.
+    sim = _model(_HelperGuardedStateWrite().__call__)
+    reference = _HelperGuardedStateWrite()
+    for p in (False, False, True, False, True, False):
+        assert bool(sim.run(p)[0]) == reference(p), f"p={p}"
 
 
 class _PropertyShadowsDict:
     """
-    A class ``property`` whose name also has an instance ``__dict__`` entry: the data descriptor shadows the dict
-    slot, so a read of ``self._mode`` must resolve through the getter (True), not the snapshot value (False).
+    A class `property` whose name also has an instance `__dict__` entry: the data descriptor shadows the dict
+    slot, so a read of `self._mode` must resolve through the getter (True), not the snapshot value (False).
     """
 
     @property
@@ -418,7 +391,7 @@ def test_property_shadowing_dict_entry_resolves_via_getter() -> None:
 
 class _PropertySetterWrite:
     """
-    A property with a setter, shadowed by a same-named ``__dict__`` entry. ``self.flag = x`` invokes the setter in
+    A property with a setter, shadowed by a same-named `__dict__` entry. `self.flag = x` invokes the setter in
     Python (descriptor precedence) but would be a plain state-slot store to the dead snapshot entry in the compiler --
     a silent divergence, since the reader inlines the getter. The write must be rejected, not miscompiled.
     """
@@ -448,7 +421,7 @@ def test_property_setter_assignment_is_rejected() -> None:
 
 
 class _DataDescriptor:
-    """A minimal data descriptor (defines ``__set__``, so it takes precedence over a same-named instance __dict__)."""
+    """A minimal data descriptor (defines `__set__`, so it takes precedence over a same-named instance `__dict__`)."""
 
     def __get__(self, instance: object, owner: object) -> bool:
         return True
@@ -507,7 +480,7 @@ def test_data_descriptor_read_is_rejected() -> None:
 class _Meta(type):
     @property
     def flag(cls) -> bool:
-        return False  # a metaclass property: governs ``Class.flag``, NOT instance access
+        return False  # a metaclass property: governs `Class.flag`, NOT instance access
 
 
 class _MetaclassPropertyShadow(metaclass=_Meta):
@@ -521,7 +494,7 @@ class _MetaclassPropertyShadow(metaclass=_Meta):
 
 
 class _InterceptingRead:
-    """A receiver whose ``__getattribute__`` rescales one attribute -- an honest idiom, but not one Holoso can read."""
+    """A receiver whose `__getattribute__` rescales one attribute -- an honest idiom, but not one Holoso can read."""
 
     def __init__(self) -> None:
         self.gain = 2.0

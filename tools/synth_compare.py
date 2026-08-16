@@ -2,10 +2,10 @@
 """
 Before/after synthesis comparison for the bundled example matrix.
 
-``capture`` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency, f_max,
+`capture` synthesizes every TARGET on the current checkout and writes a JSON of per-target cycle latency, f_max,
 slack, fabric area, and pass/fail.
 
-``render`` reads a BEFORE and an AFTER JSON and emits a side-by-side HTML report with deltas and a flag on every
+`render` reads a BEFORE and an AFTER JSON and emits a side-by-side HTML report with deltas and a flag on every
 target whose operator stage knobs were retuned.
 
 Report-only tooling -- not part of the compiler, no tests, no design-doc coupling.
@@ -30,12 +30,11 @@ sys.path.insert(0, str(REPO))
 
 import holoso  # noqa: E402
 from holoso._eel import lower  # noqa: E402
-from holoso._hir import optimize  # noqa: E402
 from holoso._lir import RegallocTuning, build  # noqa: E402
 from holoso._mir import lower as lower_to_mir  # noqa: E402
 from synth import build_compiler_ooc_design  # noqa: E402
 from synth.flows import make_flow  # noqa: E402
-from tests._modelref import build_ops  # noqa: E402
+from tests._modelref import mir_options  # noqa: E402
 from tests._synth_targets import TARGETS  # noqa: E402
 
 # Per-flow resource-primitive names for the LUT/FF/DSP/BRAM report columns; each tool names them differently.
@@ -63,12 +62,7 @@ def capture(out_path: str) -> None:
         }
         try:
             lir = build(
-                lower_to_mir(
-                    optimize(lower(target.kernel()).hir, target.ops.ifconv_max_ops),
-                    build_ops(target.ops),
-                    target.ops.ffmt,
-                    target.ops.ifmt,
-                ),
+                lower_to_mir(lower(target.kernel(), target.ops.unroll_max_trips).hir, mir_options(target.ops)),
                 target.name,
                 target.ops.ucode_fetch_stages,
                 RegallocTuning(
