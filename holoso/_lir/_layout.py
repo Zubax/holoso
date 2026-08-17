@@ -35,12 +35,10 @@ def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) 
 
 def install_inclusive_makespan(work_makespan: int, install_pushes_makespan: bool) -> int:
     """
-    The block makespan inclusive of its tail install: a block whose install lands PAST the work makespan is one higher.
-    That happens only for a computed source that is the block's own last-committing work, which the install must fire
-    one step after to read-first it. A tail whose every install fits at the makespan -- a block-entry-resident source,
-    or a computed source committing before the last work -- adds no step. The single owner of this `+1` so the overlap
-    layout's boundary derivation and the per-block LirBlock makespan cannot disagree on it (the dual of the per-install
-    `install_issue_cycle`).
+    The block makespan inclusive of its tail install: one higher for a block whose install issues past the work
+    makespan (a source that is the block's own last-committing work; see `install_issue_cycle`, this function's
+    per-install dual). The single owner of this `+1` so the overlap layout's boundary derivation and the per-block
+    LirBlock makespan cannot disagree on it.
     """
     return work_makespan + (1 if install_pushes_makespan else 0)
 
@@ -163,23 +161,19 @@ def schedule_with_overlap(
         overlaps = bool(targets) and not has_install and all(preds[target] == 1 for target in targets)
         # The drained boundary is the latest cycle a value LANDS in this block's frame, taken per op -- a pooled result
         # and an inline result both write the array combinationally and land at the same bank-independent cycle. Three
-        # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install -- one whose source
-        # is the block's own LAST work lands a step past it at the drain boundary `boundary_step(makespan)` (the
-        # makespan install-inclusive), while an install fitting at the makespan (a resident source, or a computed
-        # source committing before the last work) lands at `landing_cycle(sched.makespan)` within the work
-        # boundary, paying neither the +1 step nor the later drain; (2) a NON-coalesced state slot's read-first boundary
-        # copy lands at `boundary_step(sched.makespan)` -- its source is among the op landings, but the copy adds the
-        # fetch-pipeline; `has_state_copy` flags whether the lone Ret block has one, decided by the coalescing
+        # landings are INVISIBLE to the op schedule and are added explicitly: (1) a phi tail install lands read-first at
+        # `boundary_step(makespan)`, the makespan install-inclusive (one past the work makespan only when a source is
+        # the block's own last work; see `install_issue_cycle`); (2) a NON-coalesced state slot's read-first
+        # boundary copy lands at `boundary_step(sched.makespan)` -- its source is among the op landings, but the copy
+        # adds the fetch-pipeline; `has_state_copy` flags whether the lone Ret block has one, decided by the coalescing
         # fixpoint -- a coalesced slot writes its register in place and needs no copy, so the charge usually clears
         # (the fixpoint may latch it back on); (3) the entry's input loads land on cycle 1.
         work_drain = max(
             (_value_word_and_landing(mir, vid, issue, fetch_lag)[1] for vid, issue in sched.issue_cycle.items()),
             default=0,
         )
-        if install_pushes_makespan:
+        if has_install:
             work_drain = max(work_drain, boundary_step(makespan, fetch_lag))
-        elif has_install:
-            work_drain = max(work_drain, landing_cycle(sched.makespan, fetch_lag))
         if bid == mir.ret_block and has_state_copy:
             work_drain = max(work_drain, boundary_step(sched.makespan, fetch_lag))
         if bid == mir.entry:

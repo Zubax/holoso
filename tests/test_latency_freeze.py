@@ -64,9 +64,9 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "priority_encoder-e6m18": (21, 21),
     "crc32-e6m18": (45, 45),
     "lfsr16-e6m18": (12, 12),
-    # Branchy kernels whose phi-arm installs source block-entry-resident values (boolean/float live-out constants, or an
-    # input/state read) on the normal path -- the inline-class timing (no source-sample edge, no +1 step) lands each
-    # within the work makespan rather than at the copy-pipeline boundary, shrinking every downstream block base.
+    # Branchy kernels whose phi-arm installs have settled sources (boolean/float live-out constants, or an
+    # input/state read) on the normal path -- no read-first push, so each lands within the work boundary,
+    # shrinking every downstream block base.
     "uart_tx-e6m18": (12, 37),
     "uart_rx-e6m18": (6, 51),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
@@ -101,8 +101,8 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "flux_observer-e8m36": (87, 87),
     # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
     # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
-    "imu_fusion-e8m36": (234, 412),
-    "imu_fusion-e6m18": (207, 349),
+    "imu_fusion-e8m36": (233, 409),
+    "imu_fusion-e6m18": (206, 346),
 }
 
 

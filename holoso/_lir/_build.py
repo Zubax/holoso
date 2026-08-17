@@ -136,10 +136,11 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
                     f"block {mir_block.id} branches on a phi that takes an arm from the same block; the install "
                     f"would overwrite the condition before the branch reads it"
                 )
-    # The phi-residency classification (`value_resident_at_entry`) rests on every phi-bearing block being
-    # multi-predecessor, which is what keeps overlap spills out of phi registers; a future pass emitting a phi into a
-    # single-predecessor block would silently void that argument (the sibling-install tripwire does not read-gate
-    # installs against in-flight landings), so the reliance is machine-checked here.
+    # The phi-residency premise -- a phi's register settles before any frame that reads it begins, so a phi source
+    # is always settled (`install_source_commit`) -- rests on every phi-bearing block being multi-predecessor, which
+    # is what keeps overlap spills out of phi registers; a future pass emitting a phi into a single-predecessor block
+    # would silently void that argument (the sibling-install tripwire does not read-gate installs against in-flight
+    # landings), so the reliance is machine-checked here.
     pred_edges = pred_count(mir)
     for mir_block in mir.blocks:
         assert (
@@ -149,7 +150,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     # Schedule every block in reverse-postorder (a block after its forward-edge predecessors) and lay out each block's
     # terminator offset, with cross-block software pipelining: a block whose successors are all single-predecessor
     # shrinks its terminator below the drained boundary and spills its in-flight results into the successor, which
-    # inherits the busy/landing residue. The +1-install drain keeps install-bearing blocks unshrunk, matching makespan.
+    # inherits the busy/landing residue. The install drain keeps install-bearing blocks unshrunk, matching makespan.
     #
     # The install set is computed to a fixpoint. `block_has_install` marks a block install-bearing from the CFG shape
     # (any phi arm originates in it), but a block whose every arm COALESCES onto the merged register installs nothing,
@@ -181,7 +182,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         result = layout_and_allocate(
             mir, wide_mir, bool_mir, pool, has_install_blocks, has_state_copy, fetch_lag, tuning
         )
-        raw = actual_install_blocks(result.alloc, wide_mir, bool_mir, result.overlap.block_sched)
+        raw = actual_install_blocks(result.alloc, result.overlap.block_sched, result.overlap.block_inflight, fetch_lag)
         # The two derivations of install-bearing -- the CFG-shape seed and the post-allocation copies -- must agree on
         # the key universe: a block outside the seed can never install, so a wider `raw` means the derivations
         # drifted, which must fail loudly rather than be absorbed as a silent permanent pin. On the FIRST round the
@@ -262,19 +263,19 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             )
         ]
         work_makespan = sched.makespan
-        # A None commit from `install_source_commit` is a block-entry-resident source needing no read-first
-        # sampling. The placement (`install_issue_cycle`) charges the +1 only for a computed source committing at
-        # the makespan; a resident or earlier-committing computed source pays none.
+        inflight = overlap.block_inflight[block.id]
+        # Placement per install through the one `install_source_commit` + `install_issue_cycle` pair (shared with
+        # the push classification and the interference residence, so the three cannot drift).
         wide_copies = []
         for c in alloc.wide_copies.get(block.id, []):
             src = wide_operand(wide_mir, c.source, c.conditioner, alloc, const_pool)
-            commit = install_source_commit(sched, wide_mir.nodes[c.source], c.source)
+            commit = install_source_commit(sched, c.source, inflight, fetch_lag)
             issue = install_issue_cycle(work_makespan, commit)
             wide_copies.append(WideCopy(RegRef(c.dst), src, issue, commit is None))
         bool_writes = []
         for w in alloc.bool_writes.get(block.id, []):
             bsrc = bool_operand(bool_mir, w.source, alloc, w.inversion)
-            commit = install_source_commit(sched, bool_mir.nodes[w.source], w.source)
+            commit = install_source_commit(sched, w.source, inflight, fetch_lag)
             bool_writes.append(
                 BoolWrite(BoolRegRef(w.dst), bsrc, install_issue_cycle(work_makespan, commit), commit is None)
             )
@@ -302,9 +303,11 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             landing <= term_offset for landing in install_landings
         ), f"block {block.id}: a phi-arm install lands at {max(install_landings)} past the terminator {term_offset}"
         # A tail install must read its source register strictly before a sibling install's write to that register
-        # lands (see `value_resident_at_entry` for why placement guarantees this): the structural tripwire for a
-        # placement regression, which the value cosim shares with the model and cannot see. Cross-bank pairs are inert
-        # (RegRef never equals BoolRegRef), so one check serves both banks.
+        # lands. Placement guarantees this because a sibling-written source register is always a settled one -- a
+        # non-settled source is live through the boundary (`phi_arm_out`), so interference keeps every sibling install
+        # destination off its register -- and settled installs share one unpushed fire step (`install_issue_cycle`).
+        # The structural tripwire for a placement regression, which the value cosim shares with the model and cannot
+        # see. Cross-bank pairs are inert (RegRef never equals BoolRegRef), so one check serves both banks.
         for writer in installs:
             for reader in installs:
                 if reader.source.source == writer.dst:

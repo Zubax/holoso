@@ -78,6 +78,7 @@ from ._modelref import (
     branch_boundary_kernel,
     build_model_and_interpreter,
     mir_options,
+    staged_fadd_options,
     ChainedSlots,
     COMPARATOR_OP_CASES,
     default_mir,
@@ -482,10 +483,10 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
 def test_bool_only_block_drains_at_the_work_boundary() -> None:
     # A drained block that does WORK carrying only boolean values at its boundary lands at boundary_step(makespan) (the
     # one bank-independent drain). The drain distinction that remains is the install's SOURCE, not its bank: a tail
-    # INSTALL whose source is COMPUTED in-block reads-first one step past the work makespan (its block_makespan absorbs
-    # the +1), so it drains one step LATER than a resident-source install that fires combinationally at the work
-    # makespan. Crash-before: a drain that ignored the install source would land a computed-source copy one PC before
-    # its read-first lands.
+    # INSTALL whose source is the block's own LAST work reads-first one step past the work makespan (its
+    # block_makespan absorbs the +1), so it drains one step LATER than a settled-source install that fires
+    # combinationally at the work makespan. Crash-before: a drain that ignored the install source would land a
+    # last-work copy one PC before its read-first lands.
 
     def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
         return not block.wide_copies and not any(
@@ -504,35 +505,43 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     ), "pfd Ret: bool work, no install"
     assert pfd_ret.term_offset == boundary_step(pfd_ret.block_makespan, pfd.fetch_lag)
 
-    # An install-bearing bool-only block's drain tracks its install's SOURCE. A COMPUTED-source copy (the phi arm is an
-    # operator result the block produced) reads-first one step past the work makespan, so its block_makespan absorbs the
-    # +1 and the block drains one step LATER -- shrinking it would read the copy one PC before it lands. A source
-    # RESIDENT at block entry (here an input) needs no read-first: the install fires inline-class at the work makespan,
-    # so the block drains one step EARLIER, at boundary_step(makespan). Both residual installs are
-    # forced by `return r, <arm>` keeping the c-false arm live past the merge so it cannot coalesce onto the phi
-    # register; if-conversion is disabled so each diamond stays a real branch rather than collapsing to a select.
-    # (In-place state commit elided the former majority_voter sticky-fault installs.)
+    # An install-bearing bool-only block's drain tracks its install's SOURCE. A copy whose source is the block's own
+    # LAST work reads-first one step past the work makespan, so its block_makespan absorbs the +1 and the block
+    # drains one step LATER -- shrinking it would read the copy one PC before it lands. A source SETTLED at block
+    # entry (here an input) needs no read-first sampling: the install fires at the work makespan and the block drains
+    # at boundary_step(makespan). Both residual installs are forced by `return r, <arm>` keeping the c-false arm live
+    # past the merge so it cannot coalesce onto the phi register; if-conversion is disabled so each diamond stays a
+    # real branch rather than collapsing to a select. (In-place state commit elided the former majority_voter
+    # sticky-fault installs.)
 
     def bool_install_blocks(lir: Lir) -> list[LirBlock]:  # bool-only blocks carrying a tail bool install
         return [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]
 
     def computed_source_install(a: bool, b: bool, c: bool) -> tuple[bool, bool]:
-        x = a and b  # COMPUTED in-block; returned so the c-false arm (= x) cannot coalesce -> a computed-source install
-        r = x
+        # The bool twin of _LastWorkArmSource: q's arm value coalesces onto q's register, so r's install in each arm
+        # sources the arm's OWN (last-committing) boolean op and cannot coalesce (r and q are both live at Ret).
         if c:
-            r = a or b
-        return r, x
+            q = a or b
+            r = q
+        else:
+            q = a and b
+            r = b
+        return r, q
 
-    computed = bool_install_blocks(
-        build_lir(_run(computed_source_install, replace(OPS, ifconv_max_ops=0)), "computed_source_install")
-    )
-    assert computed and all(
-        not w.resident_source for b in computed for w in b.bool_writes
-    ), "no computed-source bool install to exercise the later-draining case"
+    computed = [
+        b
+        for b in bool_install_blocks(
+            build_lir(_run(computed_source_install, replace(OPS, ifconv_max_ops=0)), "computed_source_install")
+        )
+        if any(not w.settled_source for w in b.bool_writes)
+    ]
+    assert computed, "no computed-source bool install to exercise the pushed-drain case"
     for block in computed:
+        work = max(op.commit_cycle for op in _block_ops(block))
+        assert block.block_makespan == work + 1, "a last-work copy source must push the block makespan by one"
         assert block.term_offset == boundary_step(
             block.block_makespan, _FETCH_LAG
-        ), "a computed-source bool install reads-first past the work makespan, draining where its block_makespan lands"
+        ), "a last-work bool install reads-first past the work makespan, draining where its block_makespan lands"
 
     def resident_source_install(a: bool, b: bool, c: bool) -> tuple[bool, bool]:
         r = a  # the c-false arm is the INPUT a (resident at block entry), returned so it cannot coalesce
@@ -544,12 +553,13 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
         build_lir(_run(resident_source_install, replace(OPS, ifconv_max_ops=0)), "resident_source_install")
     )
     assert resident and all(
-        w.resident_source for b in resident for w in b.bool_writes
-    ), "no resident-source bool install to exercise the inline-class drain"
+        w.settled_source for b in resident for w in b.bool_writes
+    ), "no settled-source bool install to exercise the unpushed drain"
     for block in resident:
+        assert block.block_makespan == 0, "a settled source must not push the empty block's makespan"
         assert block.term_offset == boundary_step(block.block_makespan, _FETCH_LAG), (
-            "a resident-source bool install fires inline-class at the work makespan, one step under "
-            "a computed-source one"
+            "a settled-source bool install fires at the work makespan and drains at its read-first landing, "
+            "one step under a last-work one"
         )
 
 
@@ -637,11 +647,11 @@ def _const_branch_mir(ops: MirOptions) -> Mir:
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_const_branch_install_block_drains_to_its_inline_landing(config: OperatorCase) -> None:
     # Regression (fuzz-found B1 miscompile): a block whose branch condition is a literal installs that constant with a
-    # tail bool write. The source is entry-resident, so the write is inline-class: it fires at the combinational step
-    # and lands one read-first edge later, at the combinational landing within the work makespan -- and the block must
-    # drain to exactly that landing, where the terminator then reads the condition the following step. The drain must
-    # neither shrink below it (terminator reads a stale condition -- the original B1 bug) nor pay the wider
-    # computed-source-copy boundary. Crash-before: KeyError (model) / stale branch read (RTL).
+    # tail bool write. The source is settled, so the write fires at the work makespan and lands one read-first edge
+    # later, within the work boundary -- and the block must drain to exactly that landing, where the terminator then
+    # reads the condition the following step. The drain must neither shrink below it (terminator reads a stale
+    # condition -- the original B1 bug) nor pay the wider last-work-copy boundary. Crash-before: KeyError (model) /
+    # stale branch read (RTL).
     lir = build_lir(_const_branch_mir(config.make_mir(FMT)), f"const_branch_{config.label}")
     const_blocks = [
         b
@@ -2379,3 +2389,38 @@ def test_forced_state_copy_regrowth_latches_and_stays_correct(
     for raw in (1.0, 2.0, 3.0, 4.0, 5.0):
         x = fmt.decode(fmt.encode(raw))
         assert float(model.run(x)[0]) == reference(x)
+
+
+def test_inflight_source_install_fires_exactly_at_the_spilled_landing() -> None:
+    # The equality boundary of the in-flight source classification: the entry's LAST op is a staged (latency >= 2),
+    # error-port-free fadd, so the entry's issue-side envelope is that op's own write word (term = commit) and its
+    # result spills at successor-local fetch_lag -- the deepest a received spill can land. The op-less pass-through
+    # arm's install then fires EXACTLY at that landing (fire == landing; a read at a landing step returns the new
+    # value), with the virtual commit negative and no push. `x` is read past the merge so the arm cannot coalesce;
+    # value correctness on both paths rides the model (RTL equivalence is covered by the cosim twin in
+    # test_install_landing).
+    def passthrough(c: bool, a: float, b: float) -> tuple[float, float]:
+        x = a + b
+        if c:
+            y = a / b
+        else:
+            y = x
+        return y * b, x
+
+    lir = build_lir(_run(passthrough, mir_options(staged_fadd_options(FMT)), FMT), "inflight_equality")
+    entry = lir.blocks[lir.entry]
+    producer = next(op for op in entry.ops if op.operator.mnemonic.startswith("fadd"))
+    assert producer.latency >= 2, "the staged fadd must be deep enough for its word to set the entry envelope"
+    assert entry.term_offset == producer.commit_cycle, "the entry envelope must be the producer's own write word"
+    spilled_landing = successor_local_cycle(landing_cycle(producer.commit_cycle, lir.fetch_lag), entry.term_offset)
+    assert spilled_landing == lir.fetch_lag, "the spill must land at the deepest legal step (successor-local 2)"
+    copy = next(c for b in lir.blocks for c in b.wide_copies if not c.settled_source and not (b.ops or b.inline_ops))
+    assert copy.issue_cycle == 0, "a spilled source must not push the install (its virtual commit is negative)"
+    assert copy.fire_step(lir.fetch_lag) == spilled_landing, "the install must fire exactly at the spilled landing"
+
+    model = build_model(lir)
+    for c in (True, False):
+        for a, b in [(2.0, 4.0), (3.0, 1.5), (-1.0, 2.0)]:
+            got = [float(v) for v in model.run(c, a, b)]
+            y = a / b if c else a + b
+            assert abs(got[0] - y * b) < 1e-9 and abs(got[1] - (a + b)) < 1e-9, f"c={c} a={a} b={b}: {got}"

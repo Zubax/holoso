@@ -67,10 +67,9 @@ class BankLiveness:
     reads: dict[int, list[tuple[ValueId, int]]] = field(default_factory=dict)  # block -> [(value, read cycle)]
     boundary_users: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> boundary-read values
     arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi-arm values live out of it
-    # block -> {phi dest installed at its tail: the install's block-local FIRE step}. The fire step is per install, not
-    # per block: a computed-source copy fires at its copy step, an install of a block-entry-resident source
-    # (`value_resident_at_entry`) one read-first edge earlier, so its destination register is occupied from the true
-    # (earlier) write cycle and a tenant cannot be clobbered.
+    # block -> {phi dest installed at its tail: the install's block-local FIRE step}. The fire step is per install,
+    # not per block (`install_issue_cycle`), so the destination register is occupied from the true (earliest) write
+    # cycle and a tenant cannot be clobbered.
     installs: dict[int, dict[ValueId, int]] = field(default_factory=dict)
     # Cross-block overlap: per block, a predecessor value whose in-flight write SPILLS past the predecessor's shrunk
     # terminator and lands in THIS block, mapped to its block-local landing cycle. The spilled write fires

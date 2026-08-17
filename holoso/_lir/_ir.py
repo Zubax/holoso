@@ -132,18 +132,18 @@ def install_landing(fire_step: int) -> int:
 
 def install_issue_cycle(work_makespan: int, source_commit: int | None) -> int:
     """
-    The scheduler-frame placement of a block's tail install; `source_commit` is None for a block-entry-RESIDENT
-    source (per `value_resident_at_entry`: a constant, input, state read, or phi result), which needs no read-first
-    sampling. The install sits at the work makespan -- landing read-first at the boundary, after every in-block read,
-    the latest placement (minimal destination residence). It is pushed one step past only when a COMPUTED source
-    commits AT the makespan, which the install must fire after to read-first (`source_commit + READ_FIRST_EDGE` then
-    exceeds the makespan): either the block's own last-committing op, or -- conservatively -- an operator result not
-    scheduled in this block (a possible overlap spill), which the callers pass `source_commit == work_makespan` so
-    the placement never reads off a foreign frame. A resident source and a copy sourcing an EARLIER in-block op stay
-    at the makespan and pay no terminator cycle; keeping phi sources unpushed is load-bearing for the same-step
-    parallel-bundle contract cross-referencing loop-header phis rely on. The per-install dual of
-    `install_inclusive_makespan` (which carries the +1 into the block makespan exactly when an install lands past the
-    makespan), so the placement and the drain agree and an install cannot land past its block's terminator.
+    The scheduler-frame placement of a block's tail install; `source_commit` is None for a SETTLED source (per
+    `install_source_commit`: a constant, input, state read, phi result, or a foreign result already landed), which
+    needs no read-first sampling. The install sits at the work makespan -- landing read-first at the boundary, after
+    every in-block read, the latest placement (minimal destination residence). It is pushed one step past only when
+    a locally COMPUTED source commits AT the makespan, which the install must fire after to read-first
+    (`source_commit + READ_FIRST_EDGE` then exceeds the makespan) -- the block's own last-committing op. A
+    spilled-in source carries a NEGATIVE virtual commit (the inverse of its landing; see `install_source_commit`),
+    so the same `max` places its fire at or after that landing without a push. A settled source and a copy sourcing
+    an EARLIER in-block op stay at the makespan and pay no terminator cycle; keeping them unpushed is load-bearing
+    for the same-step parallel-bundle contract cross-referencing loop-header phis rely on. The per-install dual of
+    `install_inclusive_makespan` (which carries the +1 into the block makespan exactly when an install issues past
+    the work makespan), so the placement and the drain agree and an install cannot land past its block's terminator.
     """
     if source_commit is None:
         return work_makespan
@@ -498,21 +498,18 @@ class BoolOutputWire(OutputWire):
 class WideCopy:
     """
     A pc-gated move installing a phi arm's value into the merged register at a predecessor's tail: `dst`
-    takes `source` on the block-relative `issue_cycle`. Used when a phi arm is not an operator result that can be
-    coalesced directly onto the merged register (e.g. an input, a constant, or a value defined in another block).
-    `resident_source` records whether `source` is available at block entry (`value_resident_at_entry`, which a
-    `RegRef` operand alone cannot reveal) rather than computed -- informational; the placement (`issue_cycle`) is
-    `install_issue_cycle`'s, pushed past the work makespan only for a computed source committing there.
+    takes `source` on the block-relative `issue_cycle` (placed by `install_issue_cycle`). Used when a phi arm
+    cannot coalesce onto the merged register. `settled_source` records whether `install_source_commit` answered
+    None -- which a `RegRef` operand alone cannot reveal -- informational, consumed by tests only.
     """
 
     dst: RegRef
     source: WideOperand
     issue_cycle: int
-    resident_source: bool
+    settled_source: bool
 
     @property
     def is_const(self) -> bool:
-        """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
         return isinstance(self.source.source, WideConstRef)
 
     def fire_step(self, fetch_lag: int) -> int:
@@ -526,19 +523,16 @@ class WideCopy:
 class BoolWrite:
     """
     A boolean register install of a phi arm (a bool const or another bool register, with the arm's folded inversion)
-    on a block-relative cycle. `resident_source` records whether `source` is available at block entry
-    (`value_resident_at_entry`) rather than computed -- informational; the placement is `install_issue_cycle`'s
-    (see WideCopy).
+    on a block-relative cycle; see WideCopy.
     """
 
     dst: BoolRegRef
     source: BoolOperand
     issue_cycle: int
-    resident_source: bool
+    settled_source: bool
 
     @property
     def is_const(self) -> bool:
-        """A literal-constant install (one kind of resident source); meaningful where the literal itself matters."""
         return isinstance(self.source.source, BoolConstRef)
 
     def fire_step(self, fetch_lag: int) -> int:
@@ -589,7 +583,7 @@ class LirBlock:
     the block (0 if it has none). `term_offset` is the block-relative fetch cycle at which the terminator redirects
     the PC -- the block's boundary step -- and is the single source of truth for the terminator PC (the successor
     frame begins one step later, at `term_pc + 1`). For a block that drains (a multi-predecessor successor or a
-    phi/const install) it is the latest cycle a value LANDS in the block's frame -- taken per landing event (every
+    tail install) it is the latest cycle a value LANDS in the block's frame -- taken per landing event (every
     result, pooled or inline, wide or boolean, lands at the one bank-independent `landing_cycle`) -- but cross-block
     software pipelining shrinks it to the issue-side envelope when the block's in-flight results may spill into
     single-predecessor successors -- so a consumer reads it here rather than re-deriving the boundary.
@@ -1069,8 +1063,8 @@ class Lir:
         an early non-coalesced slot writeback) fires and samples its source on the copy step but lands its destination
         one PC later via `install_landing` -- the same +1 the model commits. A boundary install reads-then-writes
         at the boundary and lands there. Residence is then resolved per basic block by `_cfg_residence` (CFG-aware
-        register liveness), so a value live on two mutually-exclusive arms that rejoin at a merge stays resident on BOTH
-        arms. The result is cycle-exact to the numerical model on every register and every path.
+        register liveness), so a value live on two mutually-exclusive arms that rejoin at a merge stays resident on
+        BOTH arms. The result is cycle-exact to the numerical model on every register and every path.
         """
         present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[RegRef, list[int]] = {}
@@ -1125,8 +1119,8 @@ class Lir:
         boundary where a slot's live-out must persist for the next initiation. A boolean result that spills past an
         overlap-shrunk terminator is stamped on every successor arm via `write_landing_pcs`, exactly as the numerical
         model re-keys it; a phi/boolean write lands its destination one PC after its fire step via `install_landing`
-        (the model's +1), while a boolean slot always installs read-first at the boundary. Residence is resolved by the
-        same per-block `_cfg_residence` as reg_liveness, so a spilled or merged boolean is cycle-exact too.
+        (the model's +1), while a boolean slot always installs read-first at the boundary. Residence is resolved by
+        the same per-block `_cfg_residence` as reg_liveness, so a spilled or merged boolean is cycle-exact too.
         """
         present = self.initiation_interval
         defs: dict[BoolRegRef, list[int]] = {}

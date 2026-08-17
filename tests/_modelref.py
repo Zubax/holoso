@@ -282,6 +282,13 @@ def fcmp_s1_options(fmt: FloatFormat) -> Options:
     return dataclasses.replace(options, operator=operator)
 
 
+def staged_fadd_options(fmt: FloatFormat) -> Options:
+    """The default config with only the adder's decode stage raised, guaranteeing an fadd latency of at least 2."""
+    options = default_options(fmt)
+    operator = dataclasses.replace(options.operator, fadd=FAddOptions(stage_decode=1))
+    return dataclasses.replace(options, operator=operator)
+
+
 def fcmp_s1_mir(fmt: FloatFormat) -> MirOptions:
     return mir_options(fcmp_s1_options(fmt))
 
@@ -554,7 +561,7 @@ def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
 def branchy_swap_mixed_arm_loop(x: float, d: float, n: float) -> tuple[float, float]:
     """
     A loop whose header phis mix arm kinds across a real in-body branch (the unspeculatable division keeps it a
-    branch): one diamond arm carries computed values, the other a phi-sourced pair. Once phi sources are resident, a
+    branch): one diamond arm carries computed values, the other a phi-sourced pair. Phi sources being settled, a
     block's push classification narrows after its computed arm coalesces, and the next allocation round's coalescing
     holds that arm TRANSIENTLY de-coalesced -- its install past the shortened boundary -- so this kernel pins that the
     interference residence tolerates the transient (the failure mode is a loud residence assert at build time, not a

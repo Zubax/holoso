@@ -570,11 +570,13 @@ TARGETS: list[SynthTarget] = [
     # imu_fusion: the fusion capstone -- three norm/rsqrt chains (fsqrt/fdiv, one feeding the coarse alignment), the
     # sorter-backed clamp, and real gate branches over the heaviest register pressure in the matrix, in the plain and
     # the ffma-contracted datapaths. The native root retired the wall these rows used to close against (the flog2
-    # Horner pmul), and the three plain rows plus the ffma Vivado row keep closing on their old datapath knobs. The
-    # two ffma ECP5 rows each needed one more stage once that wall left. On yosys the deepest path is now the
-    # sorter's compare cone entered straight off the register file, which fsort stage_input splits; on diamond it is
-    # the fadd normalize/pack tail into the register file, which fadd stage_pack splits -- and that row's fadd
-    # stage_output stays, since removing it only exposes the same tail one stage earlier.
+    # Horner pmul); the two ffma ECP5 rows each needed one more stage once that wall left. On yosys the deepest path
+    # is the sorter's compare cone entered straight off the register file, which fsort stage_input splits; on diamond
+    # it is the fadd normalize/pack tail into the register file, which fadd stage_pack splits -- and the plain
+    # diamond row's fadd stage_output stays, since removing it only exposes the same tail one stage earlier. The
+    # exact install scheduling shifted the plain diamond and ffma Vivado rows a hair under their fences (12 and
+    # 19 ps): the diamond miss was a lone controller clock-enable route, re-closed by splitting the fadd pack tail;
+    # the Vivado miss was the fadd subtract-normalize cone, which fadd stage_normalize splits.
     for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
@@ -595,7 +597,7 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
@@ -655,7 +657,7 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_output=1),
+            fadd=FAddOptions(stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),

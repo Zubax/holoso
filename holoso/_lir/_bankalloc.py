@@ -25,7 +25,7 @@ from .._operators import BoolInversion, HardwareOperator, PooledHardwareOperator
 from .._value import WideValue
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map, value_resident_at_entry
+from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import Producer, RegallocTuning
@@ -94,44 +94,52 @@ def layout_and_allocate(
     return _LayoutAllocation(overlap, inst_of, instances, consts, const_pool, alloc)
 
 
-def install_source_commit(sched: Schedule, source_node: MirNode, source: ValueId) -> int | None:
+def install_source_commit(
+    sched: Schedule, source: ValueId, inflight: Mapping[ValueId, int], fetch_lag: int
+) -> int | None:
     """
-    A tail install source's commit cycle in the installing block's own frame, None for a block-entry-RESIDENT source --
-    exactly `install_issue_cycle`'s contract. The lone encoding of the residency-to-commit rule, shared by the push
-    classification, the interference residence, and the LIR copy placement, so the three cannot drift apart (a drift
-    here recreates the placement-disagreement class of the phi-swap miscompile).
+    A tail install source's commit cycle in the installing block's own frame, None for a source SETTLED before the
+    block's first step -- exactly `install_issue_cycle`'s contract. A source scheduled in this block commits at its
+    own commit cycle. One spilled in past an overlapped predecessor boundary (`inflight`, the scheduler's own
+    `livein_landing`) is charged the virtual commit whose landing is its carried landing cycle, so the install's fire
+    step cannot precede that landing; the spill bound (a received spill lands at successor-local <= fetch_lag,
+    enforced by the issue-side envelope's word floors) keeps that virtual commit negative, so a spilled source never
+    pushes the install past the work makespan -- asserted, so a future envelope change that breaks the bound fails
+    loudly instead of firing an install before its source lands. Everything else -- a constant, an input, a state
+    read, a phi, or a foreign result already landed -- is settled at entry. The lone encoding of the residency rule,
+    shared by the push classification, the interference residence, and the LIR copy placement, so the three cannot
+    drift apart (a drift here recreates the placement-disagreement class of the phi-swap miscompile).
     """
-    return None if value_resident_at_entry(source_node) else sched.commit_or_makespan(source)
-
-
-def _install_pushes_makespan(sched: Schedule, source_node: MirNode, source: ValueId) -> bool:
-    """
-    Whether a tail install of `source` lands PAST the work makespan -- the per-install +1 drain. True only for a
-    COMPUTED source that is the block's own last-committing work (the install fires one step after to read-first it);
-    an earlier-committing or block-entry-resident source fits at the makespan. Decided through the one
-    `install_issue_cycle` so this classification, the LIR placement, and the interference residence cannot drift.
-    """
-    return install_issue_cycle(sched.makespan, install_source_commit(sched, source_node, source)) > sched.makespan
+    if source in sched.issue_cycle:
+        return sched.commit_cycle(source)
+    landing = inflight.get(source)
+    if landing is not None:
+        commit = landing - fetch_lag - READ_FIRST_EDGE
+        assert commit < 0, f"received spill lands at {landing}, past the fetch lag: the spill bound is broken"
+        return commit
+    return None
 
 
 def actual_install_blocks(
-    alloc: Allocation, wide_mir: MirWideView, bool_mir: MirBoolView, block_sched: Mapping[int, Schedule]
+    alloc: Allocation,
+    block_sched: Mapping[int, Schedule],
+    block_inflight: Mapping[int, Mapping[ValueId, int]],
+    fetch_lag: int,
 ) -> dict[int, bool]:
     """
     The post-coalescing install classification (the refinement `block_has_install` seeds): each block that actually
-    installs at its tail, mapped to whether any of its installs lands past the work makespan -- a computed source that
-    is the block's own last work, so the install must read-first it and the block pays the +1 drain (`True`). An
-    install whose source commits earlier, or is block-entry resident per `value_resident_at_entry` (including the
-    const branch materialization already in `alloc.bool_writes`), fits at the makespan (`False`). How narrowing
-    and regrowth of this classification drive the layout is the caller's protocol (the install fixpoint in the
-    builder).
+    installs at its tail, mapped to whether any of its installs issues past the work makespan, decided through the
+    same `install_source_commit` + `install_issue_cycle` pair as the LIR placement and the interference residence,
+    so the three cannot drift. How narrowing and regrowth of this classification drive the layout is the caller's
+    protocol (the install fixpoint in the builder).
     """
     install: dict[int, bool] = {}
-    for nodes, bank_installs in ((wide_mir.nodes, alloc.wide_copies), (bool_mir.nodes, alloc.bool_writes)):
+    for bank_installs in (alloc.wide_copies, alloc.bool_writes):
         for bid, entries in bank_installs.items():
             sched = block_sched[bid]
             for entry in entries:
-                pushes = _install_pushes_makespan(sched, nodes[entry.source], entry.source)
+                commit = install_source_commit(sched, entry.source, block_inflight[bid], fetch_lag)
+                pushes = install_issue_cycle(sched.makespan, commit) > sched.makespan
                 install[bid] = install.get(bid, False) or pushes
     return install
 
@@ -384,9 +392,9 @@ class _InterferenceBuilder:
     phi_block: dict[ValueId, int]
     arm_out: dict[int, frozenset[ValueId]]
     inflight_defs: dict[int, dict[ValueId, int]]
-    # block -> phi dest -> its arm source's commit cycle in THIS block's frame, None for a block-entry-resident source
-    # (`install_issue_cycle`'s contract), so the interference residence matches the LIR copy's placement and cannot
-    # drift onto a foreign block's frame.
+    # block -> phi dest -> its arm source's commit cycle in THIS block's frame, None for a source settled before the
+    # block's first step (`install_issue_cycle`'s contract), so the interference residence matches the LIR copy's
+    # placement and cannot drift onto a foreign block's frame.
     install_source: dict[int, dict[ValueId, int | None]]
     fetch_lag: int
 
@@ -460,14 +468,14 @@ def _allocate_bank(
     boundary_base = bank.boundary_base(mir, values, ret_block)
 
     # Per block, each phi dest whose arm originates there -> its source's commit cycle in the PREDECESSOR's own frame
-    # (where the install fires, not the source's home block), None for a block-entry-resident source that needs no
-    # read-first sampling. The same rule build and actual_install_blocks apply, so the interference residence cannot
-    # drift onto a foreign block's frame.
+    # (where the install fires, not the source's home block), None for a source settled before the block's first
+    # step. The same rule build and actual_install_blocks apply, so the interference residence cannot drift onto a
+    # foreign block's frame.
     install_source: dict[int, dict[ValueId, int | None]] = {}
     for vid, phi in phi_nodes.items():
         for pred, value, _conditioner in phi.arms:
             install_source.setdefault(pred, {})[vid] = install_source_commit(
-                block_sched[pred], view.nodes[value], value
+                block_sched[pred], value, block_inflight[pred], fetch_lag
             )
 
     interference = _InterferenceBuilder(
@@ -639,7 +647,7 @@ def _allocate(
     Assign wide and boolean registers across the CFG. Both banks are colored by hardware-frame liveness, reusing
     registers across mutually-exclusive and non-overlapping live ranges. A phi is resolved by installing each arm's
     value into the phi's register with a copy at the predecessor's tail; copies sharing a fire step are a parallel
-    (read-then-write) bundle, and placement keeps a swap correct (see `value_resident_at_entry`).
+    (read-then-write) bundle, and placement keeps a swap correct (see `install_issue_cycle`).
     `block_makespan` (install-inclusive) and `block_term_offset` (the drained boundary, or the overlap-shrunk
     terminator) come from the overlap layout, so the liveness boundary matches the laid-out block spans exactly.
     `block_inflight` carries each block's received cross-block spills (split per bank), reserving a spilled value's
