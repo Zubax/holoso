@@ -9,14 +9,10 @@ from .._mir import (
     Mir,
     MirBoolView,
     MirBranch,
-    MirConst,
-    MirInput,
     MirJump,
-    MirNode,
     MirOperation,
     MirPhi,
     MirRet,
-    MirStateRead,
     MirWideView,
 )
 from .._util import ValueId
@@ -26,27 +22,6 @@ def mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
     node = mir.nodes[vid]
     assert isinstance(node, MirOperation)
     return node
-
-
-def value_resident_at_entry(node: MirNode) -> bool:
-    """
-    Whether a value is resident in its register from a block's first step rather than produced by the block's own work:
-    a literal constant, an input load, a persistent-state read, or a phi result. A phi is entry-resident in any
-    frontend-generated (well-formed, dominance-respecting) MIR: its register settles before any frame that reads it
-    begins -- install-bearing predecessors drain rather than overlap, multi-predecessor blocks receive no spills, and a
-    phi is never itself an in-flight spill. Residency decides a tail install's PLACEMENT (`install_issue_cycle`):
-    every resident-source install sits AT the work makespan, so installs that read each other's registers (the
-    cross-referencing loop-header phis of `a, b = b, a + x`) share one fire step, where both backends resolve them as
-    a read-then-write parallel bundle; classifying a phi as computed instead pushes its install one step past its
-    siblings, which then read an already-overwritten source. An operator result stays NOT entry-resident: locally it
-    genuinely lands mid/late-block, and a foreign one may arrive as an overlap spill; its conservative pushed placement
-    is harmless because an operator-result source is live through the boundary (`phi_arm_out`), so interference keeps
-    every sibling install destination off its register. The lone source of this residency fact, shared by the install
-    seed, the post-coalescing refinement, the builder, and the allocator residence, so they cannot drift. The positive
-    test means a future node kind defaults to non-resident -- the safe direction (the conservative computed-source
-    treatment).
-    """
-    return isinstance(node, (MirConst, MirInput, MirStateRead, MirPhi))
 
 
 def succ_map(mir: Mir) -> dict[int, list[int]]:
@@ -130,23 +105,21 @@ def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueI
 
 def block_has_install(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView) -> dict[int, bool]:
     """
-    Each install-bearing block mapped to whether it carries a COMPUTED-source install -- a wide copy or a bool write
-    whose source is an operator result rather than block-entry RESIDENT (a literal constant, including a phi-arm const
-    arm or a const branch condition, an input, a state read, or a phi result). This is the
-    CONSERVATIVE seed for the makespan +1: a computed source MIGHT be the block's own last work, which the install must
-    fire one step past to read-first (pushing the makespan); the fixpoint's `actual_install_blocks` narrows it to the
-    blocks that actually push, once the schedule is known. Determinable from the MIR shape before register assignment
-    (`value_resident_at_entry`), conservatively: an arm is assumed not to coalesce, so a computed-source arm marks the
-    block even if it later coalesces away (the fixpoint then narrows it). The liveness boundary and the layout share
-    this classification so the per-block makespan and drain agree.
+    Each install-bearing block mapped to whether it carries an install whose source is the block's OWN operation --
+    the only source kind that can commit at the work makespan and push the install one step past it
+    (`install_issue_cycle`); everything else (a constant, including a const branch condition, an input, a state
+    read, a phi, or a value computed in another block) never pushes. This is the CONSERVATIVE seed for that +1: an
+    arm is assumed not to coalesce, so a local-source arm marks its block even if it later coalesces away, and the
+    fixpoint's `actual_install_blocks` narrows the bit to the blocks whose source really is the last work, once the
+    schedule is known. The liveness boundary and the layout share this classification so the per-block makespan and
+    drain agree.
     """
+    local_ops = {block.id: set(block.operations) for block in mir.blocks}
     install: dict[int, bool] = {}
-    for phi in wide_mir.phi_nodes.values():
-        for pred, value, _conditioner in phi.arms:
-            install[pred] = install.get(pred, False) or not value_resident_at_entry(wide_mir.nodes[value])
-    for phi in bool_mir.phi_nodes.values():
-        for pred, value, _conditioner in phi.arms:
-            install[pred] = install.get(pred, False) or not value_resident_at_entry(bool_mir.nodes[value])
+    for phi_nodes in (wide_mir.phi_nodes, bool_mir.phi_nodes):
+        for phi in phi_nodes.values():
+            for pred, value, _conditioner in phi.arms:
+                install[pred] = install.get(pred, False) or value in local_ops[pred]
     for block_id in const_branch_conditions(mir, bool_mir):
-        install.setdefault(block_id, False)  # a const branch materializes a literal: a resident source, never pushing
+        install.setdefault(block_id, False)  # a const branch materializes a literal: a settled source, never pushing
     return install

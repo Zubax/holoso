@@ -190,13 +190,12 @@ def _measure(name: str) -> Metrics:
 # - last_pc and max_block_span are the stage-count guards. They reflect the per-block drain tightener: the
 #   coalesced-install fixpoint -- a phi-arm predecessor whose every arm coalesces installs nothing, so its
 #   +1 install drain is dropped. The drained boundary is the latest value LANDING per op: every op -- inline (a
-#   select or a bool->float cast) or pooled -- lands at the same uniform per-op landing, and an install reading a
-#   block-entry-RESIDENT source (`value_resident_at_entry`) fires at the
-#   combinational step and drops its +1 install drain. last_pc tiles every block's span (a per-block drain regression
-#   anywhere inflates it); max_block_span localizes it to one block. These timing rules move the schedule-length
-#   guards but not nreg/bnreg/steering/copies; signal_window carries a deliberately-loosened steering arm (one freed
-#   boolean register traded for one write-select mux) -- refrozen rather than chased, since the rules are global and
-#   correctness-neutral.
+#   select or a bool->float cast) or pooled -- lands at the same uniform per-op landing, and an install with a
+#   SETTLED source (`install_source_commit`) fires at the work makespan and drops its +1 install drain. last_pc tiles
+#   every block's span (a per-block drain regression anywhere inflates it); max_block_span localizes it to one
+#   block. These timing rules move the schedule-length guards but not nreg/bnreg/steering/copies; signal_window
+#   carries a deliberately-loosened steering arm (one freed boolean register traded for one write-select mux) --
+#   refrozen rather than chased, since the rules are global and correctness-neutral.
 # - pid uses a variable sample interval: the derivative path contains a real divide, and the first-sample and saturation
 #   guards keep the kernel multi-block with one residual copy. The larger PID row is therefore a property of the example
 #   itself, not a scheduler regression to chase.
