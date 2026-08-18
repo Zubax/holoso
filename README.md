@@ -23,8 +23,9 @@ Holoso focuses on Python because this is a popular language in modeling, system 
 ability to generate production HDL directly from the original model allows the designer to work with much simpler
 harnesses and iterate faster.
 
-See [PRIOR_ART.md](PRIOR_ART.md) for a detailed review of existing alternatives,
-and why none are good enough for practical use.
+See the `examples/` directory for a collection of practical usage examples showcasing the capabilities of Holoso.
+By its nature, it is very easy to use -- just write Python virtually as you normally do, feed it to Holoso,
+and get the synthesizable RTL with a test bench and reports out the other end. More details below.
 
 ⚠️ Holoso is under active development and many of the features we aspire to deliver are currently missing.
 Holoso is not yet stable; breaking changes will occur regularly without notice until v1.0 is out.
