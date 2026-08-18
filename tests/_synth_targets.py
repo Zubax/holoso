@@ -542,7 +542,9 @@ TARGETS: list[SynthTarget] = [
         name="rigid_body_rates_e6m18",
     ),
     # flux_observer: a short stateful clamped fadd/fmul/fsort integrator feeding the same CORDIC atan2 as to_polar,
-    # so the rows start from that operator's one measured configuration; the surrounding datapath is lean.
+    # so the rows start from that operator's one measured configuration. The ECP5 rows keep a lean datapath around
+    # it; on Vivado the register file reaches both the sorter's compare cone and the DSP operand mux inside one
+    # period, so those two entries take an input stage each.
     for_example(
         "flux_observer",
         FlowId.YOSYS_ECP5,
@@ -565,7 +567,27 @@ TARGETS: list[SynthTarget] = [
         "flux_observer",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions()),
+        op_config(F_e6m18, fmul=FMulOptions(stage_input=1), fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions(stage_input=1)),
+    ),
+    # foc: that observer embedded in a full current controller -- the same CORDIC atan2 plus from_polar's fsincos,
+    # the sorter, and the divides of the limiter and the modulator, over the widest microcode word in the matrix.
+    # Every path this row closes against runs from that word into an operator entered straight off the register
+    # file, so all three splits are input stages: the DSP operand mux, the adder's exponent-difference carry chain,
+    # and the sorter's compare cone, chased in that order. Only the Vivado flow is measured here; the ECP5 rows are
+    # absent rather than guessed, since closure is only ever established by running the flow.
+    for_example(
+        "foc",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1),
+            fmul=FMulOptions(stage_input=1),
+            fsort=FSortOptions(stage_input=1),
+            fsqrt=FSqrtOptions(),
+            fatan2=_TO_POLAR_FATAN2,
+            fsincos=_FROM_POLAR_FSINCOS,
+        ),
     ),
     # imu_fusion: the fusion capstone -- three norm/rsqrt chains (fsqrt/fdiv, one feeding the coarse alignment), the
     # sorter-backed clamp, and real gate branches over the heaviest register pressure in the matrix, in the plain and

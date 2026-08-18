@@ -35,6 +35,7 @@ from equal_temperament import equal_temperament as equal_temperament  # noqa: E4
 from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
 from flux_observer import FluxObserver  # noqa: E402
+from foc import FocController  # noqa: E402
 from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
 import imu_fusion as imu_fusion  # noqa: E402  # synth matrix; it synthesizes the shipped realistic-config kernel
@@ -233,6 +234,11 @@ class ExampleSpec:
     # is compared within its OutputTolerance allowance; an absent lane (and every bool lane) must match the float64
     # reference bit-for-bit. `None` excludes the kernel from the generic reference harness.
     reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
+    # The front-end oracle's slack (`test_eel_oracle`), where both sides are float64 in the same operation order and
+    # only the host's own library shape differs -- numpy reaching BLAS for a dot or a norm may contract a product the
+    # evaluator rounds. A kernel that carries such a difference through a feedback recurrence needs more than the
+    # shared default; one that does not must not be given any.
+    oracle_ulps: int = 16
 
     def __post_init__(self) -> None:
         inputs = set(self.inputs)
@@ -324,10 +330,11 @@ def _uart_rx_frame(
 
 
 def _fresh_flux_observer() -> Callable[..., object]:
-    # The shipped instance: R/L_d/flux_linkage and the flux-linkage-aligned reset snapshot match
-    # examples/flux_observer.py, so every layer -- cosim, oracle, synthesis matrix -- exercises the same circuit
-    # the bundled example writes.
-    return FluxObserver(R=0.05, L_d=2e-5, flux_linkage=0.005, flux=np.array([0.005, 0.0])).tick
+    return FluxObserver().tick
+
+
+def _fresh_foc() -> Callable[..., object]:
+    return FocController().tick
 
 
 def _fresh_finite_set_controller() -> Callable[..., object]:
@@ -421,14 +428,33 @@ def rigid_body_scalar(
     return omega_next[0], omega_next[1], omega_next[2], momentum[0], momentum[1], momentum[2]
 
 
-_FLUX_OBSERVER_INPUTS = ("dt", "u_ab_0", "u_ab_1", "i_ab_0", "i_ab_1")
+# The machine the manual sequences describe, shared by the observer and the controller that embeds it: the flux
+# linkage each adopts on its aligning first transaction, so the clamp rails where the rows expect.
+_FLUX_LINKAGE = 0.005
+_PHASE_RESISTANCE = 0.05
+_PHASE_INDUCTANCE = 2e-5
+
+_FLUX_OBSERVER_INPUTS = (
+    "params_R", "params_L_d", "params_flux_linkage",
+    "dt", "u_alpha_beta_0", "u_alpha_beta_1", "i_alpha_beta_0", "i_alpha_beta_1",
+)  # fmt: skip
 
 
 def _flux_row(dt: float, u: tuple[float, float], i: tuple[float, float]) -> InputVector:
-    return {"dt": dt, "u_ab_0": u[0], "u_ab_1": u[1], "i_ab_0": i[0], "i_ab_1": i[1]}
+    return {
+        "params_R": _PHASE_RESISTANCE,
+        "params_L_d": _PHASE_INDUCTANCE,
+        "params_flux_linkage": _FLUX_LINKAGE,
+        "dt": dt,
+        "u_alpha_beta_0": u[0],
+        "u_alpha_beta_1": u[1],
+        "i_alpha_beta_0": i[0],
+        "i_alpha_beta_1": i[1],
+    }
 
 
 _FLUX_OBSERVER_MANUAL = [  # a hand-steered spin: the carried flux vector visits all four atan2 quadrants in order
+    _flux_row(1e-3, (0.0, 0.0), (0.0, 0.0)),  # the aligning transaction, which adopts the prior and integrates nothing
     _flux_row(1e-3, (50.0, 20.0), (5.0, -3.0)),
     _flux_row(1e-3, (-120.0, 10.0), (-10.0, 0.0)),
     _flux_row(1e-3, (0.0, -80.0), (0.0, 0.0)),
@@ -447,13 +473,97 @@ _FLUX_OBSERVER_MANUAL = [  # a hand-steered spin: the carried flux vector visits
 
 def _draw_flux_observer(rng: np.random.Generator) -> InputVector:
     # The voltage scale straddles the clamp box: a large draw at a long dt rails a flux lane, a small draw at a
-    # short dt moves it inside the linear region, so the sweep keeps exercising both sides of the clamp.
+    # short dt moves it inside the linear region, so the sweep keeps exercising both sides of the clamp. The machine
+    # parameters are drawn too, over the range of small PMSMs, since they are live ports rather than folded constants.
     return {
+        "params_R": log_uniform_positive(rng, 0.01, 0.5),
+        "params_L_d": log_uniform_positive(rng, 5e-6, 1e-4),
+        "params_flux_linkage": log_uniform_positive(rng, 1e-3, 2e-2),
         "dt": log_uniform_positive(rng, 2e-5, 2e-3),
-        "u_ab_0": bounded(rng, -12.0, 12.0),
-        "u_ab_1": bounded(rng, -12.0, 12.0),
+        "u_alpha_beta_0": bounded(rng, -12.0, 12.0),
+        "u_alpha_beta_1": bounded(rng, -12.0, 12.0),
+        "i_alpha_beta_0": bounded(rng, -20.0, 20.0),
+        "i_alpha_beta_1": bounded(rng, -20.0, 20.0),
+    }
+
+
+_FOC_INPUTS = (
+    "params_R", "params_L_dq_0", "params_L_dq_1", "params_flux_linkage", "params_speed_filter_gain",
+    "dt", "i_ab_0", "i_ab_1", "i_dq_ref_0", "i_dq_ref_1", "v_dc",
+)  # fmt: skip
+
+
+def _foc_row(
+    dt: float,
+    i_ab: tuple[float, float],
+    i_dq_ref: tuple[float, float],
+    v_dc: float,
+    inductance: float = _PHASE_INDUCTANCE,
+) -> InputVector:
+    return {
+        "params_R": _PHASE_RESISTANCE,
+        "params_L_dq_0": inductance,
+        "params_L_dq_1": inductance,
+        "params_flux_linkage": _FLUX_LINKAGE,
+        "params_speed_filter_gain": 0.05,
+        "dt": dt,
+        "i_ab_0": i_ab[0],
+        "i_ab_1": i_ab[1],
+        "i_dq_ref_0": i_dq_ref[0],
+        "i_dq_ref_1": i_dq_ref[1],
+        "v_dc": v_dc,
+    }
+
+
+# One continuous PWM history covering every arm of the controller. It opens on the aligning transaction (the
+# observer adopts its prior from the parameters and integrates nothing), walks a rising current through the linear
+# regime where the PI integrators advance,
+# then commands a setpoint the bus cannot serve so the vector limiter engages and freezes them. The four steered
+# rows that follow carry a tenfold inductance, whose L*di term slams the flux estimate clear across the clamp box:
+# their currents were solved offline against the state the preceding rows leave, so the estimated angle lands on a
+# demanded value and BOTH branch-cut arms fire (a +5.6 rad step and a -5.6 rad step, each a comfortable 2.4 rad
+# clear of the +-pi decision), which no smooth trajectory reaches within a short sequence. The last rows settle
+# back onto the shipped machine with the limiter released.
+_FOC_MANUAL = [
+    _foc_row(2e-5, (0.0, 0.0), (0.0, 0.0), 24.0),
+    _foc_row(2e-5, (0.5, -0.25), (0.0, 1.5), 24.0),
+    _foc_row(2e-5, (1.0, -0.5), (0.0, 1.5), 24.4),
+    _foc_row(2e-5, (2.0, -1.0), (-1.5, 2.0), 23.6),
+    _foc_row(2e-5, (-1.0, 2.0), (-1.5, 2.0), 24.0),
+    _foc_row(2e-5, (0.0, 0.0), (0.0, 40.0), 24.0),
+    _foc_row(2e-5, (-5.0, 2.0), (0.0, 40.0), 12.0),  # the limiter engages on a sagging bus
+    _foc_row(5e-5, (38.47, -23.16), (0.0, 0.0), 24.0, inductance=2e-4),
+    _foc_row(5e-5, (34.66, -9.10), (0.0, 0.0), 24.0, inductance=2e-4),  # wraps through -pi
+    _foc_row(5e-5, (30.84, -19.17), (0.0, 0.0), 24.0, inductance=2e-4),  # and back through +pi
+    _foc_row(5e-5, (-10.38, 2.70), (0.0, 0.0), 24.0, inductance=2e-4),
+    _foc_row(2e-5, (0.0, 0.0), (0.0, 1.0), 24.0),
+    _foc_row(2e-5, (0.0, 0.0), (0.0, 1.0), 24.0),
+]
+
+
+def _draw_foc(rng: np.random.Generator) -> InputVector:
+    # Small-PMSM machine parameters and a PWM period between 10 and 100 kHz, with the currents and the bus swept over
+    # an ESC's whole operating range. The drawn currents bear no relation to the voltage the controller last
+    # commanded, so the flux estimate tumbles and the demanded voltage stays far above the ceiling: the random sweep
+    # lives on the limiter, and the linear regime is the manual sequence's to cover. The speed filter is the one lane
+    # drawn away from the manual sequence's setting, over the slow per-sample gains a PWM-rate drive actually uses
+    # (a millisecond-scale time constant): the estimator is a closed loop around a pure integrator, and its gain is
+    # what decides whether a rounding difference decays or compounds. On uncorrelated rows the flux estimate
+    # occasionally passes near the origin, where the angle it carries is ill-conditioned; a fast filter turns that
+    # into an amplifier and the model and the float64 reference separate within a few hundred rows, so this spec's
+    # comparison is validated at the default HOLOSO_TEST_RANDOM_COUNT rather than at an arbitrarily raised one.
+    return {
+        "params_R": log_uniform_positive(rng, 0.02, 0.3),
+        "params_L_dq_0": log_uniform_positive(rng, 1e-5, 1e-4),
+        "params_L_dq_1": log_uniform_positive(rng, 1e-5, 1e-4),
+        "params_flux_linkage": log_uniform_positive(rng, 2e-3, 2e-2),
+        "params_speed_filter_gain": log_uniform_positive(rng, 5e-4, 5e-3),
+        "dt": log_uniform_positive(rng, 1e-5, 1e-4),
         "i_ab_0": bounded(rng, -20.0, 20.0),
         "i_ab_1": bounded(rng, -20.0, 20.0),
+        "i_dq_ref_0": bounded(rng, -10.0, 10.0),
+        "i_dq_ref_1": bounded(rng, -10.0, 10.0),
+        "v_dc": bounded(rng, 12.0, 48.0),
     }
 
 
@@ -506,6 +616,10 @@ _IMU_FUSION_CAL_LANES = dict(
 _IMU_FUSION_G = 9.80665
 
 
+_IMU_BIAS_LIMIT = 0.0005
+"""The catalogue's bias clamp: also the floor of the bias lanes' error budget, whose rails resynchronize them."""
+
+
 def _fresh_imu_fusion() -> Callable[..., object]:
     """
     The oracle-safe catalogue configuration, distinct from the shipped realistic defaults (the synth rows pass the
@@ -515,7 +629,7 @@ def _fresh_imu_fusion() -> Callable[..., object]:
     summation-order noise past the oracle budgets). The attitude needs no override: the manual sequence opens
     with an accepted coarse-alignment row whose strong rates twist the estimate straight off the near-zero lanes.
     """
-    return ImuFusion(bias_limit=0.0005, gyro_limit=3.0).update
+    return ImuFusion(bias_limit=_IMU_BIAS_LIMIT, gyro_limit=3.0).update
 
 
 # One continuous history crafted offline by simulating the reference and frozen as literals (the generator lives
@@ -1333,11 +1447,14 @@ SPECS = [
         name="imu_fusion",
         inputs=_IMU_FUSION_INPUTS,
         make_kernel=_fresh_imu_fusion,
-        # The gyro/accel 3-vector parameters decompose into scalar leaf ports the catalogue drives directly,
-        # but the generic reference harness binds its reference positionally with scalars, which a vector-parameter
-        # kernel cannot accept -- the bespoke twin in test_example_reference carries the budgets instead
-        # (the flux_observer pattern).
-        reference=None,
+        # The q lanes are an isometric recurrence (linear growth at the per-step rounding count, unit-norm floor);
+        # the b lanes are bounded absolutely by the catalogue clamp, whose rails resynchronize them bit-exactly
+        # (floor = the clamp); the out lanes inherit the carried q error at the ~1 g operand scale.
+        reference={
+            **{f"state_attitude_{k}": OutputTolerance(ulps=64, growth_ulps=32, floor=1.0) for k in range(4)},
+            **{f"state_bias_{k}": OutputTolerance(ulps=16, growth_ulps=4, floor=_IMU_BIAS_LIMIT) for k in range(3)},
+            **{f"out_0_{k}": OutputTolerance(ulps=64, growth_ulps=16, floor=10.0) for k in range(3)},
+        },
         nominal=_IMU_FUSION_MANUAL[4],  # the first bias-railing in-band row
         manual=_IMU_FUSION_MANUAL,
         draw_random=_draw_imu_fusion,
@@ -1383,7 +1500,11 @@ SPECS = [
         name="finite_set_current_controller",  # stateful; record/array parameters drive decomposed scalar lanes
         inputs=_FSCC_INPUTS,
         make_kernel=_fresh_finite_set_controller,
-        reference=None,  # the Kinematics record and ndarray parameters cannot bind from scalar rows
+        # The bool switch lanes must match bit-for-bit -- the driven domain keeps the drive comparisons away from
+        # near-ties, and an exact symmetric tie computes bit-equal drives on both sides, so the first-wins scan picks
+        # the same candidate. The balance lanes carry the zero-mean recurrence's budget with a unit floor, since a
+        # true-zero lane would make a relative budget vacuous.
+        reference={f"out_switch_balance_{k}": OutputTolerance(ulps=64, growth_ulps=8, floor=1.0) for k in range(3)},
         nominal=_fscc_row(0.5, (1.0, -0.5, -0.5), (1e4, -1e4, 0.0), 100.0, (2.0, -1.0)),
         manual=[
             _fscc_row(0.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0.0, (0.0, 0.0)),  # quiet: the all-false arm
@@ -1399,17 +1520,84 @@ SPECS = [
         operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
     ExampleSpec(
-        name="flux_observer",  # stateful 2-vector I/O driven through its decomposed scalar port lanes
+        name="flux_observer",  # stateful record/2-vector I/O driven through its decomposed scalar port lanes
         inputs=_FLUX_OBSERVER_INPUTS,
         make_kernel=_fresh_flux_observer,
-        reference=None,  # the ndarray u_ab/i_ab parameters cannot bind from scalar rows; a bespoke twin covers it
+        # The i_last lanes are an identity install of the quantized input, so they must match bit-for-bit; the
+        # rounded lanes carry budgets (the atan2 CORDIC is faithful rather than exact, and the flux recurrence
+        # accumulates rounding through carried state at the flux-linkage scale).
+        reference={
+            "out_0": OutputTolerance(ulps=64),
+            "state_flux_0": OutputTolerance(ulps=64, growth_ulps=1, floor=_FLUX_LINKAGE),
+            "state_flux_1": OutputTolerance(ulps=64, growth_ulps=1, floor=_FLUX_LINKAGE),
+        },
         nominal=_flux_row(1e-4, (1.0, 0.5), (2.0, -1.0)),
         manual=_FLUX_OBSERVER_MANUAL,
         draw_random=_draw_flux_observer,
-        # The full format-edge sweep is safe on this accumulator because the clamp bounds the carried flux every
-        # row: an infinite update lands as a railed ±flux_linkage, never as an infinity a later opposite-signed row
-        # could cancel into inf - inf.
+        # The full format-edge sweep is safe on the voltage and current lanes because the clamp bounds the carried
+        # flux every row: an infinite update lands as a railed ±flux_linkage, never as an infinity a later
+        # opposite-signed row could cancel into inf - inf. The clamp itself is what holds that guarantee, so the
+        # machine parameters are swept over physical magnitudes instead -- a railed flux_linkage would open the box
+        # and let an infinite flux reach the atan2 with both operands infinite.
+        edge_overrides={
+            "params_R": (0.0, _PHASE_RESISTANCE, 5.0),
+            "params_L_d": (0.0, _PHASE_INDUCTANCE, 1e-2),
+            "params_flux_linkage": (0.0, 1e-3, _FLUX_LINKAGE, 1.0),
+        },
         edge_values=_WIDE_EDGES,
+        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    ),
+    ExampleSpec(
+        name="foc",  # the capstone: the observer above embedded in a full sensorless current controller
+        inputs=_FOC_INPUTS,
+        make_kernel=_fresh_foc,
+        # Four tiers, each measured against the driven sequence rather than assumed. The current samples the observer
+        # carries are one Clarke product of the row, so they hold at the operand scale; the flux integrator and the
+        # duty cycles it feeds accumulate one rounding per row; the dq frame and the commanded voltage close a loop
+        # through the estimated angle, which is ill-conditioned wherever the flux vector passes near the origin; and
+        # the speed estimate divides an angle difference by a PWM period, so it carries whatever the angle carries
+        # amplified by the reciprocal of a period as short as ten microseconds -- the widest budget in the catalogue,
+        # and still under a thousandth of a radian per second at the speeds these rows reach.
+        reference={
+            "out_0_0": OutputTolerance(ulps=64, growth_ulps=4),
+            "out_0_1": OutputTolerance(ulps=64, growth_ulps=4),
+            "out_0_2": OutputTolerance(ulps=64, growth_ulps=4),
+            "out_1_0": OutputTolerance(ulps=256, growth_ulps=8, floor=1.0),
+            "out_1_1": OutputTolerance(ulps=256, growth_ulps=8, floor=1.0),
+            "state_integral_dq_0": OutputTolerance(ulps=128, growth_ulps=4, floor=1.0),
+            "state_integral_dq_1": OutputTolerance(ulps=128, growth_ulps=4, floor=1.0),
+            "state_observer_flux_0": OutputTolerance(ulps=64, growth_ulps=1, floor=_FLUX_LINKAGE),
+            "state_observer_flux_1": OutputTolerance(ulps=64, growth_ulps=1, floor=_FLUX_LINKAGE),
+            "state_observer_i_last_0": OutputTolerance(ulps=64, floor=1.0),
+            "state_observer_i_last_1": OutputTolerance(ulps=64, floor=1.0),
+            "state_omega": OutputTolerance(ulps=1024, growth_ulps=8),
+            "state_theta_prev": OutputTolerance(ulps=64, growth_ulps=4),
+            "state_u_alpha_beta_0": OutputTolerance(ulps=256, growth_ulps=8),
+            "state_u_alpha_beta_1": OutputTolerance(ulps=256, growth_ulps=8),
+        },
+        # The Clarke and Park products and the voltage norm are numpy calls the host may serve from BLAS, whose
+        # contracted products differ from the evaluator's separately rounded ones by an ulp the kernel then divides
+        # by a PWM period into the speed estimate. The measured requirement is about two thousand float64 ulps, so
+        # this is set a factor of four above it -- loose against a fold-exact kernel, and still four parts in a
+        # trillion against a front end that got an operand or a term wrong.
+        oracle_ulps=8192,
+        nominal=_foc_row(2e-5, (2.0, -1.0), (0.0, 2.0), 24.0),
+        manual=_FOC_MANUAL,
+        draw_random=_draw_foc,
+        # Every lane is pinned to physical magnitudes: the format rails have no meaning for a machine parameter, and
+        # this kernel has no clamp standing between them and an undefined form -- a railed current overflows the
+        # Park rotation into inf - inf, a subnormal period divides the angle difference into an infinite speed whose
+        # sine is a NaN, and a zero bus divides the modulator.
+        edge_overrides={
+            "params_R": (0.0, _PHASE_RESISTANCE, 5.0),
+            "params_L_dq_0": (0.0, _PHASE_INDUCTANCE, 1e-3),
+            "params_L_dq_1": (0.0, _PHASE_INDUCTANCE, 1e-3),
+            "params_flux_linkage": (0.0, 1e-3, _FLUX_LINKAGE, 0.05),
+            "params_speed_filter_gain": (0.0, 0.05, 1.0),
+            "dt": (1e-5, 2e-5, 1e-4),
+            "v_dc": (6.0, 12.0, 24.0, 48.0),
+        },
+        edge_values=(0.0, 5.0, -5.0, 40.0, -40.0),  # the current lanes: quiet, nominal, and both saturating rails
         operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
 ]

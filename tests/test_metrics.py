@@ -60,6 +60,7 @@ from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingInte
 from biquad import Biquad  # noqa: E402
 from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
+from foc import FocController  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
 
@@ -67,6 +68,7 @@ _FMT = FloatFormat(8, 36)
 _EXTRA_OPERATORS: dict[str, Callable[[OperatorOptions], OperatorOptions]] = {
     "imu_fusion": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     "finite_set_current_controller": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    "foc": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
 }
 
 _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
@@ -92,6 +94,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "ekf1_stateless": lambda: update_x_P,
     "finite_set_current_controller": lambda: FiniteSetCurrentController().__call__,
     "ekf1_stateful": lambda: Ekf1().update,
+    "foc": lambda: FocController().tick,
 }
 
 
@@ -248,6 +251,10 @@ BASELINE: dict[str, Metrics] = {
     "ekf1_stateful": Metrics(
         True, nreg=40, bnreg=0, steering=89, copies=0, min_ii=127, last_pc=127, max_block_span=127
     ),
+    # A deep composition: a nested component instance (the flux observer) whose state joins the controller's own,
+    # every transcendental the library offers, and two data-dependent branches -- so it gates cross-component slot
+    # allocation against the register and steering blowup that inlining a component can cause.
+    "foc": Metrics(False, nreg=32, bnreg=3, steering=73, copies=4, min_ii=284, last_pc=335, max_block_span=217),
 }
 
 

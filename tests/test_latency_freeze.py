@@ -96,9 +96,14 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "fir-e8m36": (20, 20),
     "biquad-e8m36": (21, 21),
     "ekf1_stateful-e8m36": (125, 125),
-    # Straight-line: the clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC
-    # atan2 tail.
-    "flux_observer-e8m36": (87, 87),
+    # The clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC atan2 tail, and
+    # the aligning first transaction is a real branch around the whole integrator -- so the shortest static path is
+    # the one that adopts the prior, well under the last PC that covers the integrating arm.
+    "flux_observer-e8m36": (74, 97),
+    # The controller that embeds that observer: the same atan2 tail, then a sincos, a norm, and the divides of the
+    # limiter and the modulator, with the alignment, the branch-cut correction and the anti-windup freeze all
+    # surviving as real branches -- so the last PC covers arms the shortest static path does not.
+    "foc-e8m36": (284, 335),
     # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
     # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
     "imu_fusion-e8m36": (233, 409),

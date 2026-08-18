@@ -83,7 +83,7 @@ _VECTOR_KERNELS: list[tuple[str, object, list[InputRow]]] = [
 def test_eel_oracle_on_examples(spec: ExampleSpec) -> None:
     hir = lower(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir
     vectors = spec.reference_vectors()
-    compared = assert_hir_matches_reference(hir, spec.make_kernel(), vectors, label=spec.name)
+    compared = assert_hir_matches_reference(hir, spec.make_kernel(), vectors, label=spec.name, ulps=spec.oracle_ulps)
     assert compared == len(vectors)
 
 

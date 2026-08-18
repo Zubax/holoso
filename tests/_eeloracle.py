@@ -219,7 +219,7 @@ def expected_input_names(reference: Callable[..., object]) -> list[str]:
     return names
 
 
-def _binder(reference: Callable[..., object]) -> Callable[[InputRow], tuple[list[object], dict[str, object]]]:
+def binder(reference: Callable[..., object]) -> Callable[[InputRow], tuple[list[object], dict[str, object]]]:
     """Row lookups happen outside the discard-guarded call, so a typo'd vector key crashes instead of discarding."""
     parameters = list(inspect.signature(reference).parameters.values())
     kinds = {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
@@ -293,7 +293,7 @@ def assert_hir_matches_reference(
     assert not private_ported, f"{label}: state ports exposing private slots: {private_ported}"
     portless = [slot for slot in evaluator.state if slot not in private_names and slot not in public_slots]
     assert not portless, f"{label}: public slots without state_ ports: {portless}"
-    bind = _binder(reference)
+    bind = binder(reference)
     compared = 0
     for index, row in enumerate(vectors):
         context = f"{label}[{index}]"
