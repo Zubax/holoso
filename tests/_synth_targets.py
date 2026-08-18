@@ -163,6 +163,7 @@ def _from_polar_kernel() -> Callable[..., object]:
 # per-flow stage knobs elsewhere in the matrix).
 _TO_POLAR_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
 _FROM_POLAR_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
+_FLUX_OBSERVER_DIAMOND_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=2)
 # kepler's fsincos (coalesced sin+cos per Newton iteration) dominates timing, so its measured closure coincides with
 # from_polar's -- the same operator.
 _KEPLER_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
@@ -542,9 +543,9 @@ TARGETS: list[SynthTarget] = [
         name="rigid_body_rates_e6m18",
     ),
     # flux_observer: a short stateful clamped fadd/fmul/fsort integrator feeding the same CORDIC atan2 as to_polar,
-    # so the rows start from that operator's one measured configuration. The ECP5 rows keep a lean datapath around
-    # it; on Vivado the register file reaches both the sorter's compare cone and the DSP operand mux inside one
-    # period, so those two entries take an input stage each.
+    # so the rows start from that operator's measured configuration. Diamond uses the smaller 2×2 product grid because
+    # the 3×3 topology's extra registers congest the shared normalizer. On Vivado the register file reaches both the
+    # sorter's compare cone and the DSP operand mux inside one period, so those two entries take an input stage each.
     for_example(
         "flux_observer",
         FlowId.YOSYS_ECP5,
@@ -561,7 +562,12 @@ TARGETS: list[SynthTarget] = [
         "flux_observer",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(F_e6m18, fadd=FAddOptions(stage_input=1), fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions()),
+        op_config(
+            F_e6m18,
+            fadd=FAddOptions(stage_input=1),
+            fatan2=_FLUX_OBSERVER_DIAMOND_FATAN2,
+            fsort=FSortOptions(),
+        ),
     ),
     for_example(
         "flux_observer",
