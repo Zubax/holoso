@@ -229,9 +229,11 @@ BASELINE: dict[str, Metrics] = {
     ),
     "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=16, last_pc=16, max_block_span=16),
     # The capability-probe controller: records, reductions, reshape, dtype conversions, and a branchy scan in one
-    # kernel, so it gates the whole new-frontend surface against fabric regressions.
+    # kernel, so it gates the whole new-frontend surface against fabric regressions. The pairwise extrema over the
+    # six active drives hold two partial maxima live where a fold held one, at no cost in latency: the dot products
+    # bound that block, not the max.
     "finite_set_current_controller": Metrics(
-        False, nreg=23, bnreg=4, steering=68, copies=12, min_ii=160, last_pc=204, max_block_span=108
+        False, nreg=24, bnreg=4, steering=68, copies=12, min_ii=160, last_pc=204, max_block_span=108
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
     # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.

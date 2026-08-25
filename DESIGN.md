@@ -273,8 +273,9 @@ typed lowerings, each either a single semantic HIR operator or an inlined compos
 position and optionally a refinement demanding a compile-time value -- of known sign, or of one named value where the
 sign does not tell the lowerings apart (a one-half exponent is the square root, an integral one a multiply chain);
 selection takes the unique most refined lowering every one of whose positions accepts the operand. An array
-composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static left
-folds, so FMA contraction stays reachable. A composite may admit a sequence at a declared argument position, and a
+composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
+pairwise trees, log-deep in the operator's latency, while the dot product stays a left fold so FMA contraction
+remains reachable. A composite may admit a sequence at a declared argument position, and a
 scalar entry may be lifted per key to apply elementwise over an array's leaves. Every stub is ordinary Python in
 the supported subset, so each is its own numerical reference.
 

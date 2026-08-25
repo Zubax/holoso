@@ -38,7 +38,7 @@ from flux_observer import FluxObserver  # noqa: E402
 from foc import FocController  # noqa: E402
 from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
-from image_agc_streamed import PIXEL_MAX, ImageAgc  # noqa: E402
+from image_agc_streamed import EXPOSURE_MIN_s, PIXEL_MAX, ImageAgc  # noqa: E402
 import imu_fusion as imu_fusion  # noqa: E402  # synth matrix; it synthesizes the shipped realistic-config kernel
 from imu_fusion import ImuFusion as ImuFusion  # noqa: E402
 from iq_oscillator import IqOscillator  # noqa: E402
@@ -166,29 +166,47 @@ _PWM_MANUAL = _drive(
 )
 
 
-# The gain control's pixel bus carries a whole beat per transaction, so each vector is one beat plus its target;
-# the beat mirrors the example's own bus width. The catalogue drives a frame far shorter than the one the example
-# ships, so a vector sequence crosses several frame boundaries.
+# The exposure control's pixel bus carries a whole beat per transaction, so each vector is one beat plus its target;
+# the beat mirrors the example's own bus width. The catalogue drives a 64x4 frame -- the smallest whose central
+# quarter is whole beats and whole rows -- so a vector sequence crosses many frame boundaries.
 _AGC_BEAT = 16
-_AGC_FRAME = 64
+_AGC_COLS = 4
+_AGC_ROWS = 4
+_AGC_TARGET = 120
 
 
 def _agc(pixels: Sequence[int], target: int) -> InputVector:
     return {**{f"pixels_{i}": pixel for i, pixel in enumerate(pixels)}, "target": target}
 
 
-def _agc_frame(pixels: Sequence[int], target: int) -> list[InputVector]:
-    return [_agc(pixels, target) for _ in range(_AGC_FRAME // _AGC_BEAT)]
+def _agc_frame(beat_at: Callable[[int, int], Sequence[int]], target: int = _AGC_TARGET) -> list[InputVector]:
+    return [_agc(beat_at(x, y), target) for y in range(_AGC_ROWS) for x in range(_AGC_COLS)]
 
 
-_AGC_RAMP = [5 * i for i in range(1, _AGC_BEAT + 1)]
+def _agc_flat(value: int) -> Callable[[int, int], Sequence[int]]:
+    return lambda x, y: [value] * _AGC_BEAT
+
+
+def _agc_centre(inside: int, outside: int) -> Callable[[int, int], Sequence[int]]:
+    return lambda x, y: [inside if 1 <= x < 3 and 1 <= y < 3 else outside] * _AGC_BEAT
+
+
+def _agc_hot(saturated: int) -> Callable[[int, int], Sequence[int]]:
+    """A dark frame whose first beat carries the given number of saturated pixels; the clip limit is two."""
+    return lambda x, y: (
+        [PIXEL_MAX] * saturated + [10] * (_AGC_BEAT - saturated) if (x, y) == (0, 0) else [10] * _AGC_BEAT
+    )
+
+
 _AGC_MANUAL = (
-    _agc_frame(_AGC_RAMP, 120)  # a dark frame passing through at the reset gain of one
-    + _agc_frame(_AGC_RAMP, 120)  # and repeated under the gain it measured: mean 42.5 against target 120
-    + _agc_frame([0] * _AGC_BEAT, 120)  # black: the mean floors at one LSB and the gain takes its ceiling
-    + _agc_frame([250] * _AGC_BEAT, 120)  # entered at that ceiling, so every output pixel clamps
-    + _agc_frame([100] * _AGC_BEAT, 50)  # a target that halves the mean exactly
-    + _agc_frame([99, 101] * (_AGC_BEAT // 2), 120)  # so these odd pixels land on a tie and must round to even
+    _agc_frame(_agc_flat(40))  # passes through at the reset demand; a dark frame, so the demand starts to rise
+    + _agc_frame(_agc_flat(0)) * 8  # black: the largest error, integrating up through all three actuators to the clamp
+    + _agc_frame(_agc_flat(40)) * 10  # over-corrected now, so the digital gain converges down into the deadband
+    + _agc_frame(_agc_hot(4))  # saturates more than the limit while dark: the increase is refused
+    + _agc_frame(_agc_hot(2))  # saturates exactly the limit: the increase goes through
+    + _agc_frame(_agc_centre(200, 0)) * 2  # a bright centre in a dark field meters bright, so the demand falls
+    + _agc_frame(_agc_flat(250), 1) * 8  # bright against the lowest target: down to the floor and clamped there
+    + _agc_frame(_agc_flat(120))  # on target at the floor: held by the deadband
 )
 
 
@@ -1121,15 +1139,20 @@ SPECS = [
     ExampleSpec(
         name="image_agc_streamed",
         inputs=tuple(f"pixels_{i}" for i in range(_AGC_BEAT)) + ("target",),
-        make_kernel=lambda: ImageAgc(frame_pixels=_AGC_FRAME).__call__,
-        # The pixel sum is a small integer, hence exact, so the gain carries only the roundings of the two divisions
-        # it is made of, and each frame recomputes it rather than carrying it forward, so the budget stays flat.
-        # The output pixels are integer lanes and match exactly.
-        reference={"state_gain": OutputTolerance(ulps=4)},
-        nominal=_agc([128] * _AGC_BEAT, 120),
+        make_kernel=lambda: ImageAgc(width=_AGC_COLS * _AGC_BEAT, height=_AGC_ROWS).__call__,
+        # The demand in stops carries its rounding forward through state, and the gains are its exp2, where an
+        # absolute error of d stops is a relative error of ln2*d -- amplified by the demand's magnitude of up to
+        # fourteen stops. The pixel sums are small integers, hence exact; the output pixels are integer lanes and
+        # match exactly. The exposure's own scale is its floor, or the budget would be absolute at unity.
+        reference={
+            "state_exposure_s": OutputTolerance(ulps=8, growth_ulps=2, floor=EXPOSURE_MIN_s),
+            "state_analog_gain": OutputTolerance(ulps=8, growth_ulps=2),
+            "state_digital_gain": OutputTolerance(ulps=8, growth_ulps=2),
+        },
+        nominal=_agc([128] * _AGC_BEAT, _AGC_TARGET),
         manual=_AGC_MANUAL,
         draw_random=lambda rng: _agc(
-            [int(v) for v in rng.integers(0, PIXEL_MAX + 1, _AGC_BEAT)], int(rng.integers(0, PIXEL_MAX + 1))
+            [int(v) for v in rng.integers(0, PIXEL_MAX + 1, _AGC_BEAT)], int(rng.integers(64, 193))
         ),
         # Every port carries an 8-bit quantity, so the sweep leaves that range on purpose: the far end saturates the
         # accumulator, and the rounding of the gained pixel back to an integer saturates too, on both sides alike.

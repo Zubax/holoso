@@ -1075,13 +1075,43 @@ def test_reductions_are_independent_of_the_unroll_threshold() -> None:
     _assert_python_matches_holoso(kernel, np.array([1.25, -0.5, 3.0]), options=options)
 
 
-def test_sum_of_products_contracts_to_fma_chain() -> None:
-    # A summed elementwise product must contract exactly as `v @ w` does: one fmul, then n-1 ffma.
+def test_sum_of_products_contracts_at_the_leaves_of_the_tree() -> None:
+    # The sum is a pairwise tree, so the products contract into its leaves -- each pair one fmul then one ffma -- and
+    # the level above is a plain add; a kernel that wants the full n-1 ffma chain writes the dot product `u @ w`.
     def kernel(u: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
         return float(np.sum(u * w))
 
     fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
-    assert _mnemonic_counts(kernel, fma_mir) == {"fmul": 1, "ffma": 3}
+    assert _mnemonic_counts(kernel, fma_mir) == {"fmul": 2, "ffma": 2, "fadd": 1}
+
+
+def test_reductions_are_log_deep() -> None:
+    # A whole-array reduction must finish well ahead of an explicit left fold over the same elements: the fold
+    # serializes on the operator's latency, the reduction on its logarithm. Both families, since each rides its own
+    # adder.
+    def int_tree(v: Int[np.ndarray, "16"]) -> int:
+        return np.sum(v)  # type: ignore[no-any-return]
+
+    def int_chain(v: Int[np.ndarray, "16"]) -> int:
+        acc = v[0]
+        for x in v[1:]:
+            acc = acc + x
+        return acc  # type: ignore[no-any-return]
+
+    def float_tree(v: Float64[np.ndarray, "16"]) -> float:
+        return float(np.sum(v))
+
+    def float_chain(v: Float64[np.ndarray, "16"]) -> float:
+        acc = v[0]
+        for x in v[1:]:
+            acc = acc + x
+        return float(acc)
+
+    def min_ii(fn: Callable[..., object]) -> int:
+        return _synth(fn).initiation_interval[0]
+
+    assert min_ii(int_tree) < min_ii(int_chain) // 2
+    assert min_ii(float_tree) < min_ii(float_chain) // 2
 
 
 # ---------------------------------------------------------------- reshape and dtype conversions
