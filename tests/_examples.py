@@ -38,6 +38,7 @@ from flux_observer import FluxObserver  # noqa: E402
 from foc import FocController  # noqa: E402
 from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
 from iir1_lpf import IIR1LPF as IIR1LPF  # noqa: E402
+from image_agc_streamed import PIXEL_MAX, ImageAgc  # noqa: E402
 import imu_fusion as imu_fusion  # noqa: E402  # synth matrix; it synthesizes the shipped realistic-config kernel
 from imu_fusion import ImuFusion as ImuFusion  # noqa: E402
 from iq_oscillator import IqOscillator  # noqa: E402
@@ -162,6 +163,32 @@ _PWM_MANUAL = _drive(
     + [3] * 5  # ends part-way up the ramp, so the next change lands mid-period
     + [6] * 7  # retuned while counting up, and this segment ends on the way down
     + [2] * 6,  # so this one is retuned while counting down
+)
+
+
+# The gain control's pixel bus carries a whole beat per transaction, so each vector is one beat plus its target;
+# the beat mirrors the example's own bus width. The catalogue drives a frame far shorter than the one the example
+# ships, so a vector sequence crosses several frame boundaries.
+_AGC_BEAT = 16
+_AGC_FRAME = 64
+
+
+def _agc(pixels: Sequence[int], target: int) -> InputVector:
+    return {**{f"pixels_{i}": pixel for i, pixel in enumerate(pixels)}, "target": target}
+
+
+def _agc_frame(pixels: Sequence[int], target: int) -> list[InputVector]:
+    return [_agc(pixels, target) for _ in range(_AGC_FRAME // _AGC_BEAT)]
+
+
+_AGC_RAMP = [5 * i for i in range(1, _AGC_BEAT + 1)]
+_AGC_MANUAL = (
+    _agc_frame(_AGC_RAMP, 120)  # a dark frame passing through at the reset gain of one
+    + _agc_frame(_AGC_RAMP, 120)  # and repeated under the gain it measured: mean 42.5 against target 120
+    + _agc_frame([0] * _AGC_BEAT, 120)  # black: the mean floors at one LSB and the gain takes its ceiling
+    + _agc_frame([250] * _AGC_BEAT, 120)  # entered at that ceiling, so every output pixel clamps
+    + _agc_frame([100] * _AGC_BEAT, 50)  # a target that halves the mean exactly
+    + _agc_frame([99, 101] * (_AGC_BEAT // 2), 120)  # so these odd pixels land on a tie and must round to even
 )
 
 
@@ -1090,6 +1117,26 @@ SPECS = [
         edge_values=(0, 1, 1 << 30, 1 << 31, 0xC0000000, _NCO_PHASE_MASK, 1 << 32, -1),
         formats=(FloatFormat(6, 18),),  # float-free, so the kernel's own wint_min alone sizes the accumulator
         wint_min=34,  # the pre-mask sum reaches 2**33 - 2: one carry bit above the accumulator, plus the sign bit
+    ),
+    ExampleSpec(
+        name="image_agc_streamed",
+        inputs=tuple(f"pixels_{i}" for i in range(_AGC_BEAT)) + ("target",),
+        make_kernel=lambda: ImageAgc(frame_pixels=_AGC_FRAME).__call__,
+        # The pixel sum is a small integer, hence exact, so the gain carries only the roundings of the two divisions
+        # it is made of, and each frame recomputes it rather than carrying it forward, so the budget stays flat.
+        # The output pixels are integer lanes and match exactly.
+        reference={"state_gain": OutputTolerance(ulps=4)},
+        nominal=_agc([128] * _AGC_BEAT, 120),
+        manual=_AGC_MANUAL,
+        draw_random=lambda rng: _agc(
+            [int(v) for v in rng.integers(0, PIXEL_MAX + 1, _AGC_BEAT)], int(rng.integers(0, PIXEL_MAX + 1))
+        ),
+        # Every port carries an 8-bit quantity, so the sweep leaves that range on purpose: the far end saturates the
+        # accumulator, and the rounding of the gained pixel back to an integer saturates too, on both sides alike.
+        edge_values=(0, 1, 128, PIXEL_MAX, -1, 1 << 42),
+        operators=lambda ops: dataclasses.replace(
+            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), ftoint=FToIntOptions()
+        ),
     ),
     ExampleSpec(
         name="pwm",

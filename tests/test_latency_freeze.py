@@ -59,6 +59,10 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # oscillator's two general multiplies collapse to one exponent add.
     "iq_oscillator-e8m36": (55, 55),
     "nco-e6m18": (12, 12),
+    # The sixteen pixel lanes scale, round and clamp independently on the pooled operators, and the gain update
+    # is a real branch taken once per frame -- so the shortest static path is a beat that ends no frame, and the
+    # last PC covers the one that does (measured: 51 against 81 realized cycles).
+    "image_agc_streamed-e8m36": (51, 84),
     "pwm-e6m18": (11, 11),
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
