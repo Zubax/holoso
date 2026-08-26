@@ -42,9 +42,10 @@ def load(fn: types.FunctionType) -> SourceUnit:
     try:
         lines, start = inspect.getsourcelines(fn)
     except (OSError, TypeError) as exc:
+        origin = getattr(getattr(fn, "__code__", None), "co_filename", "?")
         raise SourceUnavailable(
-            f"cannot retrieve source for {getattr(fn, '__name__', '?')!r}; "
-            "define it in an importable module (not a REPL/exec/lambda)"
+            f"cannot retrieve source for {getattr(fn, '__name__', '?')!r} at {origin!r}; "
+            "a runtime-generated function needs its text registered in linecache under that filename"
         ) from exc
     filename = inspect.getsourcefile(fn) or "<unknown>"
     if fn.__name__ == "<lambda>":

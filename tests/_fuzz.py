@@ -1,7 +1,7 @@
 """
 End-to-end blackbox differential fuzzing of the Holoso compiler.
 
-The campaign generates small kernels as Python *source text* -- rendered to real importable modules under `build/` so
+The campaign generates small kernels as Python *source text* -- rendered to linecache-backed modules under `build/` so
 the frontend's `inspect.getsourcelines` retrieval succeeds -- and drives each through the public-ish compiler pipeline
 twice: once into the numerical model (downstream of LIR scheduling/binding/regalloc/overlap) and once into the MIR
 interpreter (the schedule-independent oracle, upstream of the LIR layer). The two share the front/mid-end and
@@ -184,8 +184,8 @@ def _binary_literal(significand: float, exp: int) -> str:
 
 def _render_module(name: str, source: str) -> types.ModuleType:
     """
-    The frontend retrieves the kernel's source via `inspect.getsourcelines`, which a REPL/exec-only function cannot
-    satisfy -- hence the real, linecache-backed file rather than a bare `exec`.
+    The linecache entry is what makes the kernel's source retrievable by the frontend; the file on disk exists for
+    post-mortem debugging of a failing case, not for the compiler.
     """
     _FUZZ_TMP.mkdir(parents=True, exist_ok=True)
     path = str((_FUZZ_TMP / f"{name}.py").resolve())
