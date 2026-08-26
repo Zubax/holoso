@@ -43,9 +43,6 @@ class VivadoArtix7Flow(Flow):
         def runner(directory: Path) -> SynthReport:
             env = dict(os.environ)
             env["HOME"] = str(directory / ".vivado_home")
-            env["LD_LIBRARY_PATH"] = os.pathsep.join(
-                [str(_udev_stub(directory)), *([p] if (p := env.get("LD_LIBRARY_PATH")) else [])]
-            )
             run_logged(
                 [require_tool("vivado"), "-mode", "batch", "-source", _TCL, "-nojournal"],
                 directory / _LOG,
@@ -57,23 +54,6 @@ class VivadoArtix7Flow(Flow):
         return SynthArtifact(
             flow=FlowId.VIVADO_ARTIX7, top=top, files=[*src, xdc, tcl], commands=commands, runner=runner
         )
-
-
-def _udev_stub(directory: Path) -> Path:
-    """
-    A directory holding an unloadable `libudev.so.1`, to be put ahead of the real one on Vivado's library search path.
-
-    Vivado's licence manager dlopens libudev to scan for hardware dongles, and against libudev >= 259 that scan
-    corrupts the heap: v2025.2.1 dies (SIGSEGV/SIGABRT) at the end of `route_design`, after the design has routed
-    but before any report is written, so the flow loses its results to a crash it cannot otherwise survive. The load
-    is optional -- a failed dlopen takes the licence manager down its own no-dongle path -- so an unloadable stub
-    ahead of the real library restores the run. Dongle-locked licences are consequently invisible to this flow;
-    floating and node-locked ones are unaffected, and nothing in out-of-context synthesis needs udev.
-    """
-    stub = directory / ".udev_stub"
-    stub.mkdir(parents=True, exist_ok=True)
-    (stub / "libudev.so.1").write_bytes(b"")
-    return stub
 
 
 def _tcl(top: str, part: str, verilog_paths: list[Path]) -> str:
