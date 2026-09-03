@@ -255,7 +255,7 @@ async def _transact(dut, a, b):
 
 @cocotb.test()
 async def div0_errpc(dut):
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    Clock(dut.clk, 10, unit="ns").start()
     await FallingEdge(dut.clk)
     dut.rst.value = 1
     dut.in_valid.value = 0
@@ -343,7 +343,7 @@ async def _transact(dut, x):
 
 @cocotb.test()
 async def log2_errpc(dut):
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    Clock(dut.clk, 10, unit="ns").start()
     await FallingEdge(dut.clk)
     dut.rst.value = 1
     dut.in_valid.value = 0
@@ -407,7 +407,7 @@ async def _transact(dut, x, y, z):
 
 @cocotb.test()
 async def overlap_div0_errpc(dut):
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    Clock(dut.clk, 10, unit="ns").start()
     await FallingEdge(dut.clk)
     dut.rst.value = 1
     dut.in_valid.value = 0

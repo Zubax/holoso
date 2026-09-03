@@ -99,7 +99,7 @@ async def cosim(dut):
     else:
         sequence = [[_input_bits(p, rng) for p in _IN_PORTS] for _ in range(_DEFAULT_COUNT)]
 
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    Clock(dut.clk, 10, unit="ns").start()
     await FallingEdge(dut.clk)
     dut.rst.value = 1
     dut.in_valid.value = 0

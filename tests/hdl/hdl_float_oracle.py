@@ -16,7 +16,6 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
-import cocotb
 import holoso
 import numpy as np
 from holoso._backend.verilog._support import support_files
@@ -345,7 +344,7 @@ def stage_tag(stages: dict[str, int]) -> str:
 
 
 async def start_clock(dut: Any, period_ns: int = 10) -> None:
-    cocotb.start_soon(Clock(dut.clk, period_ns, unit="ns").start())
+    Clock(dut.clk, period_ns, unit="ns").start()
     await FallingEdge(dut.clk)
 
 

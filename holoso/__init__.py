@@ -56,5 +56,5 @@ FSqrtOptions = _operators.FSqrtOperator.Options
 FToIntOptions = _operators.FToIntOperator.Options
 IMulOptions = _operators.IMulOperator.Options
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 __url__ = "https://holoso.digital"
