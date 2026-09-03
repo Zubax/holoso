@@ -67,7 +67,7 @@ class _Kernel:
     """
     Read-only metadata shared by the serializable handle and the runnable simulator: both wrap one compiled kernel and
     describe its module name, float format, and typed I/O ports. `inputs`/`outputs` are the kernel's logical ports
-    -- the parameters and return values named as the user wrote them, each with its ScalarType.
+    -- the parameters and return values under the names the hardware carries, each with its ScalarType.
     Subclasses set the `_lir` instance attribute; this base is never instantiated directly.
     """
 

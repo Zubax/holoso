@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from ..._hir import BoolConst, BoolType, Const as HirConst, FloatConst, FloatType, Hir, HirBuilder, IntConst, IntType
 from ..._hir import Operator, Type
 from .._ir import *
-from .._names import port_name, public_slot, slot_name, state_port_name
+from .._names import hardware_name, port_name, public_slot, slot_name, state_port_name
 
 _TYPES: dict[ScalarType, Type] = {
     ScalarType.BOOL: BoolType(),
@@ -64,7 +64,7 @@ def emit(fn: EelFunction) -> Hir:
     env: _Env = {}
     for param in fn.params:
         assert param.stype is not None
-        env[param.name] = builder.input(param.name, _TYPES[param.stype])
+        env[param.name] = builder.input(hardware_name(param.name), _TYPES[param.stype])
     sites: list[_Site] = []
     terminated = _block(_Emit(builder, fn, sites, [], []), fn.body, env)
     assert terminated, "the residual body ends in a return site on every path"

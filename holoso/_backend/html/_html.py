@@ -49,16 +49,16 @@ def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
         f"<div class='sub'>{generated} {_esc(output_header())}</div>"
         f"</header><main>",
     ]
-    # The compact summary sections share one wrapping row (metrics, then the narrow constants and interface) so they
-    # do not waste page height; the wide register-grid schedule follows below.
+    # The compact summary sections share one wrapping row so they do not waste page height. Constants come last
+    # because that block wants the full width, which would push every narrower section onto a line of its own.
     out.append("<div class='toprow'>")
     out.append(f"<div class='sec'>{_metrics(lir)}</div>")
     out.append(f"<div class='sec'>{_stage_config(lir)}</div>")
+    out.append(f"<div class='sec'>{_interface(lir)}</div>")
+    out.append(f"<div class='sec modhdrsec'>{_module_header(verilog_output.verilog)}</div>")
     constants = _constants(lir)
     if constants:
         out.append(f"<div class='sec'>{constants}</div>")
-    out.append(f"<div class='sec'>{_interface(lir)}</div>")
-    out.append(f"<div class='sec modhdrsec'>{_module_header(verilog_output.verilog)}</div>")
     out.append("</div>")
     out.append(render_schedule(lir))
     out.append("</main></body></html>")

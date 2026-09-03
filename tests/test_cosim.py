@@ -61,6 +61,16 @@ def test_cosim_small_kernel(sim: str) -> None:
     run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="kernel"))
 
 
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_greek_identifiers(sim: str) -> None:
+    # The interface names come from Python identifiers, which admit Greek; Verilog does not. Only a real elaboration
+    # proves the spelled-out names reach the DUT, since the bench addresses every port by that same name.
+    def kernel(ω: float, Δt: float) -> float:
+        return ω * Δt
+
+    run_cosim(sim, holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="greek_kernel"))
+
+
 @pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_comparison_at_branch_boundary(sim: str, config: OptionsCase) -> None:

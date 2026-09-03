@@ -14,7 +14,7 @@ from ._backend.html import generate as generate_html, HtmlOutput
 from ._backend.numerical import generate as generate_model, NumericalModel
 from ._backend.verilog import generate as generate_verilog, VerilogOutput
 
-from ._eel import lower as lower_frontend
+from ._eel import lower as lower_frontend, spelled
 from ._lir import Branch, ControlPort, DataInputPort, DataOutputPort, Port, RegallocTuning, build
 from ._mir import MirOptions, lower as lower_to_mir
 from ._operators import OperatorOptions
@@ -167,7 +167,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     `options` configures the machine; `name` overrides the generated module name (inferred from target by default).
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)-5.5s %(name)s: %(message)s")  # no-op if already setup
-    module_name: str = name or _default_module_name(target)
+    module_name: str = spelled(name or _default_module_name(target))
     _validate_module_name(module_name)
     _logger.info("Synthesis start: module=%r target=%r", module_name, target)
     _logger.info("Options:")

@@ -56,7 +56,7 @@ from .._annotations import accepted_stypes, annotation_stype, unaliased
 from .._desugar import desugar
 from .._ir import *
 from .._decorator import plain_function
-from .._names import indexed_names, port_name, public_slot, state_port_name
+from .._names import hardware_name, indexed_names, port_name, public_slot
 from . import _aggregate, _express, _mutate, _ops
 from ._ownership import allocations, borrow, escape, release, share
 from ._reject import reattribute, reject
@@ -441,7 +441,7 @@ class Interpreter:
         params: list[Param] = []
         for param in remaining:
             params.extend(self._param(param, frame))
-        names = [param.name for param in params]
+        names = [hardware_name(param.name) for param in params]
         if len(set(names)) != len(names):
             collision = next(name for name in names if names.count(name) > 1)
             reject(eel.origin, f"the decomposed parameter names collide on {collision!r}; rename the parameters")
@@ -451,10 +451,6 @@ class Interpreter:
             self._decls = self.state.decls()
             for key in sorted(self.specs):
                 frame.env[key] = self._init_slot(key, self.specs[key], eel.origin, sink)
-            ports = names + [state_port_name(decl.slot) for decl in self._decls if public_slot(decl.slot)]
-            if len(set(ports)) != len(ports):
-                collision = next(name for name in ports if ports.count(name) > 1)
-                reject(eel.origin, f"a state port collides with a parameter on {collision!r}; rename one of them")
         flow = self._block(eel.body, frame, [sink], Ctx())
         assert not flow.exits, "no exit lane escapes the root frame"
         if flow.fall is not None:

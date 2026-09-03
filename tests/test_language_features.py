@@ -1,12 +1,14 @@
 """
 Public-API, black-box behavioral tests for front-end language features: the boolean `^` operator, instance/
 inherited/static method calls, `@property` reads, descriptor and attribute-access-protocol boundaries, and
-module-level constant resolution. Every test drives the compiler ONLY through `holoso.synthesize(fn, ops)` and
+module-level constant resolution, and the spelling of identifiers that reach the synthesized
+interface. Every test drives the compiler ONLY through `holoso.synthesize(fn, ops)` and
 exercises the elaborated numerical model, asserting on observable output values, so the tests survive a refactor of
 the front end. The rejection checks guard soundness boundaries where a silent miscompile would otherwise diverge
 from Python -- behavioral, not mere input validation.
 """
 
+import dataclasses
 import itertools
 from collections.abc import Callable
 from typing import Any
@@ -687,3 +689,83 @@ def test_a_walrus_colliding_with_the_for_target_is_rejected() -> None:
     # A generalized loop target puts store paths, and their index reads, in the header's region.
     with pytest.raises(UnsupportedConstruct, match="`:=`"):
         holoso.synthesize(_walrus_in_a_for_target, _ops())
+
+
+@dataclasses.dataclass(frozen=True)
+class _Estimate:
+    σ: float
+    ω: float
+
+
+class _GreekEstimator:
+    def __init__(self) -> None:
+        self.σ_i = 0.5
+        self._Δ_prev = 0.0
+
+    def __call__(self, ω_ref: float, Δt: float, ς: float, Θ: Float64[np.ndarray, "2"]) -> _Estimate:
+        dω = ω_ref - self._Δ_prev
+        self._Δ_prev = ω_ref
+        self.σ_i = self.σ_i + dω * Δt * (Θ[0] + Θ[1])
+        return _Estimate(σ=self.σ_i - dω * ς, ω=dω)
+
+
+def test_greek_identifiers_reach_the_interface_spelled_out() -> None:
+    # Verilog has no Greek alphabet, so a scientific kernel's names are spelled out one letter for one word on every
+    # lane of the interface -- parameters, decomposed array elements, record fields, and state slots alike.
+    result = holoso.synthesize(_GreekEstimator().__call__, _ops(), name="greek")
+    assert [port.name for port in result.input_ports] == [
+        "in_omega_ref",
+        "in_Deltat",
+        "in_sigma",  # a final sigma spells the same word
+        "in_Theta_0",
+        "in_Theta_1",
+    ]
+    assert [port.name for port in result.output_ports] == ["out_sigma", "out_omega", "state_sigma_i"]
+    for line in result.verilog_output.verilog.splitlines():
+        code = line.split("//", 1)[0]  # comments keep their × and ≤; nothing an elaborator reads may
+        assert code.isascii(), f"non-ASCII outside a comment: {line!r}"
+    sim, ref = result.numerical_model.elaborate(), _GreekEstimator()
+    theta = np.array([0.5, 1.5])
+    for x in (2.0, -1.0, 0.5):
+        want = ref(x, 0.25, 2.0, theta)
+        got = [float(v) for v in sim.run(x, 0.25, 2.0, *map(float, theta))]
+        assert got[:2] == [want.σ, want.ω], f"x={x}: {got} != {want}"
+
+
+class _BothSpellings:
+    def __init__(self) -> None:
+        self.σ = 0.0
+        self.sigma = 0.0
+
+    def step(self, x: float) -> float:
+        self.σ = self.σ + x
+        self.sigma = self.sigma - x
+        return self.σ + self.sigma
+
+
+def test_one_letter_spelled_both_ways_is_rejected_rather_than_aliased() -> None:
+    # The substitution inserts no separator, so two distinct attributes can decompose onto one slot name. Aliasing
+    # them would silently merge two state registers, so the collision is a rejection.
+    with pytest.raises(UnsupportedConstruct, match="same slot name"):
+        holoso.synthesize(_BothSpellings().step, _ops())
+
+
+def _cyrillic(ж: float) -> float:
+    return ж * 2.0
+
+
+def test_a_letter_with_no_verilog_spelling_is_refused() -> None:
+    # Python identifiers admit every alphabet; the module interface admits one. What the table cannot spell is
+    # refused at synthesis rather than emitted as Verilog no tool will parse.
+    with pytest.raises(UnsupportedConstruct, match="no way at all"):
+        holoso.synthesize(_cyrillic, _ops())
+
+
+def Δθ_estimator(x: float) -> float:
+    return x + 1.0
+
+
+def test_a_greek_kernel_name_spells_out_the_module_name() -> None:
+    # The module name is a synthesized identifier like any other, and it names the written artifacts besides.
+    assert holoso.synthesize(Δθ_estimator, _ops()).module_name == "Deltatheta_estimator"
+    assert holoso.synthesize(Δθ_estimator, _ops(), name="σ_est").module_name == "sigma_est"
