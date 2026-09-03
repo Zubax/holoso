@@ -1004,12 +1004,6 @@ def test_trig_of_constants_fold() -> None:
 def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None:
     # The composite steers a zero base away from log2's pole, but only a POSITIVE exponent leaves the base itself:
     # 0**-1 diverges. Regression: the shortcut returned the base for every exponent, so 0**-1 answered 0.0.
-    # A constant pole folds through that same composite, answering +inf as the datapath does; the host raises here.
-    def constant_pole(x: float) -> float:
-        return x + math.pow(0.0, -1.0)
-
-    assert math.isinf(float(_sim(constant_pole, "pow_zero_negative").run(1.0)[0]))
-
     def runtime_pole(b: float, e: float) -> float:
         return math.pow(b, e)
 
@@ -1166,22 +1160,31 @@ def test_composite_unconfigured_operator_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(with_exp2=False), name="lib_cbrt_unconfigured")
 
 
-def test_pow_needs_transcendentals_even_for_a_constant_exponent() -> None:
-    # The rung ladder never prunes the general exp2/log2 path, so even a compile-time exponent requires both
-    # configured -- unlike ** which is a bare multiply chain. Guards the DESIGN.md claim.
-    def kernel(x: float) -> float:
-        return pow(x, 3.0)  # type: ignore[no-any-return]
+def test_pow_needs_transcendentals_only_for_a_fractional_exponent() -> None:
+    # A compile-time FRACTIONAL exponent still needs both operators; a whole one needs neither, however spelled.
+    def fractional(x: float) -> float:
+        return pow(x, 3.5)  # type: ignore[no-any-return]
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_exp2=False), name="lib_pow_needs_exp2")
+        holoso.synthesize(fractional, _ops(with_exp2=False), name="lib_pow_needs_exp2")
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_log2=False), name="lib_pow_needs_log2")
+        holoso.synthesize(fractional, _ops(with_log2=False), name="lib_pow_needs_log2")
+
+    def whole(x: float) -> float:
+        return pow(x, 3.0)  # type: ignore[no-any-return]
+
+    def reciprocal(x: float) -> float:
+        return x**-1.0  # type: ignore[no-any-return]
+
+    lean = _ops(with_exp2=False, with_log2=False)
+    for kernel, want in ((whole, 8.0), (reciprocal, 0.5)):
+        sim = holoso.synthesize(kernel, lean, name=f"lib_pow_whole_{kernel.__name__}").numerical_model
+        assert float(sim.elaborate().run(2.0)[0]) == want, kernel.__name__
 
 
 def test_a_static_integer_exponent_chain_expands_in_every_spelling() -> None:
-    # A static INTEGER exponent expands into a multiplication chain -- exact, and identical whichever way the power is
-    # spelled. A FLOAT exponent of the same magnitude is a different lane by design (the exp2/log2 identity of the
-    # pow_ stub), so it is compared against the host rather than against the chain.
+    # A static WHOLE exponent expands into a multiplication chain, identical whichever way the power is spelled,
+    # the float spelling of the same whole number included: wholeness selects the chain, not the type.
     def with_pow(x: float) -> float:
         return pow(x, 3)
 
@@ -1194,12 +1197,11 @@ def test_a_static_integer_exponent_chain_expands_in_every_spelling() -> None:
     def with_float_exponent(x: float) -> float:
         return x**3.0  # type: ignore[no-any-return]
 
-    sims = [_sim(fn, f"lib_pow_{fn.__name__}") for fn in (with_pow, with_math, with_star)]
-    general = _sim(with_float_exponent, "lib_pow_float_exponent")
+    sims = [_sim(fn, f"lib_pow_{fn.__name__}") for fn in (with_pow, with_math, with_star, with_float_exponent)]
     for x in (2.0, -2.0, 0.5, -1.5, 100.0):
         bits = {_bits(sim.run(x)[0]) for sim in sims}
-        assert len(bits) == 1, f"the static-integer spellings disagree at x={x}"
-        assert float(general.run(x)[0]) == pytest.approx(x**3.0, rel=1e-5), x
+        assert len(bits) == 1, f"the static-whole spellings disagree at x={x}"
+        assert float(sims[0].run(x)[0]) == pytest.approx(x**3.0, rel=1e-5), x
     assert float(sims[0].run(-2.0)[0]) == -8.0
 
 

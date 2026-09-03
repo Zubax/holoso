@@ -10,6 +10,7 @@ import numpy as np
 
 from .._annotations import annotation_stype, host_type
 from .._ir import *
+from .._decorator import plain_function
 from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, resolve
 from . import _aggregate, _ops
 from ._ownership import share
@@ -385,20 +386,19 @@ def _inlinable(
     The plain-Python callee behind any calling spelling, with the receiver arguments CPython's descriptor
     protocol would prepend; an admitted receiver's frozen attributes fold and its state reads see the current
     slots. A C-level callable (a numpy dispatcher or ufunc, a partial) resolves to None: a callee the
-    registry does not carry.
+    registry does not carry, save for a wrapper the compiler reads through.
     """
-    if isinstance(raw, types.FunctionType):
-        return raw, []
+    if (fn := plain_function(raw)) is not None:
+        return fn, []
     if inspect.ismethod(raw):
-        if not isinstance(raw.__func__, types.FunctionType):
-            return None
-        return raw.__func__, [interp.snapshot.admit(display, raw.__self__, origin)]
+        fn = plain_function(raw.__func__)
+        return None if fn is None else (fn, [interp.snapshot.admit(display, raw.__self__, origin)])
     if callable(raw):
         call_attr = mro_attr(type(raw), "__call__")
-        if isinstance(call_attr, staticmethod) and isinstance(call_attr.__func__, types.FunctionType):
-            return call_attr.__func__, []
-        if isinstance(call_attr, types.FunctionType):
-            return call_attr, [interp.snapshot.admit(display, raw, origin)]
+        if isinstance(call_attr, staticmethod) and (fn := plain_function(call_attr.__func__)) is not None:
+            return fn, []
+        if (fn := plain_function(call_attr)) is not None:
+            return fn, [interp.snapshot.admit(display, raw, origin)]
     return None
 
 

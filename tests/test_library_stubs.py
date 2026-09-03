@@ -19,6 +19,7 @@ import holoso
 from holoso import FAddOptions, OperatorOptions, Options, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._eel._lib import Array, Lifted, Reshape, ScalarFunction, resolve
+from holoso._eel._lib._registry import Domain, StaticOneHalf, StaticWholeNonNegative
 from holoso._eel._ir import BinaryOp, ScalarType
 from holoso._eel._lib._linalg import cross, inv, matmul, norm, transpose
 from holoso._eel._lib._reductions import amax, amin, mean, sum_
@@ -141,38 +142,53 @@ _FLOAT_ONLY: list[object] = [
     math.cbrt, np.cbrt, math.fabs, np.fabs, math.fma, math.hypot, np.hypot,
     math.isfinite, np.isfinite, math.isinf, np.isinf, np.isneginf, np.isposinf,
     np.rint,  # the one rounding spelling whose own answer on an integer is a float
+    math.pow, np.float_power,  # the float-computing power spellings never reach the integer chain
 ]  # fmt: skip
 _INT_AND_FLOAT: list[object] = [
-    min, max, np.sign,
+    min, max, np.sign, abs, np.abs, np.absolute,
     round, np.round, np.around, math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix,
-    pow, math.pow, np.power, np.float_power, BinaryOp.POW,
+    pow, np.power, BinaryOp.POW,
 ]  # fmt: skip
-_LIFTED: list[object] = [abs, np.abs, np.absolute]  # array-capable; math.fabs/np.fabs stay scalar-only
 _INT_ONLY: list[object] = [int.bit_count, np.bitwise_count]
+# Deliberately NOT array-capable: these answer a boolean or an unsigned array, families the subset does not have.
+_SCALAR_ONLY: list[object] = [np.isfinite, np.isinf, np.isposinf, np.isneginf, np.bitwise_count]
+
+
+def _entry(external: object) -> ScalarFunction:
+    """A lifted key is the same scalar entry made array-capable, so the domain check sees straight through it."""
+    match = resolve(external)
+    scalar = match.scalar if isinstance(match, Lifted) else match
+    assert isinstance(scalar, ScalarFunction), external
+    return scalar
+
+
+def test_a_named_constant_is_not_more_specific_than_a_wholeness_it_fails() -> None:
+    # Selection takes the unique most refined lowering, so `within` must not order a one-half exponent under a
+    # whole one: 0.5 satisfies the former alone. Nothing else observes this -- `accepts` filters it out first.
+    root = Domain(ScalarType.FLOAT, StaticOneHalf)
+    whole = Domain(ScalarType.FLOAT, StaticWholeNonNegative)
+    assert not root.within(whole) and not whole.within(root) and root.apart(whole)
 
 
 def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
     """
     White-box registry-completeness sentinel: driving all ~80 spellings through synthesize would be prohibitively
-    slow, and dropping a spelling or a domain must fail here rather than go unnoticed.
+    slow, and dropping a spelling, a domain, or the array-capability of one must fail here rather than go unnoticed.
     """
     for external, served in ((e, [ScalarType.FLOAT]) for e in _FLOAT_ONLY):
-        match = resolve(external)
-        assert isinstance(match, ScalarFunction), external
-        assert match.domains == served, external
+        assert _entry(external).domains == served, external
     for external in _INT_AND_FLOAT:
-        match = resolve(external)
-        assert isinstance(match, ScalarFunction), external
-        assert match.domains == [ScalarType.INT, ScalarType.FLOAT], external
+        assert _entry(external).domains == [ScalarType.INT, ScalarType.FLOAT], external
     for external in _INT_ONLY:
-        match = resolve(external)
-        assert isinstance(match, ScalarFunction), external
-        assert match.domains == [ScalarType.INT], external
-    for external in _LIFTED:
-        match = resolve(external)
-        assert isinstance(match, Lifted), external
-        assert match.scalar.domains == [ScalarType.INT, ScalarType.FLOAT], external
-    assert isinstance(resolve(math.fabs), ScalarFunction) and isinstance(resolve(np.fabs), ScalarFunction)
+        assert _entry(external).domains == [ScalarType.INT], external
+    # Array capability is derived from the host, not enumerated: every registered unary numpy spelling maps over
+    # an array, save those above, and so does the builtin abs. A `math` twin raises on one and stays scalar.
+    assert isinstance(resolve(abs), Lifted) and isinstance(resolve(math.fabs), ScalarFunction)
+    for name in dir(np):
+        member = getattr(np, name, None)
+        if callable(member) and isinstance(found := resolve(member), (ScalarFunction, Lifted)):
+            scalar_only = any(member is k for k in _SCALAR_ONLY)
+            assert isinstance(found, Lifted) == (_entry(member).arity == 1 and not scalar_only), name
     for external in (
         np.transpose,
         np.ravel,

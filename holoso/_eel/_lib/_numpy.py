@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 
 from ._intrinsics import atan2, ceil, cos, exp2, floor, isinf, log2, round_, sin, sqrt
-from ._registry import array, lib
+from ._registry import array, lib, lift
 
 _LOG2E = math.log2(math.e)
 _LN2 = math.log(2.0)
@@ -287,3 +287,16 @@ def degrees(x: float) -> float:
 @lib(math.radians, np.radians, np.deg2rad)
 def radians(x: float) -> float:
     return x * _RAD_PER_DEG
+
+
+# The array-capable spellings, declared here because this module and the intrinsics it imports register them all.
+# Only numpy keys qualify: their `math` twins raise on an array, and a lifted predicate or bit count would mint a
+# boolean or unsigned array, families the subset does not have.
+lift(
+    abs, np.abs, np.absolute, np.fabs, np.sign,
+    np.floor, np.ceil, np.trunc, np.fix, np.round, np.around, np.rint,
+    np.sqrt, np.cbrt, np.exp, np.exp2, np.expm1, np.log, np.log2, np.log10, np.log1p,
+    np.sin, np.cos, np.tan, np.arcsin, np.arccos, np.arctan,
+    np.sinh, np.cosh, np.tanh, np.arcsinh, np.arccosh, np.arctanh,
+    np.degrees, np.rad2deg, np.radians, np.deg2rad,
+)  # fmt: skip

@@ -8,6 +8,7 @@ keeps a compact MIR population sentinel for the exact operator count that module
 """
 
 import dataclasses
+import math
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -685,6 +686,31 @@ def test_np_array_factory_converts_list_and_matches_numpy() -> None:
 
     m = np.array([[1.0, 2.0], [3.0, 4.0]])
     assert np.allclose(_run(_sim(mat_minus_rows), m, a, b), np.asarray(mat_minus_rows(m, a, b)).flatten(), rtol=1e-12)
+
+
+def test_numpy_unary_functions_map_over_an_array() -> None:
+    # numpy applies a unary ufunc elementwise, so the kernel must too, in every rank and against numpy itself.
+    def folded(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.sqrt(np.abs(m)) - np.abs(m) / 2.0
+
+    def mixed(v: Float64[np.ndarray, "3"], s: float) -> Float64[np.ndarray, "3"]:
+        return np.sign(v) * np.sqrt(s)  # type: ignore[no-any-return]  # a lifted and a scalar call, one entry
+
+    _assert_python_matches_holoso(folded, np.array([[0.5, -1.0], [2.0, -0.25]]))
+    _assert_python_matches_holoso(mixed, np.array([-2.0, 0.0, 3.0]), 16.0)
+
+
+def test_scalar_only_unary_functions_still_refuse_an_array() -> None:
+    # The `math` twins raise on an array in CPython, and a predicate answers a boolean the module boundary cannot
+    # carry, so neither may quietly acquire the elementwise meaning its numpy namesake has.
+    def with_math(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return math.sqrt(v)  # type: ignore[return-value]  # math rejects an array in CPython too
+
+    def with_predicate(v: Float64[np.ndarray, "3"]) -> Bool[np.ndarray, "3"]:
+        return np.isfinite(v)
+
+    _refused(with_math, "cannot be used as a scalar")
+    _refused(with_predicate, "cannot be used as a scalar")
 
 
 def test_elementwise_and_globals_match_numpy() -> None:

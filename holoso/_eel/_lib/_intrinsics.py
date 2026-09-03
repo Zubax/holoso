@@ -7,7 +7,7 @@ Beware of subtle differences in return types; e.g., `round(float) -> int` while 
 import math
 import numpy as np
 from ..._hir import *
-from ._registry import intrinsic, lift
+from ._registry import intrinsic
 
 
 @intrinsic(FloatFloor, np.floor)  # math.floor() etc are excluded because they return int and require special handling.
@@ -41,10 +41,6 @@ def abs_float(x: float) -> float:
 @intrinsic(IntAbs, abs, np.abs, np.absolute)
 def abs_int(x: int) -> int:
     return abs(x)
-
-
-# The one array-capable scalar family; math.fabs/np.fabs stay scalar-only (their own integer answer is a float).
-lift(abs, np.abs, np.absolute)
 
 
 @intrinsic(IntPopcount, int.bit_count, np.bitwise_count)

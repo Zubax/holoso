@@ -9,6 +9,7 @@ from .._errors import UnsupportedConstruct
 from .._hir import Hir
 from ._desugar import desugar
 from ._emit import emit
+from ._decorator import plain_function
 from ._pe import partial_evaluate
 from ._print import print_eel
 
@@ -30,13 +31,14 @@ class FrontendOutput:
 def resolve_target(target: object) -> tuple[types.FunctionType, object | None]:
     """A bound method contributes its receiver, bound as a frozen snapshot root by the partial evaluator."""
     if inspect.ismethod(target):
-        fn = target.__func__
-        if not isinstance(fn, types.FunctionType):
-            raise UnsupportedConstruct(f"the target {target!r} is not a plain function or a bound method")
+        fn = plain_function(target.__func__)
+        if fn is None:
+            raise UnsupportedConstruct(f"the target is a bound method of {target.__func__!r}, not of a function")
         return fn, target.__self__
-    if not isinstance(target, types.FunctionType):
+    fn = plain_function(target)
+    if fn is None:
         raise UnsupportedConstruct(f"the target {target!r} is not a plain function")
-    return target, None
+    return fn, None
 
 
 def lower(target: object, unroll_max_trips: int) -> FrontendOutput:

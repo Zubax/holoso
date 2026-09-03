@@ -346,7 +346,7 @@ _CASES: list[tuple[object, str]] = [
     (_k_genexp, "generator expressions"),
     (_k_comp_filter, "comprehension `if` filters"),
     (_k_comp_multi, "multiple `for` clauses"),
-    (_k_comp_unpack, "comprehension target unpacking"),
+    (_k_comp_unpack, "comprehension target must be a plain name"),
     (_k_yield, "generators are not supported"),
     (_k_async, "async functions are not supported"),
     (_k_try, "unsupported statement: Try"),

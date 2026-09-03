@@ -233,8 +233,10 @@ aggregates only with identical kind and shape -- for a record, identical class.
 Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an
 array the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle
 fixed by its class -- a plain generated frozen dataclass, so construction is structural and field reads fold.
-A `for` target may be a tuple of names, and `enumerate` answers a one-shot iterator exactly as in Python:
-consumed by a single iteration, refused everywhere else.
+One assignment-target vocabulary serves every statement that binds one -- a plain assignment, an unpack, a `for`
+header: a name, an attribute, an element, or a tuple of those nested arbitrarily, bound left to right off one
+evaluation of the right-hand side as CPython binds it. A comprehension keeps its own narrower rule, a plain name.
+`enumerate` answers a one-shot iterator exactly as in Python: consumed by a single iteration, refused elsewhere.
 Arrays and records never exist as hardware aggregates: they are compile-time bookkeeping over scalar wires,
 decomposed at the module boundary into indexed and field-path ports, and only scalar leaves reach HIR. Structural
 transforms (slices, transposes, reshapes) restructure the same storage; a dtype-changing conversion mints a fresh
@@ -270,14 +272,15 @@ driver-level restart -- lean-first, since carrying an untouched leaf would destr
 Calls dispatch on the object identity the callee resolves to, not its spelled name, so every spelling of a symbol
 (`**` or its function form, `@` or `np.matmul`) resolves one registry entry. A scalar callee carries a group of
 typed lowerings, each either a single semantic HIR operator or an inlined composite, declaring a domain per operand
-position and optionally a refinement demanding a compile-time value -- of known sign, or of one named value where the
-sign does not tell the lowerings apart (a one-half exponent is the square root, an integral one a multiply chain);
+position and optionally a refinement demanding a compile-time value -- of known sign and wholeness, or of one named
+value where neither tells the lowerings apart (a one-half exponent is the square root, a small whole one a chain);
 selection takes the unique most refined lowering every one of whose positions accepts the operand. An array
 composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
 pairwise trees, log-deep in the operator's latency, while the dot product stays a left fold so FMA contraction
 remains reachable. A composite may admit a sequence at a declared argument position, and a
-scalar entry may be lifted per key to apply elementwise over an array's leaves. Every stub is ordinary Python in
-the supported subset, so each is its own numerical reference.
+scalar entry may be lifted per key to apply elementwise over an array's leaves, which a unary numpy spelling is
+wherever its answer stays in a family the subset has, and its `math` twin never is. Every stub is ordinary Python
+in the supported subset, so each is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own

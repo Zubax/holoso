@@ -1,6 +1,6 @@
 """
 The base scalar annotations, shared by the interpreter conforming a declared parameter and the registry selecting
-a lowering. A refinement narrowing one -- `StaticNonNegative[int]` and its twin -- is the registry's own matching
+a lowering. A refinement narrowing one -- `StaticWholeNonNegative[int]` and its kin -- is the registry's own matching
 language and is read there, so the tree never learns what a refinement is.
 """
 

@@ -347,26 +347,49 @@ def _overflowing_static_power(x: float) -> float:
     return x + 1e300**3
 
 
-def _zero_to_negative_float_power(x: float) -> float:
-    return x + 0.0**-1.0  # type: ignore[no-any-return]
-
-
-def _overflowing_static_float_power(x: float) -> float:
-    return x + 1e300**3.0  # type: ignore[no-any-return]
-
-
 def test_a_static_power_the_host_refuses_saturates_like_the_datapath() -> None:
     """
     The lowering owns the answer at every binding time: a fold runs the very stub the hardware runs, so an
-    overflow saturates to inf as `exp2` already does, and each exponent domain answers its pole the way its own
-    datapath does -- the composite's guarded +inf under a float exponent, a division that names no number under an
-    integer one, judged by the survivor sweep rather than predicted.
+    overflow saturates to inf as `exp2` already does, while a whole negative exponent is the reciprocal of a
+    multiply chain and its pole is the division that names no number -- judged by the survivor sweep, not predicted.
     """
-    for fn in (_overflowing_static_power, _overflowing_static_float_power, _zero_to_negative_float_power):
-        assert "inf" in _residual(fn, _FADD), fn
+    assert "inf" in _residual(_overflowing_static_power, _FADD)
     with pytest.raises(SynthesisError, match="names no number") as info:
         holoso.synthesize(_zero_to_negative_power, _FADD_FDIV, name="k")
     assert not isinstance(info.value, UnsupportedConstruct)
+
+
+_PAST_FLOAT_RANGE = 1 << 1024
+_PAST_THE_CHAIN = 200.0  # the bound is 128, so these straddle it
+_WITHIN_THE_CHAIN = 100.0
+
+
+def _exponent_past_the_float_range(x: float) -> float:
+    return x**_PAST_FLOAT_RANGE
+
+
+def _exponent_past_the_chain(x: float) -> float:
+    return x**_PAST_THE_CHAIN  # type: ignore[no-any-return]
+
+
+def _int_exponent_past_the_chain(x: float) -> float:
+    return x**200
+
+
+def _exponent_within_the_chain(x: float) -> float:
+    return x**_WITHIN_THE_CHAIN  # type: ignore[no-any-return]
+
+
+def test_a_whole_exponent_past_the_bound_takes_the_general_rung() -> None:
+    # The chain spends a trip per exponent bit, so past the bound the exp2/log2 rung takes over, needing hardware
+    # the chain does not. Selection gets there without putting an unbounded int through binary64 to judge it.
+    lean = Options(OperatorOptions(fmul=FMulOptions(), fcmp=FCmpOptions()))
+    holoso.synthesize(_exponent_within_the_chain, lean, name="k")
+    for kernel in (_exponent_past_the_chain, _int_exponent_past_the_chain):  # either spelling of the same value
+        with pytest.raises(UnsupportedConstruct, match="flog2"):
+            holoso.synthesize(kernel, lean, name="k")
+    with pytest.raises(SynthesisError):  # past the float range the general rung cannot take it either
+        holoso.synthesize(_exponent_past_the_float_range, _FADD_FMUL, name="k")
 
 
 def _dead_pole(x: float) -> float:
@@ -392,19 +415,6 @@ def test_the_exact_fold_is_the_sign_blind_one_python_gives() -> None:
     _oracle(_nonnegative_int_fold_stays_int, [{"x": 2.0}])
     _oracle(_negative_base_fold_stays_int, [{"x": 2.0}])
     assert "-122" in _residual(_negative_base_fold_stays_int, _FMUL)
-
-
-def _pow_huge_exponent(x: float) -> float:
-    return x ** (10**9)
-
-
-def test_a_huge_exponent_expands_logarithmically() -> None:
-    """
-    The TODO.md huge-exponent hang class: square-and-multiply spends one trip per exponent BIT, so an exponent no
-    linear chain could ever expand costs a few dozen multiplies instead of exhausting the budget -- the whole
-    kernel synthesizes promptly on a multiplier-only machine.
-    """
-    holoso.synthesize(_pow_huge_exponent, _FMUL, name="k")
 
 
 # ---------------------------------------------------------------------- environment snapshots

@@ -986,14 +986,14 @@ def test_comprehensions_match_cpython() -> None:
 
 
 # Just over half the expansion budget, so one body fits and two do not.
-_HALF_BUDGET_EXPONENT = 55001
+_HALF_BUDGET_ELEMENTS = 26000
 
 
 def _float_carry_fits(n: int, x: float) -> float:
     acc = 0.0
     i = 0
     while i < n:
-        acc = acc + x**_HALF_BUDGET_EXPONENT
+        acc = acc + x * float(len(list(range(_HALF_BUDGET_ELEMENTS))))
         i = i + 1
     return acc
 
@@ -1002,7 +1002,7 @@ def _int_carry_promotes_then_fits(n: int, x: float) -> float:
     acc = 0  # the int seed makes the first pass assume an INT carry, so the whole body is built twice
     i = 0
     while i < n:
-        acc = acc + x**_HALF_BUDGET_EXPONENT  # type: ignore[assignment]  # the rebind to float IS the promotion
+        acc = acc + x * float(len(list(range(_HALF_BUDGET_ELEMENTS))))  # type: ignore[assignment]
         i = i + 1
     return acc
 

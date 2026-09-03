@@ -55,6 +55,7 @@ from ..._errors import HolosoError, SynthesisError
 from .._annotations import accepted_stypes, annotation_stype, unaliased
 from .._desugar import desugar
 from .._ir import *
+from .._decorator import plain_function
 from .._names import indexed_names, port_name, public_slot, state_port_name
 from . import _aggregate, _express, _mutate, _ops
 from ._ownership import allocations, borrow, escape, release, share
@@ -1046,8 +1047,8 @@ class Interpreter:
             release(held)
         current = self._meet_lanes(stmt.origin, frame, breaks, current, sinks if not escaped else None)
         if stmt.target.name.startswith("for$"):
-            # A desugared tuple target's hidden binding is dead past the loop (only the body-head unpack reads
-            # it); leaving it bound would leak the internal name into an enclosing residual loop's carried set.
+            # A desugared non-name target's hidden binding is dead past the loop (only the body head reads it);
+            # leaving it bound would leak the internal name into an enclosing residual loop's carried set.
             frame.env.pop(stmt.target.name, None)
         return _Flow(escaped, current)
 
@@ -1755,10 +1756,8 @@ class Interpreter:
             assert not isinstance(bound, (_Moved, _SlotAlias)), "slot bindings never ride the conduits"
             return self.readable(bound, origin)
         found: object = mro_attr(type(base.value), attr, _MISSING)
-        if isinstance(found, property) and isinstance(found.fget, types.FunctionType):
-            return self.inline(
-                origin, f"{base.name}.{attr}", found.fget, [base], {}, frame, sink, positional_only=False
-            )
+        if isinstance(found, property) and (fget := plain_function(found.fget)) is not None:
+            return self.inline(origin, f"{base.name}.{attr}", fget, [base], {}, frame, sink, positional_only=False)
         if isinstance(found, types.MemberDescriptorType):
             if dataclasses.is_dataclass(type(base.value)) and inadmissible_reason(type(base.value)) is None:
                 return self.snapshot.admit(f"{base.name}.{attr}", getattr(base.value, attr), origin)
@@ -1778,8 +1777,8 @@ class Interpreter:
             reject(origin, f"{base.name!r} has no attribute {attr!r}")
         if isinstance(found, staticmethod):
             return self.snapshot.admit(f"{base.name}.{attr}", found.__func__, origin)
-        if isinstance(found, types.FunctionType):
-            return self.snapshot.admit(f"{base.name}.{attr}", types.MethodType(found, base.value), origin)
+        if (fn := plain_function(found)) is not None:
+            return self.snapshot.admit(f"{base.name}.{attr}", types.MethodType(fn, base.value), origin)
         if isinstance(found, classmethod):
             return self.snapshot.admit(
                 f"{base.name}.{attr}", types.MethodType(found.__func__, type(base.value)), origin

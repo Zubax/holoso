@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from jaxtyping import Float64
 
 import holoso
 from holoso import (
@@ -612,3 +613,77 @@ def test_property_over_written_state_recomputes_each_read() -> None:
     for x in (2.0, 4.0, 1.0, 3.0):
         got = tuple(float(v) for v in sim.run(x))
         assert got == ref(x), f"x={x}: {got} != {ref(x)}"
+
+
+def _split(x: float) -> tuple[float, float]:
+    return x + 1.0, x * 2.0
+
+
+class _UnpackIntoState:
+    def __init__(self) -> None:
+        self._a = 0.0
+        self._b = 1.0
+        self._v = np.zeros(2)
+
+    def step(self, x: float) -> float:
+        self._a, self._b = self._b, self._a + x  # a swap-shaped unpack: both stores read the OLD slots
+        (self._v[0], carry), self._v[1] = _split(self._a), self._b
+        return float(carry + self._v[0] * 8.0 + self._v[1] * 16.0)
+
+
+def test_unpack_into_state_attributes_and_elements_matches_python() -> None:
+    # Attribute, subscript and nested targets bind left to right off ONE evaluation of the right-hand side, so
+    # the swap exchanges the slots rather than collapsing them.
+    sim = _model(_UnpackIntoState().step)
+    ref = _UnpackIntoState()
+    for x in (2.0, -1.0, 0.5, 3.0):
+        got, want = float(sim.run(x)[0]), ref.step(x)
+        assert got == want, f"x={x}: {got} != {want}"
+
+
+def _unpack_reads_the_old_index(x: float) -> Float64[np.ndarray, "2"]:
+    t = np.array([x, x + 1.0])
+    i = 0
+    t[i], i = 7.0, 1  # CPython stores through the OLD i, then rebinds it
+    return t
+
+
+def test_unpack_store_index_sees_the_pre_unpack_binding() -> None:
+    # The store's index is read where CPython reads it -- before any target of the same unpack rebinds the name.
+    sim = _model(_unpack_reads_the_old_index)
+    for x in (2.0, -3.0):
+        assert [float(v) for v in sim.run(x)] == list(_unpack_reads_the_old_index(x))
+
+
+class _ForIntoState:
+    def __init__(self) -> None:
+        self._last = -1.0
+        self._total = 0.0
+
+    def step(self, x: float) -> float:
+        for self._last in (x, x + 1.0, x + 2.0):
+            self._total = self._total + self._last
+        return self._total + self._last * 4.0
+
+
+def test_a_for_target_may_be_a_state_attribute() -> None:
+    # A loop target is an assignment target like any other, and what it leaves bound outlives the loop.
+    sim = _model(_ForIntoState().step)
+    ref = _ForIntoState()
+    for x in (2.0, -1.0, 0.5):
+        got, want = float(sim.run(x)[0]), ref.step(x)
+        assert got == want, f"x={x}: {got} != {want}"
+
+
+def _walrus_in_a_for_target() -> Float64[np.ndarray, "2 2"]:
+    i = 0
+    a = np.zeros((2, 2))
+    for a[i, (i := 1)] in (7.0,):  # CPython stores through the OLD i; the hoisted index would read the new one
+        pass
+    return a
+
+
+def test_a_walrus_colliding_with_the_for_target_is_rejected() -> None:
+    # A generalized loop target puts store paths, and their index reads, in the header's region.
+    with pytest.raises(UnsupportedConstruct, match="`:=`"):
+        holoso.synthesize(_walrus_in_a_for_target, _ops())

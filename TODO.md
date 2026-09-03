@@ -26,9 +26,6 @@ state-disjointness rule even though the slot is fully overwritten, because the d
 The diagnostic names the fix (`np.array(self.P.T)`); lifting it needs the install check to see that the source and the
 destination are the same slot.
 
-A tuple swap of two state attributes (`self.a, self.b = self.b, self.a + x`) is refused because an unpack target must
-be a plain name. It is the one refusal here with no one-line rewrite -- the swap needs a temporary.
-
 Also refused, each naming the construct and each with a plain rewrite: a walrus that reads the name it binds
 (`b = (a := a + x)`); a `list[...]` return annotation, in favour of `tuple[...]`, though a returned list literal stays
 legal; a value that is an array in one arm and a sequence in the other, since aggregates join a branch only when every

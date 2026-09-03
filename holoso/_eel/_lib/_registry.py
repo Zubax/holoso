@@ -8,16 +8,16 @@ no-supported-attribute rejection.
 
 A scalar callee resolves to a group of typed lowerings: `min` is a hardware operator over floats and a
 compare-and-select composite over integers. A lowering's domain is its stub's own annotations.
-A domain is per operand position and may carry a refinement (`StaticNegative[int]`) --
+A domain is per operand position and may carry a refinement (`StaticWholeNonNegative[int]`) --
 which a subset operator reaches as a key like any other, so an operator and its spellings cannot part.
 """
 
 import inspect
 import types
 import typing
+from typing import TypeAliasType
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from enum import Enum
 
 from ..._hir import BoolType, FloatType, IntType, Operator
 from .._annotations import accepted_stypes, annotation_stype
@@ -30,15 +30,6 @@ _HIR_TYPES: dict[ScalarType, type] = {
 }
 
 
-class Sign(Enum):
-    NEGATIVE = -1
-    ZERO = 0
-    POSITIVE = 1
-
-
-_EVERY_SIGN = frozenset(Sign)
-
-
 @dataclass(frozen=True, slots=True)
 class Operand:
     """A null `const` is a runtime operand, not an absent one."""
@@ -46,105 +37,67 @@ class Operand:
     stype: ScalarType
     const: bool | int | float | None = None
 
-    @property
-    def sign(self) -> Sign:
-        assert self.const is not None
-        return Sign.POSITIVE if self.const > 0 else Sign.NEGATIVE if self.const < 0 else Sign.ZERO
 
-
-class Refinement(Enum):
-    """
-    What a declaration demands beyond a type, so one callee may carry a lowering that exists only where the
-    compiler already knows the number.
-    """
-
-    ANY = "any"
-    STATIC_NONNEGATIVE = "static nonnegative"
-    STATIC_NEGATIVE = "static negative"
-    STATIC_ONE_HALF = "static one half"
-
-
-@dataclass(frozen=True, slots=True)
-class _Demand:
-    """`exact` names the one constant admitted, where knowing the sign is not enough to pick the lowering."""
-
-    runtime: bool
-    signs: frozenset[Sign]
-    exact: float | None = None
-
-    def __post_init__(self) -> None:
-        # A demand admitting nothing would select nothing, and every lowering ordering would still hold -- so the
-        # stub would go silently unreachable instead of failing anywhere.
-        assert self.runtime or self.signs, "a demand that admits neither a runtime operand nor any sign is unusable"
-        if self.exact is not None:
-            assert not self.runtime, "a named constant is not a runtime operand"
-            assert Operand(ScalarType.FLOAT, self.exact).sign in self.signs, "the named constant's own sign is out"
-
-
-# A new refinement is one row here and nothing else.
-_DEMANDS: dict[Refinement, _Demand] = {
-    Refinement.ANY: _Demand(True, _EVERY_SIGN),
-    Refinement.STATIC_NONNEGATIVE: _Demand(False, frozenset({Sign.ZERO, Sign.POSITIVE})),
-    Refinement.STATIC_NEGATIVE: _Demand(False, frozenset({Sign.NEGATIVE})),
-    Refinement.STATIC_ONE_HALF: _Demand(False, frozenset({Sign.POSITIVE}), 0.5),
-}
-
-# They erase to their argument for the type checker; the alias object itself is the marker, read back through
-# `typing.get_origin`.
-type StaticNonNegative[T] = T
-type StaticNegative[T] = T
+# The refinements: each admits a set of compile-time constants, and they are pairwise disjoint, which is what lets
+# the specificity order below compare them by identity alone. They erase to their argument for the type checker;
+# the alias object itself is the marker, read back through `typing.get_origin`.
+type StaticWholeNonNegative[T] = T
+type StaticWholeNegative[T] = T
 type StaticOneHalf[T] = T
 
-_REFINEMENTS: dict[object, Refinement] = {
-    StaticNonNegative: Refinement.STATIC_NONNEGATIVE,
-    StaticNegative: Refinement.STATIC_NEGATIVE,
-    StaticOneHalf: Refinement.STATIC_ONE_HALF,
+# The chain needs no transcendental hardware and measures at least as accurate as the general rung at every
+# exponent both can express, so this bound is deliberately a length cap and nothing more: 128 keeps the chain
+# inside a couple of dozen cycles while covering every exponent a kernel spells by hand.
+_WHOLE_MAX = 128.0
+
+
+def _whole(const: bool | int | float) -> bool:
+    return not isinstance(const, float) or const.is_integer()
+
+
+_REFINEMENTS: dict[TypeAliasType, Callable[[bool | int | float], bool]] = {
+    StaticWholeNonNegative: lambda c: _whole(c) and 0 <= c <= _WHOLE_MAX,
+    StaticWholeNegative: lambda c: _whole(c) and -_WHOLE_MAX <= c < 0,
+    StaticOneHalf: lambda c: c == 0.5,
 }
+
+# A refinement overlapping another would make the identity comparisons below unsound.
+assert not any(
+    one is not other and admits(sample) and _REFINEMENTS[other](sample)
+    for one, admits in _REFINEMENTS.items()
+    for other in _REFINEMENTS
+    for sample in (-_WHOLE_MAX, -2, -1, -0.5, 0, 0.5, 1, 2, _WHOLE_MAX)
+), "the refinements must be pairwise disjoint"
 
 
 @dataclass(frozen=True, slots=True)
 class Domain:
     stype: ScalarType
-    refinement: Refinement = Refinement.ANY
+    refinement: TypeAliasType | None = None
 
     def accepts(self, operand: Operand) -> bool:
         if operand.stype not in accepted_stypes(self.stype):
             return False
-        demand = _DEMANDS[self.refinement]
-        if operand.const is None:
-            return demand.runtime
-        return operand.sign in demand.signs and (demand.exact is None or operand.const == demand.exact)
-
-    def admits(self, value: float) -> bool:
-        """Whether a constant of this value satisfies the domain; an integral value can arrive as either type."""
-        stypes = (ScalarType.INT, ScalarType.FLOAT) if float(value).is_integer() else (ScalarType.FLOAT,)
-        return any(self.accepts(Operand(stype, value)) for stype in stypes)
+        if self.refinement is None:
+            return True
+        return operand.const is not None and _REFINEMENTS[self.refinement](operand.const)
 
     def within(self, other: Domain) -> bool:
         """Whether every operand this domain accepts the other accepts too -- the specificity order."""
-        mine, theirs = _DEMANDS[self.refinement], _DEMANDS[other.refinement]
         types = accepted_stypes(self.stype) <= accepted_stypes(other.stype)
-        exact = theirs.exact is None or mine.exact == theirs.exact
-        return types and (theirs.runtime or not mine.runtime) and mine.signs <= theirs.signs and exact
+        return types and (other.refinement is None or other.refinement is self.refinement)
 
     def apart(self, other: Domain) -> bool:
         """Whether no operand at all satisfies both, which lets two incomparable lowerings coexist."""
-        mine, theirs = _DEMANDS[self.refinement], _DEMANDS[other.refinement]
         if accepted_stypes(self.stype).isdisjoint(accepted_stypes(other.stype)):
             return True
-        if not (mine.runtime and theirs.runtime) and mine.signs.isdisjoint(theirs.signs):
-            return True
-        # A refinement naming its constant admits that operand and no other, so the pair separates as soon as the
-        # peer turns that one constant away -- which is what tells a one-half exponent from an integral one.
-        return any(
-            demand.exact is not None and not peer.admits(demand.exact)
-            for demand, peer in ((mine, other), (theirs, self))
-        )
+        return self.refinement is not None and other.refinement is not None and self.refinement is not other.refinement
 
 
 def _annotation_domain(annotation: object) -> Domain | None:
-    refinement = _REFINEMENTS.get(typing.get_origin(annotation), Refinement.ANY)
-    if refinement is not Refinement.ANY:
+    marker = typing.get_origin(annotation)
+    refinement = marker if isinstance(marker, TypeAliasType) and marker in _REFINEMENTS else None
+    if refinement is not None:
         (annotation,) = typing.get_args(annotation)
     stype = annotation_stype(annotation)
     return None if stype is None else Domain(stype, refinement)
@@ -297,7 +250,7 @@ def _scalar_lowering(fn: object, operator: Operator | None) -> ScalarLowering:
     assert operands and all(d.stype in (ScalarType.INT, ScalarType.FLOAT) for d in operands), "numeric operands"
     if operator is not None:
         # A single HIR operation consumes whatever the datapath carries, so it cannot demand a binding time.
-        assert all(d.refinement is Refinement.ANY for d in operands), "an intrinsic takes unrefined operands"
+        assert all(d.refinement is None for d in operands), "an intrinsic takes unrefined operands"
         signature = operator.signature
         assert isinstance(signature.result_type, _HIR_TYPES[_declared(fn, "return").stype])
         assert len(signature.operand_types) == len(operands)
