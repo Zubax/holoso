@@ -1166,6 +1166,30 @@ def test_reshape_matches_numpy_across_spellings() -> None:
     _assert_python_matches_holoso(shapes, v, m)
 
 
+def test_reshape_infers_the_one_unknown_dimension_like_numpy() -> None:
+    def shapes(
+        v: Float64[np.ndarray, "6"], m: Float64[np.ndarray, "2 3"]
+    ) -> tuple[float, float, float, float, float, float]:
+        flat = m.reshape(-1)
+        col = v.reshape(-1, 1)
+        row = m.reshape(1, -1)
+        pair = v.reshape((-1, 3))
+        free = np.reshape(m, shape=(2, -1))
+        unbound = np.ndarray.reshape(m, -1)
+        return (
+            float(flat[4]),
+            float(col[5, 0]),
+            float(row[0, 3]),
+            float(pair[1, 0]),
+            float(free[1, 2]),
+            float(np.sum(unbound)),
+        )
+
+    v = np.array([1.0, -2.0, 3.5, 0.25, -4.0, 6.0])
+    m = np.array([[0.5, 1.5, -2.5], [3.0, -0.5, 2.0]])
+    _assert_python_matches_holoso(shapes, v, m)
+
+
 def test_reshape_descriptor_spelling_matches_numpy() -> None:
     def unbound(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "4"]:
         return np.ndarray.reshape(m, 4)

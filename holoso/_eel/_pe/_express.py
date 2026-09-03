@@ -625,10 +625,15 @@ def _reshape(origin: Origin, display: str, base: Value, dim_values: list[Value])
     if not dim_values:
         reject(origin, f"{display}() requires a shape (an int or a tuple of ints)")
     dims = [_aggregate.static_index(origin, value, "a reshape dimension") for value in dim_values]
-    if any(dim < 0 for dim in dims):
-        reject(origin, f"{display}() does not support dimension inference (-1); spell the dimension explicitly")
+    if any(dim < -1 for dim in dims) or dims.count(-1) > 1:
+        reject(origin, f"{display}() infers at most one dimension, spelled -1, got {tuple(dims)}")
     if len(dims) > 2 or 0 in dims:
         reject(origin, f"{display}() supports only non-empty 1-D and 2-D shapes, got {tuple(dims)}")
+    if -1 in dims:
+        known = math.prod(dim for dim in dims if dim != -1)
+        assert known > 0
+        if len(base.leaves) % known == 0:
+            dims[dims.index(-1)] = len(base.leaves) // known
     if math.prod(dims) != len(base.leaves):
         reject(origin, f"cannot reshape an array of size {len(base.leaves)} into shape {tuple(dims)}")
     share(base)
