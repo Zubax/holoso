@@ -206,6 +206,20 @@ class Hir:
                 refs.append(block.terminator.cond)
         return refs
 
+    def use_counts(self) -> dict[ValueId, int]:
+        """Total reference count per value across every use site: operation operands, phi arms, external references."""
+        counts: dict[ValueId, int] = {vid: 0 for vid in self.nodes}
+        for node in self.nodes.values():
+            if isinstance(node, Operation):
+                for operand in node.operands:
+                    counts[operand] += 1
+            elif isinstance(node, Phi):
+                for _, value in node.arms:
+                    counts[value] += 1
+        for vid in self.external_value_references():
+            counts[vid] += 1
+        return counts
+
     def value_types(self) -> frozenset[Type]:
         """
         What sizes the machine word: a family absent from the graph needs no room in the wide register, however the

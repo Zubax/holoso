@@ -1593,8 +1593,9 @@ def test_state_early_copy_frees_source_register() -> None:
 
 def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
     # +c and -c share a single nonnegative pool entry; the sign rides the (free) per-operand sign control.
-    def f(a: float) -> float:
-        return a * 1000.0 + a * (-1000.0)
+    # The two scalings sit in different sums, so each stands as its own multiply rather than being factored out.
+    def f(a: float, b: float) -> tuple[float, float]:
+        return a * 1000.0 + b, a * (-1000.0) + b
 
     lir = build_lir(_run(f), "f")
     assert [c for c in lir.wide_consts if c == FloatValue.from_float(FMT, 1000.0)] == [

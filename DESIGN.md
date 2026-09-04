@@ -41,12 +41,32 @@ optimizer's own passes, never the layer that knows the machine, which may substi
 hand it to the optimizer again (see MIR).
 
 Optimization identities are provided for what the compiler cannot see. Over an operand of unknown value they hold
-whatever that value turns out to be; the absence of NaN is a significant enabler: commutativity and associativity;
-`x/x == 1` (even for x=0); `x/y == x*(1/y)`; `x*0 == 0` (even for non-finite x); `0/x == 0`; `x+(-x) == 0`;
-`int(float(i)) ≈ i`; `float(int(f)) == trunc(f)`; extensible on the same principles. Error-bearing operations are
-elided and reordered freely -- what the optimizer deletes signals no error, and what it moves signals its error
-elsewhere. Bit-exactness, agreement with host Python, and IEEE 754 conformance are anti-goals; a test that asserts
-the datapath's answer for a foldable expression is defective by definition.
+whatever that value turns out to be; the absence of NaN is a significant enabler:
+commutativity, associativity, and distributivity; `x/x == 1` (even for x=0);
+`x/y == x*(1/y)`; `1/(x*y) == (1/x)*(1/y)` (which parts company at `x=0, y=inf`, where the left is an infinity and the
+right a zero); `x*0 == 0` (even for non-finite x); `0/x == 0`; `x+(-x) == 0`;
+`int(float(i)) ≈ i`; `float(int(f)) == trunc(f)`; and a sum read as a linear combination, which distributes a
+constant across it and rounds the distributed constant. The list is extensible on the same principles.
+
+That last one carries further than the rest and is the one to weigh before trusting a kernel to it: every other identity
+diverges only at zero, an infinity or a subnormal, whereas computing a sum at the scale of an equivalent sum diverges
+at ordinary magnitudes -- without bound where the other sum's terms cancel, and into an infinity where it rails.
+Which of two equivalent sums the other is derived from follows the order they are written.
+Examples:
+
+- `3x+3y` ⇒ `3(x+y)` -- three roundings to two; example:
+  - x=0.1 y=0.7 written 2.4000091552734375 answered 2.399993896484375
+  - x=7.7 y=0.3 written 24.0001220703125 answered 24.0
+
+- Given both sums in a kernel: `3.0*a + 9.0*b,  a + 3.0*b`; the second is exactly one third of the first,
+  so it's answered as `keeper×fl(1/3)`. But 1/3 has no exact float, so the constant that gets materialized is
+  0.(3) — a rounded number that appears nowhere in the kernel, while the written form has only exact constants.
+  - a=1.300 b=2.9 direct 9.99993896484375 via keeper 10.0
+  - a=0.017 b=5.5 direct 16.5169677734375 via keeper 16.51708984375
+
+Error-bearing operations are elided and reordered freely -- what the optimizer deletes signals no error, and what it
+moves signals its error elsewhere. Bit-exactness, agreement with host Python, and IEEE 754 conformance are anti-goals;
+a test that asserts the datapath's answer for a foldable expression is defective by definition.
 
 Where every operand IS known, no identity applies and ordinary arithmetic decides: constant evaluation is the same
 expression in Python and nothing more, each operator answering as its own registered reference does -- the numpy
@@ -58,7 +78,8 @@ consistency the language does not have would mean inventing an answer. Nothing e
 representability in the target format. A constant the machine must HOLD is another matter: one whose encoding
 crosses between finite-nonzero and zero or infinity is refused at selection rather than silently becoming what it
 encodes to, integers and floats alike. Only a constant that materializes is asked -- one an operator absorbs, such
-as a power-of-two scale, never becomes a word and is never refused.
+as a power-of-two scale, never becomes a word and is never refused -- except where an adjacent addition absorbs it
+into a fused multiply-add, which materializes the scale and so is taken only where the format holds it exactly.
 
 The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware answers 1 even when `x` is zero at run
 time, while `0.0/0.0` written out is refused at compile time.
@@ -350,7 +371,13 @@ shift (exactly the floor division, negative dividends included), the remainder i
 rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR) is bounded by the count of left shifts
 in the graph. An absorbed scale never becomes a word -- only its exponent materializes -- and constant scalings
 compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width and composing
-two scalings of one value cannot itself fail.
+two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of their sum.
+
+Two rewrites adopt a value on behalf of another rather than rewriting one in place: sharing one reciprocal among
+the divisions by a divisor that already has one, and answering a sum that is a constant multiple of a sum already
+computed. Being the only ones a value about to die can mislead, they wait for the reducing round to settle before
+they look at the graph, and only one of them rewrites per settled graph. Both share within a block only, which is
+the dominance the builder's own interning already establishes.
 
 ## MIR
 
@@ -374,19 +401,21 @@ holds, so that clamp stays at lowering.
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
 RESULT is its own. The float lowerer maps each semantic float operator to its configured hardware operator and
 collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands, results, or output
-wires; multiply-by-power-of-two selects the `fmul_ilog2` scaler, its exponent an ordinary integer operand, and the
-four rounding operators map to one shared `fround` distinguished by an immediate mode, which a float-to-integer
-conversion reading one of them absorbs as its own. The integer lowerer answers a constant shift count from the count
-itself: a right shift past the word is the sign fill, a negative count is refused, and a count no other use reads is
-never lowered; `imul_pow2` rides the same shifter through its saturating product tap.
+wires; multiply-by-power-of-two selects the `fmul_ilog2` scaler, its exponent an ordinary integer operand,
+unless an adjacent addition absorbs it into an fma instead; and the four rounding operators map to one shared `fround`
+distinguished by an immediate mode, which a float-to-integer conversion reading one of them absorbs as its own.
+The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill,
+a negative count is refused, and a count no other use reads is never lowered; `imul_pow2` rides the same shifter
+through its saturating product tap.
 
-Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter
-transaction, sin/cos computed simultaneously by the sincos operator, FMA contraction of a single-use `a*b+c`, a
-directional infinity classifier for an infinity predicate adjacent to a sign test -- matched at MIR because this is
-the first layer aware of hardware semantics. Some semantic operators lower into combinations of hardware operators
-depending on availability and context (e.g. hypotenuse via fatan2); such composite lowerings may use inline muxes to
-sanitize operands fed into their internal primitives so that semantically valid edge cases do not raise avoidable
-primitive-side errors, while invalid source inputs still reach the error-bearing primitive.
+Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
+sin/cos computed simultaneously by the sincos operator, FMA contraction of `a*b+c` wherever the additions that read
+the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
+left alone), a directional infinity classifier for an infinity predicate adjacent to a sign test -- matched at MIR
+because this is the first layer aware of hardware semantics. Some semantic operators lower into combinations of
+hardware operators depending on availability and context (e.g. hypotenuse via fatan2); such composite lowerings may
+use inline muxes to sanitize operands fed into their internal primitives so that semantically valid edge cases do not
+raise avoidable primitive-side errors, while invalid source inputs still reach the error-bearing primitive.
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is carried through as per-bank views sharing the block

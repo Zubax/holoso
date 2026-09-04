@@ -100,7 +100,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # control flow at all), so their whole schedule is one block and min II equals last PC.
     "fir-e8m36": (20, 20),
     "biquad-e8m36": (21, 21),
-    "ekf1_stateful-e8m36": (125, 125),
+    "ekf1_stateful-e8m36": (124, 124),
     # The clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC atan2 tail, and
     # the aligning first transaction is a real branch around the whole integrator -- so the shortest static path is
     # the one that adopts the prior, well under the last PC that covers the integrating arm.

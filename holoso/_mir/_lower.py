@@ -1,11 +1,14 @@
 """Lower optimized HIR to selected MIR."""
 
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 from .._errors import UnsupportedConstruct
 from .._hir import (
+    copy_node,
+    eliminate_dead_code,
+    rebuild,
     BoolAnd,
     BoolConst,
     BoolNot,
@@ -29,6 +32,7 @@ from .._hir import (
     FloatExp2,
     FloatFloor,
     FloatFma,
+    HirBuilder,
     FloatGreater,
     FloatGreaterOrEqual,
     FloatHypot2,
@@ -88,6 +92,7 @@ from .._hir import (
     Operator,
     Phi,
     Ret,
+    Scaling,
     StateRead,
     StateSlot,
     Terminator,
@@ -139,6 +144,7 @@ from .._operators import (
 )
 from .._type import (
     BoolType as ScalarBoolType,
+    FloatFormat,
     FloatType as ScalarFloatType,
     IntFormat,
     IntType as ScalarIntType,
@@ -248,17 +254,34 @@ def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, 
 
 
 @dataclass(frozen=True, slots=True)
-class _FmaPlan:
+class _ValueFmaPlan:
     """
-    A planned contraction of `a*b + c` into one `ffma`. `mul` is the FloatMul whose standalone MIR op is
-    suppressed, `ma`/`mb` its operands, `c` the addend, `product_sign` the sign peeled off the product operand.
+    A contraction of `a*b + c` into one `ffma`: `product` is the FloatMul whose standalone MIR op it suppresses,
+    `product_sign` the sign peeled off the product operand.
     """
 
-    mul: ValueId
-    ma: ValueId
-    mb: ValueId
+    product: ValueId
+    a: ValueId
+    b: ValueId
     c: ValueId
     product_sign: FloatSignControl
+
+
+@dataclass(frozen=True, slots=True)
+class _ScaleFmaPlan:
+    """
+    The same over an exponent scaling, `a*2**k + c`. The scaler is exact, so the fma may only stand in for it where
+    the format holds `2**k` exactly -- checked at planning, since the plan materializes what the scaler never did.
+    """
+
+    product: ValueId
+    a: ValueId
+    scale: float
+    c: ValueId
+    product_sign: FloatSignControl
+
+
+type _FmaPlan = _ValueFmaPlan | _ScaleFmaPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,21 +292,6 @@ class _DirectionalInfPlan:
     sign: FloatSignControl
     semantic: FloatIsPosInf | FloatIsNegInf
     members: frozenset[ValueId]
-
-
-def _compute_use_counts(hir: Hir) -> dict[ValueId, int]:
-    """Total reference count per value across every use site: operation operands, phi arms, and external references."""
-    counts: dict[ValueId, int] = {vid: 0 for vid in hir.nodes}
-    for node in hir.nodes.values():
-        if isinstance(node, Operation):
-            for operand in node.operands:
-                counts[operand] += 1
-        elif isinstance(node, Phi):
-            for _, value in node.arms:
-                counts[value] += 1
-    for vid in hir.external_value_references():
-        counts[vid] += 1
-    return counts
 
 
 def _is_zero_float(hir: Hir, vid: ValueId) -> bool:
@@ -358,11 +366,20 @@ def _plan_directional_inf_fusions(hir: Hir, use_counts: dict[ValueId, int]) -> d
     return plans
 
 
-def _exclusive_mul(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tuple[ValueId, FloatSignControl] | None:
+def _exact_scale(fmt: FloatFormat, k: int) -> float | None:
     """
-    If `vid` is a single-use `a*b` reached through single-use sign ops, return the FloatMul and its combined sign;
-    else None. Every node on the path must have use-count 1, so the rounded product is observed nowhere else -- only
-    then is contracting to a single rounding faithful. A FloatMulPow2 (`a*2**k`) is not a FloatMul, so never matches.
+    `2**k` only where this format holds it EXACTLY. Both halves are load-bearing: the host arithmetic rails past
+    `k = 1023` while composed exponents are unbounded by design, and a format without subnormals rounds a small
+    power onto a neighbour it is not, which would have the contraction multiply by the wrong factor.
+    """
+    value = Scaling(1.0, k, False).coefficient()
+    return value if value is not None and fmt.round(value) == value else None
+
+
+def _product_operand(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tuple[ValueId, FloatSignControl] | None:
+    """
+    Every intermediate sign node must have use-count 1: a sign op is never lowered, so a second reader of one would
+    be left asking for a base the contraction suppressed. The terminal node's exclusivity is the planner's to judge.
     """
     signs: list[FloatSignControl] = []
     node = hir.nodes[vid]
@@ -372,35 +389,98 @@ def _exclusive_mul(hir: Hir, use_counts: dict[ValueId, int], vid: ValueId) -> tu
         signs.append(sign)
         (vid,) = node.operands
         node = hir.nodes[vid]
-    if not (isinstance(node, Operation) and isinstance(node.operator, FloatMul)) or use_counts[vid] != 1:
-        return None
     product_sign = FloatSignControl()
     for sign in reversed(signs):
         product_sign = product_sign.then(sign)
     return vid, product_sign
 
 
+def _fma_plan(hir: Hir, fmt: FloatFormat, product: ValueId, sign: FloatSignControl, addend: ValueId) -> _FmaPlan | None:
+    node = hir.nodes[product]
+    if not isinstance(node, Operation):
+        return None
+    match node.operator:
+        case FloatMul():
+            a, b = node.operands
+            return _ValueFmaPlan(product=product, a=a, b=b, c=addend, product_sign=sign)
+        case FloatMulPow2(k=k) if (scale := _exact_scale(fmt, k)) is not None:
+            (a,) = node.operands
+            return _ScaleFmaPlan(product=product, a=a, scale=scale, c=addend, product_sign=sign)
+        case _:
+            return None
+
+
+def _contract_fmas(hir: Hir, ops: OpConfig) -> Hir:
+    """
+    Rewrite every contractible `a*b + c` into the semantic `FloatFma` the kernel could have written itself, so one
+    lowering serves both spellings. The product sign rides HIR sign operations, which selection folds onto the
+    operand conditioners as it does for any other operand.
+
+    Runs after judgement: the constant an exponent scaling materializes is the machine's own, not the program's.
+    """
+    plans = _plan_fma_fusions(hir, ops, hir.use_counts())
+    if not plans:
+        return hir
+    # Operations intern per block, so a block and a node name one value -- which is what `BuildValue`, handed the
+    # node and not its id, needs to find the plan.
+    planned = {
+        (block.id, hir.nodes[vid]): plans[vid] for block in hir.blocks for vid in block.operations if vid in plans
+    }
+
+    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+        plan = planned.get((builder.current_block, node))
+        if plan is None:
+            return copy_node(builder, node, remap)
+        signed = _signed(builder, remap[plan.a], plan.product_sign)
+        match plan:
+            case _ValueFmaPlan(b=b):
+                # `|a*b|` is `|a||b|`, so an absolute product signs both multipliers; a negation signs only one.
+                other = _signed(builder, remap[b], FloatSignControl(absolute=plan.product_sign.absolute))
+            case _ScaleFmaPlan(scale=scale):
+                other = builder.const_node(FloatConst(scale))
+        return builder.operation(FloatFma(), [signed, other, remap[plan.c]])
+
+    _logger.info("FMA contraction: %d addition(s) contracted with their product", len(plans))
+    return eliminate_dead_code(rebuild(hir, build_value))
+
+
+def _signed(builder: HirBuilder, value: ValueId, sign: FloatSignControl) -> ValueId:
+    if sign.absolute:
+        value = builder.operation(FloatAbs(), [value])
+    return builder.operation(FloatNeg(), [value]) if sign.negate else value
+
+
 def _plan_fma_fusions(hir: Hir, ops: OpConfig, use_counts: dict[ValueId, int]) -> dict[ValueId, _FmaPlan]:
     """
-    Map each FloatAdd that will contract into an `ffma` to its plan (only when `ffma` is configured). When both
-    addends are exclusive products only the first contracts -- one fma carries one product.
+    A plan exists only for a product suppressed entirely: one over a product that still materializes would
+    single-round an add whose product is observed elsewhere, the divergence the exclusivity rule exists to refuse.
+
+    So a product is carried by every add that names it or by none. Where each of its uses is one distinct add's
+    product operand, contracting all of them deletes it: N adds and a product become N fmas -- an exclusive product
+    being the N=1 instance rather than a case of its own. Where any use is something else -- an addend, an output,
+    one add naming it twice -- it stays and no add contracts it. An add that could take either of two products
+    takes whichever was created first.
     """
     if ops.ffma is None:
         return {}
-    plans: dict[ValueId, _FmaPlan] = {}
+    fmt = ops.float_format
+    sites: dict[ValueId, list[tuple[ValueId, _FmaPlan]]] = defaultdict(list)
     for vid, node in hir.nodes.items():
         if not (isinstance(node, Operation) and isinstance(node.operator, FloatAdd)):
             continue
         op0, op1 = node.operands
         for product_operand, addend in ((op0, op1), (op1, op0)):
-            found = _exclusive_mul(hir, use_counts, product_operand)
-            if found is not None:
-                mul_vid, product_sign = found
-                mul_node = hir.nodes[mul_vid]
-                assert isinstance(mul_node, Operation)
-                ma, mb = mul_node.operands
-                plans[vid] = _FmaPlan(mul=mul_vid, ma=ma, mb=mb, c=addend, product_sign=product_sign)
-                break
+            peeled = _product_operand(hir, use_counts, product_operand)
+            if peeled is not None and (plan := _fma_plan(hir, fmt, peeled[0], peeled[1], addend)) is not None:
+                sites[plan.product].append((vid, plan))
+
+    plans: dict[ValueId, _FmaPlan] = {}
+    # Fewest uses first, so an exclusive product -- which nothing else can want -- never loses its add to a shared
+    # one that then fails to be claimed whole.
+    for product in sorted(sites, key=lambda product: (use_counts[product], product)):
+        adds = [add for add, _ in sites[product]]
+        if len(adds) == len(set(adds)) == use_counts[product] and not any(add in plans for add in adds):
+            plans.update(sites[product])
     return plans
 
 
@@ -491,9 +571,7 @@ class _LoweringContext:
         self.builder = MirBuilder(self.float_format, self.int_format)
         self.remap: dict[ValueId, ValueId] = {}
         # Every plan below reads the same whole-DAG reference count.
-        use_counts = _compute_use_counts(hir)
-        self.fma_plans = _plan_fma_fusions(hir, ops, use_counts)
-        self.fused_muls = {plan.mul for plan in self.fma_plans.values()}
+        use_counts = hir.use_counts()
         self.directional_inf_plans = _plan_directional_inf_fusions(hir, use_counts)
         self.fused_directional_inf_members = {
             member for plan in self.directional_inf_plans.values() for member in plan.members
@@ -755,17 +833,8 @@ class _FloatLowerer:
             case Operation() if _sign_of(node) is not None:
                 return True
             case Operation() as operation:
-                if old_id in self.context.fused_muls:
-                    return True  # this product is contracted into an adjacent fma; it has no standalone MIR op
                 if old_id in self.context.absorbed_roundings:
                     return True  # absorbed into an adjacent conversion's mode immediate
-                plan = self.context.fma_plans.get(old_id)
-                if plan is not None:
-                    assert isinstance(operation.operator, FloatAdd)
-                    self.context.remap[old_id] = self._emit_ffma(
-                        operation.operator, plan.ma, plan.mb, plan.c, plan.product_sign
-                    )
-                    return True
                 atan2_id = self.context.fused_hypots.get(old_id)
                 if atan2_id is not None:
                     self.context.remap[old_id] = self._lower_fused_hypot(atan2_id)
@@ -820,7 +889,7 @@ class _FloatLowerer:
             case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=(a, b)):
                 return self._lower_minmax(semantic, a, b)
             case Operation(operator=FloatFma() as semantic, operands=(a, b, c)):
-                return self._emit_ffma(semantic, a, b, c, FloatSignControl())
+                return self._emit_ffma(semantic, a, b, c)
             case Operation(operator=BoolToFloat() as semantic, operands=(a,)):
                 # `float(cond)` crosses from the boolean bank into the wide bank; a NOT chain folds into the
                 # operand conditioner.
@@ -863,25 +932,12 @@ class _FloatLowerer:
             output_port=output_port,
         )
 
-    def _emit_ffma(
-        self, semantic: Operator, a: ValueId, b: ValueId, c: ValueId, product_sign: FloatSignControl
-    ) -> ValueId:
-        """
-        y = product_sign(a*b) + c as one ffma (explicit math.fma passes an identity product_sign).
-        The product sign distributes onto the multiplier operands -- negation onto a only (-(a*b) = (-a)*b),
-        absolute onto both (|a*b| = |a||b|) -- composed with each operand's own folded chain; c keeps its own.
-        The raise fires only for explicit math.fma, since a contraction plan exists only when ffma is configured.
-        """
+    def _emit_ffma(self, semantic: Operator, a: ValueId, b: ValueId, c: ValueId) -> ValueId:
+        """Each operand's own sign chain folds onto its conditioner, as it does for any other operand."""
         operator = require(self.context.ops.ffma, "ffma")
-        base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
-        base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
-        base_c, sign_c = _collapse_signs(self.context.hir.nodes, c)
-        cond_a = sign_a.then(product_sign)
-        cond_b = sign_b.then(FloatSignControl(absolute=product_sign.absolute))
+        bases, signs = zip(*(_collapse_signs(self.context.hir.nodes, operand) for operand in (a, b, c)))
         return self.context.builder.operation(
-            _select_hardware(semantic, operator),
-            [self.context.remap[base_a], self.context.remap[base_b], self.context.remap[base_c]],
-            [cond_a, cond_b, sign_c],
+            _select_hardware(semantic, operator), [self.context.remap[base] for base in bases], list(signs)
         )
 
     def _lower_round(self, semantic: FloatRound | FloatFloor | FloatCeil | FloatTrunc, a: ValueId) -> ValueId:
@@ -1322,4 +1378,4 @@ def lower(hir: Hir, options: MirOptions) -> Mir:
         len(hir.blocks),
     )
     refuse(hir)
-    return _LoweringContext(hir, ops).run()
+    return _LoweringContext(_contract_fmas(hir, ops), ops).run()

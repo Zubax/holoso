@@ -68,6 +68,7 @@ def run(hir: Hir) -> Hir:
     constant division and the conversion round trips, and reduce the if-conversion muxes. All before hardware
     selection, and none of it minting a LEFT shift, whose count the machine-word substitution below MIR settles.
     """
+    uses = hir.use_counts()
     known: dict[ValueId, Const] = {}  # constants this pass established, keyed by the id it built them under
     neg_of: dict[ValueId, ValueId] = {}  # both numeric families share it: an id names one node of one family
     bwnot_of: dict[ValueId, ValueId] = {}
@@ -145,10 +146,44 @@ def run(hir: Hir) -> Hir:
                 return survivors[0]
         return builder.operation(operator, operands)
 
-    def reduce_add(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
+    def reduce_add(builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, old_b: ValueId) -> ValueId:
+        # Reads the OLD graph for the same reason `reduce_mul` does: factoring needs each addend's own scaling.
+        a, b = remap[old_a], remap[old_b]
         if opposites(a, b):
             return emit_float_const(builder, 0.0)
+        factored = factor_common_scale(builder, remap, old_a, old_b)
+        if factored is not None:
+            return factored
         return reduce_algebra(builder, FloatAdd(), [a, b])
+
+    def factor_common_scale(
+        builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, old_b: ValueId
+    ) -> ValueId | None:
+        """
+        Two addends scaled by the same constant are one scaling of their sum, the sign riding the addition.
+
+        Only at the SAME exponent, where the two scalings genuinely become one. Carrying an exponent step inside
+        instead retires nothing: it swaps a multiply for a scaler and moves the multiply behind the addition.
+        """
+        left = scaling(remap, old_a, owned=True)
+        right = scaling(remap, old_b, owned=True)
+        if left is None or right is None:
+            return None
+        (base_a, sa), (base_b, sb) = left, right
+        if (sa.significand, sa.k) != (sb.significand, sb.k):
+            return None
+        if not sa.is_power_of_two and sa.coefficient() is None:
+            return None  # no host float names the factor, and only a non-exponent one needs naming
+        inner_a = remap[base_a]
+        inner_b = emit_exponent(builder, remap[base_b], Scaling(1.0, 0, sa.negative != sb.negative))
+        summed = (
+            emit_float_const(builder, 0.0)
+            if opposites(inner_a, inner_b)
+            else reduce_algebra(builder, FloatAdd(), [inner_a, inner_b])
+        )
+        factored = emit_scaling(builder, summed, sa)
+        assert factored is not None, "an exponent needs no coefficient and any other was just proved nameable"
+        return factored
 
     def emit_exponent(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId:
         """An exponent scaling over a value: the scaler, the sign sideband it rides with, or at zero exponent neither."""
@@ -188,8 +223,20 @@ def run(hir: Hir) -> Hir:
                 return emit_exponent(builder, other, scaling)
         return reduce_algebra(builder, FloatMul(), [a, b])
 
-    def scaling(remap: dict[ValueId, ValueId], old_id: ValueId) -> tuple[ValueId, Scaling] | None:
-        """The value an old-graph node scales and the constant it scales it by; `None` if it scales nothing."""
+    def scaling(
+        remap: dict[ValueId, ValueId], old_id: ValueId, *, owned: bool = False
+    ) -> tuple[ValueId, Scaling] | None:
+        """
+        The value an old-graph node scales and the constant it scales it by; `None` if it scales nothing. One layer
+        only -- the round repeats, so a scaled scaling composes over successive rounds.
+
+        `owned` additionally requires this use to be the node's only one. A caller that means to REPLACE it needs
+        that, or the node survives the rewrite meant to retire it.
+        """
+        if known.get(remap[old_id]) is not None:
+            return None  # a node the rebuild already answered is a constant, and folding owns it
+        if owned and uses[old_id] != 1:
+            return None
         match hir.nodes[old_id]:
             case Operation(operator=FloatMulPow2(k=k), operands=(x,)):
                 return x, Scaling(1.0, k, False)
@@ -216,8 +263,8 @@ def run(hir: Hir) -> Hir:
         return emit_scaling(builder, remap[base], outer.compose(inner))
 
     def reduce_mul(builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, old_b: ValueId) -> ValueId:
-        # The only reduction that reads the shape of the OLD graph, hence the old ids: composition needs the operand's
-        # own operator, which the rebuilt operand no longer names once it has been reduced.
+        # Reads the shape of the OLD graph, hence the old ids: composition needs the operand's own operator, which
+        # the rebuilt operand no longer names once it has been reduced.
         for const_side, other in ((old_b, old_a), (old_a, old_b)):
             factor = float_of(remap[const_side])
             if factor is not None and (outer := scaling_of(factor)) is not None:
@@ -429,7 +476,7 @@ def run(hir: Hir) -> Hir:
             case Operation(operator=FloatNeg(), operands=(a,)):
                 return make_neg(builder, remap[a])
             case Operation(operator=FloatAdd(), operands=(a, b)):
-                return reduce_add(builder, remap[a], remap[b])
+                return reduce_add(builder, remap, a, b)
             case Operation(operator=FloatMul(), operands=(a, b)):
                 return reduce_mul(builder, remap, a, b)
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
