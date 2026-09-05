@@ -196,6 +196,9 @@ def atan(x: float) -> float:
     return atan2(x, 1.0)
 
 
+# `1 - x*x` cancels as |x| approaches 1, exactly where these are steepest, and `ffma` answers it by not rounding
+# the product first. Spelling it `(1-x)*(1+x)` would buy the same without `ffma`, but it destroys the `a*b + c`
+# shape and costs a cycle everywhere -- so an accuracy-sensitive build configures `ffma` instead.
 @lib(math.asin, np.arcsin, np.asin)
 def asin(x: float) -> float:
     return atan2(x, sqrt(1.0 - x * x))
