@@ -1,20 +1,23 @@
 """
-Golden per-lane accuracy freeze over the example matrix, the counterpart of `test_latency_freeze.py`.
+Per-lane accuracy guard over the example matrix: what `test_latency_freeze.py` does for the schedule, bounded the
+way `test_metrics.py` bounds hardware cost rather than pinned to equality.
 
-`test_example_reference.py` already bounds every float lane by a spec-owned `OutputTolerance`, but a bound is not
-a freeze: a lane may drift from 2.7 to 3.1 ulps inside a budget of 16 and nothing notices, and that drift is
-exactly what reassociating a sum or contracting a product moves.
+`test_example_reference.py` already bounds every float lane by a spec-owned `OutputTolerance`, but that budget is
+a CONTRACT, derived from the source algorithm and deliberately generous: a lane may drift from 2.7 to 3.1 ulps
+inside a budget of 16 and nothing notices, and that drift is exactly what reassociating a sum or contracting a
+product moves. The bound here is the opposite kind -- taken from what the build actually achieves, so it sits
+against the lane rather than above it, and the first drift trips it.
 
-Pinned per lane, in ulps of the lane's own scale -- the scaling `OutputTolerance.allowance` applies where a lane
-has a budget, so a frozen figure reads against the one permitting it -- are the MAXIMUM, which the budget
-bounds, and the RMS, which is what actually moves when a rewrite shifts many transactions a little rather than one
-a lot. A lane whose figures both round away is omitted, so a lane appearing here is a regression. Every spec is
+Bounded per lane, in ulps of the lane's own scale -- the scaling `OutputTolerance.allowance` applies where a lane
+has a budget, so a figure reads against the one permitting it -- are the MAXIMUM, which the budget bounds, and the
+RMS, which is what actually moves when a rewrite shifts many transactions a little rather than one a lot. A lane
+whose figures both round away is omitted, so its bound is zero and any error there is a regression. Every spec is
 measured at every format it declares and with `ffma` both absent and configured, since contraction changes which
 operand is rounded and the reference suite drives only the first format at the default operator set.
 
-The oracle is float64, so a model MORE exact than the reference reads as a change like any other: worth recording
-rather than fearing. Figures are independent of `HOLOSO_REGALLOC_EFFORT`, and of `HOLOSO_TEST_RANDOM_COUNT`
-because the draw is pinned here rather than read from the environment.
+Each figure is an upper bound taken on the build that froze it, not an equality: a rewrite that improves a lane
+passes, and re-taking the row keeps the bound tight. Figures are independent of `HOLOSO_REGALLOC_EFFORT`, and of
+`HOLOSO_TEST_RANDOM_COUNT` because the draw is pinned here rather than read from the environment.
 """
 
 import dataclasses
@@ -28,9 +31,10 @@ from ._examples import DEFAULT_RANDOM_COUNT, SPECS, ExampleSpec
 from ._modelref import unit_roundoff
 from ._refdrive import FloatLane, drive
 
-# Kernel label -> lane -> (maximum, RMS). A lane absent from a row is exact over the whole sequence. Rounded to
-# two and three decimals: finer is last-bit noise in the float64 oracle, coarser hides a real drift.
-_FROZEN: dict[str, dict[str, tuple[float, float]]] = {
+# Kernel label -> lane -> the (maximum, RMS) it may not exceed, each an upper bound taken on the build that froze
+# it, as in `test_metrics.py`. A lane absent from a row was exact over the whole sequence, so its bound is zero.
+# Rounded to two and three decimals: finer is last-bit noise in the float64 oracle, coarser hides a real drift.
+_BASELINE: dict[str, dict[str, tuple[float, float]]] = {
     "madd-e8m36": {"out_0": (0.71, 0.216)},
     "madd-e8m36-ffma": {"out_0": (0.71, 0.216)},
     "signal_window-e8m36": {},
@@ -333,23 +337,27 @@ def _lane_errors(spec: ExampleSpec, fmt: FloatFormat, fma: bool) -> dict[str, tu
     return errors
 
 
-def test_every_case_is_frozen() -> None:
+def test_every_case_is_bounded() -> None:
     """
     A row outliving the case it was taken for: the parametrized test below fails on its own where a row is MISSING,
     but a stale one it never reads would sit here unnoticed.
     """
-    assert sorted(_FROZEN) == sorted(_label(spec, fmt, fma) for spec, fmt, fma in _CASES)
+    assert sorted(_BASELINE) == sorted(_label(spec, fmt, fma) for spec, fmt, fma in _CASES)
 
 
 @pytest.mark.parametrize("spec,fmt,fma", [pytest.param(s, f, m, id=_label(s, f, m)) for s, f, m in _CASES])
-def test_lane_accuracy_is_frozen(spec: ExampleSpec, fmt: FloatFormat, fma: bool) -> None:
+def test_lane_accuracy_does_not_regress(spec: ExampleSpec, fmt: FloatFormat, fma: bool) -> None:
     label = _label(spec, fmt, fma)
-    measured = _lane_errors(spec, fmt, fma)
-    frozen = _FROZEN[label]
-    assert measured == frozen, (
-        f"{label}: per-lane accuracy changed.\n"
-        f"  frozen:   {frozen}\n"
-        f"  measured: {measured}\n"
-        "If this is a deliberate change, update the frozen row in the same commit; a lane that got WORSE needs a "
-        "reason, and a lane that got BETTER is worth recording."
+    baseline = _BASELINE[label]
+    regressed = {}
+    for port, (worst, rms) in _lane_errors(spec, fmt, fma).items():
+        # A lane the row omits was exact when the row was taken, so its bound is zero and any error is a regression.
+        bounds = baseline.get(port, (0.0, 0.0))
+        if worst > bounds[0] or rms > bounds[1]:
+            regressed[port] = {"bound": bounds, "measured": (worst, rms)}
+    assert not regressed, (
+        f"{label}: per-lane accuracy regressed.\n"
+        f"  {regressed}\n"
+        "A lane that got worse needs a reason. One that got better passes as it stands; re-take the row in the "
+        "same commit to keep the bound tight."
     )
