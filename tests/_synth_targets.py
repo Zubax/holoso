@@ -685,10 +685,14 @@ TARGETS: list[SynthTarget] = [
         150,
         op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_normalize=1, stage_output=1),
+            # Two hops here are long and mostly route, so this row closes on one machine and not on another: the
+            # microcode word into the adder's decode, and the register file into the sorter. A stage on each buys
+            # 0.15 ns of slack to 0.44. The scaler's own decode is the next hop and must NOT be staged -- measured,
+            # that costs 0.28 ns, the design being congestion-bound rather than deep by then.
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fsqrt=FSqrtOptions(),
-            fsort=FSortOptions(),
+            fsort=FSortOptions(stage_input=1),
             ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
         ),
         kernel=_imu_fusion_kernel,
