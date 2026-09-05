@@ -66,7 +66,10 @@ _FMT = FloatFormat(8, 36)
 _NARROW = FloatFormat(6, 18)
 # Frozen random vectors per example (over and above the manual and edge vectors); scale via the env knob to trade
 # coverage for cosimulation wall-clock.
-_RANDOM_COUNT = int(os.environ.get("HOLOSO_TEST_RANDOM_COUNT", "48"))
+DEFAULT_RANDOM_COUNT = 48
+"""The draw the reference suite takes and the accuracy freeze is frozen over; the env knob only tunes the former."""
+
+_RANDOM_COUNT = int(os.environ.get("HOLOSO_TEST_RANDOM_COUNT", str(DEFAULT_RANDOM_COUNT)))
 _SEED = 0x05EED
 
 # Canonical format edges (zero, ±0.5, ±1, ±smallest-normal, ±largest-finite); the EKF variants stay finite and keep the
@@ -277,7 +280,8 @@ class ExampleSpec:
     operators: Callable[[OperatorOptions], OperatorOptions] = lambda ops: ops
     # The Python-reference accuracy contract, keyed by output port name (`out_*`/`state_*`): a listed float lane
     # is compared within its OutputTolerance allowance; an absent lane (and every bool lane) must match the float64
-    # reference bit-for-bit. `None` excludes the kernel from the generic reference harness.
+    # reference bit-for-bit. `None` states that no budget has been derived, which excludes the kernel from the
+    # tolerance check but not from the accuracy freeze, which measures against the reference rather than a budget.
     reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
     # The front-end oracle's slack (`test_eel_oracle`), where both sides are float64 in the same operation order and
     # only the host's own library shape differs -- numpy reaching BLAS for a dot or a norm may contract a product the
@@ -300,16 +304,17 @@ class ExampleSpec:
         """The same adjustment over an arbitrary base, so the pipeline-depth variants stay in one place."""
         return dataclasses.replace(options, operator=self.operators(options.operator), wint_min=self.wint_min)
 
-    def reference_vectors(self) -> list[InputVector]:
+    def reference_vectors(self, count: int = _RANDOM_COUNT) -> list[InputVector]:
         """
-        The manual sequence then the random draw -- the inputs on which the ZKF model and the float64 Python reference
+        The manual sequence then the random draw, `count` of them where a caller needs a sequence the environment
+        cannot move -- the inputs on which the ZKF model and the float64 Python reference
         agree to within the per-operation rounding tolerance, so the Python-reference suite drives this subset. The
         per-input format-edge sweep is intentionally excluded: at the format extremes the model legitimately diverges
         from float64 (an operation overflowing to the format's infinity stays finite in float64), a property of the
         datapath rather than a compiler defect, and the cosim suite (RTL == model) covers those edges instead.
         """
         rng = np.random.default_rng(_SEED)
-        return [*self.manual, *(self.draw_random(rng) for _ in range(_RANDOM_COUNT))]
+        return [*self.manual, *(self.draw_random(rng) for _ in range(count))]
 
     def raw_vectors(self) -> list[InputVector]:
         """The full reproducible input sequence as raw float/bool rows: manual, then random, then per-input edges."""
@@ -1550,7 +1555,8 @@ SPECS = [
         inputs=("dt", "u_shunt", "di_dt"),
         make_kernel=_fresh_stateful_ekf,
         # No spec-owned error budget has been derived for the carried covariance recurrence (cancellation-prone
-        # P products through 1/S), so the generic reference harness is not driven; test_verify pins one step.
+        # P products through 1/S), so the tolerance check is not driven; the accuracy freeze measures the lanes
+        # anyway and test_verify pins one step.
         reference=None,
         nominal={"dt": 1e-2, "u_shunt": 0.5, "di_dt": 0.5},
         manual=[  # a short measurement sequence threaded through the carried state

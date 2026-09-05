@@ -23,70 +23,24 @@ its kernel from the harness.
 
 import itertools
 from collections.abc import Callable, Mapping
-from typing import Any
 
 import numpy as np
 import pytest
 
 import holoso
-from holoso import BoolType, FloatFormat, FloatType, IntType
+from holoso import FloatFormat
 from ._examples import SPECS, ExampleSpec, InputVector, OutputTolerance
 from majority_voter import MajorityVoter  # noqa: E402
 from uart import UartTx  # noqa: E402
-from ._eeloracle import binder, walk_instance_leaves
-from ._modelref import default_options, flatten_value, port_name, within
-
-_STATE_PREFIX = "state_"
+from ._eeloracle import binder
+from ._modelref import default_options, within
+from ._refdrive import BoolLane, FloatLane, IntLane, drive
 
 _CASES = [
     pytest.param(spec, spec.formats[0], id=f"{spec.name}-e{spec.formats[0].wexp}m{spec.formats[0].wman}")
     for spec in SPECS
     if spec.reference is not None
 ]
-
-
-def _quantize(value: float | bool | int, fmt: FloatFormat) -> float | bool | int:
-    """A float rounded into `fmt`, so the model and the float64 reference get one operand; a bool/int is exact."""
-    return value if isinstance(value, (bool, int)) else fmt.decode(fmt.encode(value))
-
-
-def _declared_family(scalar_type: object) -> type:
-    match scalar_type:
-        case BoolType():
-            return bool
-        case IntType():
-            return int
-        case FloatType():
-            return float
-    raise AssertionError(scalar_type)
-
-
-def _family_of(value: object) -> type:
-    """The family a value actually carries, on either side: the model's typed scalars and Python's own numbers."""
-    if isinstance(value, (bool, np.bool_)):
-        return bool
-    if isinstance(value, (int, np.integer, holoso.IntValue)):
-        return int
-    return float
-
-
-def _state_leaves(instance: object) -> dict[str, Any]:
-    """
-    Public attribute leaves named exactly as the compiler decomposes state slots (a scalar keeps its name, an
-    aggregate flattens row-major, a nested component prefixes its own leaves) -- the forward direction of
-    `_eeloracle.walk_instance_leaves`. The name alone cannot prove which attribute a port belongs to (aggregate
-    `q` and scalar `q_0` both mint `q_0`), so a name minted twice is dropped and its lookup fails loudly instead
-    of comparing against a guess.
-    """
-    leaves: dict[str, Any] = {}
-    ambiguous: set[str] = set()
-    for name, private, leaf in walk_instance_leaves(instance):
-        if private:
-            continue
-        if name in leaves:
-            ambiguous.add(name)
-        leaves[name] = leaf
-    return {name: leaf for name, leaf in leaves.items() if name not in ambiguous}
 
 
 def _assert_model_matches_reference(
@@ -99,58 +53,23 @@ def _assert_model_matches_reference(
     tolerances: Mapping[str, OutputTolerance],
 ) -> None:
     """
-    Advance the model and the plain-Python reference in lockstep, matching outputs BY NAME: a returned leaf maps to
-    its `out_<path>` port via `port_name`, a `state_<attr>` port reads the reference instance's attribute, and
-    a returned leaf without a port must equal a public state live-out the model folded into its `state_` port.
-    Both sides must carry the port's declared scalar family before any coercion, so a bool/float swap cannot hide.
+    Boolean and integer lanes must match exactly; a float lane matches bit-for-bit unless the spec granted it a
+    budget, which scales by its own reference magnitude and grows with the recurrence age.
     """
-    instance = getattr(reference, "__self__", None)
-    assert [port.name for port in model.inputs] == list(inputs), f"{label}: input ports differ from the spec"
     port_names = {port.name for port in model.outputs}
     assert set(tolerances) <= port_names, f"{label}: budgets for nonexistent ports {set(tolerances) - port_names}"
-    bind = binder(reference)
-    for age, row in enumerate(vectors):
-        quantized = {name: _quantize(value, fmt) for name, value in row.items()}
-        got = model.run(*[quantized[port.name] for port in model.inputs])
-        args, kwargs = bind(quantized)
-        result = reference(*args, **kwargs)
-        return_leaves = {} if result is None else {port_name(path): leaf for path, leaf in flatten_value(result)}
-        state_leaves = {} if instance is None else _state_leaves(instance)
-        expected: dict[str, float | bool | int] = {}
-        for port in model.outputs:
-            if port.name.startswith(_STATE_PREFIX):
-                name = port.name[len(_STATE_PREFIX) :]
-                assert name in state_leaves, f"{label}: port {port.name} matches no unambiguous public state leaf"
-                expected[port.name] = state_leaves[name]
-            else:
-                assert port.name in return_leaves, f"{label}: port {port.name} has no leaf in {sorted(return_leaves)}"
-                expected[port.name] = return_leaves[port.name]
-        state_live_outs = [value for name, value in expected.items() if name.startswith(_STATE_PREFIX)]
-        for leaf_name, leaf in return_leaves.items():
-            if leaf_name not in port_names:
-                assert any(
-                    isinstance(leaf, bool) == isinstance(value, bool) and leaf == value for value in state_live_outs
-                ), f"{label} {row}: return leaf {leaf_name} has no port and matches no public state live-out"
-        for port, got_value in zip(model.outputs, got, strict=True):
-            want = expected[port.name]
-            family = _declared_family(port.scalar_type)
-            assert (
-                _family_of(got_value) is family
-            ), f"{label} {row} {port.name}: model value {got_value!r} is not of the declared {port.scalar_type}"
-            assert (
-                _family_of(want) is family
-            ), f"{label} {row} {port.name}: reference value {want!r} is not of the declared {port.scalar_type}"
-            if family is bool:
-                assert bool(got_value) == bool(want), f"{label} {row} {port.name}: {bool(got_value)} != {bool(want)}"
-            elif family is int:
-                assert isinstance(got_value, holoso.IntValue) and isinstance(want, (int, np.integer))
-                assert int(got_value) == int(want), f"{label} {row} {port.name}: {int(got_value)} != {int(want)}"
-            else:
-                budget = tolerances.get(port.name)
-                atol = 0.0 if budget is None else budget.allowance(fmt, float(want), age)
-                assert within(
-                    float(got_value), float(want), 0.0, atol
-                ), f"{label} {row} {port.name}: {float(got_value)} vs {float(want)} (atol={atol:g})"
+    for row in drive(label, model, reference, inputs, vectors, fmt):
+        where = f"{label} #{row.age} {row.port}"
+        match row:
+            case BoolLane(got=got_bool, want=want_bool):
+                assert got_bool == want_bool, f"{where}: {got_bool} != {want_bool}"
+            case IntLane(got=got_int, want=want_int):
+                assert int(got_int) == want_int, f"{where}: {int(got_int)} != {want_int}"
+            case FloatLane(got=got_float, want=want):
+                got = float(got_float)
+                budget = tolerances.get(row.port)
+                atol = 0.0 if budget is None else budget.allowance(fmt, want, row.age)
+                assert within(got, want, 0.0, atol), f"{where}: {got} vs {want} (atol={atol:g})"
 
 
 @pytest.mark.parametrize("spec,fmt", _CASES)
