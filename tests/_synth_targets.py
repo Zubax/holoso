@@ -702,7 +702,15 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(F_e6m18, fsincos=FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=1)),
     ),
-    for_example("kepler", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
+    # At lean the adder's normalize shifter is one combinational barrel shift between the s2 and s3 boundaries,
+    # and on artix7 it is what this row's critical path runs through (s2_raw_result -> s3_sub_aligned, ~77% route)
+    # once the sincos is staged off it. One barrier splits the shift and puts the path back on the multiplier.
+    for_example(
+        "kepler",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1), fsincos=_KEPLER_FSINCOS),
+    ),
 ]
 
 assert len({t.label for t in TARGETS}) == len(TARGETS)  # labels key build dirs and pytest ids
