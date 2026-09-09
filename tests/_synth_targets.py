@@ -577,17 +577,17 @@ TARGETS: list[SynthTarget] = [
     ),
     # foc: that observer embedded in a full current controller -- the same CORDIC atan2 plus from_polar's fsincos,
     # the sorter, and the divides of the limiter and the modulator, over the widest microcode word in the matrix.
-    # Every path this row closes against runs from that word into an operator entered straight off the register
-    # file, so all three splits are input stages: the DSP operand mux, the adder's exponent-difference carry chain,
-    # and the sorter's compare cone, chased in that order. Only the Vivado flow is measured here; the ECP5 rows are
-    # absent rather than guessed, since closure is only ever established by running the flow.
+    # Input stages split the DSP operand mux, the adder's exponent-difference carry chain, and the sorter's compare
+    # cone; the adder's pack stage splits exponent correction from packing and register-file writeback.
+    # Only the Vivado flow is measured here; the ECP5 rows are absent rather than guessed, since closure is only
+    # ever established by running the flow.
     for_example(
         "foc",
         FlowId.VIVADO_ARTIX7,
         150,
         op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_input=1),
+            fadd=FAddOptions(stage_input=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1),
             fsort=FSortOptions(stage_input=1),
             fsqrt=FSqrtOptions(),
@@ -652,7 +652,8 @@ TARGETS: list[SynthTarget] = [
         100,
         op_config(
             F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_pack=1),
+            # The rounding carry chain plus register-file writeback exceeds the period; separate them at the output.
+            fadd=FAddOptions(stage_input=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
