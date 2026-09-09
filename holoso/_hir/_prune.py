@@ -3,6 +3,7 @@ Constant-branch pruning, the only pass that deletes a control edge. Without it a
 selected, materialized, and refused upon -- for code no input can reach.
 """
 
+from dataclasses import replace
 import logging
 from typing import assert_never
 
@@ -21,6 +22,7 @@ from ._ir import (
     StateSlot,
     Terminator,
     predecessors,
+    references,
     renumber,
     successors,
     validate_phi_predecessors,
@@ -120,26 +122,17 @@ def _take(hir: Hir, decided: Block, target: BlockId) -> Hir:
             case _:
                 assert_never(terminator)
 
-    return Hir(
+    return replace(
+        hir,
         nodes=nodes,
         blocks=[Block(b.id, b.phis, b.operations, retarget(b.terminator)) for b in repaired],
-        input_ids=hir.input_ids,
         outputs=[OutputPort(out.name, resolve(out.value)) for out in hir.outputs],
         state_slots=[StateSlot(s.name, s.reset_value, resolve(s.live_out)) for s in hir.state_slots],
     )
 
 
 def _references(hir: Hir) -> list[ValueId]:
-    refs = list(hir.external_value_references())
-    for node in hir.nodes.values():
-        match node:
-            case Operation(operands=operands):
-                refs.extend(operands)
-            case Phi(arms=arms):
-                refs.extend(value for _pred, value in arms)
-            case _:
-                pass
-    return refs
+    return [*hir.external_value_references(), *(r for node in hir.nodes.values() for r in references(node))]
 
 
 def run(hir: Hir) -> Hir | None:

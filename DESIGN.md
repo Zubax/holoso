@@ -46,23 +46,20 @@ commutativity, associativity, and distributivity; `x/x == 1` (even for x=0);
 `x/y == x*(1/y)`; `1/(x*y) == (1/x)*(1/y)` (which parts company at `x=0, y=inf`, where the left is an infinity and the
 right a zero); `x*0 == 0` (even for non-finite x); `0/x == 0`; `x+(-x) == 0`;
 `int(float(i)) ≈ i`; `float(int(f)) == trunc(f)`; and a sum read as a linear combination, which distributes a
-constant across it and rounds the distributed constant. The list is extensible on the same principles.
+constant across it, rounds the distributed constant, and cancels terms that sum to zero. The list is extensible on
+the same principles.
 
-That last one carries further than the rest and is the one to weigh before trusting a kernel to it: every other identity
-diverges only at zero, an infinity or a subnormal, whereas computing a sum at the scale of an equivalent sum diverges
-at ordinary magnitudes -- without bound where the other sum's terms cancel, and into an infinity where it rails.
-Which of two equivalent sums the other is derived from follows the order they are written.
+That last one carries further than the rest. Cancellation is read from the terms alone, never from why they were
+written, so Kahan summation, TwoSum and Dekker splitting reduce to the arithmetic they compensate; and the answer's
+own coefficient is rounded, which wins where the written difference cancels and can lose where it does not.
 Examples:
 
 - `3x+3y` ⇒ `3(x+y)` -- three roundings to two; example:
   - x=0.1 y=0.7 written 2.4000091552734375 answered 2.399993896484375
   - x=7.7 y=0.3 written 24.0001220703125 answered 24.0
 
-- Given both sums in a kernel: `3.0*a + 9.0*b,  a + 3.0*b`; the second is exactly one third of the first,
-  so it's answered as `keeper×fl(1/3)`. But 1/3 has no exact float, so the constant that gets materialized is
-  0.(3) — a rounded number that appears nowhere in the kernel, while the written form has only exact constants.
-  - a=1.300 b=2.9 direct 9.99993896484375 via keeper 10.0
-  - a=0.017 b=5.5 direct 16.5169677734375 via keeper 16.51708984375
+- `x - 0.999x` ⇒ `fl(0.001)·x` -- the written difference keeps none of its operands' digits where the form keeps all
+  of them; over 2000 points of x in \[0.5, 4\] at e8m36, RMS ulps of the result 243 against 0.265.
 
 Error-bearing operations are elided and reordered freely -- what the optimizer deletes signals no error, and what it
 moves signals its error elsewhere. Bit-exactness, agreement with host Python, and IEEE 754 conformance are anti-goals;
@@ -362,8 +359,11 @@ erase an expression before it is judged, exactly as the survivor-based charter r
 through an inlined library composite may name an expression the kernel never spelled; an accepted limitation of the
 composites, not of the rule.
 
-Strength reduction speaks all three scalar families with one grammar. Beyond the identity and absorbing elements the
-operators declare, it states the rules the shared algebra cannot: the one-sided constant rules of the
+Strength reduction speaks all three scalar families with one grammar. Each binary operator also declares its MIRROR,
+the operator that means the same with its operands exchanged, so a constant operand settles on the right and every
+spelling of one product or relation names one node; it is declared rather than inferred because the answer is about
+bits, `fmin` and `fmax` breaking ties toward the second operand. Beyond that and the identity and absorbing elements
+the operators declare, it states the rules the shared algebra cannot: the one-sided constant rules of the
 non-commutative operators, the value-equality and complement folds (under the same license as `x/x`), negation and
 complement tracked as involutions so every spelling of a negation names one node and `-(-x)` costs nothing, and the
 constant power-of-two rewrites -- the product into the saturating semantic `imul_pow2`, the quotient into the right
@@ -373,11 +373,23 @@ in the graph. An absorbed scale never becomes a word -- only its exponent materi
 compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width and composing
 two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of their sum.
 
-Two rewrites adopt a value on behalf of another rather than rewriting one in place: sharing one reciprocal among
-the divisions by a divisor that already has one, and answering a sum that is a constant multiple of a sum already
-computed. Being the only ones a value about to die can mislead, they wait for the reducing round to settle before
-they look at the graph, and only one of them rewrites per settled graph. Both share within a block only, which is
-the dominance the builder's own interning already establishes.
+A constant scaling over a value has one HIR shape, decided in one place and read back by one reader: the value itself,
+an exponent scaling, or a multiplication by a positive constant with the sign peeled into a negation over it, so
+`x*3.0` and `x*-3.0` share one multiply. The reader composes a stack of such layers down to the outermost one whose
+composition no host float names, or that another consumer still wants, and that layer's operand is the base.
+
+A sum whose terms cancel is answered by what is left: a scaling of the single remaining term, or the number the sum
+denotes, so `x - 0.999*x` is one multiply and `(x+y)-y` is `x`. Every such answer is taken, since it replaces an
+addition with at most one operation whatever else reads the terms. A sum that is a constant multiple of ANOTHER sum is
+not answered: it would inherit that sum's rounding error scaled by the factor between them, unbounded where that sum's
+terms cancel.
+
+Reciprocal sharing adopts a value on behalf of another rather than rewriting one in place: one reciprocal serves
+every division by a divisor that already has one. Being the only rewrite a value about to die can mislead, it waits
+for the reducing round to settle before it looks at the graph, and shares within a block only, which is the dominance
+the builder's own interning already establishes. The sum answers run there too: their coefficient rounds an exact
+ratio once, and rounded over a sum the round has not finished exposing it cancels away what the settled sum still
+carries.
 
 ## MIR
 
@@ -404,6 +416,8 @@ collapses semantic negation/absolute-value chains into MIR sign-control sideband
 wires; multiply-by-power-of-two selects the `fmul_ilog2` scaler, its exponent an ordinary integer operand,
 unless an adjacent addition absorbs it into an fma instead; and the four rounding operators map to one shared `fround`
 distinguished by an immediate mode, which a float-to-integer conversion reading one of them absorbs as its own.
+Which operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel
+can be refused for want of an operator it never wrote.
 The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill,
 a negative count is refused, and a count no other use reads is never lowered; `imul_pow2` rides the same shifter
 through its saturating product tap.

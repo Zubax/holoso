@@ -3,13 +3,13 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirWideView
+from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirWideView, reverse_postorder
 from .._operators import HardwareOperator, PooledHardwareOperator
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule, schedule_ops
 from ._build_base import OverlapLayout
-from ._mir_facts import mir_operation, mir_rpo, pred_count, succ_map
+from ._mir_facts import mir_operation, pred_count, succ_map
 
 
 def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) -> tuple[int, int, HardwareOperator]:
@@ -139,7 +139,7 @@ def schedule_with_overlap(
     # successor block -> the spill carry its single overlapping predecessor hands it (set at most once: a carried-into
     # block is single-predecessor, so only that one predecessor overlaps into it).
     carry: dict[int, _SpillCarry] = {}
-    for bid in mir_rpo(mir):
+    for bid in reverse_postorder(mir):
         block = blocks_by_id[bid]
         inherited = carry.get(bid, _SpillCarry({}, {}))
         livein_landing = inherited.livein_landing
@@ -237,7 +237,7 @@ def layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     # back-edge targets an earlier, lower-addressed block, which the next-PC sequencer redirects like any other jump, so
     # the linear layout needs no special case; the frontend emits reducible loops, so a back-edge target dominates it.
     ret_index = next(b.index for b in blocks if isinstance(b.terminator, Ret))
-    order = [bid for bid in mir_rpo(mir) if bid != ret_index] + [ret_index]
+    order = [bid for bid in reverse_postorder(mir) if bid != ret_index] + [ret_index]
     position = {bid: i for i, bid in enumerate(order)}
     term_offset = {b.index: b.term_offset for b in blocks}
     length = {index: offset + 1 for index, offset in term_offset.items()}

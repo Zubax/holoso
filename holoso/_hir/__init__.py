@@ -18,6 +18,7 @@ from ._ir import (
     StateRead as StateRead,
     StateSlot as StateSlot,
     Terminator as Terminator,
+    references as references,
     successors as successors,
 )
 from ._scaling import Scaling as Scaling, scaling_of as scaling_of

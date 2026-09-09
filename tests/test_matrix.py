@@ -218,12 +218,9 @@ def test_matmul_rejections() -> None:
     _refused(boolean, "must hold numbers, not booleans")
 
 
-def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
-    # The documented reason for the left-fold dot expansion: with ffma configured, an n-element dot must lower to one
-    # fmul plus n-1 ffma (each running-sum add fuses the next single-use product). At n=4 any balanced tree must keep a
-    # real fadd (its final add sums two ffma results), so the pooled module set pins the chain publicly, and the
-    # residual text pins the left-fold association; the MIR population sentinel keeps the exact count that module
-    # pooling erases from the Verilog.
+def test_dot_product_left_fold_contracts_to_an_ffma_chain() -> None:
+    # An n-element dot lowers to one fmul plus n-1 ffma, which the MIR counts pin since pooling erases them from the
+    # Verilog; the residual pins the left fold the front end emits.
     def dot(v: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
@@ -1113,8 +1110,8 @@ def test_sum_of_products_contracts_at_the_leaves_of_the_tree() -> None:
 
 def test_reductions_are_log_deep() -> None:
     # A whole-array reduction must finish well ahead of an explicit left fold over the same elements: the fold
-    # serializes on the operator's latency, the reduction on its logarithm. Both families, since each rides its own
-    # adder.
+    # serializes on the operator's latency, the reduction on its logarithm. The compiler does not reassociate, so a
+    # fold the source wrote stays a chain in both families.
     def int_tree(v: Int[np.ndarray, "16"]) -> int:
         return np.sum(v)  # type: ignore[no-any-return]
 

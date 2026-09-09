@@ -387,7 +387,8 @@ def test_without_the_scaler_the_constant_is_still_what_is_refused() -> None:
     with pytest.raises(UnsupportedConstruct) as exc:
         _synth(f, options, name="no_scaler_to_split_into")
     assert exc.value.message == (
-        "constant 3.333333333333333e-10 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
+        "constant 3.333333333333333e-10 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp, or configure "
+        "fmul_ilog2 to carry the multiplier as a significand and an exponent"
     )
 
 

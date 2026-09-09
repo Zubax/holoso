@@ -14,10 +14,13 @@ def optimize(hir: Hir, ifconv_max_ops: int) -> Hir:
     right and the round simply repeats until it leaves the graph untouched. The budget asserts that convergence
     instead of trusting it, since an oscillating pair of rewrites would otherwise hang.
 
-    The sharing passes wait for the round to SETTLE, being the only ones that adopt a value on behalf of another
-    and so the only ones a value about to die can mislead. Settled, not merely swept once: an if-converted diamond
-    leaves a select over two equal arms that the NEXT round folds, and only then does its condition's cone die.
-    Each is swept after, so the one behind it reads a liveness its own rewrites have not left stale.
+    The sharing passes wait for the round to SETTLE, each for its own reason. Reciprocal sharing reads a liveness,
+    which a value about to die misleads. A sum answer rounds an exact ratio once, and taken over a sum the round has
+    not finished exposing it rounds away what the settled sum still carries: `x + 1e-20*x` answered as `x` before the
+    `- x` behind a merge joins it cancels to nothing, where the settled sum is `1e-20*x`. Settled, not merely swept
+    once: an if-converted diamond leaves a select over two equal arms that the NEXT round folds, and only then does
+    its condition's cone die and its arm join the sum it feeds. Each is swept after, so the one behind it reads a
+    liveness its own rewrites have not left stale.
 
     This reduces, and the only build it declines is one that pruning proves never returns.
     """

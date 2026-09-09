@@ -198,7 +198,8 @@ def _measure(name: str) -> Metrics:
 #   every block's span (a per-block drain regression anywhere inflates it); max_block_span localizes it to one
 #   block. These timing rules move the schedule-length guards but not nreg/bnreg/steering/copies; signal_window
 #   carries a deliberately-loosened steering arm (one freed boolean register traded for one write-select mux) --
-#   refrozen rather than chased, since the rules are global and correctness-neutral.
+#   refrozen rather than chased, since the rules are global and correctness-neutral. Settling a commutative operator's
+#   constant operand on one side re-colors what it interns, at an unchanged schedule, and is refrozen the same way.
 # - pid uses a variable sample interval: the derivative path contains a real divide, and the first-sample and saturation
 #   guards keep the kernel multi-block with one residual copy. The larger PID row is therefore a property of the example
 #   itself, not a scheduler regression to chase.
@@ -208,7 +209,7 @@ BASELINE: dict[str, Metrics] = {
     "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=9, last_pc=9, max_block_span=9),
     "iir1_hpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=20, last_pc=20, max_block_span=20),
     "iir1_lpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=15, last_pc=15, max_block_span=15),
-    "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=36, last_pc=68, max_block_span=31),
+    "pid": Metrics(False, nreg=9, bnreg=2, steering=13, copies=1, min_ii=36, last_pc=68, max_block_span=31),
     "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "quadrature_encoder": Metrics(False, nreg=0, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
     "phase_frequency_detector": Metrics(
@@ -221,28 +222,28 @@ BASELINE: dict[str, Metrics] = {
     # recip_newton's loop opens with a statically-true convergence test, so the partial evaluator peels the first
     # trip: one more live value across the loop entry (nreg, steering) and one body's worth of extra microcode, in
     # exchange for a shorter realized transaction (test_cycle_model).
-    "recip_newton": Metrics(False, nreg=5, bnreg=1, steering=7, copies=1, min_ii=29, last_pc=46, max_block_span=23),
-    "remainder": Metrics(False, nreg=9, bnreg=4, steering=11, copies=2, min_ii=37, last_pc=54, max_block_span=17),
-    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=14, last_pc=47, max_block_span=24),
+    "recip_newton": Metrics(False, nreg=5, bnreg=1, steering=6, copies=1, min_ii=29, last_pc=46, max_block_span=23),
+    "remainder": Metrics(False, nreg=9, bnreg=4, steering=10, copies=2, min_ii=37, last_pc=51, max_block_span=17),
+    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=14, last_pc=45, max_block_span=24),
     "cordic_sincos": Metrics(
-        False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=104, last_pc=104, max_block_span=104
+        False, nreg=7, bnreg=1, steering=35, copies=0, min_ii=104, last_pc=104, max_block_span=104
     ),
-    "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=16, last_pc=16, max_block_span=16),
+    "integrator": Metrics(True, nreg=5, bnreg=0, steering=3, copies=0, min_ii=16, last_pc=16, max_block_span=16),
     # The capability-probe controller: records, reductions, reshape, dtype conversions, and a branchy scan in one
     # kernel, so it gates the whole new-frontend surface against fabric regressions. The pairwise extrema over the
     # six active drives hold two partial maxima live where a fold held one, at no cost in latency: the dot products
     # bound that block, not the max.
     "finite_set_current_controller": Metrics(
-        False, nreg=24, bnreg=4, steering=68, copies=12, min_ii=160, last_pc=204, max_block_span=108
+        False, nreg=20, bnreg=4, steering=72, copies=12, min_ii=160, last_pc=204, max_block_span=108
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
     # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.
     "imu_fusion": Metrics(
-        False, nreg=48, bnreg=5, steering=117, copies=14, min_ii=252, last_pc=439, max_block_span=129
+        False, nreg=44, bnreg=5, steering=110, copies=14, min_ii=233, last_pc=409, max_block_span=120
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's.
     "fir": Metrics(True, nreg=8, bnreg=0, steering=5, copies=0, min_ii=20, last_pc=20, max_block_span=20),
-    "biquad": Metrics(True, nreg=6, bnreg=0, steering=5, copies=0, min_ii=21, last_pc=21, max_block_span=21),
+    "biquad": Metrics(True, nreg=6, bnreg=0, steering=3, copies=0, min_ii=21, last_pc=21, max_block_span=21),
     # The two largest kernels carry slightly higher register pressure as a deliberate latency-for-area point: the
     # uniform landing keeps min_ii/last_pc tight, so a result resides a cycle longer, raising register
     # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (`<=`) pinned
@@ -251,12 +252,12 @@ BASELINE: dict[str, Metrics] = {
         True, nreg=41, bnreg=0, steering=100, copies=0, min_ii=125, last_pc=125, max_block_span=125
     ),
     "ekf1_stateful": Metrics(
-        True, nreg=40, bnreg=0, steering=89, copies=0, min_ii=127, last_pc=127, max_block_span=127
+        True, nreg=39, bnreg=0, steering=88, copies=0, min_ii=125, last_pc=125, max_block_span=125
     ),
     # A deep composition: a nested component instance (the flux observer) whose state joins the controller's own,
     # every transcendental the library offers, and two data-dependent branches -- so it gates cross-component slot
     # allocation against the register and steering blowup that inlining a component can cause.
-    "foc": Metrics(False, nreg=32, bnreg=3, steering=73, copies=4, min_ii=284, last_pc=335, max_block_span=217),
+    "foc": Metrics(False, nreg=33, bnreg=3, steering=73, copies=4, min_ii=284, last_pc=335, max_block_span=217),
 }
 
 

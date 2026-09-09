@@ -9,11 +9,10 @@ from .._mir import (
     Mir,
     MirBoolView,
     MirBranch,
-    MirJump,
     MirOperation,
     MirPhi,
-    MirRet,
     MirWideView,
+    successors,
 )
 from .._util import ValueId
 
@@ -25,16 +24,7 @@ def mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
 
 
 def succ_map(mir: Mir) -> dict[int, list[int]]:
-    succ: dict[int, list[int]] = {}
-    for block in mir.blocks:
-        match block.terminator:
-            case MirJump(target=target):
-                succ[block.id] = [target]
-            case MirBranch(if_true=if_true, if_false=if_false):
-                succ[block.id] = [if_true, if_false]
-            case MirRet():
-                succ[block.id] = []
-    return succ
+    return {block.id: successors(block) for block in mir.blocks}
 
 
 def pred_count(mir: Mir) -> dict[int, int]:
@@ -47,30 +37,6 @@ def pred_count(mir: Mir) -> dict[int, int]:
         for target in targets:
             count[target] += 1
     return count
-
-
-def mir_rpo(mir: Mir) -> list[int]:
-    """Reverse-postorder of the MIR block CFG from the entry (predecessors before successors)."""
-    successors = succ_map(mir)
-    order: list[int] = []
-    visited: set[int] = set()
-    # Iterative DFS (explicit stack) rather than recursion: a deep CFG (e.g. nested unrolled loops chaining thousands
-    # of blocks) would otherwise exceed Python's recursion limit. A node is emitted once all its successors are done.
-    stack: list[tuple[int, int]] = [(mir.entry, 0)]
-    visited.add(mir.entry)
-    while stack:
-        node, index = stack[-1]
-        succs = successors[node]
-        if index < len(succs):
-            stack[-1] = (node, index + 1)
-            successor = succs[index]
-            if successor not in visited:
-                visited.add(successor)
-                stack.append((successor, 0))
-        else:
-            order.append(node)
-            stack.pop()
-    return order[::-1]
 
 
 def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]) -> dict[int, frozenset[ValueId]]:

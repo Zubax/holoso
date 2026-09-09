@@ -105,6 +105,8 @@ class Operator(ABC):
     # The default is False so a future error-bearing operator that omits the declaration is a missed optimization
     # rather than a silent spurious-error bug; pure operators opt in explicitly.
     speculatable: ClassVar[bool] = False
+    # Rides the reader's port conditioner at every consumer position, so a pass prices it at nothing.
+    sideband: ClassVar[bool] = False
 
     @property
     @abstractmethod
@@ -139,9 +141,24 @@ class Operator(ABC):
         """
         return None
 
+    @property
+    def mirror(self) -> "Operator | None":
+        """
+        Declared rather than inferred from the algebra, because the answer is about bits: `fmin`/`fmax` break ties
+        toward the second operand, so exchanging them flips the sign of a zero.
+        """
+        return None
+
 
 @dataclass(frozen=True, slots=True)
-class FloatAdd(Operator):
+class CommutativeOperator(Operator, ABC):
+    @property
+    def mirror(self) -> Operator:
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class FloatAdd(CommutativeOperator):
     mnemonic: ClassVar[str] = "fadd"
     speculatable: ClassVar[bool] = True
 
@@ -158,7 +175,7 @@ class FloatAdd(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatMul(Operator):
+class FloatMul(CommutativeOperator):
     mnemonic: ClassVar[str] = "fmul"
     speculatable: ClassVar[bool] = True
 
@@ -195,6 +212,7 @@ class FloatDiv(Operator):
 class FloatNeg(Operator):
     mnemonic: ClassVar[str] = "fneg"
     speculatable: ClassVar[bool] = True
+    sideband: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -209,6 +227,7 @@ class FloatNeg(Operator):
 class FloatAbs(Operator):
     mnemonic: ClassVar[str] = "fabs"
     speculatable: ClassVar[bool] = True
+    sideband: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -515,7 +534,7 @@ class FloatIsNegInf(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
-    """Fused multiply-add `a*b + c` from an explicit `math.fma` call: always single-rounds."""
+    """Always single-rounds, so the contraction may not absorb another addition into it."""
 
     mnemonic: ClassVar[str] = "ffma"
     speculatable: ClassVar[bool] = True
@@ -575,6 +594,10 @@ class FloatLess(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value < b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return FloatGreater()
+
 
 @dataclass(frozen=True, slots=True)
 class FloatLessOrEqual(FloatComparison):
@@ -583,6 +606,10 @@ class FloatLessOrEqual(FloatComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value <= b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return FloatGreaterOrEqual()
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,6 +620,10 @@ class FloatEqual(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value == b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class FloatNotEqual(FloatComparison):
@@ -601,6 +632,10 @@ class FloatNotEqual(FloatComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value != b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +646,10 @@ class FloatGreaterOrEqual(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value >= b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return FloatLessOrEqual()
+
 
 @dataclass(frozen=True, slots=True)
 class FloatGreater(FloatComparison):
@@ -620,9 +659,13 @@ class FloatGreater(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value > b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return FloatLess()
+
 
 @dataclass(frozen=True, slots=True)
-class BoolAnd(Operator):
+class BoolAnd(CommutativeOperator):
     mnemonic: ClassVar[str] = "band"
     speculatable: ClassVar[bool] = True
 
@@ -644,7 +687,7 @@ class BoolAnd(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class BoolOr(Operator):
+class BoolOr(CommutativeOperator):
     mnemonic: ClassVar[str] = "bor"
     speculatable: ClassVar[bool] = True
 
@@ -666,7 +709,7 @@ class BoolOr(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class BoolXor(Operator):
+class BoolXor(CommutativeOperator):
     mnemonic: ClassVar[str] = "bxor"
     speculatable: ClassVar[bool] = True
 
@@ -687,6 +730,7 @@ class BoolXor(Operator):
 class BoolNot(Operator):
     mnemonic: ClassVar[str] = "bnot"
     speculatable: ClassVar[bool] = True
+    sideband: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -777,7 +821,7 @@ def _int_signature(arity: int) -> Signature:
 
 
 @dataclass(frozen=True, slots=True)
-class IntAdd(Operator):
+class IntAdd(CommutativeOperator):
     mnemonic: ClassVar[str] = "iadd"
     speculatable: ClassVar[bool] = True
 
@@ -806,7 +850,7 @@ class IntSub(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntMul(Operator):
+class IntMul(CommutativeOperator):
     mnemonic: ClassVar[str] = "imul"
     speculatable: ClassVar[bool] = True
 
@@ -938,7 +982,7 @@ class IntShiftRight(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwAnd(Operator):
+class IntBwAnd(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwand"
     speculatable: ClassVar[bool] = True
 
@@ -958,7 +1002,7 @@ class IntBwAnd(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwOr(Operator):
+class IntBwOr(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwor"
     speculatable: ClassVar[bool] = True
 
@@ -978,7 +1022,7 @@ class IntBwOr(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwXor(Operator):
+class IntBwXor(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwxor"
     speculatable: ClassVar[bool] = True
 
@@ -1025,6 +1069,10 @@ class IntLess(IntComparison):
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value < b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return IntGreater()
+
 
 @dataclass(frozen=True, slots=True)
 class IntLessOrEqual(IntComparison):
@@ -1033,6 +1081,10 @@ class IntLessOrEqual(IntComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value <= b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return IntGreaterOrEqual()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1043,6 +1095,10 @@ class IntEqual(IntComparison):
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value == b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class IntNotEqual(IntComparison):
@@ -1051,6 +1107,10 @@ class IntNotEqual(IntComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value != b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -1061,6 +1121,10 @@ class IntGreaterOrEqual(IntComparison):
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value >= b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return IntLessOrEqual()
+
 
 @dataclass(frozen=True, slots=True)
 class IntGreater(IntComparison):
@@ -1069,6 +1133,10 @@ class IntGreater(IntComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value > b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return IntLess()
 
 
 @dataclass(frozen=True, slots=True)

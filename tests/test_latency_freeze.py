@@ -83,7 +83,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The all-false early return and the break-terminated candidate scan survive as real branches, so the
     # frozen last PC covers the full active path with every scan trip taken.
     "finite_set_current_controller-e8m36": (160, 204),
-    "remainder-e8m36": (37, 54),
+    "remainder-e8m36": (37, 51),
     "octave_index-e6m18": (14, 36),
     "octave_index-e8m36": (14, 45),
     "equal_temperament-e8m36": (40, 40),
@@ -93,14 +93,15 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The three pivot-swap diamonds of the 3x3 Gauss-Jordan inversion if-convert into selects, so the whole
     # kernel is one straight-line block serialized on the pooled divider.
     "rigid_body_scalar-e8m36": (126, 126),
-    "kepler-e8m36": (80, 155),
+    "kepler-e8m36": (75, 150),
     "integrator-e8m36": (16, 16),
     "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
     # control flow at all), so their whole schedule is one block and min II equals last PC.
     "fir-e8m36": (20, 20),
     "biquad-e8m36": (21, 21),
-    "ekf1_stateful-e8m36": (124, 124),
+    # No sum is computed as a multiple of another, so the two covariance sums run side by side rather than in series.
+    "ekf1_stateful-e8m36": (123, 123),
     # The clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC atan2 tail, and
     # the aligning first transaction is a real branch around the whole integrator -- so the shortest static path is
     # the one that adopts the prior, well under the last PC that covers the integrating arm.
@@ -142,8 +143,7 @@ def test_schedule_length_is_frozen(spec: ExampleSpec, fmt: FloatFormat) -> None:
         f"{frozen_ii}. If this is a deliberate schedule improvement, update the frozen value."
     )
     lir = build_lir(
-        lower_to_mir(lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
-        spec.name,
+        lower_to_mir(lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), spec.name
     )
     assert (lir.min_initiation_interval, lir.last_pc) == (frozen_ii, frozen_last_pc), (
         f"{label}: scheduling efficiency changed -- (min II, last PC) differs from the frozen "
@@ -195,8 +195,7 @@ def test_chained_copy_schedule_is_frozen(
     result = holoso.synthesize(kernel_cls().__call__, default_options(_FMT), name=name)
     assert result.initiation_interval[0] == frozen[0]
     lir = build_lir(
-        lower_to_mir(lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
-        name,
+        lower_to_mir(lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)), name
     )
     slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
     assert all(

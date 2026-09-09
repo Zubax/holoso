@@ -1,5 +1,12 @@
 # TODO
 
+## hypot by exact exponent scaling
+
+`2^k·sqrt((x/2^k)² + (y/2^k)²)` matches the naive form (0.143 vs 0.211 mean ulps) while staying overflow-safe,
+removing an fdiv and an fsort. Needs a new inline operator (exponent extraction into `fmul_ilog2`'s integer port).
+
+`norm` for n≥3 is the same class.
+
 ## Frontend limitations
 
 An empty array slice (`v[:0]`) is refused where it is taken rather than where it is used, so even `len(v[:0])` fails;

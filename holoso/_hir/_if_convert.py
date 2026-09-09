@@ -17,6 +17,7 @@ Both arms are computed, so conversion only pays where arms are cheap: the per-ar
 reduce to and/or/not in the strength-reduction pass that re-runs after if-conversion.
 """
 
+from dataclasses import replace
 import logging
 
 from ._const import BoolConst
@@ -107,7 +108,7 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
             assert isinstance(phi, Phi)
             arms = tuple((pred.id if arm_pred == merge.id else arm_pred, value) for arm_pred, value in phi.arms)
             nodes[vid] = Phi(type=phi.type, arms=arms)
-    return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
+    return replace(hir, nodes=nodes, blocks=blocks)
 
 
 def run(hir: Hir, max_ops: int) -> Hir | None:

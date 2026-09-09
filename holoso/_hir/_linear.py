@@ -1,15 +1,8 @@
 """
-Linear-form sharing: a sum that is a constant multiple of a sum already computed is that multiple of it.
+Reading a sum as a linear combination and answering it where the terms cancel.
 
-Strength reduction composes a scaling with an adjacent one, but an intervening addition stops it, so a kernel
-needing one quantity in two unit systems materializes the same combination twice.
-
-Rests on distributing a constant across a sum, and relocating the scale a sum is computed at.
-The second is the sharp one: a derived sum inherits the keeper's absolute rounding error scaled by the factor between
-them, unbounded relative to its own value where the keeper's terms cancel,
-and one derived from a keeper that rails is an infinity. Which sum is the keeper follows the order they are written.
-
-Runs on a settled graph, so a form it registers belongs to a value a later pass will keep.
+The difference of two close values keeps none of their digits where the remainder the form carries keeps all of them;
+a coefficient the answer must round can cost accuracy in return, the trade the fast-math charter makes everywhere.
 """
 
 import logging
@@ -17,12 +10,12 @@ import math
 from dataclasses import dataclass
 from fractions import Fraction
 
-from ._const import FloatConst
-from ._copy import copy_node, rebuild
+from ._const import Const, FloatConst
+from ._copy import copy_node, rebuild, reverse_postorder
 from .._util import BlockId, ValueId
-from ._ir import Hir, HirBuilder, Node, Operation
+from ._ir import Hir, HirBuilder, Node, Operation, StateRead
 from ._operators import FloatAdd, FloatMul, FloatMulPow2, FloatNeg
-from ._scaling import Scaling, scaling_of
+from ._scaling import Rendering, scaled_node, scaling_of_ratio
 
 _logger = logging.getLogger(__name__)
 
@@ -33,23 +26,37 @@ _MAX_BITS = 4096
 
 
 @dataclass(frozen=True, slots=True)
+class _Scaled:
+    """In the shape strength reduction gives a constant scaling, so no round restates it."""
+
+    base: ValueId
+    rendering: Rendering
+
+
+@dataclass(frozen=True, slots=True)
+class _Constant:
+    value: float
+
+
+type _Answer = _Scaled | _Constant
+
+
+@dataclass(frozen=True, slots=True)
 class _LinearForm:
     """
-    Two forms differing by one overall factor denote values exactly one multiplication apart, which is what lets
-    the second share the first.
-
-    Coefficients are exact rationals, never host floats: `1e308*x + 1e-300*y` and `1e308*x + 1e-200*y` both collapse
-    the small coefficient to zero in doubles, and merging them would answer for a difference the format holds.
+    Coefficients are exact rationals: `x + 1e-20*x - x` is `1e-20*x`, which a double coefficient, having absorbed the
+    small term into 1.0, would answer as zero.
     """
 
     _terms: tuple[tuple[ValueId, Fraction], ...]
     _constant: Fraction
 
-    def scaled(self, factor: Fraction) -> _LinearForm:
-        assert factor, "a zero factor is an absorbing element, not a scaling, and would erase every term's identity"
+    def scaled(self, factor: Fraction) -> "_LinearForm":
+        # A zero factor is an absorbing element, not a scaling: it would erase every term's identity.
+        assert factor
         return _LinearForm(tuple((base, c * factor) for base, c in self._terms), self._constant * factor)
 
-    def plus(self, other: _LinearForm) -> _LinearForm:
+    def plus(self, other: "_LinearForm") -> "_LinearForm":
         merged: dict[ValueId, Fraction] = dict(self._terms)
         for base, c in other._terms:
             total = merged.get(base, Fraction(0)) + c
@@ -68,23 +75,23 @@ class _LinearForm:
             for _, c in (*self._terms, (0, self._constant))
         )
 
-    def normalized(self) -> tuple[_LinearForm, Fraction] | None:
-        """`None` where the terms all cancelled: that denotes a constant, which folding owns rather than sharing."""
+    def collapsed(self, vid: ValueId) -> _Answer | None:
+        """A form the pass gave up on reads as `1 * itself`, which `vid` is here to refuse."""
         if not self._terms:
-            return None
-        pivot = self._terms[0][1]
-        assert pivot, "a zero coefficient is never kept, so the pivot cannot be one"
-        scaled = _LinearForm(tuple((base, c / pivot) for base, c in self._terms), self._constant / pivot)
-        return scaled, pivot
-
-
-def _retirable(hir: Hir, uses: dict[ValueId, int], operand: ValueId, keeper: ValueId) -> bool:
-    """A sign op is not an operator but a sideband on its consumer, so it is walked through rather than counted."""
-    while operand != keeper and uses[operand] == 1 and isinstance(node := hir.nodes[operand], Operation):
-        if not isinstance(node.operator, FloatNeg):
-            return True
-        (operand,) = node.operands
-    return False
+            if not self._constant:
+                return _Constant(0.0)
+            # A number the machine must hold, exponent or not, so this one path still asks for the host float.
+            named = scaling_of_ratio(self._constant)
+            value = None if named is None else named.coefficient()
+            return None if value is None else _Constant(value)
+        if len(self._terms) == 1 and not self._constant:
+            base, coefficient = self._terms[0]
+            if base == vid:
+                return None
+            named = scaling_of_ratio(coefficient)
+            rendering = None if named is None else named.rendering()
+            return None if rendering is None else _Scaled(base, rendering)
+        return None
 
 
 def _opaque(vid: ValueId) -> _LinearForm:
@@ -113,11 +120,9 @@ def _forms(hir: Hir) -> dict[ValueId, _LinearForm]:
                 combined = forms[node.operands[0]].scaled(Fraction(2) ** k)
             case FloatMul():
                 a, b = node.operands
-                for base, other in ((a, b), (b, a)):
+                for base, other in ((a, b), (b, a)):  # either way round: this reads the graph it is given
                     constant = hir.nodes[other]
-                    # Zero and the infinities are absorbing elements rather than scalings, the exclusion
-                    # `scaling_of` already makes. Zero matters beyond tidiness: a surviving `inf * 0.0` names no
-                    # number and is the refusal gate's to convict, not this pass's to erase.
+                    # A surviving `inf * 0.0` names no number and is the refusal gate's to convict, not ours to erase.
                     if isinstance(constant, FloatConst) and math.isfinite(constant.value) and constant.value != 0.0:
                         combined = forms[base].scaled(Fraction(constant.value))
                         break
@@ -127,71 +132,49 @@ def _forms(hir: Hir) -> dict[ValueId, _LinearForm]:
                 return _opaque(vid)
         return _opaque(vid) if combined.oversized else combined
 
-    for vid in sorted(hir.nodes):
-        node = hir.nodes[vid]
-        # Ascending order is what keeps this iterative: a rebuilt graph numbers every operand below its user, so
-        # no walk nests. Phis may name a later value, and are opaque anyway.
-        assert not isinstance(node, Operation) or all(operand < vid for operand in node.operands)
+    # Dominance order: every operand is defined before its user, so no walk nests; phis are opaque.
+    blocks = {block.id: block for block in hir.blocks}
+    for vid in hir.input_ids:
         forms[vid] = compute(vid)
+    for vid, node in hir.nodes.items():
+        if isinstance(node, (Const, StateRead)):
+            forms[vid] = compute(vid)
+    for bid in reverse_postorder(hir):
+        for vid in blocks[bid].phis + blocks[bid].operations:
+            forms[vid] = compute(vid)
+    assert len(forms) == len(hir.nodes)
     return forms
 
 
-def _scaling(ratio: Fraction) -> Scaling | None:
-    """A ratio read as the constant it scales by; `None` where the host arithmetic does not hold it."""
-    try:
-        return scaling_of(float(ratio))
-    except OverflowError:
-        return None
-
-
 def run(hir: Hir) -> Hir:
-    """Block-scoped, matching the builder's own interning, so a keeper always dominates the use that adopts it."""
+    """
+    Every answer is taken: it replaces an addition with at most one operation whatever else reads the terms, so no
+    liveness is read to know it does not add work.
+    """
     forms = _forms(hir)
-    uses = hir.use_counts()
-    rewrites: dict[tuple[BlockId, Node], tuple[ValueId, float]] = {}
-
-    def retires_something(node: Operation, keeper: ValueId) -> bool:
-        """
-        Where nothing retires, the rewrite trades an addition for a multiplication by a coefficient that need not
-        even be exact, so the sum stands. The keeper never counts -- the rewrite READS it, so an operand that is
-        the keeper gains a use rather than losing its last one, which is what `x + x + x` turns on.
-        """
-        return any(_retirable(hir, uses, operand, keeper) for operand in node.operands)
-
+    answers: dict[tuple[BlockId, Node], _Answer] = {}
     for block in hir.blocks:
-        keepers: dict[_LinearForm, tuple[ValueId, Fraction]] = {}
         for vid in block.operations:
             node = hir.nodes[vid]
-            if not (isinstance(node, Operation) and isinstance(node.operator, FloatAdd)):
-                continue
-            normalized = forms[vid].normalized()
-            if normalized is None:
-                continue
-            unit, pivot = normalized
-            keeper = keepers.get(unit)
-            if keeper is None:
-                keepers[unit] = (vid, pivot)
-                continue
-            keeper_id, keeper_pivot = keeper
-            scaling = _scaling(pivot / keeper_pivot)
-            if scaling is None or (coefficient := scaling.coefficient()) is None:
-                continue
-            # A power-of-two ratio is a scaler once the next reduction round absorbs it, so it pays either way;
-            # any other stays a multiplication.
-            if scaling.is_power_of_two or retires_something(node, keeper_id):
-                # Operations intern per block, so block and node name the value uniquely -- which is how the
-                # rebuild driver, given the node and not its id, finds the rewrite.
-                rewrites[(block.id, node)] = (keeper_id, coefficient)
-    if not rewrites:
+            if isinstance(node, Operation) and isinstance(node.operator, FloatAdd):
+                answer = forms[vid].collapsed(vid)
+                if answer is not None:
+                    answers[block.id, node] = answer
+    if not answers:
         return hir
 
     def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-        rewrite = rewrites.get((builder.current_block, node))
-        if rewrite is None:
-            return copy_node(builder, node, remap)
-        keeper, coefficient = rewrite
-        return builder.operation(FloatMul(), [remap[keeper], builder.const_node(FloatConst(coefficient))])
+        match answers.get((builder.current_block, node)):
+            case _Constant(value=value):
+                return builder.const_node(FloatConst(value))
+            case _Scaled(base=base, rendering=rendering):
+                scaled = remap[base]
+                operation = scaled_node(rendering.magnitude, scaled, lambda c: builder.const_node(FloatConst(c)))
+                if operation is not None:
+                    scaled = builder.operation(operation.operator, list(operation.operands))
+                return builder.operation(FloatNeg(), [scaled]) if rendering.negative else scaled
+            case None:
+                return copy_node(builder, node, remap)
 
-    result = rebuild(hir, build_value)
-    _logger.info("Linear-form sharing: %d sum(s) answered as a scaling of an equivalent sum", len(rewrites))
-    return result
+    _logger.info("Linear-form cancellation: %d sum(s) answered by what their terms leave", len(answers))
+    return rebuild(hir, build_value)

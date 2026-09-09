@@ -7,6 +7,7 @@ from typing import ClassVar
 
 from .._mir import (
     Mir,
+    reverse_postorder,
     MirBoolOutput,
     MirBoolView,
     MirBranch,
@@ -25,7 +26,7 @@ from .._operators import BoolInversion, HardwareOperator, PooledHardwareOperator
 from .._value import WideValue
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import const_branch_conditions, mir_rpo, phi_arm_out, succ_map
+from ._mir_facts import const_branch_conditions, phi_arm_out, succ_map
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import Producer, RegallocTuning
@@ -203,7 +204,7 @@ def _movable_order(
     (the `-3` sentinel sorts a phi -- which has no commit -- ahead of the operations in its block). Value-id last
     keeps the order, and hence the coloring, seed-independent; both banks MUST use this one definition.
     """
-    rpo_pos = {bid: i for i, bid in enumerate(mir_rpo(mir))}
+    rpo_pos = {bid: i for i, bid in enumerate(reverse_postorder(mir))}
     block_of = {**op_block, **phi_block}
     return sorted(candidates, key=lambda vid: (rpo_pos[block_of[vid]], op_commit.get(vid, -3), vid))
 

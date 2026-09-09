@@ -492,6 +492,20 @@ def test_min_max_is_not_bit_commutative() -> None:
         assert _bits(out[1]) == ref1.bits, f"min(y,-x) x={x} y={y}"
 
 
+def test_min_max_against_a_constant_keeps_its_operand_order() -> None:
+    # At x=0 the tie is between the written +0 and the conditioned -0, so swapping the constant operand flips the sign.
+    def kernel(x: float) -> tuple[float, float]:
+        return min(0.0, -x), max(0.0, -x)
+
+    sim = _sim(kernel, "min_max_const")
+    for x in [0.0, 2.5, -2.5]:
+        neg_x = _v(x).apply_sign(negate=True, absolute=False)
+        low, high = FloatValue.sort(_v(0.0), neg_x)
+        out = sim.run(x)
+        assert _bits(out[0]) == low.bits, f"min(0.0,-x) x={x}"
+        assert _bits(out[1]) == high.bits, f"max(0.0,-x) x={x}"
+
+
 def test_min_max_of_constants_fold() -> None:
     # min/max of two constants fold in the format-agnostic HIR, so a kernel using only constant min/max needs no
     # fsort hardware; synthesizing with fsort unconfigured proves the fold (an unfolded min/max would be rejected).

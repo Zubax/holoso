@@ -7,7 +7,7 @@ from collections.abc import Callable, Set
 from typing import assert_never
 
 from ._const import Const
-from .._util import BlockId, ValueId
+from .._util import BlockId, ValueId, reverse_postorder_of
 from ._ir import Branch, Hir, HirBuilder, InPort, Jump, Node, Operation, Phi, Ret, StateRead, Terminator, successors
 
 # A pass supplies one of these to rebuild each value into the target builder; it returns the new value id and may fold
@@ -57,43 +57,21 @@ def _globals_in_order(hir: Hir) -> list[ValueId]:
 
 def reverse_postorder(hir: Hir) -> list[BlockId]:
     """
-    Block ids in reverse-postorder of the CFG from the entry. Predecessors precede successors (a back-edge target
-    precedes its body), so visiting blocks in this order remaps every operand and forward phi arm before its use --
-    numeric id order does not (a nested `if`'s merge gets a higher id than the outer merge it feeds).
+    Predecessors precede successors (a back-edge target precedes its body), so visiting blocks in this order remaps
+    every operand and forward phi arm before its use -- numeric id order does not, a nested `if`'s merge getting a
+    higher id than the outer merge it feeds.
     """
-    succs = {block.id: successors(block) for block in hir.blocks}
-    order: list[BlockId] = []
-    visited: set[BlockId] = set()
-    # Iterative DFS (explicit stack) rather than recursion: a deep CFG -- e.g. nested unrolled loops, which chain
-    # thousands of blocks -- would otherwise exceed Python's recursion limit. Each frame is (node, child_index); a node
-    # is appended to the postorder once all its successors have been emitted.
-    stack: list[tuple[BlockId, int]] = [(hir.entry, 0)]
-    visited.add(hir.entry)
-    while stack:
-        node, index = stack[-1]
-        outgoing = succs[node]
-        if index < len(outgoing):
-            stack[-1] = (node, index + 1)
-            successor = outgoing[index]
-            if successor not in visited:
-                visited.add(successor)
-                stack.append((successor, 0))
-        else:
-            order.append(node)
-            stack.pop()
-    return order[::-1]
+    return reverse_postorder_of(hir.entry, {block.id: successors(block) for block in hir.blocks})
 
 
-def rebuild(hir: Hir, build_value: BuildValue, keep: Set[ValueId] | None = None) -> Hir:
+def rebuild(hir: Hir, build_value: BuildValue | None = None, keep: Set[ValueId] | None = None) -> Hir:
     """
-    Rebuild `hir` into a fresh HirBuilder, delegating each value's construction to `build_value` and
-    copying the CFG structure (blocks, phis, terminators) generically. Block ids are preserved. Values are visited in a
-    dominance-respecting order -- inputs, then entry-global constants/state reads, then each block's phis and
-    operations in reverse-postorder of the blocks -- so operands and phi arms are already remapped when used. The one
-    exception is a loop-header phi's latch (back-edge) arm, which references a body value defined later in the order:
-    such a phi is copied open with its available arms (`build_value` is bypassed, as the pass cannot fold an
-    incomplete merge) and its arms are closed once every block has been visited. `keep` (DCE) restricts which
-    non-input values are emitted; dropped values must not be referenced by any kept value.
+    Delegates each value to `build_value` (absent, every value is copied) and copies the CFG generically; block ids
+    are preserved. Values are visited in a dominance-respecting order -- inputs, then entry-global constants and state
+    reads, then each block's phis and operations in reverse-postorder of the blocks -- so operands and phi arms are
+    already remapped when used. The one exception is a loop-header phi's latch arm, which names a body value defined
+    later: such a phi is copied open and closed once every block has been visited. `keep` restricts which non-input
+    values are emitted; a dropped value must not be referenced by any kept one.
     """
     builder = HirBuilder()
     remap: dict[ValueId, ValueId] = {}
@@ -103,7 +81,8 @@ def rebuild(hir: Hir, build_value: BuildValue, keep: Set[ValueId] | None = None)
     deferred: list[ValueId] = []  # loop-header phis with a forward-referenced latch arm, closed after every block
 
     def emit(vid: ValueId) -> None:
-        remap[vid] = build_value(builder, hir.nodes[vid], remap)
+        node = hir.nodes[vid]
+        remap[vid] = copy_node(builder, node, remap) if build_value is None else build_value(builder, node, remap)
 
     builder.position_at(entry)
     for vid in hir.input_ids:

@@ -5,11 +5,11 @@ or decline because the datapath would answer differently.
 """
 
 import math
-import sys
+from collections.abc import Callable
 
 from ._const import BoolConst, Const, FloatConst, IntConst
 from ._copy import copy_node, rebuild
-from ._scaling import Scaling, scaling_of
+from ._scaling import Identity, Rendering, Scaling, read_scaling, rendering_of, scaled_node, scaling_of
 from .._util import BlockId, ValueId
 from ._ir import Hir, HirBuilder, Node, Operation, Phi
 from ._operators import (
@@ -130,11 +130,13 @@ def run(hir: Hir) -> Hir:
 
     def reduce_algebra(builder: HirBuilder, operator: Operator, operands: list[ValueId]) -> ValueId:
         """
-        The algebra an operator declares, applied over an operand the compiler cannot see: an absorbing operand fixes
-        the result regardless of the others (`x or True`), and an identity operand drops out (`x and True` -> x).
-        Sound for any associative operator that declares them, which every declaration here is. This is the shared
-        fallback of the reductions rather than a pass of its own, so no rewrite escapes it.
+        The shared fallback of the reductions, so no rewrite escapes it: absorbing and identity operands, and a constant
+        operand settled on the right through the mirror so every spelling of one expression names one node.
         """
+        mirror = operator.mirror
+        if mirror is not None and operands[0] in known and operands[-1] not in known:
+            assert len(operands) == 2
+            operator, operands = mirror, operands[::-1]
         consts = [known.get(operand) for operand in operands]
         absorbing = operator.absorbing()
         if absorbing is not None and absorbing in consts:
@@ -165,117 +167,81 @@ def run(hir: Hir) -> Hir:
         Only at the SAME exponent, where the two scalings genuinely become one. Carrying an exponent step inside
         instead retires nothing: it swaps a multiply for a scaler and moves the multiply behind the addition.
         """
-        left = scaling(remap, old_a, owned=True)
-        right = scaling(remap, old_b, owned=True)
+        left = scaling(remap, old_a)
+        right = scaling(remap, old_b)
         if left is None or right is None:
             return None
         (base_a, sa), (base_b, sb) = left, right
         if (sa.significand, sa.k) != (sb.significand, sb.k):
             return None
-        if not sa.is_power_of_two and sa.coefficient() is None:
-            return None  # no host float names the factor, and only a non-exponent one needs naming
+        factor = sa.rendering()
+        if factor is None:
+            return None
         inner_a = remap[base_a]
-        inner_b = emit_exponent(builder, remap[base_b], Scaling(1.0, 0, sa.negative != sb.negative))
+        inner_b = emit_rendering(builder, remap[base_b], Rendering(Identity(), sa.negative != sb.negative))
         summed = (
             emit_float_const(builder, 0.0)
             if opposites(inner_a, inner_b)
             else reduce_algebra(builder, FloatAdd(), [inner_a, inner_b])
         )
-        factored = emit_scaling(builder, summed, sa)
-        assert factored is not None, "an exponent needs no coefficient and any other was just proved nameable"
-        return factored
+        return emit_rendering(builder, summed, factor)
 
-    def emit_exponent(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId:
-        """An exponent scaling over a value: the scaler, the sign sideband it rides with, or at zero exponent neither."""
-        assert scaling.is_power_of_two
-        scaled = builder.operation(FloatMulPow2(scaling.k), [base]) if scaling.k else base
-        return make_neg(builder, scaled) if scaling.negative else scaled
+    def emit_rendering(builder: HirBuilder, base: ValueId, rendering: Rendering) -> ValueId:
+        """A constant scaling's HIR shape over a value, whichever rewrite asked for it."""
+        node = scaled_node(rendering.magnitude, base, lambda c: emit_float_const(builder, c))
+        scaled = base if node is None else reduce_algebra(builder, node.operator, list(node.operands))
+        return make_neg(builder, scaled) if rendering.negative else scaled
 
     def emit_scaling(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId | None:
-        """
-        The one node a scaling becomes over a value, or None where no host float names its coefficient and the
-        operands must stand as written -- each of which the machine layer can still carry apart, where this cannot.
-        """
-        if scaling.is_power_of_two:
-            return emit_exponent(builder, base, scaling)
-        coefficient = scaling.coefficient()
-        return (
-            None
-            if coefficient is None
-            else reduce_algebra(builder, FloatMul(), [base, emit_float_const(builder, coefficient)])
-        )
+        """None where no host float names the coefficient: the operands then stand as written."""
+        rendering = scaling.rendering()
+        return None if rendering is None else emit_rendering(builder, base, rendering)
 
     def scale_or_multiply(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
-        if is_neg_one(a):
-            return make_neg(builder, b)
-        if is_neg_one(b):
-            return make_neg(builder, a)
+        """A written product by a constant takes the constant's own shape; by zero or an infinity it is a product."""
         for const_side, other in ((b, a), (a, b)):
             scale = float_of(const_side)
-            # A unit scaling is `x*1`, left to the declared identity rather than minted as a shift; `x*-1` never
-            # reaches here, the negation above having claimed it.
-            if (
-                scale is not None
-                and (scaling := scaling_of(scale)) is not None
-                and scaling.is_power_of_two
-                and scaling.k
-            ):
-                return emit_exponent(builder, other, scaling)
+            if scale is not None and (rendering := rendering_of(scale)) is not None:
+                return emit_rendering(builder, other, rendering)
         return reduce_algebra(builder, FloatMul(), [a, b])
 
-    def scaling(
-        remap: dict[ValueId, ValueId], old_id: ValueId, *, owned: bool = False
-    ) -> tuple[ValueId, Scaling] | None:
+    def constant_of(remap: dict[ValueId, ValueId]) -> Callable[[ValueId], float | None]:
         """
-        The value an old-graph node scales and the constant it scales it by; `None` if it scales nothing. One layer
-        only -- the round repeats, so a scaled scaling composes over successive rounds.
+        Shape is read off the OLD graph and constant-ness off the REBUILT one: a fold this round may have made an
+        operand a constant.
+        """
+        return lambda old_id: float_of(remap[old_id])
 
-        `owned` additionally requires this use to be the node's only one. A caller that means to REPLACE it needs
-        that, or the node survives the rewrite meant to retire it.
-        """
+    def scaling(remap: dict[ValueId, ValueId], old_id: ValueId) -> tuple[ValueId, Scaling] | None:
+        """Composition stops at a layer another consumer still wants, since the caller replaces what it composes."""
         if known.get(remap[old_id]) is not None:
             return None  # a node the rebuild already answered is a constant, and folding owns it
-        if owned and uses[old_id] != 1:
-            return None
-        match hir.nodes[old_id]:
-            case Operation(operator=FloatMulPow2(k=k), operands=(x,)):
-                return x, Scaling(1.0, k, False)
-            case Operation(operator=FloatNeg(), operands=(x,)):
-                return x, Scaling(1.0, 0, True)  # a negation is a scaling by -1, and the cheapest one there is
-            case Operation(operator=FloatMul(), operands=(x, y)):
-                for base, other in ((x, y), (y, x)):
-                    factor = float_of(remap[other])
-                    if factor is not None and (found := scaling_of(factor)) is not None:
-                        return base, found
-        return None
+        reading = read_scaling(hir, old_id, constant_of(remap), lambda layer: uses[layer] == 1)
+        return None if reading is None else (reading.base, reading.scaling)
 
-    def reassociate(
-        builder: HirBuilder, remap: dict[ValueId, ValueId], outer: Scaling, old_operand: ValueId
-    ) -> ValueId | None:
+    def reduce_scaling(builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId) -> ValueId | None:
         """
-        Scaling an already-scaled value scales it once. Cost is never the question: the composed node replaces the
-        outer scaling one for one, and the inner survives only while another consumer still wants it.
+        The composed node replaces the outer one; the inner layers survive only while another consumer wants them. None
+        where the node scales nothing.
         """
-        found = scaling(remap, old_operand)
-        if found is None:
+        reading = read_scaling(hir, vid, constant_of(remap))
+        if reading is None or len(reading.layers) < 2:
             return None
-        base, inner = found
-        return emit_scaling(builder, remap[base], outer.compose(inner))
+        composed = emit_scaling(builder, remap[reading.base], reading.scaling)
+        assert composed is not None
+        return composed
 
-    def reduce_mul(builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, old_b: ValueId) -> ValueId:
-        # Reads the shape of the OLD graph, hence the old ids: composition needs the operand's own operator, which
-        # the rebuilt operand no longer names once it has been reduced.
-        for const_side, other in ((old_b, old_a), (old_a, old_b)):
-            factor = float_of(remap[const_side])
-            if factor is not None and (outer := scaling_of(factor)) is not None:
-                fused = reassociate(builder, remap, outer, other)
-                if fused is not None:
-                    return fused
-        return scale_or_multiply(builder, remap[old_a], remap[old_b])
+    def reduce_mul(
+        builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId, old_a: ValueId, old_b: ValueId
+    ) -> ValueId:
+        composed = reduce_scaling(builder, remap, vid)
+        return composed if composed is not None else scale_or_multiply(builder, remap[old_a], remap[old_b])
 
-    def reduce_mul_pow2(builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, k: int) -> ValueId:
-        fused = reassociate(builder, remap, Scaling(1.0, k, False), old_a)
-        return fused if fused is not None else builder.operation(FloatMulPow2(k), [remap[old_a]])
+    def reduce_mul_pow2(
+        builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId, old_a: ValueId, k: int
+    ) -> ValueId:
+        composed = reduce_scaling(builder, remap, vid)
+        return composed if composed is not None else builder.operation(FloatMulPow2(k), [remap[old_a]])
 
     def reduce_div(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
         if a == b:
@@ -291,13 +257,13 @@ def run(hir: Hir) -> Hir:
         # only because nothing has needed the fold; `1/inf` is `0.0`, a perfectly good second factor.
         if divisor is not None and divisor != 0.0 and math.isfinite(divisor):
             scaling = scaling_of(divisor)
-            if scaling is not None and scaling.is_power_of_two:  # by a signed power of two: its negated exponent
-                return emit_exponent(builder, a, Scaling(1.0, -scaling.k, scaling.negative))
-            # The same normality test as the composition above: a divisor whose reciprocal rails or falls into the
-            # host's subnormals has none this arithmetic can carry, so the division stands as written.
-            reciprocal = 1.0 / divisor
-            if sys.float_info.min <= abs(reciprocal) < math.inf:
-                return builder.operation(FloatMul(), [a, emit_float_const(builder, reciprocal)])
+            assert scaling is not None
+            # A reciprocal that rails or falls into the host's subnormals renders as nothing: the division stands.
+            reciprocal = (
+                Scaling(1.0, -scaling.k, scaling.negative) if scaling.is_power_of_two else scaling_of(1.0 / divisor)
+            )
+            if reciprocal is not None and (emitted := emit_scaling(builder, a, reciprocal)) is not None:
+                return emitted
         return reduce_algebra(builder, FloatDiv(), [a, b])
 
     def reduce_iadd(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
@@ -436,6 +402,10 @@ def run(hir: Hir) -> Hir:
             return reduce_algebra(builder, BoolAnd(), [cond, a])  # (c, a, False) == c and a
         return builder.operation(BoolSelect(), [cond, a, b])  # both arms dynamic: keep the mux
 
+    # Operations intern per block, so a block and a node name one value -- which is what `BuildValue`, handed the
+    # node and not its id, needs to read the old graph's shape under it.
+    ids = {(block.id, hir.nodes[vid]): vid for block in hir.blocks for vid in block.operations}
+
     def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         if isinstance(node, Operation):
             # Ask what the operation names, but only where every operand is known -- and then no identity applies,
@@ -478,9 +448,9 @@ def run(hir: Hir) -> Hir:
             case Operation(operator=FloatAdd(), operands=(a, b)):
                 return reduce_add(builder, remap, a, b)
             case Operation(operator=FloatMul(), operands=(a, b)):
-                return reduce_mul(builder, remap, a, b)
+                return reduce_mul(builder, remap, ids[builder.current_block, node], a, b)
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
-                return reduce_mul_pow2(builder, remap, a, k)
+                return reduce_mul_pow2(builder, remap, ids[builder.current_block, node], a, k)
             case Operation(operator=FloatDiv(), operands=(a, b)):
                 return reduce_div(builder, remap[a], remap[b])
             case Operation(operator=(FloatRound() | FloatFloor() | FloatCeil() | FloatTrunc()) as op, operands=(a,)):
