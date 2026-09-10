@@ -299,8 +299,8 @@ def build_microcode(
         for imm in inst.operator.immediate_ports:
             add(f_imm(base, imm.name), imm.width)
         # A sign field exists for a FLOAT port alone, on either side: it drives a sideband only a float module has.
-        for pos, operand_type in enumerate(inst.operator.signature.operand_types):
-            if has_sign_control(operand_type):
+        for pos in range(inst.operator.signature.arity):
+            if inst.operator.conditions_operand(pos):
                 add(f_osgn(base, PORT_LETTERS[pos]), 2)
             read_book = read_books[(inst, pos)]
             if len(read_book.sources) > 1:
@@ -321,11 +321,13 @@ def build_microcode(
         signature = op.operator.signature
         for pos, operand in enumerate(op.operands):
             assert isinstance(operand, WideOperand), "pooled operators read only wide operands today (no read lane)"
-            if has_sign_control(signature.operand_types[pos]):
+            if op.operator.conditions_operand(pos):
                 assert isinstance(operand.conditioner, FloatSignControl)
                 put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
             else:
-                assert isinstance(operand.conditioner, IntIdentity)
+                # No sideband to drive: an integer port, or a float one whose sign this operator cannot observe.
+                # Type agreement is `_check_conditioner`'s at MIR; what is left to hold here is emptiness.
+                assert operand.conditioner.is_identity
             field = f_rd(base, PORT_LETTERS[pos])
             if field in fields:
                 put(field, ci, read_books[(op.inst, pos)].code(operand.source))

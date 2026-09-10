@@ -392,8 +392,8 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
             w(f".{imm.name}({f_imm(base, imm.name)}),")
         # Only a FLOAT port has a sign sideband to bind, on either side; a boolean output's inversion is fabric-side
         # at the write, and an integer port folds nothing. An untapped float output is tied to the identity.
-        for port, letter, operand_type in zip(operand_ports, letters, operator.signature.operand_types, strict=True):
-            if has_sign_control(operand_type):
+        for position, (port, letter) in enumerate(zip(operand_ports, letters, strict=True)):
+            if operator.conditions_operand(position):
                 w(f".{port}_sgnop({f_osgn(base, letter)}),")
         for q, result_type in enumerate(operator.signature.result_types):
             if has_sign_control(result_type):

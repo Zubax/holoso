@@ -188,6 +188,46 @@ class FDivOperator(FloatHardwareOperator):
 
 
 @dataclass(frozen=True, slots=True)
+class FILog2Operator(ZkfBackedOperator):
+    """
+    The extraction half of the exponent pair, `FMulILog2Operator` being the scaling half: the two compose with no
+    arithmetic between them, sharing the binade convention `FloatValue.ilog2` states. Sign-invariant: the operand's
+    conditioner reaches no logic at all, sign conditioning rewriting only the bit the exponent field does not read.
+    """
+
+    ifmt: IntFormat
+
+    @dataclass(frozen=True, slots=True)
+    class Options:
+        stage_input: int = 0
+
+    mnemonic: ClassVar[str] = "filog2"
+    unconditioned_operands: ClassVar[frozenset[int]] = frozenset({0})
+    operand_hdl_ports: ClassVar[list[str]] = ["a"]
+    output_hdl_ports: ClassVar[list[str]] = ["y"]
+    opt: Options
+
+    def __post_init__(self) -> None:
+        model = zkf.Ilog2Model(
+            zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), wint=self.ifmt.width, stage_input=self.opt.stage_input
+        )
+        object.__setattr__(self, "_model", model)
+
+    @property
+    def signature(self) -> ScalarSignature:
+        return ScalarSignature((FloatType(self.fmt),), (IntType(self.ifmt),))
+
+    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+        (a,) = self._validated_operands(operands)
+        assert isinstance(a, FloatValue)
+        return (IntValue.from_int(self.ifmt, a.ilog2()),)
+
+    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+        (a,) = operands
+        return f"ilog2({a})"
+
+
+@dataclass(frozen=True, slots=True)
 class FMulILog2Operator(ZkfBackedOperator):
     """Exact scaling by a power of two: `a * 2**k`; every `k` is legal."""
 
@@ -644,6 +684,9 @@ class FloatClassificationOperator(InlineHardwareOperator, ABC):
 @dataclass(frozen=True, slots=True)
 class FloatIsFiniteOperator(FloatClassificationOperator):
     mnemonic: ClassVar[str] = "fisfinite"
+    # The exponent field alone decides finiteness; the directional classifiers below read the sign and so declare
+    # nothing, which is why this sits here rather than on the shared base.
+    unconditioned_operands: ClassVar[frozenset[int]] = frozenset({0})
 
     def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
         (a,) = operands
@@ -698,6 +741,7 @@ class FloatIsNegInfOperator(FloatClassificationOperator):
 @dataclass(frozen=True, slots=True)
 class FloatToBoolOperator(InlineHardwareOperator):
     mnemonic: ClassVar[str] = "ftobool"
+    unconditioned_operands: ClassVar[frozenset[int]] = frozenset({0})  # a zero test reads the exponent alone
     fmt: FloatFormat
 
     @property

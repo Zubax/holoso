@@ -2,10 +2,12 @@
 
 ## hypot by exact exponent scaling
 
-`2^k·sqrt((x/2^k)² + (y/2^k)²)` matches the naive form (0.143 vs 0.211 mean ulps) while staying overflow-safe,
-removing an fdiv and an fsort. Needs a new inline operator (exponent extraction into `fmul_ilog2`'s integer port).
+`2^k·sqrt((x/2^k)² + (y/2^k)²)` matches the naive form while staying overflow-safe, removing the fdiv. Exponent
+extraction into `fmul_ilog2`'s integer port is the `filog2` operator, which now exists as a pooled ZKF-backed
+module; what remains is the semantic operator, its lowering, and the expansion itself.
 
-`norm` for n≥3 is the same class.
+`norm` for n≥3 is the same class, but not the same expansion: its window must account for the arity, since n scaled
+squares accumulate where two do not.
 
 ## Frontend limitations
 

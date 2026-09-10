@@ -1,6 +1,7 @@
 """Construct LIR operands, scheduled ops, terminators, outputs, inputs, and the constant pool from selected MIR."""
 
 import math
+from dataclasses import replace
 from typing import assert_never
 
 from .._errors import UnsupportedConstruct
@@ -62,6 +63,28 @@ def _typed_operand(
     return wide_operand(wide_mir, vid, conditioner, alloc, pool)
 
 
+def _operands_of(
+    node: MirOperation,
+    wide_mir: MirWideView,
+    bool_mir: MirBoolView,
+    alloc: Allocation,
+    pool: dict[ValueId, PooledConst],
+) -> list[WideOperand | BoolOperand]:
+    """
+    The constant pool stores a float as its magnitude and folds the sign onto whoever reads it -- BELOW the MIR
+    normalization that cleared an unconditioned operand, so the sign would reappear on a port with nothing to bind
+    it to. This is the last place that still knows the operator, hence the last that can erase it.
+    """
+    operands: list[WideOperand | BoolOperand] = []
+    for position, (vid, conditioner) in enumerate(zip(node.operands, node.operand_conditioners, strict=True)):
+        operand = _typed_operand(wide_mir, bool_mir, vid, conditioner, alloc, pool)
+        if position in node.operator.unconditioned_operands:
+            assert isinstance(operand, WideOperand)  # the declaration admits float ports alone
+            operand = replace(operand, conditioner=FloatSignControl())
+        operands.append(operand)
+    return operands
+
+
 def _value_dst(wide_mir: MirWideView, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
     if vid in wide_mir.operation_nodes:
         return RegRef(alloc.wide_reg[vid])
@@ -79,10 +102,7 @@ def build_inline_op(
 ) -> InlineScheduledOp:
     node = mir_operation(mir, vid)
     assert isinstance(node.operator, InlineHardwareOperator)
-    operands = [
-        _typed_operand(wide_mir, bool_mir, operand, conditioner, alloc, pool)
-        for operand, conditioner in zip(node.operands, node.operand_conditioners, strict=True)
-    ]
+    operands = _operands_of(node, wide_mir, bool_mir, alloc, pool)
     return InlineScheduledOp(
         operator=node.operator,
         operands=operands,
@@ -112,10 +132,7 @@ def build_pooled_op(
     """
     leader = min(members)
     node = mir_operation(mir, leader)
-    operands = [
-        _typed_operand(wide_mir, bool_mir, operand, conditioner, alloc, pool)
-        for operand, conditioner in zip(node.operands, node.operand_conditioners, strict=True)
-    ]
+    operands = _operands_of(node, wide_mir, bool_mir, alloc, pool)
     swapped = bool(swap.get(leader))
     if swapped:  # commutative operator: exchange operands (with their conditioners) to shrink read muxes
         operands.reverse()

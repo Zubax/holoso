@@ -413,7 +413,10 @@ holds, so that clamp stays at lowering.
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
 RESULT is its own. The float lowerer maps each semantic float operator to its configured hardware operator and
 collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands, results, or output
-wires; multiply-by-power-of-two selects the `fmul_ilog2` scaler, its exponent an ordinary integer operand,
+wires -- except onto an operand its operator declares UNCONDITIONED, where the builder drops the chain outright
+rather than folding it, for EVERY producer of MIR operations and not this lowerer alone, since a transform no
+result can observe would otherwise buy a second firing for one answer;
+multiply-by-power-of-two selects the `fmul_ilog2` scaler, its exponent an ordinary integer operand,
 unless an adjacent addition absorbs it into an fma instead; and the four rounding operators map to one shared `fround`
 distinguished by an immediate mode, which a float-to-integer conversion reading one of them absorbs as its own.
 Which operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel
@@ -442,17 +445,22 @@ privileged.
 
 LIR is the scheduled, bound, register-allocated microprogram. Its resources are the bound operator instances, the
 float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a wide constant pool
-shared by both families, and the typed input loads and output wires. The pool interns constants by their typed
-encoded machine value -- a float by its encoded magnitude, the sign riding the consumer's free sideband, an integer
-by its whole word -- so encoding-equal float literals share one word and the two families cannot collide. Each wide
+shared by both families, and the typed input loads and output wires. The pool interns constants by their typed encoded
+machine value -- a float by its encoded magnitude, the sign riding the consumer's free sideband (erased again where
+that consumer's operand declines its conditioner, the pool folding below the layer that normalized it), an integer by
+its whole word -- so encoding-equal float literals share one word and the two families cannot collide. Each wide
 carrier names its own scalar family (a state slot's reset snapshot is an encoded value of the slot's family), so the
 port metadata the RTL and the numerical model share never assumes one. LIR names its carriers after the bank that
 holds them, being the physical binding layer, and types a carrier's folded conditioner by what the bank may hold: a
 float port folds a sign into the free `fsgnop` sideband and a boolean port an inversion, but an integer port folds
-nothing, since two's-complement negation is not free in fabric. Each scheduled firing carries its operands and
-conditioners, its register writes, and an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal
-API plus shared analysis helpers (per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive
-them.
+nothing, since two's-complement negation is not free in fabric. Whether a float OPERAND port has that sideband at all
+is the operator's to declare, not the port type's to imply: one that reads no sign bit on any output -- the exponent
+extractor, the finiteness and zero tests -- declares the operand UNCONDITIONED and then admits only the identity
+conditioner: a pooled one binds no sign field and allocates no microcode bits, while an inline one, having neither
+to begin with, sheds the `holoso_fsgnop` that would have wrapped its operand in the write expression. A result port keeps the type rule, negating a
+result being always observable. Each scheduled firing carries its operands and conditioners, its register writes, and
+an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API plus shared analysis helpers
+(per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach

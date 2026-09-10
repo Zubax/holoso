@@ -51,4 +51,13 @@ module holoso_fsgnop_tb #(parameter WEXP = 6, parameter WMAN = 18) (
     assign y = holoso_fsgnop(x, op);
 endmodule
 
+module holoso_ftobool_tb #(parameter WEXP = 6, parameter WMAN = 18) (
+    input  wire [WEXP+WMAN-1:0] x,
+    output wire                 y
+);
+    localparam WFLT = WEXP + WMAN;
+    `include "holoso_support_inline.vh"
+    assign y = holoso_ftobool(x);
+endmodule
+
 `default_nettype wire

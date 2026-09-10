@@ -187,6 +187,19 @@ class HardwareOperator(ABC):
     # The permutation must preserve each port's type, so a swapped firing's taps stay in their banks.
     swap_output_permutation: ClassVar[tuple[int, ...] | None] = None
 
+    # Operand positions that bind NO conditioner sideband, their port being fixed to the identity: the operator
+    # cannot observe the transform, so offering one would buy a second firing for one answer.
+    unconditioned_operands: ClassVar[frozenset[int]] = frozenset()
+
+    def conditions_operand(self, position: int) -> bool:
+        """
+        Whether this operand port binds a conditioner sideband. A RESULT port's is decided by its type alone -- a
+        conditioned result is always observable -- so only the operand side admits a per-operator answer.
+        """
+        if position in self.unconditioned_operands:
+            return False
+        return has_sign_control(self.signature.operand_types[position])
+
     @property
     @abstractmethod
     def latency(self) -> int: ...

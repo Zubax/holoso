@@ -107,6 +107,14 @@ class FloatValue:
         result = self._zval.cmp(other._zval)
         return result.gt - result.lt
 
+    def ilog2(self) -> int:
+        """
+        Matches `zkf_ilog2`: the unbiased exponent, which is `-bias` for zero and `bias+1` for an infinity.
+        Those two put the limit cases below and above every finite exponent, so an extremum over the answer
+        needs no special case for them.
+        """
+        return self._zval.ilog2()
+
     def scale_pow2(self, k: int) -> FloatValue:
         """Matches `zkf_mul_ilog2`."""
         if isinstance(k, bool) or not isinstance(k, int):

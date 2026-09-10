@@ -11,7 +11,9 @@ from .._operators import (
     HardwareOperator,
     InlineHardwareOperator,
     IntIdentity,
+    PooledHardwareOperator,
     PortConditioner,
+    has_sign_control,
     identity_conditioner,
 )
 from .._errors import UnsupportedConstruct
@@ -55,6 +57,25 @@ def refuse_degrading(value: float, fmt: FloatFormat, what: str, remedy: str = "w
         raise UnsupportedConstruct(f"{what} {value!r} degrades to {fmt.decode(fmt.encode(value))!r} in {fmt}; {remedy}")
 
 
+def _check_unconditioned_operands(operator: HardwareOperator) -> None:
+    """
+    The declaration asserts what the operator READS, which nothing can derive, so these three rules close the ways
+    it can be wrong. They run per operation because an operator has no constructor of its own to hang them on.
+    """
+    declined = operator.unconditioned_operands
+    if not declined:
+        return
+    signature = operator.signature
+    # Declining a sideband the port never had would say nothing; only a float port carries one to decline.
+    assert all(has_sign_control(signature.operand_types[position]) for position in declined)
+    # An ERROR sideband is an observable output that "unchanged across every RESULT port" does not cover, so the
+    # claim would be unsound rather than merely unverified; an operator raising one may decline nothing.
+    assert not (isinstance(operator, PooledHardwareOperator) and operator.error_ports)
+    # A firing may exchange a commutative operator's operands together with their conditioners, so a claim covering
+    # one of them would migrate onto the other. `swap_output_permutation` maps RESULT ports and cannot say this.
+    assert not operator.is_commutative or declined == frozenset(range(signature.arity))
+
+
 def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType) -> None:
     """Port conditioner must be the type's own: sign control for floats, inversion for bools, identity for ints."""
     assert isinstance(conditioner, type(identity_conditioner(port_type)))
@@ -86,8 +107,15 @@ class MirOperation:
         assert all(0 <= value < (1 << port.width) for value, port in zip(self.immediates, ports, strict=True))
         assert len(self.operands) == signature.arity
         assert len(self.operand_conditioners) == signature.arity
-        for conditioner, operand_type in zip(self.operand_conditioners, signature.operand_types, strict=True):
+        _check_unconditioned_operands(self.operator)
+        for position, (conditioner, operand_type) in enumerate(
+            zip(self.operand_conditioners, signature.operand_types, strict=True)
+        ):
             _check_conditioner(conditioner, operand_type)
+            # The invariant the whole design rests on: a declined sideband leaves nothing to bind. Stated over the
+            # declaration rather than over `conditions_operand`, which also answers no for the boolean and integer
+            # ports -- and a boolean port carries a real inversion.
+            assert position not in self.operator.unconditioned_operands or conditioner.is_identity
         assert 0 <= self.output_port < len(signature.result_types)
         _check_conditioner(self.output_conditioner, signature.result_types[self.output_port])
         object.__setattr__(self, "scalar_type", signature.result_types[self.output_port])
@@ -644,6 +672,14 @@ class MirBuilder:
             self._type_of(operand) == expected
             for operand, expected in zip(operands, signature.operand_types, strict=True)
         )
+        # Normalized BEFORE the key below, so every conditioned view of one unconditioned operand interns to a
+        # single value. Discarding the transform is what the declaration licenses: it cannot be observed.
+        operand_conditioners = [
+            identity_conditioner(operand_type) if position in operator.unconditioned_operands else conditioner
+            for position, (conditioner, operand_type) in enumerate(
+                zip(operand_conditioners, signature.operand_types, strict=True)
+            )
+        ]
         if output_conditioner is None:
             output_conditioner = identity_conditioner(signature.result_types[output_port])
         key = (
