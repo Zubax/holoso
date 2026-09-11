@@ -1,12 +1,5 @@
 # TODO
 
-## norm by exact exponent scaling
-
-`hypot` expands this way now, but `norm` cannot reuse it: `np.linalg.norm` order 2 is `sqrt(dot(x, x))` at every
-n, so it never reaches `hypot`. Its window must also account for the arity -- n scaled squares accumulate where two
-do not, and at e6m18 the two-operand window returns an infinity for eight inputs of 1.5. The library cannot compute
-that window, front-end lowering never seeing the float format, so this wants an n-ary semantic operator.
-
 ## Frontend limitations
 
 An empty array slice (`v[:0]`) is refused where it is taken rather than where it is used, so even `len(v[:0])` fails;
