@@ -103,7 +103,7 @@ CASES = (
             _Vector((3.0, 4.0), False),
         ),
     ),
-    # `FloatHypot2` is speculatable, so if-conversion flattens this diamond and the expansion runs on the arm the
+    # `FloatHypot` is speculatable, so if-conversion flattens this diamond and the expansion runs on the arm the
     # inputs did not take. That is the claim the flag rests on, and only the hardware can show the flag stays clear.
     _Case(
         "speculated_hypot",

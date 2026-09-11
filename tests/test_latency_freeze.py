@@ -109,11 +109,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The controller that embeds that observer: the same atan2 tail, then a sincos, a norm, and the divides of the
     # limiter and the modulator, with the alignment, the branch-cut correction and the anti-windup freeze all
     # surviving as real branches -- so the last PC covers arms the shortest static path does not.
-    "foc-e8m36": (284, 335),
+    "foc-e8m36": (298, 349),
     # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
     # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
-    "imu_fusion-e8m36": (233, 409),
-    "imu_fusion-e6m18": (206, 346),
+    "imu_fusion-e8m36": (270, 464),
+    "imu_fusion-e6m18": (243, 401),
 }
 
 

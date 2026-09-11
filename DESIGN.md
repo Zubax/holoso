@@ -215,9 +215,10 @@ Every pooled operator, float or integer, is named by exactly one field of the pu
 there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
 reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every
 float operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA contraction,
-`fsort` enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone hypotenuse); what a kernel
-cannot reach through the operators it was given is refused at MIR lowering. An integer operator is never optional,
-only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
+`fsort` enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean
+norms included); what a kernel cannot reach through the operators it was given is refused at MIR lowering. An integer
+operator is never optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially
+all of it.
 
 ## Front-end
 
@@ -295,13 +296,14 @@ Calls dispatch on the object identity the callee resolves to, not its spelled na
 typed lowerings, each either a single semantic HIR operator or an inlined composite, declaring a domain per operand
 position and optionally a refinement demanding a compile-time value -- of known sign and wholeness, or of one named
 value where neither tells the lowerings apart (a one-half exponent is the square root, a small whole one a chain);
-selection takes the unique most refined lowering every one of whose positions accepts the operand. An array
-composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
+selection takes the unique most refined lowering every one of whose positions accepts the operand. An entry of no
+fixed arity mints its operator for the call's own count, which is what `math.hypot` and the Euclidean norms are. An
+array composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
 pairwise trees, log-deep in the operator's latency, while the dot product stays a left fold so FMA contraction
-remains reachable. A composite may admit a sequence at a declared argument position, and a
-scalar entry may be lifted per key to apply elementwise over an array's leaves, which a unary numpy spelling is
-wherever its answer stays in a family the subset has, and its `math` twin never is. Every stub is ordinary Python
-in the supported subset, so each is its own numerical reference.
+remains reachable. A composite may admit a sequence at a declared argument position, and a scalar entry may be
+lifted per key to apply elementwise over an array's leaves, which a unary numpy spelling is wherever its answer stays
+in a family the subset has, and its `math` twin never is. Every stub is ordinary Python in the supported subset, so
+each is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
@@ -404,19 +406,21 @@ may ASK a format, but the machine may TELL HIR, since a fact answered only at se
 fold it could have enabled. The trigonometric cores count angles in turns, so the radian operators are restated over a
 turn-native vocabulary with an explicit conversion, ahead of the optimizer, letting a kernel whose phase is already in
 turns have its own scaling meet that conversion and cancel. The machine word is told from inside the fixpoint, since
-only a fold can reveal a shift count. A hypotenuse no adjacent atan2 will carry is told its format's exponent range
-and expanded into `2^-k*sqrt((x*2^k)^2 + (y*2^k)^2)`, the scale taken at the top of what the range allows. Being exact
-it cannot overflow the square, and it keeps the smaller operand wherever the significand is no wider than the exponent
-range affords, which the written form never does. The scale is bounded both ways -- the dominant square must stay
-normal and the sum must stay finite -- and a format leaving no room between them is refused. Expansion and fusion
-settle together, since expanding one hypotenuse can cancel an expression and delete the atan2 another was to fuse
-with. The float format is told last, once nothing more will move: a multiplication by a constant the format cannot
-hold splits into one by its significand and one by its exponent, so a kernel is not refused over a number the
-optimizer minted and it never wrote; told any earlier, the optimizer would compose the pair straight back. A scale
-past the format's own exponent span is left to be refused. What may be told is bounded by the same unboundedness that
-motivates it: a rule qualifies only if its answer is independent of every operand, since a later round can reveal one
-as a constant no word holds -- a left shift past the word is zero whatever it shifts, while the right shift's sign
-fill holds only for a value the word already holds, so that clamp stays at lowering.
+only a fold can reveal a shift count. A magnitude no adjacent atan2 will carry is told its format's exponent range
+and expanded into `2^-k*sqrt(sum((x_i*2^k)^2))`, the scale taken at the top of what the range allows. Being exact it
+cannot overflow the dominant square, and it keeps the smaller legs wherever the significand is no wider than the
+exponent range affords, which the written sum of squares never does. The scale is bounded both ways -- the dominant
+square must stay normal and the sum must stay finite -- and a format leaving no room between them is refused. The
+upper bound moves with the arity, n scaled squares accumulating `ceil(log2 n)` binades where two accumulate one, so a
+format serving a pair can refuse a longer vector. Only a pair fuses with an atan2, which is what its magnitude port
+carries; expansion and fusion settle together, since expanding one magnitude can cancel an expression and delete the
+atan2 another was to fuse with. The float format is told last, once nothing more will move: a multiplication by a
+constant the format cannot hold splits into one by its significand and one by its exponent, so a kernel is not refused
+over a number the optimizer minted and it never wrote; told any earlier, the optimizer would compose the pair straight
+back. A scale past the format's own exponent span is left to be refused. What may be told is bounded by the same
+unboundedness that motivates it: a rule qualifies only if its answer is independent of every operand, since a later
+round can reveal one as a constant no word holds -- a left shift past the word is zero whatever it shifts, while the
+right shift's sign fill holds only for a value the word already holds, so that clamp stays at lowering.
 
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
 RESULT is its own. The float lowerer maps each semantic float operator to its configured hardware operator and
@@ -438,7 +442,7 @@ sin/cos computed simultaneously by the sincos operator, FMA contraction of `a*b+
 the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
 left alone), a directional infinity classifier for an infinity predicate adjacent to a sign test -- matched at MIR
 because this is the first layer aware of hardware semantics. Some semantic operators lower into combinations of
-hardware operators depending on availability and context (e.g. hypotenuse via fatan2).
+hardware operators depending on availability and context (e.g. a two-legged magnitude via fatan2).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is carried through as per-bank views sharing the block

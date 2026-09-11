@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import numpy as np
 import pytest
+from jaxtyping import Float64
 
 import holoso
 from holoso import (
@@ -1424,10 +1425,113 @@ def test_a_hypotenuse_beside_an_unholdable_multiplier_still_builds() -> None:
     assert {"holoso_filog2", "holoso_fsqrt"} <= modules
 
 
-def test_a_hypotenuse_is_refused_where_no_scaling_keeps_the_square_in_range() -> None:
+def test_a_magnitude_is_refused_where_no_scaling_keeps_the_square_in_range() -> None:
     # Two exponent bits cannot hold a normalized operand's square, so no scale satisfies both ends of the window.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
-    with pytest.raises(UnsupportedConstruct, match="hypotenuse"):
+    with pytest.raises(UnsupportedConstruct, match="magnitude"):
         holoso.synthesize(kernel, _ops(fmt=FloatFormat(2, 12)), name="hypot_narrow_exponent")
+
+
+_NARROW = FloatFormat(6, 18)  # bias 31, so the finite span tops out just under 2**32
+
+
+def _magnitude3(v: Float64[np.ndarray, "3"]) -> float:
+    return math.hypot(*v)
+
+
+def _magnitude5(v: Float64[np.ndarray, "5"]) -> float:
+    return math.hypot(*v)
+
+
+def _magnitude8(v: Float64[np.ndarray, "8"]) -> float:
+    return math.hypot(*v)
+
+
+def _magnitude9(v: Float64[np.ndarray, "9"]) -> float:
+    return math.hypot(*v)
+
+
+def test_the_scaling_window_accounts_for_the_operand_count() -> None:
+    # The pair's scale 2**14 lifts eight 1.5s to a sum of 18*2**28, past the finite span; the arity's is 2**13.
+    model = holoso.synthesize(_magnitude8, _ops(fmt=_NARROW), name="magnitude_eight").numerical_model.elaborate()
+    assert float(model.run(*([1.5] * 8))[0]) == pytest.approx(math.sqrt(18.0), rel=1e-5)
+
+
+def test_a_magnitude_answers_where_the_written_sum_of_squares_overflows() -> None:
+    # Squares of 2**40 against a span topping out under 2**32: the written form rails, the scaled one answers.
+    model = holoso.synthesize(_magnitude3, _ops(fmt=_NARROW), name="magnitude_big").numerical_model.elaborate()
+    assert float(model.run(*([2.0**20] * 3))[0]) == pytest.approx(2.0**20 * math.sqrt(3.0), rel=1e-5)
+
+
+def test_a_magnitude_answers_where_the_written_sum_of_squares_underflows() -> None:
+    # The legs are representable but their squares 2**-40 fall under the smallest normal, so the written form
+    # answers zero.
+    model = holoso.synthesize(_magnitude3, _ops(fmt=_NARROW), name="magnitude_small").numerical_model.elaborate()
+    assert float(model.run(*([2.0**-20] * 3))[0]) == pytest.approx(2.0**-20 * math.sqrt(3.0), rel=1e-5)
+
+
+def test_a_magnitude_of_zeros_is_zero() -> None:
+    # Every exponent extraction answers the same floor at once, which is where an n-ary maximum goes wrong.
+    model = holoso.synthesize(_magnitude5, _ops(fmt=_NARROW), name="magnitude_zeros").numerical_model.elaborate()
+    assert float(model.run(*([0.0] * 5))[0]) == 0.0
+
+
+def _norm3(v: Float64[np.ndarray, "3"]) -> float:
+    return float(np.linalg.norm(v))
+
+
+def _frobenius(m: Float64[np.ndarray, "2 3"]) -> float:
+    return float(np.linalg.norm(m))
+
+
+def test_the_euclidean_norm_answers_where_the_written_sum_of_squares_rails() -> None:
+    # `sqrt(x @ x)` rails both ways inside this format: 2**20 squares past the finite span and 2**-20 under the
+    # normal floor.
+    model = holoso.synthesize(_norm3, _ops(fmt=_NARROW), name="norm_rails").numerical_model.elaborate()
+    assert float(model.run(*([2.0**20] * 3))[0]) == pytest.approx(2.0**20 * math.sqrt(3.0), rel=1e-5)
+    assert float(model.run(*([2.0**-20] * 3))[0]) == pytest.approx(2.0**-20 * math.sqrt(3.0), rel=1e-5)
+
+
+def test_the_frobenius_norm_takes_the_same_expansion() -> None:
+    # The 2-D default flattens onto the same operator.
+    model = holoso.synthesize(_frobenius, _ops(fmt=_NARROW), name="norm_frobenius").numerical_model.elaborate()
+    assert float(model.run(*([2.0**20] * 6))[0]) == pytest.approx(2.0**20 * math.sqrt(6.0), rel=1e-5)
+
+
+def test_a_euclidean_norm_needs_the_scaling_operators() -> None:
+    # Refused by name rather than silently answered by the weaker form.
+    with pytest.raises(UnsupportedConstruct, match="filog2"):
+        holoso.synthesize(_norm3, _ops(fmt=_NARROW, with_ilog2=False), name="norm_without_ilog2")
+
+
+def _norm1(v: Float64[np.ndarray, "1"]) -> float:
+    return float(np.linalg.norm(v))
+
+
+def _mixed_arity(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "8"]) -> tuple[float, float]:
+    return float(np.linalg.norm(v)), float(np.linalg.norm(w))
+
+
+def test_a_one_element_norm_needs_none_of_the_scaling_operators() -> None:
+    # A lone leg is its absolute value, which rides a sign conditioner, so nothing is instantiated at all.
+    model = holoso.synthesize(_norm1, Options(OperatorOptions()), name="norm_one").numerical_model.elaborate()
+    assert float(model.run(-3.5)[0]) == 3.5
+    assert not _modules(holoso.synthesize(_norm1, Options(OperatorOptions()), name="norm_one"))
+
+
+def test_two_arities_in_one_kernel_each_take_their_own_window() -> None:
+    # A graph holding both must scale each magnitude by its own window.
+    model = holoso.synthesize(_mixed_arity, _ops(fmt=_NARROW), name="norm_mixed").numerical_model.elaborate()
+    got = model.run(*([1.5] * 3), *([1.5] * 8))
+    assert float(got[0]) == pytest.approx(1.5 * math.sqrt(3.0), rel=1e-5)
+    assert float(got[1]) == pytest.approx(1.5 * math.sqrt(8.0), rel=1e-5)
+
+
+def test_an_arity_the_format_cannot_hold_is_refused_by_name() -> None:
+    # The window narrows with the arity, so a format serving a pair can refuse a longer vector by name.
+    with pytest.raises(UnsupportedConstruct, match="magnitude over 9 operands"):
+        holoso.synthesize(_magnitude9, _ops(fmt=FloatFormat(3, 12)), name="magnitude_arity_refused")
+    # The same format holds every shorter one, so the refusal is about the arity rather than the format alone.
+    holoso.synthesize(_magnitude8, _ops(fmt=FloatFormat(3, 12)), name="magnitude_arity_admitted")

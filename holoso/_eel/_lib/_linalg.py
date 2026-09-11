@@ -127,20 +127,23 @@ def norm(x: np.ndarray, order: Any = None) -> Any:
     The vector norms over a 1-D operand: Euclidean (the default, or ord 2), absolute sum (ord 1), and the Chebyshev
     extremes (ord of either infinity); a 2-D operand answers the Frobenius norm (the default). numpy defines no
     squared-magnitude order -- that spelling is the plain dot product `x @ x`.
+
+    The Euclidean orders answer the n-ary magnitude rather than `sqrt(x @ x)`, which rails wherever a leg's square
+    leaves the format as numpy's own answer does; the exponent scaling that keeps it costs the root, the extractor
+    and the scaler, which these orders therefore need.
     FIXME The matrix orders beyond Frobenius (the operator norms and the nuclear norm) are not supported.
     """
     x = x + 0.0  # numpy answers every norm in float, so int elements promote before any arithmetic can saturate
     if x.ndim == 2:
         if order is not None:
             raise ValueError(f"unsupported matrix norm order {order}")
-        flat = flatten(x)
-        return np.sqrt(_dot(flat, flat))
+        return math.hypot(*flatten(x))
     if x.ndim != 1:
         raise ValueError(f"norm requires a 1-D or 2-D operand, got a {x.ndim}-D value")
     if order is None:
         order = 2
     if order == 2:
-        return np.sqrt(_dot(x, x))
+        return math.hypot(*x)
     if order == 1:
         acc = abs(x[0])
         for k in range(1, len(x)):

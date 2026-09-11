@@ -22,6 +22,7 @@ from holoso import (
     FDivOptions,
     FExp2Options,
     FFmaOptions,
+    FILog2Options,
     FLog2Options,
     FloatFormat,
     FMulILog2Options,
@@ -48,6 +49,7 @@ def op_config(
     fmul: FMulOptions | None = None,
     fdiv: FDivOptions | None = None,
     fmul_ilog2: FMulILog2Options | None = None,
+    filog2: FILog2Options | None = None,
     fcmp: FCmpOptions | None = None,
     ffma: FFmaOptions | None = None,
     fexp2: FExp2Options | None = None,
@@ -69,6 +71,7 @@ def op_config(
             fmul=fmul or FMulOptions(),
             fdiv=fdiv or FDivOptions(),
             fmul_ilog2=fmul_ilog2 or FMulILog2Options(),
+            filog2=filog2 or FILog2Options(),
             fcmp=fcmp or FCmpOptions(),
             ffma=ffma,
             fexp2=fexp2,
@@ -595,6 +598,9 @@ TARGETS: list[SynthTarget] = [
             fsincos=_FROM_POLAR_FSINCOS,
         ),
     ),
+    # The Euclidean norms expand by exact exponent scaling, a `filog2` per leg and its scalings. Two rows fell just
+    # under their fence on that (99.19 and 148.22) and each took one stage on the hop its critical path named: the
+    # extractor's input on diamond, the scaler's input on the ffma Vivado row.
     # imu_fusion: the fusion capstone -- three norm/rsqrt chains (fsqrt/fdiv, one feeding the coarse alignment), the
     # sorter-backed clamp, and real gate branches over the heaviest register pressure in the matrix, in the plain and
     # the ffma-contracted datapaths. The native root retired the wall these rows used to close against (the flog2
@@ -628,6 +634,7 @@ TARGETS: list[SynthTarget] = [
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
+            filog2=FILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
         ),
@@ -692,6 +699,7 @@ TARGETS: list[SynthTarget] = [
             # that costs 0.28 ns, the design being congestion-bound rather than deep by then.
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
             fsort=FSortOptions(stage_input=1),
             ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),

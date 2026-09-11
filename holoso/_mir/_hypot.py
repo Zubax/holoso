@@ -1,12 +1,13 @@
-"""The standalone hypotenuse: which ones an adjacent atan2 carries, and the expansion for the rest."""
+"""The standalone magnitude: which ones an adjacent atan2 carries, and the expansion for the rest."""
 
 import logging
+from collections.abc import Callable
 
 from .._errors import UnsupportedConstruct
 from .._hir import (
     FloatAdd,
     FloatAtan2Turns,
-    FloatHypot2,
+    FloatHypot,
     FloatILog2,
     FloatMul,
     FloatMulPow2Dynamic,
@@ -32,17 +33,24 @@ _logger = logging.getLogger(__name__)
 
 def _operand_base_set(hir: Hir, node: Operation) -> tuple[ValueId, ...]:
     """
-    Order-independent: hypot is commutative and sign-invariant, as is the fatan2 magnitude it taps, so a hypot fuses
-    with any same-block atan2 over the same value pair.
+    Order-independent: a magnitude is commutative and sign-invariant, as is the fatan2 magnitude it taps, so a
+    two-legged one fuses with any same-block atan2 over the same value pair.
     """
     return tuple(sorted(collapse_signs(hir.nodes, operand)[0] for operand in node.operands))
 
 
+def _pair(hir: Hir, vid: ValueId) -> Operation | None:
+    node = hir.nodes[vid]
+    if isinstance(node, Operation) and isinstance(node.operator, FloatHypot) and node.operator.arity == 2:
+        return node
+    return None
+
+
 def plan_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     """
-    Map each FloatHypot2 to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's magnitude
-    port (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR firing fusion
-    it feeds.
+    Map each two-legged FloatHypot to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's
+    magnitude port (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR
+    firing fusion it feeds; a pair is the only arity that port carries.
     """
     if ops.fatan2 is None:
         return {}
@@ -53,38 +61,53 @@ def plan_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
             if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatAtan2Turns):
                 atan2_by_pair.setdefault(_operand_base_set(hir, node), vid)
         for vid in block.operations:
-            if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatHypot2):
-                match = atan2_by_pair.get(_operand_base_set(hir, node))
+            if (pair := _pair(hir, vid)) is not None:
+                match = atan2_by_pair.get(_operand_base_set(hir, pair))
                 if match is not None:
                     plans[vid] = match
     if plans:
-        _logger.info("Hypotenuse: %d fused onto an adjacent atan2's magnitude port", len(plans))
+        _logger.info("Magnitude: %d fused onto an adjacent atan2's magnitude port", len(plans))
     return plans
 
 
 def count(hir: Hir) -> int:
-    return sum(isinstance(n, Operation) and isinstance(n.operator, FloatHypot2) for n in hir.nodes.values())
+    return sum(isinstance(n, Operation) and isinstance(n.operator, FloatHypot) for n in hir.nodes.values())
 
 
-def _scaling_exponent(fmt: FloatFormat) -> tuple[int, int]:
+def _bias(fmt: FloatFormat) -> int:
+    return (1 << (fmt.wexp - 1)) - 1
+
+
+def _scaling_exponent(fmt: FloatFormat, arity: int) -> int | None:
     """
-    The bias, and the exponent the expansion normalizes the larger operand to. Bounded both ways -- the dominant
-    square must stay normal, `2t >= 1 - bias`, and the sum must stay finite, `2t + 3 <= bias` -- and the window
-    they leave is empty exactly at `wexp < 3`, which the caller refuses.
+    The exponent the expansion normalizes the LARGEST leg to, or None where the window is empty. The dominant square
+    must stay normal, `2t >= 1 - bias`; and each scaled square being below `2^(2t+2)`, `n` of them stay under
+    `2^(2t + 2 + ceil(log2 n))`, which held to `bias` leaves the sum a binade below overflow.
     """
-    bias = (1 << (fmt.wexp - 1)) - 1
-    return bias, (bias - 3) // 2
+    assert arity >= 2
+    bias = _bias(fmt)
+    top = (bias - 2 - (arity - 1).bit_length()) // 2
+    return top if 2 * top >= 1 - bias else None
+
+
+def _tree(values: list[ValueId], combine: Callable[[ValueId, ValueId], ValueId]) -> ValueId:
+    """Balanced, so the reduction is `ceil(log2 n)` operators deep where a fold would be `n-1`."""
+    assert values
+    while len(values) > 1:
+        pairs = range(0, len(values), 2)
+        values = [combine(values[i], values[i + 1]) if i + 1 < len(values) else values[i] for i in pairs]
+    return values[0]
 
 
 def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
     """
-    Rewrite each hypotenuse no adjacent atan2 will carry into `2^-k * sqrt((x*2^k)^2 + (y*2^k)^2)`. Being exact,
-    the scaling cannot overflow the square; the smaller leg's square still underflows once the significand outruns
-    the exponent range, a loss the written form shares and exceeds. Sign chains are dropped rather than folded, so
-    two spellings of one magnitude expand alike and can cancel -- which the orphan case turns on.
+    Rewrite each magnitude no adjacent atan2 will carry into `2^-k * sqrt(sum((x_i*2^k)^2))`. Being exact, the
+    scaling cannot overflow the dominant square; a smaller leg's square still underflows once the significand
+    outruns the exponent range, a loss the written form shares and exceeds. Sign chains are dropped rather than
+    folded, so two spellings of one magnitude expand alike and can cancel -- which the orphan case turns on.
 
     Fusion is planned here rather than by the caller because it must be re-planned on every round: an expansion can
-    let an expression cancel, and the cancellation can delete the atan2 another hypotenuse was to fuse with.
+    let an expression cancel, and the cancellation can delete the atan2 another magnitude was to fuse with.
     """
     fused, fmt = plan_fusions(hir, ops), ops.float_format
     # Operations intern per block, so a block and a node name one value -- which is how `BuildValue`, handed the
@@ -93,33 +116,43 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
         (block.id, node)
         for block in hir.blocks
         for vid in block.operations
-        if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatHypot2) and vid not in fused
+        if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatHypot) and vid not in fused
     }
     if not targets:
         return None
-    if fmt.wexp < 3:
-        raise UnsupportedConstruct(
-            f"a standalone hypotenuse needs an exponent range that holds a normalized operand's square, which "
-            f"{fmt} has not; widen wexp"
-        )
-    bias, scale = _scaling_exponent(fmt)  # the window's top leaves the smaller operand the most room to flush
+    bias = _bias(fmt)
+    # The window's top leaves the smaller legs the most room to flush, and it narrows with the arity. Sorted, so a
+    # graph holding several refusable arities names the shortest vector it cannot hold.
+    scales: dict[int, int] = {}
+    for arity in sorted({len(node.operands) for _, node in targets}):
+        scale = _scaling_exponent(fmt, arity)
+        if scale is None:
+            raise UnsupportedConstruct(
+                f"a standalone magnitude over {arity} operands needs an exponent range that holds their scaled "
+                f"squares, which {fmt} has not; widen wexp or shorten the vector"
+            )
+        scales[arity] = scale
 
     def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         if (builder.current_block, node) not in targets:
             return copy_node(builder, node, remap)
-        assert isinstance(node, Operation) and len(node.operands) == 2  # the integer max below is binary
+        assert isinstance(node, Operation)
+        assert len(node.operands) >= 2  # strength reduction answers a lone leg with the absolute value
+        scale = scales[len(node.operands)]
         legs = [remap[collapse_signs(hir.nodes, operand)[0]] for operand in node.operands]  # signs dropped
         exponents = [builder.operation(FloatILog2(bias), [leg]) for leg in legs]
-        larger = builder.operation(
-            IntSelect(), [builder.operation(IntGreater(), exponents), exponents[0], exponents[1]]
+        largest = _tree(
+            exponents,
+            lambda a, b: builder.operation(IntSelect(), [builder.operation(IntGreater(), [a, b]), a, b]),
         )
-        k = builder.operation(IntSub(), [builder.int_const(scale), larger])
+        k = builder.operation(IntSub(), [builder.int_const(scale), largest])
         squares = [
             builder.operation(FloatMul(), [scaled, scaled])
             for scaled in (builder.operation(FloatMulPow2Dynamic(), [leg, k]) for leg in legs)
         ]
-        root = builder.operation(FloatSqrt(), [builder.operation(FloatAdd(), squares)])
+        summed = _tree(squares, lambda a, b: builder.operation(FloatAdd(), [a, b]))
+        root = builder.operation(FloatSqrt(), [summed])
         return builder.operation(FloatMulPow2Dynamic(), [root, builder.operation(IntNeg(), [k])])
 
-    _logger.info("Hypotenuse: %d expanded by exact exponent scaling at 2^%d", len(targets), scale)
+    _logger.info("Magnitude: %d expanded by exact exponent scaling; scale per arity: %s", len(targets), scales)
     return rebuild(hir, build_value)

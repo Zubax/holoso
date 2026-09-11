@@ -4,14 +4,14 @@ import dataclasses
 import inspect
 import math
 import types
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import numpy as np
 
 from .._annotations import annotation_stype, host_type
 from .._ir import *
 from .._decorator import plain_function
-from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, resolve
+from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, VariadicFunction, resolve
 from . import _aggregate, _ops
 from ._ownership import share
 from ._record import inadmissible_reason as record_inadmissible
@@ -323,6 +323,9 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         case ScalarFunction() as match:
             values = _operand_arguments(interp, node, callee.name, frame, sink)
             return _scalar_call(interp, node.origin, callee.name, match, values, frame, sink)
+        case VariadicFunction() as match:
+            values = _operand_arguments(interp, node, callee.name, frame, sink)
+            return _variadic_call(interp, node.origin, callee.name, match, values, sink)
         case Lifted(scalar=lifted):
             values = _operand_arguments(interp, node, callee.name, frame, sink)
             if len(values) == 1 and isinstance(values[0], TensorValue):
@@ -496,11 +499,7 @@ def _scalar_call(
     operands = [scalar(value, origin) for value in values]
     chosen = match.select([_operand(operand) for operand in operands])
     if chosen is None:
-        served = " or ".join(stype.value for stype in match.domains)
-        got = ", ".join(operand.stype.value for operand in operands)
-        boolean = any(operand.stype is ScalarType.BOOL for operand in operands)
-        note = "; a boolean is not a number, cast explicitly with int(...) or float(...)" if boolean else ""
-        reject(origin, f"{display}() takes {served} operands, got {got}{note}")
+        _refuse_domains(origin, display, operands, match.domains)
     # Both kinds of lowering, so inlining judges base types alone and never learns what a refinement is.
     conformed = [
         interp.conform(operand, declared.stype, origin, sink, f"argument {i + 1} of {display}()")
@@ -510,6 +509,34 @@ def _scalar_call(
         promoted: list[Value] = list(conformed)
         return interp.inline(origin, display, chosen.stub, promoted, {}, frame, sink, positional_only=True)
     return apply(interp, chosen.operator, conformed, origin, sink)
+
+
+def _refuse_domains(origin: Origin, display: str, operands: list[Scalar], domains: list[ScalarType]) -> NoReturn:
+    served = " or ".join(stype.value for stype in domains)
+    got = ", ".join(operand.stype.value for operand in operands)
+    boolean = any(operand.stype is ScalarType.BOOL for operand in operands)
+    note = "; a boolean is not a number, cast explicitly with int(...) or float(...)" if boolean else ""
+    reject(origin, f"{display}() takes {served} operands, got {got}{note}")
+
+
+def _variadic_call(
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    match: VariadicFunction,
+    values: list[Value],
+    sink: Sink,
+) -> Value:
+    if len(values) < match.minimum:
+        reject(origin, f"{display}() takes at least {match.minimum} argument(s), got {len(values)}")
+    operands = [scalar(value, origin) for value in values]
+    if not all(match.domain.accepts(_operand(operand)) for operand in operands):
+        _refuse_domains(origin, display, operands, match.domains)
+    conformed = [
+        interp.conform(operand, match.domain.stype, origin, sink, f"argument {i + 1} of {display}()")
+        for i, operand in enumerate(operands)
+    ]
+    return apply(interp, match.operator(len(conformed)), conformed, origin, sink)
 
 
 def _lifted_call(

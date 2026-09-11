@@ -511,7 +511,7 @@ class _LoweringContext:
             member for plan in self.directional_inf_plans.values() for member in plan.members
         }
         self.fused_hypots = plan_fusions(hir, ops)
-        # The derivation expanded every unfused hypotenuse, so the survivors all ride an atan2's magnitude port.
+        # The derivation expanded every unfused magnitude, so the survivors all ride an atan2's magnitude port.
         assert hypot_count(hir) == len(self.fused_hypots)
         self.folded_shift_counts = _plan_folded_shift_counts(hir, use_counts)
         self.absorbed_roundings = _plan_absorbed_roundings(hir, use_counts)
@@ -1148,7 +1148,9 @@ def _derive(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Hir:
     input rather than its consumer, and the word width from within the fixpoint, since only a fold can reveal a count.
     """
     hir = optimize(trig_abi(hir), ifconv_max_ops)
-    fuel = left_shifts(hir) + hypot_count(hir) + 1  # each rewrite deletes one of these, and no pass mints either
+    # Each rewrite deletes one of these and no pass grows either count: a magnitude is re-minted only in place of
+    # the one it replaced.
+    fuel = left_shifts(hir) + hypot_count(hir) + 1
     while True:
         rewritten = specialize(hir, ops.int_format) or expand_unfused(hir, ops)
         if rewritten is None:

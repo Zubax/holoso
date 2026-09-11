@@ -220,6 +220,7 @@ def main() -> None:
             fcmp=holoso.FCmpOptions(),
             fsort=holoso.FSortOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
+            filog2=holoso.FILog2Options(),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=24),
     )

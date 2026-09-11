@@ -18,10 +18,12 @@ from ._operators import (
     BoolOr,
     BoolSelect,
     BoolXor,
+    FloatAbs,
     FloatAdd,
     FloatCeil,
     FloatDiv,
     FloatFloor,
+    FloatHypot,
     FloatMul,
     FloatMulPow2,
     FloatNeg,
@@ -243,6 +245,17 @@ def run(hir: Hir) -> Hir:
         composed = reduce_scaling(builder, remap, vid)
         return composed if composed is not None else builder.operation(FloatMulPow2(k), [remap[old_a]])
 
+    def reduce_hypot(builder: HirBuilder, legs: list[ValueId]) -> ValueId:
+        """
+        Exact for every value, the infinities included. Reached only where some leg is unknown, an all-known
+        magnitude having been folded above, so a survivor always remains.
+        """
+        survivors = [leg for leg in legs if float_of(leg) != 0.0]
+        assert survivors
+        if len(survivors) == 1:
+            return builder.operation(FloatAbs(), survivors)
+        return builder.operation(FloatHypot(len(survivors)), survivors)
+
     def reduce_div(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
         if a == b:
             return emit_float_const(builder, 1.0)
@@ -453,6 +466,8 @@ def run(hir: Hir) -> Hir:
                 return reduce_mul_pow2(builder, remap, ids[builder.current_block, node], a, k)
             case Operation(operator=FloatDiv(), operands=(a, b)):
                 return reduce_div(builder, remap[a], remap[b])
+            case Operation(operator=FloatHypot(), operands=legs):
+                return reduce_hypot(builder, [remap[leg] for leg in legs])
             case Operation(operator=(FloatRound() | FloatFloor() | FloatCeil() | FloatTrunc()) as op, operands=(a,)):
                 return reduce_rounding(builder, op, remap[a])
             case Operation(operator=IntToFloat(), operands=(a,)):

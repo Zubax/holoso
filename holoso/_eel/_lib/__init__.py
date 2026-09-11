@@ -19,5 +19,6 @@ from ._registry import (
     Operand as Operand,
     Reshape as Reshape,
     ScalarFunction as ScalarFunction,
+    VariadicFunction as VariadicFunction,
     resolve as resolve,
 )

@@ -237,9 +237,10 @@ BASELINE: dict[str, Metrics] = {
         False, nreg=20, bnreg=4, steering=72, copies=12, min_ii=160, last_pc=204, max_block_span=108
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
-    # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.
+    # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced. Its
+    # three Euclidean norms carry an exponent extraction per leg and the scalings around it, which this row prices.
     "imu_fusion": Metrics(
-        False, nreg=44, bnreg=5, steering=110, copies=14, min_ii=233, last_pc=409, max_block_span=120
+        False, nreg=51, bnreg=5, steering=132, copies=14, min_ii=270, last_pc=464, max_block_span=139
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's.
     "fir": Metrics(True, nreg=8, bnreg=0, steering=5, copies=0, min_ii=20, last_pc=20, max_block_span=20),
@@ -257,7 +258,7 @@ BASELINE: dict[str, Metrics] = {
     # A deep composition: a nested component instance (the flux observer) whose state joins the controller's own,
     # every transcendental the library offers, and two data-dependent branches -- so it gates cross-component slot
     # allocation against the register and steering blowup that inlining a component can cause.
-    "foc": Metrics(False, nreg=33, bnreg=3, steering=73, copies=4, min_ii=284, last_pc=335, max_block_span=217),
+    "foc": Metrics(False, nreg=37, bnreg=3, steering=78, copies=4, min_ii=298, last_pc=349, max_block_span=231),
 }
 
 

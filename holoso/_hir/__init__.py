@@ -45,7 +45,7 @@ from ._operators import (
     FloatFma as FloatFma,
     FloatGreater as FloatGreater,
     FloatGreaterOrEqual as FloatGreaterOrEqual,
-    FloatHypot2 as FloatHypot2,
+    FloatHypot as FloatHypot,
     FloatILog2 as FloatILog2,
     FloatIsFinite as FloatIsFinite,
     FloatIsInf as FloatIsInf,

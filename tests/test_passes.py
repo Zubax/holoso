@@ -64,7 +64,7 @@ from holoso._hir import (
     FloatExp2,
     FloatFloor,
     FloatFma,
-    FloatHypot2,
+    FloatHypot,
     FloatIsFinite,
     FloatIsInf,
     FloatIsNegInf,
@@ -1342,9 +1342,9 @@ def test_an_integer_self_division_erases_an_operand_that_names_no_number() -> No
         (FloatExp2(), (1e10,), math.inf),  # past the carrier, upward only
         (FloatLog2(), (math.inf,), math.inf),
         (FloatSqrt(), (math.inf,), math.inf),
-        (FloatHypot2(), (math.inf, 1.0), math.inf),
-        (FloatHypot2(), (1.5e308, 1.5e308), math.inf),  # math.hypot saturates rather than raising, so the fold does
-        (FloatHypot2(), (-math.inf, 1.0), math.inf),  # a magnitude is never negative
+        (FloatHypot(2), (math.inf, 1.0), math.inf),
+        (FloatHypot(2), (1.5e308, 1.5e308), math.inf),  # math.hypot saturates rather than raising, so the fold does
+        (FloatHypot(2), (-math.inf, 1.0), math.inf),  # a magnitude is never negative
         (FloatAtan2(), (math.inf, math.inf), math.pi / 4.0),
         (FloatFloor(), (2.7,), 2.0),
         (FloatTrunc(), (-2.7,), -2.0),

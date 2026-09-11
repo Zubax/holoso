@@ -2322,6 +2322,43 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
     assert len(_firings(lir, "filog2")) == 2 and len(_firings(lir, "fmul_ilog2")) == 3
 
 
+def test_a_zero_leg_costs_a_magnitude_nothing() -> None:
+    # Otherwise a scaler, a multiply, an add and a compare/select survive for a leg that is identically zero,
+    # which `imu_fusion`'s coarse alignment writes literally.
+    def four(a: float, b: float, c: float) -> float:
+        return math.hypot(a, b, c, 0.0)
+
+    def three(a: float, b: float, c: float) -> float:
+        return math.hypot(a, b, c)
+
+    padded, bare = (build_lir(_run(k, _CORDIC_OPS), n) for k, n in ((four, "zero_leg"), (three, "no_zero_leg")))
+    assert _instance_counts(padded) == _instance_counts(bare)
+    for mnemonic in ("filog2", "fmul_ilog2", "fmul", "fadd", "icmp"):
+        assert len(_firings(padded, mnemonic)) == len(_firings(bare, mnemonic)), mnemonic
+
+
+def test_dropping_a_zero_leg_hands_the_pair_back_to_the_cordic() -> None:
+    # A three-legged magnitude cannot ride the CORDIC's magnitude port, but once the constant leg goes the
+    # survivors are a pair over the atan2's own operands.
+    def kernel(y: float, x: float) -> tuple[float, float]:
+        return math.hypot(y, x, 0.0), math.atan2(y, x)
+
+    lir = build_lir(_run(kernel, _CORDIC_OPS), "zero_leg_fuse")
+    assert len(_firings(lir, "fatan2")) == 1
+    counts = _instance_counts(lir)
+    assert "filog2" not in counts and "fsqrt" not in counts
+
+
+def test_a_two_legged_magnitude_still_fuses_with_an_adjacent_atan2() -> None:
+    # The n-ary operator must not cost the pair its CORDIC.
+    def kernel(y: float, x: float) -> tuple[float, float]:
+        return math.hypot(y, x), math.atan2(y, x)
+
+    lir = build_lir(_run(kernel, _CORDIC_OPS), "narity_pair_fuse")
+    assert len(_firings(lir, "fatan2")) == 1
+    assert "filog2" not in _instance_counts(lir)
+
+
 def test_independent_sincos_share_one_instance_spaced_by_ii() -> None:
     def kernel(a: float, b: float) -> tuple[float, float, float, float]:
         return math.sin(a), math.cos(a), math.sin(b), math.cos(b)

@@ -7,7 +7,7 @@ Beware of subtle differences in return types; e.g., `round(float) -> int` while 
 import math
 import numpy as np
 from ..._hir import *
-from ._registry import intrinsic
+from ._registry import intrinsic, variadic
 
 
 @intrinsic(FloatFloor, np.floor)  # math.floor() etc are excluded because they return int and require special handling.
@@ -95,8 +95,14 @@ def atan2(y: float, x: float) -> float:
     return math.atan2(y, x)
 
 
-@intrinsic(FloatHypot2, math.hypot, np.hypot)
-def hypot(x: float, y: float) -> float:
+@variadic(FloatHypot, math.hypot, minimum=1)
+def hypot(*coords: float) -> float:
+    return math.hypot(*coords)
+
+
+# numpy's is a strictly binary ufunc -- `np.hypot(a, b, c)` is a TypeError on the host -- so its entry stays fixed.
+@intrinsic(lambda: FloatHypot(2), np.hypot)
+def hypot_pair(x: float, y: float) -> float:
     return math.hypot(x, y)
 
 

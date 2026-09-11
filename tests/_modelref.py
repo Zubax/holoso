@@ -417,6 +417,7 @@ def staged_options(fmt: FloatFormat) -> Options:
             fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
             fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
+            filog2=FILog2Options(stage_input=1),
             fcmp=FCmpOptions(stage_input=1),
             fexp2=_if_supported(
                 FExp2Operator,

@@ -1549,6 +1549,10 @@ SPECS = [
         edge_values=_WIDE_EDGES,
         formats=(_FMT, FloatFormat(6, 18)),  # the deep datapath, and the narrow one the synth matrix ships
         operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+        # The evaluator answers each of the three norms as the correctly rounded magnitude where the host reaches
+        # numpy's `sqrt(dot)`, so each carries an ulp the two sides do not share and the recurrence accumulates
+        # them. Measured at 20 ulps over this sequence; four times that, as `foc` below is set.
+        oracle_ulps=80,
     ),
     ExampleSpec(
         name="ekf1_stateful",

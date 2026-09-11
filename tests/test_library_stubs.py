@@ -18,7 +18,7 @@ from jaxtyping import Float64
 import holoso
 from holoso import FAddOptions, OperatorOptions, Options, UnsupportedConstruct
 from holoso._eel import lower
-from holoso._eel._lib import Array, Lifted, Reshape, ScalarFunction, resolve
+from holoso._eel._lib import Array, Lifted, Reshape, ScalarFunction, VariadicFunction, resolve
 from holoso._eel._lib._registry import Domain, StaticOneHalf, StaticWholeNonNegative
 from holoso._eel._ir import BinaryOp, ScalarType
 from holoso._eel._lib._linalg import cross, inv, matmul, norm, transpose
@@ -154,11 +154,11 @@ _INT_ONLY: list[object] = [int.bit_count, np.bitwise_count]
 _SCALAR_ONLY: list[object] = [np.isfinite, np.isinf, np.isposinf, np.isneginf, np.bitwise_count]
 
 
-def _entry(external: object) -> ScalarFunction:
+def _entry(external: object) -> ScalarFunction | VariadicFunction:
     """A lifted key is the same scalar entry made array-capable, so the domain check sees straight through it."""
     match = resolve(external)
     scalar = match.scalar if isinstance(match, Lifted) else match
-    assert isinstance(scalar, ScalarFunction), external
+    assert isinstance(scalar, (ScalarFunction, VariadicFunction)), external
     return scalar
 
 
@@ -188,7 +188,8 @@ def test_every_spelling_resolves_with_the_domains_it_serves() -> None:
         member = getattr(np, name, None)
         if callable(member) and isinstance(found := resolve(member), (ScalarFunction, Lifted)):
             scalar_only = any(member is k for k in _SCALAR_ONLY)
-            assert isinstance(found, Lifted) == (_entry(member).arity == 1 and not scalar_only), name
+            scalar = found.scalar if isinstance(found, Lifted) else found
+            assert isinstance(found, Lifted) == (scalar.arity == 1 and not scalar_only), name
     for external in (
         np.transpose,
         np.ravel,

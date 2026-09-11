@@ -4,6 +4,7 @@ import math
 from collections.abc import Mapping
 
 import numpy as np
+from jaxtyping import Float64
 import pytest
 from cocotb_tools.runner import get_runner
 
@@ -649,6 +650,27 @@ def test_cosim_root_and_lone_hypot(sim: str) -> None:
         ffmt=FloatFormat(8, 24),
     )
     run_cosim(sim, holoso.synthesize(kernel, options, name="cs_root_hypot"))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_n_ary_norm(sim: str) -> None:
+    # The Euclidean norm of a four-vector: one exponent extraction per leg, a compare/select tree over the integer
+    # bank, five exact scalings and a pairwise sum of squares under one root -- the n-ary shape the two-legged
+    # expansion above never exercises, driven through real RTL.
+    def kernel(v: Float64[np.ndarray, "4"]) -> float:
+        return float(np.linalg.norm(v))
+
+    options = Options(
+        OperatorOptions(
+            fadd=FAddOptions(),
+            fmul=FMulOptions(),
+            fmul_ilog2=FMulILog2Options(),
+            filog2=FILog2Options(),
+            fsqrt=FSqrtOptions(),
+        ),
+        ffmt=FloatFormat(8, 24),
+    )
+    run_cosim(sim, holoso.synthesize(kernel, options, name="cs_norm4"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)

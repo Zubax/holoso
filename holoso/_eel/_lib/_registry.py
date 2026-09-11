@@ -145,6 +145,23 @@ class ScalarFunction:
 
 
 @dataclass(frozen=True, slots=True)
+class VariadicFunction:
+    """
+    A scalar entry of no fixed arity, `math.hypot` being n-ary in Python. Not a `ScalarLowering`: those compare their
+    domains positionally, which a variable-length operand list has no positions for. The operator is therefore a
+    factory where a fixed-arity entry stores an instance.
+    """
+
+    operator: Callable[[int], Operator]
+    domain: Domain
+    minimum: int
+
+    @property
+    def domains(self) -> list[ScalarType]:
+        return [self.domain.stype]
+
+
+@dataclass(frozen=True, slots=True)
 class Array:
     """
     An inlined composite whose meaning is rank and shape, so it declares no scalar domain. `derives` marks a
@@ -199,7 +216,7 @@ class Lifted:
     scalar: ScalarFunction
 
 
-type Match = ScalarFunction | Array | Factory | Conversion | Reshape | Lifted
+type Match = ScalarFunction | VariadicFunction | Array | Factory | Conversion | Reshape | Lifted
 
 _REGISTRY: dict[object, Match] = {}
 
@@ -263,6 +280,27 @@ def intrinsic[F: Callable[..., object]](operator: Callable[[], Operator], *subst
 
     def register(fn: F) -> F:
         _register_scalar(_scalar_lowering(fn, op), (fn, *substituted))
+        return fn
+
+    return register
+
+
+def variadic[F: Callable[..., object]](
+    operator: Callable[[int], Operator], *substituted: object, minimum: int
+) -> Callable[[F], F]:
+    def register(fn: F) -> F:
+        assert isinstance(fn, types.FunctionType)
+        code = fn.__code__
+        assert code.co_argcount == 0 and code.co_flags & inspect.CO_VARARGS, "a variadic entry takes only *args"
+        domain = _declared(fn, code.co_varnames[0])
+        assert domain.stype in (ScalarType.INT, ScalarType.FLOAT) and domain.refinement is None
+        result = _declared(fn, "return")
+        for arity in (minimum, minimum + 1):  # arity-uniform, so two samples pin the shape
+            signature = operator(arity).signature
+            assert signature.arity == arity
+            assert isinstance(signature.result_type, _HIR_TYPES[result.stype])
+            assert all(isinstance(ty, _HIR_TYPES[domain.stype]) for ty in signature.operand_types)
+        _register(VariadicFunction(operator, domain, minimum), (fn, *substituted))
         return fn
 
     return register

@@ -504,18 +504,23 @@ class FloatAtan2Turns(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatHypot2(Operator):
+class FloatHypot(Operator):
     """
-    A semantic op only because it may be computed as a byproduct of atan2. Speculatable: every input has an answer,
-    and neither lowering can fault -- the atan2 raises nothing, and the expansion's root sees a sum of squares.
+    Semantic because a pair may be computed as a byproduct of atan2, and because the expansion serving every other
+    case needs a scaling window only the float format can supply. Speculatable: every input has an answer, and
+    neither lowering can fault -- the atan2 raises nothing, and the expansion's root sees a sum of squares.
     """
 
-    mnemonic: ClassVar[str] = "fhypot2"
+    mnemonic: ClassVar[str] = "fhypot"
     speculatable: ClassVar[bool] = True
+    arity: int
+
+    def __post_init__(self) -> None:
+        assert self.arity >= 1
 
     @property
     def signature(self) -> Signature:
-        return _float_signature(2)
+        return _float_signature(self.arity)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the magnitude", math.hypot)
