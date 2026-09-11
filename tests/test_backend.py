@@ -23,7 +23,15 @@ from holoso import (
     FToIntOptions,
     FloatFormat,
     FloatValue,
+    IAbsOptions,
+    IAddOptions,
+    ICmpOptions,
+    IDivOptions,
     IMulOptions,
+    IPopcntOptions,
+    IShlOptions,
+    IShrOptions,
+    ISubOptions,
     IntFormat,
     IntValue,
     OperatorOptions,
@@ -168,14 +176,14 @@ endmodule
 
 def _integer_operators(ifmt: IntFormat) -> list[PooledHardwareOperator]:
     return [
-        IAddOperator(ifmt),
-        ISubOperator(ifmt),
-        IDivOperator(ifmt),
-        IAbsOperator(ifmt),
-        IShlOperator(ifmt),
-        IShrOperator(ifmt),
-        ICmpOperator(ifmt),
-        IPopcntOperator(ifmt),
+        IAddOperator(ifmt, IAddOptions()),
+        ISubOperator(ifmt, ISubOptions()),
+        IDivOperator(ifmt, IDivOptions()),
+        IAbsOperator(ifmt, IAbsOptions()),
+        IShlOperator(ifmt, IShlOptions()),
+        IShrOperator(ifmt, IShrOptions()),
+        ICmpOperator(ifmt, ICmpOptions()),
+        IPopcntOperator(ifmt, IPopcntOptions()),
         *(IMulOperator(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
     ]
 
@@ -268,7 +276,7 @@ def test_fsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tm
 @requires_iverilog
 def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     # The negative twin of the probe above, so its silence means something.
-    operator = IDivOperator(IntFormat(33))
+    operator = IDivOperator(IntFormat(33), IDivOptions())
     verilog = _pooled_probe("wrong_int_latency", [operator]).replace(
         f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
     )
@@ -282,7 +290,7 @@ def test_popcount_wrapper_rejects_wrong_result_width(tmp_path: Path) -> None:
     # The count port is narrower than the word it counts, and Verilog would accept a wrapper that disagreed about
     # how much narrower -- silently padding or truncating. The guard is what makes the width a checked claim, so it
     # needs its own negative twin.
-    operator = IPopcntOperator(IntFormat(33))
+    operator = IPopcntOperator(IntFormat(33), IPopcntOptions())
     width = operator.count_width
     verilog = _pooled_probe("wrong_popcnt_width", [operator]).replace(f".WY({width})", f".WY({width + 1})")
     result = _compile("wrong_popcnt_width", verilog, tmp_path)

@@ -8,14 +8,14 @@ from .._errors import UnsupportedConstruct
 from .._type import FloatFormat, FloatType, IntFormat, IntType
 from ._common import HardwareOperator
 from ._float import *
-from ._int import IMulOperator
+from ._int import *
 
 
 @dataclass(frozen=True, slots=True)
 class OperatorOptions:
     """
-    `None` is not built, and a kernel needing it is refused by name; a configured but unused operator costs nothing.
-    Integer operators are always available, so only their knobs appear here.
+    Every pooled operator appears here with its own options. A float one may be absent, and a kernel needing it is
+    refused by name; an integer one is never optional, only tuned, so it carries its options rather than `None`.
     """
 
     fadd: FAddOperator.Options | None = None
@@ -35,7 +35,15 @@ class OperatorOptions:
     ffromint: FFromIntOperator.Options | None = None
     ftoint: FToIntOperator.Options | None = None
 
+    iadd: IAddOperator.Options = IAddOperator.Options()
+    isub: ISubOperator.Options = ISubOperator.Options()
     imul: IMulOperator.Options = IMulOperator.Options()
+    idiv: IDivOperator.Options = IDivOperator.Options()
+    iabs: IAbsOperator.Options = IAbsOperator.Options()
+    ishl: IShlOperator.Options = IShlOperator.Options()
+    ishr: IShrOperator.Options = IShrOperator.Options()
+    ipopcnt: IPopcntOperator.Options = IPopcntOperator.Options()
+    icmp: ICmpOperator.Options = ICmpOperator.Options()
 
 
 _CONFIGURED = TypeVar("_CONFIGURED", bound=HardwareOperator)
@@ -138,8 +146,40 @@ class OpConfig:
         return None if opt is None else self._checked(FToIntOperator(self.float_format, self.int_format, opt))
 
     @cached_property
+    def iadd(self) -> IAddOperator:
+        return self._checked(IAddOperator(self.int_format, self.options.iadd))
+
+    @cached_property
+    def isub(self) -> ISubOperator:
+        return self._checked(ISubOperator(self.int_format, self.options.isub))
+
+    @cached_property
     def imul(self) -> IMulOperator:
         return self._checked(IMulOperator(self.int_format, self.options.imul))
+
+    @cached_property
+    def idiv(self) -> IDivOperator:
+        return self._checked(IDivOperator(self.int_format, self.options.idiv))
+
+    @cached_property
+    def iabs(self) -> IAbsOperator:
+        return self._checked(IAbsOperator(self.int_format, self.options.iabs))
+
+    @cached_property
+    def ishl(self) -> IShlOperator:
+        return self._checked(IShlOperator(self.int_format, self.options.ishl))
+
+    @cached_property
+    def ishr(self) -> IShrOperator:
+        return self._checked(IShrOperator(self.int_format, self.options.ishr))
+
+    @cached_property
+    def ipopcnt(self) -> IPopcntOperator:
+        return self._checked(IPopcntOperator(self.int_format, self.options.ipopcnt))
+
+    @cached_property
+    def icmp(self) -> ICmpOperator:
+        return self._checked(ICmpOperator(self.int_format, self.options.icmp))
 
     def _checked(self, operator: _CONFIGURED) -> _CONFIGURED:
         """

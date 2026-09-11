@@ -19,6 +19,7 @@ from ._common import (
     ImmediateField,
     InlineHardwareOperator,
     PooledHardwareOperator,
+    PooledOperatorOptions,
     PortConditioner,
     ScalarSignature,
 )
@@ -72,7 +73,7 @@ class FloatHardwareOperator(ZkfBackedOperator, ABC):
 @dataclass(frozen=True, slots=True)
 class FAddOperator(FloatHardwareOperator):
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0  # takes any count of input register stages (extra stages relieve routing congestion)
         stage_decode: int = 0
         stage_align: int = 0
@@ -114,7 +115,7 @@ class FAddOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FMulOperator(FloatHardwareOperator):
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_product: int = 0  # splitting the product is rarely useful unless wman exceeds the DSP slice input width
         stage_pack: int = 0
@@ -154,7 +155,7 @@ class FMulOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FDivOperator(FloatHardwareOperator):
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_pack: int = 0
         stage_output: int = 0
@@ -198,7 +199,7 @@ class FILog2Operator(ZkfBackedOperator):
     ifmt: IntFormat
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
 
     mnemonic: ClassVar[str] = "filog2"
@@ -234,7 +235,7 @@ class FMulILog2Operator(ZkfBackedOperator):
     ifmt: IntFormat
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_decode: int = 0
 
@@ -276,7 +277,7 @@ class FCmpOperator(FloatHardwareOperator, ComparatorOperator):
     """ZKF has no NaN, so the ordering is total."""
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
 
     mnemonic: ClassVar[str] = "fcmp"
@@ -300,7 +301,7 @@ class FRoundOperator(FloatHardwareOperator):
     """
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         """The zkf core is combinational, hence the nonzero default: a pooled operator needs latency >= 1."""
 
         stage_input: int = 1
@@ -356,7 +357,7 @@ class FFmaOperator(FloatHardwareOperator):
     """
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_product: int = 0
         stage_decode: int = 0
@@ -409,7 +410,7 @@ class FSortOperator(FloatHardwareOperator):
     """
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
 
     mnemonic: ClassVar[str] = "fsort"
@@ -444,7 +445,7 @@ class FSortOperator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FExp2Operator(FloatHardwareOperator):
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_reduce: int = 0
         stage_product: int = 0
@@ -485,7 +486,7 @@ class FExp2Operator(FloatHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FLog2Operator(FloatHardwareOperator):
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_decode: int = 0
         stage_product: int = 0
@@ -535,7 +536,7 @@ class FSqrtOperator(FloatHardwareOperator):
     """Correctly-rounded square root; a negative operand yields -inf and raises `domain_error` (as log2's does)."""
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_pack: int = 0
         stage_output: int = 0
@@ -573,7 +574,7 @@ class FSincosOperator(FloatHardwareOperator):
     """NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring."""
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         unroll100: int = 100
         stage_input: int = 0
         stage_product: int = 0
@@ -624,7 +625,7 @@ class FAtan2Operator(FloatHardwareOperator):
     """NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring."""
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         """A nearby hypot over the same operands folds into the magnitude port for free."""
 
         unroll100: int = 100
@@ -792,7 +793,7 @@ class FFromIntOperator(ZkfBackedOperator):
     ifmt: IntFormat
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
         stage_normalize: int = 0
         stage_pack: int = 0
@@ -838,7 +839,7 @@ class FToIntOperator(ZkfBackedOperator):
     ifmt: IntFormat
 
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_input: int = 0
 
     mnemonic: ClassVar[str] = "ftoint"

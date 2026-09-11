@@ -55,7 +55,15 @@ FSincosOptions = _operators.FSincosOperator.Options
 FSortOptions = _operators.FSortOperator.Options
 FSqrtOptions = _operators.FSqrtOperator.Options
 FToIntOptions = _operators.FToIntOperator.Options
+IAbsOptions = _operators.IAbsOperator.Options
+IAddOptions = _operators.IAddOperator.Options
+ICmpOptions = _operators.ICmpOperator.Options
+IDivOptions = _operators.IDivOperator.Options
 IMulOptions = _operators.IMulOperator.Options
+IPopcntOptions = _operators.IPopcntOperator.Options
+IShlOptions = _operators.IShlOperator.Options
+IShrOptions = _operators.IShrOperator.Options
+ISubOptions = _operators.ISubOperator.Options
 
 __version__ = "0.5.0"
 __url__ = "https://holoso.digital"

@@ -7,7 +7,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import IntFormat
+from holoso import IDivOptions, IntFormat
 from holoso._operators import IDivOperator
 
 from .hdl_float_oracle import (
@@ -116,7 +116,7 @@ async def idivs_cocotb(dut: Any) -> None:
 def test_idivs(sim: str, width: int, quotient_floor: int) -> None:
     # The floor rows take the operator's own parameters, so a wrong QUOTIENT_FLOOR would compute the other division;
     # the truncating rows no operator can ask for keep their own, pinned against the same closed form.
-    hardware = IDivOperator(IntFormat(width))
+    hardware = IDivOperator(IntFormat(width), IDivOptions())
     latency = 3 + (width + 1) // 2
     assert latency == hardware.latency
     parameters = hardware.params if quotient_floor else {"W": width, "QUOTIENT_FLOOR": 0, "LATENCY": latency}

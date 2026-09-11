@@ -260,6 +260,13 @@ class HardwareOperator(ABC):
         """
 
 
+@dataclass(frozen=True, slots=True)
+class PooledOperatorOptions:
+    """
+    The knobs of one pooled operator. Every pooled operator subclasses this.
+    """
+
+
 @dataclass(frozen=True)
 class PooledHardwareOperator(HardwareOperator, ABC):
     """
@@ -268,6 +275,7 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     generated RTL (a per-operand read opcode selects each operand, a per-register write opcode installs each result).
     """
 
+    Options: ClassVar[type[PooledOperatorOptions]]  # held in the `opt` field; empty for some, never absent
     error_ports: ClassVar[list[str]] = []
     operand_hdl_ports: ClassVar[list[str]]  # module port name per operand, aligned with the arity
     output_hdl_ports: ClassVar[list[str]]  # module port name per output, aligned with result_types

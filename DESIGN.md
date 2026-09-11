@@ -211,10 +211,13 @@ pooled one also the port names of the module it stands for, so the fully specifi
 resource-sharing key; a machine holds one configuration per pooled class. An operator may declare per-firing
 microcode-driven immediate inputs, and declares a per-instance initiation interval (most are II=1, fully pipelined).
 
-Every float operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA
-contraction, `fsort` enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone hypotenuse); what a
-kernel cannot reach through the operators it was given is refused at MIR lowering. An integer operator is never
-optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
+Every pooled operator, float or integer, is named by exactly one field of the public options and carries its own knobs
+there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
+reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every
+float operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA contraction,
+`fsort` enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone hypotenuse); what a kernel
+cannot reach through the operators it was given is refused at MIR lowering. An integer operator is never optional,
+only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
 
 ## Front-end
 
@@ -600,7 +603,7 @@ its snapshot, the non-reset arm applies its opcode-selected update and boundary 
 fetch registers are reset-unconditional, so they pack into the BRAM output register and settle to the first word
 under reset; the rest of the datapath likewise stays out of the reset cone.
 
-Each operator instance carries its own options and float format, fixed at construction from the user's `Options`;
+Each operator instance carries its own options and formats, fixed at construction from the user's `Options`;
 every instantiation lists every hardware parameter explicitly, turning a param-name mismatch into a loud
 elaboration error. The auxiliary HDL ships as one self-contained `holoso_support.v`, assembled in memory from
 hand-written operator catalogues plus included external RTL, so the end application adds a single file to the

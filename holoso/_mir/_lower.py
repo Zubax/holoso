@@ -119,14 +119,6 @@ from .._operators import (
     FloatIsFiniteOperator,
     FloatIsNegInfOperator,
     FloatIsPosInfOperator,
-    IAbsOperator,
-    IAddOperator,
-    ICmpOperator,
-    IDivOperator,
-    IPopcntOperator,
-    IShlOperator,
-    IShrOperator,
-    ISubOperator,
     IntBwAndOperator,
     IntBwNotOperator,
     IntBwOrOperator,
@@ -662,7 +654,7 @@ class _LoweringContext:
                 return True
             case Operation(operator=IntComparison() as semantic, operands=(a, b)):
                 # Two's complement is totally ordered, so the integer comparator taps exactly as the float one does.
-                icmp = ICmpOperator(self.int_format)
+                icmp = self.ops.icmp
                 port, inversion = icmp.tap_of(_RELATION_OF[type(semantic)])
                 self.remap[old_id] = self.builder.operation(
                     icmp,
@@ -1001,9 +993,9 @@ class _IntLowerer:
         fmt = self.context.int_format
         match node:
             case Operation(operator=IntAdd(), operands=(a, b)):
-                return self._emit(IAddOperator(fmt), a, b)
+                return self._emit(self.context.ops.iadd, a, b)
             case Operation(operator=IntSub(), operands=(a, b)):
-                return self._emit(ISubOperator(fmt), a, b)
+                return self._emit(self.context.ops.isub, a, b)
             case Operation(operator=IntMul(), operands=(a, b)):
                 return self._emit(self.context.ops.imul, a, b)
             case Operation(operator=IntMulPow2() as semantic, operands=(a,)):
@@ -1011,15 +1003,15 @@ class _IntLowerer:
             case Operation(operator=IntNeg(), operands=(a,)):
                 return self._negate(self.context.remap[a])
             case Operation(operator=IntAbs(), operands=(a,)):
-                return self._emit(IAbsOperator(fmt), a)
+                return self._emit(self.context.ops.iabs, a)
             case Operation(operator=IntPopcount(), operands=(a,)):
-                return self._emit(IPopcntOperator(fmt), a)
+                return self._emit(self.context.ops.ipopcnt, a)
             # The quotient and the remainder are two taps of one divider: written from the same operands with the same
             # conditioners, they share a MIR intern key up to the port and fuse into a single firing at LIR build.
             case Operation(operator=IntDivFloor(), operands=(a, b)):
-                return self._emit(IDivOperator(fmt), a, b, output_port=0)
+                return self._emit(self.context.ops.idiv, a, b, output_port=0)
             case Operation(operator=IntMod(), operands=(a, b)):
-                return self._emit(IDivOperator(fmt), a, b, output_port=1)
+                return self._emit(self.context.ops.idiv, a, b, output_port=1)
             case Operation(operator=(IntShiftLeft() | IntShiftRight()) as semantic, operands=(a, b)):
                 return self._lower_shift(semantic, a, b)
             case Operation(operator=IntBwAnd(), operands=(a, b)):
@@ -1080,8 +1072,8 @@ class _IntLowerer:
         shift past the word answers zero and a right shift past it answers the sign fill, as Python's own unbounded
         shift does once the word truncates it.
         """
-        fmt = self.context.int_format
-        hardware = IShrOperator(fmt) if isinstance(semantic, IntShiftRight) else IShlOperator(fmt)
+        ops = self.context.ops
+        hardware = ops.ishr if isinstance(semantic, IntShiftRight) else ops.ishl
         return self._emit(hardware, a, count)
 
     def _constant_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: int) -> ValueId:
@@ -1111,7 +1103,7 @@ class _IntLowerer:
         """
         fmt = self.context.int_format
         return self.context.builder.operation(
-            IShlOperator(fmt),
+            self.context.ops.ishl,
             [self.context.remap[a], self._const(fmt.saturate(min(semantic.k, fmt.width)))],
             [IntIdentity(), IntIdentity()],
             output_port=1,
@@ -1120,7 +1112,7 @@ class _IntLowerer:
     def _negate(self, value: ValueId) -> ValueId:
         """`0 - x`: there is no negation module, and the subtractor saturates `-MIN` correctly."""
         return self.context.builder.operation(
-            ISubOperator(self.context.int_format),
+            self.context.ops.isub,
             [self._const(0), value],
             [IntIdentity(), IntIdentity()],
         )
