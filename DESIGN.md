@@ -489,8 +489,9 @@ read-address latches were tried and dropped: inconsistent across result classes 
 installs). Because the banks and the pooled/inline classes are uniform instances of one model rather than hand-coded
 cases, boolean-logic and cast chains schedule back-to-back. Block-resident operands (inputs, state reads, phis) are
 available from the block's first control word. Ready ops issue in critical-path order onto free instances, pooled by
-the fully specified hardware operator itself (equal-by-value); a per-class budget, currently one, serializes
-co-issues beyond it.
+the fully specified hardware operator itself (equal-by-value); the per-class budget is that operator's own `instances`
+option, a cap rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it
+serialize.
 
 Read-first plus the +1 edge, not write-through forwarding, is a deliberate trade: forwarding would erase the +1 but
 its muxes cost `O(NRD*NWR)` across many read and write ports -- unsustainable -- while the +1 hides under pipelined

@@ -5,7 +5,7 @@ sound only under the carrier contract in DESIGN.md.
 """
 
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 from .._value import IntValue, ScalarValue
@@ -62,7 +62,7 @@ class IAddOperator(IntHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
-    opt: Options
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -87,7 +87,7 @@ class ISubOperator(IntHardwareOperator):
     mnemonic: ClassVar[str] = "isubs"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -113,7 +113,7 @@ class IMulOperator(IntHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         if not 0 <= self.opt.stage_product <= 4:
@@ -151,7 +151,7 @@ class IDivOperator(IntHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["num", "den"]
     output_hdl_ports: ClassVar[list[str]] = ["quo", "rem"]
     error_ports: ClassVar[list[str]] = ["div0"]
-    opt: Options
+    opt: Options = field()
 
     @property
     def latency(self) -> int:
@@ -191,7 +191,7 @@ class IAbsOperator(IntHardwareOperator):
     mnemonic: ClassVar[str] = "iabss"
     operand_hdl_ports: ClassVar[list[str]] = ["x"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -220,7 +220,7 @@ class IShlOperator(IntHardwareOperator):
     mnemonic: ClassVar[str] = "ishl"
     operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
     output_hdl_ports: ClassVar[list[str]] = ["shft", "prod"]
-    opt: Options
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -254,7 +254,7 @@ class IShrOperator(IntHardwareOperator):
     mnemonic: ClassVar[str] = "ishr"
     operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
     output_hdl_ports: ClassVar[list[str]] = ["shft"]
-    opt: Options
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -284,7 +284,7 @@ class IPopcntOperator(IntHardwareOperator):
     mnemonic: ClassVar[str] = "ipopcnt"
     operand_hdl_ports: ClassVar[list[str]] = ["x"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
 
     @property
     def count_width(self) -> int:
@@ -321,7 +321,7 @@ class ICmpOperator(IntHardwareOperator, ComparatorOperator):
     class Options(PooledOperatorOptions): ...
 
     mnemonic: ClassVar[str] = "icmp"
-    opt: Options
+    opt: Options = field()
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands)

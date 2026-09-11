@@ -2236,6 +2236,36 @@ def _firings(lir: Lir, mnemonic: str) -> list[PooledScheduledOp]:
     return [op for op in lir.ops if op.inst.operator.mnemonic == mnemonic]
 
 
+def _multiplier_ops(instances: int) -> MirOptions:
+    return mir_options(
+        Options(
+            OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(instances=instances), fcmp=FCmpOptions()), ffmt=FMT
+        )
+    )
+
+
+def _four_products(a: float, b: float, c: float, d: float) -> tuple[float, float, float, float]:
+    return a * b, b * c, c * d, d * a
+
+
+def test_a_second_multiplier_shortens_an_independent_product_chain() -> None:
+    one = build_lir(_run(_four_products, _multiplier_ops(1)), "products_one")
+    two = build_lir(_run(_four_products, _multiplier_ops(2)), "products_two")
+    assert _instance_counts(one)["fmul"] == 1 and _instance_counts(two)["fmul"] == 2
+    assert len(_firings(two, "fmul")) == len(_firings(one, "fmul")) == 4
+    assert two.initiation_interval < one.initiation_interval
+
+
+def test_a_dependent_product_chain_leaves_the_second_multiplier_uninstantiated() -> None:
+    # The budget is a cap: nothing here can co-issue, so the second instance is configured and never built.
+    def chain(a: float, b: float, c: float, d: float) -> float:
+        return a * b * c * d
+
+    lir = build_lir(_run(chain, _multiplier_ops(2)), "products_chain")
+    assert _instance_counts(lir)["fmul"] == 1
+    assert len(_firings(lir, "fmul")) == 3
+
+
 def test_sincos_coalesces_sin_and_cos_into_one_firing() -> None:
     def kernel(x: float) -> tuple[float, float]:
         return math.sin(x), math.cos(x)

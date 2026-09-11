@@ -70,12 +70,12 @@ def resolve_pool(nodes: dict[ValueId, MirNode]) -> dict[type[HardwareOperator], 
     The per-class instance budget over the FULL node table: at least one of every pooled operator class present in
     the graph, whichever bank its taps land in (a comparator whose every tap is boolean still needs its instance).
     Only pooled (module-backed) operators are budgeted; inline operators carry no physical instance.
+    The budget is a CAP, not a count: the schedule binds what it can use.
     """
     pool: dict[type[HardwareOperator], int] = {}
     for node in nodes.values():
         if isinstance(node, MirOperation) and isinstance(node.operator, PooledHardwareOperator):
-            requested = 1  # TODO: we can add heuristics for determining how many operator instances to use.
-            pool[type(node.operator)] = max(1, requested)
+            pool[type(node.operator)] = node.operator.opt.instances
     return pool
 
 

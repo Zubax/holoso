@@ -85,7 +85,7 @@ class FAddOperator(FloatHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # signed sum: a+b == b+a bit-for-bit
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.AddModel(
@@ -125,7 +125,7 @@ class FMulOperator(FloatHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # product: a*b == b*a bit-for-bit
-    opt: Options
+    opt: Options = field()
     wmultiplier: int
 
     def __post_init__(self) -> None:
@@ -164,7 +164,7 @@ class FDivOperator(FloatHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     error_ports: ClassVar[list[str]] = ["div0"]
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.DivModel(
@@ -206,7 +206,7 @@ class FILog2Operator(ZkfBackedOperator):
     unconditioned_operands: ClassVar[frozenset[int]] = frozenset({0})
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.Ilog2Model(
@@ -242,7 +242,7 @@ class FMulILog2Operator(ZkfBackedOperator):
     mnemonic: ClassVar[str] = "fmul_ilog2"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "k"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.MulIlog2Model(
@@ -281,7 +281,7 @@ class FCmpOperator(FloatHardwareOperator, ComparatorOperator):
         stage_input: int = 0
 
     mnemonic: ClassVar[str] = "fcmp"
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.CmpModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.opt.stage_input)
@@ -313,7 +313,7 @@ class FRoundOperator(FloatHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     immediate_ports: ClassVar[list[ImmediateField]] = [ImmediateField("round_mode", 2)]
-    opt: Options
+    opt: Options = field()
 
     _EVAL: ClassVar[dict[RoundMode, Callable[[FloatValue], FloatValue]]] = {
         RoundMode.NEAREST_EVEN: FloatValue.round,
@@ -369,7 +369,7 @@ class FFmaOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "ffma"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b", "c"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
     wmultiplier: int
 
     def __post_init__(self) -> None:
@@ -416,7 +416,7 @@ class FSortOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fsort"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["min", "max"]
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.SortModel(zkf.ZkfFormat(self.fmt.wexp, self.fmt.wman), stage_input=self.opt.stage_input)
@@ -455,7 +455,7 @@ class FExp2Operator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fexp2"
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
     wmultiplier: int
 
     def __post_init__(self) -> None:
@@ -500,7 +500,7 @@ class FLog2Operator(FloatHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     error_ports: ClassVar[list[str]] = ["domain_error", "pole"]
-    opt: Options
+    opt: Options = field()
     wmultiplier: int
 
     def __post_init__(self) -> None:
@@ -545,7 +545,7 @@ class FSqrtOperator(FloatHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     error_ports: ClassVar[list[str]] = ["domain_error"]
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.SqrtModel(
@@ -585,7 +585,7 @@ class FSincosOperator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fsincos"
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["sin", "cos"]
-    opt: Options
+    opt: Options = field()
     wmultiplier: int
 
     def __post_init__(self) -> None:
@@ -638,7 +638,7 @@ class FAtan2Operator(FloatHardwareOperator):
     mnemonic: ClassVar[str] = "fatan2"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["theta", "mag"]
-    opt: Options
+    opt: Options = field()
     wmultiplier: int
 
     def __post_init__(self) -> None:
@@ -802,7 +802,7 @@ class FFromIntOperator(ZkfBackedOperator):
     mnemonic: ClassVar[str] = "ffromint"
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.FromIntModel(
@@ -846,7 +846,7 @@ class FToIntOperator(ZkfBackedOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     immediate_ports: ClassVar[list[ImmediateField]] = [ImmediateField("round_mode", 2)]
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         model = zkf.ToIntModel(

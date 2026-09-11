@@ -266,6 +266,12 @@ class PooledOperatorOptions:
     The knobs of one pooled operator. Every pooled operator subclasses this.
     """
 
+    instances: int = 1
+    """How many physical copies of this operator the machine may emit. A cap: only the copies the schedule uses."""
+
+    def __post_init__(self) -> None:
+        assert self.instances >= 1
+
 
 @dataclass(frozen=True)
 class PooledHardwareOperator(HardwareOperator, ABC):
@@ -275,7 +281,13 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     generated RTL (a per-operand read opcode selects each operand, a per-register write opcode installs each result).
     """
 
-    Options: ClassVar[type[PooledOperatorOptions]]  # held in the `opt` field; empty for some, never absent
+    Options: ClassVar[type[PooledOperatorOptions]]  # the type of the `opt` field below
+
+    @property
+    @abstractmethod
+    def opt(self) -> PooledOperatorOptions:
+        """This operator's knobs. Each subclass satisfies it with a field declared `opt: Options = field()`."""
+
     error_ports: ClassVar[list[str]] = []
     operand_hdl_ports: ClassVar[list[str]]  # module port name per operand, aligned with the arity
     output_hdl_ports: ClassVar[list[str]]  # module port name per output, aligned with result_types

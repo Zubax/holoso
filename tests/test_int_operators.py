@@ -12,7 +12,7 @@ extension (`tests/hdl/test_int_inline.py`).
 """
 
 from collections.abc import Callable
-from dataclasses import fields
+from dataclasses import MISSING, fields
 from inspect import isabstract, isclass
 from typing import get_args, get_type_hints
 
@@ -430,12 +430,9 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
     assert ops.ftoint.signature.result_types == (IntType(IntFormat(44)),)
 
 
-def test_the_catalogue_builds_every_operator_for_the_machines_own_formats() -> None:
-    # A conversion operator carries one format per side, so a check keyed on the operator's own `fmt` could not see
-    # a wrong `ifmt` at all -- it read the float side and agreed with itself. The catalogue now BUILDS each operator
-    # from the machine's formats instead of accepting one built elsewhere, so the mismatch is unrepresentable
-    # rather than merely caught; this walks the whole catalogue and pins that.
-    options = Options(
+def _everything_configured() -> Options:
+    """Every float operator present, so the catalogue walks its whole surface."""
+    return Options(
         OperatorOptions(
             fadd=holoso.FAddOptions(),
             fmul=holoso.FMulOptions(),
@@ -457,6 +454,14 @@ def test_the_catalogue_builds_every_operator_for_the_machines_own_formats() -> N
         ffmt=FloatFormat(6, 18),
         wint_min=33,
     )
+
+
+def test_the_catalogue_builds_every_operator_for_the_machines_own_formats() -> None:
+    # A conversion operator carries one format per side, so a check keyed on the operator's own `fmt` could not see
+    # a wrong `ifmt` at all -- it read the float side and agreed with itself. The catalogue now BUILDS each operator
+    # from the machine's formats instead of accepting one built elsewhere, so the mismatch is unrepresentable
+    # rather than merely caught; this walks the whole catalogue and pins that.
+    options = _everything_configured()
     ops = build_ops(options, options.wint_min)
     built = 0
     for name in (field.name for field in fields(OperatorOptions)):
@@ -473,14 +478,18 @@ def test_the_catalogue_builds_every_operator_for_the_machines_own_formats() -> N
     assert built == len(fields(OperatorOptions)), built  # every float optional, plus the nine integer operators
 
 
-def test_every_pooled_operator_is_publicly_configurable() -> None:
-    # A pooled operator the public options do not name is unreachable by configuration, and one whose knobs are not
-    # publicly aliased cannot be spelled at all, so the correspondence is pinned in both directions.
-    pooled = [
+def _pooled_operators() -> list[type[PooledHardwareOperator]]:
+    return [
         cls
         for cls in vars(holoso._operators).values()
         if isclass(cls) and issubclass(cls, PooledHardwareOperator) and not isabstract(cls)
     ]
+
+
+def test_every_pooled_operator_is_publicly_configurable() -> None:
+    # A pooled operator the public options do not name is unreachable by configuration, and one whose knobs are not
+    # publicly aliased cannot be spelled at all, so the correspondence is pinned in both directions.
+    pooled = _pooled_operators()
     declared = set()
     for name, annotation in get_type_hints(OperatorOptions).items():
         unwrapped = [arg for arg in get_args(annotation) if arg is not type(None)] or [annotation]
@@ -490,6 +499,27 @@ def test_every_pooled_operator_is_publicly_configurable() -> None:
     for cls in pooled:
         assert issubclass(cls.Options, PooledOperatorOptions) and cls.Options is not PooledOperatorOptions
         assert getattr(holoso, cls.__name__.removesuffix("Operator") + "Options") is cls.Options
+
+
+def test_the_instance_cap_reaches_the_operator_but_never_the_rtl() -> None:
+    # The count is a machine-level budget, so it rides operator identity (two configurations are different
+    # operators) but must not become a module parameter, which would fail elaboration against the shipped cores.
+    narrow, wide = IMulOperator(IntFormat(32), IMulOptions()), IMulOperator(IntFormat(32), IMulOptions(instances=4))
+    assert wide.opt.instances == 4 and narrow != wide
+    options = _everything_configured()
+    ops = build_ops(options, options.wint_min)
+    for name in (field.name for field in fields(OperatorOptions)):
+        operator = getattr(ops, name)
+        assert operator is not None, name
+        assert "INSTANCES" not in {param.upper() for param in operator.params}
+
+
+def test_no_pooled_operator_takes_a_default_for_its_options() -> None:
+    # `PooledHardwareOperator.opt` is an abstract property, and a dataclass would take that property OBJECT as the
+    # field's default unless the subclass spells `= field()`. The failure is silent: the operator constructs with
+    # no options at all and every later read returns the property.
+    for cls in _pooled_operators():
+        assert cls.__dataclass_fields__["opt"].default is MISSING, cls.__name__
 
 
 def _add(a: float, b: float) -> float:

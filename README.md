@@ -131,6 +131,9 @@ options = holoso.Options(
 )
 ```
 
+Every operator also takes `instances`, which caps how many physical copies of it the machine may emit; the
+default of one shares a single module across the whole kernel, and a higher cap lets independent work co-issue.
+
 You only need to set the options for the operators that the kernel actually uses.
 If the kernel needs an unconfigured operator, the behavior depends on whether Holoso can express the missing
 operator in terms of the configured ones. If it can, it will do so silently; if not, it will raise an error.
