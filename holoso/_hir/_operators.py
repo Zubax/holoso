@@ -257,6 +257,50 @@ class FloatMulPow2(Operator):
 
 
 @dataclass(frozen=True, slots=True)
+class FloatILog2(Operator):
+    """
+    `floor(log2|x|)`, the extraction half of the pair `FloatMulPow2Dynamic` scales by. Zero answers `-bias` and an
+    infinity `bias + 1`, outside the finite span in the direction their magnitude implies, so an extremum over the
+    answer needs no special case. The bias is told by the machine; HIR asks no format.
+    """
+
+    mnemonic: ClassVar[str] = "filog2"
+    speculatable: ClassVar[bool] = True
+    bias: int
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), IntType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand).value for operand in operands]
+        if a == 0.0:
+            return IntConst(-self.bias)
+        if math.isinf(a):
+            return IntConst(self.bias + 1)
+        return IntConst(math.frexp(abs(a))[1] - 1)  # not floor(log2 x), which answers 3 just below 8
+
+
+@dataclass(frozen=True, slots=True)
+class FloatMulPow2Dynamic(Operator):
+    """
+    Scaling by a power of two whose exponent is data, `FloatMulPow2` being the constant spelling the scaling
+    algebra composes.
+    """
+
+    mnemonic: ClassVar[str] = "fmul_pow2_dyn"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(), IntType()), FloatType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, k = operands  # unpacked here, `_fold_float` taking one family only
+        return FloatMulPow2(_int_const(k).value).evaluate([a])
+
+
+@dataclass(frozen=True, slots=True)
 class FloatRound(Operator):
     """Round a float to the nearest integral-valued float, ties to even."""
 
@@ -462,11 +506,12 @@ class FloatAtan2Turns(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatHypot2(Operator):
     """
-    A semantic op only because it may be computed as a byproduct of atan2 -- the MIR op selector will manage this.
-    If not, it is expected to be lowered as the ordinary sqrt(x**2+y**2).
+    A semantic op only because it may be computed as a byproduct of atan2. Speculatable: every input has an answer,
+    and neither lowering can fault -- the atan2 raises nothing, and the expansion's root sees a sum of squares.
     """
 
     mnemonic: ClassVar[str] = "fhypot2"
+    speculatable: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:

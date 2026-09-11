@@ -16,6 +16,7 @@ from holoso import (
     FCmpOptions,
     FDivOptions,
     FExp2Options,
+    FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
@@ -239,7 +240,7 @@ def _if_supported[O](operator: Callable[..., object], fmt: FloatFormat, opt: O) 
 
 def build_ops(options: Options, width: int) -> OpConfig:
     """For the few tests that inspect a built machine with no kernel to settle its word, so they name the width."""
-    return OpConfig.build(options.operator, options.ffmt, options.wmultiplier or 0, IntFormat(width))
+    return OpConfig(options.operator, options.ffmt, IntFormat(width), options.wmultiplier or 0)
 
 
 DEFAULT_FETCH_STAGES = 3
@@ -260,6 +261,7 @@ def default_options(fmt: FloatFormat) -> Options:
             fmul=FMulOptions(),
             fdiv=FDivOptions(),
             fmul_ilog2=FMulILog2Options(),
+            filog2=FILog2Options(),
             fcmp=FCmpOptions(),
             fexp2=_if_supported(FExp2Operator, fmt, FExp2Options()),
             flog2=_if_supported(FLog2Operator, fmt, FLog2Options()),

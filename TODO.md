@@ -1,13 +1,11 @@
 # TODO
 
-## hypot by exact exponent scaling
+## norm by exact exponent scaling
 
-`2^k·sqrt((x/2^k)² + (y/2^k)²)` matches the naive form while staying overflow-safe, removing the fdiv. Exponent
-extraction into `fmul_ilog2`'s integer port is the `filog2` operator, which now exists as a pooled ZKF-backed
-module; what remains is the semantic operator, its lowering, and the expansion itself.
-
-`norm` for n≥3 is the same class, but not the same expansion: its window must account for the arity, since n scaled
-squares accumulate where two do not.
+`hypot` expands this way now, but `norm` cannot reuse it: `np.linalg.norm` order 2 is `sqrt(dot(x, x))` at every
+n, so it never reaches `hypot`. Its window must also account for the arity -- n scaled squares accumulate where two
+do not, and at e6m18 the two-operand window returns an infinity for eight inputs of 1.5. The library cannot compute
+that window, front-end lowering never seeing the float format, so this wants an n-ary semantic operator.
 
 ## Frontend limitations
 

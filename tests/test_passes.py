@@ -697,6 +697,27 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
         assert float(sim.run(a, b)[0]) == f(a, b)
 
 
+def test_if_conversion_speculates_a_hypotenuse() -> None:
+    # Unlike the division above, a hypotenuse cannot fault on a never-taken path: the atan2 lowering raises nothing
+    # and the expansion's only error-bearing primitive is a root over a sum of squares.
+    def f(a: float, b: float) -> float:
+        if a > b:
+            y = a + b
+        else:
+            y = math.hypot(a, b)
+        return y
+
+    options = dataclasses.replace(
+        OPTIONS,
+        operator=dataclasses.replace(OPTIONS.operator, filog2=holoso.FILog2Options(), fsqrt=holoso.FSqrtOptions()),
+    )
+    result = _synth(f, options, name="spec_hypot")
+    assert result.initiation_interval[1] is not None  # the diamond collapsed rather than surviving as a branch
+    sim = result.numerical_model.elaborate()
+    for a, b in [(3.0, 1.0), (3.0, 4.0), (5.0, 12.0)]:  # exact in the format on both arms
+        assert float(sim.run(a, b)[0]) == f(a, b)
+
+
 def test_if_conversion_respects_the_arm_size_budget() -> None:
     def f(a: float, b: float) -> float:
         if a > b:

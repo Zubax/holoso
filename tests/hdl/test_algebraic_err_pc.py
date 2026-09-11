@@ -14,6 +14,7 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FDivOptions,
+    FILog2Options,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
@@ -40,6 +41,7 @@ def _ops() -> MirOptions:
                 fmul=FMulOptions(),
                 fdiv=FDivOptions(),
                 fmul_ilog2=FMulILog2Options(),
+                filog2=FILog2Options(),
                 fcmp=FCmpOptions(),
                 fsort=FSortOptions(),
                 fsqrt=FSqrtOptions(),
@@ -49,12 +51,18 @@ def _ops() -> MirOptions:
     )
 
 
-def _sqrt(x: float) -> float:
-    return math.sqrt(x)
-
-
 def _hypot(y: float, x: float) -> float:
     return math.hypot(y, x)
+
+
+def _speculated_hypot(a: float, b: float) -> float:
+    if a > b:
+        return a + b
+    return math.hypot(a, b)
+
+
+def _sqrt(x: float) -> float:
+    return math.sqrt(x)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +90,9 @@ CASES = (
             _Vector((0.0,), False),
         ),
     ),
+    # The expansion's only error-bearing primitive is the root, over a sum of squares. The ORDINARY vector is the
+    # one that discriminates: the two extremes pass even when the sum is wrong, since neither can go negative --
+    # verified against a mutant that negates one square, which they miss and (3, 4) catches.
     _Case(
         "hypot",
         _hypot,
@@ -89,6 +100,20 @@ CASES = (
         (
             _Vector((0.0, 0.0), False),
             _Vector((float("inf"), 2.0), False),
+            _Vector((3.0, 4.0), False),
+        ),
+    ),
+    # `FloatHypot2` is speculatable, so if-conversion flattens this diamond and the expansion runs on the arm the
+    # inputs did not take. That is the claim the flag rests on, and only the hardware can show the flag stays clear.
+    _Case(
+        "speculated_hypot",
+        _speculated_hypot,
+        ("a", "b"),
+        (
+            _Vector((3.0, 1.0), False),
+            _Vector((1.0, 3.0), False),
+            _Vector((0.0, 0.0), False),
+            _Vector((float("inf"), 1.0), False),
         ),
     ),
 )

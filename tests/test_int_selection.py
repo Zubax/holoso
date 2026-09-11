@@ -219,8 +219,9 @@ def test_a_runtime_exponent_scaling_carries_mixed_conditioner_lists() -> None:
 
 def test_exponent_extraction_places_the_limit_cases_outside_the_finite_span() -> None:
     """
-    Nothing above MIR reaches `filog2` yet, so it is exercised as a hand-built graph exactly as the scaling above is.
-    The limit answers carry the weight: zero and an infinity must fall below and above every finite exponent, or an
+    A hand-built graph reaches the operator directly, without the hypotenuse expansion that is its only source in a
+    real kernel. The limit answers carry the weight: zero and an infinity must fall below and above every finite
+    exponent, or an
     extremum taken over the answer -- which is how a scaled magnitude picks its normalizing exponent -- would need a
     special case for each of them.
     """

@@ -37,7 +37,7 @@ from .._hir import (
     HirBuilder,
     FloatGreater,
     FloatGreaterOrEqual,
-    FloatHypot2,
+    FloatILog2,
     FloatIsFinite,
     FloatIsInf,
     FloatIsNegInf,
@@ -49,6 +49,7 @@ from .._hir import (
     FloatMin,
     FloatMul,
     FloatMulPow2,
+    FloatMulPow2Dynamic,
     FloatNeg,
     FloatNotEqual,
     FloatRound,
@@ -153,7 +154,9 @@ from .._type import (
     ScalarType,
 )
 from ._ir import Mir, MirBuilder, MirOperation
+from ._hypot import count as hypot_count, expand_unfused, plan_fusions
 from ._options import MirOptions
+from ._signs import collapse_signs, sign_chain, sign_of
 
 _logger = logging.getLogger(__name__)
 
@@ -207,20 +210,10 @@ def _exact_scale(fmt: FloatFormat, k: int) -> float | None:
     return value if value is not None and fmt.round(value) == value else None
 
 
-def _sign_of(node: Operation) -> FloatSignControl | None:
-    match node:
-        case Operation(operator=FloatNeg()):
-            return FloatSignControl(negate=True)
-        case Operation(operator=FloatAbs()):
-            return FloatSignControl(absolute=True)
-        case _:
-            return None
-
-
 def _collapse_bool_inversions(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, BoolInversion]:
     """
     Peel a chain of semantic NOT operations, returning the base value and the combined inversion -- the boolean dual
-    of _collapse_signs. Folding happens on the CONSUMER side only: a NOT over a comparison must never flip
+    of collapse_signs. Folding happens on the CONSUMER side only: a NOT over a comparison must never flip
     the producer's tap conditioner (two taps of one comparator port with different inversions cannot fuse and would
     serialize two firings), and consumer-side folding keeps one shared producer for both polarities of a value.
     """
@@ -243,35 +236,11 @@ def _collapse_conditioner(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[Val
         case HirBoolType():
             return _collapse_bool_inversions(nodes, vid)
         case HirFloatType():
-            return _collapse_signs(nodes, vid)
+            return collapse_signs(nodes, vid)
         case HirIntType():
             return vid, IntIdentity()
         case _:
             raise UnsupportedConstruct(f"no conditioner-collapse rule for HIR type {ty!r}")
-
-
-def _sign_chain(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, list[tuple[ValueId, FloatSignControl]]]:
-    """Outermost first."""
-    chain: list[tuple[ValueId, FloatSignControl]] = []
-    node = nodes[vid]
-    while isinstance(node, Operation) and (sign := _sign_of(node)) is not None:
-        chain.append((vid, sign))
-        (vid,) = node.operands
-        node = nodes[vid]
-    return vid, chain
-
-
-def _compose_signs(chain: list[tuple[ValueId, FloatSignControl]]) -> FloatSignControl:
-    control = FloatSignControl()
-    for _, sign in reversed(chain):  # innermost first
-        control = control.then(sign)
-    return control
-
-
-def _collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, FloatSignControl]:
-    """Peel a chain of semantic sign operations, returning the non-sign base value and combined sign control."""
-    base, chain = _sign_chain(nodes, vid)
-    return base, _compose_signs(chain)
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +285,7 @@ class _DirectionalInfPlan:
 
 
 def _is_zero_float(hir: Hir, vid: ValueId) -> bool:
-    base, _ = _collapse_signs(hir.nodes, vid)
+    base, _ = collapse_signs(hir.nodes, vid)
     node = hir.nodes[base]
     return isinstance(node, FloatConst) and node.value == 0.0
 
@@ -324,7 +293,7 @@ def _is_zero_float(hir: Hir, vid: ValueId) -> bool:
 def _match_isinf_operand(hir: Hir, vid: ValueId) -> ValueId | None:
     match hir.nodes[vid]:
         case Operation(operator=FloatIsInf(), operands=(operand,)):
-            base, _ = _collapse_signs(hir.nodes, operand)
+            base, _ = collapse_signs(hir.nodes, operand)
             return base
         case _:
             return None
@@ -345,7 +314,7 @@ def _match_zero_sign_relation(
     right_zero = _is_zero_float(hir, right)
     if left_zero == right_zero:
         return None
-    operand, sign = _collapse_signs(hir.nodes, left if right_zero else right)
+    operand, sign = collapse_signs(hir.nodes, left if right_zero else right)
     if sign.absolute:
         return None
     # `x > 0` and `0 < x` both test the positive side; either mirroring alone flips it.
@@ -469,11 +438,11 @@ def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
             continue
         op0, op1 = node.operands
         for product_operand, addend in ((op0, op1), (op1, op0)):
-            base, chain = _sign_chain(hir.nodes, product_operand)
-            plan = _fma_plan(hir, fmt, base, _compose_signs(chain), addend)
+            base, control, chain = sign_chain(hir.nodes, product_operand)
+            plan = _fma_plan(hir, fmt, base, control, addend)
             if plan is not None:
                 sites[plan.product].append((vid, plan))
-                signs[plan.product].update(sign for sign, _ in chain)
+                signs[plan.product].update(chain)
 
     plans: dict[ValueId, _FmaPlan] = {}
     # Fewest adds first, so an exclusive product -- which nothing else can want -- never loses its add to a shared
@@ -484,36 +453,6 @@ def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
         reads = [_Read(site, site in adds) for member in cone for site in readers[member] if site not in cone]
         if _absorbable(reads) and not any(add in plans for add in adds):
             plans.update(sites[product])
-    return plans
-
-
-def _operand_base_set(hir: Hir, node: Operation) -> tuple[ValueId, ...]:
-    """
-    Order-independent: hypot is commutative and sign-invariant, as is the fatan2 magnitude it taps, so a hypot fuses
-    with any same-block atan2 over the same value pair.
-    """
-    return tuple(sorted(_collapse_signs(hir.nodes, operand)[0] for operand in node.operands))
-
-
-def _plan_hypot_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
-    """
-    Map each FloatHypot2 to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's magnitude
-    port (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR firing fusion
-    it feeds.
-    """
-    if ops.fatan2 is None:
-        return {}
-    plans: dict[ValueId, ValueId] = {}
-    for block in hir.blocks:
-        atan2_by_pair: dict[tuple[ValueId, ...], ValueId] = {}
-        for vid in block.operations:
-            if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatAtan2Turns):
-                atan2_by_pair.setdefault(_operand_base_set(hir, node), vid)
-        for vid in block.operations:
-            if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatHypot2):
-                match = atan2_by_pair.get(_operand_base_set(hir, node))
-                if match is not None:
-                    plans[vid] = match
     return plans
 
 
@@ -579,7 +518,9 @@ class _LoweringContext:
         self.fused_directional_inf_members = {
             member for plan in self.directional_inf_plans.values() for member in plan.members
         }
-        self.fused_hypots = _plan_hypot_fusions(hir, ops)
+        self.fused_hypots = plan_fusions(hir, ops)
+        # The derivation expanded every unfused hypotenuse, so the survivors all ride an atan2's magnitude port.
+        assert hypot_count(hir) == len(self.fused_hypots)
         self.folded_shift_counts = _plan_folded_shift_counts(hir, use_counts)
         self.absorbed_roundings = _plan_absorbed_roundings(hir, use_counts)
         self.float_lowerer = _FloatLowerer(self)
@@ -707,8 +648,8 @@ class _LoweringContext:
                 # A relation is one comparator output port with an optional inversion (the ZKF ordering is total and
                 # the flags one-hot), so every relation -- and every comparison over the same operand pair -- selects
                 # into the same pooled fcmp operator and can fuse into one firing.
-                base_a, sign_a = _collapse_signs(self.hir.nodes, a)
-                base_b, sign_b = _collapse_signs(self.hir.nodes, b)
+                base_a, sign_a = collapse_signs(self.hir.nodes, a)
+                base_b, sign_b = collapse_signs(self.hir.nodes, b)
                 fcmp = require(self.ops.fcmp, "fcmp")
                 port, inversion = fcmp.tap_of(_RELATION_OF[type(semantic)])
                 self.remap[old_id] = self.builder.operation(
@@ -762,7 +703,7 @@ class _LoweringContext:
             case Operation(operator=FloatToBool(), operands=(a,)):
                 # `bool(x)` reads a float operand (its sign is irrelevant: the exponent test is sign-invariant) and
                 # writes the boolean bank, like the comparison but with an inline exponent reduction in place of fcmp.
-                base, sign = _collapse_signs(self.hir.nodes, a)
+                base, sign = collapse_signs(self.hir.nodes, a)
                 self.remap[old_id] = self.builder.operation(
                     FloatToBoolOperator(self.float_format), [self.remap[base]], [sign]
                 )
@@ -781,7 +722,7 @@ class _LoweringContext:
         self, old_id: ValueId, semantic: FloatIsFinite | FloatIsInf | FloatIsPosInf | FloatIsNegInf, a: ValueId
     ) -> None:
         operator, output = self.float_lowerer.classification_lowering(semantic)
-        base, sign = _collapse_signs(self.hir.nodes, a)
+        base, sign = collapse_signs(self.hir.nodes, a)
         self.remap[old_id] = self.builder.operation(operator, [self.remap[base]], [sign], output_conditioner=output)
 
     def _lower_output(self, name: str, value: ValueId) -> None:
@@ -834,7 +775,7 @@ class _FloatLowerer:
             case FloatConst(value=value):
                 self.context.remap[old_id] = self._lower_float_const(value)
                 return True
-            case Operation(operator=semantic) if _sign_of(node) is not None:
+            case Operation(operator=semantic) if sign_of(node) is not None:
                 assert semantic.sideband
                 return True
             case Operation() as operation:
@@ -873,6 +814,9 @@ class _FloatLowerer:
                 return self._emit_float(require(self.context.ops.fdiv, "fdiv"), [a, b])
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
                 return self._lower_float_mul_pow2(a, k)
+            case Operation(operator=FloatMulPow2Dynamic(), operands=(a, k)):
+                base, sign = collapse_signs(self.context.hir.nodes, a)
+                return self._emit_scale(self.context.remap[base], sign, self.context.remap[k])
             case Operation(
                 operator=(FloatRound() | FloatFloor() | FloatCeil() | FloatTrunc()) as semantic, operands=(a,)
             ):
@@ -887,8 +831,6 @@ class _FloatLowerer:
                 return self._emit_float(require(self.context.ops.fsqrt, "fsqrt"), [a])
             case Operation(operator=FloatAtan2Turns(), operands=(y, x)):
                 return self._lower_atan2(y, x)
-            case Operation(operator=FloatHypot2(), operands=(y, x)):
-                return self._lower_hypot2_naive(y, x)  # a fusible hypot is intercepted in lower_node
             case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=(a, b)):
                 return self._lower_minmax(semantic, a, b)
             case Operation(operator=FloatFma(), operands=(a, b, c)):
@@ -912,8 +854,8 @@ class _FloatLowerer:
                 # The if-conversion mux: arm signs and a condition NOT chain fold into the operand conditioners
                 # (`x if c else -x` and `a if not c else b` cost no hardware beyond the mux itself).
                 base_c, inv_c = _collapse_bool_inversions(self.context.hir.nodes, cond)
-                base_a, sign_a = _collapse_signs(self.context.hir.nodes, a)
-                base_b, sign_b = _collapse_signs(self.context.hir.nodes, b)
+                base_a, sign_a = collapse_signs(self.context.hir.nodes, a)
+                base_b, sign_b = collapse_signs(self.context.hir.nodes, b)
                 return self.context.builder.operation(
                     SelectOperator(ScalarFloatType(self.context.float_format)),
                     [self.context.remap[base_c], self.context.remap[base_a], self.context.remap[base_b]],
@@ -931,7 +873,7 @@ class _FloatLowerer:
     ) -> ValueId:
         # Each operand's sign chain folds onto its conditioner, applied before the op: min(-a, b) feeds the sorter -a,
         # floor(-x) feeds -x.
-        bases, signs = zip(*(_collapse_signs(self.context.hir.nodes, operand) for operand in operands))
+        bases, signs = zip(*(collapse_signs(self.context.hir.nodes, operand) for operand in operands))
         return self.context.builder.operation(
             hardware, [self.context.remap[base] for base in bases], list(signs), output_port, immediates=immediates
         )
@@ -950,7 +892,7 @@ class _FloatLowerer:
         # kernel's angle wanted was stated in HIR and folded there. The sign rides the core's own operand, so one
         # value serves sin(-x)/cos(-x) and a sin+cos over one argument fuse into one firing.
         operator = require(self.context.ops.fsincos, "fsincos")
-        base, sign = _collapse_signs(self.context.hir.nodes, a)
+        base, sign = collapse_signs(self.context.hir.nodes, a)
         return self.context.builder.operation(
             operator,
             [self.context.remap[base]],
@@ -973,37 +915,6 @@ class _FloatLowerer:
         assert operator is not None  # only reached for a planned fusion, which exists only when fatan2 is configured
         return self._emit_float(operator, [y, x], 1)
 
-    def _lower_hypot2_naive(self, y: ValueId, x: ValueId) -> ValueId:
-        """
-        Standalone hypot has no dedicated primitive, so it uses h*sqrt(1 + (l/h)^2), where the sorter hands over
-        l=min(|x|,|y|) and h=max(|x|,|y|) in one firing. Scaling by the larger magnitude is what keeps the square
-        in range; the larger one's own quotient is exactly 1, so it is written rather than divided for.
-        Both extremes of h are semantically valid but neither may reach the divider: h==0 means 0/0, which latches
-        div0, and h==inf leans on zkf_div's unstated inf/inf. The mux keeps the division away from both while the
-        surrounding formula still returns 0 or inf.
-        """
-        ops = self.context.ops
-        fsort = require(ops.fsort, "fsort")
-        fmul = require(ops.fmul, "fmul")
-        # Both operands reach the sorter under an absolute conditioner and leave it as magnitudes, so a folded sign
-        # chain has nothing to change here and is dropped rather than carried through the decomposition.
-        base_y, _ = _collapse_signs(self.context.hir.nodes, y)
-        base_x, _ = _collapse_signs(self.context.hir.nodes, x)
-        my, mx = self.context.remap[base_y], self.context.remap[base_x]
-        absolute = FloatSignControl(absolute=True)
-        low, high = [
-            self.context.builder.operation(fsort, [mx, my], [absolute, absolute], output_port=port) for port in (0, 1)
-        ]
-        bypass = self._bool_or(self._float_eq_zero(high), self._float_isinf(high))
-        safe_high = self._float_select(bypass, self._lower_float_const(1.0), high)
-        scaled = self._mir_op(require(ops.fdiv, "fdiv"), [low, safe_high])
-        squares = self._mir_op(
-            require(ops.fadd, "fadd"),
-            [self._lower_float_const(1.0), self._mir_op(fmul, [scaled, scaled])],
-        )
-        root = self._mir_op(require(ops.fsqrt, "fsqrt"), [squares])
-        return self._mir_op(fmul, [high, root])
-
     def classification_lowering(
         self, semantic: FloatIsFinite | FloatIsInf | FloatIsPosInf | FloatIsNegInf
     ) -> tuple[FloatClassificationOperator, BoolInversion]:
@@ -1018,43 +929,8 @@ class _FloatLowerer:
             case FloatIsNegInf():
                 return FloatIsNegInfOperator(fmt), BoolInversion()
 
-    def _float_eq_zero(self, operand: ValueId) -> ValueId:
-        fcmp = require(self.context.ops.fcmp, "fcmp")
-        port, inversion = fcmp.tap_of(_RELATION_OF[FloatEqual])
-        return self.context.builder.operation(
-            fcmp,
-            [operand, self._lower_float_const(0.0)],
-            [FloatSignControl(), FloatSignControl()],
-            output_port=port,
-            output_conditioner=inversion,
-        )
-
-    def _float_isinf(self, operand: ValueId) -> ValueId:
-        semantic = FloatIsInf()
-        operator, output = self.classification_lowering(semantic)
-        return self.context.builder.operation(operator, [operand], [FloatSignControl()], output_conditioner=output)
-
-    def _bool_or(self, a: ValueId, b: ValueId) -> ValueId:
-        return self.context.builder.operation(BoolOrOperator(), [a, b], [BoolInversion(), BoolInversion()])
-
-    def _float_select(self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId:
-        return self.context.builder.operation(
-            SelectOperator(ScalarFloatType(self.context.float_format)),
-            [cond, a, b],
-            [BoolInversion(), FloatSignControl(), FloatSignControl()],
-        )
-
-    def _mir_op(self, hardware: HardwareOperator, operands: list[ValueId], output_port: int = 0) -> ValueId:
-        # Operands are already-lowered MIR ids taking identity conditioners -- a decomposition's interior.
-        return self.context.builder.operation(
-            hardware,
-            operands,
-            [FloatSignControl()] * len(operands),
-            output_port=output_port,
-        )
-
     def _lower_float_mul_pow2(self, a: ValueId, k: int) -> ValueId:
-        base, sign = _collapse_signs(self.context.hir.nodes, a)
+        base, sign = collapse_signs(self.context.hir.nodes, a)
         return self._emit_scale_pow2(self.context.remap[base], sign, k)
 
     def _emit_scale_pow2(self, operand: ValueId, sign: FloatSignControl, k: int) -> ValueId:
@@ -1063,7 +939,9 @@ class _FloatLowerer:
         format already lies far beyond the float's dynamic range, where the scaler rails or flushes identically.
         """
         ifmt = self.context.int_format
-        exponent = self.context.builder.int_const(ifmt.saturate(k), ScalarIntType(ifmt))
+        return self._emit_scale(operand, sign, self.context.builder.int_const(ifmt.saturate(k), ScalarIntType(ifmt)))
+
+    def _emit_scale(self, operand: ValueId, sign: FloatSignControl, exponent: ValueId) -> ValueId:
         return self.context.builder.operation(
             require(self.context.ops.fmul_ilog2, "fmul_ilog2"),
             [operand, exponent],
@@ -1071,14 +949,14 @@ class _FloatLowerer:
         )
 
     def lower_output(self, name: str, value: ValueId) -> bool:
-        base, sign = _collapse_signs(self.context.hir.nodes, value)
+        base, sign = collapse_signs(self.context.hir.nodes, value)
         if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
             return False
         self.context.builder.float_output(name, self.context.remap[base], sign)
         return True
 
     def lower_state_slot(self, slot: StateSlot) -> bool:
-        base, sign = _collapse_signs(self.context.hir.nodes, slot.live_out)
+        base, sign = collapse_signs(self.context.hir.nodes, slot.live_out)
         if not isinstance(self.context.hir.nodes[base].type, HirFloatType):
             return False
         assert isinstance(slot.reset_value, FloatConst), "the gate owns a slot whose reset is of the wrong family"
@@ -1165,6 +1043,11 @@ class _IntLowerer:
                 return self.context.builder.operation(BoolToIntOperator(fmt), [self.context.remap[base]], [inversion])
             case Operation(operator=FloatToInt(), operands=(a,)):
                 return self._lower_to_int(a)
+            case Operation(operator=FloatILog2(), operands=(a,)):
+                base, _ = collapse_signs(self.context.hir.nodes, a)  # the exponent cannot see the sign
+                return self.context.builder.operation(
+                    require(self.context.ops.filog2, "filog2"), [self.context.remap[base]], [FloatSignControl()]
+                )
             case _:
                 return None
 
@@ -1174,7 +1057,7 @@ class _IntLowerer:
         The surviving operand's sign chain folds onto the float port, applied before the rounding as the source has it.
         """
         mode, operand = _absorbed_rounding(self.context.hir, a) or (RoundMode.TRUNC, a)
-        base, sign = _collapse_signs(self.context.hir.nodes, operand)
+        base, sign = collapse_signs(self.context.hir.nodes, operand)
         return self.context.builder.operation(
             require(self.context.ops.ftoint, "ftoint"),
             [self.context.remap[base]],
@@ -1273,13 +1156,15 @@ def _derive(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Hir:
     input rather than its consumer, and the word width from within the fixpoint, since only a fold can reveal a count.
     """
     hir = optimize(trig_abi(hir), ifconv_max_ops)
-    rounds = left_shifts(hir) + 1  # every substitution deletes one, and no pass mints one
-    while (substituted := specialize(hir, ops.int_format)) is not None:
-        rounds -= 1
-        # Specialization must not unsettle what an earlier round settled.
-        assert rounds > 0
-        hir = optimize(substituted, ifconv_max_ops)
-    return rescale(hir, ops)
+    fuel = left_shifts(hir) + hypot_count(hir) + 1  # each rewrite deletes one of these, and no pass mints either
+    while True:
+        rewritten = specialize(hir, ops.int_format) or expand_unfused(hir, ops)
+        if rewritten is None:
+            break
+        fuel -= 1
+        assert fuel > 0, "the derivation is not settling"
+        hir = optimize(rewritten, ifconv_max_ops)
+    return rescale(hir, ops)  # last: strength reduction would compose the pair it splits straight back
 
 
 def _widest_word(options: MirOptions) -> int:
@@ -1303,10 +1188,10 @@ def lower(hir: Hir, options: MirOptions) -> Mir:
     cascades, so the passes run again after every substitution and `refuse` waits for the graph that is actually built.
     """
     original, widest = hir, _widest_word(options)
-    ops = OpConfig.build(options.operator, options.float_format, options.wmultiplier, IntFormat(widest))
+    ops = OpConfig(options.operator, options.float_format, IntFormat(widest), options.wmultiplier)
     hir = _derive(original, ops, options.ifconv_max_ops)
     if (word := _word(hir, options)) != widest:
-        narrow = OpConfig.build(options.operator, options.float_format, options.wmultiplier, IntFormat(word))
+        narrow = OpConfig(options.operator, options.float_format, IntFormat(word), options.wmultiplier)
         try:
             candidate = _derive(original, narrow, options.ifconv_max_ops)
         except UnsupportedConstruct as ex:

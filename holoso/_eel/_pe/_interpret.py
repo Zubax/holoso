@@ -64,7 +64,6 @@ from ._residual import assigned_names, drop_return_rows, prune, rechained
 from ._snapshot import Snapshotter, describe_opaque as _describe_opaque
 from ._state import (
     READ_PROTOCOLS,
-    ComponentTree,
     ScalarSpec,
     SequenceSpec,
     Spec,

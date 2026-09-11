@@ -16,7 +16,6 @@ from holoso import (
     FDivOptions,
     FMulILog2Options,
     FMulOptions,
-    FSortOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
@@ -610,7 +609,7 @@ def _const_branch_mir(ops: MirOptions) -> Mir:
     below being worth covering regardless.
     """
     # The machine this case asks for, not the default one: the parametrized cases differ only in operator staging.
-    built = OpConfig.build(ops.operator, ops.float_format, ops.wmultiplier, default_ifmt(FMT))
+    built = OpConfig(ops.operator, ops.float_format, default_ifmt(FMT), ops.wmultiplier)
     fcmp, fadd = require(built.fcmp, "fcmp"), require(built.fadd, "fadd")
     port, inversion = fcmp.tap_of(Relation.GT)
     builder = MirBuilder(FMT, default_ifmt(FMT))
@@ -2224,8 +2223,9 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
 # CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing -- the first operators with
 # initiation_interval > 1, so the scheduler's busy_until spacing is exercised here for the first time.
 
-# default_mir already carries fexp2/flog2/fsqrt/fsincos/fatan2; the lone-hypot decomposition also needs fsort.
-_CORDIC_OPS = replace(default_mir(FMT), operator=replace(default_mir(FMT).operator, fsort=FSortOptions()))
+# default_mir already carries fexp2/flog2/fsqrt/fsincos/fatan2 and the exponent extractor the lone-hypot
+# expansion asks for, so nothing needs adding here any more.
+_CORDIC_OPS = default_mir(FMT)
 
 
 def _instance_counts(lir: Lir) -> Counter[str]:
@@ -2283,11 +2283,13 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "lone_hypot")
     counts = _instance_counts(lir)
-    assert "fatan2" not in counts
-    assert counts.get("fsqrt") == 1 and counts.get("fsort") == 1  # the scaled sum of squares under the native root
-    # One sorter firing hands over both magnitudes, and only the smaller one is divided down: the larger one's own
-    # quotient is exactly 1 and is written into the sum instead.
-    assert len(_firings(lir, "fsort")) == 1 and len(_firings(lir, "fdiv")) == 1
+    assert "fatan2" not in counts  # no CORDIC is spun up for a hypotenuse that has no angle beside it
+    # The exponent scaling replaced the divide form outright: no sorter and no divider, and the root now sees a sum
+    # of two squares taken at a scale that cannot overflow.
+    assert counts.get("fsqrt") == 1 and counts.get("filog2") == 1
+    assert "fsort" not in counts and "fdiv" not in counts
+    # Both legs are extracted on the one instance and all three scalings ride one scaler.
+    assert len(_firings(lir, "filog2")) == 2 and len(_firings(lir, "fmul_ilog2")) == 3
 
 
 def test_independent_sincos_share_one_instance_spaced_by_ii() -> None:

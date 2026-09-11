@@ -12,7 +12,7 @@ extension (`tests/hdl/test_int_inline.py`).
 """
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import fields
 
 import pytest
 
@@ -51,6 +51,7 @@ from holoso._operators import (
     IntInlineOperator,
     IntShiftConstOperator,
     IntToBoolOperator,
+    OperatorOptions,
     Relation,
     RoundMode,
 )
@@ -405,13 +406,47 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
     assert ops.ftoint.signature.result_types == (IntType(IntFormat(44)),)
 
 
-def test_the_configuration_checks_every_port_format_and_not_just_the_operator_kind() -> None:
-    # A conversion operator carries one format per side, so a check keyed on the operator's own `fmt` could
-    # not see a wrong `ifmt` at all -- it read the float side and agreed with itself.
-    options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33)
+def test_the_catalogue_builds_every_operator_for_the_machines_own_formats() -> None:
+    # A conversion operator carries one format per side, so a check keyed on the operator's own `fmt` could not see
+    # a wrong `ifmt` at all -- it read the float side and agreed with itself. The catalogue now BUILDS each operator
+    # from the machine's formats instead of accepting one built elsewhere, so the mismatch is unrepresentable
+    # rather than merely caught; this walks the whole catalogue and pins that.
+    options = Options(
+        OperatorOptions(
+            fadd=holoso.FAddOptions(),
+            fmul=holoso.FMulOptions(),
+            fdiv=holoso.FDivOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(),
+            filog2=holoso.FILog2Options(),
+            fcmp=holoso.FCmpOptions(),
+            fround=holoso.FRoundOptions(),
+            ffma=holoso.FFmaOptions(),
+            fsort=holoso.FSortOptions(),
+            fsqrt=holoso.FSqrtOptions(),
+            fexp2=holoso.FExp2Options(),
+            flog2=holoso.FLog2Options(),
+            fsincos=holoso.FSincosOptions(),
+            fatan2=holoso.FAtan2Options(),
+            ffromint=holoso.FFromIntOptions(),
+            ftoint=holoso.FToIntOptions(),
+        ),
+        ffmt=FloatFormat(6, 18),
+        wint_min=33,
+    )
     ops = build_ops(options, options.wint_min)
-    with pytest.raises(AssertionError, match="ftoint"):
-        replace(ops, ftoint=FToIntOperator(options.ffmt, IntFormat(17), FToIntOptions()))
+    built = 0
+    for name in (field.name for field in fields(OperatorOptions)):
+        operator = getattr(ops, name)
+        if operator is None:
+            continue
+        built += 1
+        signature = operator.signature
+        for port in signature.operand_types + signature.result_types:
+            if isinstance(port, FloatType):
+                assert port.fmt == ops.float_format, (name, port)
+            if isinstance(port, IntType):
+                assert port.fmt == ops.int_format, (name, port)
+    assert built == len(fields(OperatorOptions)), built  # every optional, plus the never-optional multiplier
 
 
 def _add(a: float, b: float) -> float:

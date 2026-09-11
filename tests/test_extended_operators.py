@@ -18,6 +18,7 @@ from holoso import (
     FDivOptions,
     FExp2Options,
     FFmaOptions,
+    FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
@@ -32,8 +33,9 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
+from holoso._operators import FAtan2Operator, FSincosOperator
 from holoso._value import ScalarValue
-from ._modelref import instantiated_modules as _modules, random_legal_bits
+from ._modelref import _if_supported, instantiated_modules as _modules, random_legal_bits
 
 # Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -58,13 +60,17 @@ def _ops(
     with_sqrt: bool = True,
     with_sincos: bool = True,
     with_atan2: bool = True,
+    with_ilog2: bool = True,
+    with_scaler: bool = True,
+    fmt: FloatFormat = FMT,
 ) -> Options:
     return Options(
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
             fdiv=FDivOptions(),
-            fmul_ilog2=FMulILog2Options(),
+            fmul_ilog2=FMulILog2Options() if with_scaler else None,
+            filog2=FILog2Options() if with_ilog2 else None,
             fcmp=FCmpOptions(),
             fround=FRoundOptions() if with_round else None,
             ffma=FFmaOptions() if with_fma else None,
@@ -72,10 +78,10 @@ def _ops(
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
             fsqrt=FSqrtOptions() if with_sqrt else None,
-            fsincos=FSincosOptions() if with_sincos else None,
-            fatan2=FAtan2Options() if with_atan2 else None,
+            fsincos=_if_supported(FSincosOperator, fmt, FSincosOptions()) if with_sincos else None,
+            fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options()) if with_atan2 else None,
         ),
-        ffmt=FMT,
+        ffmt=fmt,
     )
 
 
@@ -928,15 +934,17 @@ def test_hypot_sign_flipped_still_fuses_with_atan2() -> None:
 
 
 def test_hypot_lone_decomposition_is_approximate() -> None:
-    # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fsqrt); the root is
-    # exact but the scaling divisions and squares are not, so the composite stays approximate on finite nonzero inputs.
+    # A lone hypot is expanded by exact exponent scaling, so only the two squares and their sum round before the
+    # correctly-rounded root, and it stays in range where a written `sqrt(x*x + y*y)` overflows or flushes.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
     sim = _sim(kernel, "hypot_lone")
     assert _bits(sim.run(0.0, 0.0)[0]) == _v(0.0).bits
     assert _bits(sim.run(_POS_INF, 2.0)[0]) == _v(_POS_INF).bits
-    assert _bits(sim.run(_POS_INF, _POS_INF)[0]) == _v(_POS_INF).bits  # the only pair that could divide inf by inf
+    assert _bits(sim.run(_POS_INF, _POS_INF)[0]) == _v(_POS_INF).bits
+    assert _bits(sim.run(0.0, -7.5)[0]) == _v(7.5).bits  # a zero leg leaves the other exactly, no rounding at all
+    assert _bits(sim.run(-3.0, 4.0)[0]) == _v(5.0).bits  # signs are dropped, the squares being sign-blind
     rng = np.random.default_rng(0x4F0)
     for _ in range(200):
         # Spread over ±20 decades, which is what the magnitude scaling is FOR: the naive sqrt(y*y + x*x) overflows
@@ -946,17 +954,19 @@ def test_hypot_lone_decomposition_is_approximate() -> None:
         native = math.hypot(y, x)
         if native == 0.0 or math.isinf(native):
             continue
-        assert abs(float(sim.run(y, x)[0]) - native) <= 64 * _ulp32(native), f"lone hypot y={y} x={x}"
+        # Two ulps against the divide form's sixty-four; measured worst over 4000 draws is 1.003.
+        assert abs(float(sim.run(y, x)[0]) - native) <= 2 * _ulp32(native), f"lone hypot y={y} x={x}"
 
 
 def test_hypot_lone_missing_primitive_is_rejected() -> None:
-    # The decomposition needs fsort/fsqrt; absent either, a lone hypot is a clear configuration error.
+    # The expansion needs the extractor and the root, but no longer the sorter the divide form did.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
-    for ops in (_ops(with_sort=False), _ops(with_sqrt=False)):
+    for ops in (_ops(with_ilog2=False), _ops(with_sqrt=False), _ops(with_scaler=False)):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(kernel, ops, name="hypot_lone_reject")
+    holoso.synthesize(kernel, _ops(with_sort=False), name="hypot_lone_no_sorter")
 
 
 def _sqrt_ref(x: float) -> int:
@@ -1383,3 +1393,41 @@ def test_other_exponents_keep_the_general_power() -> None:
     assert "holoso_fsqrt" not in _modules(holoso.synthesize(fourth_root, _ops(), name="pow_quarter"))
     assert "holoso_fsqrt" not in _modules(holoso.synthesize(runtime_exponent, _ops(), name="pow_runtime_e"))
     assert _modules(holoso.synthesize(cube, _ops(), name="pow_cube")) == {"holoso_fmul"}
+
+
+def test_a_hypotenuse_orphaned_by_a_cancelled_fusion_is_still_expanded() -> None:
+    """
+    The two over `(x, y)` and `(-x, y)` expand alike, signs being dropped; their difference cancels, taking the
+    atan2 with it and orphaning `hypot(a, b)`, which was planned as fused. So expansion cannot be a single pass.
+    """
+
+    def kernel(a: float, b: float, x: float, y: float) -> float:
+        delta = math.hypot(x, y) - math.hypot(-x, y)
+        return math.hypot(a, b) + delta * math.atan2(a, b)
+
+    modules = _modules(holoso.synthesize(kernel, _ops(), name="hypot_orphan_modules"))
+    assert "holoso_fatan2" not in modules, "the cancellation must have deleted the only atan2"
+    assert {"holoso_filog2", "holoso_fsqrt", "holoso_fmul_ilog2"} <= modules
+    assert "holoso_fsort" not in modules and "holoso_fdiv" not in modules
+    sim = _sim(kernel, "hypot_orphan")
+    for a, b in ((3.0, 4.0), (0.0, 0.0), (-3.0, 4.0)):
+        assert float(sim.run(a, b, 1.0, 2.0)[0]) == float(_v(math.hypot(a, b))), (a, b)
+
+
+def test_a_hypotenuse_beside_an_unholdable_multiplier_still_builds() -> None:
+    # Pins the pass order: rescaling stays last. Were anything to optimize after it, strength reduction would
+    # recompose the pair it split and the kernel would be refused over a constant it never wrote.
+    def kernel(x: float, y: float) -> tuple[float, float]:
+        return math.hypot(x, y), (x * 2.0**40) * 3.0
+
+    modules = _modules(holoso.synthesize(kernel, _ops(fmt=FloatFormat(6, 18)), name="hypot_beside_wide_scale"))
+    assert {"holoso_filog2", "holoso_fsqrt"} <= modules
+
+
+def test_a_hypotenuse_is_refused_where_no_scaling_keeps_the_square_in_range() -> None:
+    # Two exponent bits cannot hold a normalized operand's square, so no scale satisfies both ends of the window.
+    def kernel(y: float, x: float) -> float:
+        return math.hypot(y, x)
+
+    with pytest.raises(UnsupportedConstruct, match="hypotenuse"):
+        holoso.synthesize(kernel, _ops(fmt=FloatFormat(2, 12)), name="hypot_narrow_exponent")

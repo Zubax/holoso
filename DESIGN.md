@@ -212,7 +212,7 @@ resource-sharing key; a machine holds one configuration per pooled class. An ope
 microcode-driven immediate inputs, and declares a per-instance initiation interval (most are II=1, fully pipelined).
 
 Every float operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA
-contraction, `fsort` enables min/max, `fsqrt` enables the square root and with it the standalone hypotenuse); what a
+contraction, `fsort` enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone hypotenuse); what a
 kernel cannot reach through the operators it was given is refused at MIR lowering. An integer operator is never
 optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
 
@@ -396,19 +396,24 @@ carries.
 MIR owns the whole boundary: it optimizes the front end's HIR, judges what survives, and only then selects hardware.
 Optimization is not the caller's to run, because the judgement must see the last graph and no earlier one.
 
-It is also where what the machine knows is written back INTO HIR -- the direction the layering permits: nothing in
-HIR may ASK a format, but the machine may TELL HIR, since a fact answered only at selection would be stranded past
-every fold it could have enabled. The trigonometric cores count angles in turns, so the radian operators are
-restated over a turn-native vocabulary with an explicit conversion, ahead of the optimizer, letting a kernel whose
-phase is already in turns have its own scaling meet that conversion and cancel. The machine word is told from inside
-the fixpoint, since only a fold can reveal a shift count. The float format is told last, once nothing more will
-move: a multiplication by a constant the format cannot hold splits into one by its significand and one by its
-exponent, so a kernel is not refused over a number the optimizer minted and it never wrote; told any earlier, the
-optimizer would compose the pair straight back. A scale past the format's own exponent span is left to be refused.
-What may be told is bounded by the same unboundedness that motivates it: a rule qualifies only if its answer is
-independent of every operand, since a later round can reveal one as a constant no word holds -- a left shift past
-the word is zero whatever it shifts, while the right shift's sign fill holds only for a value the word already
-holds, so that clamp stays at lowering.
+It is also where what the machine knows is written back INTO HIR -- the direction the layering permits: nothing in HIR
+may ASK a format, but the machine may TELL HIR, since a fact answered only at selection would be stranded past every
+fold it could have enabled. The trigonometric cores count angles in turns, so the radian operators are restated over a
+turn-native vocabulary with an explicit conversion, ahead of the optimizer, letting a kernel whose phase is already in
+turns have its own scaling meet that conversion and cancel. The machine word is told from inside the fixpoint, since
+only a fold can reveal a shift count. A hypotenuse no adjacent atan2 will carry is told its format's exponent range
+and expanded into `2^-k*sqrt((x*2^k)^2 + (y*2^k)^2)`, the scale taken at the top of what the range allows. Being exact
+it cannot overflow the square, and it keeps the smaller operand wherever the significand is no wider than the exponent
+range affords, which the written form never does. The scale is bounded both ways -- the dominant square must stay
+normal and the sum must stay finite -- and a format leaving no room between them is refused. Expansion and fusion
+settle together, since expanding one hypotenuse can cancel an expression and delete the atan2 another was to fuse
+with. The float format is told last, once nothing more will move: a multiplication by a constant the format cannot
+hold splits into one by its significand and one by its exponent, so a kernel is not refused over a number the
+optimizer minted and it never wrote; told any earlier, the optimizer would compose the pair straight back. A scale
+past the format's own exponent span is left to be refused. What may be told is bounded by the same unboundedness that
+motivates it: a rule qualifies only if its answer is independent of every operand, since a later round can reveal one
+as a constant no word holds -- a left shift past the word is zero whatever it shifts, while the right shift's sign
+fill holds only for a value the word already holds, so that clamp stays at lowering.
 
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
 RESULT is its own. The float lowerer maps each semantic float operator to its configured hardware operator and
@@ -430,9 +435,7 @@ sin/cos computed simultaneously by the sincos operator, FMA contraction of `a*b+
 the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
 left alone), a directional infinity classifier for an infinity predicate adjacent to a sign test -- matched at MIR
 because this is the first layer aware of hardware semantics. Some semantic operators lower into combinations of
-hardware operators depending on availability and context (e.g. hypotenuse via fatan2); such composite lowerings may
-use inline muxes to sanitize operands fed into their internal primitives so that semantically valid edge cases do not
-raise avoidable primitive-side errors, while invalid source inputs still reach the error-bearing primitive.
+hardware operators depending on availability and context (e.g. hypotenuse via fatan2).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is carried through as per-bank views sharing the block
@@ -456,11 +459,11 @@ float port folds a sign into the free `fsgnop` sideband and a boolean port an in
 nothing, since two's-complement negation is not free in fabric. Whether a float OPERAND port has that sideband at all
 is the operator's to declare, not the port type's to imply: one that reads no sign bit on any output -- the exponent
 extractor, the finiteness and zero tests -- declares the operand UNCONDITIONED and then admits only the identity
-conditioner: a pooled one binds no sign field and allocates no microcode bits, while an inline one, having neither
-to begin with, sheds the `holoso_fsgnop` that would have wrapped its operand in the write expression. A result port keeps the type rule, negating a
-result being always observable. Each scheduled firing carries its operands and conditioners, its register writes, and
-an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API plus shared analysis helpers
-(per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
+conditioner: a pooled one binds no sign field and allocates no microcode bits, while an inline one, having neither to
+begin with, sheds the `holoso_fsgnop` that would have wrapped its operand in the write expression. A result port keeps
+the type rule, negating a result being always observable. Each scheduled firing carries its operands and conditioners,
+its register writes, and an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API plus shared
+analysis helpers (per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach
