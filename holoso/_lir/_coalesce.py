@@ -1,19 +1,21 @@
-"""Per-bank phi-arm coalescing and quotient register coloring for the LIR builder."""
+"""Per-bank phi-arm coalescing for the LIR builder."""
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from .._mir import MirPhi
 from .._util import ValueId
-from ._ir import ReadPort
-from ._regalloc import ColoringProblem, Producer, color, find_coloring_conflict
-from ._build_base import ColorObjective
+from ._regalloc import find_coloring_conflict
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class _PhiCoalescing:
+class PhiCoalescing:
     leader: dict[ValueId, ValueId]  # value -> class leader (a value never merged maps to itself, implicitly)
     coalesced: frozenset[tuple[int, ValueId]]  # (pred, phi) arms that share the merged register (no install copy)
+    pinned: dict[ValueId, int]  # per class leader with a pinned member, the register its pin fixes
 
 
 def coalescable_arms(
@@ -46,21 +48,21 @@ def _coalesce_phis(
     pinned: dict[ValueId, int],
     reserved_regs: set[int],
     forbidden: set[tuple[int, ValueId]],
-) -> _PhiCoalescing:
+) -> PhiCoalescing:
     """
     Union-find phi-arm coalescing for one bank. Each phi result and its register-backed, identity-conditioner arms
     (`candidate_arms`) merge into one congruence class whenever the merge introduces no interference -- judged on
     `oracle`, the install-free interference graph, since a coalesced class carries no install copy. The arms and the
     phi then share a register and the install copy vanishes. A class carries at most one pinned register; a class may
     not land on a `reserved` register -- the NON-coalesced state-slot registers, whose copy-back/early-install
-    machinery owns them. A COALESCED slot's register is NOT reserved: it is seeded by the slot live-out's pin, so the
+    machinery owns them. A COALESCED slot's register is NOT reserved: it is pinned by the slot live-out, so the
     phi live-out and the slot live-in (its "unchanged" arm) merge onto it for an in-place commit. `phi_order` is the
     deterministic processing order (block reverse-postorder, then value id); arms are processed in their phi-arm order.
 
     `oracle` is only an OVER-APPROXIMATION of coalescability: it omits the residual (non-coalesced) arms' install
     writes, so it can admit a merge the final install-aware interference rejects (a coalesced phi whose residual
-    sibling arm's install lands in a register a class member is still live in). The caller (coalesce_and_color)
-    corrects this by rebuilding the final interference and re-running with the offending arms in `forbidden` -- the
+    sibling arm's install lands in a register a class member is still live in). The caller (`coalesce`) corrects
+    this by rebuilding the final interference and re-running with the offending arms in `forbidden` -- the
     `(pred, phi)` arms this call must skip, never admitting them into a class. The fixpoint converges because
     forbidding only ever grows.
     """
@@ -119,72 +121,13 @@ def _coalesce_phis(
         for pred, arm in candidate_arms.get(phi_vid, [])
         if leader.get(arm, arm) == leader.get(phi_vid, phi_vid)
     )
-    return _PhiCoalescing(leader, coalesced)
-
-
-def _color_quotient(
-    leader: dict[ValueId, ValueId],
-    pinned: dict[ValueId, int],
-    interferes: dict[ValueId, set[ValueId]],
-    objective: ColorObjective,
-) -> tuple[dict[ValueId, int], int, int | None]:
-    """
-    Color the per-value interference graph after collapsing each coalescing class to its leader, then expand the
-    leader's color back onto every member. The quotient unions each class's consumer ports and producers so the
-    steering objective stays exact (a coalesced register really is read/written by every member's port/producer). A
-    class with a pinned member pins its leader. Reduces to the plain per-value coloring when `leader` is the identity
-    (every value its own singleton class, e.g. a kernel with no coalescable phi arms). The third return is the register
-    of an interfering co-assignment under the FULL (residual-install) interference, or None when the coloring is sound
-    -- a conflict can only come from the pins, which the caller resolves by backing the offending slot out of
-    coalescing.
-    """
-
-    def lead(v: ValueId) -> ValueId:
-        return leader.get(v, v)
-
-    leaders = sorted({lead(v) for v in interferes})
     q_pinned: dict[ValueId, int] = {}
     for vid, reg in pinned.items():
-        head = lead(vid)
+        head = leader.get(vid, vid)
         # `setdefault` runs outside the assert (which `-O` strips) so the pinned map is populated under `-O` too.
         pinned_reg = q_pinned.setdefault(head, reg)
         assert pinned_reg == reg, f"coalescing class {head} spans two pinned registers"
-    q_interferes: dict[ValueId, set[ValueId]] = {head: set() for head in leaders}
-    q_ports: dict[ValueId, set[ReadPort]] = {head: set() for head in leaders}
-    q_producers: dict[ValueId, set[Producer]] = {head: set() for head in leaders}
-    for vid in sorted(interferes):
-        head = lead(vid)
-        q_ports[head] |= objective.consumer_ports.get(vid, set())
-        q_producers[head] |= objective.producer_key[vid]
-        for other in interferes[vid]:
-            head_other = lead(other)
-            if head_other != head:
-                q_interferes[head].add(head_other)
-                q_interferes[head_other].add(head)
-    q_movable: list[ValueId] = []
-    seen: set[ValueId] = set()
-    for vid in objective.movable:  # leaders of the movable values, first occurrence, preserving the deterministic order
-        head = lead(vid)
-        if head in q_pinned or head in seen:
-            continue
-        seen.add(head)
-        q_movable.append(head)
-    q_assign, nreg = color(
-        ColoringProblem(
-            movable=q_movable,
-            pinned=q_pinned,
-            interferes=q_interferes,
-            consumer_ports=q_ports,
-            producer_key={head: frozenset(producers) for head, producers in q_producers.items()},
-            fresh_start=objective.fresh_start,
-            tuning=objective.tuning,
-        )
-    )
-    assign = {vid: q_assign[lead(vid)] for vid in interferes}
-    # Check the EXPANDED per-value coloring against the FULL (residual-install) interference -- stronger than a check
-    # over the collapsed quotient, catching any unsound union or oracle drift. A conflict is returned (not raised) so
-    # the slot-coalescing retry can back the offending slot register out and recolor.
-    return assign, nreg, find_coloring_conflict(assign, interferes)
+    return PhiCoalescing(leader, coalesced, q_pinned)
 
 
 def _residual_installs(
@@ -199,32 +142,36 @@ def _residual_installs(
     return {pred: frozenset(dests) for pred, dests in installs.items()}
 
 
-def coalesce_and_color(
+def coalesce(
     phi_nodes: Mapping[ValueId, MirPhi],
     phi_order: list[ValueId],
     candidate_arms: dict[ValueId, list[tuple[int, ValueId]]],
     pinned: dict[ValueId, int],
     reserved_regs: set[int],
     build_interferes: Callable[[dict[int, frozenset[ValueId]]], dict[ValueId, set[ValueId]]],
-    objective: ColorObjective,
-) -> tuple[dict[ValueId, int], int, _PhiCoalescing, int | None]:
+) -> tuple[PhiCoalescing, dict[ValueId, set[ValueId]], int | None]:
     """
-    Coalesce one bank's phi arms and color it, iterated to a soundness fixpoint. `_coalesce_phis` judges merges on the
-    install-free oracle -- `build_interferes({})`, the same interference graph with no residual installs -- which
-    over-approximates coalescability (see its docstring); the final interference from the actual residual installs can
-    therefore show a coalescing class interfering with itself -- a member still live where a residual sibling arm's
-    install writes the merged register. When it does, every arm-merge of each offending class is FORBIDDEN and
-    coalescing re-runs. Forbidding the whole class (not just the guilty merge) is an intentional sound-but-conservative
-    choice: it cannot under-forbid, and the worst case (all arms forbidden) is the copy-everything baseline, which has
-    no class-internal interference -- so the loop converges. The returned coalescing is the FINAL one; its `coalesced`
-    arms are exactly the copies the emitter elides. The fourth return is the register of an interfering co-assignment
-    (from the pins) or None; the caller backs the offending slot out of in-place coalescing and recolors.
+    Coalesce one bank's phi arms, iterated to a soundness fixpoint. `_coalesce_phis` judges merges on the install-free
+    oracle -- `build_interferes({})`, the same interference graph with no residual installs -- which over-approximates
+    coalescability (see its docstring); the final interference from the actual residual installs can therefore show a
+    coalescing class interfering with itself -- a member still live where a residual sibling arm's install writes the
+    merged register. When it does, every arm-merge of each offending class is FORBIDDEN and coalescing re-runs.
+    Forbidding the whole class (not just the guilty merge) is an intentional sound-but-conservative choice: it cannot
+    under-forbid, and the worst case (all arms forbidden) is the copy-everything baseline, which has no class-internal
+    interference -- so the loop converges. Returns the FINAL coalescing (its `coalesced` arms are exactly the copies
+    the emitter elides), the final install-aware interference, and the register of two interfering pinned classes, or
+    None. The annealer never co-locates interfering movable values and a class never interferes with itself, so an
+    unsound coloring can only come from the pins -- a state slot whose live-in and coalesced live-out interfere under
+    the final interference -- and is known before any coloring; the caller backs the offending slot out of in-place
+    coalescing and re-coalesces.
     """
     # The install-free baseline; deriving it here from the same builder keeps it in lockstep with the final graph.
     oracle = build_interferes({})
     forbidden: set[tuple[int, ValueId]] = set()
     arm_budget = sum(len(arms) for arms in candidate_arms.values())
-    for _round in range(arm_budget + 1):  # forbidding grows by >= 1 each conflicting round; this bounds the fixpoint
+    for round_index in range(
+        arm_budget + 1
+    ):  # forbidding grows by >= 1 each conflicting round; this bounds the fixpoint
         coalescing = _coalesce_phis(phi_nodes, phi_order, candidate_arms, oracle, pinned, reserved_regs, forbidden)
         interferes = build_interferes(_residual_installs(phi_nodes, coalescing.coalesced))
         bad_leaders: set[ValueId] = set()
@@ -233,8 +180,13 @@ def coalesce_and_color(
             if any(coalescing.leader.get(other, other) == head for other in neighbours):
                 bad_leaders.add(head)  # this class interferes with itself under the final, install-aware graph
         if not bad_leaders:
-            assign, nreg, conflict = _color_quotient(coalescing.leader, pinned, interferes, objective)
-            return assign, nreg, coalescing, conflict
+            if forbidden:
+                _logger.info("Coalescing: %d arms forbidden over %d rounds", len(forbidden), round_index)
+            q_pinned = coalescing.pinned
+            pinned_expansion = {
+                vid: q_pinned[head] for vid in interferes if (head := coalescing.leader.get(vid, vid)) in q_pinned
+            }
+            return coalescing, interferes, find_coloring_conflict(pinned_expansion, interferes)
         forbidden |= {
             (pred, phi_vid)
             for pred, phi_vid in coalescing.coalesced

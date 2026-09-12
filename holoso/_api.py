@@ -108,7 +108,11 @@ class Options:
     """
 
     ifconv_max_ops: int = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
-    """Per-arm operation budget for diamond if-conversion; 0 converts only the operation-free diamonds."""
+    """
+    Per-arm operation budget for diamond if-conversion; 0 converts only the operation-free diamonds.
+    Currently, this counts semantic operations, which may expand into many hardware operations depending on context.
+    E.g., addition is always one-to-one, while, say, hypotenuse may expand into a dozen microcode cycles.
+    """
 
     unroll_max_trips: int = int(os.getenv("HOLOSO_UNROLL_MAX_TRIPS", "1024"))
     """
@@ -119,17 +123,19 @@ class Options:
     ucode_fetch_stages: int = 3
     """Controller fmax/latency trade-off: a deeper fetch raises fmax but costs idle refills on a mispredicted branch."""
 
-    regalloc_effort: int = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "5000"))
-    """How hard to search for the best register allocation. Better machines take longer to build."""
-
-    regalloc_reuse_write_cap: int = int(os.getenv("HOLOSO_REG_REUSE_WRITE_CAP", "2"))
+    regalloc_effort: int = int(os.getenv("HOLOSO_REGALLOC_EFFORT", "10_000"))
     """
-    How wide a per-register write select the regfile compaction may build: more compact register file, larger and
-    slower steering fabric. A penalty rather than a hard cap, since some registers need an irreducibly wider select.
+    How hard to search for the best register allocation, in annealing proposals (candidate moves) per decision: a
+    value's register, the operand order of a commutative operation, and the instance of an operation whose operator
+    has several. 0 skips the annealing and keeps the greedy starting allocation after one local-improvement pass.
+    Better machines take longer to build.
     """
 
     regalloc_register_price: float = float(os.getenv("HOLOSO_REG_PRICE", "2.0"))
-    """What one register is worth in steering mux arms. Greater values buy fewer registers with heavier steering."""
+    """
+    What one register is worth in register-file multiplexer inputs: the allocator merges two registers when the
+    multiplexer inputs it adds cost less than this. Greater values give fewer registers and wider multiplexers.
+    """
 
     def __post_init__(self) -> None:
         if self.wint_min < 2:
@@ -144,8 +150,6 @@ class Options:
             raise ValueError(f"ucode_fetch_stages must be >= 1, got {self.ucode_fetch_stages}")
         if self.regalloc_effort < 0:
             raise ValueError(f"regalloc_effort must be >= 0, got {self.regalloc_effort}")
-        if self.regalloc_reuse_write_cap < 1:
-            raise ValueError(f"regalloc_reuse_write_cap must be >= 1, got {self.regalloc_reuse_write_cap}")
         if self.regalloc_register_price <= 0:
             raise ValueError(f"regalloc_register_price must be > 0, got {self.regalloc_register_price}")
 
@@ -186,11 +190,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
         mir,
         module_name,
         options.ucode_fetch_stages,
-        RegallocTuning(
-            effort=options.regalloc_effort,
-            reuse_write_cap=options.regalloc_reuse_write_cap,
-            register_price=options.regalloc_register_price,
-        ),
+        RegallocTuning(effort=options.regalloc_effort, register_price=options.regalloc_register_price),
     )
     _logger.info("LIR ports:\n\t%s", "\n\t".join(f"{port}" for port in lir.ports))
 

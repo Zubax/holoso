@@ -1,177 +1,607 @@
 """
-Reach-aware register coloring over an explicit interference graph.
+Register allocation of one bank, jointly with the orientation of every commutative firing (which read port each
+operand takes) and, for a pooled class realized on several instances, with the instance each firing (one activation
+of a pooled operator) binds, by one deterministic incremental annealer over an explicit interference graph.
 
-The engine is bank- and timeline-agnostic: register sharing is decided entirely by the symmetric interference graph the
-caller supplies (built in ._liveness from per-block hardware-frame residence, the same executing-step frame as
-`Lir.reg_liveness`), so the one `color` routine colors a straight-line block or a whole control-flow graph, and
-either the wide or the boolean bank. The interference graph already encodes the read-first `R(a) < W(b)` rule and the
-path-awareness of mutually-exclusive arms; this module only places values onto registers given those constraints.
+Register sharing is decided entirely by the interference graph the caller supplies (built in `._liveness` from
+per-block hardware-frame residence), so one `color` routine colors a straight-line block or a whole control-flow graph,
+and either bank; of the timeline this module sees only each firing's busy window, which decides where it may be rebound.
 
-Unlike a CPU register allocator, the primary objective is NOT to minimize the register count: flip-flops are abundant on
-an FPGA and interconnect is scarce, so the cost that matters most is *steering* -- the fan-in of the per-port read muxes
-and the per-register write selects of the sparse register file synthesized in the backend. The primary objective is
-therefore total mux fan-in: `sum_p max(0, |read-set(p)| - 1) + sum_r max(0, |writers(r)| - 1)`, where a read port
-`p` is one operator `(instance, operand-position)` and `writers(r)` are the distinct producers of the values
-placed in register `r`. Two values read by the same port that do not interfere are best placed in the same register so
-that port reaches one register, not two; values produced by the same instance likewise want to share a register so its
-write port fans into one place.
+The objective is the steering of the sparse register file the backend emits (its read and write multiplexers), plus a
+price per register:
 
-Register count is a bounded *secondary* objective. A register costs flip-flops but no steering, so it is worth shedding
-only when doing so widens a write select modestly: the allocator colors twice -- once reach-minimal, once compacting
-into shared registers up to a write-select cap -- and keeps whichever minimizes `reach + price * registers` (see
-RegallocTuning). The reach-minimal coloring is always a candidate, so trading for fewer registers never raises
-steering by more than the price paid per register freed.
+    sum over ports (|sources| - 1) + sum over registers (|writers| - 1) + register_price * open registers
 
-The allocator is a port-affinity-biased graph coloring (each value takes the same-interference-free register of least
-marginal mux growth), refined by simulated annealing. Pinned values (input ports on the low load lanes, state live-ins
-and coalesced live-outs on their slot registers) are fixed by the caller; everything else is movable, reusing a pinned
-or earlier register wherever the interference graph allows. There is no spilling: a value the cap cannot place by reuse
-simply opens a new register.
+A read port is one `(operator, instance, operand position)`; its sources, the arms of its read mux, are the registers
+and the constant-pool words it reads (a constant is an arm like a register, an immovable pseudo-register). A register's
+writers are the output lanes `(operator, instance, output port)` landing in it and the fixed producers the emitter
+places beside them, keyed exactly as the emitter's write codebook keys them: an inline result by its operator and
+resolved operands (two results of one expression over the same registers are one arm), a residual phi arm by the operand
+it moves, and the handshake-gated input load and slot install each by itself. Those keys depend on the assignment, so a
+value move re-keys every producer reading it. An open register is one above the pinned registers that holds at least one
+value.
+
+Orientation belongs to the same objective because a commutative firing may read its operands either way round:
+swapping moves each operand from one port's mux to the other's and permutes the firing's output taps through the
+operator's `swap_output_permutation`, a pure relabeling at zero latency (Chen & Cong, ASP-DAC 2004). Binding
+belongs to it for the same reason: the instance a firing runs on decides which ports read its operands and which
+lanes write its results, and the scheduler's first-free choice is only the seed. A firing may move to any instance of
+its class whose busy windows -- the other firings' in the block and the busy residue an overlapping predecessor
+left, the cycles its instance stays busy in this block's frame -- leave its own window free, so neither the instance
+count nor the latency changes.
+
+The search starts from the seed, a greedy allocation guided by port affinity, refined by simulated annealing over value
+moves, instance moves, pair swaps and orientation flips with incremental cost deltas, then a first-improvement descent
+over the complete move set, so the result is a local optimum of that neighborhood and never worse than the seed. Pinned
+values (the i-th input port on register i, where the input load writes it; state live-ins and coalesced live-outs on
+their slot registers) are fixed by the caller; everything else may reuse any occupied register the interference graph
+allows except the reserved ones (a non-coalesced slot register belongs to its copy-back machinery). There is no
+spilling: a value opens a new register when no other fits. The random number generator is `random.Random(0)` and every
+iteration order is hash-independent, so the result is a function of the problem alone.
 """
 
+import logging
+import math
+import os
+import random
+from abc import ABC, abstractmethod
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
+from typing import NamedTuple
 
-import numpy as np
-from scipy.optimize import dual_annealing
-
+from .._operators import InlineHardwareOperator, PooledHardwareOperator, PortConditioner
 from .._util import ValueId
-from ._ir import OperatorInstance, ReadPort
+from ._ir import BoolOperand
+from ._sources import InlineWriteSource, MoveWriteSource, OperandTemplate, WideOperandTemplate
 
-# Write-source identity: an operator instance, the input load, or a per-slot state writer -- opaque keys for grouping
-# the write-select fan-in objective. The read-port identity `ReadPort` lives in `_ir` beside its enumerator.
-type Producer = OperatorInstance | str
+_logger = logging.getLogger(__name__)
 
-_NO_CAP = 1 << 30  # an effectively unbounded write-select budget, used for the reach-minimal coloring
-_INFEASIBLE_COST = 1e18  # annealing penalty for an undecodable point (far above any real mux-fan-in objective)
+_TEMPERATURE_START = 2.0
+_TEMPERATURE_END = 0.05
+
+# The shares of proposals drawn as instance moves, pair swaps and orientation flips, each only while such decisions
+# exist; the rest are value moves. Set by hand when each move kind was added and confirmed flat by a sweep over the
+# example kernels at the shipped effort, summing the allocator's objective: halving or doubling the flip share, or
+# the two binding shares, moves the sum by under one percent, comparable to the half-percent spread between random
+# seeds, while dropping all three, leaving flips and rebinds to the descent, costs about 2.5 percent. Not exposed
+# through `RegallocTuning`: unlike `effort` and `register_price` they trade nothing a user can reason about.
+_BIND_SHARE = float(os.getenv("HOLOSO_REGALLOC_BIND_SHARE", "0.25"))
+_SWAP_SHARE = float(os.getenv("HOLOSO_REGALLOC_SWAP_SHARE", "0.10"))
+_FLIP_SHARE = float(os.getenv("HOLOSO_REGALLOC_FLIP_SHARE", "0.12"))
+
+_EPSILON = 1e-9
 
 
 @dataclass(frozen=True, slots=True)
 class RegallocTuning:
     """
-    `effort` is the annealing function-evaluation budget, `reuse_write_cap` bounds the per-register write select
-    the compaction may build, and `register_price` is what one freed register is worth in mux-arm units: the
-    allocator minimizes `reach + register_price * registers`.
+    `effort` is the search budget in proposals per decision (a movable value's register, a commutative firing's
+    orientation, a bindable firing's instance); 0 keeps the greedy seed and its descent. `register_price` is what one
+    freed register is worth in mux arms: the allocator minimizes `steering + register_price * registers`.
     """
 
     effort: int
-    reuse_write_cap: int
     register_price: float
+
+
+@dataclass(frozen=True, slots=True)
+class PoolWord:
+    """A constant-pool word as an operand source: an arm of whichever port reads it, on no register."""
+
+    index: int
+
+
+type _Source = ValueId | PoolWord
+
+
+class FixedProducer(ABC):
+    """
+    A writer of a register beside the pooled output lanes, keyed under an assignment as the emitter's write select
+    keys it: `holes` are the values of this bank whose registers the key depends on, `substitute` renames them
+    (to a coalescing class leader), `resolve` yields the key. A handshake-gated arm has no holes and is its own key.
+    """
+
+    @property
+    @abstractmethod
+    def holes(self) -> list[ValueId]: ...
+
+    @abstractmethod
+    def substitute(self, fn: Callable[[ValueId], ValueId]) -> "FixedProducer": ...
+
+    @abstractmethod
+    def resolve(self, register_of: Callable[[ValueId], int]) -> "_WriterKey": ...
+
+
+class _StaticWriter(FixedProducer):
+    """A handshake-gated arm: no holes, its own key."""
+
+    @property
+    def holes(self) -> list[ValueId]:
+        return []
+
+    def substitute(self, fn: Callable[[ValueId], ValueId]) -> "_StaticWriter":
+        return self
+
+    def resolve(self, register_of: Callable[[ValueId], int]) -> "_StaticWriter":
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class InputWriter(_StaticWriter):
+    """The load of an input port into its register."""
+
+    value: ValueId
+
+
+@dataclass(frozen=True, slots=True)
+class SlotWriter(_StaticWriter):
+    """A state slot's install of a live-out that ends up in another register, into the slot register."""
+
+    slot: str
+
+
+@dataclass(frozen=True, slots=True)
+class InlineWriter(FixedProducer):
+    """An inline operator's combinational result; its boolean operands are resolved, that bank being colored first."""
+
+    operator: InlineHardwareOperator
+    operands: tuple[WideOperandTemplate | BoolOperand, ...]
+    conditioner: PortConditioner
+
+    @property
+    def holes(self) -> list[ValueId]:
+        return [t.hole for t in self.operands if isinstance(t, WideOperandTemplate) and t.hole is not None]
+
+    def substitute(self, fn: Callable[[ValueId], ValueId]) -> "InlineWriter":
+        operands = tuple(t.substitute(fn) if isinstance(t, WideOperandTemplate) else t for t in self.operands)
+        return InlineWriter(self.operator, operands, self.conditioner)
+
+    def resolve(self, register_of: Callable[[ValueId], int]) -> InlineWriteSource:
+        operands = tuple(t.resolve(register_of) if isinstance(t, WideOperandTemplate) else t for t in self.operands)
+        return InlineWriteSource(self.operator, operands, self.conditioner)
+
+
+@dataclass(frozen=True, slots=True)
+class MoveWriter(FixedProducer):
+    """A residual (non-coalesced) phi arm's install copy."""
+
+    source: OperandTemplate
+
+    @property
+    def holes(self) -> list[ValueId]:
+        return [] if self.source.hole is None else [self.source.hole]
+
+    def substitute(self, fn: Callable[[ValueId], ValueId]) -> "MoveWriter":
+        return MoveWriter(self.source.substitute(fn))
+
+    def resolve(self, register_of: Callable[[ValueId], int]) -> MoveWriteSource:
+        return MoveWriteSource(self.source.resolve(register_of))
+
+
+type _WriterKey = _StaticWriter | InlineWriteSource | MoveWriteSource
+
+
+@dataclass(frozen=True, slots=True)
+class Firing:
+    """
+    One pooled firing as the bank's objective sees it: the leader the build keys the orientation and the binding by,
+    the operator, the block and block-local issue cycle, the instance the scheduler bound and whether the annealer may
+    rebind it (its class has more than one realized instance and its busy window ends inside the block, so it leaves
+    no residue on a successor), its operand sources in source order (a value of this bank or a constant-pool word),
+    and the tapped output ports landing in this bank with the value each writes. A firing tapping nothing into this
+    bank (a comparator's boolean taps) still reads its wide operands.
+    """
+
+    leader: ValueId
+    operator: PooledHardwareOperator
+    block: int
+    issue: int
+    seed_instance: int
+    bindable: bool
+    reads: list[_Source]
+    writes: list[tuple[int, ValueId]]
+
+    @property
+    def window(self) -> range:
+        return range(self.issue, self.issue + self.operator.initiation_interval)
 
 
 @dataclass(frozen=True, slots=True)
 class ColoringProblem:
     """
-    A register-coloring instance decoupled from any single timeline: register sharing is decided by an explicit
-    interference graph (see ._liveness), so the same engine colors a straight-line block or a whole CFG, and
-    either register bank.
+    A register-allocation instance decoupled from any single timeline: register sharing is decided by an explicit
+    interference graph (see ._liveness), so the same routine colors a straight-line block or a whole CFG, and either
+    register bank.
 
     `movable` are the values to place (in a stable order); `pinned` fixes inputs and state live-ins to their
-    registers; `interferes` is the symmetric adjacency; `consumer_ports` and `producer_key` drive the mux-fan-in
-    objective; `fresh_start` is the first register index above the pinned block. There is no write-path restriction:
-    the emitter drives every register with a single write opcode selecting among all its writers, so any two
-    non-interfering values may share a register regardless of whether they are produced by an operator, a phi-arm copy,
-    or a cast.
-
-    `producer_key` is a SET of producers per value, not a single one: a coalesced phi class is one `movable` entry
-    backed by every arm operator that writes its register, so the write-select fan-in counts the union of those
-    producers. A non-coalesced value carries a singleton set, recovering the one-producer-per-value objective exactly.
-    A phi contributes a single placeholder producer (`phi:<vid>`) rather than one key per residual arm copy; this is a
-    deliberate approximation that the annealer tolerates (it may miscount a phi register's fan-in by a copy or two, and
-    never affects coloring validity) -- the honest steering cost is the ground-truth `Lir.write_select_fanin`.
+    registers; `interferes` is the symmetric adjacency over every value of the bank; `fixed_producers` names each
+    value's writers other than pooled lanes, every hole a value of this bank; `reserved` are the registers no
+    movable value may join; `fresh_start`
+    is the first register index above the pinned registers; `firings` are the bank's pooled firings, whose reads and
+    writes are keyed by the values here (a coalesced class appears as its leader, so a merged register is read and
+    written by every member's port and lane); `instances` is the realized instance count per operator, the bound a
+    firing may be rebound within; `entry_busy` is, per (block, operator, instance), the block-local cycle before
+    which the instance is still busy with an overlapping predecessor's firing. The boolean bank passes no firings,
+    only its residual arms and slot installs, so its objective is nearly the register count.
     """
 
     movable: list[ValueId]
     pinned: dict[ValueId, int]
     interferes: dict[ValueId, set[ValueId]]
-    consumer_ports: dict[ValueId, set[ReadPort]]
-    producer_key: dict[ValueId, frozenset[Producer]]
+    fixed_producers: dict[ValueId, list[FixedProducer]]
+    reserved: frozenset[int]
     fresh_start: int
+    firings: list[Firing]
+    instances: dict[PooledHardwareOperator, int]
+    entry_busy: dict["InstanceSlot", int]
     tuning: RegallocTuning
 
 
-def color(problem: ColoringProblem) -> tuple[dict[ValueId, int], int]:
+@dataclass(frozen=True, slots=True)
+class Coloring:
     """
-    Color one bank by the reach-aware objective: a port-affinity greedy seed (reach-minimal and cap-compacted), the
-    cheaper of the two by `reach + price * registers`, refined by simulated annealing. Reduces to the straight-line
-    coloring on a single block because the interference graph there is exactly the interval-overlap graph.
+    The allocation: every value's register (labels compacted above `fresh_start` by first use), the register
+    count, per firing leader whether the build reads its operands the other way round and the instance it binds
+    (labels canonical by first use in block, cycle, leader order), and the objective's two steering terms as
+    allocated.
     """
-    cap, price = problem.tuning.reuse_write_cap, problem.tuning.register_price
 
-    def greedy_seed(compact: bool, budget: int) -> tuple[dict[ValueId, int], int]:
-        seed = _color_greedy(problem, compact, budget)
-        return seed, max((max(seed.values()) + 1) if seed else 0, problem.fresh_start)
-
-    base_seed, base_nreg = greedy_seed(compact=False, budget=_NO_CAP)
-    comp_seed, comp_nreg = greedy_seed(compact=True, budget=cap)
-    assign, nreg = _color_refine(problem, base_seed, base_nreg, _NO_CAP), base_nreg
-    if comp_nreg < base_nreg:
-        comp_assign = _color_refine(problem, comp_seed, comp_nreg, cap)
-        base_score = (_objective(assign, problem.consumer_ports, problem.producer_key) + price * base_nreg, base_nreg)
-        comp_score = (
-            _objective(comp_assign, problem.consumer_ports, problem.producer_key) + price * comp_nreg,
-            comp_nreg,
-        )
-        if comp_score < base_score:
-            assign, nreg = comp_assign, comp_nreg
-    return assign, nreg
+    assign: dict[ValueId, int]
+    nreg: int
+    swap: dict[ValueId, bool]
+    instance: dict[ValueId, int]
+    read_arms: int
+    write_arms: int
 
 
-def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[ValueId, int]:
+# Named tuples, not dataclasses: these are the counter keys of the annealer's hot loop.
+class _Port(NamedTuple):
+    operator: PooledHardwareOperator
+    instance: int
+    position: int
+
+
+class _Lane(NamedTuple):
+    operator: PooledHardwareOperator
+    instance: int
+    port: int
+
+
+class InstanceSlot(NamedTuple):
+    """One instance of a pooled class within one block: what a firing occupies for its busy window."""
+
+    block: int
+    operator: PooledHardwareOperator
+    instance: int
+
+
+type _Writer = _Lane | _WriterKey
+type _ReadSource = int | PoolWord
+
+
+@dataclass(frozen=True, slots=True)
+class _Snapshot:
+    assign: dict[ValueId, int]
+    flip: list[bool]
+    instance: list[int]
+
+
+class _State:
     """
-    Port-affinity-biased graph coloring. Each value takes a register whose occupants it does not interfere with, of
-    least marginal mux growth (`compact` ranks any admissible reused register ahead of a fresh one); a fresh register
-    is the fallback. With one block this reproduces the straight-line linear scan exactly.
+    The allocation under search with its incremental objective: per port the sources it reaches, per register its
+    writers (both with multiplicity, so a source leaves a mux only when its last read or write moves away), the
+    register membership, and per instance the cycles its firings occupy. A fixed producer's writer key is its
+    resolution under the current assignment, so a value move re-keys the producers reading it (`dependents`) as
+    well as those writing it. Every move goes through the counters, so its cost delta is exact and the inverse move
+    is its undo.
+    """
+
+    def __init__(self, problem: ColoringProblem, start: _Snapshot) -> None:
+        self.problem = problem
+        self.price = problem.tuning.register_price
+        self.flip = list(start.flip)
+        self.instance = list(start.instance)
+        self.occupancy: dict[tuple[InstanceSlot, int], int] = {}  # (slot, cycle) -> the firing busy there
+        self.assign: dict[ValueId, int] = {}
+        self.members: dict[int, set[ValueId]] = {}
+        self.port_sources: dict[_Port, Counter[_ReadSource]] = {}
+        self.reg_writers: dict[int, Counter[_Writer]] = {}
+        self.writer_regs: dict[_Writer, Counter[int]] = {}
+        self.read_arms = 0
+        self.write_arms = 0
+        self.open = 0
+        self.readers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, operand position)
+        self.producers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, output port)
+        self.dependents: dict[ValueId, list[tuple[ValueId, FixedProducer]]] = {}  # hole -> (written value, producer)
+        for i, firing in enumerate(problem.firings):
+            for pos, source in enumerate(firing.reads):
+                if not isinstance(source, PoolWord):
+                    self.readers.setdefault(source, []).append((i, pos))
+            for port, value in firing.writes:
+                self.producers.setdefault(value, []).append((i, port))
+        for vid in sorted(problem.fixed_producers):
+            producers = problem.fixed_producers[vid]
+            assert len(set(producers)) == len(producers), f"value {vid} lists a producer twice"
+            for producer in producers:
+                for hole in producer.holes:
+                    assert hole in problem.interferes, f"producer of {vid} depends on {hole}, not of this bank"
+                    self.dependents.setdefault(hole, []).append((vid, producer))
+        for vid, reg in start.assign.items():
+            self._join(vid, reg)
+        for vid in start.assign:
+            self._produce(vid, 1)
+        for i in range(len(problem.firings)):
+            self._attach(i, 1)
+
+    @property
+    def cost(self) -> float:
+        return self.read_arms + self.write_arms + self.price * self.open
+
+    def snapshot(self) -> _Snapshot:
+        return _Snapshot(dict(self.assign), list(self.flip), list(self.instance))
+
+    def _read(self, port: _Port, source: _ReadSource, delta: int) -> None:
+        sources = self.port_sources.setdefault(port, Counter())
+        before = len(sources)
+        count = sources[source] + delta
+        assert count >= 0
+        if count:
+            sources[source] = count
+        else:
+            del sources[source]
+        self.read_arms += max(0, len(sources) - 1) - max(0, before - 1)
+
+    def _write(self, reg: int, writer: _Writer, delta: int) -> None:
+        writers = self.reg_writers.setdefault(reg, Counter())
+        before = len(writers)
+        count = writers[writer] + delta
+        assert count >= 0
+        regs = self.writer_regs.setdefault(writer, Counter())
+        if count:
+            writers[writer] = count
+            regs[reg] += delta
+        else:
+            del writers[writer]
+            del regs[reg]
+            if not regs:
+                del self.writer_regs[writer]
+        self.write_arms += max(0, len(writers) - 1) - max(0, before - 1)
+
+    def _port(self, i: int, pos: int) -> _Port:
+        firing = self.problem.firings[i]
+        if self.flip[i]:
+            pos = 1 - pos  # commutative firings have arity 2 (checked by `color`)
+        return _Port(firing.operator, self.instance[i], pos)
+
+    def _lane(self, i: int, port: int) -> _Lane:
+        firing = self.problem.firings[i]
+        if self.flip[i]:
+            permutation = firing.operator.swap_output_permutation
+            assert permutation is not None
+            port = permutation[port]
+        return _Lane(firing.operator, self.instance[i], port)
+
+    def _slot(self, i: int, instance: int) -> InstanceSlot:
+        firing = self.problem.firings[i]
+        return InstanceSlot(firing.block, firing.operator, instance)
+
+    def _read_source(self, source: _Source) -> _ReadSource:
+        return source if isinstance(source, PoolWord) else self.assign[source]
+
+    def _attach(self, i: int, delta: int) -> None:
+        firing = self.problem.firings[i]
+        for pos, source in enumerate(firing.reads):
+            self._read(self._port(i, pos), self._read_source(source), delta)
+        for port, value in firing.writes:
+            self._write(self.assign[value], self._lane(i, port), delta)
+        slot = self._slot(i, self.instance[i])
+        for cycle in firing.window:
+            if delta > 0:
+                assert (slot, cycle) not in self.occupancy, "two firings of one class busy on one instance"
+                self.occupancy[(slot, cycle)] = i
+            else:
+                del self.occupancy[(slot, cycle)]
+
+    def _join(self, vid: ValueId, reg: int) -> None:
+        self.assign[vid] = reg
+        members = self.members.setdefault(reg, set())
+        if not members and reg >= self.problem.fresh_start:
+            self.open += 1
+        members.add(vid)
+
+    def _leave(self, vid: ValueId) -> None:
+        reg = self.assign.pop(vid)
+        members = self.members[reg]
+        members.discard(vid)
+        if not members and reg >= self.problem.fresh_start:
+            self.open -= 1
+
+    def _resolve(self, producer: FixedProducer) -> _Writer:
+        return producer.resolve(self.assign.__getitem__)
+
+    def _produce(self, vid: ValueId, delta: int) -> None:
+        for producer in self.problem.fixed_producers.get(vid, ()):
+            self._write(self.assign[vid], self._resolve(producer), delta)
+
+    def _rekeyed(self, vid: ValueId) -> list[tuple[ValueId, FixedProducer]]:
+        """The producers whose key changes when `vid` moves: those it writes with and those reading it, once each."""
+        own = [(vid, producer) for producer in self.problem.fixed_producers.get(vid, ())]
+        return list(dict.fromkeys([*own, *self.dependents.get(vid, ())]))
+
+    def _writers_of(self, vid: ValueId) -> list[_Writer]:
+        lanes: list[_Writer] = [self._lane(i, port) for i, port in self.producers.get(vid, ())]
+        return [*(self._resolve(p) for p in self.problem.fixed_producers.get(vid, ())), *lanes]
+
+    def _touch(self, vid: ValueId, delta: int) -> None:
+        """Count (or discount) every endpoint keyed by `vid`'s register: reads, lanes, the producers it re-keys."""
+        reg = self.assign[vid]
+        for i, pos in self.readers.get(vid, ()):
+            self._read(self._port(i, pos), reg, delta)
+        for i, port in self.producers.get(vid, ()):
+            self._write(reg, self._lane(i, port), delta)
+        for dst, producer in self._rekeyed(vid):
+            self._write(self.assign[dst], self._resolve(producer), delta)
+
+    def move_value(self, vid: ValueId, reg: int) -> None:
+        self._touch(vid, -1)
+        self._leave(vid)
+        self._join(vid, reg)
+        self._touch(vid, 1)
+
+    def flip_firing(self, i: int) -> None:
+        self._attach(i, -1)
+        self.flip[i] = not self.flip[i]
+        self._attach(i, 1)
+
+    def instance_free(self, i: int, instance: int) -> bool:
+        """Whether firing `i` may run on `instance`: past the inherited residue, clashing with no other firing there."""
+        firing = self.problem.firings[i]
+        slot = self._slot(i, instance)
+        if firing.issue < self.problem.entry_busy.get(slot, 0):
+            return False
+        return all(self.occupancy.get((slot, cycle), i) == i for cycle in firing.window)
+
+    def move_instance(self, i: int, instance: int) -> None:
+        self._attach(i, -1)
+        self.instance[i] = instance
+        self._attach(i, 1)
+
+    def swap_instances(self, i: int, j: int) -> bool:
+        """Exchange two same-class firings' instances if both windows are free after the exchange; else no change."""
+        assert self.problem.firings[i].operator == self.problem.firings[j].operator
+        self._attach(i, -1)
+        self._attach(j, -1)
+        legal = self.instance_free(i, self.instance[j]) and self.instance_free(j, self.instance[i])
+        if legal:
+            self.instance[i], self.instance[j] = self.instance[j], self.instance[i]
+        self._attach(i, 1)
+        self._attach(j, 1)
+        return legal
+
+    def fits(self, vid: ValueId, reg: int) -> bool:
+        if reg in self.problem.reserved:
+            return False
+        members = self.members.get(reg)
+        if not members:
+            # An empty register among the pinned ones may not be joined; above them, any empty register is open.
+            assert reg >= self.problem.fresh_start or reg in self.problem.reserved
+            return reg >= self.problem.fresh_start
+        return self.problem.interferes[vid].isdisjoint(members)
+
+    def fresh(self) -> int:
+        reg = self.problem.fresh_start
+        while self.members.get(reg):
+            reg += 1
+        return reg
+
+    def occupied(self) -> list[int]:
+        return sorted(reg for reg, members in self.members.items() if members)
+
+    def propose_register(self, vid: ValueId, rng: random.Random) -> int | None:
+        """
+        A target register for `vid` drawn from its affinities -- the registers its ports already reach, the ones its
+        writers already drive -- or any occupied register, or a fresh one; None when the draw is infeasible (which
+        consumes budget like any other proposal).
+        """
+        draw = rng.random()
+        candidates: list[int]
+        if draw < 0.45:
+            candidates = [
+                source
+                for i, pos in self.readers.get(vid, ())
+                for source in self.port_sources.get(self._port(i, pos), ())
+                if isinstance(source, int)
+            ]
+        elif draw < 0.65:
+            candidates = [reg for writer in self._writers_of(vid) for reg in self.writer_regs.get(writer, ())]
+        elif draw < 0.9:
+            candidates = [reg for reg, members in self.members.items() if members]
+        else:
+            candidates = [self.fresh()]
+        old = self.assign[vid]
+        candidates = [reg for reg in candidates if reg != old]
+        if not candidates:
+            return None
+        reg = candidates[rng.randrange(len(candidates))]
+        return reg if self.fits(vid, reg) else None
+
+
+def _check_swappable(operator: PooledHardwareOperator) -> None:
+    """A flip exchanges the two operands with their conditioners, which only a symmetric pair of ports can carry."""
+    assert operator.signature.arity == 2, operator.mnemonic
+    assert operator.conditions_operand(0) == operator.conditions_operand(1), operator.mnemonic
+    assert (0 in operator.unconditioned_operands) == (1 in operator.unconditioned_operands), operator.mnemonic
+
+
+type _SeedWriter = _Lane | FixedProducer  # a producer stands for itself before any register is assigned
+
+
+def _seed_incidence(
+    problem: ColoringProblem,
+) -> tuple[dict[ValueId, set[_Port]], dict[ValueId, frozenset[_SeedWriter]]]:
+    """Per value, the ports reading it and the writers driving it at the scheduler's binding and source orientation."""
+    ports: dict[ValueId, set[_Port]] = {vid: set() for vid in problem.interferes}
+    writers: dict[ValueId, set[_SeedWriter]] = {
+        vid: set(problem.fixed_producers.get(vid, ())) for vid in problem.interferes
+    }
+    for firing in problem.firings:
+        for pos, source in enumerate(firing.reads):
+            if not isinstance(source, PoolWord):
+                ports[source].add(_Port(firing.operator, firing.seed_instance, pos))
+        for port, value in firing.writes:
+            writers[value].add(_Lane(firing.operator, firing.seed_instance, port))
+    return ports, {vid: frozenset(w) for vid, w in writers.items()}
+
+
+def _greedy(
+    problem: ColoringProblem, ports_of: dict[ValueId, set[_Port]], writers_of: dict[ValueId, frozenset[_SeedWriter]]
+) -> dict[ValueId, int]:
+    """
+    Port-affinity-biased graph coloring: each value takes the admissible register of least marginal mux growth, a
+    fresh register being the fallback (a fixed producer counts as one writer of its own here; the exact,
+    assignment-dependent keys are computed once the seed is placed). With one block this reproduces the
+    straight-line linear scan exactly.
     """
     assign: dict[ValueId, int] = {}
-    reg_ports: dict[int, set[ReadPort]] = {}
-    reg_writers: dict[int, set[Producer]] = {}
+    reg_ports: dict[int, set[_Port]] = {}
+    reg_writers: dict[int, set[_SeedWriter]] = {}
     reg_members: dict[int, set[ValueId]] = {}
-    port_reach: Counter[ReadPort] = Counter()
+    port_reach: Counter[_Port] = Counter()
 
     def place(vid: ValueId, reg: int) -> None:
         assign[vid] = reg
         ports = reg_ports.setdefault(reg, set())
-        for port in problem.consumer_ports[vid]:
+        for port in ports_of[vid]:
             if port not in ports:
                 ports.add(port)
                 port_reach[port] += 1
-        reg_writers.setdefault(reg, set()).update(problem.producer_key[vid])
+        reg_writers.setdefault(reg, set()).update(writers_of[vid])
         reg_members.setdefault(reg, set()).add(vid)
 
     def marginal_cost(vid: ValueId, reg: int) -> int:
-        ports: frozenset[ReadPort] | set[ReadPort] = reg_ports.get(reg, frozenset())
-        writers: frozenset[Producer] | set[Producer] = reg_writers.get(reg, frozenset())
-        read = sum(1 for port in problem.consumer_ports[vid] if port not in ports and port_reach[port] >= 1)
-        # Exact incremental write-select growth (union of the value's producers into the register's), so a coalesced
-        # class's several producers are charged honestly; a singleton set reduces to the one-producer +1-or-0 step.
-        merged = writers | problem.producer_key[vid]
-        write = max(0, len(merged) - 1) - max(0, len(writers) - 1)
-        return read + write
-
-    def candidate_key(vid: ValueId, reg: int, is_fresh: int) -> tuple[int, int, int]:
-        cost = marginal_cost(vid, reg)
-        return (is_fresh, cost, reg) if compact else (cost, is_fresh, reg)
+        ports: frozenset[_Port] | set[_Port] = reg_ports.get(reg, frozenset())
+        writers: frozenset[_SeedWriter] | set[_SeedWriter] = reg_writers.get(reg, frozenset())
+        read = sum(1 for port in ports_of[vid] if port not in ports and port_reach[port] >= 1)
+        merged = writers | writers_of[vid]
+        return read + max(0, len(merged) - 1) - max(0, len(writers) - 1)
 
     def admissible(vid: ValueId, reg: int) -> bool:
-        if reg not in reg_members:  # a reserved register below fresh_start with no occupant (e.g. a write-only slot)
+        if reg in problem.reserved or reg not in reg_members:
             return False
-        if not problem.interferes[vid].isdisjoint(reg_members[reg]):
-            return False
-        if compact and len(reg_writers[reg] | problem.producer_key[vid]) > cap:
-            return False
-        return True
+        return problem.interferes[vid].isdisjoint(reg_members[reg])
 
     for vid, reg in sorted(problem.pinned.items(), key=lambda item: (item[1], item[0])):
         place(vid, reg)
     next_reg = problem.fresh_start
     for vid in problem.movable:
         best_reg, best_fresh = next_reg, True
-        best_key = candidate_key(vid, next_reg, 1)
+        best_key = (marginal_cost(vid, next_reg), 1, next_reg)
         for reg in range(next_reg):
             if not admissible(vid, reg):
                 continue
-            key = candidate_key(vid, reg, 0)
+            key = (marginal_cost(vid, reg), 0, reg)
             if key < best_key:
                 best_key, best_reg, best_fresh = key, reg, False
         if best_fresh:
@@ -180,80 +610,236 @@ def _color_greedy(problem: ColoringProblem, compact: bool, cap: int) -> dict[Val
     return assign
 
 
-def _color_refine(problem: ColoringProblem, seed: dict[ValueId, int], nreg: int, cap: int) -> dict[ValueId, int]:
+@dataclass(frozen=True, slots=True)
+class _Decisions:
+    """What the search may change: the movable values, the flippable firings, the bindable firings by class."""
+
+    movable: list[ValueId]
+    flippable: list[int]
+    bindable: list[int]
+    swappable: list[list[int]]  # the classes with at least two bindable firings
+
+    @classmethod
+    def of(cls, problem: ColoringProblem) -> "_Decisions":
+        flippable = [i for i, firing in enumerate(problem.firings) if firing.operator.is_commutative]
+        bindable = [i for i, firing in enumerate(problem.firings) if firing.bindable]
+        by_class: dict[PooledHardwareOperator, list[int]] = {}
+        for i in bindable:
+            by_class.setdefault(problem.firings[i].operator, []).append(i)
+        return cls(problem.movable, flippable, bindable, [members for members in by_class.values() if len(members) > 1])
+
+    @property
+    def count(self) -> int:
+        return len(self.movable) + len(self.flippable) + len(self.bindable)
+
+
+def _unswap(state: _State, i: int, j: int) -> None:
+    restored = state.swap_instances(i, j)
+    assert restored
+
+
+def _anneal(state: _State, rng: random.Random, proposals: int, decisions: _Decisions) -> _Snapshot:
     """
-    Refine the greedy coloring with `scipy.optimize.dual_annealing`. Each movable value gets a continuous coordinate
-    in `[0, nreg)`; a decode repairs it to the nearest same-pool register free of interference and within the
-    write-select budget. Every evaluated point is a valid coloring and the seed is the start, so the pass only improves.
+    Simulated annealing over the incremental state: each proposal is a value move drawn from the value's affinities,
+    an instance move, a pair swap within a class, or an orientation flip, accepted by the Metropolis rule under
+    geometric cooling; an infeasible draw spends its proposal. Returns the best allocation seen.
     """
-    order = problem.movable
-    if len(order) < 2 or nreg <= 1:
-        return seed
-    op_set = set(order)
-    pinned = [(vid, reg) for vid, reg in seed.items() if vid not in op_set]
-    seed_regs = set(seed.values())  # the registers the seed actually uses; a reserved (unplaced) register is excluded
-
-    def decode(coords: np.ndarray) -> dict[ValueId, int] | None:
-        assign: dict[ValueId, int] = {}
-        members: list[set[ValueId]] = [set() for _ in range(nreg)]
-        writers: list[set[Producer]] = [set() for _ in range(nreg)]
-        for vid, reg in pinned:
-            assign[vid] = reg
-            members[reg].add(vid)
-            writers[reg].update(problem.producer_key[vid])
-
-        def fits(vid: ValueId, reg: int, within_cap: bool) -> bool:
-            if reg not in seed_regs:  # a reserved register with no seed occupant (e.g. a write-only state slot)
-                return False
-            if not problem.interferes[vid].isdisjoint(members[reg]):
-                return False
-            return not within_cap or len(writers[reg] | problem.producer_key[vid]) <= cap
-
-        for index, vid in enumerate(order):
-            pref = min(nreg - 1, max(0, int(coords[index])))
-            chosen = -1
-            for offset in range(nreg):
-                reg = (pref + offset) % nreg
-                if fits(vid, reg, within_cap=True):
-                    chosen = reg
-                    break
-            if chosen < 0:
-                free = [r for r in range(nreg) if fits(vid, r, within_cap=False)]
-                if not free:
-                    return None
-                chosen = min(free, key=lambda reg: (len(writers[reg] | problem.producer_key[vid]), reg))
-            assign[vid] = chosen
-            members[chosen].add(vid)
-            writers[chosen].update(problem.producer_key[vid])
-        return assign
-
-    effort = problem.tuning.effort
-    if effort <= 0:
-        return seed
-    best = seed
-    best_cost = _objective(seed, problem.consumer_ports, problem.producer_key)
-    if best_cost == 0:
-        return best
-
-    def cost(coords: np.ndarray) -> float:
-        nonlocal best, best_cost
-        candidate = decode(coords)
-        if candidate is None:
-            return _INFEASIBLE_COST
-        value = _objective(candidate, problem.consumer_ports, problem.producer_key)
-        if value < best_cost:
-            best, best_cost = candidate, value
-        return float(value)
-
-    x0 = np.array([float(seed[vid]) for vid in order])
-    bounds = [(0.0, nreg - 1e-6)] * len(order)
-    dual_annealing(cost, bounds, x0=x0, seed=0, maxiter=effort, maxfun=effort, no_local_search=True)
+    problem = state.problem
+    best_cost = state.cost
+    best = state.snapshot()
+    bind_share = _BIND_SHARE if decisions.bindable else 0.0
+    swap_share = _SWAP_SHARE if decisions.swappable else 0.0
+    flip_share = _FLIP_SHARE if decisions.flippable else 0.0
+    for step in range(proposals):
+        temperature = _TEMPERATURE_START * (_TEMPERATURE_END / _TEMPERATURE_START) ** (step / proposals)
+        before = state.cost
+        undo: Callable[[], None]
+        draw = rng.random()
+        if draw < bind_share:
+            i = decisions.bindable[rng.randrange(len(decisions.bindable))]
+            target = rng.randrange(problem.instances[problem.firings[i].operator])
+            if target == state.instance[i] or not state.instance_free(i, target):
+                continue
+            undo = partial(state.move_instance, i, state.instance[i])
+            state.move_instance(i, target)
+        elif draw < bind_share + swap_share:
+            members = decisions.swappable[rng.randrange(len(decisions.swappable))]
+            i, j = rng.sample(members, 2)
+            if state.instance[i] == state.instance[j] or not state.swap_instances(i, j):
+                continue
+            undo = partial(_unswap, state, i, j)
+        elif draw < bind_share + swap_share + flip_share:
+            i = decisions.flippable[rng.randrange(len(decisions.flippable))]
+            state.flip_firing(i)
+            undo = partial(state.flip_firing, i)
+        else:
+            if not decisions.movable:
+                continue
+            vid = decisions.movable[rng.randrange(len(decisions.movable))]
+            reg = state.propose_register(vid, rng)
+            if reg is None:
+                continue
+            undo = partial(state.move_value, vid, state.assign[vid])
+            state.move_value(vid, reg)
+        delta = state.cost - before
+        if delta <= 0 or rng.random() < math.exp(-delta / temperature):
+            if state.cost < best_cost - _EPSILON:
+                best_cost = state.cost
+                best = state.snapshot()
+        else:
+            undo()
     return best
+
+
+def _descend(state: _State, decisions: _Decisions) -> int:
+    """
+    First-improvement descent over the complete move set -- every movable value against every occupied non-reserved
+    register and one fresh register, every bindable firing against every free instance of its class, every legal pair
+    swap, every flip -- until no move improves, so the result is a local optimum of the annealer's neighborhood.
+    Returns the number of sweeps.
+    """
+    problem = state.problem
+    sweeps = 0
+    improved = True
+    while improved:
+        improved = False
+        sweeps += 1
+        for vid in decisions.movable:
+            old = state.assign[vid]
+            best_reg, best_cost = None, state.cost
+            for reg in [*state.occupied(), state.fresh()]:
+                if reg == old or not state.fits(vid, reg):
+                    continue
+                state.move_value(vid, reg)
+                if state.cost < best_cost - _EPSILON:
+                    best_reg, best_cost = reg, state.cost
+                state.move_value(vid, old)
+            if best_reg is not None:
+                state.move_value(vid, best_reg)
+                improved = True
+        for i in decisions.bindable:
+            old = state.instance[i]
+            best_instance, best_cost = None, state.cost
+            for instance in range(problem.instances[problem.firings[i].operator]):
+                if instance == old or not state.instance_free(i, instance):
+                    continue
+                state.move_instance(i, instance)
+                if state.cost < best_cost - _EPSILON:
+                    best_instance, best_cost = instance, state.cost
+                state.move_instance(i, old)
+            if best_instance is not None:
+                state.move_instance(i, best_instance)
+                improved = True
+        for members in decisions.swappable:
+            for a, i in enumerate(members):
+                for j in members[a + 1 :]:
+                    if state.instance[i] == state.instance[j]:
+                        continue
+                    before = state.cost
+                    if not state.swap_instances(i, j):
+                        continue
+                    if state.cost < before - _EPSILON:
+                        improved = True
+                    else:
+                        restored = state.swap_instances(i, j)
+                        assert restored
+        for i in decisions.flippable:
+            before = state.cost
+            state.flip_firing(i)
+            if state.cost < before - _EPSILON:
+                improved = True
+            else:
+                state.flip_firing(i)
+    return sweeps
+
+
+def _compact(problem: ColoringProblem, assign: dict[ValueId, int]) -> tuple[dict[ValueId, int], int]:
+    """Relabel the open registers by first use (pinned values first, then the movable order); pins keep their index."""
+    relabel: dict[int, int] = {}
+    next_reg = problem.fresh_start
+    compacted: dict[ValueId, int] = {}
+    for vid in [*sorted(problem.pinned), *problem.movable]:
+        reg = assign[vid]
+        if reg < problem.fresh_start:
+            compacted[vid] = reg
+            continue
+        if reg not in relabel:
+            relabel[reg] = next_reg
+            next_reg += 1
+        compacted[vid] = relabel[reg]
+    return compacted, max(next_reg, problem.fresh_start)
+
+
+def _canonical_instances(problem: ColoringProblem, instance: list[int]) -> dict[ValueId, int]:
+    """
+    Per firing leader, its instance relabeled per class by first use in block, cycle, leader order, so the labels
+    are dense and every labeled instance is used. The relabeling is one bijection per class over every block, so the
+    cross-seam residue the search honored on the raw labels holds on the canonical ones too.
+    """
+    labels: dict[tuple[PooledHardwareOperator, int], int] = {}
+    used: Counter[PooledHardwareOperator] = Counter()
+    order = sorted(range(len(problem.firings)), key=lambda i: (problem.firings[i].block, problem.firings[i].issue, i))
+    for i in order:
+        key = (problem.firings[i].operator, instance[i])
+        if key not in labels:
+            labels[key] = used[key[0]]
+            used[key[0]] += 1
+    assert all(used[operator] <= count for operator, count in problem.instances.items())
+    return {problem.firings[i].leader: labels[(problem.firings[i].operator, instance[i])] for i in order}
+
+
+def color(problem: ColoringProblem) -> Coloring:
+    """
+    Allocate one bank: the greedy seed, the annealing over `effort` proposals per decision (skipped
+    at effort 0), then the descent. Reduces to the straight-line coloring on a single block because the interference
+    graph there is exactly the interval-overlap graph.
+    """
+    for operator in {firing.operator for firing in problem.firings if firing.operator.is_commutative}:
+        _check_swappable(operator)
+    assert all(not firing.bindable or problem.instances[firing.operator] > 1 for firing in problem.firings)
+    ports_of, writers_of = _seed_incidence(problem)
+    seed = _Snapshot(
+        _greedy(problem, ports_of, writers_of),
+        [False] * len(problem.firings),
+        [firing.seed_instance for firing in problem.firings],
+    )
+    state = _State(problem, seed)
+    seed_cost = state.cost
+    decisions = _Decisions.of(problem)
+    proposals = problem.tuning.effort * decisions.count
+    if proposals > 0:
+        state = _State(problem, _anneal(state, random.Random(0), proposals, decisions))
+    sweeps = _descend(state, decisions)
+    assert state.cost <= seed_cost + _EPSILON
+    # Every window is disjoint from every other on its instance (`_attach` asserts it on every move); every firing
+    # sits past its inherited residue, and no movable value joined a reserved register.
+    assert all(state.instance_free(i, state.instance[i]) for i in range(len(problem.firings)))
+    assert all(state.assign[vid] not in problem.reserved for vid in problem.movable)
+    compacted, nreg = _compact(problem, state.assign)
+    _logger.info(
+        "Register allocation: values=%d pinned=%d firings=%d commutative=%d bindable=%d proposals=%d; objective "
+        "%g -> %g (read arms %d, write arms %d, open registers %d) after %d descent sweeps",
+        len(problem.interferes),
+        len(problem.pinned),
+        len(problem.firings),
+        len(decisions.flippable),
+        len(decisions.bindable),
+        proposals,
+        seed_cost,
+        state.cost,
+        state.read_arms,
+        state.write_arms,
+        state.open,
+        sweeps,
+    )
+    swap = {firing.leader: state.flip[i] for i, firing in enumerate(problem.firings)}
+    bound = _canonical_instances(problem, state.instance)
+    return Coloring(compacted, nreg, swap, bound, state.read_arms, state.write_arms)
 
 
 def find_coloring_conflict(assign: dict[ValueId, int], interferes: dict[ValueId, set[ValueId]]) -> int | None:
     """
-    The first register carrying two interfering values, or None if the coloring is sound. The colorer never co-locates
+    The first register carrying two interfering values, or None if the coloring is sound. The annealer never co-locates
     interfering MOVABLE values, so a conflict can only come from the caller's pins -- e.g. a state slot whose live-in
     and a coalesced live-out turn out to interfere under the final, install-aware interference. The caller backs that
     slot out of its in-place coalescing and recolors; an all-copy-back coloring has no pin conflicts, so the retry
@@ -267,25 +853,3 @@ def find_coloring_conflict(assign: dict[ValueId, int], interferes: dict[ValueId,
         if any(not interferes[vid].isdisjoint(members) for vid in vids):
             return reg
     return None
-
-
-def _objective(
-    assign: dict[ValueId, int],
-    consumer_ports: dict[ValueId, set[ReadPort]],
-    producer_key: dict[ValueId, frozenset[Producer]],
-) -> int:
-    """Total sparse-regfile mux fan-in: read-mux fan-in across ports plus write-select fan-in across registers."""
-    members: dict[int, list[ValueId]] = {}
-    for vid, reg in assign.items():
-        members.setdefault(reg, []).append(vid)
-    port_regs: dict[ReadPort, set[int]] = {}
-    write = 0
-    for reg, vids in members.items():
-        writers: set[Producer] = set()
-        for vid in vids:
-            writers |= producer_key[vid]
-            for port in consumer_ports[vid]:
-                port_regs.setdefault(port, set()).add(reg)
-        write += max(0, len(writers) - 1)
-    read = sum(max(0, len(regs) - 1) for regs in port_regs.values())
-    return read + write

@@ -27,12 +27,11 @@ from holoso import (
 )
 from holoso._api import _mir_options
 from holoso._mir import MirOptions
-from holoso._lir import RegallocTuning
-from holoso._lir import build
+from holoso._lir import Lir, RegallocTuning, build
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
+from holoso._operators._common import PooledOperatorOptions
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
-from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat, IntFormat
 from holoso._value import FloatValue, ScalarValue
@@ -58,11 +57,7 @@ def default_ifmt(ffmt: FloatFormat) -> IntFormat:
     return IntFormat(max(Options(OperatorOptions()).wint_min, ffmt.width))
 
 
-DEFAULT_TUNING = RegallocTuning(
-    effort=_DEFAULTS.regalloc_effort,
-    reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,
-    register_price=_DEFAULTS.regalloc_register_price,
-)
+_DEFAULT_TUNING = RegallocTuning(effort=_DEFAULTS.regalloc_effort, register_price=_DEFAULTS.regalloc_register_price)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +84,7 @@ def build_model_and_interpreter(
     ops: MirOptions,
     name: str,
     fmt: FloatFormat,
+    tuning: RegallocTuning = _DEFAULT_TUNING,
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
@@ -97,7 +93,7 @@ def build_model_and_interpreter(
     (upstream of `build`), so the two share everything except the LIR layer.
     """
     mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
-    return build_model(build_lir(mir, name)), MirInterpreter(mir)
+    return build_model(build_lir(mir, name, tuning)), MirInterpreter(mir)
 
 
 def show_value(value: ScalarValue) -> str:
@@ -245,13 +241,25 @@ def build_ops(options: Options, width: int) -> OpConfig:
 
 DEFAULT_FETCH_STAGES = 3
 
-# Restated as literals so the frozen metric baselines cannot move with the environment overrides below.
-SHIPPED_TUNING = RegallocTuning(effort=5000, reuse_write_cap=2, register_price=2.0)
+# Restated as literals so a frozen figure cannot move with the environment: what `Options()` ships, whatever the
+# test session set `HOLOSO_REGALLOC_EFFORT` to.
+SHIPPED_TUNING = RegallocTuning(effort=3000, register_price=2.0)
 
 
-def build_lir(mir: Mir, name: str, tuning: RegallocTuning = DEFAULT_TUNING) -> Lir:
+def build_lir(mir: Mir, name: str, tuning: RegallocTuning = _DEFAULT_TUNING) -> Lir:
     """The default machine build shared by the white-box tests."""
     return build(mir, name, DEFAULT_FETCH_STAGES, tuning)
+
+
+def with_instances(options: Options, instances: int) -> Options:
+    """The same options with every pooled operator the configuration enables allowed `instances` copies."""
+    operator = options.operator
+    widened: dict[str, Any] = {
+        field.name: dataclasses.replace(value, instances=instances)
+        for field in dataclasses.fields(operator)
+        if isinstance(value := getattr(operator, field.name), PooledOperatorOptions)
+    }
+    return dataclasses.replace(options, operator=dataclasses.replace(operator, **widened))
 
 
 def default_options(fmt: FloatFormat) -> Options:
@@ -277,7 +285,7 @@ def default_mir(fmt: FloatFormat) -> MirOptions:
     return mir_options(default_options(fmt))
 
 
-def fcmp_s1_options(fmt: FloatFormat) -> Options:
+def _fcmp_s1_options(fmt: FloatFormat) -> Options:
     """The default config with only the comparator's stage knob raised (latency 2)."""
     options = default_options(fmt)
     operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=1))
@@ -291,8 +299,8 @@ def staged_fadd_options(fmt: FloatFormat) -> Options:
     return dataclasses.replace(options, operator=operator)
 
 
-def fcmp_s1_mir(fmt: FloatFormat) -> MirOptions:
-    return mir_options(fcmp_s1_options(fmt))
+def _fcmp_s1_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(_fcmp_s1_options(fmt))
 
 
 def branch_boundary_kernel(a: float, b: float, c: float) -> float:
@@ -457,7 +465,7 @@ PIPELINE_OP_CASES = (
 
 COMPARATOR_OP_CASES = (
     OperatorCase("default", default_mir, 1),
-    OperatorCase("fcmp_s1", fcmp_s1_mir, 2),
+    OperatorCase("fcmp_s1", _fcmp_s1_mir, 2),
     OperatorCase("staged", staged_mir, 2),
 )
 
@@ -468,7 +476,7 @@ PIPELINE_OPTIONS_CASES = (
 
 COMPARATOR_OPTIONS_CASES = (
     OptionsCase("default", default_options),
-    OptionsCase("fcmp_s1", fcmp_s1_options),
+    OptionsCase("fcmp_s1", _fcmp_s1_options),
     OptionsCase("staged", staged_options),
 )
 

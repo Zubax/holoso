@@ -4,8 +4,8 @@ End-to-end blackbox differential fuzzing entry point.
 The marked campaign (`pytest -m fuzz`) generates many kernels and drives them through the differential runner; it is
 slow and excluded from the normal `tests` session. A tiny UNMARKED smoke campaign runs in the normal session so the
 fuzzer cannot bit-rot. Both read their budget from the environment (with sane defaults), so a CI job can scale coverage
-without editing code. The regalloc effort is whatever `HOLOSO_REGALLOC_EFFORT` was at process import (it is frozen
-once in `holoso._lir._regalloc` and cannot be changed in-process), and any divergence saves a self-contained
+without editing code. The regalloc effort is whatever `HOLOSO_REGALLOC_EFFORT` was at process import (it is the
+`holoso.Options` default, read once, and cannot be changed in-process), and any divergence saves a self-contained
 reproducer under `tests/fuzz_regressions/` before failing.
 """
 
@@ -24,8 +24,8 @@ from ._fuzz import CampaignStats, CheckKind, Divergence, Shape, run_campaign, sa
 # and the bool bank. The differential oracle is format-agnostic, so one well-chosen format suffices.
 _FMT = FloatFormat(6, 18)
 
-# The effort frozen at import time in the regalloc; recorded into every reproducer so a regression replays at the same
-# effort. Reading it here (not mutating it) matches how the compiler reads it.
+# The effort frozen at import time in the `Options` default; recorded into every reproducer so a regression replays
+# at the same effort. Reading it here (not mutating it) matches how the compiler reads it.
 _EFFORT = os.environ.get("HOLOSO_REGALLOC_EFFORT", "")
 
 

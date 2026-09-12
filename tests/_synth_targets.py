@@ -37,12 +37,12 @@ from synth.flows import FlowId
 
 from ._examples import SPECS, ekf1_stateful, imu_fusion, polar, rigid_body_rates
 
-F_e6m18 = FloatFormat(6, 18)
-F_e8m36 = FloatFormat(8, 36)
-F_e4m8 = FloatFormat(4, 8)  # the narrowest datapath; the float-free UART ignores it and takes its 16-bit floor
+_F_e6m18 = FloatFormat(6, 18)
+_F_e8m36 = FloatFormat(8, 36)
+_F_e4m8 = FloatFormat(4, 8)  # the narrowest datapath; the float-free UART ignores it and takes its 16-bit floor
 
 
-def op_config(
+def _op_config(
     fmt: FloatFormat,
     *,
     fadd: FAddOptions | None = None,
@@ -105,7 +105,7 @@ class SynthTarget:
 _SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
 
 
-def for_example(
+def _for_example(
     example: str,
     flow: FlowId,
     target_frequency_MHz: float,
@@ -175,245 +175,268 @@ _KEPLER_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=
 TARGETS: list[SynthTarget] = [
     # Most of the catalogue closes the bar at lean (no optional stages) on all three tools -- verified by a full lean
     # baseline. One explicit row per (example, flow); duplication is intentional.
-    for_example("madd", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("madd", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("madd", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("poly3", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("poly3", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("poly3", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
-    for_example("signal_window", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("signal_window", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("signal_window", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("iir1_hpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fadd=FAddOptions(stage_output=1))),
-    for_example("iir1_hpf", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("iir1_hpf", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fadd=FAddOptions(stage_output=1))),
-    for_example("iir1_lpf", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("iir1_lpf", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example(
+    _for_example("madd", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("madd", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("madd", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("poly3", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("poly3", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("poly3", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
+    _for_example("signal_window", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("signal_window", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("signal_window", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("iir1_hpf", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, fadd=FAddOptions(stage_output=1))),
+    _for_example("iir1_hpf", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("iir1_hpf", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, fadd=FAddOptions(stage_output=1))),
+    _for_example("iir1_lpf", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("iir1_lpf", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example(
         "pid",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),
             fmul=FMulOptions(stage_output=1),
             fdiv=FDivOptions(stage_output=1),
         ),
     ),
-    for_example("pid", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOptions(stage_input=1, stage_output=1))),
-    for_example("pid", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("schmitt_trigger", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("quadrature_encoder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("quadrature_encoder", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("quadrature_encoder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("phase_frequency_detector", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("phase_frequency_detector", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("phase_frequency_detector", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("latching_fault_register", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("latching_fault_register", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("latching_fault_register", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("majority_voter", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("majority_voter", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("majority_voter", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("recip_newton", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
+    _for_example(
+        "pid", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_output=1))
+    ),
+    _for_example("pid", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("schmitt_trigger", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("quadrature_encoder", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("quadrature_encoder", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("quadrature_encoder", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("phase_frequency_detector", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("phase_frequency_detector", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("phase_frequency_detector", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("latching_fault_register", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("latching_fault_register", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("latching_fault_register", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("majority_voter", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("majority_voter", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("majority_voter", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("recip_newton", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     # Diamond's critical path here is the fmul post-product cone (DSP product register through pack/normalize into
     # the register file), 18 logic levels at 58% route. One pack stage splits it; the other two flows close lean.
-    for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fmul=FMulOptions(stage_pack=1))),
+    _for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, fmul=FMulOptions(stage_pack=1))),
     # Vivado closes this lean only on some releases: 2025.2 clears 150 MHz, 2026.1 misses by 0.078 ns on the same
     # adder normalize cascade the Diamond rows above split. One barrier holds it on both.
-    for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
-    for_example("integrator", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example(
+    _for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
+    _for_example("integrator", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example(
         "integrator",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_output=1),
             fmul=FMulOptions(stage_output=1),
             fdiv=FDivOptions(stage_output=1),
         ),
     ),
-    for_example("integrator", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
+    _for_example("integrator", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     # Straight-line multiply-accumulate chains; both close lean on all three flows.
-    for_example("fir", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example("fir", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18)),
-    for_example("fir", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("biquad", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
+    _for_example("fir", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("fir", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("fir", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("biquad", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     # Diamond routes the adder's close-cancellation normalize cascade long enough to miss 100 MHz once the
     # composed scaling shortens the schedule around it; one barrier splits it.
-    for_example("biquad", FlowId.DIAMOND_ECP5, 100, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
-    for_example("biquad", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
-    for_example("uart_tx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
-    for_example("uart_tx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
-    for_example("uart_tx", FlowId.VIVADO_ARTIX7, 150, op_config(F_e4m8)),
-    for_example("uart_rx", FlowId.YOSYS_ECP5, 100, op_config(F_e4m8)),
-    for_example("uart_rx", FlowId.DIAMOND_ECP5, 100, op_config(F_e4m8)),
-    for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, op_config(F_e4m8)),
-    for_example(
+    _for_example("biquad", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
+    _for_example("biquad", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
+    _for_example("uart_tx", FlowId.YOSYS_ECP5, 100, _op_config(_F_e4m8)),
+    _for_example("uart_tx", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e4m8)),
+    _for_example("uart_tx", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e4m8)),
+    _for_example("uart_rx", FlowId.YOSYS_ECP5, 100, _op_config(_F_e4m8)),
+    _for_example("uart_rx", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e4m8)),
+    _for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e4m8)),
+    _for_example(
         "ekf1_stateless",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_decode=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_output=1),
         ),
     ),
-    for_example(
+    _for_example(
         "ekf1_stateless",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_output=1),
             fdiv=FDivOptions(stage_input=1, stage_output=1),
         ),
     ),
-    for_example(
+    _for_example(
         "ekf1_stateless",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_product=1),
         ),
     ),
-    for_example(
+    # The same EKF with a second multiplier: the allocator binds the co-issued products across the two instances.
+    # Against the one-multiplier row: 18 percent more LUTs for a 15 percent shorter transaction (DESIGN.md).
+    _for_example(
+        "ekf1_stateless",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_product=1, instances=2),
+        ),
+        name="ekf1_stateless_e6m18_fmul2",
+    ),
+    _for_example(
         "ekf1_stateful",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_decode=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_output=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
-    for_example(
+    _for_example(
         "ekf1_stateful",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOptions(stage_pack=1),
-            fdiv=FDivOptions(stage_input=1, stage_output=1),
-        ),
+        # Closed lean: the register file through the adder's b-port read mux into its exponent difference (81.5 MHz
+        # with no stage) takes the adder's input stage.
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1)),
         kernel=_ekf1_stateful_kernel,
     ),
-    for_example(
+    _for_example(
         "ekf1_stateful",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1),
             fmul=FMulOptions(stage_product=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
-    for_example(
+    _for_example(
         "cordic_sincos",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_decode=1),
-            fmul_ilog2=FMulILog2Options(stage_decode=1),
+            # The microcode immediate out of the EBR (5.6 ns clock-to-out) into the scaler's exponent adder (83.6
+            # MHz): the scaler's input stage.
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
     ),
-    for_example(
+    _for_example(
         "cordic_sincos",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=1, stage_output=1),
             fmul_ilog2=FMulILog2Options(stage_decode=1),
         ),
     ),
-    for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
-    for_example("octave_index", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example(
+    _for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
+    _for_example("octave_index", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example(
         "octave_index",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_output=1),
             fdiv=FDivOptions(stage_output=1),
         ),
     ),
-    for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18)),
+    _for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
     # octave_index's transcendental sibling. The exp2/log2 Horner products and log2's final f*C(f) product need
     # registered partial-product reduction; this one config closes all three flows.
-    for_example(
+    _for_example(
         "equal_temperament",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fmul=FMulOptions(stage_pack=1),
-            fexp2=FExp2Options(stage_reduce=1, stage_product=2),
+            # The exp2 pack rounding carry (93.3 MHz): its pack stage.
+            fexp2=FExp2Options(stage_reduce=1, stage_product=2, stage_pack=1),
             flog2=FLog2Options(stage_product=2, stage_product_final=2, stage_normalize=2, stage_pack=1),
         ),
     ),
-    for_example(
+    _for_example(
         "equal_temperament",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_normalize=1),
+            # The DSP product through the multiplier's pack rounding into the register file (87.9 MHz): the pack
+            # stage.
+            fmul=FMulOptions(stage_pack=1),
             fexp2=FExp2Options(stage_product=2),
             flog2=FLog2Options(stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
-    for_example(
+    _for_example(
         "equal_temperament",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_normalize=1),
             fexp2=FExp2Options(stage_product=2),
             flog2=FLog2Options(stage_product=2, stage_product_final=2, stage_normalize=1, stage_pack=1),
         ),
     ),
-    for_example("remainder", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18)),
-    for_example(
+    _for_example("remainder", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example(
         "remainder",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(F_e6m18, fdiv=FDivOptions(stage_input=1, stage_output=1)),
+        # The adder's subtraction result through its normalization shift (99.3 MHz): the normalize stage.
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1), fdiv=FDivOptions(stage_input=1, stage_output=1)),
     ),
-    for_example("remainder", FlowId.VIVADO_ARTIX7, 150, op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1))),
-    for_example(
+    _for_example("remainder", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
+    _for_example(
         "ekf1_stateless",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e8m36,
-            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1, stage_output=1),
+        # Closed lean from the product stage alone (60.2 MHz), one stage per critical path in this order: the
+        # register file into the adder's exponent difference, the partial-product sum, the multiplier's pack rounding,
+        # the register file into the scaler's exponent adder, the adder's pack into the register file, the adder's
+        # normalization, the register file into the multiplier's exponent adder, the scaler's decode, the
+        # multiplier's pack rounding into the register file.
+        _op_config(
+            _F_e8m36,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
-            fdiv=FDivOptions(stage_input=1, stage_output=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
     ),
-    for_example(
+    _for_example(
         "ekf1_stateless",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e8m36,
+        _op_config(
+            _F_e8m36,
             fadd=FAddOptions(
                 stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
             ),
@@ -422,47 +445,47 @@ TARGETS: list[SynthTarget] = [
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
     ),
-    for_example(
+    _for_example(
         "ekf1_stateless",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e8m36,
+        _op_config(
+            _F_e8m36,
             fadd=FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
             fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
         ),
     ),
-    for_example(
+    _for_example(
         "ekf1_stateful",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e8m36,
+        _op_config(
+            _F_e8m36,
             fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_product=2, stage_output=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
-    for_example(
+    _for_example(
         "ekf1_stateful",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e8m36,
+        _op_config(
+            _F_e8m36,
             fadd=FAddOptions(stage_input=2, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
             fdiv=FDivOptions(stage_input=3, stage_pack=1, stage_output=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
-    for_example(
+    _for_example(
         "ekf1_stateful",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e8m36,
+        _op_config(
+            _F_e8m36,
             fadd=FAddOptions(stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
             fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
@@ -475,42 +498,42 @@ TARGETS: list[SynthTarget] = [
         kernel=_to_polar_kernel,
         flow=FlowId.YOSYS_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
+        ops=_op_config(_F_e6m18, fatan2=_TO_POLAR_FATAN2),
         name="to_polar_e6m18",
     ),
     SynthTarget(
         kernel=_to_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
+        ops=_op_config(_F_e6m18, fatan2=_TO_POLAR_FATAN2),
         name="to_polar_e6m18",
     ),
     SynthTarget(
         kernel=_to_polar_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=op_config(F_e6m18, fatan2=_TO_POLAR_FATAN2),
+        ops=_op_config(_F_e6m18, fatan2=_TO_POLAR_FATAN2),
         name="to_polar_e6m18",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
         flow=FlowId.YOSYS_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
+        ops=_op_config(_F_e6m18, fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(F_e6m18, fmul=FMulOptions(stage_pack=1), fsincos=_FROM_POLAR_FSINCOS),
+        ops=_op_config(_F_e6m18, fmul=FMulOptions(stage_pack=1), fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=op_config(F_e6m18, fmul=FMulOptions(stage_input=1), fsincos=_FROM_POLAR_FSINCOS),
+        ops=_op_config(_F_e6m18, fmul=FMulOptions(stage_input=1), fsincos=_FROM_POLAR_FSINCOS),
         name="from_polar_e6m18",
     ),
     # rigid_body_rates: the pivoted 3x3 Gauss-Jordan inversion -- conditional-swap select networks feeding one pooled
@@ -519,8 +542,8 @@ TARGETS: list[SynthTarget] = [
         kernel=_rigid_body_rates_kernel,
         flow=FlowId.YOSYS_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(
-            F_e6m18,
+        ops=_op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
         ),
@@ -530,8 +553,8 @@ TARGETS: list[SynthTarget] = [
         kernel=_rigid_body_rates_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=op_config(
-            F_e6m18,
+        ops=_op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1),
             fmul=FMulOptions(stage_output=1),
             fdiv=FDivOptions(stage_input=1),
@@ -542,41 +565,52 @@ TARGETS: list[SynthTarget] = [
         kernel=_rigid_body_rates_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=op_config(F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_input=1)),
+        ops=_op_config(_F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_input=1)),
         name="rigid_body_rates_e6m18",
     ),
     # flux_observer: a short stateful clamped fadd/fmul/fsort integrator feeding the same CORDIC atan2 as to_polar,
     # so the rows start from that operator's measured configuration. Diamond uses the smaller 2×2 product grid because
     # the 3×3 topology's extra registers congest the shared normalizer. On Vivado the register file reaches both the
     # sorter's compare cone and the DSP operand mux inside one period, so those two entries take an input stage each.
-    for_example(
+    _for_example(
         "flux_observer",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1),
-            fmul=FMulOptions(stage_input=1),
+            # The multiplier's pack rounding carry (98.1 MHz): its pack stage.
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
             fatan2=_TO_POLAR_FATAN2,
             fsort=FSortOptions(),
         ),
     ),
-    for_example(
+    _for_example(
         "flux_observer",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1),
+            # The DSP product through the multiplier's pack rounding into the register file (98.1 MHz): the pack
+            # stage.
+            fmul=FMulOptions(stage_pack=1),
             fatan2=_FLUX_OBSERVER_DIAMOND_FATAN2,
             fsort=FSortOptions(),
         ),
     ),
-    for_example(
+    # The register file into the adder's exponent difference (-0.03 ns): the adder's input stage.
+    _for_example(
         "flux_observer",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(F_e6m18, fmul=FMulOptions(stage_input=1), fatan2=_TO_POLAR_FATAN2, fsort=FSortOptions(stage_input=1)),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(stage_input=1),
+            fmul=FMulOptions(stage_input=1),
+            fatan2=_TO_POLAR_FATAN2,
+            fsort=FSortOptions(stage_input=1),
+        ),
     ),
     # foc: that observer embedded in a full current controller -- the same CORDIC atan2 plus from_polar's fsincos,
     # the sorter, and the divides of the limiter and the modulator, over the widest microcode word in the matrix.
@@ -584,12 +618,12 @@ TARGETS: list[SynthTarget] = [
     # cone; the adder's pack stage splits exponent correction from packing and register-file writeback.
     # Only the Vivado flow is measured here; the ECP5 rows are absent rather than guessed, since closure is only
     # ever established by running the flow.
-    for_example(
+    _for_example(
         "foc",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1),
             fsort=FSortOptions(stage_input=1),
@@ -611,12 +645,12 @@ TARGETS: list[SynthTarget] = [
     # exact install scheduling shifted the plain diamond and ffma Vivado rows a hair under their fences (12 and
     # 19 ps): the diamond miss was a lone controller clock-enable route, re-closed by splitting the fadd pack tail;
     # the Vivado miss was the fadd subtract-normalize cone, which fadd stage_normalize splits.
-    for_example(
+    _for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
@@ -625,12 +659,12 @@ TARGETS: list[SynthTarget] = [
         ),
         kernel=_imu_fusion_kernel,
     ),
-    for_example(
+    _for_example(
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
@@ -640,25 +674,27 @@ TARGETS: list[SynthTarget] = [
         ),
         kernel=_imu_fusion_kernel,
     ),
-    for_example(
+    _for_example(
         "imu_fusion",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
+            # The register file into the scaler's decode (-0.07 ns): the scaler's input stage.
+            fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
         ),
         kernel=_imu_fusion_kernel,
     ),
-    for_example(
+    _for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             # The rounding carry chain plus register-file writeback exceeds the period; separate them at the output.
             fadd=FAddOptions(stage_input=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
@@ -671,12 +707,12 @@ TARGETS: list[SynthTarget] = [
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
     ),
-    for_example(
+    _for_example(
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
@@ -687,12 +723,12 @@ TARGETS: list[SynthTarget] = [
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
     ),
-    for_example(
+    _for_example(
         "imu_fusion",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(
-            F_e6m18,
+        _op_config(
+            _F_e6m18,
             # Two hops here are long and mostly route, so this row closes on one machine and not on another: the
             # microcode word into the adder's decode, and the register file into the sorter. A stage on each buys
             # 0.15 ns of slack to 0.44. The scaler's own decode is the next hop and must NOT be staged -- measured,
@@ -708,21 +744,27 @@ TARGETS: list[SynthTarget] = [
         name="imu_fusion_e6m18_fma",
     ),
     # kepler: fsincos inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the matrix.
-    for_example("kepler", FlowId.YOSYS_ECP5, 100, op_config(F_e6m18, fsincos=_KEPLER_FSINCOS)),
-    for_example(
+    # The adder's aligned subtraction through its pack rounding carry (99.3 MHz): the pack stage.
+    _for_example(
+        "kepler",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_pack=1), fsincos=_KEPLER_FSINCOS),
+    ),
+    _for_example(
         "kepler",
         FlowId.DIAMOND_ECP5,
         100,
-        op_config(F_e6m18, fsincos=FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=1)),
+        _op_config(_F_e6m18, fsincos=FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=1)),
     ),
     # At lean the adder's normalize shifter is one combinational barrel shift between the s2 and s3 boundaries,
     # and on artix7 it is what this row's critical path runs through (s2_raw_result -> s3_sub_aligned, ~77% route)
     # once the sincos is staged off it. One barrier splits the shift and puts the path back on the multiplier.
-    for_example(
+    _for_example(
         "kepler",
         FlowId.VIVADO_ARTIX7,
         150,
-        op_config(F_e6m18, fadd=FAddOptions(stage_normalize=1), fsincos=_KEPLER_FSINCOS),
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1), fsincos=_KEPLER_FSINCOS),
     ),
 ]
 

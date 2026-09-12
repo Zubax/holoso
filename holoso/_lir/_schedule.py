@@ -15,6 +15,7 @@ each idle cycle, but the backend gates every operator's `in_valid` with `transac
 re-fetched word commits nothing and a cycle-0 issue is safe regardless of operator kind.
 """
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -22,6 +23,8 @@ from .._util import ValueId
 from .._mir import MirNode, MirOperation
 from .._operators import HardwareOperator, PooledHardwareOperator, PortConditioner
 from ._ir import OperatorInstance, dependency_edge, landing_cycle, operand_read_cycle, read_cycle
+
+_logger = logging.getLogger(__name__)
 
 # A pooled firing's fusion identity: the operator, operand values, their conditioners, and per-firing immediates --
 # everything the module activation consumes. Output ports/conditioners are excluded (members differ there); so two
@@ -32,15 +35,17 @@ type _FiringKey = tuple[PooledHardwareOperator, tuple[ValueId, ...], tuple[PortC
 @dataclass(frozen=True, slots=True)
 class Schedule:
     """
-    The scheduler's output: per-value issue cycle, the bound instance and firing leader for pooled values, the full
-    instance set, and the makespan. Members of one firing share an issue cycle, an instance, and a leader (the
-    smallest member id); the LIR build collapses each leader group into one scheduled op with one write per member.
+    The scheduler's output: per-value issue cycle, per pooled firing leader the bound instance and the members, and
+    the makespan. Members of one firing share an issue cycle, an instance, and a leader (the smallest member id); the
+    LIR build collapses each leader group into one scheduled op with one write per member. The binding is the
+    first-free one and only a SEED, the binding the register allocator starts from: it rebinds firings whose busy
+    windows end inside their block among the realized instances, honoring the busy residue an overlapping predecessor
+    leaves (the cycles an instance stays busy in this block's frame).
     """
 
     issue_cycle: dict[ValueId, int]
-    inst_of: dict[ValueId, OperatorInstance]
+    inst_of: dict[ValueId, OperatorInstance]  # pooled firing leader -> the instance it binds
     firings: dict[ValueId, list[ValueId]]  # pooled firing leader -> its members, sorted by output port
-    instances: list[OperatorInstance]
     makespan: int  # max commit cycle (issue_cycle + latency), or 0 if there are no ops
     # Per scheduled value, its operator latency, so the commit cycle (issue + latency) has a single owner here rather
     # than being recomputed by every consumer of the schedule.
@@ -79,7 +84,7 @@ def resolve_pool(nodes: dict[ValueId, MirNode]) -> dict[type[HardwareOperator], 
     return pool
 
 
-def fuse_block_firings(nodes: dict[ValueId, MirNode], schedulable: set[ValueId]) -> dict[ValueId, list[ValueId]]:
+def _fuse_block_firings(nodes: dict[ValueId, MirNode], schedulable: set[ValueId]) -> dict[ValueId, list[ValueId]]:
     """
     Group one block's pooled operations into firings: leader (smallest member id) -> members sorted by output port.
     Operations fuse when they share the operator, operands, and operand conditioners while tapping DISTINCT output
@@ -149,7 +154,7 @@ def schedule_ops(
     resident at the block start (a prior block's drained result, a state read, an input, or a phi), but a predecessor
     result spilled past an OVERLAPPED boundary lands mid-block instead -- `livein_landing` carries its block-local
     landing cycle, and a consumer's operand read must not precede it. A pooled instance accepts a new firing every
-    `initiation_interval` cycles; `entry_busy` seeds each instance's busy window with the residue inherited from an
+    `initiation_interval` cycles; `entry_busy` starts each instance's busy window at the busy residue inherited from an
     overlapping predecessor (empty under draining, where an instance is necessarily idle by the boundary for every
     operator whose initiation interval stays within `Lir.__post_init__`'s bound). Both carries are empty
     for a fully-drained block, leaving the schedule identical to an isolated per-block pass.
@@ -159,16 +164,20 @@ def schedule_ops(
     op_ids = sorted(schedulable)
     if not op_ids:
         return Schedule(
-            issue_cycle={}, inst_of={}, firings={}, instances=[], makespan=0, latency={}, busy_until=dict(entry_busy)
+            issue_cycle={},
+            inst_of={},
+            firings={},
+            makespan=0,
+            latency={},
+            busy_until=dict(entry_busy),
         )
     schedulable_set = set(op_ids)
 
-    firings = fuse_block_firings(nodes, schedulable_set)
+    firings = _fuse_block_firings(nodes, schedulable_set)
     height = _critical_path(nodes, op_ids, schedulable_set, fetch_lag)
     issue_cycle: dict[ValueId, int] = {}
-    inst_count: dict[PooledHardwareOperator, int] = {}
-    slot_of: dict[ValueId, tuple[PooledHardwareOperator, int]] = {}  # per firing leader
-    # instance slot -> first cycle it is free again, seeded with the busy residue inherited from overlapping
+    inst_of: dict[ValueId, OperatorInstance] = {}
+    # instance slot -> first cycle it is free again, starting from the busy residue inherited from overlapping
     # predecessors
     busy_until: dict[tuple[PooledHardwareOperator, int], int] = dict(entry_busy)
 
@@ -226,41 +235,23 @@ def schedule_ops(
                 if slot is None:
                     continue
                 busy_until[(operator, slot)] = cycle + operator.initiation_interval
-                inst_count[operator] = max(inst_count.get(operator, 0), slot + 1)
-                slot_of[leader] = (operator, slot)
+                inst_of[leader] = OperatorInstance(operator, slot)
             for member in firings[leader]:
                 issue_cycle[member] = cycle
             unscheduled.discard(leader)
         cycle += 1
 
-    inst_of, instances = _bind_instances(inst_count, slot_of, firings)
-    pooled_firings = {leader: members for leader, members in firings.items() if leader in slot_of}
+    pooled_firings = {leader: members for leader, members in firings.items() if leader in inst_of}
     latency = {vid: _op(nodes, vid).operator.latency for vid in op_ids}
     makespan = max((commit_cycle(vid) for vid in op_ids), default=0)
+    _logger.debug(
+        "Schedule: %d firings, makespan %d, %d live-ins in flight", len(firings), makespan, len(livein_landing)
+    )
     return Schedule(
         issue_cycle=issue_cycle,
         inst_of=inst_of,
         firings=pooled_firings,
-        instances=instances,
         makespan=makespan,
         latency=latency,
         busy_until=busy_until,
     )
-
-
-def _bind_instances(
-    inst_count: dict[PooledHardwareOperator, int],
-    slot_of: dict[ValueId, tuple[PooledHardwareOperator, int]],
-    firings: dict[ValueId, list[ValueId]],
-) -> tuple[dict[ValueId, OperatorInstance], list[OperatorInstance]]:
-    """
-    Bind every member of each pooled firing to its physical instance. Instance indices are local to one concrete
-    hardware operator value.
-    """
-    inst_of = {
-        member: OperatorInstance(operator, slot)
-        for leader, (operator, slot) in slot_of.items()
-        for member in firings[leader]
-    }
-    instances = [OperatorInstance(operator, slot) for operator in inst_count for slot in range(inst_count[operator])]
-    return inst_of, instances

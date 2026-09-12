@@ -21,6 +21,9 @@ such as design rationale, high-level context, non-obvious implications, etc.
 Comments that describe what the code does or restate what is inferrable from the type system are strictly prohibited.
 The best comment is no comment.
 
+When a piece of document or a comment must be written, do not use jargon or abbreviations that are not widely known.
+Always use precise terminology and be sure to explicitly introduce each concept before using it.
+
 ### Reset strategy
 
 Use synchronous active-high reset for stream control only: validity flags, state-machine state, and other control

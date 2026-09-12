@@ -71,12 +71,12 @@ def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueI
 
 def block_has_install(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView) -> dict[int, bool]:
     """
-    Each install-bearing block mapped to whether it carries an install whose source is the block's OWN operation --
-    the only source kind that can commit at the work makespan and push the install one step past it
-    (`install_issue_cycle`); everything else (a constant, including a const branch condition, an input, a state
-    read, a phi, or a value computed in another block) never pushes. This is the CONSERVATIVE seed for that +1: an
-    arm is assumed not to coalesce, so a local-source arm marks its block even if it later coalesces away, and the
-    fixpoint's `actual_install_blocks` narrows the bit to the blocks whose source really is the last work, once the
+    Each install-bearing block mapped to whether it carries an install whose source is the block's OWN operation -- the
+    only source kind that can commit at the work makespan and push the install one step past it (`install_issue_cycle`);
+    everything else (a constant, including a const branch condition, an input, a state read, a phi, or a value computed
+    in another block) never pushes. This is the CONSERVATIVE seed for that +1: an arm is assumed not to coalesce, so a
+    local-source arm marks its block even if it later coalesces away, and the fixpoint's
+    `CoalescedLayout.install_blocks` narrows the bit to the blocks whose source really is the last work, once the
     schedule is known. The liveness boundary and the layout share this classification so the per-block makespan and
     drain agree.
     """

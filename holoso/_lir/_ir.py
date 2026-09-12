@@ -172,7 +172,7 @@ def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:
     return block_local_cycle - term_offset - 1
 
 
-def residence_rows(
+def _residence_rows(
     defs: list[int], uses: list[int], present: int, read_first_defs: frozenset[int] = frozenset()
 ) -> set[int]:
     """
@@ -243,8 +243,7 @@ class OperatorInstance:
             assert all(result_types[permutation[p]] == result_types[p] for p in range(len(permutation)))
 
 
-# An operator READ port: the `(instance, operand-position)` pair keying `read_set_per_port`. Distinct from the
-# WRITE-side `(instance, output-port)` lanes of `_write_sets`, which are not read ports.
+# `(instance, operand position)`; the write side's `(instance, output port)` lanes are a different key.
 type ReadPort = tuple[OperatorInstance, int]
 
 
@@ -258,10 +257,6 @@ class RegRef:
     def stable_label(self) -> str:
         return f"r{self.index}"
 
-    @property
-    def is_register(self) -> bool:
-        return True
-
 
 @dataclass(frozen=True, slots=True)
 class BoolRegRef:
@@ -273,38 +268,30 @@ class BoolRegRef:
     def stable_label(self) -> str:
         return f"b{self.index}"
 
-    @property
-    def is_register(self) -> bool:
-        return True
-
 
 _BankReg = TypeVar("_BankReg", RegRef, BoolRegRef)  # one register bank's reference type (wide or boolean)
 
 
 @dataclass(frozen=True, slots=True)
-class ConstRef:
+class _ConstRef:
     index: int
 
     @property
     def stable_label(self) -> str:
         return f"c{self.index}"
 
-    @property
-    def is_register(self) -> bool:
-        return False
+
+@dataclass(frozen=True, slots=True)
+class WideConstRef(_ConstRef): ...
 
 
 @dataclass(frozen=True, slots=True)
-class WideConstRef(ConstRef): ...
+class _Operand:
+    source: RegRef | _ConstRef
 
 
 @dataclass(frozen=True, slots=True)
-class Operand:
-    source: RegRef | ConstRef
-
-
-@dataclass(frozen=True, slots=True)
-class WideOperand(Operand):
+class WideOperand(_Operand):
     source: RegRef | WideConstRef
     conditioner: WideConditioner
 
@@ -314,7 +301,7 @@ class WideOperand(Operand):
 
 
 @dataclass(frozen=True, slots=True)
-class InputLoad:
+class _InputLoad:
     """An input port sampled into a typed register at in_valid."""
 
     name: str
@@ -323,12 +310,12 @@ class InputLoad:
 
 
 @dataclass(frozen=True, slots=True)
-class WideInputLoad(InputLoad):
+class WideInputLoad(_InputLoad):
     dst: RegRef
     scalar_type: FloatType | IntType
 
 
-def wide_liveout_coalesced(tap: WideOperand, reg: RegRef) -> bool:
+def _wide_liveout_coalesced(tap: WideOperand, reg: RegRef) -> bool:
     """A wide state live-out shares its slot register (no install copy) iff its tap is `reg` with the identity."""
     return tap.source == reg and tap.conditioner.is_identity
 
@@ -359,11 +346,11 @@ class WideStateSlot:
 
     @property
     def needs_copy(self) -> bool:
-        return not wide_liveout_coalesced(self.tap, self.reg)
+        return not _wide_liveout_coalesced(self.tap, self.reg)
 
 
 @dataclass(frozen=True, slots=True)
-class BoolInputLoad(InputLoad):
+class BoolInputLoad(_InputLoad):
     dst: BoolRegRef
     scalar_type: BoolType = BoolType()
 
@@ -474,7 +461,7 @@ class InlineScheduledOp:
 
 
 @dataclass(frozen=True, slots=True)
-class OutputWire:
+class _OutputWire:
     """An output port: a named external sink driven at the present step by a typed source tap."""
 
     name: str
@@ -483,13 +470,13 @@ class OutputWire:
 
 
 @dataclass(frozen=True, slots=True)
-class WideOutputWire(OutputWire):
+class WideOutputWire(_OutputWire):
     tap: WideOperand
     scalar_type: FloatType | IntType
 
 
 @dataclass(frozen=True, slots=True)
-class BoolOutputWire(OutputWire):
+class BoolOutputWire(_OutputWire):
     tap: BoolOperand
     scalar_type: BoolType = BoolType()
 
@@ -613,7 +600,7 @@ def _trace_landing(
     return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
 
 
-def bool_liveout_coalesced(live_out: BoolOperand, reg: BoolRegRef) -> bool:
+def _bool_liveout_coalesced(live_out: BoolOperand, reg: BoolRegRef) -> bool:
     """A bool state live-out shares its slot register (no install copy) iff it is exactly `reg`, uninverted."""
     return isinstance(live_out.source, BoolRegRef) and live_out.source == reg and live_out.inversion.is_identity
 
@@ -640,7 +627,7 @@ class BoolStateSlot:
         False only when the live-out already resides in the slot register UNINVERTED (an unwritten slot); a live-out
         under an inversion needs the install copy to apply it, even from the slot's own register.
         """
-        return not bool_liveout_coalesced(self.live_out, self.reg)
+        return not _bool_liveout_coalesced(self.live_out, self.reg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -733,6 +720,19 @@ class Lir:
                 f"{inst.operator.mnemonic}: initiation_interval {inst.operator.initiation_interval} needs cross-block "
                 f"busy tracking (max supported is latency + {drain + 1})"
             )
+        # The numerical model evaluates firings in isolation and cannot witness a double issue; the residue across an
+        # overlapped seam is asserted in the allocator, where it is known.
+        for block in self.blocks:
+            windows: dict[OperatorInstance, list[range]] = {}
+            for op in block.ops:
+                windows.setdefault(op.inst, []).append(
+                    range(op.issue_cycle, op.issue_cycle + op.operator.initiation_interval)
+                )
+            for inst, spans in windows.items():
+                spans.sort(key=lambda span: span.start)
+                assert all(
+                    earlier.stop <= later.start for earlier, later in zip(spans, spans[1:])
+                ), f"block {block.index}: two firings busy on {inst.name} at once"
 
     @property
     def ports(self) -> list[Port]:
@@ -851,74 +851,6 @@ class Lir:
         return self.state_copy_step(slot) >= self.last_pc
 
     @property
-    def read_set_per_port(self) -> dict[ReadPort, list[int]]:
-        """
-        For each operator read port -- identified by its `(instance, operand-position)` pair -- the sorted distinct
-        register indices it ever reads across the schedule.
-
-        Constant operands are excluded: they are immediates on the per-operand const-select path, not register reads.
-        Ports that never read a register are absent. This drives the sparse per-port read mux: a port that reads a
-        single register needs no mux at all, and one that reads several needs a mux spanning only those registers.
-        """
-        sets: dict[ReadPort, set[int]] = {}
-        for op in self.ops:
-            for pos, operand in enumerate(op.operands):
-                if isinstance(operand.source, RegRef):
-                    sets.setdefault((op.inst, pos), set()).add(operand.source.index)
-        return {port: sorted(regs) for port, regs in sets.items()}
-
-    def _write_sets(self, bank: type[RegRef] | type[BoolRegRef]) -> dict[int, list[tuple[OperatorInstance, int]]]:
-        # Cost proxy for write_select_fanin only (writers in canonical order); the emitter routes writes via the opcode.
-        sets: dict[int, list[tuple[OperatorInstance, int]]] = {}
-        for op in self.ops:
-            for write in op.writes:
-                if not isinstance(write.dst, bank):
-                    continue
-                writers = sets.setdefault(write.dst.index, [])
-                if (op.inst, write.port) not in writers:
-                    writers.append((op.inst, write.port))
-        for writers in sets.values():
-            writers.sort(key=lambda lane: (lane[0].operator.mnemonic, lane[0].index, lane[1]))
-        return sets
-
-    @property
-    def write_select_fanin(self) -> int:
-        """
-        The per-register writer fan-in summed over both banks: for every register, the number of distinct drivers
-        writing it beyond the first (`max(0, drivers - 1)`) -- the input load, every pooled writeback lane, every
-        inline (cast) write, every phi-arm copy/write, and a non-coalesced slot's install. The register allocator
-        minimizes this steering proxy; a register's live-in carry is the write opcode's implicit NOP hold, not a driver,
-        so it is not counted. It counts the phi-arm copies that `_write_sets` (pooled lanes only) omits, so
-        it stays meaningful as coalescing trades copies for shared writeback lanes. The emitted per-register opcode
-        `case` may fold value-equal drivers below this count, so this is an upper bound on the realized mux fan-in.
-        """
-        wide: dict[int, int] = {}
-        boolc: dict[int, int] = {}
-        for load in self.wide_inputs:
-            wide[load.dst.index] = wide.get(load.dst.index, 0) + 1
-        for bload in self.bool_inputs:
-            boolc[bload.dst.index] = boolc.get(bload.dst.index, 0) + 1
-        for reg, lanes in self._write_sets(RegRef).items():
-            wide[reg] = wide.get(reg, 0) + len(lanes)
-        for reg, lanes in self._write_sets(BoolRegRef).items():
-            boolc[reg] = boolc.get(reg, 0) + len(lanes)
-        for block in self.blocks:
-            for inline_op in block.inline_ops:
-                target = wide if isinstance(inline_op.write.dst, RegRef) else boolc
-                target[inline_op.write.dst.index] = target.get(inline_op.write.dst.index, 0) + 1
-            for copy in block.wide_copies:
-                wide[copy.dst.index] = wide.get(copy.dst.index, 0) + 1
-            for bwrite in block.bool_writes:
-                boolc[bwrite.dst.index] = boolc.get(bwrite.dst.index, 0) + 1
-        for slot in self.wide_state_slots:
-            if slot.needs_copy:
-                wide[slot.reg.index] = wide.get(slot.reg.index, 0) + 1
-        for bslot in self.bool_state_slots:
-            if bslot.needs_copy:
-                boolc[bslot.reg.index] = boolc.get(bslot.reg.index, 0) + 1
-        return sum(max(0, n - 1) for n in wide.values()) + sum(max(0, n - 1) for n in boolc.values())
-
-    @property
     def group_by_cycle(self) -> tuple[dict[int, list[PooledScheduledOp]], dict[int, list[PooledScheduledOp]]]:
         issues: dict[int, list[PooledScheduledOp]] = {}
         commits: dict[int, list[PooledScheduledOp]] = {}
@@ -945,16 +877,16 @@ class Lir:
     ) -> dict[_BankReg, set[int]]:
         """
         Collapse a bank's absolute def/use PCs into the rows each register holds a live value, computed PER BASIC BLOCK
-        (where the PC stream is straight-line, so `residence_rows` is exact) with backward register liveness carrying
+        (where the PC stream is straight-line, so `_residence_rows` is exact) with backward register liveness carrying
         a value across block boundaries. This is path-aware where a single global timeline is not: a value live on two
         mutually-exclusive arms that rejoin at a merge stays resident on BOTH arms, instead of the later-addressed arm's
         landing truncating the earlier one. For a straight-line kernel (one block) it reduces to a single
-        `residence_rows` over the whole frame.
+        `_residence_rows` over the whole frame.
 
         `defs`/`uses` are absolute fetch PCs (the report grid's row axis); each falls inside exactly one block's
         `[base, term_pc]` range (the ranges tile the frame contiguously in layout order). Within a block a live-in
         register is given a pseudo-def at the block base and a live-out one a pseudo-use at the terminator PC, so the
-        per-block `residence_rows` extends the carried value across the whole block. `read_first` lists, per
+        per-block `_residence_rows` extends the carried value across the whole block. `read_first` lists, per
         register, the READ-FIRST def PCs (a boundary state install): a read on such a PC reads the PRIOR value, so it
         both keeps that read out of the install's own residence and -- when the read is the register's earliest one in
         its block -- marks the register live-in there (the carried value, not the install, supplies that read).
@@ -1015,7 +947,7 @@ class Lir:
             for reg in active:
                 d = block_defs[index].get(reg, []) + ([base] if reg in live_in[index] else [])
                 u = block_uses[index].get(reg, []) + ([boundary] if reg in live_out[index] else [])
-                resident = residence_rows(d, u, boundary, frozenset(read_first.get(reg, set())))
+                resident = _residence_rows(d, u, boundary, frozenset(read_first.get(reg, set())))
                 if resident:
                     rows.setdefault(reg, set()).update(resident)
         return rows

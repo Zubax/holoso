@@ -14,8 +14,7 @@ verification-suite mechanics. Read the representative examples under `examples/`
 
 Build our own compiler. The differentiating work is the front/mid-end: partial evaluation of Python, shape inference,
 and operator scheduling for a resource-shared FSM. No external HLS gives us this for Python, and most would force a
-pipeline-oriented optimizer we don't want. We delegate only to lightweight Python tools where it clearly pays:
-Cocotb for testbenches, ILP solvers and function minimization (SciPy) for scheduling/regalloc.
+pipeline-oriented optimizer we don't want. We delegate only to lightweight Python tools where it clearly pays.
 
 The target is a specialized program, not a pipeline. We synthesize a sequential FSM (a zero-instruction-set computer,
 ZISC) that time-multiplexes a few shared operators over a register file. We do not pursue a constant or near-1
@@ -145,6 +144,19 @@ the slow HDL-emission/simulation iteration begins.
   result being taken before restarting).
 - Makespan / II -- a block's schedule length in cycles; the initiation interval (II) is the whole executed path's
   exact cycle count.
+- Firing -- one activation of a pooled operator: the operation, or the fused group of operations, that a single
+  issue of the module computes; its members share the issue cycle and the instance.
+- Instance -- one physical copy of a pooled operator. The scheduler binds each firing to an instance; the register
+  allocator may rebind it.
+- Mux arm -- one input of a register-file multiplexer: a source an operand port's read multiplexer selects among, or
+  a writer a register's write select takes. The arm count over all ports and registers is the steering, the
+  multiplexer fabric the register allocator minimizes.
+- Register price -- the number of mux arms one register is worth to the register allocator (`regalloc_register_price`).
+- Seed -- the allocation the register allocator's annealing starts from.
+- Orientation -- which of a commutative firing's read ports each operand takes; swapping them costs no hardware and
+  moves each operand between the two ports' multiplexers.
+- Busy residue -- the cycles for which an instance stays busy in a successor block's frame because a firing of an
+  overlapping predecessor is still in flight there.
 - ZISC -- zero-instruction-set computer: the VLIW microcode-driven sequential FSM that Holoso synthesizes.
 
 ## Python API
@@ -495,7 +507,8 @@ cases, boolean-logic and cast chains schedule back-to-back. Block-resident opera
 available from the block's first control word. Ready ops issue in critical-path order onto free instances, pooled by
 the fully specified hardware operator itself (equal-by-value); the per-class budget is that operator's own `instances`
 option, a cap rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it
-serialize.
+serialize. The scheduler's first-free binding of a firing to an instance is only a seed: the register allocator
+rebinds firings among the realized instances without changing an issue cycle or the instance count.
 
 Read-first plus the +1 edge, not write-through forwarding, is a deliberate trade: forwarding would erase the +1 but
 its muxes cost `O(NRD*NWR)` across many read and write ports -- unsustainable -- while the +1 hides under pipelined
@@ -505,21 +518,21 @@ overlap.
 
 Register allocation is reach-aware over the whole CFG: whether two values may share a register is decided on a
 hardware-frame interference graph from per-block liveness, two values interfering when their residences overlap under
-the read-first rule. Path-awareness is free: the two arms of an `if` are live in no common block, so their
-temporaries reuse the same registers, keeping a heavily-branched kernel to a handful of wide registers. The primary
-objective is to minimize per-port read-set and per-register writer-set fan-in -- the FPGA steering cost that matters,
-not flip-flop count; register count is a bounded secondary objective, and there is no spilling to memory. The
-coloring is a port-affinity greedy seed refined by simulated annealing over the same objective, and colors both
-banks.
+the read-first rule. Path-awareness is free: the two arms of an `if` are live in no common block, so their temporaries
+reuse the same registers, keeping a heavily-branched kernel to a handful of wide registers. The objective is the
+emitted mux arm count plus the register price times the register count: the steering is the FPGA cost that matters,
+not the flip-flop count, and there is no spilling to memory. Three decisions share that objective and one search: a
+value's register, a commutative firing's orientation (after Chen & Cong), and a firing's instance where its operator
+has several. The search is simulated annealing from the seed, deterministic and with incremental cost updates,
+finished by a local-improvement descent, so the result is never worse than the seed. The boolean bank is allocated
+first, since a wide inline result names the boolean register it reads. The install fixpoint iterates the layout and
+the coalescing alone; the coloring runs once on the converged layout.
 
 Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed, identity-arm
 predecessors merge by union-find whenever the two sides do not interfere, so the arm value flows straight into the
 merged register with no copy (a diamond's mutually-exclusive arms do not interfere, so they usually coalesce away).
 The pass is pure post-schedule register reassignment -- values never change, though the surviving copy set decides
-which tail installs pay a terminator cycle, so PC layout and cycle counts may shift with it. Commutative port
-assignment, after allocation, orients each commutative firing's operands across its read ports to minimize total
-read-set size -- a pure relabelling at no hardware or latency cost; the minimization is graph bipartisation, solved
-exactly per instance as a small MILP with a local search fallback.
+which tail installs pay a terminator cycle, so PC layout and cycle counts may shift with it.
 
 Persistent state slots. Both banks commit state in place: a live-out is written directly into its slot register,
 read-first, so a same-frame self-update (an accumulator) reads the old value and writes the new one with no copy; an
@@ -571,9 +584,11 @@ controller -- one pre-decoded VLIW control word per step, written as a synchrono
 `case`-over-address is the inferable-ROM form every synthesis tool recognizes and maps to an appropriate ROM (LUT
 logic or block RAM), unlike the array-plus-`initial` form, which some tools flatten to logic and others force into a
 slow block RAM even when tiny; it occupies its own clocked block, the sole sanctioned second `always @(posedge clk)`,
-since that dedicated form is what triggers the inference. The ROM is read through a short multi-stage fetch (PC
-latch, ROM read register, routing register) so the controller is short register-to-register paths rather than a wide
-combinational cone; the fetch leads the executing step, which under static scheduling only adds to the makespan/II.
+since that dedicated form is what triggers the inference. The RTL stays tool-neutral: the ROM read register carries
+the `HOLOSO_ATTRIBUTE_ROM` macro, empty by default, through which a flow attaches its synthesizer's mapping attribute.
+The ROM is read through a short multi-stage fetch (PC latch, ROM read register, routing register) so the controller is
+short register-to-register paths rather than a wide combinational cone; the fetch leads the executing step, which
+under static scheduling only adds to the makespan/II.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
 `in_valid`); the PC advances every clock; at the last PC it asserts `out_valid` while outputs drive combinationally
@@ -664,18 +679,23 @@ and debugging what the compiler did -- not a simplified or approximated view.
 ## Fabric-area exploration
 
 The synthesized fabric is dominated by the per-operand read multiplexers: on a register-pressure-heavy kernel (an EKF
-update) they are roughly 60-65% of the LUTs. The read-set sizes sit at the interference floor -- the values a port
-reads are largely simultaneously live -- so the muxes encode real liveness rather than allocation slack, which bounds
-most levers. Results below were measured end-to-end across Yosys+nextpnr-ECP5, Lattice Diamond, and Vivado, and are
-recorded so the dead ends are not re-explored.
+update) they are roughly 60-65% of the LUTs. The read-set sizes sit close to the interference floor -- the values a
+port reads are largely simultaneously live -- so the muxes encode real liveness rather than allocation slack, which
+bounds most levers; what slack remains is the annealer's. Results below were measured end-to-end across
+Yosys+nextpnr-ECP5, Lattice Diamond, and Vivado, and are recorded so the dead ends are not re-explored.
 
 Adopted (lossless, f_max-neutral):
 
 - Read and write muxes as a `case` over the endpoint's dense opcode rather than an indexed part-select into a packed
   gather bus, or the nested-ternary const-pool selector it replaced: smallest and fastest of the encodings tried.
   Nested-ternary muxes are catastrophic.
-- Commutative operand port assignment, solved exactly as a MILP: a few percent LUT on the EKF across all three tools,
-  at zero hardware or latency cost. Based on Chen & Cong.
+- One annealer over registers, commutative operand orientation and instance binding (see Register allocation), in
+  place of a greedy coloring whose annealed refinement was inert plus an exact port-assignment MILP: a few percent
+  LUT on the EKF under Vivado at no latency cost, the orientation move matching the MILP's result. Based on Chen & Cong.
+- The microcode ROM in block RAM on Vivado, through the emitter's attribute hook: without `rom_style = "block"` on
+  the ROM read register Vivado keeps the `case` ROM in LUT logic, 5-10 percent of a machine. An initialized-array ROM
+  was tried first and rejected: Yosys then forces every ROM into a block RAM whose clock-to-out caps the short
+  kernels, and Diamond places worse; the `case` form leaves both untouched, so the attribute belongs to the flow.
 - A per-register write opcode and a grouped input load: read/write symmetry that folds every write-enable,
   write-address, const-pool selector, and boolean inversion into one tiny opcode, at modest ROM cost.
 - Explicit don't-care fill of a float write's WREG-WFLT high bits (`{{(WREG-WFLT){1'bx}}, value}`, float views
@@ -684,19 +704,33 @@ Adopted (lossless, f_max-neutral):
   on every gapped row, growing with the gap); Vivado and Yosys sweep the dead bits under either spelling. X-filling
   the constant pool was measured null (a constant's high bits are dead at every use) and skipped.
 
+The register price. The allocator trades registers for mux arms at `regalloc_register_price` (2.0), and across the
+example kernels the trades go both ways: the EKF kernels spend registers to remove arms, foc and imu_fusion spend arms
+to remove registers. Vivado confirms both directions except on imu_fusion, whose LUT count an arm count cannot predict:
+a single-writer register costs no write mux at all, and a LUT6 fabric prices a mux in steps. That regression is no
+larger than the LUT-count difference between two synthesis runs of equivalent designs, so the price stays 2.0; a convex
+per-endpoint mux cost is the refinement if a kernel ever regresses beyond that.
+
+Operator replication (`instances`) trades area for latency and pays in mux arms; it is not an area loss: a second
+multiplier shortens the EKF transaction by about a sixth for a similar fraction more LUTs under the annealer's
+binding. The earlier "replication rejected" verdict was measured under the first-free binding and the greedy colorer.
+
 Explored and rejected for register-pressure-bound kernels:
 
 - LUTRAM register file: a multi-write workload needs a live-value table costing as many LUTs as the FF+mux it
   replaces; banking helps only when access sets partition cleanly.
 - Register-file size cap via pressure-limited scheduling: `nreg` floors at peak liveness, so it trades large latency
   and f_max for a couple percent.
-- Operator replication and FMA fusion: both raise read-operand traffic (more, or wider, read ports), enlarging total
-  mux area despite fewer ops or a shorter makespan. This is why the FMA contraction is opt-in (only when `ffma` is
-  configured): it is a numerical feature (single- vs double-rounding), not an area lever, so a pressure-bound kernel
-  should leave `ffma` unconfigured.
+- FMA fusion as an area reduction: it raises read-operand traffic (a wider read port), enlarging total mux area
+  despite fewer ops. This is why the FMA contraction is opt-in (only when `ffma` is configured): it is a numerical
+  feature (single- vs double-rounding), so a pressure-bound kernel should leave `ffma` unconfigured.
 - Operand collectors (copy/move ops off the worst-reach ports): a copy relocates fan-in rather than removing it -- a
   net gain needs a value moved onto a co-reachable but not co-live target, which the interference floor denies, and
   copies on the shared operator also cost cycles.
+- Allocator variants that lost to the one annealer: an exact post-coloring rebind (minutes per kernel for a few
+  arms), exact joint solving (does not scale), a hard write-select cap and a register price that rises during the
+  annealing (the fixed price does their job), and alternating exact rebind with recoloring (subsumed by the joint
+  moves).
 
 Latency-for-area trades (set aside -- latency is a real cost and the area gain did not justify it):
 
@@ -708,7 +742,7 @@ Latency-for-area trades (set aside -- latency is a real cost and the area gain d
 ## References
 
 - L. Chen, J. Cong. Register Binding and Port Assignment for Multiplexer Optimization. ASP-DAC 2004. Basis for the
-  commutative operand port-assignment pass.
+  allocator's orientation move (commutative operand port assignment).
 - J. Cong, Y. Fan, et al. Architecture and Synthesis for Multi-Cycle Communication (the Regular Distributed Register
   microarchitecture). ISPD 2003. Banking plus scheduled inter-bank copies.
 - A. Terechko, et al. Inter-cluster Communication Models for Clustered VLIW Processors. HPCA 2003. Producer-side

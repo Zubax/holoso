@@ -5,7 +5,9 @@ Render a scheduled Lir into a synthesizable Verilog ZISC module that instantiate
 The controller is a microcode ROM (see ._microcode): one pre-decoded VLIW control word per step, written as a
 synchronous `case` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
 fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
-which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
+which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there. The ROM read register's
+declaration carries the `HOLOSO_ATTRIBUTE_ROM` macro, empty unless the flow defines it, so a tool-specific mapping
+attribute can be attached without touching the generated RTL.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
 routing is uniform: each operand port's read mux is a `case` over that port's read codebook (its registers and the
@@ -123,7 +125,7 @@ class _WideRenderer:
     def _fill_float(self, view: str) -> str:
         return f"{{{{(WREG-WFLT){{1'bx}}}}, {view}}}" if self._active else view
 
-    def wide_source(self, source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
+    def _wide_source(self, source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
         """A wide source's value view with its folded conditioner applied; a float view is WFLT wide at gap > 0."""
         raw = _source_net(source)
         match conditioner:
@@ -140,13 +142,13 @@ class _WideRenderer:
     def operand_rhs(self, operand: WideOperand | BoolOperand) -> str:
         match operand:
             case WideOperand():
-                return self.wide_source(operand.source, operand.conditioner)
+                return self._wide_source(operand.source, operand.conditioner)
             case BoolOperand():
                 return _bool_operand_rhs(operand)
             case _:
                 assert_never(operand)
 
-    def inline_rhs(
+    def _inline_rhs(
         self,
         operator: InlineHardwareOperator,
         operands: tuple[WideOperand | BoolOperand, ...],
@@ -181,7 +183,7 @@ class _WideRenderer:
                 result_type = inst.operator.signature.result_types[port]
                 return self._fill_float(net) if isinstance(result_type, FloatType) else net
             case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
-                expr = self.inline_rhs(operator, operands, conditioner)
+                expr = self._inline_rhs(operator, operands, conditioner)
                 if isinstance(dst, BoolRegRef):
                     return expr
                 assert len(operator.signature.result_types) == 1
@@ -215,7 +217,7 @@ def generate(lir: Lir) -> VerilogOutput:
 
     # The two dual codebooks, built once and threaded to both the microcode packer and the emitters so the
     # code<->source mapping cannot drift: per operand port (read) and per register (write). The write side derives from
-    # a single `write_events` traversal, shared by the codebook, the packer, and the ROM-comment landings.
+    # the one `write_events` traversal, shared by the codebook, the packer, and the ROM-comment landings.
     read_books = read_codebook(lir)
     events = write_events(lir)
     write_books = write_codebook(events)
@@ -244,17 +246,40 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_clocked(w, lir, write_books, renderer)
     _emit_outputs(w, lir, renderer)
     w("\nendmodule\n")
+    w(_ROM_ATTRIBUTE_MACRO_TRAILER)
     return VerilogOutput(verilog=w.render(), support_files=support_files())
+
+
+# The defaulted macro is undefined again after the module so that a flow's own definition, read before this file,
+# is the only one that outlives it.
+_ROM_ATTRIBUTE_MACRO_HEADER = """
+`ifndef HOLOSO_ATTRIBUTE_ROM
+`define HOLOSO_ATTRIBUTE_ROM
+`define HOLOSO_ATTRIBUTE_ROM_DEFAULTED
+`endif
+"""
+
+_ROM_ATTRIBUTE_MACRO_TRAILER = """
+`ifdef HOLOSO_ATTRIBUTE_ROM_DEFAULTED
+`undef HOLOSO_ATTRIBUTE_ROM
+`undef HOLOSO_ATTRIBUTE_ROM_DEFAULTED
+`endif
+"""
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:
     # Generation time is not included for reproducibility.
     fmt = lir.float_format
-    w(f"""
+    w(
+        f"""
 {output_header("// ")}
 
 `timescale 1ns/1ps
-
+""",
+        "",
+    )
+    w(_ROM_ATTRIBUTE_MACRO_HEADER, "")
+    w(f"""
 // Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.
 module {lir.module_name} (
 """)
@@ -426,9 +451,11 @@ def _emit_microcode_rom(
     landings: dict[int, list[str]],
 ) -> None:
     digits = (ucw + 3) // 4
+    # The mapping attribute belongs on the read register: it is the declaration a synthesizer inspects when it infers
+    # the ROM from the clocked `case`.
     w("""
 // Microcode VLIW ROM.
-reg [UCW-1:0] ucode_q;     // 2nd fetch stage
+`HOLOSO_ATTRIBUTE_ROM reg [UCW-1:0] ucode_q;  // 2nd fetch stage
 reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
     packed = sorted((f for f in fields.values() if f.offset >= 0), key=lambda f: f.offset)
     if packed:
@@ -438,7 +465,6 @@ reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
         for f, bits in zip(packed, bit_strs):
             w(f"//   {bits:<{wbit}}  {f.name}")
     w("""
-(* rom_style = "block", syn_romstyle = "EBR" *)
 always @(posedge clk)
     case (ucode_addr_q)""")
     w.push()

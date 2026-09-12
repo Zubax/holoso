@@ -133,6 +133,7 @@ options = holoso.Options(
 
 Every operator also takes `instances`, which caps how many physical copies of it the machine may emit; the
 default of one shares a single module across the whole kernel, and a higher cap lets independent work co-issue.
+A second copy shortens the transaction but tends to increase the fabric area and may even reduce max frequency.
 
 You only need to set the options for the operators that the kernel actually uses.
 If the kernel needs an unconfigured operator, the behavior depends on whether Holoso can express the missing
@@ -184,6 +185,10 @@ out = result.write("outputs")
 for filename, path in out.items():
     print(f"{filename}: {path}")
 ```
+
+The generated RTL is tool-neutral with per-flow customization hooks.
+One such hook is the `HOLOSO_ATTRIBUTE_ROM` macro that can be defined to control the microcode ROM implementation; e.g.,
+`` `define HOLOSO_ATTRIBUTE_ROM (* rom_style = "block" *) `` for Vivado.
 
 ### Inspect the results
 

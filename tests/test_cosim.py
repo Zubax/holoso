@@ -1,5 +1,6 @@
 """Functional cosimulation: drive generated modules and check their outputs bit-for-bit against the model backend."""
 
+import dataclasses
 import math
 from collections.abc import Mapping
 
@@ -16,6 +17,7 @@ from holoso import (
     FILog2Options,
     FMulILog2Options,
     FMulOptions,
+    FSincosOptions,
     FSortOptions,
     FSqrtOptions,
     FloatFormat,
@@ -482,6 +484,61 @@ def test_cosim_mirrored_comparisons_swap_orientation(sim: str, config: OptionsCa
 
     fmt = FloatFormat(6, 18)
     run_cosim(sim, holoso.synthesize(kernel, config.make_options(fmt), name=f"mirrored_cmp_{config.label}"))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_two_multiplier_instances_co_issue(sim: str) -> None:
+    # Two co-issued products realize the second multiplier; the wrappers' over-issue `$fatal` (armed under SIMULATION)
+    # is the oracle for a double-driven module, which the model cannot see.
+    def kernel(a: float, b: float, c: float, d: float) -> float:
+        return a * b + c * d
+
+    fmt = FloatFormat(6, 18)
+    options = default_options(fmt)
+    operators = dataclasses.replace(options.operator, fmul=FMulOptions(instances=2))
+    options = dataclasses.replace(options, operator=operators)
+    lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "fmul_pair")
+    products = [op for op in lir.ops if op.inst.operator.mnemonic == "fmul"]
+    assert {op.inst.name for op in products} == {"fmul_0", "fmul_1"}
+    assert len({op.issue_cycle for op in products}) == 1, "the products must co-issue for the pool to bind both"
+    run_cosim(sim, holoso.synthesize(kernel, options, name="fmul_pair"))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_two_cordic_instances_with_contending_windows(sim: str) -> None:
+    # Three sin/cos products contend for two CORDIC instances whose busy windows are long (II well above 1), so a
+    # wrong rebinding would double-issue; the wrappers' over-issue `$fatal` is the oracle.
+    def kernel(a: float, b: float, c: float) -> tuple[float, float, float]:
+        return math.sin(a) * math.cos(b), math.sin(b) + math.cos(c), math.sin(c) * math.sin(a)
+
+    fmt = FloatFormat(6, 18)
+    options = default_options(fmt)
+    assert options.operator.fsincos is not None
+    operators = dataclasses.replace(
+        options.operator, fsincos=FSincosOptions(instances=2), fmul=FMulOptions(instances=2)
+    )
+    options = dataclasses.replace(options, operator=operators)
+    lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "sincos_pair")
+    assert {inst.name for inst in lir.instances} >= {"fsincos_0", "fsincos_1"}
+    run_cosim(sim, holoso.synthesize(kernel, options, name="sincos_pair"))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_two_comparator_instances_swap_and_rebind(sim: str) -> None:
+    # Six comparisons over two shared operands, two of them mirrored, on two comparator instances: the allocator
+    # both flips the mirrored firings (their lt tap moving to gt) and rebinds firings across the instances so each
+    # instance's ports read one operand register. Every relation must survive the permuted boolean lanes bit-exactly.
+    def kernel(a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float) -> tuple[float, ...]:
+        return float(d < c), float(a < b), float(a < e), float(c < f), float(h < c), float(a < g)
+
+    fmt = FloatFormat(6, 18)
+    options = default_options(fmt)
+    options = dataclasses.replace(
+        options, operator=dataclasses.replace(options.operator, fcmp=FCmpOptions(instances=2))
+    )
+    lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "cmp_pair")
+    assert {inst.name for inst in lir.instances} == {"fcmp_0", "fcmp_1"}
+    run_cosim(sim, holoso.synthesize(kernel, options, name="cmp_pair"))
 
 
 @pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)

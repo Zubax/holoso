@@ -35,6 +35,19 @@ from ._ir import (
     operand_read_cycle as operand_read_cycle,
     pooled_write_word as pooled_write_word,
 )
+from ._sources import (
+    InlineWriteSource as InlineWriteSource,
+    MoveWriteSource as MoveWriteSource,
+    OpWriteSource as OpWriteSource,
+    ReadSource as ReadSource,
+    read_arms as read_arms,
+    write_arms as write_arms,
+    WriteEvent as WriteEvent,
+    WriteSource as WriteSource,
+    read_sources_per_port as read_sources_per_port,
+    write_events as write_events,
+    write_sources_per_register as write_sources_per_register,
+)
 from ._ports import (
     ControlInputPort as ControlInputPort,
     ControlOutputPort as ControlOutputPort,

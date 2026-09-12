@@ -40,6 +40,7 @@ from holoso._lir import (
     WideOperand,
     landing_cycle,
     operand_read_cycle,
+    read_sources_per_port,
 )
 from holoso._lir._ir import (
     READ_FIRST_EDGE,
@@ -68,7 +69,7 @@ from holoso._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from ._modelref import default_ifmt, build_lir, build_model
+from ._modelref import default_ifmt, build_lir, build_model, SHIPPED_TUNING
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType
 from holoso._value import FloatValue, ScalarValue
@@ -81,7 +82,6 @@ from ._modelref import (
     ChainedSlots,
     COMPARATOR_OP_CASES,
     default_mir,
-    default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
     OperatorCase,
@@ -825,17 +825,17 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
 
 def test_residence_tint_is_path_exact_across_a_merge() -> None:
     # Regression (review P1, all three reviewers): the report's residence tint was not path-exact. Three manifestations,
-    # all fixed: (a) a single global residence_rows collapsed a register's def/use across mutually-exclusive arms, so a
+    # all fixed: (a) a single global _residence_rows collapsed a register's def/use across mutually-exclusive arms, so a
     # value live on two arms that rejoin at a merge had its lower-addressed arm truncated by the other arm's landing
     # (live register tinted DEAD) -- fixed by per-block CFG residence (_cfg_residence); (b) the read-first `<=` bounds
-    # in residence_rows and the upward-exposed test treated a read on a value's own landing PC as reading the PRIOR
+    # in _residence_rows and the upward-exposed test treated a read on a value's own landing PC as reading the PRIOR
     # occupant, painting a register's residence spuriously back toward the block entry (dead register tinted LIVE) --
     # fixed by the write-then-read strict `<`; (c) a pc-gated install (a phi copy, a boolean write, or an early slot
     # writeback) was tinted at its FIRE step, one cycle before the model commits it -- fixed by routing both
     # the model and the diagnostic through `install_landing` (fire + 1), while a boundary slot install is read-first
     # at the boundary. Tied to the model oracle in BOTH banks: reg_liveness/bool_liveness must equal the union over both
     # branch arms (or, for the loop kernel, the executed trace) of the model's per-path residence, computed with an
-    # INDEPENDENT write-then-read liveness that does not share residence_rows' rule. Crash-before: false-arm mid-rows
+    # INDEPENDENT write-then-read liveness that does not share _residence_rows' rule. Crash-before: false-arm mid-rows
     # missing, pre-landing rows spuriously present, and -- for the install skew -- recip_newton's wide phi copies tinted
     # at their fire PC instead of their landing PC and bw's boolean write tinted at its fire step instead of its
     # landing.
@@ -942,7 +942,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             # Backward per-path liveness in the model's write-then-read order (a write lands then is read at the same
             # PC), so a read on a value's landing reads THAT value, not the prior occupant: kill the carry with the
             # write AFTER folding in the read. A def cell is resident even if its value is never read (it occupies the
-            # register that cycle). Crucially this oracle does NOT share residence_rows' rule, so it is an independent
+            # register that cycle). Crucially this oracle does NOT share _residence_rows' rule, so it is an independent
             # check -- the buggy `<=` and fire-step-install variants over-tint against it.
             for step_pc, reads, writes, breads, bwrites in reversed(steps):
                 for reg in reads | live | writes:
@@ -992,7 +992,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
 
 
 def test_state_slot_residence_matches_the_model_under_carry() -> None:
-    # Regression (review): the READ-FIRST boundary-install path -- residence_rows' read_first_defs and _cfg_residence
+    # Regression (review): the READ-FIRST boundary-install path -- _residence_rows' read_first_defs and _cfg_residence
     # `upward` refinement -- governs only persistent state slots, which the stateless oracle above never builds. A
     # boundary state install reads-then-writes at last_pc, so a read there (an output tap of the live-in, or an in-place
     # install's own source) reads the PRIOR value; the prior strict-`<` rule mis-attributed it to the boundary def and
@@ -1311,7 +1311,7 @@ def test_fmul_ilog2_non_concurrent_scalings_share_one_instance() -> None:
     sched = _schedule(mir)
     assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]
     assert sched.inst_of[il[0]] == sched.inst_of[il[1]]
-    assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
+    assert len({i for i in sched.inst_of.values() if isinstance(i.operator, FMulILog2Operator)}) == 1
 
 
 def test_fmul_ilog2_concurrent_scalings_serialize_by_default() -> None:
@@ -1325,7 +1325,7 @@ def test_fmul_ilog2_concurrent_scalings_serialize_by_default() -> None:
 
     one = _schedule(mir)  # default budget 1 -> serialize onto a single instance
     assert one.issue_cycle[il[0]] != one.issue_cycle[il[1]]
-    assert sum(1 for i in one.instances if isinstance(i.operator, FMulILog2Operator)) == 1
+    assert len({i for i in one.inst_of.values() if isinstance(i.operator, FMulILog2Operator)}) == 1
 
 
 def test_fmul_ilog2_different_exponents_share_one_instance() -> None:
@@ -1338,7 +1338,7 @@ def test_fmul_ilog2_different_exponents_share_one_instance() -> None:
     sched = _schedule(mir)
     assert sched.inst_of[il[0]] == sched.inst_of[il[1]]
     assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]
-    assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
+    assert len({i for i in sched.inst_of.values() if isinstance(i.operator, FMulILog2Operator)}) == 1
 
 
 def test_state_writeback_installs_early_and_is_first_class() -> None:
@@ -1461,7 +1461,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
             a = a + 4.0
         return a
 
-    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches")
+    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches", SHIPPED_TUNING)
     comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons
@@ -1647,10 +1647,11 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
         R_diag=[1e3, 1e-6],
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
-    lir = build_lir(_run(filt.update), "ekf1_stateful")
-    # Gap reuse sheds ~4 of the fully-reserved 45; the allocator trades this kernel's last register against one
-    # steering arm, so the ceiling is one above the count it settles on.
-    assert lir.regfile.nreg <= 41
+    lir = build_lir(_run(filt.update), "ekf1_stateful", SHIPPED_TUNING)
+    # Gap reuse sheds the fully-reserved 45 down to the count the shipped tuning settles on, frozen here as a ceiling
+    # (the allocator trades registers for mux arms at the configured price, so the count is a property of the
+    # tuning).
+    assert lir.regfile.nreg <= 42
 
 
 type _Producer = tuple[str, int]
@@ -1730,7 +1731,8 @@ def test_register_sharing_is_hardware_disjoint() -> None:
 
 
 def _read_mux_fan_in(lir: Lir) -> int:
-    return sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
+    books = read_sources_per_port(lir).values()
+    return sum(max(0, sum(isinstance(source, RegRef) for source in book) - 1) for book in books)
 
 
 def test_is_commutative_marks_only_the_symmetric_operators() -> None:
@@ -1741,69 +1743,20 @@ def test_is_commutative_marks_only_the_symmetric_operators() -> None:
     assert not FDivOperator(FMT, FDivOptions()).is_commutative
 
 
-def test_commutative_port_assignment_never_increases_read_mux_fan_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import holoso._lir._build as build_module
+def test_orientation_reclaims_multiplier_reach() -> None:
+    # `a * b + c * a`: read in source order the multiplier's first port takes {a, c} and its second {b, a}, two
+    # arms; with the second product read the other way round the first port takes a alone and the second {b, c},
+    # one arm. The allocator owns the orientation, so the build lands at one.
+    def f(a: float, b: float, c: float) -> float:
+        return a * b + c * a
 
-    import ekf1_stateless
-
-    cfg = mir_options(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(stage_decode=1),
-                fmul=FMulOptions(stage_input=1),
-                fdiv=FDivOptions(),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
-            ),
-            ffmt=FMT,
-        )
+    lir = build_lir(_run(f), "oriented_products", SHIPPED_TUNING)
+    products = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FMulOperator)]
+    assert len(products) == 2, "the premise needs both products to survive HIR as multiplies"
+    books = read_sources_per_port(lir)
+    assert (
+        sum(max(0, len(book) - 1) for (inst, _), book in books.items() if isinstance(inst.operator, FMulOperator)) == 1
     )
-    monkeypatch.setattr(build_module, "assign_commutative_ports", lambda *args, **kwargs: {})
-    baseline = build_lir(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
-    monkeypatch.undo()
-    optimized = build_lir(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
-
-    assert _read_mux_fan_in(optimized) <= _read_mux_fan_in(baseline)
-    assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1_stateless has commutative reach to reclaim
-
-
-def test_reach_floor_seed_skips_annealing(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The mux-fan-in objective bottoms out at 0 (every read port reaches one register, every register one producer). A
-    # greedy seed already there is globally optimal, so refinement must short-circuit rather than burn the budget.
-    import holoso._lir._regalloc as regalloc
-
-    calls: list[int] = []
-    real = regalloc.dual_annealing  # type: ignore[attr-defined]  # scipy's dual_annealing, not reexported by _regalloc
-
-    def tracking_dual_annealing(*args: object, **kwargs: object) -> object:
-        calls.append(1)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(regalloc, "dual_annealing", tracking_dual_annealing)
-
-    def floor_kernel(a: float, b: float) -> float:
-        return a + b  # no register sharing -> greedy seed is at the reach floor
-
-    def sharing_kernel(a: float, b: float, c: float) -> float:
-        return a * b + c  # the product and the sum reuse registers, lifting the objective above the floor
-
-    build_lir(_run(floor_kernel), "floor")
-    assert calls == []
-    build_lir(_run(sharing_kernel), "sharing")
-    assert calls
-
-
-def test_zero_regalloc_effort_bypasses_annealing(monkeypatch: pytest.MonkeyPatch) -> None:
-    import holoso._lir._regalloc as regalloc
-
-    monkeypatch.setattr(regalloc, "dual_annealing", lambda *args, **kwargs: pytest.fail("annealing was not bypassed"))
-
-    def sharing_kernel(a: float, b: float, c: float) -> float:
-        return a * b + c
-
-    holoso.synthesize(sharing_kernel, replace(default_options(FMT), regalloc_effort=0), name="sharing")
 
 
 def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
@@ -1975,7 +1928,7 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 2
     sources = [tuple(operand.source for operand in op.operands) for op in firings]
-    assert sources[0] == sources[1], "the MILP must orient both firings to read the same registers per port"
+    assert sources[0] == sources[1], "the allocator must orient both firings to read the same registers per port"
     gt_port, lt_port = (FCmpOperator.tap_of(rel)[0] for rel in (Relation.GT, Relation.LT))
     ports = sorted(write.port for op in firings for write in op.writes)
     assert ports == sorted((gt_port, lt_port)), "exactly one firing's lt tap must move to gt under the swap"
@@ -2144,7 +2097,7 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
             x = (x - 1.0) if x > 1.0 else (x + 1.0)
         return x
 
-    lir = build_lir(_run(f), "breg_reuse")
+    lir = build_lir(_run(f), "breg_reuse", SHIPPED_TUNING)
     conditions = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     assert conditions == 6, "the unrolled chain carries six comparisons"
     assert lir.bool_regfile.nreg <= 2, f"disjoint condition lifetimes must share registers, got {lir.bool_regfile.nreg}"
@@ -2165,7 +2118,7 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     def f(a: float, b: float, c: float, d: float, e: float, g: float) -> float:
         return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
 
-    lir = build_lir(_run(f), "bool_chain")
+    lir = build_lir(_run(f), "bool_chain", SHIPPED_TUNING)
     comparisons = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     ands = sum(1 for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
     assert comparisons == 5 and ands >= 4, (comparisons, ands)
@@ -2209,7 +2162,7 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
     # float path (a public attribute and its write-only alias) is exercised too.
     from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
 
-    pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_merge")
+    pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_merge", SHIPPED_TUNING)
     assert pfd.bool_regfile.nreg == 5
     assert pfd.regfile.nreg == 0  # purely boolean: the wide bank is unused
     assert len(pfd.bool_state_slots) == 2  # the four attributes collapse onto two registers
@@ -2396,8 +2349,7 @@ def test_forced_install_regrowth_pins_and_stays_correct(
     build must still match Python and the MIR interpreter. White-box is warranted because a black-box witness does
     not exist; if one ever appears, it must replace this fake.
     """
-    from holoso._lir import _build
-    from holoso._lir._bankalloc import actual_install_blocks as real_installs
+    from holoso._lir._bankalloc import CoalescedLayout
 
     def kernel(x: float, n: float) -> float:
         a = 0.0
@@ -2408,14 +2360,15 @@ def test_forced_install_regrowth_pins_and_stays_correct(
             i = i - 1.0
         return a * 2.0 + b
 
+    real_installs = CoalescedLayout.install_blocks
     calls = {"n": 0}
 
-    def fake_installs(*args: object) -> dict[int, bool]:
+    def fake_installs(layout: CoalescedLayout) -> dict[int, bool]:
         calls["n"] += 1
-        real = real_installs(*args)  # type: ignore[arg-type]
+        real = real_installs(layout)
         return {b: False for b in real} if calls["n"] == 1 else real
 
-    monkeypatch.setattr(_build, "actual_install_blocks", fake_installs)
+    monkeypatch.setattr(CoalescedLayout, "install_blocks", fake_installs)
     fmt = FloatFormat(6, 18)
     with caplog.at_level("INFO", logger="holoso._lir._build"):
         model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "forced_pin", fmt)
@@ -2432,7 +2385,7 @@ def test_forced_state_copy_regrowth_latches_and_stays_correct(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The state-copy latch twin of the forced-pin test: a chained-copy kernel whose charge is faked away once."""
-    from holoso._lir import _build
+    from holoso._lir._bankalloc import CoalescedLayout
 
     class Delay2:
         def __init__(self) -> None:
@@ -2445,14 +2398,14 @@ def test_forced_state_copy_regrowth_latches_and_stays_correct(
             self.x0 = x
             return out
 
-    real_state = _build._has_state_copy
+    real_state = CoalescedLayout.has_state_copy
     calls = {"n": 0}
 
-    def fake_state(*args: object) -> bool:
+    def fake_state(layout: CoalescedLayout) -> bool:
         calls["n"] += 1
-        return False if calls["n"] == 1 else real_state(*args)  # type: ignore[arg-type]
+        return False if calls["n"] == 1 else real_state(layout)
 
-    monkeypatch.setattr(_build, "_has_state_copy", fake_state)
+    monkeypatch.setattr(CoalescedLayout, "has_state_copy", fake_state)
     fmt = FloatFormat(8, 36)
     with caplog.at_level("INFO", logger="holoso._lir._build"):
         model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_mir(fmt), "forced_latch", fmt)

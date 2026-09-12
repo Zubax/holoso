@@ -1,5 +1,6 @@
 """Block scheduling with cross-block overlap, terminator-offset derivation, and ROM block layout for the builder."""
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -10,6 +11,8 @@ from ._ir import *
 from ._schedule import Schedule, schedule_ops
 from ._build_base import OverlapLayout
 from ._mir_facts import mir_operation, pred_count, succ_map
+
+_logger = logging.getLogger(__name__)
 
 
 def _value_word_and_landing(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) -> tuple[int, int, HardwareOperator]:
@@ -136,6 +139,7 @@ def schedule_with_overlap(
     block_makespan: dict[int, int] = {}
     block_term_offset: dict[int, int] = {}
     block_inflight: dict[int, dict[ValueId, int]] = {}
+    block_entry_busy: dict[int, dict[tuple[PooledHardwareOperator, int], int]] = {}
     # successor block -> the spill carry its single overlapping predecessor hands it (set at most once: a carried-into
     # block is single-predecessor, so only that one predecessor overlaps into it).
     carry: dict[int, _SpillCarry] = {}
@@ -144,6 +148,7 @@ def schedule_with_overlap(
         inherited = carry.get(bid, _SpillCarry({}, {}))
         livein_landing = inherited.livein_landing
         block_inflight[bid] = livein_landing  # the spills this block receives (== its scheduler livein_landing)
+        block_entry_busy[bid] = inherited.entry_busy
         sched = schedule_ops(
             mir.nodes,
             pool,
@@ -210,7 +215,13 @@ def schedule_with_overlap(
             spill = _SpillCarry(busy, landing)
             for target in targets:
                 carry[target] = spill
-    return OverlapLayout(block_sched, block_makespan, block_term_offset, block_inflight)
+    _logger.info(
+        "Layout: %d blocks, %d receiving spills, terminator offsets %s",
+        len(block_term_offset),
+        len(carry),
+        [block_term_offset[bid] for bid in sorted(block_term_offset)],
+    )
+    return OverlapLayout(block_sched, block_makespan, block_term_offset, block_inflight, block_entry_busy)
 
 
 @dataclass(frozen=True, slots=True)
