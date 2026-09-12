@@ -26,7 +26,7 @@ import holoso._operators as operators
 from holoso._backend.verilog._emit import generate
 from holoso._eel import lower as lower_frontend
 from holoso._hir import FloatFloor, FloatNeg, FloatToInt, FloatType as HirFloatType, HirBuilder
-from holoso._lir import Lir, PooledScheduledOp, WideOperand
+from holoso._lir import Lir, PooledScheduledOp, WideEarlyInstall, WideOperand
 from holoso._mir import Mir, MirBuilder, MirIntConst, MirInterpreter, MirOperation, lower as lower_to_mir
 from holoso._operators import (
     FILog2Operator,
@@ -323,7 +323,7 @@ def test_a_slot_fed_by_an_integer_input_installs_ahead_of_the_boundary() -> None
     """
     lir = build_lir(_select(InputLatch().step), "input_latch")
     (slot,) = lir.wide_state_slots
-    assert slot.install_cycle == 1 < lir.initiation_interval
+    assert isinstance(slot.install, WideEarlyInstall) and slot.install.cycle == 1 < lir.initiation_interval
 
 
 def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering() -> None:

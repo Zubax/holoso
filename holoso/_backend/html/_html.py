@@ -16,6 +16,7 @@ from importlib import resources
 from typing import assert_never
 
 from ..._lir import (
+    BoolBoundaryInstall,
     BoolOperand,
     BoolRegRef,
     Branch,
@@ -25,6 +26,7 @@ from ..._lir import (
     OpWriteSource,
     RegRef,
     WideOperand,
+    handshake_arms,
     read_sources_per_port,
     write_arms,
     write_events,
@@ -267,9 +269,9 @@ def _bool_read_fanin(lir: Lir) -> dict[BoolRegRef, int]:
                     pass
                 case _:
                     assert_never(source)
-    for slot in lir.bool_state_slots:
-        if slot.needs_copy:
-            tally(slot.live_out)
+    for arm in handshake_arms(lir).values():
+        if isinstance(arm, BoolBoundaryInstall):
+            tally(arm.source)
     for block in lir.blocks:
         if isinstance(block.terminator, Branch):
             fanin[block.terminator.cond] = fanin.get(block.terminator.cond, 0) + 1

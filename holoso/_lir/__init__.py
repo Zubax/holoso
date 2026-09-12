@@ -4,6 +4,7 @@ from ._build import build as build
 from ._regalloc import RegallocTuning as RegallocTuning
 from ._ir import Lir as Lir
 from ._ir import (
+    BoolBoundaryInstall as BoolBoundaryInstall,
     BoolConstRef as BoolConstRef,
     BoolInputLoad as BoolInputLoad,
     BoolOperand as BoolOperand,
@@ -12,6 +13,7 @@ from ._ir import (
     BoolSource as BoolSource,
     BoolWrite as BoolWrite,
     Branch as Branch,
+    InPlace as InPlace,
     InlineScheduledOp as InlineScheduledOp,
     Jump as Jump,
     LirBlock as LirBlock,
@@ -22,8 +24,10 @@ from ._ir import (
     RegRef as RegRef,
     Ret as Ret,
     ScheduledOp as ScheduledOp,
+    WideBoundaryInstall as WideBoundaryInstall,
     WideConstRef as WideConstRef,
     WideCopy as WideCopy,
+    WideEarlyInstall as WideEarlyInstall,
     WideInputLoad as WideInputLoad,
     WideOperand as WideOperand,
     WideOutputWire as WideOutputWire,
@@ -36,10 +40,12 @@ from ._ir import (
     pooled_write_word as pooled_write_word,
 )
 from ._sources import (
+    HandshakeArm as HandshakeArm,
     InlineWriteSource as InlineWriteSource,
     MoveWriteSource as MoveWriteSource,
     OpWriteSource as OpWriteSource,
     ReadSource as ReadSource,
+    handshake_arms as handshake_arms,
     read_arms as read_arms,
     write_arms as write_arms,
     WriteEvent as WriteEvent,

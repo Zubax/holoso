@@ -60,7 +60,7 @@ from holoso import SynthesisResult
 from holoso._type import FloatType, IntType, ScalarType
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._lir import BoolRegRef, Lir, RegRef, WideStateSlot
+from holoso._lir import BoolBoundaryInstall, BoolRegRef, Lir, RegRef, WideBoundaryInstall, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import MirOptions, Mir, lower as lower_to_mir
 
@@ -613,12 +613,12 @@ def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(bank: str, 
     coexisting: Sequence[WideStateSlot | BoolStateSlot]
     if bank == "wide":
         coexisting = [
-            slot
-            for slot in lir.wide_state_slots
-            if slot.needs_copy and lir.wide_state_install_is_boundary(slot) and slot.reg in steps
+            slot for slot in lir.wide_state_slots if isinstance(slot.install, WideBoundaryInstall) and slot.reg in steps
         ]
-    else:  # a boolean state install is boundary-only by construction
-        coexisting = [slot for slot in lir.bool_state_slots if slot.needs_copy and slot.reg in steps]
+    else:
+        coexisting = [
+            slot for slot in lir.bool_state_slots if isinstance(slot.install, BoolBoundaryInstall) and slot.reg in steps
+        ]
     assert coexisting, "the premise needs a boundary-installing slot whose own register also takes opcode writes"
     for slot in coexisting:
         assert max(steps[slot.reg]) < lir.present_step, f"{slot.name!r}: {sorted(steps[slot.reg])} vs present_step"
@@ -771,10 +771,10 @@ def test_the_boundary_installed_integer_slot_taps_its_conditioner() -> None:
         lower_to_mir(lower(_IntegerKernel().step, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(_INT_OPTIONS)),
         "int_kernel",
     )
-    (slot,) = [s for s in lir.wide_state_slots if s.needs_copy and lir.wide_state_install_is_boundary(s)]
-    assert isinstance(slot.tap.source, RegRef)
+    (slot,) = [s for s in lir.wide_state_slots if isinstance(s.install, WideBoundaryInstall)]
+    assert isinstance(slot.install, WideBoundaryInstall) and isinstance(slot.install.source.source, RegRef)
     verilog = generate(lir).verilog
-    assert f"if (out_valid && out_ready) regs[{slot.reg.index}] <= regs[{slot.tap.source.index}];" in verilog
+    assert f"if (out_valid && out_ready) regs[{slot.reg.index}] <= regs[{slot.install.source.source.index}];" in verilog
 
 
 def test_an_integer_port_declares_itself_signed(_integer_result: SynthesisResult) -> None:

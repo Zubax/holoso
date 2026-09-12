@@ -115,7 +115,10 @@ class FixedProducer(ABC):
 
 
 class _StaticWriter(FixedProducer):
-    """A handshake-gated arm: no holes, its own key."""
+    """
+    A writer keyed by itself, with no holes: a handshake-gated arm, which the emitter counts beside the opcode arms
+    whatever operand it moves, or an early slot install, alone on its reserved register.
+    """
 
     @property
     def holes(self) -> list[ValueId]:

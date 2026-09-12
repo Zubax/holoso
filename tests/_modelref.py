@@ -499,8 +499,10 @@ class ChainedSlots:
 
 class SelectHold:
     """
-    A Ret-block select is the slot live-in's LAST reader while the new live-out commits early: pins the read-step
-    frame of the state early-install bound. Shared by the white-box schedule test and its RTL cosim twin.
+    A Ret-block select is the slot live-in's LAST reader, and reads it only after the new live-out has landed (its
+    condition waits on a divide), so the live-out cannot commit in place and installs early, bounded by that read:
+    pins the read-step frame of the state early-install bound. Shared by the white-box schedule test and its RTL
+    cosim twin.
     """
 
     def __init__(self) -> None:
@@ -509,8 +511,9 @@ class SelectHold:
     def step(self, x: float, c: float) -> float:
         old = self._h
         self._h = x + 1.0
-        y = old if c > 0.0 else x
-        return y * 2.0 + (x * 1.5) / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)
+        scale = 1.5 / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)
+        y = old if c * scale > 0.0 else x
+        return y * 2.0 + x * scale
 
 
 def phi_swap_loop(x: float, n: float) -> float:

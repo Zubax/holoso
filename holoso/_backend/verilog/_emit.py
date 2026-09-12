@@ -15,7 +15,6 @@ constants it reads), and each register's write is a `case` over that register's 
 per-register opcode (code 0 == NOP hold). PC drives only the sequencer; it never gates a datapath read or write.
 """
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from textwrap import dedent
 from typing import assert_never
@@ -198,9 +197,16 @@ class _WideRenderer:
             case _:
                 assert_never(source)
 
-    def input_load_rhs(self, load: WideInputLoad | BoolInputLoad) -> str:
-        rhs = f"in_{load.name}"
-        return self._fill_float(rhs) if isinstance(load.scalar_type, FloatType) else rhs
+    def handshake_arm(self, dst: RegRef | BoolRegRef, arm: HandshakeArm) -> tuple[str, str]:
+        """The gate condition and the RHS of a register's handshake-gated write."""
+        match arm:
+            case WideInputLoad() | BoolInputLoad():
+                rhs = f"in_{arm.name}"
+                return "in_ready && in_valid", self._fill_float(rhs) if isinstance(arm.scalar_type, FloatType) else rhs
+            case WideBoundaryInstall(source=source) | BoolBoundaryInstall(source=source):
+                return "out_valid && out_ready", self.write_rhs(dst, MoveWriteSource(source))
+            case _:
+                assert_never(arm)
 
     def reset_literal(self, slot: WideStateSlot) -> str:
         """The reset snapshot in the slot's own family width; a float image gets the don't-care high bits."""
@@ -635,26 +641,24 @@ def _emit_read_muxes(
 
 def _emit_reg_write(
     w: _Writer,
-    lhs: str,
     dst: RegRef | BoolRegRef,
     book: WriteCodebook | None,
-    special_arms: list[tuple[str, str]],
+    arm: HandshakeArm | None,
     renderer: _WideRenderer,
 ) -> None:
     """
-    One segregated write statement per register (the multi-assign rule): the handshake-gated special arms first (an
-    input load, a boundary state install), then the opcode `case` over the register's write codebook as the final
-    `else`. Code 0 is the NOP hold -- an unlisted code in this clocked `case` retains the flop -- so the
-    write-enable is folded into the opcode with no extra logic level. A single-source register degenerates to
-    `if (opcode)`.
+    One segregated write statement per register (the multi-assign rule): the handshake-gated arm first, then the
+    opcode `case` over the register's write codebook as the final `else`. Code 0 is the NOP hold -- an unlisted code
+    in this clocked `case` retains the flop -- so the write-enable is folded into the opcode with no extra logic
+    level. A single-source register degenerates to `if (opcode)`.
     """
-    clause = "if"
-    for cond, rhs in special_arms:
-        w(f"{clause} ({cond}) {lhs} <= {rhs};")
-        clause = "else if"
+    lhs = f"regs[{dst.index}]" if isinstance(dst, RegRef) else f"bregs[{dst.index}]"
+    if arm is not None:
+        condition, rhs = renderer.handshake_arm(dst, arm)
+        w(f"if ({condition}) {lhs} <= {rhs};")
     if book is None or not book.sources:
         return
-    prefix = "else " if special_arms else ""
+    prefix = "else " if arm is not None else ""
     opcode = f_op(dst)
     if len(book.sources) == 1:
         w(f"{prefix}if ({opcode}) {lhs} <= {renderer.write_rhs(dst, book.sources[0])};")
@@ -672,14 +676,9 @@ def _emit_clocked(
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, register writes, and control state."""
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
-    wide_slots = {slot.reg.index: slot for slot in lir.wide_state_slots}
-    bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
-    wide_loads = {load.dst.index: load for load in lir.wide_inputs}
-    bool_loads = {load.dst.index: load for load in lir.bool_inputs}
-
-    def load_arm(loads: Mapping[int, WideInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
-        load = loads.get(reg)
-        return [("in_ready && in_valid", renderer.input_load_rhs(load))] if load else []
+    wide_slots = {slot.reg.index for slot in lir.wide_state_slots}
+    bool_slots = {slot.reg.index for slot in lir.bool_state_slots}
+    arms = handshake_arms(lir)
 
     w("""
 // All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q, transacting_q) and the
@@ -695,28 +694,20 @@ always @(posedge clk) begin
 
     # Non-slot registers: one reset-unconditional statement each. Datapath payload carries no reset, keeping the
     # high-fanout reset net off the wide cone (only control/valid state is reset); contents are don't-care until a
-    # valid write lands. A register with neither an input load nor any opcode source is simply omitted.
+    # valid write lands.
     nonslot_wide = [
-        reg for reg in range(nreg) if reg not in wide_slots and (RegRef(reg) in write_books or reg in wide_loads)
+        reg for reg in range(nreg) if reg not in wide_slots and (RegRef(reg) in write_books or RegRef(reg) in arms)
     ]
     nonslot_bool = [
-        reg for reg in range(nbreg) if reg not in bool_slots and (BoolRegRef(reg) in write_books or reg in bool_loads)
+        reg
+        for reg in range(nbreg)
+        if reg not in bool_slots and (BoolRegRef(reg) in write_books or BoolRegRef(reg) in arms)
     ]
     if nonslot_wide or nonslot_bool:
         w("// Register writes (reset-unconditional): one opcode-selected statement per register.")
-        for reg in nonslot_wide:
-            _emit_reg_write(
-                w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(wide_loads, reg), renderer
-            )
-        for reg in nonslot_bool:
-            _emit_reg_write(
-                w,
-                f"bregs[{reg}]",
-                BoolRegRef(reg),
-                write_books.get(BoolRegRef(reg)),
-                load_arm(bool_loads, reg),
-                renderer,
-            )
+        nonslot: list[RegRef | BoolRegRef] = [*map(RegRef, nonslot_wide), *map(BoolRegRef, nonslot_bool)]
+        for dst in nonslot:
+            _emit_reg_write(w, dst, write_books.get(dst), arms.get(dst), renderer)
         w("")
 
     # Control and persistent state are the reset-gated registers: the slot snapshot (under rst) and the slot's update
@@ -739,24 +730,16 @@ always @(posedge clk) begin
     w("transacting_q <= (transacting_q << 1) | transacting_in;")
     w("if (err) err_pc_q <= pc - FETCH_LAG;  // err wins; execution lags the fetch PC by FETCH_LAG, so step is pc-lag")
     w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
-    # A non-coalesced slot installs its live-out read-first at the accepted-output boundary (out_valid && out_ready, so
-    # a held boundary copies exactly once), a lower-priority arm of the same statement; an early install is an ordinary
-    # opcode source (see write_events). Boolean state installs are boundary-only.
-    for reg, slot in sorted(wide_slots.items()):
-        arms = load_arm(wide_loads, reg)
-        if slot.needs_copy and lir.wide_state_install_is_boundary(slot):
-            # This arm outranks the opcode case below it and must not shadow it, here or in the boolean bank below.
-            # It cannot: the install executes at `present_step`, and `build_microcode` -- already run, over every
-            # write event -- asserts each rides a strictly earlier step, so the word presented alongside the install
-            # holds the write NOP. That is what lets a slot register which also carries opcode writes, the shape a
-            # live-out coalesced into another slot's register leaves behind, be emitted rather than refused.
-            arms.append(("out_valid && out_ready", renderer.write_rhs(slot.reg, MoveWriteSource(slot.tap))))
-        _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms, renderer)
-    for reg, bslot in sorted(bool_slots.items()):
-        arms = load_arm(bool_loads, reg)
-        if bslot.needs_copy:
-            arms.append(("out_valid && out_ready", renderer.write_rhs(bslot.reg, MoveWriteSource(bslot.live_out))))
-        _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms, renderer)
+    # A slot's boundary install rides the accepted-output edge (out_valid && out_ready, so a held boundary copies
+    # exactly once), the handshake arm of its register's statement; an early install is an ordinary opcode source
+    # (see write_events). The arm outranks the opcode case below it and must not shadow it. It cannot: the install
+    # executes at `present_step`, and `build_microcode` -- already run, over every write event -- asserts each rides a
+    # strictly earlier step, so the word presented alongside the install holds the write NOP. That is what lets a slot
+    # register which also carries opcode writes, the shape a live-out coalesced into another slot's register leaves
+    # behind, be emitted rather than refused.
+    slots: list[RegRef | BoolRegRef] = [*map(RegRef, sorted(wide_slots)), *map(BoolRegRef, sorted(bool_slots))]
+    for dst in slots:
+        _emit_reg_write(w, dst, write_books.get(dst), arms.get(dst), renderer)
     w.pop()
     w("end")
 

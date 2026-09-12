@@ -29,6 +29,7 @@ from holoso._lir import (
     BoolOperand,
     BoolRegRef,
     Branch,
+    InPlace,
     Jump,
     Lir,
     LirBlock,
@@ -36,7 +37,9 @@ from holoso._lir import (
     RegRef,
     Ret,
     ScheduledOp,
+    WideBoundaryInstall,
     WideConstRef,
+    WideEarlyInstall,
     WideOperand,
     landing_cycle,
     operand_read_cycle,
@@ -46,7 +49,6 @@ from holoso._lir._ir import (
     READ_FIRST_EDGE,
     boundary_step,
     dependency_edge,
-    inline_fire_cycle,
     install_landing,
     pooled_write_word,
     successor_local_cycle,
@@ -1202,13 +1204,13 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         # branch arm would be tinted by the static all-paths tint but absent from a single steady run -- path coverage,
         # not a defect; a carried slot register is live on every path, so it must match exactly).
         for slot in [*lir.wide_state_slots]:
-            if slot.needs_copy:
+            if not isinstance(slot.install, InPlace):
                 tint = {pc for pc in lir.reg_liveness[slot.reg] if pc <= last}
                 model = {pc for pc in model_wide.get(slot.reg.index, set()) if 1 <= pc <= last}
                 assert tint == model, f"{name}: wide slot {slot.reg} tint {sorted(tint)} != model {sorted(model)}"
                 compared += 1
         for bslot in [*lir.bool_state_slots]:
-            if bslot.needs_copy:
+            if not isinstance(bslot.install, InPlace):
                 tint = {pc for pc in lir.bool_liveness[bslot.reg] if pc <= last}
                 model = {pc for pc in model_bool.get(bslot.reg.index, set()) if 1 <= pc <= last}
                 assert tint == model, f"{name}: bool slot {bslot.reg} tint {sorted(tint)} != model {sorted(model)}"
@@ -1353,17 +1355,14 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
 
     lir = build_lir(_run(LeakyDelay().__call__), "leaky_delay")
     (slot,) = lir.wide_state_slots
-    assert bool(lir.wide_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, WideOperand)
-    assert isinstance(slot.tap.source, RegRef)
-    # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value
-    # from the cycle the new value LANDS (one PC after the copy fires and samples its source, `install_landing`;
-    # previously absent, which is why the report could not render it).
-    landing = install_landing(lir.state_copy_step(slot))
-    assert landing in lir.reg_liveness[slot.reg]
-    assert lir.state_copy_step(slot) == inline_fire_cycle(slot.install_cycle, lir.fetch_lag)
     # Nothing reads _p's register after the old live-in and its source is an ordinary register, so the copy installs
     # before the boundary -- freeing the source register for the rest of the initiation rather than pinning it there.
-    assert lir.state_copy_step(slot) < lir.initiation_interval
+    assert isinstance(slot.install, WideEarlyInstall) and isinstance(slot.install.source.source, RegRef)
+    assert slot.install.fire_step(lir.fetch_lag) < lir.initiation_interval
+    # The writeback is a first-class event in the liveness model: the slot register holds a live value from the cycle
+    # the new value LANDS (one PC after the copy fires and samples its source, `install_landing`).
+    landing = slot.install.landing(lir.fetch_lag)
+    assert landing in lir.reg_liveness[slot.reg]
     # The carried live-out must survive to the boundary even though nothing reads it again this frame, so the slot
     # register stays live from its landing through the boundary -- an early install is not the value's death.
     assert set(range(landing, lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
@@ -1420,7 +1419,7 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
     # premise that the reserved-but-empty slot register exists and is excluded from ordinary allocation.
     lir = build_lir(_run(WriteOnlyBranch().__call__), "write_only")
     (slot,) = lir.wide_state_slots
-    assert slot.name == "acc" and slot.needs_copy
+    assert slot.name == "acc" and not isinstance(slot.install, InPlace)
     assert slot.reg.index not in {write.dst.index for op in lir.ops for write in op.writes}
 
 
@@ -1439,8 +1438,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
     lir = build_lir(_run(Filt().__call__), "filt")
     assert any(block.inline_ops for block in lir.blocks)
     (slot,) = lir.wide_state_slots
-    assert not slot.needs_copy, "the slot live-out must coalesce onto the slot register (no install copy)"
-    assert slot.tap.source == slot.reg
+    assert isinstance(slot.install, InPlace), "the slot live-out must coalesce onto the slot register (no install copy)"
     model = build_model(lir)
     model.reset()
     first = float(model.run(2.0)[0])  # state <- 0*0.9 + 2 = 2; out = float(2>0)*2 = 2
@@ -1584,9 +1582,9 @@ def test_state_early_copy_frees_source_register() -> None:
     lir = build_lir(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz")
     (xprev,) = [s for s in lir.wide_state_slots if s.name == "_x_prev"]
     (in_x,) = [load for load in lir.wide_inputs if load.name == "x"]
-    assert xprev.needs_copy and in_x.dst == xprev.tap.source
+    assert isinstance(xprev.install, WideEarlyInstall) and in_x.dst == xprev.install.source.source
     makespan = max((op.commit_cycle for op in lir.ops), default=0)
-    assert xprev.install_cycle <= makespan  # installs before the boundary (present cycle == makespan + 1)
+    assert xprev.install.cycle <= makespan  # installs before the boundary (present cycle == makespan + 1)
     assert any(write.dst == in_x.dst for op in lir.ops for write in op.writes)
 
 
@@ -1716,8 +1714,14 @@ def test_register_sharing_is_hardware_disjoint() -> None:
             note(operand.source, operand_read_cycle(op.inst.operator, op.issue_cycle, lir.fetch_lag))
     for wire in lir.wide_outputs:
         note(wire.tap.source, lir.initiation_interval)
-    for slot in lir.wide_state_slots:
-        note(slot.tap.source, lir.state_copy_step(slot))
+    for slot in lir.wide_state_slots:  # the live-out is read where the slot takes it: the fire step, or the boundary
+        match slot.install:
+            case InPlace():
+                note(slot.reg, lir.initiation_interval)
+            case WideEarlyInstall() as install:
+                note(install.source.source, install.fire_step(lir.fetch_lag))
+            case WideBoundaryInstall(source=source):
+                note(source.source, lir.initiation_interval)
 
     shared = 0
     for reg, events in timeline.items():
@@ -1944,7 +1948,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
     # transaction). The tapped slot must now install at the boundary, and the model must match plain Python.
     lir = build_lir(_run(ChainedSlots().__call__, config.make_mir(FMT)), f"chained_slots_{config.label}")
     slots = {slot.name: slot for slot in lir.wide_state_slots}
-    assert lir.state_copy_step(slots["_b"]) == lir.initiation_interval, "the tapped slot must not install early"
+    assert isinstance(slots["_b"].install, WideBoundaryInstall), "the tapped slot must not install early"
     reference = ChainedSlots()
     model = build_model(lir)
     for x in (2.0, 3.0, 4.0):
@@ -1996,7 +2000,8 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
     select_read_pc = lir.block_base[block.index] + operand_read_cycle(
         select.operator, select.issue_cycle, lir.fetch_lag
     )
-    assert lir.state_copy_step(slot) >= select_read_pc, "the install must not precede the select's operand read"
+    assert isinstance(slot.install, WideEarlyInstall), "the premise needs an early install"
+    assert slot.install.fire_step(lir.fetch_lag) >= select_read_pc, "the install must not precede the select's read"
     reference = SelectHold()
     model = build_model(lir)
     for x, c in [(2.0, 1.0), (3.0, -1.0), (4.0, 1.0), (5.0, -1.0)]:
@@ -2166,11 +2171,11 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
     assert pfd.bool_regfile.nreg == 5
     assert pfd.regfile.nreg == 0  # purely boolean: the wide bank is unused
     assert len(pfd.bool_state_slots) == 2  # the four attributes collapse onto two registers
-    assert all(not slot.needs_copy for slot in pfd.bool_state_slots)
+    assert all(isinstance(slot.install, InPlace) for slot in pfd.bool_state_slots)
 
     flt = build_lir(_run(_AliasedFloatState().step), "aliased_float")
     assert len(flt.wide_state_slots) == 1  # pub and _alias share one register
-    assert all(not slot.needs_copy for slot in flt.wide_state_slots)
+    assert all(isinstance(slot.install, InPlace) for slot in flt.wide_state_slots)
 
 
 # CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing -- the first operators with
@@ -2370,7 +2375,7 @@ def test_forced_install_regrowth_pins_and_stays_correct(
 
     monkeypatch.setattr(CoalescedLayout, "install_blocks", fake_installs)
     fmt = FloatFormat(6, 18)
-    with caplog.at_level("INFO", logger="holoso._lir._build"):
+    with caplog.at_level("INFO", logger="holoso._lir._bankalloc"):
         model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "forced_pin", fmt)
     assert any("pinning regrown block" in r.message for r in caplog.records), "the faked narrowing did not pin"
     for x in (1.0, -2.0):
@@ -2379,41 +2384,6 @@ def test_forced_install_regrowth_pins_and_stays_correct(
             model_out = model.run(*vector)
             assert float(model_out[0]) == kernel(x, n), f"model != python at x={x} n={n}"
             assert model_out == interpreter.run(*vector), f"interp != model at x={x} n={n}"
-
-
-def test_forced_state_copy_regrowth_latches_and_stays_correct(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The state-copy latch twin of the forced-pin test: a chained-copy kernel whose charge is faked away once."""
-    from holoso._lir._bankalloc import CoalescedLayout
-
-    class Delay2:
-        def __init__(self) -> None:
-            self.x0 = 0.0
-            self.x1 = 0.0
-
-        def __call__(self, x: float) -> float:
-            out = self.x1
-            self.x1 = self.x0
-            self.x0 = x
-            return out
-
-    real_state = CoalescedLayout.has_state_copy
-    calls = {"n": 0}
-
-    def fake_state(layout: CoalescedLayout) -> bool:
-        calls["n"] += 1
-        return False if calls["n"] == 1 else real_state(layout)
-
-    monkeypatch.setattr(CoalescedLayout, "has_state_copy", fake_state)
-    fmt = FloatFormat(8, 36)
-    with caplog.at_level("INFO", logger="holoso._lir._build"):
-        model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_mir(fmt), "forced_latch", fmt)
-    assert any("latching the state-copy charge" in r.message for r in caplog.records), "the fake did not latch"
-    reference = Delay2()
-    for raw in (1.0, 2.0, 3.0, 4.0, 5.0):
-        x = fmt.decode(fmt.encode(raw))
-        assert float(model.run(x)[0]) == reference(x)
 
 
 def test_inflight_source_install_fires_exactly_at_the_spilled_landing() -> None:

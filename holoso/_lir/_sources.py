@@ -14,14 +14,19 @@ from dataclasses import dataclass
 from .._operators import BoolInversion, InlineHardwareOperator, PortConditioner, WideConditioner
 from .._util import ValueId
 from ._ir import (
+    BoolBoundaryInstall,
     BoolConstRef,
+    BoolInputLoad,
     BoolOperand,
     BoolRegRef,
     Lir,
     OperatorInstance,
     ReadPort,
     RegRef,
+    WideBoundaryInstall,
     WideConstRef,
+    WideEarlyInstall,
+    WideInputLoad,
     WideOperand,
     pooled_write_word,
 )
@@ -142,9 +147,8 @@ def write_events(lir: Lir) -> list[WriteEvent]:
     Every microcode-driven register write as `(dst, source, ROM step)`, in one deterministic traversal shared by the
     codebook builder and the packer so the code<->source mapping cannot drift. The ROM step is the source's executing
     step (the fetch PC it fires on, minus the fetch lag): a pooled write rides its commit cycle, an inline/copy/write
-    rides `block_base + issue/commit`, an early state install rides `state_copy_step - fetch_lag`. Boundary state
-    installs (and all boolean state installs, which are boundary-only) are handshake-gated special arms, not opcode
-    sources, so they are excluded here.
+    rides `block_base + issue/commit`, an early state install its own absolute cycle. Boundary state installs are
+    handshake-gated arms, not opcode sources, so they are excluded here.
     """
     events: list[WriteEvent] = []
     for op in lir.ops:
@@ -167,9 +171,33 @@ def write_events(lir: Lir) -> list[WriteEvent]:
         for bwrite in block.bool_writes:
             events.append(WriteEvent(bwrite.dst, MoveWriteSource(bwrite.source), base + bwrite.issue_cycle))
     for slot in lir.wide_state_slots:
-        if slot.needs_copy and not lir.wide_state_install_is_boundary(slot):
-            events.append(WriteEvent(slot.reg, MoveWriteSource(slot.tap), lir.state_copy_step(slot) - lir.fetch_lag))
+        if isinstance(slot.install, WideEarlyInstall):
+            events.append(WriteEvent(slot.reg, MoveWriteSource(slot.install.source), slot.install.cycle))
     return events
+
+
+# A register write the handshake selects instead of the microcode: an input load at the accept edge, or a state
+# slot's boundary install at the accepted-output edge.
+type HandshakeArm = WideInputLoad | BoolInputLoad | WideBoundaryInstall | BoolBoundaryInstall
+
+
+def handshake_arms(lir: Lir) -> dict[RegRef | BoolRegRef, HandshakeArm]:
+    """
+    Per register, its handshake-gated write arm, enumerated once for the emitter that renders it, the steering count
+    that prices it, and the report that tallies it, so an arm cannot exist for one and not another. No register
+    carries two: the input lanes are pinned below the slot registers.
+    """
+    arms: dict[RegRef | BoolRegRef, HandshakeArm] = {load.dst: load for load in lir.inputs}
+    assert len(arms) == len(lir.inputs)
+    for slot in lir.wide_state_slots:
+        if isinstance(slot.install, WideBoundaryInstall):
+            assert slot.reg not in arms
+            arms[slot.reg] = slot.install
+    for bslot in lir.bool_state_slots:
+        if isinstance(bslot.install, BoolBoundaryInstall):
+            assert bslot.reg not in arms
+            arms[bslot.reg] = bslot.install
+    return arms
 
 
 def read_arms(lir: Lir) -> dict[ReadPort, int]:
@@ -178,19 +206,11 @@ def read_arms(lir: Lir) -> dict[ReadPort, int]:
 
 
 def write_arms(lir: Lir) -> dict[RegRef | BoolRegRef, int]:
-    """
-    Per register, the arms of its write select: the structurally distinct opcode sources plus the handshake-gated
-    arms the emitter places beside them (the input load; a wide slot's boundary install, a boolean slot's install).
-    """
+    """Per register, the arms of its write select: the structurally distinct opcode sources plus its handshake arm."""
     arms: dict[RegRef | BoolRegRef, int] = {
         dst: len(sources) for dst, sources in write_sources_per_register(write_events(lir)).items()
     }
-    special: list[RegRef | BoolRegRef] = [load.dst for load in lir.inputs]
-    special += [
-        slot.reg for slot in lir.wide_state_slots if slot.needs_copy and lir.wide_state_install_is_boundary(slot)
-    ]
-    special += [bslot.reg for bslot in lir.bool_state_slots if bslot.needs_copy]
-    for dst in special:
+    for dst in handshake_arms(lir):
         arms[dst] = arms.get(dst, 0) + 1
     return arms
 

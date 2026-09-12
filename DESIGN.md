@@ -142,6 +142,12 @@ the slow HDL-emission/simulation iteration begins.
   +1 dependency edge between producer and consumer.
 - Dwell -- the PC stalling at a hold point: pc 0 (accept, awaiting `in_valid`) or LASTPC (present, awaiting the
   result being taken before restarting).
+- Handshake -- the ready/valid pair at each end of a transaction: `in_valid && in_ready` accepts the inputs (the
+  accept edge), `out_valid && out_ready` releases the outputs (the accepted-output edge). A handshake-gated write is
+  a register write one of these edges selects instead of the microcode: an input load at accept, a boundary state
+  install at release. A handshake arm is that write seen as a mux arm: one input of the register's write select,
+  chosen by the handshake edge rather than by the register's write opcode, and priced by the register allocator
+  alongside the opcode-selected arms. A register carries at most one.
 - Makespan / II -- a block's schedule length in cycles; the initiation interval (II) is the whole executed path's
   exact cycle count.
 - Firing -- one activation of a pooled operator: the operation, or the fused group of operations, that a single
@@ -525,8 +531,9 @@ not the flip-flop count, and there is no spilling to memory. Three decisions sha
 value's register, a commutative firing's orientation (after Chen & Cong), and a firing's instance where its operator
 has several. The search is simulated annealing from the seed, deterministic and with incremental cost updates,
 finished by a local-improvement descent, so the result is never worse than the seed. The boolean bank is allocated
-first, since a wide inline result names the boolean register it reads. The install fixpoint iterates the layout and
-the coalescing alone; the coloring runs once on the converged layout.
+first, since a wide inline result names the boolean register it reads. Every block is scheduled once; the install
+fixpoint iterates only the draining blocks' terminator offsets and the coalescing, and the coloring runs once on the
+converged layout.
 
 Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed, identity-arm
 predecessors merge by union-find whenever the two sides do not interfere, so the arm value flows straight into the
@@ -539,8 +546,9 @@ read-first, so a same-frame self-update (an accumulator) reads the old value and
 update whose "unchanged" arm is the slot live-in coalesces onto the slot through the same union-find. When it cannot
 commit in place (a genuine overlap, a folded sign, a chained copy `self.a = self.b`), the live-out keeps its own
 register and is installed by a copy -- microcode-driven as early as the old live-in is read where eligible, otherwise
-a handshake-gated write at the output boundary; two slots that always hold the
-same value may collapse onto one register.
+a handshake-gated write at the output boundary; two slots that always hold the same value may collapse onto one
+register. Which of the three a slot gets is one explicit decision of the allocator, and the handshake-gated writes are
+enumerated once, so every consumer agrees on them by construction.
 
 ### Control flow
 

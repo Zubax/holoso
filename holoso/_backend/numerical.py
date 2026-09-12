@@ -32,11 +32,12 @@ DUT.
 """
 
 from dataclasses import dataclass
+from typing import assert_never
 
 from .._value import FloatValue, IntValue, ScalarLike, ScalarValue, WideValue, coerce_scalar
 from .._lir import WideConstRef, WideOperand
 from .._lir import RegRef, ScheduledOp
-from .._lir import BoolRegRef, Lir
+from .._lir import BoolBoundaryInstall, BoolRegRef, InPlace, Lir, WideBoundaryInstall, WideEarlyInstall
 from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
 from .._lir import install_landing, landing_cycle, operand_read_cycle
 from .._operators import *
@@ -231,17 +232,26 @@ class NumericalSimulator(_Kernel):
                 )
             if not isinstance(block.terminator, Ret):
                 self._terminators[lir.term_pc(block)] = block.terminator
-        # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at
-        # the boundary (gated on the accepted-output edge). A boolean slot always installs at the accepted boundary
-        # edge.
         for slot in lir.wide_state_slots:
-            if not slot.needs_copy:
-                continue
-            if lir.wide_state_install_is_boundary(slot):
-                self._boundary.append(_Install(slot.tap, slot.reg))
-            else:
-                self._installs.setdefault(lir.state_copy_step(slot), []).append(_Install(slot.tap, slot.reg))
-        self._boundary += [_Install(slot.live_out, slot.reg) for slot in lir.bool_state_slots if slot.needs_copy]
+            match slot.install:
+                case InPlace():
+                    pass
+                case WideEarlyInstall() as install:
+                    self._installs.setdefault(install.fire_step(lir.fetch_lag), []).append(
+                        _Install(install.source, slot.reg)
+                    )
+                case WideBoundaryInstall(source=source):
+                    self._boundary.append(_Install(source, slot.reg))
+                case _:
+                    assert_never(slot.install)
+        for bslot in lir.bool_state_slots:
+            match bslot.install:
+                case InPlace():
+                    pass
+                case BoolBoundaryInstall(source=bsource):
+                    self._boundary.append(_Install(bsource, bslot.reg))
+                case _:
+                    assert_never(bslot.install)
 
     def _next_pc(self, in_valid: bool, out_ready: bool) -> int:
         """The RTL next-PC sequencer: hold at present/accept boundaries, otherwise redirect or advance the fetch."""

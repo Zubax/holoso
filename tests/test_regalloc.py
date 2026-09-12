@@ -20,17 +20,19 @@ from holoso._eel import lower
 from holoso._lir import (
     BoolOperand,
     BoolRegRef,
+    InPlace,
     InlineWriteSource,
     Lir,
     OpWriteSource,
     RegRef,
+    WideBoundaryInstall,
     WideConstRef,
     read_arms,
     write_arms,
     write_events,
     write_sources_per_register,
 )
-from holoso._lir._build import _converge_layout, _prepare
+from holoso._lir._build import _prepare
 from holoso._lir._sources import WideOperandTemplate
 from holoso._lir._regalloc import (
     ColoringProblem,
@@ -61,8 +63,10 @@ from ._modelref import (
     DEFAULT_UNROLL_MAX_TRIPS,
     SHIPPED_TUNING,
     SharedLiveOut,
+    SharedLiveOutBool,
     assert_model_equals_interpreter,
     build_lir,
+    build_model,
     build_model_and_interpreter,
     default_ifmt,
     default_mir,
@@ -347,11 +351,38 @@ class _SharedLiveOutResets:
         return q * y
 
 
+def test_shared_live_out_slots_persist_through_the_boundary_install() -> None:
+    # The coexistence shape in both banks -- a boundary-installing slot whose own register also takes opcode writes,
+    # the premise test_backend's elaboration test pins. Its RTL bench takes the numerical model as its oracle, so
+    # the model itself is checked here over several
+    # transactions -- the wide kernel against the schedule-independent interpreter (it accumulates, so a float64
+    # reference would drift at e6m18), the boolean twin against plain Python (exact).
+    fmt = FloatFormat(6, 18)
+    model, interpreter = build_model_and_interpreter(SharedLiveOut().step, default_mir(fmt), "shared_live_out", fmt)
+    vectors = [
+        [coerce_scalar(port.scalar_type, x, port.name) for port in model.inputs] for x in (1.0, 2.5, -3.0, 4.0, 0.5)
+    ]
+    assert_model_equals_interpreter(model, interpreter, vectors, "shared_live_out")
+    bool_lir = build_lir(
+        lower_to_mir(lower(SharedLiveOutBool().step, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(fmt)), "shared_bool"
+    )
+    bool_model = build_model(bool_lir)
+    reference = SharedLiveOutBool()
+    for x, y in [(True, False), (True, True), (False, True), (True, True), (False, False), (True, False), (True, True)]:
+        got = {port.name: bool(value) for port, value in zip(bool_model.outputs, bool_model.run(x, y), strict=True)}
+        want = reference.step(x, y)
+        for name, value in got.items():  # a return aliasing public state is served by that state port alone
+            expected = (
+                want[int(name[4:])] if name.startswith("out_") else getattr(reference, name.removeprefix("state_"))
+            )
+            assert value == expected, (x, y, name)
+
+
 def test_two_slots_ending_on_one_value_hold_it_once_and_copy_once() -> None:
     fmt = FloatFormat(6, 18)
     kernel = _SharedLiveOutResets().step
     lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(fmt)), "shared_resets")
-    assert sum(slot.needs_copy for slot in lir.wide_state_slots) == 1
+    assert sum(not isinstance(slot.install, InPlace) for slot in lir.wide_state_slots) == 1
     model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "shared_resets", fmt)
     vectors = [
         [coerce_scalar(port.scalar_type, value, port.name) for port in model.inputs]
@@ -433,8 +464,7 @@ def test_engine_objective_equals_the_emitted_steering(name: str, instances: int)
     if name == "shared_live_out":
         written = {e.dst for e in write_events(lir)}
         assert any(
-            slot.needs_copy and lir.wide_state_install_is_boundary(slot) and slot.reg in written
-            for slot in lir.wide_state_slots
+            isinstance(slot.install, WideBoundaryInstall) and slot.reg in written for slot in lir.wide_state_slots
         ), "the witness needs a boundary-installing slot whose register also takes opcode writes"
     if name == "sorter":
         lanes = {
@@ -543,8 +573,7 @@ def test_the_build_carries_the_residue_into_the_binding() -> None:
     builder.float_output("out_0", builder.operation(fadd, [second, early], signs))
     builder.ret()
     mir = builder.finish()
-    converged = _converge_layout(_prepare(mir), DEFAULT_FETCH_STAGES - 1, SHIPPED_TUNING)
-    residue = converged.layout.overlap.block_entry_busy[tail]
+    residue = _prepare(mir, DEFAULT_FETCH_STAGES - 1).schedules.block_entry_busy[tail]
     assert residue == {(slow, 0): 3}, residue
     lir = build_lir(mir, "residue", SHIPPED_TUNING)
     slow_ops = [op for op in lir.ops if op.inst.operator is slow]

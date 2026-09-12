@@ -30,7 +30,7 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower
-from holoso._lir import Lir, WideStateSlot
+from holoso._lir import InPlace, Lir, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import MirOptions, Mir, lower as lower_to_mir
 from ._modelref import (
@@ -1205,7 +1205,7 @@ def test_polar_example_round_trip_and_native_reference() -> None:
 
 
 # --- White-box remnant: claims with no public spelling. The register-file layout probe, the in-place persistent-state
-# commit (`needs_copy`) coalescing group, and the merged/aliased-slot interpreter differentials drive the internal
+# commit (in place) coalescing group, and the merged/aliased-slot interpreter differentials drive the internal
 # pipeline directly.
 
 OPS = mir_options(
@@ -1240,7 +1240,7 @@ def test_model_handles_unused_input_ports() -> None:
 # --- In-place persistent-state commit: a state slot's live-out written directly into its slot register, no copy-back.
 # Both banks, operator and conditional (phi/select) live-outs. Each test drives the cycle model against a fresh Python
 # reference across a multi-transaction sequence (the carried state must stay correct) AND asserts the copy was actually
-# elided (`not needs_copy`) -- a correctness and a tightness guard, so a regression back to the copy-back fails here.
+# elided (in place) -- a correctness and a tightness guard, so a regression back to the copy-back fails here.
 
 
 def _bool_slot(lir: Lir, name: str) -> BoolStateSlot:
@@ -1264,7 +1264,7 @@ def test_inplace_bool_conditional_sticky_latch() -> None:
             return self._f
 
     lir = build_lir(_run(BoolStickyLatch().__call__), "sticky")
-    assert not _bool_slot(lir, "_f").needs_copy  # the phi live-out coalesced onto the slot register
+    assert isinstance(_bool_slot(lir, "_f").install, InPlace)  # the phi live-out coalesced onto the slot register
     model = build_model(lir)
     reference = BoolStickyLatch()
     t, f = True, False
@@ -1286,7 +1286,7 @@ def test_inplace_bool_unconditional_self_update() -> None:
             return self._f
 
     lir = build_lir(_run(BoolOrSelf().__call__), "orself")
-    assert not _bool_slot(lir, "_f").needs_copy
+    assert isinstance(_bool_slot(lir, "_f").install, InPlace)
     model = build_model(lir)
     reference = BoolOrSelf()
     for x in [False, False, True, False, False]:
@@ -1312,7 +1312,7 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
             return self._s
 
     lir = build_lir(_run(LoopPreheaderArmInPlace().__call__), "preheaderarm")
-    assert not _bool_slot(lir, "_s").needs_copy  # the loop phi coalesced onto the slot register
+    assert isinstance(_bool_slot(lir, "_s").install, InPlace)  # the loop phi coalesced onto the slot register
     model = build_model(lir)
     reference = LoopPreheaderArmInPlace()
     t, f = True, False
@@ -1339,7 +1339,9 @@ def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
             return self._x, self._w
 
     lir = build_lir(_run(WriteOnlyDwellTenant().__call__), "dwell_tenant")
-    assert not _bool_slot(lir, "_w").needs_copy, "_w must coalesce for a gap tenant to share its slot register"
+    assert isinstance(
+        _bool_slot(lir, "_w").install, InPlace
+    ), "_w must coalesce for a gap tenant to share its slot register"
     assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].inline_ops), "a cycle-0 entry gap tenant must arise"
     model = build_model(lir)
     reference = WriteOnlyDwellTenant()
@@ -1361,7 +1363,7 @@ def test_inplace_float_conditional_accumulator() -> None:
             return self._acc
 
     lir = build_lir(_run(FloatCondAccum().__call__), "accum")
-    assert not _wide_slot(lir, "_acc").needs_copy  # the select live-out coalesced onto the slot register
+    assert isinstance(_wide_slot(lir, "_acc").install, InPlace)  # the select live-out coalesced onto the slot register
     model = build_model(lir)
     reference = FloatCondAccum()
     t, f = True, False
@@ -1383,8 +1385,10 @@ def test_chained_wide_slots_do_not_coalesce() -> None:
             return self.a
 
     lir = build_lir(_run(ChainedFloatSlots().__call__), "chain")
-    assert _wide_slot(lir, "a").needs_copy  # chained copy of b's live-in -- must not coalesce in place
-    assert _wide_slot(lir, "b").needs_copy  # tapped by a's live-out -- must not coalesce in place
+    assert not isinstance(
+        _wide_slot(lir, "a").install, InPlace
+    )  # chained copy of b's live-in -- must not coalesce in place
+    assert not isinstance(_wide_slot(lir, "b").install, InPlace)  # tapped by a's live-out -- must not coalesce in place
     model = build_model(lir)
     reference = ChainedFloatSlots()
     for x in [2.0, 3.0, 4.0, 1.0]:
@@ -1409,7 +1413,9 @@ def test_inplace_multiarm_float_phi() -> None:
             return self._s
 
     lir = build_lir(_run(MultiArmFloatPhi().__call__), "multiarm")
-    assert not _wide_slot(lir, "_s").needs_copy  # the live-in is the else arm, so the live-out commits in place
+    assert isinstance(
+        _wide_slot(lir, "_s").install, InPlace
+    )  # the live-in is the else arm, so the live-out commits in place
     model = build_model(lir)
     reference = MultiArmFloatPhi()
     for x in [5.0, 15.0, -1.0, -1.0, 2.0, 30.0, -3.0]:
@@ -1436,7 +1442,9 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce() -> None:
             return self.x, self.w
 
     lir = build_lir(_run(LiveInFeedsAnotherSlotPhi().__call__, replace(OPS, ifconv_max_ops=0)), "livein_other_slot")
-    assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
+    assert not isinstance(
+        _wide_slot(lir, "x").install, InPlace
+    )  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
     model = build_model(lir)
     reference = LiveInFeedsAnotherSlotPhi()
     ports = [port.name for port in model.outputs]  # the returned leaves fold onto the state ports; match by name
@@ -1465,7 +1473,9 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce() -> None:
             return new_y, self.x
 
     lir = build_lir(_run(LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")
-    assert _wide_slot(lir, "x").needs_copy  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
+    assert not isinstance(
+        _wide_slot(lir, "x").install, InPlace
+    )  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
     model = build_model(lir)
     reference = LiveInFeedsUnrelatedPhi()
     for cond, d in [(True, 4.0), (False, 1.0), (True, 0.5), (False, 2.0), (True, 8.0)]:

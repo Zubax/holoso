@@ -59,7 +59,7 @@ def read_cycle(issue_cycle: int, fetch_lag: int) -> int:
 def inline_fire_cycle(commit_cycle: int, fetch_lag: int) -> int:
     """
     The cycle a PC-gated combinational statement fires: an inline operation (a select/mux, boolean logic, a float<->bool
-    cast), or a pc-gated install/copy (a phi-arm copy, a non-coalesced slot writeback, a boolean write). It reads ALL
+    cast), or a pc-gated install/copy (a phi-arm copy, an early state install, a boolean write). It reads ALL
     its operands (or its source) and drives its destination register's write data on this single step, `fetch_lag`
     after its scheduler-frame placement. Its result becomes readable one `READ_FIRST_EDGE` later (`landing_cycle`).
     For a pc-gated install this is the coalescing equivalence the overlap layout relies on -- `install_landing` of
@@ -121,7 +121,7 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
 
 def install_landing(fire_step: int) -> int:
     """
-    The step a pc-gated install -- a phi copy, a boolean write, or an early (non-boundary) slot writeback -- commits its
+    The step a pc-gated install -- a phi copy, a boolean write, or an early state install -- commits its
     destination and becomes readable: one after the step it fires on. The model writes the destination into `_pending`
     one PC past the fire, so the numerical model and the liveness diagnostic route this +1 through this one helper and
     cannot drift. A boundary slot install is the lone exception: it reads-then-writes at `last_pc` and does not pass
@@ -141,9 +141,9 @@ def install_issue_cycle(work_makespan: int, source_commit: int | None) -> int:
     spilled-in source carries a NEGATIVE virtual commit (the inverse of its landing; see `install_source_commit`),
     so the same `max` places its fire at or after that landing without a push. A settled source and a copy sourcing
     an EARLIER in-block op stay at the makespan and pay no terminator cycle; keeping them unpushed is load-bearing
-    for the same-step parallel-bundle contract cross-referencing loop-header phis rely on. The per-install dual of
-    `install_inclusive_makespan` (which carries the +1 into the block makespan exactly when an install issues past
-    the work makespan), so the placement and the drain agree and an install cannot land past its block's terminator.
+    for the same-step parallel-bundle contract cross-referencing loop-header phis rely on. The block layout carries
+    the same +1 into the block makespan exactly when an install issues past the work makespan, so the placement and
+    the drain agree and an install cannot land past its block's terminator.
     """
     if source_commit is None:
         return work_makespan
@@ -315,38 +315,55 @@ class WideInputLoad(_InputLoad):
     scalar_type: FloatType | IntType
 
 
-def _wide_liveout_coalesced(tap: WideOperand, reg: RegRef) -> bool:
-    """A wide state live-out shares its slot register (no install copy) iff its tap is `reg` with the identity."""
-    return tap.source == reg and tap.conditioner.is_identity
+@dataclass(frozen=True, slots=True)
+class InPlace:
+    """
+    A state slot's live-out already sits in the slot register: its producing operator -- or, for a conditional or
+    loop update, the arms of its phi -- wrote it there, so nothing is copied.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class WideEarlyInstall:
+    """
+    A pc-gated copy of a wide slot's live-out `source` into the slot register at the ABSOLUTE scheduler-frame
+    `cycle` -- a slot belongs to no block, so unlike a block copy's this cycle carries no base -- ahead of the
+    boundary, as early as the old live-in is last read and the source is available, so the source register is free
+    for the rest of the transaction.
+    """
+
+    source: WideOperand
+    cycle: int
+
+    def fire_step(self, fetch_lag: int) -> int:
+        return inline_fire_cycle(self.cycle, fetch_lag)
+
+    def landing(self, fetch_lag: int) -> int:
+        return install_landing(self.fire_step(fetch_lag))
+
+
+@dataclass(frozen=True, slots=True)
+class WideBoundaryInstall:
+    """
+    A read-first copy of a wide slot's live-out `source` into the slot register at the accepted-output edge, so an
+    output still reading the live-in sees the old value.
+    """
+
+    source: WideOperand
 
 
 @dataclass(frozen=True, slots=True)
 class WideStateSlot:
     """
     A persistent wide state register: reset to `reset_value`, holding the slot's live-in (carried over from the
-    previous initiation) until the install copy replaces it with the slot's live-out.
-
-    `tap` is the live-out's source tap (register/constant + folded conditioner), the same primitive an output wire
-    taps; here the sink is the slot register rather than a port. When the tap is exactly `reg` with an identity
-    conditioner the live-out coalesced onto the slot register (its producing operator -- or, for a conditional/loop
-    update, the arms of its phi -- wrote it in place) and the backend emits no copy; otherwise the backend fires a
-    pc-gated copy for it, scheduled at `install_cycle` -- as early as the old live-in is last read and
-    the source is available, the initiation boundary at the latest. The copy samples the tap on its fetch step
-    (`inline_fire_cycle(install_cycle)`) and the new live-out lands one fetch step later (`install_landing`) for an
-    early install, or read-first at the boundary (`LASTPC`) for a boundary install. Installing before the boundary
-    lets the source register be reused by unrelated operations for the rest of the initiation. A public attribute's
-    observable `state_<name>` port is a separate output wire tapping the same value, not a property of the slot.
+    previous initiation) until `install` replaces it with the slot's live-out. A public attribute's observable
+    `state_<name>` port is a separate output wire tapping the same value, not a property of the slot.
     """
 
     name: str
     reg: RegRef
     reset_value: WideValue  # the encoded machine word, which also names the slot's scalar family
-    tap: WideOperand
-    install_cycle: int  # scheduler-frame install cycle; hardware fire = inline_fire_cycle(it); makespan+1 = boundary
-
-    @property
-    def needs_copy(self) -> bool:
-        return not _wide_liveout_coalesced(self.tap, self.reg)
+    install: InPlace | WideEarlyInstall | WideBoundaryInstall
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,34 +617,27 @@ def _trace_landing(
     return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
 
 
-def _bool_liveout_coalesced(live_out: BoolOperand, reg: BoolRegRef) -> bool:
-    """A bool state live-out shares its slot register (no install copy) iff it is exactly `reg`, uninverted."""
-    return isinstance(live_out.source, BoolRegRef) and live_out.source == reg and live_out.inversion.is_identity
+@dataclass(frozen=True, slots=True)
+class BoolBoundaryInstall:
+    """
+    A read-first copy of a boolean slot's live-out `source` into the slot register at the accepted-output edge, so an
+    output or branch still reading the live-in sees the old value. The boolean bank has no early install.
+    """
+
+    source: BoolOperand
 
 
 @dataclass(frozen=True, slots=True)
 class BoolStateSlot:
     """
     A persistent boolean state register: reset to `reset_value`, holding the slot's live-in throughout the
-    transaction and installing its live-out (`live_out`, a boolean register or constant with a folded inversion)
-    at the boundary, read-first
-    -- so an output or branch that still reads the live-in sees the old value, exactly like a wide slot. When the
-    live-out already resides in the slot register uninverted it coalesced there (its producing operation, or the arms
-    of its phi for a conditional/loop update, wrote it in place) and `needs_copy` is False -- no boundary copy.
+    transaction until `install` replaces it with the slot's live-out.
     """
 
     name: str
     reg: BoolRegRef
     reset_value: bool
-    live_out: BoolOperand
-
-    @property
-    def needs_copy(self) -> bool:
-        """
-        False only when the live-out already resides in the slot register UNINVERTED (an unwritten slot); a live-out
-        under an inversion needs the install copy to apply it, even from the slot's own register.
-        """
-        return not _bool_liveout_coalesced(self.live_out, self.reg)
+    install: InPlace | BoolBoundaryInstall
 
 
 @dataclass(frozen=True, slots=True)
@@ -830,26 +840,6 @@ class Lir:
         by_index = {b.index: b for b in self.blocks}
         return _trace_landing(by_index, self.block_base, block, local_landing)
 
-    def state_copy_step(self, slot: WideStateSlot) -> int:
-        """
-        The fetch-PC value -- equivalently the hardware-frame cycle -- on which a non-coalesced slot's writeback copy
-        fires and reads its source. For a boundary install this is `initiation_interval` (LASTPC), where it reduces to
-        the accepted-transaction edge and the live-out lands here read-first (the boundary read still sees the live-in).
-        An early pc-gated install instead lands its destination one PC later, via `install_landing` -- the same +1 the
-        model commits. Shared by liveness and the emitter so the two cannot drift.
-        """
-        return inline_fire_cycle(slot.install_cycle, self.fetch_lag)
-
-    def wide_state_install_is_boundary(self, slot: WideStateSlot) -> bool:
-        """
-        Whether a non-coalesced wide slot installs read-first at the accepted-output boundary (its `state_copy_step`
-        reaches LASTPC) rather than early via a pc-gated copy. The single early-vs-boundary test shared by the numerical
-        model (which routes the install to the boundary edge vs a pc-gated step), the HTML report (which lands it
-        read-first at LASTPC vs one PC later), and `reg_liveness` (which makes a boundary install read-first while an
-        early one resides through the boundary to carry), so the read-first seam cannot drift between them.
-        """
-        return self.state_copy_step(slot) >= self.last_pc
-
     @property
     def group_by_cycle(self) -> tuple[dict[int, list[PooledScheduledOp]], dict[int, list[PooledScheduledOp]]]:
         issues: dict[int, list[PooledScheduledOp]] = {}
@@ -983,16 +973,15 @@ class Lir:
         This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
         shared helpers: an input lands on cycle 1; every operator result lands at `landing_cycle` (which for the last
         result is the initiation interval), selected per op by `write_landing_pcs`; an operand is read on
-        `operand_read_cycle`; an output tap on the present cycle; and a non-coalesced slot's writeback fires and
-        samples its source on `state_copy_step` -- the
-        present cycle for a boundary copy, earlier for an early install (the landing follows below). A slot register
-        additionally stays live through the present cycle, since its live-out must reside there for the next initiation.
-        Each row spans a value from when it lands in the array through its last read.
+        `operand_read_cycle`; an output tap on the present cycle; and a slot install samples its source on its fire
+        step -- the present cycle for a boundary install, earlier for an early one (the landing follows below). A slot
+        register additionally stays live through the present cycle, since its live-out must reside there for the next
+        initiation. Each row spans a value from when it lands in the array through its last read.
 
         Diagnostic only -- consumed by the reports (e.g., HTML schedule) and the tests, never by the emitter or the
         numerical model. Each op-result LANDING is stamped via `write_landing_pcs` at exactly the PC(s) the model
         writes it -- on every successor arm under overlap, not just the fall-through. A pc-gated install (a phi copy or
-        an early non-coalesced slot writeback) fires and samples its source on the copy step but lands its destination
+        an early state install) fires and samples its source on the copy step but lands its destination
         one PC later via `install_landing` -- the same +1 the model commits. A boundary install reads-then-writes
         at the boundary and lands there. Residence is then resolved per basic block by `_cfg_residence` (CFG-aware
         register liveness), so a value live on two mutually-exclusive arms that rejoin at a merge stays resident on
@@ -1006,30 +995,33 @@ class Lir:
             defs.setdefault(load.dst, []).append(1)
         for slot in self.wide_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
-            if not slot.needs_copy:
-                # A coalesced live-out is an ordinary result already in the slot register; it must reside through the
-                # boundary to carry into the next initiation, even when nothing reads it again this frame.
-                uses.setdefault(slot.reg, []).append(present)
-            elif not self.wide_state_install_is_boundary(slot):
-                # An early pc-gated install lands its destination one PC after its fire step and must reside through the
-                # boundary to carry; installing the new value early is not the slot's death.
-                step = self.state_copy_step(slot)
-                defs.setdefault(slot.reg, []).append(install_landing(step))
-                uses.setdefault(slot.reg, []).append(present)
-            else:
-                # A boundary install reads-then-writes at the boundary: the hardware samples the live-in there (read
-                # first) before clocking in the new live-out, so the boundary read belongs to the live-in (read_first),
-                # and the live-out is resident at the boundary by its def alone -- no carry use, or a dead live-in would
-                # be over-tinted across the whole frame.
-                step = self.state_copy_step(slot)
-                defs.setdefault(slot.reg, []).append(step)
-                read_first.setdefault(slot.reg, set()).add(step)
+            match slot.install:
+                case InPlace():
+                    # An in-place live-out is an ordinary result already in the slot register; it must reside through
+                    # the boundary to carry into the next initiation, even when nothing reads it again this frame.
+                    uses.setdefault(slot.reg, []).append(present)
+                case WideEarlyInstall() as install:
+                    # An early install lands its destination one PC after its fire step and must reside through the
+                    # boundary to carry; installing the new value early is not the slot's death.
+                    step = install.fire_step(self.fetch_lag)
+                    defs.setdefault(slot.reg, []).append(install.landing(self.fetch_lag))
+                    uses.setdefault(slot.reg, []).append(present)
+                    if isinstance(install.source.source, RegRef):
+                        uses.setdefault(install.source.source, []).append(step)
+                case WideBoundaryInstall(source=source):
+                    # A boundary install reads-then-writes at the boundary: the hardware samples the live-in there
+                    # (read first) before clocking in the new live-out, so the boundary read belongs to the live-in
+                    # (read_first), and the live-out is resident at the boundary by its def alone -- no carry use, or
+                    # a dead live-in would be over-tinted across the whole frame.
+                    defs.setdefault(slot.reg, []).append(present)
+                    read_first.setdefault(slot.reg, set()).add(present)
+                    if isinstance(source.source, RegRef):
+                        uses.setdefault(source.source, []).append(present)
+                case _:
+                    assert_never(slot.install)
         for wire in self.wide_outputs:
             if isinstance(wire.tap.source, RegRef):
                 uses.setdefault(wire.tap.source, []).append(present)
-        for slot in self.wide_state_slots:  # the live-out tap is read on the install step to persist the slot
-            if isinstance(slot.tap.source, RegRef):
-                uses.setdefault(slot.tap.source, []).append(self.state_copy_step(slot))
         for block in self.blocks:
             base_pc = self.block_base[block.index]
             for copy in block.wide_copies:  # phi copy fires here and samples its source; destination lands one PC later
@@ -1060,16 +1052,19 @@ class Lir:
         read_first: dict[BoolRegRef, set[int]] = {}
         for slot in self.bool_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident from the start
-            if slot.needs_copy:
-                # A boolean slot always installs read-first at the boundary: the live-out's def alone marks it resident
-                # there (no carry use, which would over-tint a dead live-in), and any boundary read of the slot register
-                # is the live-in (read_first). The install samples its source on the boundary edge.
-                defs.setdefault(slot.reg, []).append(present)
-                read_first.setdefault(slot.reg, set()).add(present)
-                if isinstance(slot.live_out.source, BoolRegRef):
-                    uses.setdefault(slot.live_out.source, []).append(present)
-            else:
-                uses.setdefault(slot.reg, []).append(present)  # a coalesced live-out must reside through the boundary
+            match slot.install:
+                case InPlace():
+                    uses.setdefault(slot.reg, []).append(present)  # an in-place live-out resides through the boundary
+                case BoolBoundaryInstall(source=source):
+                    # The live-out's def alone marks it resident at the boundary (no carry use, which would over-tint
+                    # a dead live-in), and any boundary read of the slot register is the live-in (read_first). The
+                    # install samples its source on the boundary edge.
+                    defs.setdefault(slot.reg, []).append(present)
+                    read_first.setdefault(slot.reg, set()).add(present)
+                    if isinstance(source.source, BoolRegRef):
+                        uses.setdefault(source.source, []).append(present)
+                case _:
+                    assert_never(slot.install)
         for load in self.bool_inputs:
             defs.setdefault(load.dst, []).append(1)
         for wire in self.bool_outputs:

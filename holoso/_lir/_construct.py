@@ -39,7 +39,7 @@ from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
 from ._sources import BoolOperandTemplate, OperandTemplate, WideOperandTemplate
-from ._build_base import Allocation, PooledConst
+from ._build_base import Allocation, ConstPool, PooledConst
 from ._mir_facts import mir_operation
 
 
@@ -248,9 +248,7 @@ def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
     )
 
 
-def build_const_pool(
-    mir: MirWideView, bool_operations: dict[ValueId, MirOperation] | None = None
-) -> tuple[list[WideValue], dict[ValueId, PooledConst]]:
+def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperation] | None = None) -> ConstPool:
     """
     Build the immediate/ROM pool shared by both wide families, interned by the typed encoded value, so
     encoding-equal float literals share a word and class-aware equality keeps `1` and `1.0` distinct where raw
@@ -305,7 +303,7 @@ def build_const_pool(
         magnitude = FloatValue.from_float(mir.float_format, abs(value))
         negate = math.copysign(1.0, value) < 0.0
         pool[vid] = PooledConst(intern(magnitude), FloatSignControl(negate=negate))
-    return values, pool
+    return ConstPool(values, pool)
 
 
 def tapped_wide_lanes(blocks: list[LirBlock]) -> set[tuple[OperatorInstance, int]]:

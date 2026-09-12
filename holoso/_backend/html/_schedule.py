@@ -5,6 +5,7 @@ import html
 import json
 from dataclasses import dataclass, replace
 from importlib import resources
+from typing import assert_never
 
 from ..._lir import *
 from ..._operators import HardwareOperator
@@ -211,14 +212,20 @@ def render_schedule(lir: Lir) -> str:
         for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
             fire = base_pc + bwrite.fire_step(lir.fetch_lag)
             install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
-    for slot in lir.wide_state_slots:  # a non-coalesced wide slot latches its tap (early, or read-first at boundary)
-        if slot.needs_copy:
-            fire = lir.state_copy_step(slot)
-            landing = fire if lir.wide_state_install_is_boundary(slot) else install_landing(fire)
-            install_event(slot.reg, slot.name, slot.tap, fire, landing)
-    for bslot in lir.bool_state_slots:  # a non-coalesced boolean slot installs its live-out read-first at the boundary
-        if bslot.needs_copy:
-            install_event(bslot.reg, bslot.name, bslot.live_out, lir.last_pc, lir.last_pc)
+    for slot in lir.wide_state_slots:
+        match slot.install:
+            case InPlace():
+                pass
+            case WideEarlyInstall() as install:
+                fire, landing = install.fire_step(lir.fetch_lag), install.landing(lir.fetch_lag)
+                install_event(slot.reg, slot.name, install.source, fire, landing)
+            case WideBoundaryInstall(source=source):  # read-first at the boundary
+                install_event(slot.reg, slot.name, source, lir.last_pc, lir.last_pc)
+            case _:
+                assert_never(slot.install)
+    for bslot in lir.bool_state_slots:
+        if isinstance(bslot.install, BoolBoundaryInstall):  # read-first at the boundary
+            install_event(bslot.reg, bslot.name, bslot.install.source, lir.last_pc, lir.last_pc)
 
     # Control-transfer arrows: anchor each conditional arrow's root to the boolean register it tests by making that
     # register's cell at the source row a dataflow endpoint, so the overlay can draw the dotted feed to it -- the
@@ -706,8 +713,8 @@ def _bool_consts(lir: Lir) -> list[bool]:
             if isinstance(bwrite.source.source, BoolConstRef):
                 used.add(bwrite.source.source.value)
     for bslot in lir.bool_state_slots:
-        if bslot.needs_copy and isinstance(bslot.live_out.source, BoolConstRef):
-            used.add(bslot.live_out.source.value)
+        if isinstance(bslot.install, BoolBoundaryInstall) and isinstance(bslot.install.source.source, BoolConstRef):
+            used.add(bslot.install.source.source.value)
     return sorted(used)
 
 
