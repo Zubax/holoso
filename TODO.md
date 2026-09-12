@@ -90,3 +90,16 @@ by hand which registers get such a handshake-gated arm, and the build's assertio
 count equals the emitted write-multiplexer arm count is only as strong as that restatement: a handshake arm added to the
 emitter alone would go uncounted. A typed list of those arms per register, built once in `_sources.py`, rendered by the
 emitter's clocked block and counted by `write_arms`, would close the gap.
+
+## Convex write-select cost in the register allocator
+
+The register allocator prices every multiplexer arm alike, so a register whose write select (the multiplexer in front
+of a register's data input) grows from four to seven inputs costs the same three arms as three separate two-input
+selects. On the ECP5 fabric each extra pair of inputs is another logic level on every path that ends in that
+register. The synthesis matrix showed the effect once the allocator started merging registers at the register price:
+the pid Diamond row's critical path moved from inside the adder into the write select of a register that went from
+four to seven inputs (its fmul row now carries a pack stage for it), and flux_observer (three to six) and imu_fusion
+(nine to eleven) widened the same way without failing. The refinement DESIGN.md anticipates is a convex per-endpoint
+cost: an arm beyond the fourth input of a select priced above one, so the allocator stops widening a select where the
+fabric would add a level. It re-freezes every metrics row and needs the synthesis matrix to validate, so it waits for
+a change that is measured end to end.

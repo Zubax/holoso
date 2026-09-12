@@ -201,8 +201,13 @@ TARGETS: list[SynthTarget] = [
             fdiv=FDivOptions(stage_output=1),
         ),
     ),
+    # Diamond's critical path is the fmul post-product cone (DSP product register through pack into a seven-input
+    # register write select), 21 logic levels; one pack stage splits it, as on recip_newton.
     _for_example(
-        "pid", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_output=1))
+        "pid",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_output=1), fmul=FMulOptions(stage_pack=1)),
     ),
     _for_example("pid", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
     _for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
@@ -220,7 +225,9 @@ TARGETS: list[SynthTarget] = [
     _for_example("majority_voter", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("majority_voter", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("majority_voter", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
-    _for_example("recip_newton", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    # nextpnr's critical path runs from the microcode word through the adder's operand read mux into its magnitude
+    # compare, route-dominated; the input stage splits it at the read mux.
+    _for_example("recip_newton", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1))),
     # Diamond's critical path here is the fmul post-product cone (DSP product register through pack/normalize into
     # the register file), 18 logic levels at 58% route. One pack stage splits it; the other two flows close lean.
     _for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, fmul=FMulOptions(stage_pack=1))),
@@ -255,6 +262,8 @@ TARGETS: list[SynthTarget] = [
     _for_example("uart_rx", FlowId.YOSYS_ECP5, 100, _op_config(_F_e4m8)),
     _for_example("uart_rx", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e4m8)),
     _for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e4m8)),
+    # nextpnr's critical path runs from the microcode word through the ilog2 multiplier's operand read mux into its
+    # exponent adders, route-dominated; the input stage splits it at the read mux.
     _for_example(
         "ekf1_stateless",
         FlowId.YOSYS_ECP5,
@@ -263,6 +272,7 @@ TARGETS: list[SynthTarget] = [
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_decode=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
         ),
     ),
     _for_example(
@@ -578,7 +588,8 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1),
+            # The adder's normalize shift through its exponent bias into the pack rounding (97.9 MHz): the pack stage.
+            fadd=FAddOptions(stage_input=1, stage_pack=1),
             # The multiplier's pack rounding carry (98.1 MHz): its pack stage.
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fatan2=_TO_POLAR_FATAN2,
@@ -651,7 +662,8 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_pack=1),
+            # The adder's pack rounding through the register file's write select (98.5 MHz): the output stage.
+            fadd=FAddOptions(stage_input=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
             fsqrt=FSqrtOptions(),
