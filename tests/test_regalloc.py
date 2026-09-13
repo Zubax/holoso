@@ -42,7 +42,6 @@ from holoso._lir._regalloc import (
     InputWriter,
     InstanceSlot,
     MoveWriter,
-    PoolWord,
     RegallocTuning,
     _Snapshot,
     _State,
@@ -61,7 +60,7 @@ from holoso._value import coerce_scalar
 from ._modelref import (
     DEFAULT_FETCH_STAGES,
     DEFAULT_UNROLL_MAX_TRIPS,
-    SHIPPED_TUNING,
+    FROZEN_TUNING,
     SharedLiveOut,
     SharedLiveOutBool,
     assert_model_equals_interpreter,
@@ -126,7 +125,7 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
     written: set[int] = set()
     for i in range(18):
         operator = rng.choice([_FADD, _FMUL, _FDIV])
-        reads = [rng.choice(values) if rng.random() < 0.8 else PoolWord(rng.randrange(3)) for _ in range(2)]
+        reads = [rng.choice(values) if rng.random() < 0.8 else WideConstRef(rng.randrange(3)) for _ in range(2)]
         unwritten = [v for v in movable if v not in written]
         target = rng.choice(unwritten) if unwritten and rng.random() < 0.85 else rng.choice(movable)
         written.add(target)
@@ -283,7 +282,7 @@ def test_two_singly_written_values_share_a_register_at_the_configured_price() ->
                 issue=0,
                 seed_instance=0,
                 bindable=False,
-                reads=[PoolWord(0), PoolWord(1)],
+                reads=[WideConstRef(0), WideConstRef(1)],
                 writes=[(0, 0)],
             ),
             Firing(
@@ -293,7 +292,7 @@ def test_two_singly_written_values_share_a_register_at_the_configured_price() ->
                 issue=1,
                 seed_instance=1,
                 bindable=False,
-                reads=[PoolWord(0), PoolWord(1)],
+                reads=[WideConstRef(0), WideConstRef(1)],
                 writes=[(0, 1)],
             ),
         ],
@@ -332,7 +331,7 @@ def test_repeated_residual_arms_are_one_writer() -> None:
 
     options = replace(default_options(FloatFormat(6, 18)), ifconv_max_ops=0)
     mir = lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
-    lir = build_lir(mir, "piecewise", SHIPPED_TUNING)
+    lir = build_lir(mir, "piecewise", FROZEN_TUNING)
     assert len(lir.blocks) > 1, "the premise needs the arms as residual installs, not a select"
     assert lir.regfile.nreg == 1
 
@@ -487,12 +486,12 @@ def test_a_swapped_comparator_keeps_every_relation() -> None:
 
     fmt = FloatFormat(6, 18)
     lir = build_lir(
-        lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(fmt)), "relations", SHIPPED_TUNING
+        lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(fmt)), "relations", FROZEN_TUNING
     )
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 3, "the premise needs the mirrored comparison as its own firing"
     assert len({tuple(operand.source for operand in op.operands) for op in firings}) == 1, "one firing must be swapped"
-    model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "relations", fmt, SHIPPED_TUNING)
+    model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "relations", fmt, FROZEN_TUNING)
     rng = random.Random(4)
     vectors = []
     for _ in range(64):
@@ -575,7 +574,7 @@ def test_the_build_carries_the_residue_into_the_binding() -> None:
     mir = builder.finish()
     residue = _prepare(mir, DEFAULT_FETCH_STAGES - 1).schedules.block_entry_busy[tail]
     assert residue == {(slow, 0): 3}, residue
-    lir = build_lir(mir, "residue", SHIPPED_TUNING)
+    lir = build_lir(mir, "residue", FROZEN_TUNING)
     slow_ops = [op for op in lir.ops if op.inst.operator is slow]
     assert len({op.writes[0].dst for op in slow_ops}) == 1, "the premise needs the merged lane to cost less"
     assert {op.inst.index for op in slow_ops} == {0, 1}
@@ -609,7 +608,7 @@ def _class_read_arms(lir: Lir, mnemonic: str) -> int:
     return sum(max(0, n - 1) for (inst, _), n in read_arms(lir).items() if inst.operator.mnemonic == mnemonic)
 
 
-# Kernels where the scheduler's first-free binding is provably wrong, with the multiplier read arms the shipped tuning
+# Kernels where the scheduler's first-free binding is provably wrong, with the multiplier read arms the frozen tuning
 # reaches; the figures the same annealer reaches with binding moves disabled (the seed binding, orientation on) are
 # k_chain 5, k_shared 6, k_saturated 6.
 @pytest.mark.parametrize(
@@ -622,7 +621,7 @@ def test_rebinding_beats_the_first_free_seed(
     options = default_options(_FMT)
     options = replace(options, operator=replace(options.operator, fmul=FMulOptions(instances=instances)))
     lir = build_lir(
-        lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name, SHIPPED_TUNING
+        lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name, FROZEN_TUNING
     )
     assert {inst.name for inst in lir.instances if inst.operator.mnemonic == "fmul"} == {
         f"fmul_{i}" for i in range(instances)
@@ -640,7 +639,7 @@ def test_comparators_swap_and_rebind_together() -> None:
     options = default_options(_FMT)
     options = replace(options, operator=replace(options.operator, fcmp=FCmpOptions(instances=2)))
     lir = build_lir(
-        lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "cmp_shared", SHIPPED_TUNING
+        lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "cmp_shared", FROZEN_TUNING
     )
     assert _class_read_arms(lir, "fcmp") == 4
 

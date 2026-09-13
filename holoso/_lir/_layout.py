@@ -1,5 +1,3 @@
-"""Block scheduling with cross-block overlap, once per build; per-round terminator offsets; the ROM block layout."""
-
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -10,7 +8,7 @@ from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule, resolve_pool, schedule_ops
 from ._build_base import BlockOffsets, BlockSchedules
-from ._mir_facts import const_branch_conditions, mir_operation, pred_count, succ_map
+from ._mir_facts import mir_operation, pred_count, succ_map
 
 _logger = logging.getLogger(__name__)
 
@@ -63,9 +61,7 @@ def _issue_side_envelope(
     floor = 1 if block.id == mir.entry else 0
     for vid, issue in sched.issue_cycle.items():
         word, operator = _control_word(mir, vid, issue, fetch_lag)
-        # The block may not end before an op reads its operands: it fires (and samples) at `operand_read_cycle`. A
-        # latch-free wide read samples one step past a latency-1 pooled op's control word, so the read can exceed the
-        # word -- without this floor the op would fire past the shrunk terminator and never execute.
+        # Without the operand-read floor the op would fire past the shrunk terminator and never execute.
         floor = max(floor, word, operand_read_cycle(operator, issue, fetch_lag))
         if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
             # The err_pc diagnostic latches `pc - fetch_lag` when this op's write-enable executes, which is
@@ -75,11 +71,10 @@ def _issue_side_envelope(
             floor = max(floor, word + fetch_lag)
     if isinstance(block.terminator, MirBranch):
         cond = block.terminator.cond
-        if cond in sched.issue_cycle:  # produced in-block: readable at its landing
+        if cond in sched.issue_cycle:
             floor = max(floor, landing_cycle(sched.commit_cycle(cond), fetch_lag))
-        elif cond in livein_landing:  # spilled in past an overlapped predecessor: readable at its carried landing
+        elif cond in livein_landing:
             floor = max(floor, livein_landing[cond])
-        # else: a resident live-in condition is available from the block's first cycle and imposes no floor
     return floor
 
 
@@ -96,22 +91,20 @@ def _spill_local_cycle(bid: int, block_local_cycle: int, term_offset: int) -> in
 def schedule_blocks(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, fetch_lag: int) -> BlockSchedules:
     """
     Schedule every block in reverse-postorder, threading cross-block overlap forward, once per build. A block whose
-    every successor is single-predecessor (so a spill cannot reach a wrong path) and that materializes no constant
-    branch condition (a tail write the branch must read) OVERLAPS: its terminator offset is fixed here at the
-    issue-side envelope -- the latest cycle it still drives a control word, plus the branch condition's read floor --
-    and its in-flight results land past the terminator, in the uniquely-reached successor frame, which inherits
-    `entry_busy` (the predecessor's per-instance busy residue) and `livein_landing` (the cycle each spilled value
-    lands), so its schedule neither reads a still-in-flight operand nor double-drives a busy instance. Every other
-    block drains, and its offset is derived per install-fixpoint round by `layout_offsets`. A block originating a
-    phi arm never overlaps (its phi successor is multi-predecessor, which `_prepare` asserts -- the one fact the
-    install set's independence from the schedules rests on), so the install set decides no schedule. Back-edge
-    targets and merge blocks are multi-predecessor, so no overlap crosses them: the forward-DAG carry converges in this
-    single pass with no fixpoint.
+    every successor is single-predecessor (so a spill cannot reach a wrong path) OVERLAPS: its terminator offset is
+    fixed here at the issue-side envelope -- the latest cycle it still drives a control word, plus the branch
+    condition's read floor -- and its in-flight results land past the terminator, in the uniquely-reached successor
+    frame, which inherits `entry_busy` (the predecessor's per-instance busy residue) and `livein_landing` (the cycle
+    each spilled value lands), so its schedule neither reads a still-in-flight operand nor double-drives a busy
+    instance. Every other block drains, and its offset is derived per install-fixpoint round by `layout_offsets`. A
+    block originating a phi arm never overlaps (its phi successor is multi-predecessor, which `_prepare` asserts -- the
+    one fact the install set's independence from the schedules rests on), so the install set decides no schedule.
+    Back-edge targets and merge blocks are multi-predecessor, so no overlap crosses them: the forward-DAG carry
+    converges in this single pass with no fixpoint.
     """
     pool = resolve_pool(mir.nodes)
     succ = succ_map(mir)
     preds = pred_count(mir)
-    const_branch = const_branch_conditions(mir, bool_mir)
     blocks_by_id = {block.id: block for block in mir.blocks}
     block_sched: dict[int, Schedule] = {}
     block_inflight: dict[int, dict[ValueId, int]] = {}
@@ -124,7 +117,7 @@ def schedule_blocks(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, fetc
         block = blocks_by_id[bid]
         inherited = carry.get(bid, _SpillCarry({}, {}))
         livein_landing = inherited.livein_landing
-        block_inflight[bid] = livein_landing  # the spills this block receives (== its scheduler livein_landing)
+        block_inflight[bid] = livein_landing
         block_entry_busy[bid] = inherited.entry_busy
         sched = schedule_ops(
             mir.nodes,
@@ -136,7 +129,7 @@ def schedule_blocks(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, fetc
         )
         block_sched[bid] = sched
         targets = succ[bid]
-        if not targets or bid in const_branch or any(preds[target] != 1 for target in targets):
+        if not targets or any(preds[target] != 1 for target in targets):
             continue
         term_offset = _issue_side_envelope(mir, sched, block, livein_landing, fetch_lag)
         overlap_term_offset[bid] = term_offset
@@ -226,11 +219,8 @@ class _BlockLayout:
 
 def layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
     """
-    Lay blocks out in the ROM in reverse-postorder, returning their per-block base PCs, the out_valid PC, and the
-    shortest-path initiation interval. Each block spans `term_offset + 1` fetch steps (its body up to and including
-    the terminator step; the successor frame begins at `term_pc + 1`); the single Ret block's boundary is the
-    out_valid PC.
-    `min_initiation_interval` is the shortest root-to-Ret path's traversed length.
+    Each block spans `term_offset + 1` fetch steps: its body up to and including the terminator step, the successor
+    frame beginning at `term_pc + 1`.
     """
     successors: dict[int, list[int]] = {b.index: terminator_arms(b.terminator) for b in blocks}
     # Blocks are laid out linearly in reverse-postorder, but the single Ret block is forced last so its boundary is the
@@ -259,7 +249,7 @@ def layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
             continue
         for successor in successors[index]:
             if position[successor] <= position[index]:
-                continue  # a back-edge; not on a shortest forward path
+                continue
             cand = here + length[index]
             if successor not in dist or cand < dist[successor]:
                 dist[successor] = cand

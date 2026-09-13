@@ -241,9 +241,8 @@ def build_ops(options: Options, width: int) -> OpConfig:
 
 DEFAULT_FETCH_STAGES = 3
 
-# Restated as literals so a frozen figure cannot move with the environment: what `Options()` ships, whatever the
-# test session set `HOLOSO_REGALLOC_EFFORT` to.
-SHIPPED_TUNING = RegallocTuning(effort=3000, register_price=2.0)
+# The tuning every frozen allocation figure is taken at, as literals so it cannot follow the environment.
+FROZEN_TUNING = RegallocTuning(effort=3000, register_price=2.0)
 
 
 def build_lir(mir: Mir, name: str, tuning: RegallocTuning = _DEFAULT_TUNING) -> Lir:

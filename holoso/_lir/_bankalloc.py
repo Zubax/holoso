@@ -33,7 +33,7 @@ from .._operators import (
 )
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import block_has_install, const_branch_conditions, mir_operation, phi_arm_out, succ_map
+from ._mir_facts import block_has_install, mir_operation, phi_arm_out, succ_map
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import (
@@ -45,25 +45,20 @@ from ._regalloc import (
     InputWriter,
     InstanceSlot,
     MoveWriter,
-    PoolWord,
     RegallocTuning,
     SlotWriter,
     color,
-    find_coloring_conflict,
 )
-from ._sources import BoolOperandTemplate
+from ._sources import BoolOperandTemplate, WideOperandTemplate
 from ._build_base import (
     Allocation,
-    ArmPlacement,
-    BoolArmInstall,
     Boundary,
     BuildContext,
     Early,
     BlockOffsets,
-    WideArmInstall,
 )
 from ._construct import bool_operand_template, operand_templates, wide_operand_template
-from ._coalesce import PhiCoalescing, coalescable_arms, coalesce
+from ._coalesce import PhiCoalescing, coalescable_arms, coalesce, find_coloring_conflict
 from ._layout import layout_offsets
 
 _logger = logging.getLogger(__name__)
@@ -74,9 +69,8 @@ type _BankView = MirWideView | MirBoolView
 
 class _Bank[D: Early | Boundary](ABC):
     """
-    What differs between the two physical register banks: `prepare_bank`, `_coalesce_bank` and `_color_bank` are
-    shared, and each subclass supplies the wide or boolean specifics: the view, the boundary users, the priced
-    writers and firings, and the install policy.
+    What differs between the two physical register banks; `prepare_bank`, `_coalesce_bank` and `_color_bank` are
+    shared.
     """
 
     label: ClassVar[str]
@@ -113,6 +107,19 @@ class _Bank[D: Early | Boundary](ABC):
 
 
 @dataclass(frozen=True, slots=True)
+class _ArmPlacement:
+    """
+    Where a phi arm's tail install fires in its predecessor's frame: the scheduler-frame issue cycle, and whether the
+    source is settled before the block's first step (a constant, an input, a state read, a phi, or a foreign result
+    already landed), which needs no read-first sampling. Stamped once per arm, the placement the interference
+    residence, the install classification and the emitted copy all read.
+    """
+
+    issue: int
+    settled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _BankFacts[D: Early | Boundary]:
     """
     One physical register bank's facts that no install-fixpoint round changes, computed once per build. The
@@ -132,10 +139,10 @@ class _BankFacts[D: Early | Boundary]:
     op_block: dict[ValueId, int]
     op_commit: dict[ValueId, int]
     reads: dict[int, list[tuple[ValueId, int]]]
-    boundary_base: dict[int, set[ValueId]]  # the non-slot boundary users per block
+    boundary_base: dict[int, set[ValueId]]
     liveness: BankLiveness  # the prototype: what no attempt changes, the rest left empty
     candidate_arms: dict[ValueId, list[tuple[int, ValueId]]]
-    arm_placement: dict[tuple[int, ValueId], ArmPlacement]  # (pred, phi) -> where the arm's install fires
+    arm_placement: dict[tuple[int, ValueId], _ArmPlacement]  # (pred, phi) -> where the arm's install fires
     order: list[ValueId]  # every operation and phi in the deterministic coloring order
     last_read_in_ret: dict[ValueId, int]
     ret_block: int
@@ -212,9 +219,7 @@ class CoalescedLayout:
     def install_blocks(self) -> dict[int, bool]:
         """
         The post-coalescing install classification, refining `block_has_install`'s conservative one: each block that
-        installs at its tail -- a residual phi arm, or the constant branch condition it materializes -- mapped to
-        whether any of its installs issues past the work makespan, read off the arms' stamped placement, the one the
-        interference residence and the emitted copy read too.
+        installs a residual phi arm at its tail mapped to whether any of its installs issues past the work makespan.
         """
         block_sched = self.ctx.schedules.block_sched
         install: dict[int, bool] = {}
@@ -222,8 +227,6 @@ class CoalescedLayout:
             for pred, vid, _value, _conditioner in bank.residual_arms():
                 pushes = bank.facts.arm_placement[(pred, vid)].issue > block_sched[pred].makespan
                 install[pred] = install.get(pred, False) or pushes
-        for block_id in const_branch_conditions(self.ctx.mir, self.ctx.bool_mir):
-            install.setdefault(block_id, False)  # a literal is a settled source, never pushing
         return install
 
 
@@ -287,14 +290,12 @@ class _WideBank(_Bank[Early | Boundary]):
                     ctx.schedules.instances[operator] > 1
                     and issue + operator.initiation_interval <= layout.offsets.block_term_offset[bid] + 1
                 )
-                reads: list[ValueId | PoolWord] = []
-                for operand in node.operands:
-                    if operand in values:
-                        reads.append(operand)
-                    else:
-                        entry = ctx.const_pool.entries.get(operand)
-                        assert entry is not None, f"operand {operand} of firing {leader} is neither wide nor pooled"
-                        reads.append(PoolWord(entry.index))
+                reads: list[ValueId | WideConstRef] = []
+                for template in operand_templates(node, ctx.wide_mir, ctx.bool_mir, ctx.const_pool.entries):
+                    assert isinstance(template, WideOperandTemplate) and (
+                        template.hole is None or template.hole in values
+                    )
+                    reads.append(template.source)
                 writes = [(op_nodes[m].output_port, m) for m in sched.firings[leader] if m in values]
                 seed = sched.inst_of[leader].index
                 firings.append(Firing(leader, operator, bid, issue, seed, bindable, reads, writes))
@@ -340,7 +341,8 @@ class _BoolBank(_Bank[Boundary]):
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
         for block in mir.blocks:
-            if isinstance(block.terminator, MirBranch) and block.terminator.cond in values:
+            if isinstance(block.terminator, MirBranch):
+                assert block.terminator.cond in values
                 boundary[block.id].add(block.terminator.cond)
         for out in mir.outputs:
             if isinstance(out, MirBoolOutput) and out.value in values:
@@ -412,9 +414,8 @@ def _bank_liveness_facts(
     fetch_lag: int,
 ) -> _BankLivenessFacts:
     """
-    One bank's per-value liveness facts, identical for both banks so their read-cycle semantics cannot drift:
-    definition block and commit cycle per operation, definition block per phi, and EXACT per-consumer operand reads
-    (every consumer reads on its own step via the shared cycle helper; the caller adds its bank's boundary users).
+    Identical for both banks so their read-cycle semantics cannot drift. The operand reads are EXACT per consumer, each
+    on its own step; the caller adds its bank's boundary users.
     """
     op_block: dict[ValueId, int] = {}
     op_commit: dict[ValueId, int] = {}
@@ -450,9 +451,8 @@ def _movable_order(
     op_commit: dict[ValueId, int],
 ) -> list[ValueId]:
     """
-    The deterministic coloring order shared by both banks: reverse-postorder block, then commit cycle, then value id
-    (the `-3` sentinel sorts a phi -- which has no commit -- ahead of the operations in its block). Value-id last
-    keeps the order, and hence the coloring, seed-independent; both banks MUST use this one definition.
+    The `-3` sentinel sorts a phi -- which has no commit -- ahead of the operations in its block. Value-id last keeps
+    the order, and hence the coloring, seed-independent; both banks MUST use this one definition.
     """
     rpo_pos = {bid: i for i, bid in enumerate(reverse_postorder(mir))}
     block_of = {**op_block, **phi_block}
@@ -483,14 +483,14 @@ def prepare_bank[D: Early | Boundary](bank: _Bank[D], ctx: BuildContext) -> _Ban
         for bid, spills in ctx.schedules.block_inflight.items()
     }
     ret_block = mir.ret_block
-    # Each phi arm's install placed in the PREDECESSOR's own frame (where the install fires, not the source's home
-    # block), once: the interference residence, the install classification and the emitted copy all read it here.
-    arm_placement: dict[tuple[int, ValueId], ArmPlacement] = {}
+    # Each phi arm's install is placed in the PREDECESSOR's own frame (where the install fires, not the source's home
+    # block).
+    arm_placement: dict[tuple[int, ValueId], _ArmPlacement] = {}
     for vid, phi in phi_nodes.items():
         for pred, value, _conditioner in phi.arms:
             commit = install_source_commit(block_sched[pred], value, inflight[pred], fetch_lag)
             issue = install_issue_cycle(block_sched[pred].makespan, commit)
-            arm_placement[(pred, vid)] = ArmPlacement(issue, commit is None)
+            arm_placement[(pred, vid)] = _ArmPlacement(issue, commit is None)
     liveness = BankLiveness(
         blocks=[b.id for b in mir.blocks],
         entry=mir.entry,
@@ -516,9 +516,8 @@ def prepare_bank[D: Early | Boundary](bank: _Bank[D], ctx: BuildContext) -> _Ban
         read_name = node.name if isinstance(node, MirStateRead) else None
         if read_name is not None and read_name != slot.name:
             tapped_by_other.add(read_name)
-    # Last operand-read cycle of each value in the Ret block, from the shared liveness facts so read-cycle semantics
-    # cannot drift; it bounds how early a slot may install over its source. Keyed only by state live-ins (always in
-    # `values`), so the facts' value filter drops nothing.
+    # Bounds how early a slot may install over its source. Keyed only by state live-ins (always in `values`), so the
+    # facts' value filter drops nothing.
     last_read_in_ret: dict[ValueId, int] = {}
     for vid, rc in facts.reads[ret_block]:
         last_read_in_ret[vid] = max(last_read_in_ret.get(vid, 0), rc)
@@ -643,9 +642,8 @@ def converge(ctx: BuildContext) -> CoalescedLayout:
 def _coalesce_bank[D: Early | Boundary](facts: _BankFacts[D], offsets: BlockOffsets) -> _CoalescedBank[D]:
     """
     Coalesce one physical register bank across the CFG on one round's terminator offsets: phi-arm coalescing, slot
-    in-place commits with validate-and-retry, pins and install decisions. The bank descriptor supplies the boundary
-    and install policies; the rest is bank-independent. The coloring is `_color_bank`'s, once the layout has
-    converged.
+    in-place commits with validate-and-retry, pins and install decisions. The coloring is `_color_bank`'s, once the
+    layout has converged.
     """
     bank, slots, values = facts.bank, facts.slots, facts.values
     op_nodes, phi_nodes = facts.op_nodes, facts.phi_nodes
@@ -677,9 +675,9 @@ def _coalesce_bank[D: Early | Boundary](facts: _BankFacts[D], offsets: BlockOffs
             if not slot.conditioner.is_identity or not producible or slot.name in facts.tapped_by_other:
                 continue  # a folded sideband, a non-producible live-out, or a chained copy cannot be written in-place
             if slot.name in forced_copy:
-                continue  # demoted to copy-back by a prior retry round (its in-place commit was unsound)
+                continue
             if r_in is not None and live_out in coalesce_graph.get(r_in, set()):
-                continue  # the live-out's range overlaps the live-in's -- it must be copied, not coalesced
+                continue
             coalesced[slot.name] = live_out
 
         install = bank.install_policy(facts, coalesced)
@@ -690,7 +688,7 @@ def _coalesce_bank[D: Early | Boundary](facts: _BankFacts[D], offsets: BlockOffs
         # at the boundary; an early-installed one is read by its copy at the install step, freeing its source for a
         # later tenant.
         boundary_final = {b: set(s) for b, s in facts.boundary_base.items()}
-        early_reads: list[tuple[ValueId, int]] = []  # extra Ret-block reads from early-installed slot copies
+        early_reads: list[tuple[ValueId, int]] = []
         for slot in slots:
             name, live_out, r_in = slot.name, slot.live_out, livein_of[slot.name]
             if name in coalesced:
@@ -708,8 +706,6 @@ def _coalesce_bank[D: Early | Boundary](facts: _BankFacts[D], offsets: BlockOffs
                     boundary_final[ret_block].add(live_out)
                 case _:
                     assert_never(install[name])
-        # Only an early install adds a Ret-block read; with none (always so for the boolean bank) the shared facts'
-        # reads are reused as-is, so no per-attempt copy is made.
         if early_reads:
             reads_final = {b: list(r) for b, r in facts.reads.items()}
             reads_final[ret_block].extend(early_reads)
@@ -782,14 +778,11 @@ def _color_quotient[D: Early | Boundary](
     Color the per-value interference graph after collapsing each coalescing class to its leader, then expand the
     leader's color back onto every member. The quotient maps every firing's read and write endpoints and every
     producer's holes to leaders and concatenates each class's fixed producers, so the steering objective is the
-    merged register's actual read and write fan-in. A class with a pinned member pins its leader. Reduces to the
-    plain per-value coloring when the coalescing is the identity (every value its own singleton class, e.g. a kernel
-    with no coalescable phi arms).
+    merged register's actual read and write fan-in. A class with a pinned member pins its leader.
     """
     coalescing, interferes = coalesced.coalescing, coalesced.interferes
 
-    def lead(v: ValueId) -> ValueId:
-        return coalescing.leader.get(v, v)
+    lead = coalescing.lead
 
     leaders = sorted({lead(v) for v in interferes})
     q_pinned = coalescing.pinned
@@ -807,7 +800,7 @@ def _color_quotient[D: Early | Boundary](
     q_producers = {head: list(dict.fromkeys(ps)) for head, ps in q_producers.items()}
     q_movable: list[ValueId] = []
     seen: set[ValueId] = set()
-    for vid in coalesced.movable:  # leaders of the movable values, first occurrence, preserving the deterministic order
+    for vid in coalesced.movable:
         head = lead(vid)
         if head in q_pinned or head in seen:
             continue
@@ -816,7 +809,7 @@ def _color_quotient[D: Early | Boundary](
     q_firings = [
         replace(
             firing,
-            reads=[source if isinstance(source, PoolWord) else lead(source) for source in firing.reads],
+            reads=[source if isinstance(source, WideConstRef) else lead(source) for source in firing.reads],
             writes=[(port, lead(value)) for port, value in firing.writes],
         )
         for firing in firings
@@ -853,9 +846,6 @@ def _color_bank[D: Early | Boundary](
     bool_reg: Mapping[ValueId, int],
     tuning: RegallocTuning,
 ) -> Coloring:
-    """
-    Color one coalesced bank: every value's register, and the orientation, binding and mux arms the annealer chose.
-    """
     bank = coalesced.facts.bank
     _logger.info(
         "Coloring %s register bank: %d values, %d pinned, %d movable, %d reserved",
@@ -899,34 +889,27 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
     # The boolean bank first: its allocation depends on nothing the wide bank decides, and the wide bank's inline
     # results are keyed by the boolean registers they read.
     bool_coloring = _color_bank(layout.bool_bank, layout, {}, tuning)
-    bool_reg = dict(bool_coloring.assign)
-    wide = _color_bank(layout.wide_bank, layout, bool_reg, tuning)
+    wide = _color_bank(layout.wide_bank, layout, bool_coloring.assign, tuning)
 
     # A phi arm coalesced onto the merged register needs no install copy: the arm value already resides in the phi's
     # register (they share a coloring class). Only the residual (non-coalesced) arms install by a pc-gated copy.
-    wide_copies: dict[int, list[WideArmInstall]] = {}
+    ctx = layout.ctx
+    wide_copies: dict[int, list[WideCopy]] = {}
     for pred, vid, value, conditioner in layout.wide_bank.residual_arms():
         assert not isinstance(conditioner, BoolInversion)
         placement = layout.wide_bank.facts.arm_placement[(pred, vid)]
-        wide_copies.setdefault(pred, []).append(WideArmInstall(wide.assign[vid], value, conditioner, placement))
-    bool_writes: dict[int, list[BoolArmInstall]] = {}
+        source = wide_operand_template(ctx.wide_mir, value, conditioner, ctx.const_pool.entries)
+        copy = WideCopy(
+            RegRef(wide.assign[vid]), source.resolve(wide.assign.__getitem__), placement.issue, placement.settled
+        )
+        wide_copies.setdefault(pred, []).append(copy)
+    bool_writes: dict[int, list[BoolWrite]] = {}
     for pred, vid, value, inversion in layout.bool_bank.residual_arms():
         assert isinstance(inversion, BoolInversion)
         placement = layout.bool_bank.facts.arm_placement[(pred, vid)]
-        bool_writes.setdefault(pred, []).append(BoolArmInstall(bool_reg[vid], value, inversion, placement))
-
-    # A constant branch condition (e.g. a read-only boolean attribute, or a folded test) has no register of its own;
-    # materialize it into a bool register written in the branching block so the next-PC decode can read it. The constant
-    # is globally interned, so sibling branches sharing it reuse one register -- but the write must be emitted in EVERY
-    # branching block that uses it, else a path reaching the branch through a block that did not write it reads a stale
-    # register. (A later static-branch-folding pass would instead drop the dead arm; until then this keeps it correct.)
-    nbreg = bool_coloring.nreg
-    for block_id, cond in const_branch_conditions(layout.ctx.mir, layout.ctx.bool_mir).items():
-        if cond not in bool_reg:
-            bool_reg[cond] = nbreg
-            nbreg += 1
-        settled = ArmPlacement(layout.ctx.schedules.block_sched[block_id].makespan, True)  # a literal is settled
-        bool_writes.setdefault(block_id, []).append(BoolArmInstall(bool_reg[cond], cond, BoolInversion(), settled))
+        bool_source = bool_operand_template(ctx.bool_mir, value, inversion).resolve(bool_coloring.assign.__getitem__)
+        write = BoolWrite(BoolRegRef(bool_coloring.assign[vid]), bool_source, placement.issue, placement.settled)
+        bool_writes.setdefault(pred, []).append(write)
 
     instances = [
         OperatorInstance(operator, i)
@@ -944,7 +927,7 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
     _logger.info(
         "Allocation: %d wide + %d bool registers, %d wide copies, %d bool writes",
         wide.nreg,
-        nbreg,
+        bool_coloring.nreg,
         sum(len(copies) for copies in wide_copies.values()),
         sum(len(writes) for writes in bool_writes.values()),
     )
@@ -952,10 +935,9 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
         wide=wide,
         wide_slot_reg=layout.wide_bank.facts.slot_reg,
         wide_install=layout.wide_bank.install,
-        bool_reg=bool_reg,
+        bool=bool_coloring,
         bool_slot_reg=layout.bool_bank.facts.slot_reg,
         bool_install=layout.bool_bank.install,
-        nbreg=nbreg,
         wide_copies=wide_copies,
         bool_writes=bool_writes,
         instances=instances,

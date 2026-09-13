@@ -1,5 +1,3 @@
-"""Construct LIR operands, scheduled ops, terminators, outputs, inputs, and the constant pool from selected MIR."""
-
 import math
 from collections.abc import Mapping
 from dataclasses import replace
@@ -51,7 +49,7 @@ def bool_operand_template(bool_mir: MirBoolView, vid: ValueId, inversion: BoolIn
 
 
 def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversion: BoolInversion) -> BoolOperand:
-    return bool_operand_template(bool_mir, vid, inversion).resolve(alloc.bool_reg.__getitem__)
+    return bool_operand_template(bool_mir, vid, inversion).resolve(alloc.bool.assign.__getitem__)
 
 
 def operand_templates(
@@ -91,7 +89,7 @@ def _operands_of(
         (
             template.resolve(alloc.wide.assign.__getitem__)
             if isinstance(template, WideOperandTemplate)
-            else template.resolve(alloc.bool_reg.__getitem__)
+            else template.resolve(alloc.bool.assign.__getitem__)
         )
         for template in operand_templates(node, wide_mir, bool_mir, pool)
     ]
@@ -100,7 +98,7 @@ def _operands_of(
 def _value_dst(wide_mir: MirWideView, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
     if vid in wide_mir.operation_nodes:
         return RegRef(alloc.wide.assign[vid])
-    return BoolRegRef(alloc.bool_reg[vid])
+    return BoolRegRef(alloc.bool.assign[vid])
 
 
 def build_inline_op(
@@ -144,7 +142,7 @@ def build_pooled_op(
     node = mir_operation(mir, leader)
     assert isinstance(node.operator, PooledHardwareOperator)
     operands = _operands_of(node, wide_mir, bool_mir, alloc, pool)
-    swapped = bool(alloc.wide.swap.get(leader))
+    swapped = alloc.wide.swap[leader]
     if swapped:  # commutative operator: exchange operands (with their conditioners) to shrink read muxes
         operands.reverse()
     # A swapped firing's taps move with the operands: each member's output port maps through the operator's
@@ -230,7 +228,7 @@ def build_terminator(terminator: MirTerminator, alloc: Allocation) -> Terminator
         case MirJump(target=target):
             return Jump(target)
         case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
-            return Branch(BoolRegRef(alloc.bool_reg[cond]), if_true, if_false)
+            return Branch(BoolRegRef(alloc.bool.assign[cond]), if_true, if_false)
         case MirRet():
             return Ret()
 
@@ -262,7 +260,7 @@ def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperati
     seen: set[ValueId] = set()
 
     def note(vid: ValueId) -> None:
-        node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the wide view; skip it
+        node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the wide view
         if isinstance(node, (MirFloatConst, MirIntConst)) and vid not in seen:
             seen.add(vid)
             ids.append(vid)
@@ -326,7 +324,7 @@ def build_inputs(
         if isinstance(wide_node, (MirFloatInput, MirIntInput)):
             loads.append(WideInputLoad(wide_node.name, RegRef(alloc.wide.assign[vid]), wide_node.scalar_type))
         elif isinstance(bool_node, MirBoolInput):
-            loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool_reg[vid])))
+            loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool.assign[vid])))
         else:
             assert False, f"unhandled MIR input {vid}"
     return loads

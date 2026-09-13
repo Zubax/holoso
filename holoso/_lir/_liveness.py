@@ -10,22 +10,20 @@ phi result is defined at the head of its block, and each phi arm value is live o
 values stay live across the whole loop body.
 
 Second, within each block every live value is given a half-open residence interval in that block's executing-step
-(hardware) frame -- the same frame as Lir.reg_liveness and the numerical model -- using the
-shared cycle helpers. A value resident from a predecessor (live-in, or a phi result) lands on the block's first step; a
-value defined by an in-block operator -- pooled or inline, on either bank -- lands on the one bank- and
-class-independent landing cycle (fetch lag plus the read-first edge after its commit); a value that is live out of the
-block (or read by the block's boundary -- an
-output, a branch condition, a state live-out, or a phi-arm copy) stays resident through the block boundary; and a phi
-result additionally occupies its register at the tail of every arm predecessor, where its install copy physically
-writes it one step before the boundary -- deliberately also foreclosing the phi sharing a register with its own arm
-values, although that same-step read-first self-copy would be harmless (conservatism a future copy-coalescing pass
-can reclaim, not a safety invariant). Two values interfere when their intervals overlap in *some* block under the
-read-first rule `R(a) < W(b)`. Values that live entirely within mutually-exclusive blocks (the two arms of an
-`if`) share no block, so they never interfere -- path-awareness falls out of the per-block quantification with no
-explicit reasoning about which arms are exclusive.
+(hardware) frame -- the same frame as Lir.reg_liveness and the numerical model -- using the shared cycle helpers. A
+value resident from a predecessor (live-in, or a phi result) lands on the block's first step; a value defined by an
+in-block operator -- pooled or inline, on either bank -- lands on the one bank- and class-independent landing cycle
+(fetch lag plus the read-first edge after its commit); a value that is live out of the block (or read by the block's
+boundary -- an output, a branch condition, a state live-out, or a phi-arm copy) stays resident through the block
+boundary; and a phi result additionally occupies its register at the tail of every arm predecessor, where its install
+copy physically writes it one step before the boundary -- deliberately also foreclosing the phi sharing a register with
+its own arm values, although that same-step read-first self-copy would be harmless (conservatism the phi-arm coalescing
+reclaims, not a safety invariant). Two values interfere when their intervals overlap in *some* block under the
+read-first rule `R(a) < W(b)`. Values that live entirely within mutually-exclusive blocks (the two arms of an `if`)
+share no block, so they never interfere -- path-awareness falls out of the per-block quantification with no explicit
+reasoning about which arms are exclusive.
 
-This module is bank-agnostic: the caller supplies a BankLiveness describing one register family (the wide
-bank or the 1-bit boolean bank) and receives the symmetric interference adjacency over that bank's values.
+This module is bank-agnostic: the caller supplies one register family (the wide bank or the 1-bit boolean bank).
 """
 
 from dataclasses import dataclass, field
@@ -40,16 +38,14 @@ class BankLiveness:
     cross-block live-in is resident from its block's first step; under cross-block software pipelining a predecessor's
     result may instead spill past its (shrunk) terminator and land inside this block, which `inflight_defs` records.
 
-    All cycles are block-local in the executing-step frame (block start is step 1). `op_landing` is each in-block
-    definition's landing cycle (the caller computes it with the shared `_ir` `landing_cycle` helper -- bank- and
-    class-independent now that every result writes the array combinationally). `reads`
-    carries every in-block operand read with its hardware read cycle; `boundary_users` carries values consumed at a
-    block's boundary that are not otherwise live out (outputs and state live-outs at the Ret block, a branch
-    condition); `arm_out` carries, per block, the phi-arm values a successor's phi takes from that block (each is
-    live out of it); `installs` carries, per block, the phi-result values whose install copy WRITES their register
-    at this block's tail (one entry per arm predecessor) -- the install is a real write the emitter performs one step
-    before the block boundary, so the phi register must be modeled as occupied there or it could clobber a value
-    still read at the boundary (e.g. the very branch condition selecting the successor).
+    All cycles are block-local in the executing-step frame (block start is step 1). The caller computes `op_landing`
+    with the shared `_ir` `landing_cycle` helper -- bank- and class-independent, every result writing the array
+    combinationally. `boundary_users` are values consumed at a block's boundary that are not otherwise live out
+    (outputs and state live-outs at the Ret block, a branch condition); `arm_out` are, per block, the phi-arm values a
+    successor's phi takes from that block; `installs` are, per block, the phi-result values whose install copy WRITES
+    their register at this block's tail (one entry per arm predecessor) -- the install is a real write the emitter
+    performs one step before the block boundary, so the phi register must be modeled as occupied there or it could
+    clobber a value still read at the boundary (e.g. the very branch condition selecting the successor).
     """
 
     blocks: list[int]
@@ -61,15 +57,15 @@ class BankLiveness:
     # caller stamps per install in `installs`.
     term_offset: dict[int, int]
     resident: frozenset[ValueId]  # inputs and state live-ins: resident from the start, defined at the entry
-    op_landing: dict[ValueId, int]  # op-result value -> its landing cycle in its def block (block-local)
-    op_block: dict[ValueId, int]  # op-result value -> its def block
-    phi_block: dict[ValueId, int]  # phi-result value -> the block whose head defines it
+    op_landing: dict[ValueId, int]
+    op_block: dict[ValueId, int]
+    phi_block: dict[ValueId, int]
     reads: dict[int, list[tuple[ValueId, int]]] = field(default_factory=dict)  # block -> [(value, read cycle)]
-    boundary_users: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> boundary-read values
-    arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)  # block -> phi-arm values live out of it
-    # block -> {phi dest installed at its tail: the install's block-local FIRE step}. The fire step is per install,
-    # not per block (`install_issue_cycle`), so the destination register is occupied from the true (earliest) write
-    # cycle and a tenant cannot be clobbered.
+    boundary_users: dict[int, frozenset[ValueId]] = field(default_factory=dict)
+    arm_out: dict[int, frozenset[ValueId]] = field(default_factory=dict)
+    # block -> {phi dest: the install's block-local FIRE step}. The fire step is per install, not per block
+    # (`install_issue_cycle`), so the destination register is occupied from the true (earliest) write cycle and a
+    # tenant cannot be clobbered.
     installs: dict[int, dict[ValueId, int]] = field(default_factory=dict)
     # Cross-block overlap: per block, a predecessor value whose in-flight write SPILLS past the predecessor's shrunk
     # terminator and lands in THIS block, mapped to its block-local landing cycle. The spilled write fires
@@ -77,7 +73,7 @@ class BankLiveness:
     # in every successor frame it spills into -- from the block's first step through its landing -- whether or not the
     # value is dataflow-live here. Modeling it as resident-from-step-1 keeps a sibling arm where the value is DEAD from
     # reusing that register and being clobbered by the landing. Empty under per-block draining.
-    inflight_defs: dict[int, dict[ValueId, int]] = field(default_factory=dict)  # block -> {spilled value: landing}
+    inflight_defs: dict[int, dict[ValueId, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +93,7 @@ def _defs(bank: BankLiveness) -> dict[int, set[ValueId]]:
 
 
 def _uses(bank: BankLiveness, defs: dict[int, set[ValueId]]) -> dict[int, set[ValueId]]:
-    """Upward-exposed uses per block: values read in the block (or at its boundary) that the block does not define."""
+    """Upward-exposed uses per block."""
     uses: dict[int, set[ValueId]] = {b: set() for b in bank.blocks}
     for block in bank.blocks:
         local = defs[block]
@@ -112,9 +108,6 @@ def _uses(bank: BankLiveness, defs: dict[int, set[ValueId]]) -> dict[int, set[Va
 
 def _dataflow(bank: BankLiveness, defs: dict[int, set[ValueId]], uses: dict[int, set[ValueId]]) -> _Live:
     """Backward liveness fixpoint with phi semantics (arm values live out of their predecessor)."""
-    phi_defs: dict[int, set[ValueId]] = {b: set() for b in bank.blocks}
-    for vid, block in bank.phi_block.items():
-        phi_defs[block].add(vid)
     live_in: dict[int, set[ValueId]] = {b: set() for b in bank.blocks}
     live_out: dict[int, set[ValueId]] = {b: set() for b in bank.blocks}
     changed = True
@@ -123,7 +116,7 @@ def _dataflow(bank: BankLiveness, defs: dict[int, set[ValueId]], uses: dict[int,
         for block in reversed(bank.blocks):  # a postorder-ish sweep converges quickly; the fixpoint guarantees it
             out: set[ValueId] = set(bank.arm_out.get(block, frozenset()))
             for succ in bank.succ[block]:
-                out |= live_in[succ] - phi_defs[succ]
+                out |= live_in[succ]
             new_in = uses[block] | (out - defs[block])
             if out != live_out[block] or new_in != live_in[block]:
                 live_out[block] = out
@@ -133,9 +126,7 @@ def _dataflow(bank: BankLiveness, defs: dict[int, set[ValueId]], uses: dict[int,
 
 
 def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
-    """
-    Build the symmetric register-interference adjacency for one bank from per-block hardware-frame residence intervals.
-    """
+    """Symmetric register-interference adjacency for one bank."""
     defs = _defs(bank)
     uses = _uses(bank, defs)
     live = _dataflow(bank, defs, uses)
@@ -148,15 +139,12 @@ def compute_interference(bank: BankLiveness) -> dict[ValueId, set[ValueId]]:
         installed = bank.installs.get(block, {})
         inflight = bank.inflight_defs.get(block, {})
         live_set = live.live_in[block] | defs[block] | installed.keys() | inflight.keys()
-        # A value's residence in this block: it lands on the block's first step when it is resident, a phi result, or a
-        # live-in carried from a predecessor; on its operator's landing cycle when defined here; and on the install
-        # step (one before the boundary) when its only presence is a phi install at this block's tail. It dies on its
-        # last in-block read, extended to the boundary when it is live out, consumed at the boundary, or installed
-        # here (the installed value must survive into the successor).
+        # A value whose only presence here is a phi install at this block's tail lands on the install's fire step; an
+        # installed value is kept through the boundary because it must survive into the successor.
         write_at: dict[ValueId, int] = {}
         read_at: dict[ValueId, int] = {}
         for vid in live_set:
-            if vid in bank.op_block and bank.op_block[vid] == block and vid not in live.live_in[block]:
+            if vid in bank.op_block and bank.op_block[vid] == block:
                 w = bank.op_landing[vid]
             elif vid in installed and vid not in live.live_in[block] and vid not in defs[block]:
                 w = installed[vid]  # the install's own fire step (its placement: makespan, or one step past)

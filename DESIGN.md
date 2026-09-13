@@ -720,8 +720,7 @@ larger than the LUT-count difference between two synthesis runs of equivalent de
 per-endpoint mux cost is the refinement if a kernel ever regresses beyond that.
 
 Operator replication (`instances`) trades area for latency and pays in mux arms; it is not an area loss: a second
-multiplier shortens the EKF transaction by about a sixth for a similar fraction more LUTs under the annealer's
-binding. The earlier "replication rejected" verdict was measured under the first-free binding and the greedy colorer.
+multiplier shortens the EKF transaction by about a sixth for a similar fraction more LUTs under the annealer's binding.
 
 Explored and rejected for register-pressure-bound kernels:
 

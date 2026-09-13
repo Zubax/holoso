@@ -1,8 +1,3 @@
-"""
-Build a finished Lir from MIR: the top-level orchestration that schedules and lays out the blocks, allocates
-both register banks (coalescing phi arms), constructs the per-block LIR, and assembles the final program.
-"""
-
 import logging
 from dataclasses import replace
 from typing import assert_never
@@ -16,7 +11,7 @@ from .._value import FloatValue, IntValue, WideValue, coerce_scalar
 from ._ir import *
 from ._mir_facts import mir_operation, pred_count
 from ._bankalloc import allocate, converge
-from ._build_base import Allocation, Boundary, BuildContext, Early
+from ._build_base import Boundary, BuildContext, Early
 from ._regalloc import RegallocTuning
 from ._construct import (
     bool_operand,
@@ -74,10 +69,10 @@ def _drop_redundant_state_slots(mir: Mir) -> Mir:
         if len(members) < 2:
             continue
         if isinstance(mir.nodes[members[0].live_out], MirPhi):
-            continue  # a phi live-out: dropping perturbs its install placement (if-conversion usually elides the phi)
+            continue  # rare: if-conversion usually elides the phi
         read_members = [m for m in members if m.name in read_names]
         if len(read_members) >= 2:
-            continue  # two read aliases: distinct live-ins, leave intact
+            continue
         rep = read_members[0] if read_members else members[0]
         assert all(m.name not in read_names for m in members if m is not rep), "a dropped alias must be write-only"
         dropped.update(m.name for m in members if m is not rep)
@@ -96,10 +91,14 @@ def _prepare(mir: Mir, fetch_lag: int) -> BuildContext:
     # copy lands in the condition register exactly when the terminator reads it, so the branch would consult the next
     # iteration's value instead of the current one -- and no register assignment can help, since the conflict is the
     # value with itself. The frontend never emits this shape (every arm predecessor is jump-terminated); reject it
-    # here so a future pass that creates branch-block arm predecessors fails loudly instead of miscompiling.
+    # here so a future pass that creates branch-block arm predecessors fails loudly instead of miscompiling. A branch on
+    # a constant never reaches here either: HIR pruning settles every decided branch.
     for mir_block in mir.blocks:
         terminator = mir_block.terminator
         if isinstance(terminator, MirBranch):
+            assert (
+                terminator.cond not in bool_mir.const_nodes
+            ), f"block {mir_block.id} branches on a constant pruning missed"
             cond_node = mir.nodes.get(terminator.cond)
             if isinstance(cond_node, MirPhi) and any(pred == mir_block.id for pred, _, _ in cond_node.arms):
                 raise UnsupportedConstruct(
@@ -124,11 +123,10 @@ def _prepare(mir: Mir, fetch_lag: int) -> BuildContext:
 
 def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocTuning) -> Lir:
     """
-    Build the microprogram for any kernel (a straight-line kernel is the degenerate single-`Ret`-block graph):
-    schedule each block independently, pool operator instances across the mutually-exclusive blocks, color both register
-    banks by hardware-frame liveness (reusing registers, coalescing state live-outs, orienting commutative firings),
-    install non-coalesced phi and slot live-outs by pc-gated copy, and lay the blocks out in the ROM with the single
-    `Ret` as the out_valid boundary.
+    Schedule each block, pool operator instances across the mutually-exclusive blocks, color both register banks by
+    hardware-frame liveness (reusing registers, coalescing state live-outs, orienting commutative firings), install
+    non-coalesced phi and slot live-outs by pc-gated copy, and lay the blocks out in the ROM with the single `Ret` as
+    the out_valid boundary.
     """
     ctx = _prepare(mir, fetch_lag)
     mir, wide_mir, bool_mir = ctx.mir, ctx.wide_mir, ctx.bool_mir
@@ -143,10 +141,8 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     blocks: list[LirBlock] = []
     for block in mir.blocks:
         sched = block_sched[block.id]
-        # One cross-bank schedule per block. Operations split by class, not by result bank: each pooled FIRING (one
-        # or more fused taps of one module activation) becomes a PooledScheduledOp with one write per tapped output
-        # port; every inline operator (boolean logic, the float<->bool casts) becomes an InlineScheduledOp. Each
-        # issues as soon as its own operands have landed, with no barrier.
+        # Operations split by operator class, not by result bank; each issues as soon as its own operands have landed,
+        # with no barrier.
         ops = [
             build_pooled_op(mir, wide_mir, bool_mir, members, sched, alloc, const_pool)
             for _, members in sorted(sched.firings.items(), key=lambda kv: (sched.issue_cycle[kv[0]], kv[0]))
@@ -158,27 +154,8 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
                 key=lambda v: (sched.issue_cycle[v], v),
             )
         ]
-        # Each install placed as the allocator stamped it, the placement the interference residence used.
-        wide_copies = [
-            WideCopy(
-                RegRef(c.dst),
-                wide_operand(wide_mir, c.source, c.conditioner, alloc, const_pool),
-                c.placement.issue,
-                c.placement.settled,
-            )
-            for c in alloc.wide_copies.get(block.id, [])
-        ]
-        bool_writes = [
-            BoolWrite(
-                BoolRegRef(w.dst),
-                bool_operand(bool_mir, w.source, alloc, w.inversion),
-                w.placement.issue,
-                w.placement.settled,
-            )
-            for w in alloc.bool_writes.get(block.id, [])
-        ]
-        # The block makespan carries the install +1 only when some install lands past the work makespan (a computed
-        # source that is the block's own last work), as the converged layout decided it.
+        wide_copies = alloc.wide_copies.get(block.id, [])
+        bool_writes = alloc.bool_writes.get(block.id, [])
         block_makespan = offsets.block_makespan[block.id]
         # A branch condition gets exactly one cycle of slack: a bool result committing at the
         # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by
@@ -221,8 +198,6 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
                 bool_writes,
                 build_terminator(block.terminator, alloc),
                 block_makespan,
-                # The drained boundary, or shrunk to the issue-side envelope when this block's in-flight results spill
-                # into single-predecessor successors.
                 offsets.block_term_offset[block.id],
             )
         )
@@ -298,7 +273,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         entry=mir.entry,
         last_pc=last_pc,
         min_initiation_interval=min_ii,
-        bool_regfile=BoolRegFileLayout(nreg=alloc.nbreg),
+        bool_regfile=BoolRegFileLayout(nreg=alloc.bool.nreg),
         bool_state_slots=bool_state_slots,
         fetch_lag=fetch_lag,
     )

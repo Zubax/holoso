@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from .._mir import MirPhi
 from .._util import ValueId
-from ._regalloc import find_coloring_conflict
 
 _logger = logging.getLogger(__name__)
 
@@ -16,6 +15,9 @@ class PhiCoalescing:
     leader: dict[ValueId, ValueId]  # value -> class leader (a value never merged maps to itself, implicitly)
     coalesced: frozenset[tuple[int, ValueId]]  # (pred, phi) arms that share the merged register (no install copy)
     pinned: dict[ValueId, int]  # per class leader with a pinned member, the register its pin fixes
+
+    def lead(self, vid: ValueId) -> ValueId:
+        return self.leader.get(vid, vid)
 
 
 def coalescable_arms(
@@ -74,7 +76,7 @@ def _coalesce_phis(
         root = x
         while parent[root] != root:
             root = parent[root]
-        while parent[x] != root:  # path compression
+        while parent[x] != root:
             parent[x], x = root, parent[x]
         return root
 
@@ -96,7 +98,7 @@ def _coalesce_phis(
                 continue
             pa, pb = pin.get(la), pin.get(lb)
             if pa is not None and pb is not None and pa != pb:
-                continue  # the two classes are pinned to different registers
+                continue
             # Equal pins (pa == pb) merge consistently onto that register; they arise only on a COALESCED slot register
             # (the slot's live-in and its in-place live-out share its slot pin) and SHOULD merge -- that merge is the
             # in-place commit. The other non-reserved pins are the input lanes, each a distinct register, so two
@@ -104,9 +106,9 @@ def _coalesce_phis(
             # registers.
             merged_pin = pa if pa is not None else pb
             if merged_pin is not None and merged_pin in reserved_regs:
-                continue  # a class touching a reserved (non-coalesced state-slot) register may not absorb a phi
+                continue
             if any(not oracle[m].isdisjoint(members[lb]) for m in members[la]):
-                continue  # some member of one class interferes with some member of the other
+                continue
             lo, hi = (la, lb) if la < lb else (lb, la)  # leader = lowest value id, for determinism
             parent[hi] = lo
             members[lo] |= members.pop(hi)
@@ -160,36 +162,46 @@ def coalesce(
     under-forbid, and the worst case (all arms forbidden) is the copy-everything baseline, which has no class-internal
     interference -- so the loop converges. Returns the FINAL coalescing (its `coalesced` arms are exactly the copies
     the emitter elides), the final install-aware interference, and the register of two interfering pinned classes, or
-    None. The annealer never co-locates interfering movable values and a class never interferes with itself, so an
-    unsound coloring can only come from the pins -- a state slot whose live-in and coalesced live-out interfere under
-    the final interference -- and is known before any coloring; the caller backs the offending slot out of in-place
-    coalescing and re-coalesces.
+    None (see `find_coloring_conflict`).
     """
     # The install-free baseline; deriving it here from the same builder keeps it in lockstep with the final graph.
     oracle = build_interferes({})
     forbidden: set[tuple[int, ValueId]] = set()
     arm_budget = sum(len(arms) for arms in candidate_arms.values())
-    for round_index in range(
-        arm_budget + 1
-    ):  # forbidding grows by >= 1 each conflicting round; this bounds the fixpoint
+    # Forbidding grows by at least one arm each conflicting round; this bounds the fixpoint.
+    for round_index in range(arm_budget + 1):
         coalescing = _coalesce_phis(phi_nodes, phi_order, candidate_arms, oracle, pinned, reserved_regs, forbidden)
         interferes = build_interferes(_residual_installs(phi_nodes, coalescing.coalesced))
         bad_leaders: set[ValueId] = set()
         for vid, neighbours in interferes.items():
-            head = coalescing.leader.get(vid, vid)
-            if any(coalescing.leader.get(other, other) == head for other in neighbours):
-                bad_leaders.add(head)  # this class interferes with itself under the final, install-aware graph
+            head = coalescing.lead(vid)
+            if any(coalescing.lead(other) == head for other in neighbours):
+                bad_leaders.add(head)
         if not bad_leaders:
             if forbidden:
                 _logger.info("Coalescing: %d arms forbidden over %d rounds", len(forbidden), round_index)
             q_pinned = coalescing.pinned
-            pinned_expansion = {
-                vid: q_pinned[head] for vid in interferes if (head := coalescing.leader.get(vid, vid)) in q_pinned
-            }
+            pinned_expansion = {vid: q_pinned[head] for vid in interferes if (head := coalescing.lead(vid)) in q_pinned}
             return coalescing, interferes, find_coloring_conflict(pinned_expansion, interferes)
         forbidden |= {
-            (pred, phi_vid)
-            for pred, phi_vid in coalescing.coalesced
-            if coalescing.leader.get(phi_vid, phi_vid) in bad_leaders
+            (pred, phi_vid) for pred, phi_vid in coalescing.coalesced if coalescing.lead(phi_vid) in bad_leaders
         }
-    assert False, "phi-coalescing fixpoint did not converge"  # unreachable: forbidding is monotone and bounded
+    assert False, "phi-coalescing fixpoint did not converge"
+
+
+def find_coloring_conflict(assign: dict[ValueId, int], interferes: dict[ValueId, set[ValueId]]) -> int | None:
+    """
+    The first register carrying two interfering values, or None if the assignment is sound. The annealer never
+    co-locates interfering MOVABLE values, so before coloring a conflict can only come from the pins -- e.g. a state
+    slot whose live-in and a coalesced live-out turn out to interfere under the final, install-aware interference,
+    which the caller answers by backing that slot out of its in-place coalescing and coalescing again (an all-copy-back
+    assignment has no pin conflicts, so the retry converges). After coloring it is the backstop over every value.
+    """
+    by_reg: dict[int, list[ValueId]] = {}
+    for vid, reg in assign.items():
+        by_reg.setdefault(reg, []).append(vid)
+    for reg, vids in by_reg.items():
+        members = set(vids)
+        if any(not interferes[vid].isdisjoint(members) for vid in vids):
+            return reg
+    return None

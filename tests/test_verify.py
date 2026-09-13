@@ -916,9 +916,8 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
 
 def test_model_shared_constant_branch_condition() -> None:
     class SharedConstBranchCondition:
-        # Regression (Codex F4): a constant branch condition shared by sibling branches (the interned `self.flag`) must
-        # be materialized in every branching block that uses it, not only the first, or a path through the other reads a
-        # stale boolean register.
+        # Regression (Codex F4): a constant condition shared by sibling branches (the interned `self.flag`), which
+        # pruning settles in both.
         def __init__(self) -> None:
             self.flag = True
 

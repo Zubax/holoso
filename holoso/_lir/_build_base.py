@@ -1,17 +1,15 @@
 """
-Shared carrier types for the LIR builder, referenced by more than one builder stage: the constant pool, the
-wide/bool phi-arm installs, the full register allocation, the once-computed block schedules, and the per-round block
-layout. They sit at the base of the builder stages' dependency DAG (construct/coalesce -> layout -> bankalloc all
-import from here) to keep those stage modules acyclic.
+Carrier types shared by more than one LIR builder stage. They sit at the base of the stages' dependency DAG
+(construct/coalesce -> layout -> bankalloc all import from here) to keep those stage modules acyclic.
 """
 
 from dataclasses import dataclass
 
 from .._mir import Mir, MirBoolView, MirWideView
-from .._operators import BoolInversion, PooledHardwareOperator, WideConditioner
+from .._operators import PooledHardwareOperator, WideConditioner
 from .._util import ValueId
 from .._value import WideValue
-from ._ir import InPlace, OperatorInstance
+from ._ir import BoolWrite, InPlace, OperatorInstance, WideCopy
 from ._schedule import Schedule
 from ._regalloc import Coloring
 
@@ -30,48 +28,13 @@ class PooledConst:
 
 @dataclass(frozen=True, slots=True)
 class ConstPool:
-    """The wide constant pool: index -> encoded machine word, and per pooled constant value its entry."""
-
     values: list[WideValue]
     entries: dict[ValueId, PooledConst]
 
 
 @dataclass(frozen=True, slots=True)
-class ArmPlacement:
-    """
-    Where a phi arm's tail install fires in its predecessor's frame: the scheduler-frame issue cycle, and whether the
-    source is settled before the block's first step (a constant, an input, a state read, a phi, or a foreign result
-    already landed), which needs no read-first sampling. Stamped once per arm, the placement the interference
-    residence, the install classification and the emitted copy all read.
-    """
-
-    issue: int
-    settled: bool
-
-
-@dataclass(frozen=True, slots=True)
-class WideArmInstall:
-    """A wide phi-arm install at a predecessor's tail: destination register, source value, folded conditioner."""
-
-    dst: int
-    source: ValueId
-    conditioner: WideConditioner
-    placement: ArmPlacement
-
-
-@dataclass(frozen=True, slots=True)
-class BoolArmInstall:
-    """A boolean phi-arm install at a predecessor's tail: destination register, source value, and folded inversion."""
-
-    dst: int
-    source: ValueId
-    inversion: BoolInversion
-    placement: ArmPlacement
-
-
-@dataclass(frozen=True, slots=True)
 class Early:
-    """Install a slot's live-out by a pc-gated copy at this Ret-relative scheduler-frame cycle, ahead of the boundary."""
+    """Install a slot's live-out by pc-gated copy at this Ret-relative scheduler-frame cycle, ahead of the boundary."""
 
     ret_cycle: int
 
@@ -92,12 +55,11 @@ class Allocation:
     wide: Coloring  # every wide value's register, the orientation and instance per firing, the steering as counted
     wide_slot_reg: dict[str, int]
     wide_install: dict[str, WideSlotInstall]
-    bool_reg: dict[ValueId, int]
+    bool: Coloring
     bool_slot_reg: dict[str, int]
     bool_install: dict[str, BoolSlotInstall]
-    nbreg: int
-    wide_copies: dict[int, list[WideArmInstall]]  # block -> wide phi-arm installs at its tail
-    bool_writes: dict[int, list[BoolArmInstall]]  # block -> boolean phi-arm installs at its tail
+    wide_copies: dict[int, list[WideCopy]]  # block -> wide phi-arm installs at its tail
+    bool_writes: dict[int, list[BoolWrite]]  # block -> boolean phi-arm installs at its tail
     instances: list[OperatorInstance]  # the pooled instances realized, `wide.instance` labeling them per firing
 
 

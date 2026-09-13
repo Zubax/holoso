@@ -1,14 +1,11 @@
 """
-Pure read-only structural and CFG facts over a MIR graph: the MIR node accessor, the phi-arm liveness / const-branch /
-install-bearing-block shape predicates, and the block reverse-postorder and successor maps. These emit no LIR and
-depend on nothing in the LIR layer, so they sit at the base of the builder DAG -- shared by construction, layout, and
-bank allocation without coupling those stages to one another.
+Read-only structural and control-flow facts over MIR. They depend on nothing in the LIR layer, so they sit at the base
+of the builder DAG, shared by construction, layout, and bank allocation without coupling those stages to one another.
 """
 
 from .._mir import (
     Mir,
     MirBoolView,
-    MirBranch,
     MirOperation,
     MirPhi,
     MirWideView,
@@ -41,9 +38,9 @@ def pred_count(mir: Mir) -> dict[int, int]:
 
 def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]) -> dict[int, frozenset[ValueId]]:
     """
-    Per block, the phi-arm values live out of it (each read by the phi's install copy at the block's tail) -- a liveness
-    input for both banks. The residual installs (which phi registers a block writes) are derived separately, per chosen
-    coalescing, by _residual_installs, so they are not precomputed here.
+    Per block, the phi-arm values live out of it because the phi's install copy reads them at the block's tail. The
+    residual installs (which phi registers a block writes) depend on the chosen coalescing, so `_residual_installs`
+    derives them instead.
     """
     arm_out: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
     for _vid, phi in phi_nodes.items():
@@ -53,32 +50,15 @@ def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]
     return {b: frozenset(s) for b, s in arm_out.items()}
 
 
-def const_branch_conditions(mir: Mir, bool_mir: MirBoolView) -> dict[int, ValueId]:
-    """
-    Per block, the constant branch condition it materializes at its tail. A block whose `MirBranch` tests a globally
-    interned boolean constant has no condition register, so the constant is written into a bool register in the
-    branching block. The single source of this CFG-shape fact, shared by `block_has_install` (whose key universe the
-    install fixpoint asserts every post-allocation classification stays within) and the allocator's materialization
-    (which also needs the condition value to write).
-    """
-    conditions: dict[int, ValueId] = {}
-    for block in mir.blocks:
-        term = block.terminator
-        if isinstance(term, MirBranch) and term.cond in bool_mir.const_nodes:
-            conditions[block.id] = term.cond
-    return conditions
-
-
 def block_has_install(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView) -> dict[int, bool]:
     """
     Each install-bearing block mapped to whether it carries an install whose source is the block's OWN operation -- the
     only source kind that can commit at the work makespan and push the install one step past it (`install_issue_cycle`);
-    everything else (a constant, including a const branch condition, an input, a state read, a phi, or a value computed
-    in another block) never pushes. This is the CONSERVATIVE seed for that +1: an arm is assumed not to coalesce, so a
-    local-source arm marks its block even if it later coalesces away, and the fixpoint's
-    `CoalescedLayout.install_blocks` narrows the bit to the blocks whose source really is the last work, once the
-    schedule is known. The liveness boundary and the layout share this classification so the per-block makespan and
-    drain agree.
+    everything else (a constant, an input, a state read, a phi, or a value computed in another block) never pushes. This
+    is the CONSERVATIVE seed for that +1: an arm is assumed not to coalesce, so a local-source arm marks its block even
+    if it later coalesces away, and the fixpoint's `CoalescedLayout.install_blocks` narrows the bit to the blocks whose
+    source really is the last work, once the schedule is known. The liveness boundary and the layout share this
+    classification so the per-block makespan and drain agree.
     """
     local_ops = {block.id: set(block.operations) for block in mir.blocks}
     install: dict[int, bool] = {}
@@ -86,6 +66,4 @@ def block_has_install(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView) ->
         for phi in phi_nodes.values():
             for pred, value, _conditioner in phi.arms:
                 install[pred] = install.get(pred, False) or value in local_ops[pred]
-    for block_id in const_branch_conditions(mir, bool_mir):
-        install.setdefault(block_id, False)  # a const branch materializes a literal: a settled source, never pushing
     return install

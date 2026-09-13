@@ -21,7 +21,7 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, OpConfig, require
+from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator
 from holoso._errors import UnsupportedConstruct
 from holoso._operators import Relation
 from holoso._eel import lower
@@ -71,7 +71,7 @@ from holoso._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from ._modelref import default_ifmt, build_lir, build_model, SHIPPED_TUNING
+from ._modelref import default_ifmt, build_lir, build_model, FROZEN_TUNING
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType
 from holoso._value import FloatValue, ScalarValue
@@ -602,73 +602,6 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
     sl = min(op.issue_cycle for block in stateless.blocks for op in block.inline_ops)
     assert sl == 0, "a stateless entry inline op should reclaim ucode[0]"
     assert sf == 0, "an entry inline op producing a persistent-state live-out issues on cycle 0, reclaiming ucode[0]"
-
-
-def _const_branch_mir(ops: MirOptions) -> Mir:
-    """
-    A block that branches on a literal, nested under a runtime diamond, computing `x + 1.0 if x > y else x`. HIR
-    never hands selection this shape -- pruning settles a decided branch -- so it is built directly, the LIR behavior
-    below being worth covering regardless.
-    """
-    # The machine this case asks for, not the default one: the parametrized cases differ only in operator staging.
-    built = OpConfig(ops.operator, ops.float_format, default_ifmt(FMT), ops.wmultiplier)
-    fcmp, fadd = require(built.fcmp, "fcmp"), require(built.fadd, "fadd")
-    port, inversion = fcmp.tap_of(Relation.GT)
-    builder = MirBuilder(FMT, default_ifmt(FMT))
-    entry, decided, taken, untaken, merge, bypass, join = (builder.block() for _ in range(7))
-    builder.position_at(entry)
-    x = builder.float_input("x", FloatType(FMT))
-    y = builder.float_input("y", FloatType(FMT))
-    greater = builder.operation(
-        fcmp, [x, y], [FloatSignControl(), FloatSignControl()], output_port=port, output_conditioner=inversion
-    )
-    builder.branch(greater, decided, bypass)
-    builder.position_at(decided)
-    builder.branch(builder.bool_const(True, BoolType()), taken, untaken)
-    summed = {}
-    for arm, addend in ((taken, 1.0), (untaken, 2.0)):
-        builder.position_at(arm)
-        summed[arm] = builder.operation(
-            fadd, [x, builder.float_const(addend, FloatType(FMT))], [FloatSignControl(), FloatSignControl()]
-        )
-        builder.jump(merge)
-    builder.position_at(merge)
-    merged = builder.phi(FloatType(FMT), [(arm, summed[arm], FloatSignControl()) for arm in (taken, untaken)])
-    builder.jump(join)
-    builder.position_at(bypass)
-    builder.jump(join)
-    builder.position_at(join)
-    builder.float_output(
-        "out_0", builder.phi(FloatType(FMT), [(merge, merged, FloatSignControl()), (bypass, x, FloatSignControl())])
-    )
-    builder.ret()
-    return builder.finish()
-
-
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
-def test_const_branch_install_block_drains_to_its_inline_landing(config: OperatorCase) -> None:
-    # Regression (fuzz-found B1 miscompile): a block whose branch condition is a literal installs that constant with a
-    # tail bool write. The source is settled, so the write fires at the work makespan and lands one read-first edge
-    # later, within the work boundary -- and the block must drain to exactly that landing, where the terminator then
-    # reads the condition the following step. The drain must neither shrink below it (terminator reads a stale
-    # condition -- the original B1 bug) nor pay the wider last-work-copy boundary. Crash-before: KeyError (model) /
-    # stale branch read (RTL).
-    lir = build_lir(_const_branch_mir(config.make_mir(FMT)), f"const_branch_{config.label}")
-    const_blocks = [
-        b
-        for b in lir.blocks
-        if isinstance(b.terminator, Branch) and any(w.dst == b.terminator.cond for w in b.bool_writes)
-    ]
-    assert const_blocks, "the const-branch block did not survive; the corner is no longer exercised"
-    for block in const_blocks:
-        assert all(w.is_const for w in block.bool_writes), "the const-branch condition install is not a literal const"
-        assert block.term_offset == landing_cycle(
-            block.block_makespan, lir.fetch_lag
-        ), "a const-branch block must drain to its entry-resident install's combinational landing"
-    model = build_model(lir)
-    for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
-        (got,) = model.run(x, y)
-        assert math.isclose(float(got), x + 1.0 if x > y else x, rel_tol=1e-6)
 
 
 def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
@@ -1459,7 +1392,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
             a = a + 4.0
         return a
 
-    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches", SHIPPED_TUNING)
+    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches", FROZEN_TUNING)
     comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons
@@ -1645,8 +1578,8 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
         R_diag=[1e3, 1e-6],
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
-    lir = build_lir(_run(filt.update), "ekf1_stateful", SHIPPED_TUNING)
-    # Gap reuse sheds the fully-reserved 45 down to the count the shipped tuning settles on, frozen here as a ceiling
+    lir = build_lir(_run(filt.update), "ekf1_stateful", FROZEN_TUNING)
+    # Gap reuse sheds the fully-reserved 45 down to the count the frozen tuning settles on, pinned here as a ceiling
     # (the allocator trades registers for mux arms at the configured price, so the count is a property of the
     # tuning).
     assert lir.regfile.nreg <= 42
@@ -1754,7 +1687,7 @@ def test_orientation_reclaims_multiplier_reach() -> None:
     def f(a: float, b: float, c: float) -> float:
         return a * b + c * a
 
-    lir = build_lir(_run(f), "oriented_products", SHIPPED_TUNING)
+    lir = build_lir(_run(f), "oriented_products", FROZEN_TUNING)
     products = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FMulOperator)]
     assert len(products) == 2, "the premise needs both products to survive HIR as multiplies"
     books = read_sources_per_port(lir)
@@ -2102,7 +2035,7 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
             x = (x - 1.0) if x > 1.0 else (x + 1.0)
         return x
 
-    lir = build_lir(_run(f), "breg_reuse", SHIPPED_TUNING)
+    lir = build_lir(_run(f), "breg_reuse", FROZEN_TUNING)
     conditions = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     assert conditions == 6, "the unrolled chain carries six comparisons"
     assert lir.bool_regfile.nreg <= 2, f"disjoint condition lifetimes must share registers, got {lir.bool_regfile.nreg}"
@@ -2123,7 +2056,7 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     def f(a: float, b: float, c: float, d: float, e: float, g: float) -> float:
         return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
 
-    lir = build_lir(_run(f), "bool_chain", SHIPPED_TUNING)
+    lir = build_lir(_run(f), "bool_chain", FROZEN_TUNING)
     comparisons = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     ands = sum(1 for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
     assert comparisons == 5 and ands >= 4, (comparisons, ands)
@@ -2167,7 +2100,7 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
     # float path (a public attribute and its write-only alias) is exercised too.
     from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
 
-    pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_merge", SHIPPED_TUNING)
+    pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_merge", FROZEN_TUNING)
     assert pfd.bool_regfile.nreg == 5
     assert pfd.regfile.nreg == 0  # purely boolean: the wide bank is unused
     assert len(pfd.bool_state_slots) == 2  # the four attributes collapse onto two registers

@@ -104,12 +104,6 @@ def test_cosim_overlap_spill(sim: str, config: OptionsCase) -> None:
 @pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_const_branch(sim: str, config: OptionsCase) -> None:
-    # Drained-boundary (round-5 fix): an empty const-branch block's condition is a pc-gated install read AT the
-    # terminator, landing at the drained boundary; the drain must not shrink below it or the branch reads
-    # the condition one PC before it lands. The model crashes (KeyError) on the first transaction, but a stale-register
-    # branch misdirect is a SILENT RTL miscompile only cosim discriminates (RTL vs model from one LIR). The white-box
-    # twin (test_schedule.py test_const_branch_install_block_drains_to_its_inline_landing) pins the block stays at the
-    # drained boundary.
     fmt = FloatFormat(6, 18)
     result = holoso.synthesize(const_branch_kernel, config.make_options(fmt), name=f"const_branch_{config.label}")
     run_cosim(sim, result)

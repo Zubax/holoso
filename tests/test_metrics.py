@@ -8,8 +8,8 @@ every register's write select, counted off the same source lists the Verilog cod
 so a frozen figure is the emitted mux on every kernel, straight-line or not -- the allocator's own score
 `steering + register_price * registers`, the widest read port and the widest wide write select, and the statically
 known latency figures. Here "straight-line" means the pure-float flat path: single block, no boolean fabric (an
-if-converted kernel can be single-block without being straight-line in this sense). The baseline is frozen at the
-shipped allocator tuning, passed explicitly so no environment speed-up leaks in. Value numbering is seed-independent
+if-converted kernel can be single-block without being straight-line in this sense). The baseline is frozen at a
+fixed allocator tuning, passed explicitly so no environment speed-up leaks in. Value numbering is seed-independent
 (`tests/test_determinism.py` proves byte-identical Verilog across `PYTHONHASHSEED` values), so these figures hold in
 any process without pinning the hash seed.
 
@@ -47,7 +47,7 @@ from ._modelref import (
     default_options,
     mir_options,
     DEFAULT_UNROLL_MAX_TRIPS,
-    SHIPPED_TUNING,
+    FROZEN_TUNING,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -124,7 +124,7 @@ class Metrics:
     inline result, a move; one arm however many steps select it) and the handshake-gated arms beside them (an input
     load, a boundary state install). Counting the moves matters: phi-arm coalescing trades pc-gated copies for shared
     pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a regression. `score` is the
-    allocator's objective form at the shipped register price (its own count leaves the one-bit arms and the pinned
+    allocator's objective form at the frozen register price (its own count leaves the one-bit arms and the pinned
     registers out); `max_read_port` and `max_write_select` are the widest read
     mux and the widest wide-bank write select, the localized view a total cannot give. `copies` is the total phi-arm
     install count (wide copies plus boolean writes), the direct measure of how many phi arms still install by copy
@@ -149,8 +149,6 @@ class Metrics:
     max_block_span: int
 
 
-# The baselines are frozen against the shipped allocator defaults, passed explicitly so no environment speed-up can
-# leak in here; changing a default deliberately re-freezes them.
 def _mir_for(name: str) -> MirOptions:
     """The shared default, adjusted per kernel where the default operator set cannot lower it (min/max needs fsort)."""
     if name in _EXTRA_OPERATORS:
@@ -161,7 +159,7 @@ def _mir_for(name: str) -> MirOptions:
 
 
 def _build(kernel: Callable[..., object], name: str, options: MirOptions) -> Lir:
-    return build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, options), name, SHIPPED_TUNING)
+    return build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, options), name, FROZEN_TUNING)
 
 
 def _measure(name: str) -> Metrics:
@@ -181,7 +179,7 @@ def _measure(name: str) -> Metrics:
         nreg=nreg,
         bnreg=bnreg,
         steering=steering,
-        score=steering + SHIPPED_TUNING.register_price * (nreg + bnreg),
+        score=steering + FROZEN_TUNING.register_price * (nreg + bnreg),
         max_read_port=max(reads.values(), default=0),
         max_write_select=max((n for dst, n in writes.items() if isinstance(dst, RegRef)), default=0),
         copies=copies,
@@ -340,7 +338,7 @@ _BASELINE: dict[str, Metrics] = {
         copies=0, min_ii=125, last_pc=125, max_block_span=125,
     ),
     # The EKF with a second multiplier, the knob this allocator was built for: the co-issued products shorten the
-    # transaction by 38 stages and the allocator binds them across the two instances (the shipped first-free binding
+    # transaction by 38 stages and the allocator binds them across the two instances (the scheduler's first-free binding
     # measured 140 arms here, the annealer 112). A monotonicity guard for the binding, not its proof -- the directed
     # kernels in test_regalloc.py are that.
     "ekf1_stateless_fmul2": Metrics(
