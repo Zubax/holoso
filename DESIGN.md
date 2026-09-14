@@ -714,10 +714,10 @@ Adopted (lossless, f_max-neutral):
 
 The register price. The allocator trades registers for mux arms at `regalloc_register_price` (2.0), and across the
 example kernels the trades go both ways: the EKF kernels spend registers to remove arms, foc and imu_fusion spend arms
-to remove registers. Vivado confirms both directions except on imu_fusion, whose LUT count an arm count cannot predict:
-a single-writer register costs no write mux at all, and a LUT6 fabric prices a mux in steps. That regression is no
-larger than the LUT-count difference between two synthesis runs of equivalent designs, so the price stays 2.0; a convex
-per-endpoint mux cost is the refinement if a kernel ever regresses beyond that.
+to remove registers. Across the synthesis matrix the price acts as a step at one arm per register, where the trade
+turns free: at or below it the allocator splits write selects into single-writer registers, about 1.5 percent of LUTs
+for as many flip-flops, with f_max gains confined to small kernels far above target and Diamond closures lost; above
+it nothing moves. The price stays 2.0.
 
 Operator replication (`instances`) trades area for latency and pays in mux arms; it is not an area loss: a second
 multiplier shortens the EKF transaction by about a sixth for a similar fraction more LUTs under the annealer's binding.
@@ -738,6 +738,8 @@ Explored and rejected for register-pressure-bound kernels:
   arms), exact joint solving (does not scale), a hard write-select cap and a register price that rises during the
   annealing (the fixed price does their job), and alternating exact rebind with recoloring (subsumed by the joint
   moves).
+- A nonlinear mux cost, fabric-matched (a LUT6 staircase, measured per-flow mux area) or not: no f_max gain beyond
+  annealer re-seeding noise, mostly more area; the measured tables' gains came from the cheaper register they imply.
 
 Latency-for-area trades (set aside -- latency is a real cost and the area gain did not justify it):
 
