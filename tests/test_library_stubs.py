@@ -21,6 +21,7 @@ from holoso._eel import lower
 from holoso._eel._lib import Array, Lifted, Reshape, ScalarFunction, VariadicFunction, resolve
 from holoso._eel._lib._registry import Domain, StaticOneHalf, StaticWholeNonNegative
 from holoso._eel._ir import BinaryOp, ScalarType
+from holoso._eel._lib._join import column_stack, concatenate, hstack, stack, vstack
 from holoso._eel._lib._linalg import cross, inv, matmul, norm, transpose
 from holoso._eel._lib._reductions import amax, amin, mean, sum_
 
@@ -109,6 +110,12 @@ def test_registry_resolves_the_expected_externals() -> None:
     assert resolve(np.min) == Array(amin) == resolve(np.amin) == resolve(np.ndarray.min)  # type: ignore[arg-type]
     assert resolve(np.reshape) == Reshape() == resolve(np.ndarray.reshape)
     assert resolve(np.polyval) == Array(polyval, sequences=frozenset({0}))  # type: ignore[arg-type]
+    joined = frozenset({0})
+    assert resolve(np.concat) == Array(concatenate, sequences=joined) == resolve(np.concatenate)  # type: ignore[arg-type]
+    assert resolve(np.vstack) == Array(vstack, sequences=joined)  # type: ignore[arg-type]
+    assert resolve(np.hstack) == Array(hstack, sequences=joined)  # type: ignore[arg-type]
+    assert resolve(np.column_stack) == Array(column_stack, sequences=joined)  # type: ignore[arg-type]
+    assert resolve(np.stack) == Array(stack, sequences=joined)  # type: ignore[arg-type]
     # A transpose is a non-copying derivation on the host, so its match carries the storage-equivalence flag.
     assert resolve(np.transpose) == Array(transpose, derives=True)  # type: ignore[arg-type]
     assert resolve(np.dot) == Array(matmul)  # type: ignore[arg-type]
@@ -500,6 +507,30 @@ def test_polyval_stub_matches_numpy() -> None:
     ]
     for p, x in cases:
         assert np.allclose(polyval(p, x), np.polyval(p, x), rtol=1e-14, atol=0.0), (p, x)  # type: ignore[arg-type,call-overload]
+
+
+def test_joining_stubs_match_numpy() -> None:
+    v2, v3 = np.array([1.0, 2.0]), np.array([3, 4, 5])
+    m22, m12, m21 = np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([[5, 6]]), np.array([[5.0], [6.0]])
+    x, k = np.float64(-0.5), np.int64(7)
+    cases: list[tuple[Any, Any]] = [
+        (concatenate((v2, v3)), np.concatenate((v2, v3))),
+        (concatenate((v3,)), np.concatenate((v3,))),
+        (concatenate((m22, m12, m22), 0), np.concatenate((m22, m12, m22), 0)),
+        (concatenate((m21, m22), -1), np.concatenate((m21, m22), -1)),
+        (vstack((v2, v2, m22)), np.vstack((v2, v2, m22))),
+        (vstack((x, k)), np.vstack((x, k))),
+        (hstack((x, v3, k)), np.hstack((x, v3, k))),
+        (hstack((m21, m22)), np.hstack((m21, m22))),
+        (column_stack((v2, m22, x * v2)), np.column_stack((v2, m22, x * v2))),
+        (column_stack((x, k)), np.column_stack((x, k))),
+        (stack((x, k, x)), np.stack((x, k, x))),
+        (stack((v2, v2 * x, v2)), np.stack((v2, v2 * x, v2))),
+        (stack((v3, v3 * k), -1), np.stack((v3, v3 * k), -1)),
+        (stack((v3, v3 * k), 1), np.stack((v3, v3 * k), 1)),
+    ]
+    for got, want in cases:
+        assert got.shape == want.shape and got.dtype == want.dtype and np.array_equal(got, want), (got, want)
 
 
 def test_norm_stub_matches_numpy() -> None:

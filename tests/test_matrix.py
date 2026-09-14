@@ -1405,6 +1405,105 @@ def test_abs_answers_a_fresh_array() -> None:
     _assert_python_matches_holoso(kernel, 3.0)
 
 
+# ---------------------------------------------------------------- joining arrays
+
+
+def test_concatenate_matches_numpy_across_ranks_and_axes() -> None:
+    def vectors(a: Float64[np.ndarray, "2"], b: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "7"]:
+        return np.concatenate((a, b, a))
+
+    _assert_python_matches_holoso(vectors, np.array([1.0, 2.0]), np.array([3.0, 4.0, 5.0]))
+
+    def rows(m: Float64[np.ndarray, "2 2"], r: Float64[np.ndarray, "1 2"]) -> Float64[np.ndarray, "3 2"]:
+        return np.concat([m, r * 2.0])
+
+    _assert_python_matches_holoso(rows, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([[5.0, 6.0]]))
+
+    def columns(m: Float64[np.ndarray, "2 2"], c: Float64[np.ndarray, "2 1"]) -> Float64[np.ndarray, "2 4"]:
+        return np.concatenate([c, m, c], -1)
+
+    _assert_python_matches_holoso(columns, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([[5.0], [6.0]]))
+
+
+def test_stacking_matches_numpy_across_spellings() -> None:
+    v, m, x = np.array([1.5, -2.0]), np.array([[1.0, 2.0], [3.0, 4.0]]), 0.5
+
+    def vstack_rows(v: Float64[np.ndarray, "2"], x: float) -> Float64[np.ndarray, "3 2"]:
+        return np.vstack((v, v * x, np.array([[x, 1.0]])))
+
+    def vstack_scalars(x: float) -> Float64[np.ndarray, "2 1"]:
+        return np.vstack((x, 2.0))
+
+    def hstack_vectors(v: Float64[np.ndarray, "2"], x: float) -> Float64[np.ndarray, "4"]:
+        return np.hstack((x, v, 2.0))
+
+    def hstack_matrices(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 4"]:
+        return np.hstack((m, m.T))
+
+    def column_stack_mixed(v: Float64[np.ndarray, "2"], m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 4"]:
+        return np.column_stack((v, m, -v))
+
+    def column_stack_scalars(x: float) -> Float64[np.ndarray, "1 2"]:
+        return np.column_stack((x, 1.0))
+
+    def stack_scalars(x: float) -> Float64[np.ndarray, "2"]:
+        return np.stack((x, 1.0))
+
+    def stack_rows(v: Float64[np.ndarray, "2"], x: float) -> Float64[np.ndarray, "3 2"]:
+        return np.stack([v, v + x, v * x])
+
+    def stack_columns(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.stack((v, v + 1.0), -1)
+
+    _assert_python_matches_holoso(vstack_rows, v, x)
+    _assert_python_matches_holoso(vstack_scalars, x)
+    _assert_python_matches_holoso(hstack_vectors, v, x)
+    _assert_python_matches_holoso(hstack_matrices, m)
+    _assert_python_matches_holoso(column_stack_mixed, v, m)
+    _assert_python_matches_holoso(column_stack_scalars, x)
+    _assert_python_matches_holoso(stack_scalars, x)
+    _assert_python_matches_holoso(stack_rows, v, x)
+    _assert_python_matches_holoso(stack_columns, v)
+
+
+def test_joining_promotes_mixed_families_and_preserves_the_integer_family() -> None:
+    def ints(a: int, b: int) -> Int[np.ndarray, "3"]:
+        return np.hstack((a, np.array([b, 4])))
+
+    got = [value for value in _sim(ints).run(1, -2) if isinstance(value, holoso.IntValue)]
+    assert [int(value) for value in got] == [1, -2, 4]
+
+    def mixed(v: Float64[np.ndarray, "2"], k: int) -> Float64[np.ndarray, "4"]:
+        return np.concatenate((np.array([k]), v, np.array([3])))
+
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim = holoso.synthesize(mixed, options, name="kernel").numerical_model.elaborate()
+    floats = [value for value in sim.run(1.5, 2.5, 5) if isinstance(value, holoso.FloatValue)]
+    assert [float(value) for value in floats] == mixed(np.array([1.5, 2.5]), 5).tolist()
+
+
+def test_joining_answers_a_fresh_array() -> None:
+    # The parts are shared by the sequence that carries them, so only the results can be written.
+    def kernel(x: float) -> tuple[float, float, float]:
+        src = np.array([[x, -x]])
+        out = np.vstack((src,))
+        cat = np.concatenate((src[0],))
+        columns = np.stack((src[0], src[0]), 1)
+        out[0, 1] = 2.0
+        cat[0] = 4.0
+        columns[0, 1] = 5.0
+        return src[0, 0] + src[0, 1], out[0, 0] + out[0, 1] + cat[0] + cat[1], columns[0, 0] + columns[0, 1]
+
+    _assert_python_matches_holoso(kernel, 3.0)
+
+
+def test_joining_many_parts_fits_the_expansion_budget() -> None:
+    def kernel(x: float) -> float:
+        return float(np.sum(np.hstack([x * float(k) for k in range(500)])))
+
+    _assert_python_matches_holoso(kernel, 0.5)
+
+
 # ---------------------------------------------------------------- matrix inversion
 
 

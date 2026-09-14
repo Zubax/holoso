@@ -29,7 +29,6 @@ _LN2 = math.log(2.0)
 _LOG10_2 = math.log10(2.0)
 _DEG_PER_RAD = 180.0 / math.pi
 _RAD_PER_DEG = math.pi / 180.0
-_INF = math.inf
 
 
 @lib(math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix, round, np.round, np.around)
@@ -83,23 +82,25 @@ def _elementwise(f: Callable[[Any, Any], Any], a: np.ndarray, b: np.ndarray) -> 
         raise ValueError(f"elementwise operands must be at most 2-D, got {a.ndim}-D and {b.ndim}-D")
     if a.ndim == 0 and b.ndim == 0:
         return f(a, b)
-    if b.ndim == 0:
-        if a.ndim == 1:
-            return np.array([f(a[i], b) for i in range(len(a))])
-        return np.array([[f(a[i][j], b) for j in range(len(a[0]))] for i in range(len(a))])
-    if a.ndim == 0:
-        if b.ndim == 1:
-            return np.array([f(a, b[j]) for j in range(len(b))])
-        return np.array([[f(a, b[i][j]) for j in range(len(b[0]))] for i in range(len(b))])
-    if a.ndim != b.ndim:
-        raise ValueError(f"elementwise shape mismatch: {a.ndim}-D against {b.ndim}-D; broadcasting is not supported")
-    if len(a) != len(b):
-        raise ValueError(f"elementwise shape mismatch: length {len(a)} against {len(b)}")
-    if a.ndim == 1:
-        return np.array([f(a[i], b[i]) for i in range(len(a))])
-    if len(a[0]) != len(b[0]):
-        raise ValueError(f"elementwise shape mismatch: rows of length {len(a[0])} against {len(b[0])}")
-    return np.array([[f(a[i][j], b[i][j]) for j in range(len(a[0]))] for i in range(len(a))])
+    if a.ndim != 0 and b.ndim != 0:
+        if a.ndim != b.ndim:
+            raise ValueError(
+                f"elementwise shape mismatch: {a.ndim}-D against {b.ndim}-D; broadcasting is not supported"
+            )
+        if len(a) != len(b):
+            raise ValueError(f"elementwise shape mismatch: length {len(a)} against {len(b)}")
+        if a.ndim == 2:
+            if len(a[0]) != len(b[0]):
+                raise ValueError(f"elementwise shape mismatch: rows of length {len(a[0])} against {len(b[0])}")
+    s = b if a.ndim == 0 else a
+    if s.ndim == 1:
+        return np.array([f(a if a.ndim == 0 else a[i], b if b.ndim == 0 else b[i]) for i in range(len(s))])
+    return np.array(
+        [
+            [f(a if a.ndim == 0 else a[i][j], b if b.ndim == 0 else b[i][j]) for j in range(len(s[0]))]
+            for i in range(len(s))
+        ]
+    )
 
 
 # The NaN-propagation difference between np.minimum/np.fmin (and np.maximum/np.fmax) is moot under the no-NaN policy.
@@ -185,7 +186,7 @@ def tan(x: float) -> float:
     """
     s, c = sin(x), cos(x)
     if c == 0.0:  # a real branch (div is unspeculatable), so the pole skips the divide and asserts no div-by-zero flag
-        r = _INF if s >= 0.0 else -_INF
+        r = math.inf if s >= 0.0 else -math.inf
     else:
         r = s / c
     return r
@@ -249,7 +250,7 @@ def cosh(x: float) -> float:
 @lib(math.tanh, np.tanh)
 def tanh(x: float) -> float:
     """Stable sigmoid form: no exp overflow for large |x|. FIXME Loses precision to cancellation near zero."""
-    return 2.0 / (1.0 + exp2(-2.0 * x * _LOG2E)) - 1.0
+    return 2.0 / (1.0 + exp(-2.0 * x)) - 1.0
 
 
 @lib(math.asinh, np.asinh, np.arcsinh)

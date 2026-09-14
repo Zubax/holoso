@@ -221,19 +221,23 @@ type Match = ScalarFunction | VariadicFunction | Array | Factory | Conversion | 
 _REGISTRY: dict[object, Match] = {}
 
 
+def _keys(keys: Iterable[object]) -> list[object]:
+    """numpy spells one object under several names (np.abs IS np.absolute), so one decoration may name a key twice."""
+    return list(dict.fromkeys(keys))
+
+
 def _register(match: Match, keys: Iterable[object]) -> None:
-    for key in keys:
+    for key in _keys(keys):
         if inspect.isdatadescriptor(key):
             assert isinstance(match, Array), "only array entries may bind class members"
         else:
             assert callable(key) or isinstance(key, BinaryOp), key
-        # A key holds exactly one Match; an alias to an equal Match (e.g. np.atan2 is np.arctan2) is tolerated.
-        assert _REGISTRY.get(key, match) == match, key
+        assert key not in _REGISTRY, key
         _REGISTRY[key] = match
 
 
 def _register_scalar(lowering: ScalarLowering, keys: Iterable[object]) -> None:
-    for key in keys:
+    for key in _keys(keys):
         assert (callable(key) and not inspect.isdatadescriptor(key)) or isinstance(key, BinaryOp), key
         found = _REGISTRY.get(key)
         if found is None:
@@ -241,11 +245,8 @@ def _register_scalar(lowering: ScalarLowering, keys: Iterable[object]) -> None:
             continue
         assert isinstance(found, ScalarFunction), key
         assert found.arity == len(lowering.operands), key
-        served = next((low for low in found.lowerings if low.operands == lowering.operands), None)
-        if served is not None:
-            assert served == lowering, key  # np.abs IS np.absolute, so one decoration can name a key twice
-            continue
         for other in found.lowerings:
+            assert other.operands != lowering.operands, key
             # Selection takes the most refined candidate, so any two an operand tuple could both reach must be
             # ordered.
             assert (
@@ -275,11 +276,9 @@ def _scalar_lowering(fn: object, operator: Operator | None) -> ScalarLowering:
     return ScalarLowering(fn, operator, operands)
 
 
-def intrinsic[F: Callable[..., object]](operator: Callable[[], Operator], *substituted: object) -> Callable[[F], F]:
-    op = operator()  # instantiated once here, so the registry stores an operator instance rather than a live factory
-
+def intrinsic[F: Callable[..., object]](operator: Operator, *substituted: object) -> Callable[[F], F]:
     def register(fn: F) -> F:
-        _register_scalar(_scalar_lowering(fn, op), (fn, *substituted))
+        _register_scalar(_scalar_lowering(fn, operator), (fn, *substituted))
         return fn
 
     return register
@@ -331,10 +330,8 @@ def array[F: Callable[..., object]](
 
 
 def lift(*keys: object) -> None:
-    for key in keys:
+    for key in _keys(keys):
         found = _REGISTRY.get(key)
-        if isinstance(found, Lifted):
-            continue  # np.abs IS np.absolute, so one call can name a key twice
         assert isinstance(found, ScalarFunction) and found.arity == 1, key
         _REGISTRY[key] = Lifted(found)
 

@@ -21,7 +21,6 @@ from .._ir import BinaryOp
 from ._registry import StaticOneHalf, StaticWholeNegative, StaticWholeNonNegative, lib
 from ._intrinsics import exp2, isinf, log2, round_, sqrt
 
-_INF = math.inf
 _N = TypeVar("_N", int, float)
 _POW_INT_PRESERVING = (pow, np.power, np.pow, BinaryOp.POW)
 _POW = (*_POW_INT_PRESERVING, math.pow, np.float_power)
@@ -79,7 +78,7 @@ def pow_(b: float, e: float) -> float:
     if e == 0.0 or b == 1.0 or (b == -1.0 and isinf(e)):  # |b|==1 with non-finite e: exp2(inf*0), IEEE says 1
         r = 1.0
     elif b == 0.0:  # keeps the log2 pole (and its error sideband) away from the degenerate base
-        r = 0.0 if e > 0.0 else _INF if e < 0.0 else e  # e == 0 is unreachable here, so the last arm is NaN
+        r = 0.0 if e > 0.0 else math.inf if e < 0.0 else e  # e == 0 is unreachable here, so the last arm is NaN
     else:
         t = exp2(e * log2(abs(b) if integral else b))
         r = -t if b < 0.0 and integral and odd else t

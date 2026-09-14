@@ -1201,10 +1201,16 @@ def test_pow_needs_transcendentals_only_for_a_fractional_exponent() -> None:
     def reciprocal(x: float) -> float:
         return x**-1.0  # type: ignore[no-any-return]
 
+    def long_reciprocal(x: float) -> float:
+        return np.power(x, -13)  # type: ignore[no-any-return]
+
     lean = _ops(with_exp2=False, with_log2=False)
     for kernel, want in ((whole, 8.0), (reciprocal, 0.5)):
         sim = holoso.synthesize(kernel, lean, name=f"lib_pow_whole_{kernel.__name__}").numerical_model
         assert float(sim.elaborate().run(2.0)[0]) == want, kernel.__name__
+    # 3**13 is exact, so the chain's one rounding is the reciprocal's and the result is the correctly rounded one.
+    model = holoso.synthesize(long_reciprocal, lean, name="lib_pow_long_reciprocal").numerical_model.elaborate()
+    assert _bits(model.run(3.0)[0]) == _v(3.0**-13).bits
 
 
 def test_a_static_integer_exponent_chain_expands_in_every_spelling() -> None:

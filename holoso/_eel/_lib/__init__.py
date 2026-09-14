@@ -7,6 +7,7 @@ A subset operator is a key like any callee, so `**` and `@` reach their lowering
 from . import _conversions as _conversions
 from . import _factories as _factories
 from . import _intrinsics as _intrinsics
+from . import _join as _join
 from . import _linalg as _linalg
 from . import _numpy as _numpy
 from . import _pow as _pow

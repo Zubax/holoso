@@ -52,10 +52,7 @@ def flatten(a: np.ndarray) -> Any:
         raise ValueError("cannot flatten a scalar value")
     if a.ndim > 2:
         raise ValueError(f"flatten of a {a.ndim}-D value is not supported")
-    if a.ndim == 1:
-        return a
-    width = len(a[0])
-    return np.asarray([a[k // width, k % width] for k in range(len(a) * width)])
+    return a.reshape(-1)
 
 
 @array(np.dot, np.ndarray.dot, np.matmul, np.linalg.matmul, BinaryOp.MATMUL)
@@ -145,20 +142,11 @@ def norm(x: np.ndarray, order: Any = None) -> Any:
     if order == 2:
         return math.hypot(*x)
     if order == 1:
-        acc = abs(x[0])
-        for k in range(1, len(x)):
-            acc += abs(x[k])
-        return acc
+        return np.sum(abs(x))
     if order == math.inf:
-        acc = abs(x[0])
-        for k in range(1, len(x)):
-            acc = max(acc, abs(x[k]))
-        return acc
+        return np.max(abs(x))
     if order == -math.inf:
-        acc = abs(x[0])
-        for k in range(1, len(x)):
-            acc = min(acc, abs(x[k]))
-        return acc
+        return np.min(abs(x))
     raise ValueError(f"unsupported vector norm order {order}")
 
 

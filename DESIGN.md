@@ -309,19 +309,20 @@ keeps old handles valid, exactly as in Python).
 A residual loop carries the state roots its region syntactically writes plus whatever reached stores reveal through a
 driver-level restart -- lean-first, since carrying an untouched leaf would destroy static folds.
 
-Calls dispatch on the object identity the callee resolves to, not its spelled name, so every spelling of a symbol
-(`**` or its function form, `@` or `np.matmul`) resolves one registry entry. A scalar callee carries a group of
-typed lowerings, each either a single semantic HIR operator or an inlined composite, declaring a domain per operand
-position and optionally a refinement demanding a compile-time value -- of known sign and wholeness, or of one named
-value where neither tells the lowerings apart (a one-half exponent is the square root, a small whole one a chain);
-selection takes the unique most refined lowering every one of whose positions accepts the operand. An entry of no
-fixed arity mints its operator for the call's own count, which is what `math.hypot` and the Euclidean norms are. An
-array composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
-pairwise trees, log-deep in the operator's latency, while the dot product stays a left fold so FMA contraction
-remains reachable. A composite may admit a sequence at a declared argument position, and a scalar entry may be
-lifted per key to apply elementwise over an array's leaves, which a unary numpy spelling is wherever its answer stays
-in a family the subset has, and its `math` twin never is. Every stub is ordinary Python in the supported subset, so
-each is its own numerical reference.
+Calls dispatch on the object identity the callee resolves to, not its spelled name, so every spelling of a symbol (`**`
+or its function form, `@` or `np.matmul`) resolves one registry entry. A scalar callee carries a group of typed
+lowerings, each either a single semantic HIR operator or an inlined composite, declaring a domain per operand position
+and optionally a refinement demanding a compile-time value -- of known sign and wholeness, or of one named value where
+neither tells the lowerings apart (a one-half exponent is the square root, a small whole one a chain); selection takes
+the unique most refined lowering every one of whose positions accepts the operand. An entry of no fixed arity mints its
+operator for the call's own count, which is what `math.hypot` and the Euclidean norms are. An array composite declares
+no scalar domain, rank and shape deciding its meaning; whole-array reductions are static pairwise trees, log-deep in the
+operator's latency, while the dot product stays a left fold so FMA contraction remains reachable. Joins along an axis
+(concatenation and the stacking spellings) are copying composites over a sequence of parts, promoting the whole result
+across the parts' families as numpy's conversion does. A composite may admit a sequence at a declared argument position,
+and a scalar entry may be lifted per key to apply elementwise over an array's leaves, which a unary numpy spelling is
+wherever its answer stays in a family the subset has, and its `math` twin never is. Every stub is ordinary Python in the
+supported subset, so each is its own numerical reference.
 
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
