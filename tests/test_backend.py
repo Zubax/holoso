@@ -600,28 +600,28 @@ def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
 @pytest.mark.parametrize("bank", ["wide", "bool"])
 def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(bank: str, tmp_path: Path) -> None:
     # The boundary install outranks the opcode arm on the same register, so this shape used to be refused outright.
-    # It is safe because the install executes at present_step and every write event rides a strictly earlier step; the
-    # wide kernel is cosimulated in test_cosim.py, so here only the premise and the elaboration are checked.
+    # It is safe because every opcode write lands by the last PC, so none executes alongside the install; the wide
+    # kernel is cosimulated in test_cosim.py, so here only the premise and the elaboration are checked.
     from holoso._lir import write_events
 
     kernel = SharedLiveOut().step if bank == "wide" else SharedLiveOutBool().step
     name = f"shared_live_out_{bank}"
     lir = build_lir(_run(kernel, _ops(FloatFormat(6, 18)), FloatFormat(6, 18)), name)
-    steps: dict[object, list[int]] = {}
-    for event in write_events(lir):
-        steps.setdefault(event.dst, []).append(event.step)
+    written = {event.dst for event in write_events(lir)}
     coexisting: Sequence[WideStateSlot | BoolStateSlot]
     if bank == "wide":
         coexisting = [
-            slot for slot in lir.wide_state_slots if isinstance(slot.install, WideBoundaryInstall) and slot.reg in steps
+            slot
+            for slot in lir.wide_state_slots
+            if isinstance(slot.install, WideBoundaryInstall) and slot.reg in written
         ]
     else:
         coexisting = [
-            slot for slot in lir.bool_state_slots if isinstance(slot.install, BoolBoundaryInstall) and slot.reg in steps
+            slot
+            for slot in lir.bool_state_slots
+            if isinstance(slot.install, BoolBoundaryInstall) and slot.reg in written
         ]
     assert coexisting, "the premise needs a boundary-installing slot whose own register also takes opcode writes"
-    for slot in coexisting:
-        assert max(steps[slot.reg]) < lir.present_step, f"{slot.name!r}: {sorted(steps[slot.reg])} vs present_step"
     _elaborate(name, generate(lir).verilog, tmp_path)
 
 

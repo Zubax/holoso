@@ -40,16 +40,3 @@ every cheap detector for the shape misfires on the legitimate counter-spelled lo
 A state attribute's shape and type come from the reset snapshot, so a field annotation contradicting it
 (`P: Float64[np.ndarray, "2 2"]` on an instance holding a 3x3) is documentation rather than a checked declaration.
 Parameter and return annotations are checked, so the module boundary is judged while the state boundary is not.
-
-## LIR
-
-### Boundary-install drain charge on an empty Ret block
-
-A slot installing at the accepted-output edge charges the Ret block's drain to the boundary step of its makespan,
-which is a no-op whenever the block computes anything (its own landings reach that step) and costs two to three
-cycles when it does not: a delay line, an input latched straight into a slot, a boolean-only slot. The charge looks
-like a pure tightness cost, since an empty Ret block's install sources are resident by construction, and the
-numerical model agreed with Python on every affected kernel with it forced off (delay lines from three cycles to
-one, two merge-into-Ret shapes from nine to six). Dropping it is behavior-changing: it re-freezes the chained-copy
-latency rows, needs the liveness diagnostic taught that in a one-cycle transaction the read-first boundary write
-coincides with the live-in's own landing, and wants the RTL cosimulation of those kernels before it lands.

@@ -313,7 +313,7 @@ def render_schedule(lir: Lir) -> str:
 
     # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
     # compute, latch, and fetch-staging cycles 1..II. The row axis is the fetch PC, so out_valid (pc == LASTPC == II)
-    # rises on the last row; the executing PRESENT step shown there lags the fetch by the fetch lag (present==II-lag).
+    # rises on the last row.
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.wide_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")

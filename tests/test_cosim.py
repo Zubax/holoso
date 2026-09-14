@@ -41,6 +41,8 @@ from ._modelref import (
     default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
+    EMPTY_RET_KERNELS,
+    EMPTY_RET_VECTORS,
     OptionsCase,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
@@ -185,15 +187,40 @@ class _UnusedBoolInputAccumulator:
         return self.y
 
 
+class _BoolShiftRegister2:
+    def __init__(self) -> None:
+        self._a = False
+        self._b = False
+
+    def __call__(self, x: bool) -> bool:
+        out = self._b
+        self._b = self._a
+        self._a = x
+        return out
+
+
+@pytest.mark.parametrize("bank", ["wide", "bool"])
 @pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_shift_register_backpressure(sim: str, config: OptionsCase) -> None:
+def test_cosim_shift_register_backpressure(sim: str, config: OptionsCase, bank: str) -> None:
     # The returned value taps a copy-slot register and the chain advances every accept, so together with the testbench's
     # random back-pressure this pins down that the boundary copy fires exactly once per accepted transaction -- no
     # mid-handshake output mutation and no state over-advance while out_ready is held low.
     fmt = FloatFormat(6, 18)
-    result = holoso.synthesize(_ShiftRegister2().__call__, config.make_options(fmt), name=f"shift2_{config.label}")
+    kernel = _ShiftRegister2().__call__ if bank == "wide" else _BoolShiftRegister2().__call__
+    result = holoso.synthesize(kernel, config.make_options(fmt), name=f"shift2_{bank}_{config.label}")
     run_cosim(sim, result)
+
+
+@pytest.mark.parametrize("label", list(EMPTY_RET_KERNELS))
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_boundary_install_from_an_empty_ret(sim: str, config: OptionsCase, label: str) -> None:
+    fmt = FloatFormat(6, 18)
+    result = holoso.synthesize(
+        EMPTY_RET_KERNELS[label](), config.make_options(fmt), name=f"empty_ret_{label}_{config.label}"
+    )
+    run_cosim(sim, result, vectors=[{"x": x, "y": y} for x, y in EMPTY_RET_VECTORS])
 
 
 @pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)

@@ -277,20 +277,11 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         bool_state_slots=bool_state_slots,
         fetch_lag=fetch_lag,
     )
-    # An early install lands within the boundary (the model drops a write keyed past it), and a boundary install fires
-    # exactly at it: the Ret block's terminator sits at the drained boundary of its makespan whenever a boundary install
-    # exists (the boundary-install charge), so the live-out has landed when the handshake copies it, and the copy is
-    # the read-first LASTPC write every backend places there. A boundary that collapsed below either would freeze the
-    # persistent state.
+    # The model drops a write keyed past the boundary, which would freeze the persistent state.
     for wide_slot in wide_state_slots:
         if isinstance(wide_slot.install, WideEarlyInstall):
             landing = wide_slot.install.landing(fetch_lag)
             assert landing <= last_pc, f"state slot {wide_slot.name!r} early install lands at {landing} past {last_pc}"
-    if any(isinstance(w.install, WideBoundaryInstall) for w in wide_state_slots) or any(
-        isinstance(b.install, BoolBoundaryInstall) for b in bool_state_slots
-    ):
-        boundary = block_base[ret_block] + boundary_step(block_sched[ret_block].makespan, fetch_lag)
-        assert boundary == last_pc, f"the boundary installs fire at {boundary}, not at the boundary {last_pc}"
     # The wide bank was allocated against the steering the emitter builds, arm for arm.
     emitted_read = sum(max(0, n - 1) for n in read_arms(lir).values())
     emitted_write = sum(max(0, n - 1) for dst, n in write_arms(lir).items() if isinstance(dst, RegRef))

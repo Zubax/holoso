@@ -172,9 +172,7 @@ def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:
     return block_local_cycle - term_offset - 1
 
 
-def _residence_rows(
-    defs: list[int], uses: list[int], present: int, read_first_defs: frozenset[int] = frozenset()
-) -> set[int]:
+def _residence_rows(defs: list[int], uses: list[int], boundary: int) -> set[int]:
     """
     Collapse a register's definition and use cycles into the set of cycles on which it holds a live value: each value
     resides from its landing through its last use STRICTLY before the next definition, the boundary at latest, plus the
@@ -182,30 +180,13 @@ def _residence_rows(
     is the write-then-read register semantics the numerical model commits: a read on a later value's landing cycle reads
     that NEW value, so it belongs to the next definition's residence, not the previous one -- a read on a value's OWN
     landing (the common producer->consumer case, where the consumer reads on the producer's landing PC) still counts for
-    that value.
-
-    `read_first_defs` lists the definition PCs that are READ-FIRST rather than write-then-read: the boundary state
-    install, where the hardware samples the register (the live-in, for an output tap or the install's own source) on
-    the boundary edge BEFORE clocking in the new live-out. A read on such a def's PC therefore belongs to the PRIOR
-    value, not the def landing there -- the opposite attribution from a normal landing. So the prior value keeps reads
-    up to and INCLUDING a read-first next def, and a read-first def's own value keeps only reads strictly after it.
-    Shared by the wide- and boolean-bank liveness so both banks compute residence in exactly one place.
+    that value. Shared by the wide- and boolean-bank liveness so both banks compute residence in exactly one place.
     """
     writes = sorted(defs)
-    reads = sorted(uses)
     rows: set[int] = set()
     for i, start in enumerate(writes):
-        nxt = writes[i + 1] if i + 1 < len(writes) else present + 1
-        lo_excl = start in read_first_defs  # a read AT a read-first def reads the PRIOR value, not this one's landing
-        hi_incl = nxt in read_first_defs  # ...so the prior value keeps reads up to and INCLUDING a read-first next def
-        last = max(
-            (
-                use
-                for use in reads
-                if (use > start if lo_excl else use >= start) and (use <= nxt if hi_incl else use < nxt)
-            ),
-            default=start,
-        )
+        nxt = writes[i + 1] if i + 1 < len(writes) else boundary + 1
+        last = max((use for use in uses if start <= use < nxt), default=start)
         rows.update(range(start, last + 1))
     return rows
 
@@ -479,7 +460,7 @@ class InlineScheduledOp:
 
 @dataclass(frozen=True, slots=True)
 class _OutputWire:
-    """An output port: a named external sink driven at the present step by a typed source tap."""
+    """An output port: a named external sink driven at the last PC by a typed source tap."""
 
     name: str
     tap: WideOperand | BoolOperand
@@ -788,18 +769,9 @@ class Lir:
         return [port for port in self.ports if isinstance(port, ControlPort)]
 
     @property
-    def present_step(self) -> int:
-        """
-        The hardware executing step on which the outputs are valid in the register array: the fetch PC reaches
-        `last_pc` (the Ret boundary) and the executing step lags it by the fetch lag. For a straight-line kernel this
-        is `makespan + 1` (the last commit plus the read-first edge); for a CFG it is the Ret block's resident step.
-        """
-        return self.last_pc - self.fetch_lag
-
-    @property
     def cyc_width(self) -> int:
-        """Bit width of the err_pc diagnostic: enough to hold any executing step `0..present_step`."""
-        return max(1, self.present_step.bit_length())
+        """Bit width of the err_pc diagnostic, which latches the executing step `pc - fetch_lag` of an error."""
+        return max(1, (self.last_pc - self.fetch_lag).bit_length())
 
     @property
     def initiation_interval(self) -> int:
@@ -863,7 +835,6 @@ class Lir:
         self,
         defs: dict[_BankReg, list[int]],
         uses: dict[_BankReg, list[int]],
-        read_first: dict[_BankReg, set[int]] | None = None,
     ) -> dict[_BankReg, set[int]]:
         """
         Collapse a bank's absolute def/use PCs into the rows each register holds a live value, computed PER BASIC BLOCK
@@ -876,12 +847,8 @@ class Lir:
         `defs`/`uses` are absolute fetch PCs (the report grid's row axis); each falls inside exactly one block's
         `[base, term_pc]` range (the ranges tile the frame contiguously in layout order). Within a block a live-in
         register is given a pseudo-def at the block base and a live-out one a pseudo-use at the terminator PC, so the
-        per-block `_residence_rows` extends the carried value across the whole block. `read_first` lists, per
-        register, the READ-FIRST def PCs (a boundary state install): a read on such a PC reads the PRIOR value, so it
-        both keeps that read out of the install's own residence and -- when the read is the register's earliest one in
-        its block -- marks the register live-in there (the carried value, not the install, supplies that read).
+        per-block `_residence_rows` extends the carried value across the whole block.
         """
-        read_first = read_first or {}
         order = sorted(range(len(self.blocks)), key=lambda i: self.block_base[i])
         sorted_bases = [self.block_base[i] for i in order]
         term_pc = {block.index: self.term_pc(block) for block in self.blocks}
@@ -909,15 +876,7 @@ class Lir:
         for index in block_defs:
             ds, us = block_defs[index], block_uses[index]
             written[index] = set(ds)
-            # A register is live-in (upward-exposed) if its earliest read is not supplied by an in-block def: read with
-            # no def, or read strictly before the first def, or read AT a read-first def (which reads the prior value).
-            upward[index] = {
-                reg
-                for reg, reads in us.items()
-                if reg not in ds
-                or min(reads) < min(ds[reg])
-                or (min(reads) == min(ds[reg]) and min(ds[reg]) in read_first.get(reg, set()))
-            }
+            upward[index] = {reg for reg, reads in us.items() if reg not in ds or min(reads) < min(ds[reg])}
         live_in: dict[int, set[_BankReg]] = {index: set() for index in block_defs}
         live_out: dict[int, set[_BankReg]] = {index: set() for index in block_defs}
         changed = True
@@ -937,10 +896,18 @@ class Lir:
             for reg in active:
                 d = block_defs[index].get(reg, []) + ([base] if reg in live_in[index] else [])
                 u = block_uses[index].get(reg, []) + ([boundary] if reg in live_out[index] else [])
-                resident = _residence_rows(d, u, boundary, frozenset(read_first.get(reg, set())))
+                resident = _residence_rows(d, u, boundary)
                 if resident:
                     rows.setdefault(reg, set()).update(resident)
         return rows
+
+    def _add_boundary_installs(self, rows: dict[_BankReg, set[int]], boundary_installed: list[_BankReg]) -> None:
+        """
+        A boundary install writes its slot on the accepted-output edge, after every read on the last PC, so the
+        live-out it lands occupies the register on that PC alone and changes no other value's residence.
+        """
+        for reg in boundary_installed:
+            rows.setdefault(reg, set()).add(self.last_pc)
 
     def _collect_op_events(
         self, reg_type: type[_BankReg], defs: dict[_BankReg, list[int]], uses: dict[_BankReg, list[int]]
@@ -990,7 +957,7 @@ class Lir:
         present = self.initiation_interval  # hardware-frame present / boundary step
         defs: dict[RegRef, list[int]] = {}
         uses: dict[RegRef, list[int]] = {}
-        read_first: dict[RegRef, set[int]] = {}
+        boundary_installed: list[RegRef] = []
         for load in self.wide_inputs:
             defs.setdefault(load.dst, []).append(1)
         for slot in self.wide_state_slots:
@@ -1009,12 +976,7 @@ class Lir:
                     if isinstance(install.source.source, RegRef):
                         uses.setdefault(install.source.source, []).append(step)
                 case WideBoundaryInstall(source=source):
-                    # A boundary install reads-then-writes at the boundary: the hardware samples the live-in there
-                    # (read first) before clocking in the new live-out, so the boundary read belongs to the live-in
-                    # (read_first), and the live-out is resident at the boundary by its def alone -- no carry use, or
-                    # a dead live-in would be over-tinted across the whole frame.
-                    defs.setdefault(slot.reg, []).append(present)
-                    read_first.setdefault(slot.reg, set()).add(present)
+                    boundary_installed.append(slot.reg)
                     if isinstance(source.source, RegRef):
                         uses.setdefault(source.source, []).append(present)
                 case _:
@@ -1030,7 +992,9 @@ class Lir:
                 if isinstance(copy.source.source, RegRef):
                     uses.setdefault(copy.source.source, []).append(step)
         self._collect_op_events(RegRef, defs, uses)
-        return self._cfg_residence(defs, uses, read_first)
+        rows = self._cfg_residence(defs, uses)
+        self._add_boundary_installs(rows, boundary_installed)
+        return rows
 
     @property
     def bool_liveness(self) -> dict[BoolRegRef, set[int]]:
@@ -1049,18 +1013,14 @@ class Lir:
         present = self.initiation_interval
         defs: dict[BoolRegRef, list[int]] = {}
         uses: dict[BoolRegRef, list[int]] = {}
-        read_first: dict[BoolRegRef, set[int]] = {}
+        boundary_installed: list[BoolRegRef] = []
         for slot in self.bool_state_slots:
             defs.setdefault(slot.reg, []).append(1)  # the live-in is resident from the start
             match slot.install:
                 case InPlace():
                     uses.setdefault(slot.reg, []).append(present)  # an in-place live-out resides through the boundary
                 case BoolBoundaryInstall(source=source):
-                    # The live-out's def alone marks it resident at the boundary (no carry use, which would over-tint
-                    # a dead live-in), and any boundary read of the slot register is the live-in (read_first). The
-                    # install samples its source on the boundary edge.
-                    defs.setdefault(slot.reg, []).append(present)
-                    read_first.setdefault(slot.reg, set()).add(present)
+                    boundary_installed.append(slot.reg)
                     if isinstance(source.source, BoolRegRef):
                         uses.setdefault(source.source, []).append(present)
                 case _:
@@ -1080,4 +1040,6 @@ class Lir:
             if isinstance(block.terminator, Branch):  # the next-PC case reads the condition at the block boundary PC
                 uses.setdefault(block.terminator.cond, []).append(self.term_pc(block))
         self._collect_op_events(BoolRegRef, defs, uses)
-        return self._cfg_residence(defs, uses, read_first)
+        rows = self._cfg_residence(defs, uses)
+        self._add_boundary_installs(rows, boundary_installed)
+        return rows

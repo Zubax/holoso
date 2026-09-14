@@ -547,9 +547,9 @@ read-first, so a same-frame self-update (an accumulator) reads the old value and
 update whose "unchanged" arm is the slot live-in coalesces onto the slot through the same union-find. When it cannot
 commit in place (a genuine overlap, a folded sign, a chained copy `self.a = self.b`), the live-out keeps its own
 register and is installed by a copy -- microcode-driven as early as the old live-in is read where eligible, otherwise
-a handshake-gated write at the output boundary; two slots that always hold the same value may collapse onto one
-register. Which of the three a slot gets is one explicit decision of the allocator, and the handshake-gated writes are
-enumerated once, so every consumer agrees on them by construction.
+a handshake-gated write at the output boundary, sampled on the last PC like an output, so the Ret block pays no drain
+for it; two slots that always hold the same value may collapse onto one register. Which of the three a slot gets is
+one explicit decision of the allocator, and the handshake-gated writes are enumerated once.
 
 ### Control flow
 
@@ -570,8 +570,8 @@ pipelining then shrinks the terminator offset down to the issue-side envelope --
 still drives a control word -- whenever the block carries no installs and every successor is single-predecessor, so
 a spill cannot reach a wrong path:
 in-flight results land past the terminator in the uniquely-reached successor frame, which inherits the predecessor's
-per-instance busy residue and each spilled value's landing cycle. A multi-predecessor successor (merge, loop header,
-`Ret`) never receives a spill, so the carry converges in one reverse-postorder pass and no overlap crosses a
+per-instance busy residue and each spilled value's landing cycle. A multi-predecessor successor (merge, loop header)
+never receives a spill, so the carry converges in one reverse-postorder pass and no overlap crosses a
 back-edge.
 
 ### DEFERRED

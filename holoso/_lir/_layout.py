@@ -175,7 +175,6 @@ def layout_offsets(
     mir: Mir,
     schedules: BlockSchedules,
     has_install_blocks: Mapping[int, bool],
-    boundary_install: bool,
     fetch_lag: int,
 ) -> BlockOffsets:
     """
@@ -184,9 +183,8 @@ def layout_offsets(
     installs anything ends at the drained boundary of its install-inclusive makespan: every result lands a fixed
     pipeline past its commit, so the latest landing is the makespan's, and a phi tail install lands read-first there
     too (the makespan one past the work only when a source is the block's own last work; see `install_issue_cycle`).
-    The lone Ret block is charged that boundary while a slot installs there at the accepted-output edge
-    (`boundary_install`), which matters only when it computes nothing. An empty block ends where its received spills
-    land, the entry no earlier than its input loads on cycle 1.
+    An empty block ends where its received spills land, the entry no earlier than its input loads on cycle 1. A slot's
+    boundary install asks for no drain: it samples its source on the last PC, as an output does.
     """
     block_makespan: dict[int, int] = {}
     block_term_offset: dict[int, int] = {}
@@ -197,7 +195,7 @@ def layout_offsets(
             assert bid not in has_install_blocks, f"block {bid}: an overlapping block cannot carry an install"
             term_offset = schedules.overlap_term_offset[bid]
         else:
-            drains = bool(sched.issue_cycle) or bid in has_install_blocks or (bid == mir.ret_block and boundary_install)
+            drains = bool(sched.issue_cycle) or bid in has_install_blocks
             floor = 1 if bid == mir.entry else 0
             drain = boundary_step(makespan, fetch_lag) if drains else floor
             term_offset = max([drain, *schedules.block_inflight[bid].values()])

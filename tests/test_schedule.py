@@ -927,17 +927,16 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
 
 
 def test_state_slot_residence_matches_the_model_under_carry() -> None:
-    # Regression (review): the READ-FIRST boundary-install path -- _residence_rows' read_first_defs and _cfg_residence
-    # `upward` refinement -- governs only persistent state slots, which the stateless oracle above never builds. A
-    # boundary state install reads-then-writes at last_pc, so a read there (an output tap of the live-in, or an in-place
-    # install's own source) reads the PRIOR value; the prior strict-`<` rule mis-attributed it to the boundary def and
-    # truncated the carried live-in, tinting a LIVE slot register DEAD mid-frame. Tie reg_liveness/bool_liveness for the
+    # Regression (review): a boundary state install writes its slot on the accepted-output edge, after every read on
+    # last_pc, and only persistent state slots have one, which the stateless oracle above never builds. A read there (an
+    # output tap of the live-in, or an in-place install's own source) reads the PRIOR value; attributing it to the
+    # install truncated the carried live-in, tinting a LIVE slot register DEAD mid-frame, and in a one-cycle transaction
+    # tinted the slot register before the first step. Tie reg_liveness/bool_liveness for the
     # slot registers to a STEADY-STATE model oracle: drive many back-to-back transactions, compute backward
     # write-then-read liveness over the concatenated executed trace (so a slot live-out carries into the next
     # transaction's reads and a mid-frame gap surfaces), and union residence by PC over the middle transactions. Covers
     # a single- and multi-block WIDE boundary slot and a single- and multi-block BOOLEAN boundary slot (the multi-block
-    # cases exercise the `upward` live-in marking of a carried slot). Crash-before: with read-first reverted
-    # the carried slot live-in tints DEAD between cycle 1 and its boundary read.
+    # cases exercise the `upward` live-in marking of a carried slot).
     from holoso._lir._ir import Branch, WideOperand
     from holoso._backend.numerical import NumericalSimulator
 
@@ -973,6 +972,25 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             else:
                 self._f = x < -1.0
             return out, x + 1.0
+
+    class BoolLatch:  # a one-cycle transaction: the boundary install shares the live-in's landing PC
+        def __init__(self) -> None:
+            self._f = False
+
+        def __call__(self, b: bool) -> bool:
+            prev = self._f
+            self._f = b
+            return prev
+
+    class Swap:  # a one-cycle transaction where each slot register is read on the boundary PC by the other's install
+        def __init__(self) -> None:
+            self._a = 0.0
+            self._b = 1.0
+
+        def __call__(self, x: float) -> float:
+            out = self._a
+            self._a, self._b = self._b, self._a
+            return out
 
     class BoolToggle:  # single-block boolean slot installed in place (_b <= ~_b), also read by the select
         def __init__(self) -> None:
@@ -1122,6 +1140,8 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             [(1.0, 2.0), (-1.0, 2.0), (1.5, 3.0), (-2.0, 4.0)],
         ),
         ("BoolHold", build_lir(_run(BoolHold().__call__), "BoolHold"), [(1.0,), (-2.0,), (-0.5,), (2.0,)]),
+        ("BoolLatch", build_lir(_run(BoolLatch().__call__), "BoolLatch"), [(True,), (False,), (True,), (True,)]),
+        ("Swap", build_lir(_run(Swap().__call__), "Swap"), [(0.5,), (1.5,)]),
         (
             "BoolToggle",
             build_lir(_run(BoolToggle().__call__), "BoolToggle"),
@@ -1150,7 +1170,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
                 compared += 1
     # Guard against the kernels silently losing their non-coalesced slots (e.g. a future coalescing change) -- without
     # this the loop above would vacuously pass and re-open the read-first coverage gap this test exists to close.
-    assert compared >= 5, f"expected every kernel to contribute a non-coalesced slot, compared only {compared}"
+    assert compared >= 8, f"expected every kernel to contribute a non-coalesced slot, compared only {compared}"
 
 
 def test_write_landing_recursion_handles_multi_hop_spill() -> None:
@@ -1517,7 +1537,7 @@ def test_state_early_copy_frees_source_register() -> None:
     (in_x,) = [load for load in lir.wide_inputs if load.name == "x"]
     assert isinstance(xprev.install, WideEarlyInstall) and in_x.dst == xprev.install.source.source
     makespan = max((op.commit_cycle for op in lir.ops), default=0)
-    assert xprev.install.cycle <= makespan  # installs before the boundary (present cycle == makespan + 1)
+    assert xprev.install.cycle <= makespan  # installs ahead of the boundary
     assert any(write.dst == in_x.dst for op in lir.ops for write in op.writes)
 
 

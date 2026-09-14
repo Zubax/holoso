@@ -480,6 +480,103 @@ COMPARATOR_OPTIONS_CASES = (
 )
 
 
+# Slots installed at the accepted-output edge from a Ret block that computes nothing, the live-out arriving from a merge,
+# a loop exit, or a spill out of the loop header. The vectors keep every sum, product, halving and power-of-two quotient
+# exact, so the model equals host Python.
+EMPTY_RET_VECTORS = [(1.5, 2.0), (-1.0, 2.0), (3.25, -0.5), (-2.0, 4.0), (0.75, 1.5), (2.5, 0.25)]
+
+
+def merge_wide_output(x: float, y: float) -> float:
+    if x > 0.0:
+        s = x + y
+    else:
+        s = x / y
+    return s
+
+
+def merge_bool_output(x: float, y: float) -> bool:
+    if x > 0.0:
+        f = x / y > 1.0
+    else:
+        f = x < -1.0
+    return f
+
+
+def loop_exit_output(x: float, y: float) -> float:
+    while x > 1.0:
+        x = x * 0.5
+    return x
+
+
+class MergeWideSlot:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def __call__(self, x: float, y: float) -> float:
+        out = self._s
+        self._s = merge_wide_output(x, y)
+        return out
+
+
+class MergeBoolSlot:
+    def __init__(self) -> None:
+        self._f = False
+
+    def __call__(self, x: float, y: float) -> bool:
+        out = self._f
+        self._f = merge_bool_output(x, y)
+        return out
+
+
+class LoopExitSlot:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def __call__(self, x: float, y: float) -> float:
+        out = self._s
+        self._s = loop_exit_output(x, y)
+        return out
+
+
+class SpillIntoRet:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def again(self, x: float, y: float) -> bool:
+        self._s = x * y
+        return x > 0.0
+
+    def __call__(self, x: float, y: float) -> float:
+        out = self._s
+        while self.again(x, y):
+            x = x - 1.0
+        return out
+
+
+class SpillIntoRetBool:
+    def __init__(self) -> None:
+        self._f = False
+
+    def again(self, x: float, y: float) -> bool:
+        self._f = x * y < -1.0
+        return x > 0.0
+
+    def __call__(self, x: float, y: float) -> bool:
+        out = self._f
+        while self.again(x, y):
+            x = x - 1.0
+        return out
+
+
+EMPTY_RET_KERNELS: dict[str, Callable[[], Callable[..., float | bool]]] = {
+    "merge_wide": lambda: MergeWideSlot().__call__,
+    "merge_bool": lambda: MergeBoolSlot().__call__,
+    "loop_exit": lambda: LoopExitSlot().__call__,
+    "spill_into_ret": lambda: SpillIntoRet().__call__,
+    "spill_into_ret_bool": lambda: SpillIntoRetBool().__call__,
+}
+
+
 class ChainedSlots:
     """
     Chained persistent slots: `_a` captures `_b`'s OLD value while `_b` advances, behind a long float tail.

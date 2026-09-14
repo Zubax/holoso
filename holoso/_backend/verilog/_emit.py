@@ -339,14 +339,13 @@ localparam           WFLT      = WEXP + WMAN;
 localparam           WINT      ={ifmt.width:4};  // native integer width
 localparam           WREG      ={wreg:4};  // wide register width
 localparam           NREG      ={nreg:4};  // wide register count
-localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
+localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step
 localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
 localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
-localparam [PCW-1:0] PRESENT   ={lir.present_step:4};  // executing step on which the outputs are valid in the array
-localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // = PRESENT + FETCH_LAG; out_valid asserts here
+localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // out_valid asserts here
 localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
 localparam           NBREG     ={nbreg:4};  // boolean register count
-// pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
+// pc: 0 = idle/accept; out_valid at pc==LASTPC (fetch leads execution).
 """)
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
     # concatenation implements (bias exponent at the fraction MSb, zero sign/fraction); a format whose codec disagreed
@@ -732,11 +731,11 @@ always @(posedge clk) begin
     w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
     # A slot's boundary install rides the accepted-output edge (out_valid && out_ready, so a held boundary copies
     # exactly once), the handshake arm of its register's statement; an early install is an ordinary opcode source
-    # (see write_events). The arm outranks the opcode case below it and must not shadow it. It cannot: the install
-    # executes at `present_step`, and `build_microcode` -- already run, over every write event -- asserts each rides a
-    # strictly earlier step, so the word presented alongside the install holds the write NOP. That is what lets a slot
-    # register which also carries opcode writes, the shape a live-out coalesced into another slot's register leaves
-    # behind, be emitted rather than refused.
+    # (see write_events). The arm outranks the opcode case below it and must not shadow it. It cannot: a word executing
+    # while the PC sits at LASTPC was fetched either on the way there, so a write it carried would land past the last
+    # PC, which no layout allows, or at LASTPC itself, which `transacting` masks. That is what lets a slot register
+    # which also carries opcode writes, the shape a live-out coalesced into another slot's register leaves behind, be
+    # emitted rather than refused.
     slots: list[RegRef | BoolRegRef] = [*map(RegRef, sorted(wide_slots)), *map(BoolRegRef, sorted(bool_slots))]
     for dst in slots:
         _emit_reg_write(w, dst, write_books.get(dst), arms.get(dst), renderer)
@@ -750,7 +749,7 @@ always @(posedge clk) begin
 def _emit_outputs(w: _Writer, lir: Lir, renderer: _WideRenderer) -> None:
     w("""
 assign in_ready  = (pc == 0);
-assign out_valid = (pc == LASTPC);  // result valid on PRESENT; execution lags the fetch by FETCH_LAG
+assign out_valid = (pc == LASTPC);  // execution lags the fetch by FETCH_LAG
 assign err_pc    = err_pc_q;
 """)
     for wire in lir.outputs:

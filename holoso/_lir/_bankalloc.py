@@ -146,7 +146,7 @@ class _BankFacts[D: Early | Boundary]:
     order: list[ValueId]  # every operation and phi in the deterministic coloring order
     last_read_in_ret: dict[ValueId, int]
     ret_block: int
-    ret_present: int
+    ret_makespan: int
     fetch_lag: int
 
     def interference(
@@ -326,7 +326,8 @@ class _WideBank(_Bank[Early | Boundary]):
                 cycle = (facts.op_commit[live_out] if live_out in facts.op_nodes else 0) + 1  # read-first
                 if r_in is not None:
                     cycle = max(cycle, facts.last_read_in_ret.get(r_in, 0) - inline_fire_cycle(0, facts.fetch_lag))
-                install[name] = Early(cycle) if cycle < facts.ret_present else Boundary()
+                # An early install lands within the Ret block's own drain, which an empty Ret block does not have.
+                install[name] = Early(cycle) if cycle <= facts.ret_makespan else Boundary()
             else:
                 install[name] = Boundary()
         return install
@@ -542,35 +543,9 @@ def prepare_bank[D: Early | Boundary](bank: _Bank[D], ctx: BuildContext) -> _Ban
         order=_movable_order(mir, [*op_nodes, *phi_nodes], facts.op_block, facts.phi_block, facts.op_commit),
         last_read_in_ret=last_read_in_ret,
         ret_block=ret_block,
-        # The Ret block is never install-bearing (no successors, not a branch), so its makespan, hence its present
-        # step, is the schedule's own in every round.
-        ret_present=block_sched[ret_block].makespan + 1,
+        ret_makespan=block_sched[ret_block].makespan,
         fetch_lag=fetch_lag,
     )
-
-
-def _layout_and_coalesce(
-    ctx: BuildContext, banks: _PreparedBanks, has_install_blocks: Mapping[int, bool]
-) -> CoalescedLayout:
-    """
-    One round: the terminator offsets the install classification implies, and both banks coalesced on them. A slot
-    installing at the accepted-output edge lands a fetch pipeline past its live-out, so the Ret block's drain must
-    reach that boundary; the banks coalesce under the conservative charge (any slot may) and the round's offsets
-    are then derived from the decisions they reached. No decision can depend on the charge: it moves only an empty
-    Ret block's offset, where every value is resident from the first step and every pair interferes whatever the
-    boundary, while a Ret block with ops drains to that boundary by its own landings.
-    """
-    charged = bool(ctx.wide_mir.state_slots or ctx.bool_mir.state_slots)
-    offsets = layout_offsets(ctx.mir, ctx.schedules, has_install_blocks, charged, ctx.fetch_lag)
-    bool_bank = _coalesce_bank(banks.bool, offsets)
-    wide_bank = _coalesce_bank(banks.wide, offsets)
-    decisions = [*wide_bank.install.values(), *bool_bank.install.values()]
-    boundary_install = any(isinstance(decision, Boundary) for decision in decisions)
-    offsets = layout_offsets(ctx.mir, ctx.schedules, has_install_blocks, boundary_install, ctx.fetch_lag)
-    _logger.info(
-        "Layout: terminator offsets %s", [offsets.block_term_offset[b] for b in sorted(offsets.block_term_offset)]
-    )
-    return CoalescedLayout(ctx, offsets, bool_bank, wide_bank)
 
 
 def converge(ctx: BuildContext) -> CoalescedLayout:
@@ -597,7 +572,11 @@ def converge(ctx: BuildContext) -> CoalescedLayout:
     seed_keys = frozenset(has_install_blocks)
     pinned_push: set[int] = set()
     for round_index in range(3 * len(mir.blocks) + 4):
-        layout = _layout_and_coalesce(ctx, banks, has_install_blocks)
+        offsets = layout_offsets(mir, ctx.schedules, has_install_blocks, ctx.fetch_lag)
+        _logger.info(
+            "Layout: terminator offsets %s", [offsets.block_term_offset[b] for b in sorted(offsets.block_term_offset)]
+        )
+        layout = CoalescedLayout(ctx, offsets, _coalesce_bank(banks.bool, offsets), _coalesce_bank(banks.wide, offsets))
         raw = layout.install_blocks()
         # The two derivations of install-bearing -- the CFG-shape seed and the post-coalescing copies -- must agree on
         # the key universe: a block outside the seed can never install, so a wider `raw` means the derivations
@@ -649,7 +628,7 @@ def _coalesce_bank[D: Early | Boundary](facts: _BankFacts[D], offsets: BlockOffs
     op_nodes, phi_nodes = facts.op_nodes, facts.phi_nodes
     livein_of, slot_reg, ret_block, fetch_lag = facts.livein_of, facts.slot_reg, facts.ret_block, facts.fetch_lag
     term_offset = offsets.block_term_offset
-    assert offsets.block_makespan[ret_block] + 1 == facts.ret_present
+    assert offsets.block_makespan[ret_block] == facts.ret_makespan
     phi_order = [vid for vid in facts.order if vid in phi_nodes]
     # The coalescing oracle reads every live-out at the boundary (it must persist) and every live-in at its actual
     # last read, so a live-out that lands after its live-in is fully read shows as non-interfering and coalesces --

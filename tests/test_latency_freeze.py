@@ -19,14 +19,19 @@ slots, so one slot's live-out reads another slot's live-in (the register allocat
 committed example exercises it. Two purpose-built kernels (a float delay line and a boolean shift register) pin it in
 both banks, and a behavioral check confirms the chained copy still captures each old value before it is overwritten --
 which the value-blind schedule freeze cannot.
+
+A slot installed at the accepted-output edge from a Ret block that computes nothing is pinned relationally where it can
+be: such a kernel takes exactly as long as its stateless twin returning the live-out instead.
 """
+
+from collections.abc import Callable
 
 import pytest
 
 import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
-from holoso._lir import InPlace, WideStateSlot
+from holoso._lir import BoolBoundaryInstall, InPlace, Ret, WideBoundaryInstall, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
 
@@ -37,6 +42,12 @@ from ._modelref import (
     default_mir,
     default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
+    EMPTY_RET_KERNELS,
+    loop_exit_output,
+    merge_bool_output,
+    merge_wide_output,
+    OptionsCase,
+    PIPELINE_OPTIONS_CASES,
 )
 
 # Kernel label -> frozen (min initiation interval, last microcode PC). last_pc is the out_valid boundary PC -- the
@@ -183,8 +194,8 @@ class _BoolShift3:
 # _BoolShift3 the boolean bank's. _FMT is the wide e8m36 datapath the example matrix uses.
 _FMT = FloatFormat(8, 36)
 _CHAINED_COPY: list[tuple[str, type[_Delay3] | type[_BoolShift3], tuple[int, int]]] = [
-    ("delay3", _Delay3, (3, 3)),
-    ("bool_shift3", _BoolShift3, (3, 3)),
+    ("delay3", _Delay3, (1, 1)),
+    ("bool_shift3", _BoolShift3, (1, 1)),
 ]
 
 
@@ -206,6 +217,58 @@ def test_chained_copy_schedule_is_frozen(
         f"{name}: scheduling efficiency changed -- (min II, last PC) {got} differs from the frozen {frozen}. "
         f"If this is a deliberate schedule improvement, update the frozen value."
     )
+
+
+class _Delay1:
+    def __init__(self) -> None:
+        self.x = 0.0
+
+    def __call__(self, x: float) -> float:
+        out = self.x
+        self.x = x
+        return out
+
+
+def _passthrough(x: float) -> float:
+    return x
+
+
+@pytest.mark.parametrize(
+    "stateful,stateless",
+    [
+        pytest.param(lambda: _Delay1().__call__, _passthrough, id="delay"),
+        pytest.param(EMPTY_RET_KERNELS["merge_wide"], merge_wide_output, id="merge_wide"),
+        pytest.param(EMPTY_RET_KERNELS["merge_bool"], merge_bool_output, id="merge_bool"),
+        pytest.param(EMPTY_RET_KERNELS["loop_exit"], loop_exit_output, id="loop_exit"),
+    ],
+)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+def test_a_boundary_install_costs_what_an_output_does(
+    config: OptionsCase, stateful: Callable[[], Callable[..., object]], stateless: Callable[..., object]
+) -> None:
+    # The install samples its source on the last PC, as an output does.
+    options = config.make_options(_FMT)
+    lir = build_lir(lower_to_mir(lower_frontend(stateful(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "k")
+    (ret,) = [block for block in lir.blocks if isinstance(block.terminator, Ret)]
+    slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
+    assert not (ret.ops or ret.inline_ops) and all(
+        isinstance(slot.install, (WideBoundaryInstall, BoolBoundaryInstall)) for slot in slots
+    )
+    installed = holoso.synthesize(stateful(), options, name="installed").initiation_interval
+    assert installed == holoso.synthesize(stateless, options, name="returned").initiation_interval
+
+
+@pytest.mark.parametrize(
+    "label,frozen",
+    [("spill_into_ret", {"default": 7, "staged": 10}), ("spill_into_ret_bool", {"default": 8, "staged": 13})],
+)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+def test_a_spill_into_an_empty_ret_schedule_is_frozen(config: OptionsCase, label: str, frozen: dict[str, int]) -> None:
+    # A live-out spilling into the Ret block, landing exactly on the last PC, has no stateless twin to compare against.
+    min_ii = holoso.synthesize(EMPTY_RET_KERNELS[label](), config.make_options(_FMT), name="spill").initiation_interval[
+        0
+    ]
+    assert min_ii == frozen[config.label]
 
 
 def test_chained_copy_captures_old_values() -> None:
