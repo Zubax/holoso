@@ -287,6 +287,10 @@ _CASES = [(spec, fmt, fma) for spec in SPECS for fmt in spec.formats for fma in 
 Every spec, including the one the tolerance check skips: a freeze needs a reference to measure against, not a
 budget to stay under, and the lane whose budget was never derived is exactly the one nothing else watches.
 """
+# The parametrized test fails on its own where a row is MISSING, but a stale row it never reads would go unnoticed.
+assert sorted(_BASELINE) == sorted(
+    _label(spec, fmt, fma) for spec, fmt, fma in _CASES
+), "baseline rows and cases differ"
 
 
 def _ulps(got: float, want: float, unit: float, floor: float) -> float:
@@ -339,14 +343,6 @@ def _lane_errors(spec: ExampleSpec, fmt: FloatFormat, fma: bool) -> dict[str, tu
         if worst > 0.0 or rms > 0.0:
             errors[port] = (worst, rms)
     return errors
-
-
-def test_every_case_is_bounded() -> None:
-    """
-    A row outliving the case it was taken for: the parametrized test below fails on its own where a row is MISSING,
-    but a stale one it never reads would sit here unnoticed.
-    """
-    assert sorted(_BASELINE) == sorted(_label(spec, fmt, fma) for spec, fmt, fma in _CASES)
 
 
 @pytest.mark.parametrize("spec,fmt,fma", [pytest.param(s, f, m, id=_label(s, f, m)) for s, f, m in _CASES])

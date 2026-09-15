@@ -17,7 +17,7 @@ import holoso
 from holoso import FloatFormat, FloatValue
 from holoso._eel import lower as lower_frontend
 from holoso._lir import boundary_step, landing_cycle
-from holoso._lir import BoolWrite, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, RegRef, WideCopy
+from holoso._lir import BoolCopy, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, RegRef
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import SPECS, ExampleSpec
@@ -43,24 +43,8 @@ def _build(spec: ExampleSpec) -> Lir:
     )
 
 
-def _phi_arm_installs(block: LirBlock) -> list[WideCopy | BoolWrite]:
-    return [*block.wide_copies, *block.bool_writes]
-
-
 def _block_ops(block: LirBlock) -> list[PooledScheduledOp | InlineScheduledOp]:
     return [*block.ops, *block.inline_ops]
-
-
-@pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.name)
-def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
-    lir = _build(spec)
-    for block in lir.blocks:
-        for install in _phi_arm_installs(block):
-            landing = install.landing(lir.fetch_lag)  # block-local; same fire+read-first edge the model/emitter commit
-            assert landing <= block.term_offset, (
-                f"{spec.name} block {block.index}: install of {install.dst} lands at {landing}, past the terminator "
-                f"{block.term_offset} -- a dead install an exit would orphan"
-            )
 
 
 @pytest.mark.parametrize("name", ["uart_rx", "uart_tx"])
@@ -71,11 +55,11 @@ def test_targets_still_exercise_constant_installs(name: str) -> None:
     makespan with no read-first push. Pin that these kernels still emit constant phi-arm installs, so a kernel-shape
     change cannot quietly make the recovered-cycle freezes meaningless. The settled timing itself is pinned
     end-to-end -- by those frozen lengths (uart_rx 51, uart_tx 37 in test_latency_freeze), by the
-    landing <= terminator structural invariant above, and by RTL cosim -- not by re-deriving the install's own helpers.
+    landing <= terminator invariant every Lir checks, and by RTL cosim -- not by re-deriving the install's own helpers.
     """
     spec = next(s for s in SPECS if s.name == name)
     lir = _build(spec)
-    const_installs = [x for b in lir.blocks for x in _phi_arm_installs(b) if x.is_const]
+    const_installs = [x for b in lir.blocks for x in b.copies if x.is_const]
     assert const_installs, f"{name} no longer emits constant phi-arm installs; the kernel shape changed"
 
 
@@ -110,10 +94,7 @@ def test_input_sourced_install_is_settled() -> None:
     )
     input_regs = {load.dst for load in lir.inputs}
     input_sourced = [
-        x
-        for b in lir.blocks
-        for x in _phi_arm_installs(b)
-        if x.settled_source and not x.is_const and x.source.source in input_regs
+        x for b in lir.blocks for x in b.copies if x.settled_source and not x.is_const and x.source.source in input_regs
     ]
     assert input_sourced, "the input-sourced settled install is gone, or the predicate regressed"
 
@@ -128,7 +109,7 @@ def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:
     triggers only for a copy whose source IS the last work, pinned below.)
     """
     lir = _build(next(s for s in SPECS if s.name == "recip_newton"))
-    bodies = [b for b in lir.blocks if any(not c.settled_source for c in b.wide_copies)]
+    bodies = [b for b in lir.blocks if any(not c.settled_source for c in b.copies)]
     assert bodies, "recip_newton no longer has a computed-source phi-arm copy; the kernel shape changed"
     for b in bodies:
         work = max((op.commit_cycle for op in _block_ops(b)), default=0)
@@ -136,7 +117,7 @@ def test_computed_copy_not_last_work_fits_at_work_makespan() -> None:
             f"recip_newton block {b.index}: a computed copy still pushes the makespan ({b.block_makespan} > work "
             f"{work}) -- the loop-carried install pin regressed to the conservative +1"
         )
-        assert all(c.landing(lir.fetch_lag) <= b.term_offset for c in b.wide_copies)
+        assert all(c.landing(lir.fetch_lag) <= b.term_offset for c in b.copies)
 
 
 class _HoldOrUpdateBool:
@@ -161,8 +142,8 @@ def test_state_read_sourced_install_is_settled() -> None:
     """
     A phi arm that is a STATE READ is resident at block entry (the slot register holds it from the start), so its
     tail install is settled -- the generalization's third source kind. A zero if-conversion budget keeps the diamond
-    a real branch, so the hold arm installs `self.s` by a pc-gated bool write rather than collapsing to a select.
-    Pin both that the install is so classified (a non-const settled bool write) and -- the black-box teeth --
+    a real branch, so the hold arm installs `self.s` by a PC-gated boolean copy rather than collapsing to a select.
+    Pin both that the install is so classified (a non-const settled boolean copy) and -- the black-box teeth --
     that the held value is the OLD state across a hold/update sweep, which an early-read or clobbered state-read
     install would corrupt (the model vs a fresh Python reference, schedule-independent).
     """
@@ -171,8 +152,10 @@ def test_state_read_sourced_install_is_settled() -> None:
         lower_to_mir(lower_frontend(_HoldOrUpdateBool().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         "hold_or_update_bool",
     )
-    settled_non_const = [x for b in lir.blocks for x in b.bool_writes if x.settled_source and not x.is_const]
-    assert settled_non_const, "the state-read phi arm did not install as a settled bool write"
+    settled_non_const = [
+        x for b in lir.blocks for x in b.copies if isinstance(x, BoolCopy) and x.settled_source and not x.is_const
+    ]
+    assert settled_non_const, "the state-read phi arm did not install as a settled boolean copy"
 
     model = holoso.synthesize(
         _HoldOrUpdateBool().__call__, options, name="hold_or_update_bool"
@@ -221,13 +204,13 @@ def test_cross_block_source_install_read_gates_on_the_spilled_landing() -> None:
         lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops),
         "live_through_arm",
     )
-    cross = [(blk, c) for blk in lir.blocks for c in blk.wide_copies if not c.settled_source and not _block_ops(blk)]
+    cross = [(blk, c) for blk in lir.blocks for c in blk.copies if not c.settled_source and not _block_ops(blk)]
     assert cross, "the kernel no longer exercises an in-flight-source install in an op-less arm; the shape changed"
     for blk, c in cross:
         assert c.issue_cycle == 0, "an in-flight source must not push the install past the (empty) work makespan"
         assert c.landing(lir.fetch_lag) == blk.term_offset, "the install lands read-first at the drained boundary"
     for blk in lir.blocks:
-        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.wide_copies)
+        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm", fmt)
     vectors: list[Vector] = [
@@ -278,14 +261,14 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     pushed = [
         blk
         for blk in lir.blocks
-        if any(not c.settled_source for c in blk.wide_copies)
+        if any(not c.settled_source for c in blk.copies)
         and blk.block_makespan == max((op.commit_cycle for op in _block_ops(blk)), default=0) + 1
     ]
     assert pushed, "no block takes the in-block +1 for a last-work copy source; the kernel shape changed"
     for blk in pushed:
         assert blk.term_offset == boundary_step(blk.block_makespan, lir.fetch_lag), "the push drains one step later"
     for blk in lir.blocks:
-        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.wide_copies)
+        assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm", fmt)
@@ -326,7 +309,7 @@ def test_drained_foreign_source_install_is_settled() -> None:
         (b, c)
         for b in lir.blocks
         if not _block_ops(b)
-        for c in b.wide_copies
+        for c in b.copies
         if isinstance(c.source.source, RegRef) and c.source.source not in input_regs and not c.is_const
     ]
     assert arms, "the foreign-op-sourced pass-through install is gone; the kernel shape changed"

@@ -32,12 +32,11 @@ DUT.
 """
 
 from dataclasses import dataclass
-from typing import assert_never
 
 from .._value import FloatValue, IntValue, ScalarLike, ScalarValue, WideValue, coerce_scalar
 from .._lir import WideConstRef, WideOperand
 from .._lir import RegRef, ScheduledOp
-from .._lir import BoolBoundaryInstall, BoolRegRef, InPlace, Lir, WideBoundaryInstall, WideEarlyInstall
+from .._lir import BoolRegRef, Lir
 from .._lir import Arm, BoolConstRef, BoolOperand, Branch, Exit, Jump, Terminator
 from .._lir import install_landing, landing_cycle, operand_read_cycle
 from .._operators import *
@@ -115,7 +114,7 @@ class NumericalSimulator(_Kernel):
         self._pending: dict[int, list[tuple[_Dst, ScalarValue]]] = {}  # landing PC -> in-flight (dest, value) writes
         self._op_events: dict[int, list[_OpEvent]] = {}  # read PC -> firings sampling their operands there
         self._installs: dict[int, list[_Install]] = {}  # fire PC -> pc-gated installs (readable one PC later)
-        self._boundary: list[_Install] = []  # state writebacks gated to the accepted-output boundary edge
+        self._boundary = [_Install(slot.live_out, slot.reg) for slot in lir.boundary_installs]  # at the accepted output
         self._terminators: dict[int, Terminator] = {}
         self._decode()
         self.reset()
@@ -219,35 +218,10 @@ class NumericalSimulator(_Kernel):
             for op in block_ops:
                 read_pc = operand_read_cycle(op.operator, base + op.issue_cycle, lir.fetch_lag)
                 self._op_events.setdefault(read_pc, []).append(_OpEvent(op, base + op.commit_cycle))
-            for copy in block.wide_copies:
-                self._installs.setdefault(base + copy.fire_step(lir.fetch_lag), []).append(
-                    _Install(copy.source, copy.dst)
-                )
-            for write in block.bool_writes:
-                self._installs.setdefault(base + write.fire_step(lir.fetch_lag), []).append(
-                    _Install(write.source, write.dst)
-                )
+            for copy in block.copies:
+                fire = base + copy.fire_step(lir.fetch_lag)
+                self._installs.setdefault(fire, []).append(_Install(copy.source, copy.dst))
             self._terminators[lir.term_pc(block)] = block.terminator
-        for slot in lir.wide_state_slots:
-            match slot.install:
-                case InPlace():
-                    pass
-                case WideEarlyInstall() as install:
-                    self._installs.setdefault(install.fire_step(lir.fetch_lag), []).append(
-                        _Install(install.source, slot.reg)
-                    )
-                case WideBoundaryInstall(source=source):
-                    self._boundary.append(_Install(source, slot.reg))
-                case _:
-                    assert_never(slot.install)
-        for bslot in lir.bool_state_slots:
-            match bslot.install:
-                case InPlace():
-                    pass
-                case BoolBoundaryInstall(source=bsource):
-                    self._boundary.append(_Install(bsource, bslot.reg))
-                case _:
-                    assert_never(bslot.install)
 
     def _taken_arm(self) -> Arm | None:
         """The arm the terminator at the current PC takes, reading its condition; None where no terminator sits."""

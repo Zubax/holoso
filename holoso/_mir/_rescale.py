@@ -58,7 +58,7 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
             return builder.operation(FloatMulPow2(scaling.k), [builder.operation(FloatMul(), [base, significand])])
         return builder.operation(FloatMul(), [builder.operation(FloatMulPow2(scaling.k), [base]), significand])
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         nonlocal rewrites
         if isinstance(node, Operation) and isinstance(node.operator, FloatMul):
             assert len(node.operands) == 2
@@ -68,7 +68,7 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
                     scaling = scaling_of(constant.value)
                     assert scaling is not None
                     reaches = _reaches(fmt, scaling.k)
-                    if ops.fmul_ilog2 is None:
+                    if ops.options.fmul_ilog2 is None:
                         # Past the format's reach the scaler does not help either, so it is not the remedy to name.
                         remedy = _NO_SCALER if reaches else "widen wexp or rescale"
                         refuse_degrading(constant.value, fmt, "constant", remedy)

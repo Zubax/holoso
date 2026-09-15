@@ -5,7 +5,6 @@ import html
 import json
 from dataclasses import dataclass, replace
 from importlib import resources
-from typing import assert_never
 
 from ..._lir import *
 from ..._operators import HardwareOperator
@@ -196,33 +195,18 @@ def render_schedule(lir: Lir) -> str:
         chips_at.setdefault(landing, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
         group += 1
 
-    # The landing per install kind mirrors the model's decode: a pc-gated install (a phi copy, a boolean write) always
-    # lands at `install_landing` (fire + 1); a wide slot lands there only if it fires before the boundary, else it is
-    # a read-first boundary install at every exit PC, as is a boolean slot that is not in place.
+    # The landing per install kind mirrors the model's decode: a pc-gated copy (a phi arm, an early slot install) lands
+    # at `install_landing` (fire + 1); a boundary install reads first at every exit PC.
+    early_names = {(slot.reg, slot.live_out): slot.name for slot in lir.state_slots}
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
-        for copy in block.wide_copies:  # a non-coalesced wide phi-arm merge copy
+        for copy in block.copies:  # a non-coalesced phi-arm merge copy, or a slot's early install
             fire = base_pc + copy.fire_step(lir.fetch_lag)
-            install_event(copy.dst, copy.dst.stable_label, copy.source, fire, install_landing(fire))
-        for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
-            fire = base_pc + bwrite.fire_step(lir.fetch_lag)
-            install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
-    for slot in lir.wide_state_slots:
-        match slot.install:
-            case InPlace():
-                pass
-            case WideEarlyInstall() as install:
-                fire, landing = install.fire_step(lir.fetch_lag), install.landing(lir.fetch_lag)
-                install_event(slot.reg, slot.name, install.source, fire, landing)
-            case WideBoundaryInstall(source=source):  # read-first at the boundary
-                for exit_pc in lir.exit_pcs:
-                    install_event(slot.reg, slot.name, source, exit_pc, exit_pc)
-            case _:
-                assert_never(slot.install)
-    for bslot in lir.bool_state_slots:
-        if isinstance(bslot.install, BoolBoundaryInstall):  # read-first at the boundary
-            for exit_pc in lir.exit_pcs:
-                install_event(bslot.reg, bslot.name, bslot.install.source, exit_pc, exit_pc)
+            label = early_names.get((copy.dst, copy.source), copy.dst.stable_label)
+            install_event(copy.dst, label, copy.source, fire, install_landing(fire))
+    for slot in lir.boundary_installs:  # read-first at the boundary
+        for exit_pc in lir.exit_pcs:
+            install_event(slot.reg, slot.name, slot.live_out, exit_pc, exit_pc)
     for point in lir.exit_points:
         tip = "" if point.condition is None else f" if {point.condition.stable_label}"
         chips_at.setdefault(point.pc, []).append(f"<span class='opf'>out_valid{tip}</span>")
@@ -706,12 +690,12 @@ def _bool_consts(lir: Lir) -> list[bool]:
             for operand in bop.operands:
                 if isinstance(operand.source, BoolConstRef):
                     used.add(operand.source.value)
-        for bwrite in block.bool_writes:
-            if isinstance(bwrite.source.source, BoolConstRef):
-                used.add(bwrite.source.source.value)
-    for bslot in lir.bool_state_slots:
-        if isinstance(bslot.install, BoolBoundaryInstall) and isinstance(bslot.install.source.source, BoolConstRef):
-            used.add(bslot.install.source.source.value)
+        for copy in block.copies:
+            if isinstance(copy.source.source, BoolConstRef):
+                used.add(copy.source.source.value)
+    for slot in lir.boundary_installs:
+        if isinstance(slot.live_out.source, BoolConstRef):
+            used.add(slot.live_out.source.value)
     return sorted(used)
 
 

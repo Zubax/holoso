@@ -59,13 +59,13 @@ def read_cycle(issue_cycle: int, fetch_lag: int) -> int:
 def inline_fire_cycle(commit_cycle: int, fetch_lag: int) -> int:
     """
     The cycle a PC-gated combinational statement fires: an inline operation (a select/mux, boolean logic, a float<->bool
-    cast), or a pc-gated install/copy (a phi-arm copy, an early state install, a boolean write). It reads ALL
-    its operands (or its source) and drives its destination register's write data on this single step, `fetch_lag`
-    after its scheduler-frame placement. Its result becomes readable one `READ_FIRST_EDGE` later (`landing_cycle`).
-    For a pc-gated install this is the coalescing equivalence the overlap layout relies on -- `install_landing` of
-    this fire step equals `landing_cycle(commit_cycle)`, so a phi arm coalesced onto a direct operator write lands
-    exactly where its copy would have. Whether the install sits at the work makespan or one step past lives in its
-    PLACEMENT (`install_issue_cycle`), not in this fire step.
+    cast), or a pc-gated install/copy (a phi-arm copy or an early state install). It reads ALL its operands (or its
+    source) and drives its destination register's write data on this single step, `fetch_lag` after its scheduler-frame
+    placement. Its result becomes readable one `READ_FIRST_EDGE` later (`landing_cycle`). For a pc-gated install this is
+    the coalescing equivalence the overlap layout relies on -- `install_landing` of this fire step equals
+    `landing_cycle(commit_cycle)`, so a phi arm coalesced onto a direct operator write lands exactly where its copy
+    would have. Whether the install sits at the work makespan or one step past lives in its PLACEMENT
+    (`install_issue_cycle`), not in this fire step.
     """
     return commit_cycle + fetch_lag
 
@@ -121,11 +121,10 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
 
 def install_landing(fire_step: int) -> int:
     """
-    The step a pc-gated install -- a phi copy, a boolean write, or an early state install -- commits its
-    destination and becomes readable: one after the step it fires on. The model writes the destination into `_pending`
-    one PC past the fire, so the numerical model and the liveness diagnostic route this +1 through this one helper and
-    cannot drift. A boundary slot install is the lone exception: it reads-then-writes at an exit and does not pass
-    through here.
+    The step a pc-gated copy -- a phi-arm install or an early state install -- commits its destination and becomes
+    readable: one after the step it fires on. The model writes the destination into `_pending` one PC past the fire, so
+    the numerical model and the liveness diagnostic route this +1 through this one helper and cannot drift. A boundary
+    slot install is the lone exception: it reads-then-writes at an exit and does not pass through here.
     """
     return fire_step + READ_FIRST_EDGE
 
@@ -260,7 +259,7 @@ type _Reg = RegRef | BoolRegRef
 
 
 @dataclass(frozen=True, slots=True)
-class _ConstRef:
+class WideConstRef:
     index: int
 
     @property
@@ -269,18 +268,13 @@ class _ConstRef:
 
 
 @dataclass(frozen=True, slots=True)
-class WideConstRef(_ConstRef): ...
-
-
-@dataclass(frozen=True, slots=True)
-class _Operand:
-    source: RegRef | _ConstRef
-
-
-@dataclass(frozen=True, slots=True)
-class WideOperand(_Operand):
+class WideOperand:
     source: RegRef | WideConstRef
     conditioner: WideConditioner
+
+    @property
+    def is_identity(self) -> bool:
+        return self.conditioner.is_identity
 
     @property
     def stable_label(self) -> str:
@@ -311,46 +305,34 @@ class InPlace:
 
 
 @dataclass(frozen=True, slots=True)
-class WideEarlyInstall:
+class Early:
     """
-    A pc-gated copy of a wide slot's live-out `source` into the slot register at the ABSOLUTE scheduler-frame
-    `cycle` -- a slot belongs to no block, so unlike a block copy's this cycle carries no base -- ahead of the
-    boundary, as early as the old live-in is last read and the source is available, so the source register is free
-    for the rest of the transaction.
+    A state slot's live-out is installed by a copy in the Ret block ahead of the boundary, as early as the old live-in
+    is last read and the source is available, so the source register is free for the rest of the transaction.
     """
-
-    source: WideOperand
-    cycle: int
-
-    def fire_step(self, fetch_lag: int) -> int:
-        return inline_fire_cycle(self.cycle, fetch_lag)
-
-    def landing(self, fetch_lag: int) -> int:
-        return install_landing(self.fire_step(fetch_lag))
 
 
 @dataclass(frozen=True, slots=True)
-class WideBoundaryInstall:
+class Boundary:
     """
-    A read-first copy of a wide slot's live-out `source` into the slot register at the accepted-output edge, so an
-    output still reading the live-in sees the old value.
+    A state slot's live-out is installed read-first at the accepted-output edge, so an output still reading the live-in
+    sees the old value.
     """
-
-    source: WideOperand
 
 
 @dataclass(frozen=True, slots=True)
 class WideStateSlot:
     """
     A persistent wide state register: reset to `reset_value`, holding the slot's live-in (carried over from the
-    previous initiation) until `install` replaces it with the slot's live-out. A public attribute's observable
-    `state_<name>` port is a separate output wire tapping the same value, not a property of the slot.
+    previous initiation) until `install` replaces it with `live_out`. A public attribute's observable `state_<name>`
+    port is a separate output wire tapping the same value, not a property of the slot.
     """
 
     name: str
     reg: RegRef
     reset_value: WideValue  # the encoded machine word, which also names the slot's scalar family
-    install: InPlace | WideEarlyInstall | WideBoundaryInstall
+    live_out: WideOperand
+    install: InPlace | Early | Boundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +366,10 @@ class BoolOperand:
         if isinstance(self.source, BoolConstRef) and self.inversion.invert:
             object.__setattr__(self, "source", BoolConstRef(not self.source.value))
             object.__setattr__(self, "inversion", BoolInversion())
+
+    @property
+    def is_identity(self) -> bool:
+        return self.inversion.is_identity
 
     @property
     def stable_label(self) -> str:
@@ -486,22 +472,22 @@ class BoolOutputWire(_OutputWire):
 
 
 @dataclass(frozen=True, slots=True)
-class WideCopy:
+class _Copy:
     """
-    A pc-gated move installing a phi arm's value into the merged register at a predecessor's tail: `dst`
-    takes `source` on the block-relative `issue_cycle` (placed by `install_issue_cycle`). Used when a phi arm
-    cannot coalesce onto the merged register. `settled_source` records whether `install_source_commit` answered
-    None -- which a `RegRef` operand alone cannot reveal -- informational, consumed by tests only.
+    A pc-gated move: `dst` takes `source` on the block-relative `issue_cycle`. It installs a phi arm that cannot
+    coalesce onto the merged register at a predecessor's tail (placed by `install_issue_cycle`), or a state slot's
+    live-out early in the Ret block. `settled_source` records whether `install_source_commit` answered None -- which an
+    operand alone cannot reveal -- informational, consumed by tests only.
     """
 
-    dst: RegRef
-    source: WideOperand
+    dst: RegRef | BoolRegRef
+    source: WideOperand | BoolOperand
     issue_cycle: int
     settled_source: bool
 
     @property
     def is_const(self) -> bool:
-        return isinstance(self.source.source, WideConstRef)
+        return isinstance(self.source.source, (WideConstRef, BoolConstRef))
 
     def fire_step(self, fetch_lag: int) -> int:
         return inline_fire_cycle(self.issue_cycle, fetch_lag)
@@ -511,26 +497,17 @@ class WideCopy:
 
 
 @dataclass(frozen=True, slots=True)
-class BoolWrite:
-    """
-    A boolean register install of a phi arm (a bool const or another bool register, with the arm's folded inversion)
-    on a block-relative cycle; see WideCopy.
-    """
+class WideCopy(_Copy):
+    dst: RegRef
+    source: WideOperand
+
+
+@dataclass(frozen=True, slots=True)
+class BoolCopy(_Copy):
+    """The source is a boolean register or constant, with the folded inversion."""
 
     dst: BoolRegRef
     source: BoolOperand
-    issue_cycle: int
-    settled_source: bool
-
-    @property
-    def is_const(self) -> bool:
-        return isinstance(self.source.source, BoolConstRef)
-
-    def fire_step(self, fetch_lag: int) -> int:
-        return inline_fire_cycle(self.issue_cycle, fetch_lag)
-
-    def landing(self, fetch_lag: int) -> int:
-        return install_landing(self.fire_step(fetch_lag))
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,7 +566,7 @@ def exits(terminator: Terminator) -> bool:
 class LirBlock:
     """
     One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). `ops`
-    (pooled firings), `inline_ops`, `wide_copies`, and `bool_writes` are the block's datapath events;
+    (pooled firings), `inline_ops`, and `copies` are the block's datapath events;
     `terminator` redirects the fetch PC at the block boundary. `block_makespan` is the last commit cycle inside
     the block (0 if it has none). `term_offset` is the block-relative fetch cycle at which the terminator redirects
     the PC -- the block's boundary step -- and is the single source of truth for the terminator PC (the successor
@@ -603,8 +580,7 @@ class LirBlock:
     index: int
     ops: list[PooledScheduledOp]
     inline_ops: list[InlineScheduledOp]
-    wide_copies: list[WideCopy]
-    bool_writes: list[BoolWrite]
+    copies: list[WideCopy | BoolCopy]
     terminator: Terminator
     block_makespan: int
     term_offset: int
@@ -636,26 +612,17 @@ def _trace_landing(
 
 
 @dataclass(frozen=True, slots=True)
-class BoolBoundaryInstall:
-    """
-    A read-first copy of a boolean slot's live-out `source` into the slot register at the accepted-output edge, so an
-    output or branch still reading the live-in sees the old value. The boolean bank has no early install.
-    """
-
-    source: BoolOperand
-
-
-@dataclass(frozen=True, slots=True)
 class BoolStateSlot:
     """
     A persistent boolean state register: reset to `reset_value`, holding the slot's live-in throughout the
-    transaction until `install` replaces it with the slot's live-out.
+    transaction until `install` replaces it with `live_out`. The boolean bank has no early install.
     """
 
     name: str
     reg: BoolRegRef
     reset_value: bool
-    install: InPlace | BoolBoundaryInstall
+    live_out: BoolOperand
+    install: InPlace | Boundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,7 +653,6 @@ class Lir:
     int_format: IntFormat
     regfile: RegFileLayout
     inputs: list[WideInputLoad | BoolInputLoad]  # ordered as the function parameters
-    ops: list[PooledScheduledOp]  # the pipelined pooled firings, flattened across blocks with ABSOLUTE issue cycles
     outputs: list[WideOutputWire | BoolOutputWire]
     wide_state_slots: list[WideStateSlot]  # persistent registers, ordered by attribute path
     # Control-flow overlay: the blocks that take PCs, tiling the ROM in layout order from the entry; a block that does
@@ -720,9 +686,9 @@ class Lir:
             yield from (ty.width for ty in signature.operand_types + signature.result_types if ty.is_wide)
 
     def __post_init__(self) -> None:
-        # Nothing wider than the bank may live in it, and the float format alone no longer answers whether anything
-        # does: a kernel carrying no float sizes the word below it. Registers are untyped, so every typed carrier and
-        # every operator port is the evidence instead.
+        # Nothing wider than the bank may live in it, and the float format alone cannot answer whether anything does:
+        # a kernel carrying no float sizes the word below it. Registers are untyped, so every typed carrier and every
+        # operator port is the evidence instead.
         assert all(width <= self.wide_register_width for width in self._wide_widths())
         assert self.fetch_lag in (1, 2), self.fetch_lag
         assert len({inst.operator for inst in self.instances}) == len(
@@ -749,19 +715,19 @@ class Lir:
         object.__setattr__(self, "block_base", base)
         assert all(arm in base for block in self.blocks for arm in successor_blocks(block.terminator))
         assert self.exit_pcs and min(self.exit_pcs) >= 1, "PC 0 is the accept dwell"
-        # Nothing lands past an exit: the dwell executes no write, and a conditional exit's condition holds still.
         for block in self.blocks:
-            if exits(block.terminator):
-                ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
-                installs: list[WideCopy | BoolWrite] = [*block.wide_copies, *block.bool_writes]
-                landings = [landing_cycle(op.commit_cycle, self.fetch_lag) for op in ops]
-                landings += [install.landing(self.fetch_lag) for install in installs]
-                assert all(landing <= block.term_offset for landing in landings), f"block {block.index}: past its exit"
-        for slot in self.wide_state_slots:
-            if isinstance(slot.install, WideEarlyInstall):
-                landing = slot.install.landing(self.fetch_lag)
-                (home,) = [b for b in self.blocks if base[b.index] <= landing <= self.term_pc(b)]
-                assert exits(home.terminator), f"state slot {slot.name!r} installs past its exit"
+            self._check_block(block)
+        for slot in self.state_slots:
+            assert isinstance(slot.install, InPlace) == (slot.live_out.source == slot.reg and slot.live_out.is_identity)
+            if isinstance(slot.install, Early):
+                early = [
+                    copy
+                    for block in self.blocks
+                    if exits(block.terminator)
+                    for copy in block.copies
+                    if copy.dst == slot.reg and copy.source == slot.live_out
+                ]
+                assert len(early) == 1, f"state slot {slot.name!r} has no early copy landing by its exit"
         # The numerical model evaluates firings in isolation and cannot witness a double issue; the residue across an
         # overlapped seam is asserted in the allocator, where it is known.
         for block in self.blocks:
@@ -775,6 +741,41 @@ class Lir:
                 assert all(
                     earlier.stop <= later.start for earlier, later in zip(spans, spans[1:])
                 ), f"block {block.index}: two firings busy on {inst.name} at once"
+
+    def _check_block(self, block: LirBlock) -> None:
+        ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
+        # A branch condition gets exactly one cycle of slack: a boolean result committing at the makespan lands one
+        # step before the terminator's boundary read.
+        bool_commits = [op.commit_cycle for op in ops if any(isinstance(w.dst, BoolRegRef) for w in op.writes)]
+        assert all(commit <= block.block_makespan for commit in bool_commits), f"block {block.index}: past its makespan"
+        # A copy landing past the terminator is enqueued for a PC the block never reaches: a redirect re-keys it onto
+        # the taken arm, but an exit drops it -- a silently dead install that no value comparison can see.
+        assert all(copy.landing(self.fetch_lag) <= block.term_offset for copy in block.copies), block.index
+        # Nothing lands past an exit: the dwell executes no write, and a conditional exit's condition holds still.
+        if exits(block.terminator):
+            landings = [landing_cycle(op.commit_cycle, self.fetch_lag) for op in ops]
+            assert all(landing <= block.term_offset for landing in landings), f"block {block.index}: past its exit"
+        # A copy must read its source register strictly before a sibling copy's write to that register lands. For
+        # phi-arm copies placement guarantees this because a sibling-written source register is always a settled one --
+        # a non-settled source is live through the boundary (`phi_arm_out`), so interference keeps every sibling copy
+        # destination off its register -- and settled copies share one unpushed fire step (`install_issue_cycle`). An
+        # early slot copy's source is live through its own read, so interference keeps a sibling's landing off it.
+        # Cross-bank pairs are inert, RegRef never equalling BoolRegRef.
+        for writer in block.copies:
+            for reader in block.copies:
+                assert reader.source.source != writer.dst or reader.fire_step(self.fetch_lag) < writer.landing(
+                    self.fetch_lag
+                ), f"block {block.index}: a copy reads {writer.dst} after a sibling copy's write lands"
+
+    @property
+    def state_slots(self) -> list[WideStateSlot | BoolStateSlot]:
+        slots: list[WideStateSlot | BoolStateSlot] = [*self.wide_state_slots, *self.bool_state_slots]
+        return slots
+
+    @property
+    def boundary_installs(self) -> list[WideStateSlot | BoolStateSlot]:
+        """The state slots installed at the accepted-output edge rather than by the microcode."""
+        return [slot for slot in self.state_slots if isinstance(slot.install, Boundary)]
 
     @property
     def ports(self) -> list[Port]:
@@ -898,21 +899,17 @@ class Lir:
 
     @property
     def group_by_cycle(self) -> tuple[dict[int, list[PooledScheduledOp]], dict[int, list[PooledScheduledOp]]]:
+        """The pooled firings by their absolute issue and commit steps."""
         issues: dict[int, list[PooledScheduledOp]] = {}
         commits: dict[int, list[PooledScheduledOp]] = {}
-        for op in self.ops:
-            issues.setdefault(op.issue_cycle, []).append(op)
-            commits.setdefault(op.commit_cycle, []).append(op)
+        for block in self.blocks:
+            base = self.block_base[block.index]
+            for op in block.ops:
+                issues.setdefault(base + op.issue_cycle, []).append(op)
+                commits.setdefault(base + op.commit_cycle, []).append(op)
         for group in (issues, commits):
             for ops in group.values():
-                ops.sort(
-                    key=lambda op: (
-                        op.inst.operator.mnemonic,
-                        op.inst.index,
-                        op.writes[0].dst.index,
-                        op.issue_cycle,
-                    )
-                )
+                ops.sort(key=lambda op: (op.inst.operator.mnemonic, op.inst.index, op.writes[0].dst.index))
         return issues, commits
 
     def _cfg_residence(
@@ -995,9 +992,9 @@ class Lir:
     def liveness(self) -> dict[_Reg, set[int]]:
         """
         Map each register of both banks to the fetch PCs on which it holds a live value: from a value's landing through
-        its last read, by static register liveness over the CFG paths. It equals the numerical model's residence wherever
-        every CFG path can execute, and over-tints (never under-tints) where branches correlate within or across
-        transactions.
+        its last read, by static register liveness over the CFG paths. It equals the numerical model's residence
+        wherever every CFG path can execute, and over-tints (never under-tints) where branches correlate within or
+        across transactions.
         A diagnostic for the report and the tests; the emitter and the model never read it.
 
         Timing comes from the shared helpers the model uses: an input lands on PC 1, a result at every PC
@@ -1021,24 +1018,15 @@ class Lir:
             defs.setdefault(load.dst, []).append(1)
         for wire in self.outputs:
             read(wire.tap, exit_pcs)
-        slots: list[WideStateSlot | BoolStateSlot] = [*self.wide_state_slots, *self.bool_state_slots]
-        for slot in slots:
-            match slot.install:
-                case InPlace():
-                    carried.add(slot.reg)
-                case WideEarlyInstall() as install:
-                    carried.add(slot.reg)
-                    defs.setdefault(slot.reg, []).append(install.landing(self.fetch_lag))
-                    read(install.source, [install.fire_step(self.fetch_lag)])
-                case WideBoundaryInstall(source=source) | BoolBoundaryInstall(source=source):
-                    boundary_installed.append(slot.reg)
-                    read(source, exit_pcs)
-                case _:
-                    assert_never(slot.install)
+        for slot in self.state_slots:
+            if isinstance(slot.install, Boundary):
+                boundary_installed.append(slot.reg)
+                read(slot.live_out, exit_pcs)
+            else:
+                carried.add(slot.reg)
         for block in self.blocks:
             base_pc = self.block_base[block.index]
-            copies: list[WideCopy | BoolWrite] = [*block.wide_copies, *block.bool_writes]
-            for copy in copies:
+            for copy in block.copies:
                 step = base_pc + copy.fire_step(self.fetch_lag)
                 defs.setdefault(copy.dst, []).append(install_landing(step))
                 read(copy.source, [step])

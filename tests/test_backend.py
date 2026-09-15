@@ -5,7 +5,6 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -60,8 +59,7 @@ from holoso import SynthesisResult
 from holoso._type import FloatType, IntType, ScalarType
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._lir import BoolBoundaryInstall, BoolRegRef, Lir, RegRef, WideBoundaryInstall, WideStateSlot
-from holoso._lir._ir import BoolStateSlot
+from holoso._lir import BoolRegRef, Boundary, Lir, RegRef, WideStateSlot
 from holoso._mir import MirOptions, Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
@@ -539,15 +537,12 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         fetch_lag=_FETCH_LAG,
         regfile=RegFileLayout(nreg=4, nrd=2, nwr=2, nload=2),
         inputs=[WideInputLoad("a", RegRef(0), FloatType(fmt)), WideInputLoad("b", RegRef(1), FloatType(fmt))],
-        ops=[op],
         outputs=[
             WideOutputWire("out_0", WideOperand(RegRef(2), FloatSignControl()), FloatType(fmt)),
             WideOutputWire("out_1", WideOperand(RegRef(3), FloatSignControl()), FloatType(fmt)),
         ],
         wide_state_slots=[],
-        blocks=[
-            LirBlock(0, [op], [], [], [], Jump(Exit()), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))
-        ],
+        blocks=[LirBlock(0, [op], [], [], Jump(Exit()), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
         bool_regfile=BoolRegFileLayout(nreg=0),
         bool_state_slots=[],
     )
@@ -607,19 +602,11 @@ def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(bank: str, 
     name = f"shared_live_out_{bank}"
     lir = build_lir(_run(kernel, _ops(FloatFormat(6, 18)), FloatFormat(6, 18)), name)
     written = {event.dst for event in write_events(lir)}
-    coexisting: Sequence[WideStateSlot | BoolStateSlot]
-    if bank == "wide":
-        coexisting = [
-            slot
-            for slot in lir.wide_state_slots
-            if isinstance(slot.install, WideBoundaryInstall) and slot.reg in written
-        ]
-    else:
-        coexisting = [
-            slot
-            for slot in lir.bool_state_slots
-            if isinstance(slot.install, BoolBoundaryInstall) and slot.reg in written
-        ]
+    coexisting = [
+        slot
+        for slot in lir.boundary_installs
+        if isinstance(slot, WideStateSlot) == (bank == "wide") and slot.reg in written
+    ]
     assert coexisting, "the premise needs a boundary-installing slot whose own register also takes opcode writes"
     _elaborate(name, generate(lir).verilog, tmp_path)
 
@@ -770,10 +757,10 @@ def test_the_boundary_installed_integer_slot_taps_its_conditioner() -> None:
         lower_to_mir(lower(_IntegerKernel().step, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(_INT_OPTIONS)),
         "int_kernel",
     )
-    (slot,) = [s for s in lir.wide_state_slots if isinstance(s.install, WideBoundaryInstall)]
-    assert isinstance(slot.install, WideBoundaryInstall) and isinstance(slot.install.source.source, RegRef)
+    (slot,) = [s for s in lir.wide_state_slots if isinstance(s.install, Boundary)]
+    assert isinstance(slot.live_out.source, RegRef)
     verilog = generate(lir).verilog
-    assert f"if (out_valid && out_ready) regs[{slot.reg.index}] <= regs[{slot.install.source.source.index}];" in verilog
+    assert f"if (out_valid && out_ready) regs[{slot.reg.index}] <= regs[{slot.live_out.source.index}];" in verilog
 
 
 def test_an_integer_port_declares_itself_signed(_integer_result: SynthesisResult) -> None:

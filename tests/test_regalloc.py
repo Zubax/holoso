@@ -25,7 +25,7 @@ from holoso._lir import (
     Lir,
     OpWriteSource,
     RegRef,
-    WideBoundaryInstall,
+    Boundary,
     WideConstRef,
     read_arms,
     write_arms,
@@ -75,15 +75,7 @@ from ._modelref import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-import madd  # noqa: E402
-import poly3  # noqa: E402
-from biquad import Biquad  # noqa: E402
 from cordic_sincos import CordicSinCos  # noqa: E402
-from ekf1_stateful import Ekf1  # noqa: E402
-from ekf1_stateless import update_x_P  # noqa: E402
-from fir import Fir4  # noqa: E402
-from imu_fusion import ImuFusion  # noqa: E402
-from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
 _FADD = FAddOperator(_FMT, FAddOptions())
@@ -407,24 +399,17 @@ def _select_witness(x: float) -> float:
     return x
 
 
-# The sorter chain is the lane-keying witness: two of its firings land the min and the max lane in one register, which
-# an instance-keyed writer count would price as one writer. cordic_sincos and imu_fusion are the inline-result witnesses
-# (34 and 52 annealer-counted writers against 4 and 46 emitted before the keys resolved the operand registers); the
-# casts are the boolean-register witness (two casts of predicates sharing a boolean register into one wide register are
-# one arm, which the wide bank sees because the boolean bank is allocated first); the selects are the signed constant
-# witness (three selects over `-0.5` and one register are one arm); SharedLiveOut is the slot witness (a
-# boundary-installing slot whose register also takes opcode writes).
-_EQUALITY_KERNELS: dict[str, tuple[Callable[[], Callable[..., object]], FSortOptions | None]] = {
-    "madd": (lambda: madd.madd, None),
-    "poly3": (lambda: poly3.poly3, None),
-    "fir": (lambda: Fir4().__call__, None),
-    "biquad": (lambda: Biquad().__call__, None),
-    "integrator": (lambda: TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__, None),
-    "ekf1_stateless": (lambda: update_x_P, None),
-    "ekf1_stateful": (lambda: Ekf1().update, None),
+# The build asserts the wide bank's objective against the emitted arms on every kernel; these witnesses pin that the
+# merges the objective must price alike are really exercised. The sorter chain is the lane-keying witness: two of its
+# firings land the min and the max lane in one register, which an instance-keyed writer count would price as one
+# writer. cordic_sincos is the inline-result witness, keyed by the registers its operands resolve to; the casts are the
+# boolean-register witness (two casts of predicates sharing a boolean register into one wide register are one arm,
+# which the wide bank sees because the boolean bank is allocated first); the selects are the signed constant witness
+# (three selects over `-0.5` and one register are one arm); SharedLiveOut is the slot witness (a boundary-installing
+# slot whose register also takes opcode writes).
+_WITNESSES: dict[str, tuple[Callable[[], Callable[..., object]], FSortOptions | None]] = {
     "sorter": (lambda: _sorter_witness, FSortOptions()),
     "cordic_sincos": (lambda: CordicSinCos().__call__, None),
-    "imu_fusion": (lambda: ImuFusion().update, FSortOptions()),
     "casts": (lambda: _casts_witness, None),
     "selects": (lambda: _select_witness, None),
     "shared_live_out": (lambda: SharedLiveOut().step, None),
@@ -438,11 +423,10 @@ def _merged_inline_arms(lir: Lir) -> tuple[int, int]:
 
 
 @pytest.mark.parametrize("instances", [1, 2, 3])
-@pytest.mark.parametrize("name", list(_EQUALITY_KERNELS))
-def test_engine_objective_equals_the_emitted_steering(name: str, instances: int) -> None:
-    # The build asserts the wide bank's objective against the emitted arms on every kernel; the witnesses here pin
-    # that their premise (the merge each one stands for) is really exercised.
-    make_kernel, fsort = _EQUALITY_KERNELS[name]
+@pytest.mark.parametrize("name", list(_WITNESSES))
+def test_the_steering_witnesses_exercise_their_merges(name: str, instances: int) -> None:
+    # The instance counts reach the annealer's rebinding moves, whose objective the build checks against the arms.
+    make_kernel, fsort = _WITNESSES[name]
     options = default_options(_FMT)
     if fsort is not None:
         options = replace(options, operator=replace(options.operator, fsort=fsort))
@@ -463,7 +447,7 @@ def test_engine_objective_equals_the_emitted_steering(name: str, instances: int)
     if name == "shared_live_out":
         written = {e.dst for e in write_events(lir)}
         assert any(
-            isinstance(slot.install, WideBoundaryInstall) and slot.reg in written for slot in lir.wide_state_slots
+            isinstance(slot.install, Boundary) and slot.reg in written for slot in lir.wide_state_slots
         ), "the witness needs a boundary-installing slot whose register also takes opcode writes"
     if name == "sorter":
         lanes = {
@@ -575,7 +559,7 @@ def test_the_build_carries_the_residue_into_the_binding() -> None:
     residue = _prepare(mir, DEFAULT_FETCH_STAGES - 1).schedules.block_entry_busy[tail]
     assert residue == {(slow, 0): 3}, residue
     lir = build_lir(mir, "residue", FROZEN_TUNING)
-    slow_ops = [op for op in lir.ops if op.inst.operator is slow]
+    slow_ops = [op for op in (op for block in lir.blocks for op in block.ops) if op.inst.operator is slow]
     assert len({op.writes[0].dst for op in slow_ops}) == 1, "the premise needs the merged lane to cost less"
     assert {op.inst.index for op in slow_ops} == {0, 1}
 

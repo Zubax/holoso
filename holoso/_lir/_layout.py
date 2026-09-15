@@ -43,6 +43,15 @@ class _SpillCarry:
     livein_landing: dict[ValueId, int]
 
 
+def _terminator_floor(mir: Mir, bid: int) -> int:
+    """
+    The entry block's terminator cannot redirect at PC 0, because the sequencer's accept hold (`pc==0`) precedes the
+    branch redirect and the input loads land on cycle 1. Every other block may redirect at its own base PC, so an
+    empty resident-condition branch there drains nothing, exactly like a jump.
+    """
+    return 1 if bid == mir.entry else 0
+
+
 def _issue_side_envelope(
     mir: Mir, sched: Schedule, block: MirBlock, livein_landing: Mapping[ValueId, int], fetch_lag: int
 ) -> int:
@@ -54,12 +63,9 @@ def _issue_side_envelope(
     from where the condition becomes readable: a PRODUCED condition lands inside the block at its landing; a SPILLED-IN
     live-in condition (carried past an overlapped predecessor's shrunk terminator) lands at its carried landing cycle
     (`livein_landing`); a RESIDENT live-in condition (an input, persistent state, or a fully-drained prior-block
-    result) is available from the block's first cycle and adds nothing. The floor starts at 1 for the ENTRY block only:
-    its terminator cannot redirect at PC 0, because the sequencer's accept hold (`pc==0`) precedes the branch
-    redirect, so an entry branch must settle at PC>=1. Every other block may redirect at its own base PC, so its floor
-    starts at 0 -- an empty resident-condition branch then drains nothing, exactly like a jump.
+    result) is available from the block's first cycle and adds nothing.
     """
-    floor = 1 if block.id == mir.entry else 0
+    floor = _terminator_floor(mir, block.id)
     for vid, issue in sched.issue_cycle.items():
         word, operator = _control_word(mir, vid, issue, fetch_lag)
         # Without the operand-read floor the op would fire past the shrunk terminator and never execute.
@@ -184,7 +190,7 @@ def layout_offsets(
     installs anything ends at the drained boundary of its install-inclusive makespan: every result lands a fixed
     pipeline past its commit, so the latest landing is the makespan's, and a phi tail install lands read-first there
     too (the makespan one past the work only when a source is the block's own last work; see `install_issue_cycle`).
-    An empty block ends where its received spills land, the entry no earlier than its input loads on cycle 1. A slot's
+    An empty block ends where its received spills land, no earlier than its `_terminator_floor`. A slot's
     boundary install asks for no drain: it samples its source on the exit PC, as an output does.
     """
     block_makespan: dict[int, int] = {}
@@ -197,8 +203,7 @@ def layout_offsets(
             term_offset = schedules.overlap_term_offset[bid]
         else:
             drains = bool(sched.issue_cycle) or bid in has_install_blocks
-            floor = 1 if bid == mir.entry else 0
-            drain = boundary_step(makespan, fetch_lag) if drains else floor
+            drain = boundary_step(makespan, fetch_lag) if drains else _terminator_floor(mir, bid)
             term_offset = max([drain, *schedules.block_inflight[bid].values()])
         assert term_offset <= boundary_step(
             makespan, fetch_lag
@@ -216,7 +221,7 @@ def _pc_less(mir: Mir, schedules: BlockSchedules, blocks: list[LirBlock]) -> dic
     """
     jumps: dict[int, Arm] = {}
     for block in blocks:
-        idle = not (block.ops or block.inline_ops or block.wide_copies or block.bool_writes)
+        idle = not (block.ops or block.inline_ops or block.copies)
         received = schedules.block_inflight[block.index] or schedules.block_entry_busy[block.index]
         if block.index != mir.entry and idle and not received and isinstance(block.terminator, Jump):
             jumps[block.index] = block.terminator.target

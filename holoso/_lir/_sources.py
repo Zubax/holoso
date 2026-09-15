@@ -14,20 +14,19 @@ from dataclasses import dataclass
 from .._operators import BoolInversion, InlineHardwareOperator, PortConditioner, WideConditioner
 from .._util import ValueId
 from ._ir import (
-    BoolBoundaryInstall,
     BoolConstRef,
     BoolInputLoad,
     BoolOperand,
     BoolRegRef,
+    BoolStateSlot,
     Lir,
     OperatorInstance,
     ReadPort,
     RegRef,
-    WideBoundaryInstall,
     WideConstRef,
-    WideEarlyInstall,
     WideInputLoad,
     WideOperand,
+    WideStateSlot,
     pooled_write_word,
 )
 
@@ -128,7 +127,7 @@ def read_sources_per_port(lir: Lir) -> dict[ReadPort, list[ReadSource]]:
     """
     regs: dict[ReadPort, set[int]] = {}
     consts: dict[ReadPort, list[WideConstRef]] = {}
-    for op in lir.ops:
+    for op in (op for block in lir.blocks for op in block.ops):
         for pos, operand in enumerate(op.operands):
             source = operand.source
             if isinstance(source, RegRef):
@@ -147,38 +146,34 @@ def write_events(lir: Lir) -> list[WriteEvent]:
     Every microcode-driven register write as `(dst, source, ROM step)`, in one deterministic traversal shared by the
     codebook builder and the packer so the code<->source mapping cannot drift. The ROM step is the source's executing
     step (the fetch PC it fires on, minus the fetch lag): a pooled write rides its commit cycle, an inline/copy/write
-    rides `block_base + issue/commit`, an early state install its own absolute cycle. Boundary state installs are
+    rides `block_base + issue/commit`. Boundary state installs are
     handshake-gated arms, not opcode sources, so they are excluded here.
     """
     events: list[WriteEvent] = []
-    for op in lir.ops:
-        for write in op.writes:
-            if isinstance(write.dst, RegRef):
-                invert = False  # a wide lane conditions on the wrapper, not on the opcode
-            else:
-                assert isinstance(write.conditioner, BoolInversion)
-                invert = write.conditioner.invert
-            events.append(
-                WriteEvent(write.dst, OpWriteSource(op.inst, write.port, invert), pooled_write_word(op.commit_cycle))
-            )
+    for block in lir.blocks:
+        base = lir.block_base[block.index]
+        for op in block.ops:
+            for write in op.writes:
+                if isinstance(write.dst, RegRef):
+                    invert = False  # a wide lane conditions on the wrapper, not on the opcode
+                else:
+                    assert isinstance(write.conditioner, BoolInversion)
+                    invert = write.conditioner.invert
+                lane = OpWriteSource(op.inst, write.port, invert)
+                events.append(WriteEvent(write.dst, lane, pooled_write_word(base + op.commit_cycle)))
     for block in lir.blocks:
         base = lir.block_base[block.index]
         for inline_op in block.inline_ops:
             source = InlineWriteSource(inline_op.operator, tuple(inline_op.operands), inline_op.write.conditioner)
             events.append(WriteEvent(inline_op.write.dst, source, base + inline_op.commit_cycle))
-        for copy in block.wide_copies:
+        for copy in block.copies:
             events.append(WriteEvent(copy.dst, MoveWriteSource(copy.source), base + copy.issue_cycle))
-        for bwrite in block.bool_writes:
-            events.append(WriteEvent(bwrite.dst, MoveWriteSource(bwrite.source), base + bwrite.issue_cycle))
-    for slot in lir.wide_state_slots:
-        if isinstance(slot.install, WideEarlyInstall):
-            events.append(WriteEvent(slot.reg, MoveWriteSource(slot.install.source), slot.install.cycle))
     return events
 
 
 # A register write the handshake selects instead of the microcode: an input load at the accept edge, or a state
 # slot's boundary install at the accepted-output edge.
-type HandshakeArm = WideInputLoad | BoolInputLoad | WideBoundaryInstall | BoolBoundaryInstall
+type HandshakeArm = WideInputLoad | BoolInputLoad | WideStateSlot | BoolStateSlot
 
 
 def handshake_arms(lir: Lir) -> dict[RegRef | BoolRegRef, HandshakeArm]:
@@ -189,14 +184,9 @@ def handshake_arms(lir: Lir) -> dict[RegRef | BoolRegRef, HandshakeArm]:
     """
     arms: dict[RegRef | BoolRegRef, HandshakeArm] = {load.dst: load for load in lir.inputs}
     assert len(arms) == len(lir.inputs)
-    for slot in lir.wide_state_slots:
-        if isinstance(slot.install, WideBoundaryInstall):
-            assert slot.reg not in arms
-            arms[slot.reg] = slot.install
-    for bslot in lir.bool_state_slots:
-        if isinstance(bslot.install, BoolBoundaryInstall):
-            assert bslot.reg not in arms
-            arms[bslot.reg] = bslot.install
+    for slot in lir.boundary_installs:
+        assert slot.reg not in arms
+        arms[slot.reg] = slot
     return arms
 
 
@@ -213,6 +203,28 @@ def write_arms(lir: Lir) -> dict[RegRef | BoolRegRef, int]:
     for dst in handshake_arms(lir):
         arms[dst] = arms.get(dst, 0) + 1
     return arms
+
+
+@dataclass(frozen=True, slots=True)
+class Steering:
+    """
+    The mux arms beyond each endpoint's first, since a lone source needs no multiplexer: the read ports', the wide
+    registers' write selects -- the two the register allocator minimizes -- and the boolean registers' write selects,
+    which it does not price.
+    """
+
+    read: int
+    wide_write: int
+    bool_write: int
+
+
+def steering(lir: Lir) -> Steering:
+    writes = write_arms(lir)
+    return Steering(
+        read=sum(max(0, n - 1) for n in read_arms(lir).values()),
+        wide_write=sum(max(0, n - 1) for dst, n in writes.items() if isinstance(dst, RegRef)),
+        bool_write=sum(max(0, n - 1) for dst, n in writes.items() if isinstance(dst, BoolRegRef)),
+    )
 
 
 def write_sources_per_register(events: list[WriteEvent]) -> dict[RegRef | BoolRegRef, list[WriteSource]]:

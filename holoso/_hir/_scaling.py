@@ -79,6 +79,11 @@ class Scaling:
         magnitude = self.magnitude()
         return None if magnitude is None else (-magnitude if self.negative else magnitude)
 
+    def ratio(self) -> Fraction:
+        """Exact, as the significand is a binary fraction."""
+        magnitude = Fraction(self.significand) * Fraction(2) ** self.k
+        return -magnitude if self.negative else magnitude
+
     def rendering(self) -> Rendering | None:
         """
         None where it is a product no host float names; an exponent never asks the host, which is what lets
@@ -156,7 +161,10 @@ class Reading:
     layers: tuple[ValueId, ...]
 
 
-def _layer(hir: Hir, vid: ValueId, constant: Callable[[ValueId], float | None]) -> tuple[ValueId, Scaling] | None:
+def scaling_layer(
+    hir: Hir, vid: ValueId, constant: Callable[[ValueId], float | None]
+) -> tuple[ValueId, Scaling] | None:
+    """The one constant scaling `vid` applies directly to its operand, which it also names."""
     match hir.nodes[vid]:
         case Operation(operator=FloatMulPow2(k=k), operands=(x,)):
             return x, Scaling(1.0, k, False)
@@ -184,7 +192,7 @@ def read_scaling(
     layers: list[ValueId] = []
     total = Scaling(1.0, 0, False)
     current = vid
-    while (layer := _layer(hir, current, constant)) is not None and exclusive(current):
+    while (layer := scaling_layer(hir, current, constant)) is not None and exclusive(current):
         operand, scaling = layer
         composed = total.compose(scaling)
         if layers and composed.rendering() is None:

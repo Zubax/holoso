@@ -44,7 +44,7 @@ def specialize(hir: Hir, int_format: IntFormat) -> Hir | None:
     assert width >= 2
     substitutions = 0
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         # Counts are read off the ORIGINAL graph: this pass folds nothing, so a constant there is a constant here.
         nonlocal substitutions
         match node:

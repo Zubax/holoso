@@ -233,20 +233,7 @@ def build_terminator(terminator: MirTerminator, alloc: Allocation) -> Terminator
             return Jump(Exit())
 
 
-def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
-    if base == 0:
-        return op
-    return PooledScheduledOp(
-        inst=op.inst,
-        operands=op.operands,
-        writes=op.writes,
-        issue_cycle=op.issue_cycle + base,
-        latency=op.latency,
-        immediates=op.immediates,
-    )
-
-
-def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperation] | None = None) -> ConstPool:
+def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperation]) -> ConstPool:
     """
     Build the immediate/ROM pool shared by both wide families, interned by the typed encoded value, so
     encoding-equal float literals share a word and class-aware equality keeps `1` and `1.0` distinct where raw
@@ -272,7 +259,7 @@ def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperati
         elif isinstance(node, MirPhi):  # a constant phi arm becomes a copy source, so it must be pooled
             for _, arm, _ in node.arms:
                 note(arm)
-    for operation in (bool_operations or {}).values():
+    for operation in bool_operations.values():
         for operand in operation.operands:
             note(operand)
     for out in mir.outputs:

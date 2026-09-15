@@ -10,9 +10,10 @@ from ._const import Const
 from .._util import BlockId, ValueId, reverse_postorder_of
 from ._ir import Branch, Hir, HirBuilder, InPort, Jump, Node, Operation, Phi, Ret, StateRead, Terminator, successors
 
-# A pass supplies one of these to rebuild each value into the target builder; it returns the new value id and may fold
-# an operation into a constant. The builder is already positioned at the value's block.
-type BuildValue = Callable[[HirBuilder, Node, dict[ValueId, ValueId]], ValueId]
+# A pass supplies one of these to rebuild each value into the target builder; it is handed the value's old id and node,
+# returns the new value id, and may fold an operation into a constant. The builder is already positioned at the value's
+# block.
+type BuildValue = Callable[[HirBuilder, ValueId, Node, dict[ValueId, ValueId]], ValueId]
 
 
 def copy_node(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
@@ -82,7 +83,7 @@ def rebuild(hir: Hir, build_value: BuildValue | None = None, keep: Set[ValueId] 
 
     def emit(vid: ValueId) -> None:
         node = hir.nodes[vid]
-        remap[vid] = copy_node(builder, node, remap) if build_value is None else build_value(builder, node, remap)
+        remap[vid] = copy_node(builder, node, remap) if build_value is None else build_value(builder, vid, node, remap)
 
     builder.position_at(entry)
     for vid in hir.input_ids:

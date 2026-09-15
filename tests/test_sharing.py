@@ -306,7 +306,7 @@ def test_a_common_significand_is_factored_out_of_a_sum(
 
 def test_factoring_declines_where_it_removes_nothing() -> None:
     # Carrying an exponent step inside retires nothing: it swaps a multiply for a scaler and moves the multiply
-    # `3x + 6y` tells the two apart: factored it reads fmul + fmul_ilog2 + fadd.
+    # behind the addition. `3x + 6y` tells the two apart: factored it would read fmul + fmul_ilog2 + fadd.
     assert _mnemonics(_differing_exponents, _options(fma=False)) == collections.Counter({"fmul": 2, "fadd": 1})
 
 
@@ -318,9 +318,6 @@ def test_factoring_declines_where_the_scalings_are_read_elsewhere() -> None:
         return -t + -s, t, s
 
     assert _mnemonics(kernel, _options(fma=False))["fmul_ilog2"] == 2
-
-
-# Defects the review loop found: each of these crashed or answered differently before its fix.
 
 
 def test_factoring_leaves_an_addend_the_fold_already_answered() -> None:

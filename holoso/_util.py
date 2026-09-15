@@ -2,6 +2,7 @@
 Shared auxiliary entities used across the IR layers.
 """
 
+import re
 from collections.abc import Mapping
 
 type ValueId = int
@@ -9,6 +10,8 @@ type ValueId = int
 
 type BlockId = int
 """A basic-block identifier, unique within one control-flow graph."""
+
+VERILOG_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def reverse_postorder_of(entry: BlockId, successors: Mapping[BlockId, list[BlockId]]) -> list[BlockId]:

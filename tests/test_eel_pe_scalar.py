@@ -392,6 +392,18 @@ def test_a_whole_exponent_past_the_bound_takes_the_general_rung() -> None:
         holoso.synthesize(_exponent_past_the_float_range, _FADD_FMUL, name="k")
 
 
+def _int_power_past_the_chain(k: int) -> int:
+    return k**129 + (3**129) % 17
+
+
+def test_an_integer_power_past_the_chain_bound_stays_integral() -> None:
+    # The bound exists only to hand a float power to the general rung; an integral result has no such rung.
+    model = holoso.synthesize(_int_power_past_the_chain, _INT_ONLY, name="k").numerical_model.elaborate()
+    for k in (-1, 0, 1):
+        (out,) = model.run(k)
+        assert isinstance(out, holoso.IntValue) and int(out) == _int_power_past_the_chain(k), k
+
+
 def _dead_pole(x: float) -> float:
     y = 0.0**-1  # noqa: F841
     return x

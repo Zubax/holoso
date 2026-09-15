@@ -45,19 +45,14 @@ type StaticWholeNonNegative[T] = T
 type StaticWholeNegative[T] = T
 type StaticOneHalf[T] = T
 
-# The chain needs no transcendental hardware and measures at least as accurate as the general rung at every
-# exponent both can express, so this bound is deliberately a length cap and nothing more: 128 keeps the chain
-# inside a couple of dozen cycles while covering every exponent a kernel spells by hand.
-_WHOLE_MAX = 128.0
-
 
 def _whole(const: bool | int | float) -> bool:
     return not isinstance(const, float) or const.is_integer()
 
 
 _REFINEMENTS: dict[TypeAliasType, Callable[[bool | int | float], bool]] = {
-    StaticWholeNonNegative: lambda c: _whole(c) and 0 <= c <= _WHOLE_MAX,
-    StaticWholeNegative: lambda c: _whole(c) and -_WHOLE_MAX <= c < 0,
+    StaticWholeNonNegative: lambda c: _whole(c) and c >= 0,
+    StaticWholeNegative: lambda c: _whole(c) and c < 0,
     StaticOneHalf: lambda c: c == 0.5,
 }
 
@@ -66,7 +61,7 @@ assert not any(
     one is not other and admits(sample) and _REFINEMENTS[other](sample)
     for one, admits in _REFINEMENTS.items()
     for other in _REFINEMENTS
-    for sample in (-_WHOLE_MAX, -2, -1, -0.5, 0, 0.5, 1, 2, _WHOLE_MAX)
+    for sample in (-1e300, -2, -1, -0.5, 0, 0.5, 1, 2, 1e300)
 ), "the refinements must be pairwise disjoint"
 
 

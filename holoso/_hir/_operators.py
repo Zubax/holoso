@@ -105,8 +105,6 @@ class Operator(ABC):
     # The default is False so a future error-bearing operator that omits the declaration is a missed optimization
     # rather than a silent spurious-error bug; pure operators opt in explicitly.
     speculatable: ClassVar[bool] = False
-    # Rides the reader's port conditioner at every consumer position, so a pass prices it at nothing.
-    sideband: ClassVar[bool] = False
 
     @property
     @abstractmethod
@@ -212,7 +210,6 @@ class FloatDiv(Operator):
 class FloatNeg(Operator):
     mnemonic: ClassVar[str] = "fneg"
     speculatable: ClassVar[bool] = True
-    sideband: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -227,7 +224,6 @@ class FloatNeg(Operator):
 class FloatAbs(Operator):
     mnemonic: ClassVar[str] = "fabs"
     speculatable: ClassVar[bool] = True
-    sideband: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:
@@ -780,7 +776,6 @@ class BoolXor(CommutativeOperator):
 class BoolNot(Operator):
     mnemonic: ClassVar[str] = "bnot"
     speculatable: ClassVar[bool] = True
-    sideband: ClassVar[bool] = True
 
     @property
     def signature(self) -> Signature:

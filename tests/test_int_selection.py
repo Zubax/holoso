@@ -26,7 +26,7 @@ import holoso._operators as operators
 from holoso._backend.verilog._emit import generate
 from holoso._eel import lower as lower_frontend
 from holoso._hir import FloatFloor, FloatNeg, FloatToInt, FloatType as HirFloatType, HirBuilder
-from holoso._lir import Lir, PooledScheduledOp, WideEarlyInstall, WideOperand
+from holoso._lir import Lir, PooledScheduledOp, WideOperand
 from holoso._mir import Mir, MirBuilder, MirIntConst, MirInterpreter, MirOperation, lower as lower_to_mir
 from holoso._operators import (
     FILog2Operator,
@@ -43,7 +43,7 @@ from holoso._operators import (
 from holoso._type import FloatType, IntType
 from holoso._value import FloatValue, IntValue
 
-from ._modelref import default_ifmt, build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import default_ifmt, build_lir, early_install, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 from .test_eel_calls import _min_max_of_ints
 from .test_int_synthesis import (
     cross_boundary,
@@ -323,7 +323,7 @@ def test_a_slot_fed_by_an_integer_input_installs_ahead_of_the_boundary() -> None
     """
     lir = build_lir(_select(InputLatch().step), "input_latch")
     (slot,) = lir.wide_state_slots
-    assert isinstance(slot.install, WideEarlyInstall) and slot.install.cycle == 0
+    assert early_install(lir, slot)[1].issue_cycle == 0
 
 
 def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering() -> None:
@@ -359,16 +359,14 @@ def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering(
 def test_a_sign_that_cannot_be_observed_costs_no_conditioner() -> None:
     """
     `bool(x)` reads the exponent alone, so the negation feeding the second call is unobservable. The two must name
-    ONE operation and the emitted datapath must carry no sign conditioner at all; before the operand was declared
-    the operand was declared unconditioned this kernel emitted one `holoso_fsgnop` call for a sign that could not
-    change the answer.
+    ONE operation and the emitted datapath must carry no sign conditioner at all.
     """
 
     def kernel(x: float) -> tuple[bool, bool]:
         return bool(x), bool(-x)
 
-    # The conditioner count is the sentinel; the values below cannot distinguish the fix, `bool(x)` and `bool(-x)`
-    # agreeing for every x, and stand only as insurance that the erasure did not disturb the answer.
+    # The conditioner count is the sentinel; `bool(x)` and `bool(-x)` agree for every x, so the values below only
+    # confirm that the erasure left the answer intact.
     result = holoso.synthesize(kernel, OPTIONS, name="unobservable_sign")
     assert result.verilog_output.verilog.count("holoso_fsgnop(") == 0
     model = result.numerical_model.elaborate()

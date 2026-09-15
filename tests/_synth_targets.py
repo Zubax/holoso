@@ -177,8 +177,8 @@ TARGETS: list[SynthTarget] = [
     # baseline. One explicit row per (example, flow); duplication is intentional.
     _for_example("madd", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("madd", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
-    _for_example("madd", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
-    _for_example("poly3", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    _for_example("madd", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
+    _for_example("poly3", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, fmul=FMulOptions(stage_pack=1))),
     _for_example("poly3", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("poly3", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1))),
     _for_example("signal_window", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
@@ -325,9 +325,9 @@ TARGETS: list[SynthTarget] = [
         "ekf1_stateful",
         FlowId.DIAMOND_ECP5,
         100,
-        # Closed lean: the register file through the adder's b-port read mux into its exponent difference (81.5 MHz
-        # with no stage) takes the adder's input stage.
-        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1)),
+        # The register file through the adder's b-port read mux into its exponent difference (81.5 MHz with no stage)
+        # takes the adder's input stage, and its normalizing shift the normalize stage.
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_normalize=1)),
         kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
@@ -515,7 +515,7 @@ TARGETS: list[SynthTarget] = [
         kernel=_to_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=_op_config(_F_e6m18, fatan2=_TO_POLAR_FATAN2),
+        ops=_op_config(_F_e6m18, fatan2=_TO_POLAR_FATAN2, fmul=FMulOptions(stage_output=1)),
         name="to_polar_e6m18",
     ),
     SynthTarget(
@@ -565,7 +565,7 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         ops=_op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_output=1),
             fdiv=FDivOptions(stage_input=1),
         ),

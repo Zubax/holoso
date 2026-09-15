@@ -728,8 +728,7 @@ def _descend(state: _State, decisions: _Decisions) -> int:
                     if state.cost < before - _EPSILON:
                         improved = True
                     else:
-                        restored = state.swap_instances(i, j)
-                        assert restored
+                        _unswap(state, i, j)
         for i in decisions.flippable:
             before = state.cost
             state.flip_firing(i)

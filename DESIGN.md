@@ -324,6 +324,9 @@ and a scalar entry may be lifted per key to apply elementwise over an array's le
 wherever its answer stays in a family the subset has, and its `math` twin never is. Every stub is ordinary Python in the
 supported subset, so each is its own numerical reference.
 
+A JIT dispatcher (numba's) is read through to the Python function it accelerates, as a callee and as the compile
+root, and is never state; one declaring types of its own converts rather than accelerates, so it is refused.
+
 The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
 reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
 (non-bit-exact) reference on the host. A construct whose faithful meaning the hardware cannot express -- a
@@ -399,8 +402,8 @@ two scalings of one value cannot itself fail. Two addends scaled by the same con
 
 A constant scaling over a value has one HIR shape, decided in one place and read back by one reader: the value itself,
 an exponent scaling, or a multiplication by a positive constant with the sign peeled into a negation over it, so
-`x*3.0` and `x*-3.0` share one multiply. The reader composes a stack of such layers down to the outermost one whose
-composition no host float names, or that another consumer still wants, and that layer's operand is the base.
+`x*3.0` and `x*-3.0` share one multiply. The reader composes a stack of such layers until it meets one whose
+composition with those above it no host float names, or that another consumer still wants, and that layer is the base.
 
 A sum whose terms cancel is answered by what is left: a scaling of the single remaining term, or the number the sum
 denotes, so `x - 0.999*x` is one multiply and `(x+y)-y` is `x`. Every such answer is taken, since it replaces an
@@ -546,10 +549,12 @@ Persistent state slots. Both banks commit state in place: a live-out is written 
 read-first, so a same-frame self-update (an accumulator) reads the old value and writes the new one with no copy; an
 update whose "unchanged" arm is the slot live-in coalesces onto the slot through the same union-find. When it cannot
 commit in place (a genuine overlap, a folded sign, a chained copy `self.a = self.b`), the live-out keeps its own
-register and is installed by a copy -- microcode-driven as early as the old live-in is read where eligible, otherwise
-a handshake-gated write at the output boundary, sampled at the exit like an output; two slots that always hold the
-same value may collapse onto one register. Which of the three a slot gets is one explicit decision of the allocator,
-and the handshake-gated writes are enumerated once.
+register and is installed by a copy -- an ordinary PC-gated copy in the Ret block as early as the old live-in is read,
+otherwise a handshake-gated write at the output boundary, sampled at the exit like an output; two slots that always hold
+the same value may collapse onto one register. The early copy is taken only from a result the Ret block schedules or an
+input: a source's availability alone does not make the copy cheaper than the boundary write, so the domain stays
+conservative. Which of the three a slot gets is one explicit decision of the allocator, and the handshake-gated writes
+are enumerated once.
 
 ### Control flow
 
@@ -596,10 +601,10 @@ controller -- one pre-decoded VLIW control word per step, written as a synchrono
 logic or block RAM), unlike the array-plus-`initial` form, which some tools flatten to logic and others force into a
 slow block RAM even when tiny; it occupies its own clocked block, the sole sanctioned second `always @(posedge clk)`,
 since that dedicated form is what triggers the inference. The RTL stays tool-neutral: the ROM read register carries
-the `HOLOSO_ATTRIBUTE_ROM` macro, empty by default, through which a flow attaches its synthesizer's mapping attribute.
-The ROM is read through a short multi-stage fetch (PC latch, ROM read register, routing register) so the controller is
-short register-to-register paths rather than a wide combinational cone; the fetch leads the executing step, which
-under static scheduling only adds to the makespan/II.
+the `HOLOSO_ATTRIBUTE_ROM` macro where a flow defines it, through which the flow attaches its synthesizer's mapping
+attribute. The ROM is read through a short multi-stage fetch (PC latch, ROM read register, routing register) so the
+controller is short register-to-register paths rather than a wide combinational cone; the fetch leads the executing
+step, which under static scheduling only adds to the makespan/II.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
 `in_valid`); the PC advances every clock; at an exit it asserts `out_valid` while outputs drive combinationally

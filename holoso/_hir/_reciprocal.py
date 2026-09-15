@@ -85,7 +85,7 @@ def run(hir: Hir) -> Hir:
                 stack.extend((factor, False) for factor in split)
         return built[block, divisor]
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         nonlocal rewrites
         if isinstance(node, Operation) and isinstance(node.operator, FloatDiv):
             numerator, divisor = node.operands

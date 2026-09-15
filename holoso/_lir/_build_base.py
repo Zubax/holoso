@@ -9,7 +9,7 @@ from .._mir import Mir, MirBoolView, MirWideView
 from .._operators import PooledHardwareOperator, WideConditioner
 from .._util import ValueId
 from .._value import WideValue
-from ._ir import BoolWrite, InPlace, OperatorInstance, WideCopy
+from ._ir import BoolCopy, Boundary, Early, InPlace, OperatorInstance, WideCopy
 from ._schedule import Schedule
 from ._regalloc import Coloring
 
@@ -33,33 +33,17 @@ class ConstPool:
 
 
 @dataclass(frozen=True, slots=True)
-class Early:
-    """Install a slot's live-out by pc-gated copy at this Ret-relative scheduler-frame cycle, ahead of the boundary."""
-
-    ret_cycle: int
-
-
-@dataclass(frozen=True, slots=True)
-class Boundary:
-    """Install a slot's live-out by a read-first copy at the accepted-output edge."""
-
-
-type WideSlotInstall = InPlace | Early | Boundary
-type BoolSlotInstall = InPlace | Boundary
-
-
-@dataclass(frozen=True, slots=True)
 class Allocation:
     """Every decision of the register allocator: both banks' registers, the installs, and the pooled binding."""
 
     wide: Coloring  # every wide value's register, the orientation and instance per firing, the steering as counted
     wide_slot_reg: dict[str, int]
-    wide_install: dict[str, WideSlotInstall]
+    wide_install: dict[str, InPlace | Early | Boundary]
     bool: Coloring
     bool_slot_reg: dict[str, int]
-    bool_install: dict[str, BoolSlotInstall]
-    wide_copies: dict[int, list[WideCopy]]  # block -> wide phi-arm installs at its tail
-    bool_writes: dict[int, list[BoolWrite]]  # block -> boolean phi-arm installs at its tail
+    bool_install: dict[str, InPlace | Boundary]
+    # block -> its residual phi-arm installs, and the Ret block's early ones
+    copies: dict[int, list[WideCopy | BoolCopy]]
     instances: list[OperatorInstance]  # the pooled instances realized, `wide.instance` labeling them per firing
 
 

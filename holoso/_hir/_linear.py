@@ -12,10 +12,10 @@ from fractions import Fraction
 
 from ._const import Const, FloatConst
 from ._copy import copy_node, rebuild, reverse_postorder
-from .._util import BlockId, ValueId
+from .._util import ValueId
 from ._ir import Hir, HirBuilder, Node, Operation, StateRead
-from ._operators import FloatAdd, FloatMul, FloatMulPow2, FloatNeg
-from ._scaling import Rendering, scaled_node, scaling_of_ratio
+from ._operators import FloatAdd, FloatNeg
+from ._scaling import Rendering, scaled_node, scaling_layer, scaling_of_ratio
 
 _logger = logging.getLogger(__name__)
 
@@ -102,34 +102,28 @@ def _forms(hir: Hir) -> dict[ValueId, _LinearForm]:
     """A non-finite constant is opaque wherever it appears: `Fraction` cannot name one, and `x + inf` folds nowhere."""
     forms: dict[ValueId, _LinearForm] = {}
 
+    def constant(vid: ValueId) -> float | None:
+        node = hir.nodes[vid]
+        return node.value if isinstance(node, FloatConst) else None
+
     def compute(vid: ValueId) -> _LinearForm:
         node = hir.nodes[vid]
         if isinstance(node, FloatConst):
             return _opaque(vid) if not math.isfinite(node.value) else _LinearForm((), Fraction(node.value))
         if not isinstance(node, Operation):
             return _opaque(vid)
-        match node.operator:
-            case FloatAdd():
-                a, b = node.operands
-                combined = forms[a].plus(forms[b])
-            case FloatNeg():
-                combined = forms[node.operands[0]].scaled(Fraction(-1))
-            case FloatMulPow2(k=k):
-                if abs(k) > _MAX_BITS:
-                    return _opaque(vid)
-                combined = forms[node.operands[0]].scaled(Fraction(2) ** k)
-            case FloatMul():
-                a, b = node.operands
-                for base, other in ((a, b), (b, a)):  # either way round: this reads the graph it is given
-                    constant = hir.nodes[other]
-                    # A surviving `inf * 0.0` names no number and is the refusal gate's to convict, not ours to erase.
-                    if isinstance(constant, FloatConst) and math.isfinite(constant.value) and constant.value != 0.0:
-                        combined = forms[base].scaled(Fraction(constant.value))
-                        break
-                else:
-                    return _opaque(vid)
-            case _:
+        if isinstance(node.operator, FloatAdd):
+            a, b = node.operands
+            combined = forms[a].plus(forms[b])
+        # A surviving `inf * 0.0` names no number and is the refusal gate's to convict, not ours to erase, which the
+        # layer reader already declines.
+        elif (layer := scaling_layer(hir, vid, constant)) is not None:
+            base, scaling = layer
+            if abs(scaling.k) > _MAX_BITS:
                 return _opaque(vid)
+            combined = forms[base].scaled(scaling.ratio())
+        else:
+            return _opaque(vid)
         return _opaque(vid) if combined.oversized else combined
 
     # Dominance order: every operand is defined before its user, so no walk nests; phis are opaque.
@@ -152,19 +146,17 @@ def run(hir: Hir) -> Hir:
     liveness is read to know it does not add work.
     """
     forms = _forms(hir)
-    answers: dict[tuple[BlockId, Node], _Answer] = {}
-    for block in hir.blocks:
-        for vid in block.operations:
-            node = hir.nodes[vid]
-            if isinstance(node, Operation) and isinstance(node.operator, FloatAdd):
-                answer = forms[vid].collapsed(vid)
-                if answer is not None:
-                    answers[block.id, node] = answer
+    answers: dict[ValueId, _Answer] = {}
+    for vid, node in hir.nodes.items():
+        if isinstance(node, Operation) and isinstance(node.operator, FloatAdd):
+            answer = forms[vid].collapsed(vid)
+            if answer is not None:
+                answers[vid] = answer
     if not answers:
         return hir
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-        match answers.get((builder.current_block, node)):
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+        match answers.get(vid):
             case _Constant(value=value):
                 return builder.const_node(FloatConst(value))
             case _Scaled(base=base, rendering=rendering):

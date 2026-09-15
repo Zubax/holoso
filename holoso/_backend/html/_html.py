@@ -16,9 +16,9 @@ from importlib import resources
 from typing import assert_never
 
 from ..._lir import (
-    BoolBoundaryInstall,
     BoolOperand,
     BoolRegRef,
+    BoolStateSlot,
     Branch,
     InlineWriteSource,
     Lir,
@@ -28,6 +28,7 @@ from ..._lir import (
     WideOperand,
     handshake_arms,
     read_sources_per_port,
+    steering,
     write_arms,
     write_events,
     write_sources_per_register,
@@ -87,8 +88,7 @@ def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
 
 def _metrics(lir: Lir) -> str:
     fmt = lir.float_format
-    read_muxes = sum(_read_muxes_per_register(lir).values())
-    write_muxes = sum(write_arms(lir).values())
+    arms = steering(lir)
     op_counts: dict[str, int] = {}
     for inst in lir.instances:
         op_counts[inst.operator.mnemonic] = op_counts.get(inst.operator.mnemonic, 0) + 1
@@ -98,7 +98,8 @@ def _metrics(lir: Lir) -> str:
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
         ("wide registers", f"{lir.regfile.nreg} × {lir.wide_register_width}-bit"),
         ("wide regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
-        ("register muxes, both banks", f"{read_muxes} read + {write_muxes} write = {read_muxes + write_muxes}"),
+        ("steering mux arms", f"{arms.read} read + {arms.wide_write} write = {arms.read + arms.wide_write}"),
+        ("bool write select arms", arms.bool_write),
         ("II min [cycles]", lir.min_initiation_interval),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
@@ -270,8 +271,8 @@ def _bool_read_fanin(lir: Lir) -> dict[BoolRegRef, int]:
                 case _:
                     assert_never(source)
     for arm in handshake_arms(lir).values():
-        if isinstance(arm, BoolBoundaryInstall):
-            tally(arm.source)
+        if isinstance(arm, BoolStateSlot):
+            tally(arm.live_out)
     for block in lir.blocks:
         if isinstance(block.terminator, Branch):
             fanin[block.terminator.cond] = fanin.get(block.terminator.cond, 0) + 1

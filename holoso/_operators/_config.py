@@ -1,8 +1,8 @@
 """The user's operator selection, once it has become hardware."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TypeVar
 
 from .._errors import UnsupportedConstruct
 from .._type import FloatFormat, FloatType, IntFormat, IntType
@@ -46,9 +46,6 @@ class OperatorOptions:
     icmp: ICmpOperator.Options = ICmpOperator.Options()
 
 
-_CONFIGURED = TypeVar("_CONFIGURED", bound=HardwareOperator)
-
-
 @dataclass(frozen=True)
 class OpConfig:
     """
@@ -68,124 +65,131 @@ class OpConfig:
     @cached_property
     def fadd(self) -> FAddOperator | None:
         opt = self.options.fadd
-        return None if opt is None else self._checked(FAddOperator(self.float_format, opt))
+        return None if opt is None else self._built(FAddOperator, self.float_format, opt)
 
     @cached_property
     def fmul(self) -> FMulOperator | None:
         opt = self.options.fmul
-        return None if opt is None else self._checked(FMulOperator(self.float_format, opt, self.wmultiplier))
+        return None if opt is None else self._built(FMulOperator, self.float_format, opt, self.wmultiplier)
 
     @cached_property
     def fdiv(self) -> FDivOperator | None:
         opt = self.options.fdiv
-        return None if opt is None else self._checked(FDivOperator(self.float_format, opt))
+        return None if opt is None else self._built(FDivOperator, self.float_format, opt)
 
     @cached_property
     def fmul_ilog2(self) -> FMulILog2Operator | None:
         opt = self.options.fmul_ilog2
-        return None if opt is None else self._checked(FMulILog2Operator(self.float_format, self.int_format, opt))
+        return None if opt is None else self._built(FMulILog2Operator, self.float_format, self.int_format, opt)
 
     @cached_property
     def filog2(self) -> FILog2Operator | None:
         opt = self.options.filog2
-        return None if opt is None else self._checked(FILog2Operator(self.float_format, self.int_format, opt))
+        return None if opt is None else self._built(FILog2Operator, self.float_format, self.int_format, opt)
 
     @cached_property
     def fcmp(self) -> FCmpOperator | None:
         opt = self.options.fcmp
-        return None if opt is None else self._checked(FCmpOperator(self.float_format, opt))
+        return None if opt is None else self._built(FCmpOperator, self.float_format, opt)
 
     @cached_property
     def fround(self) -> FRoundOperator | None:
         opt = self.options.fround
-        return None if opt is None else self._checked(FRoundOperator(self.float_format, opt))
+        return None if opt is None else self._built(FRoundOperator, self.float_format, opt)
 
     @cached_property
     def ffma(self) -> FFmaOperator | None:
         opt = self.options.ffma
-        return None if opt is None else self._checked(FFmaOperator(self.float_format, opt, self.wmultiplier))
+        return None if opt is None else self._built(FFmaOperator, self.float_format, opt, self.wmultiplier)
 
     @cached_property
     def fsort(self) -> FSortOperator | None:
         opt = self.options.fsort
-        return None if opt is None else self._checked(FSortOperator(self.float_format, opt))
+        return None if opt is None else self._built(FSortOperator, self.float_format, opt)
 
     @cached_property
     def fexp2(self) -> FExp2Operator | None:
         opt = self.options.fexp2
-        return None if opt is None else self._checked(FExp2Operator(self.float_format, opt, self.wmultiplier))
+        return None if opt is None else self._built(FExp2Operator, self.float_format, opt, self.wmultiplier)
 
     @cached_property
     def flog2(self) -> FLog2Operator | None:
         opt = self.options.flog2
-        return None if opt is None else self._checked(FLog2Operator(self.float_format, opt, self.wmultiplier))
+        return None if opt is None else self._built(FLog2Operator, self.float_format, opt, self.wmultiplier)
 
     @cached_property
     def fsqrt(self) -> FSqrtOperator | None:
         opt = self.options.fsqrt
-        return None if opt is None else self._checked(FSqrtOperator(self.float_format, opt))
+        return None if opt is None else self._built(FSqrtOperator, self.float_format, opt)
 
     @cached_property
     def fsincos(self) -> FSincosOperator | None:
         opt = self.options.fsincos
-        return None if opt is None else self._checked(FSincosOperator(self.float_format, opt, self.wmultiplier))
+        return None if opt is None else self._built(FSincosOperator, self.float_format, opt, self.wmultiplier)
 
     @cached_property
     def fatan2(self) -> FAtan2Operator | None:
         opt = self.options.fatan2
-        return None if opt is None else self._checked(FAtan2Operator(self.float_format, opt, self.wmultiplier))
+        return None if opt is None else self._built(FAtan2Operator, self.float_format, opt, self.wmultiplier)
 
     @cached_property
     def ffromint(self) -> FFromIntOperator | None:
         opt = self.options.ffromint
-        return None if opt is None else self._checked(FFromIntOperator(self.float_format, self.int_format, opt))
+        return None if opt is None else self._built(FFromIntOperator, self.float_format, self.int_format, opt)
 
     @cached_property
     def ftoint(self) -> FToIntOperator | None:
         opt = self.options.ftoint
-        return None if opt is None else self._checked(FToIntOperator(self.float_format, self.int_format, opt))
+        return None if opt is None else self._built(FToIntOperator, self.float_format, self.int_format, opt)
 
     @cached_property
     def iadd(self) -> IAddOperator:
-        return self._checked(IAddOperator(self.int_format, self.options.iadd))
+        return self._built(IAddOperator, self.int_format, self.options.iadd)
 
     @cached_property
     def isub(self) -> ISubOperator:
-        return self._checked(ISubOperator(self.int_format, self.options.isub))
+        return self._built(ISubOperator, self.int_format, self.options.isub)
 
     @cached_property
     def imul(self) -> IMulOperator:
-        return self._checked(IMulOperator(self.int_format, self.options.imul))
+        return self._built(IMulOperator, self.int_format, self.options.imul)
 
     @cached_property
     def idiv(self) -> IDivOperator:
-        return self._checked(IDivOperator(self.int_format, self.options.idiv))
+        return self._built(IDivOperator, self.int_format, self.options.idiv)
 
     @cached_property
     def iabs(self) -> IAbsOperator:
-        return self._checked(IAbsOperator(self.int_format, self.options.iabs))
+        return self._built(IAbsOperator, self.int_format, self.options.iabs)
 
     @cached_property
     def ishl(self) -> IShlOperator:
-        return self._checked(IShlOperator(self.int_format, self.options.ishl))
+        return self._built(IShlOperator, self.int_format, self.options.ishl)
 
     @cached_property
     def ishr(self) -> IShrOperator:
-        return self._checked(IShrOperator(self.int_format, self.options.ishr))
+        return self._built(IShrOperator, self.int_format, self.options.ishr)
 
     @cached_property
     def ipopcnt(self) -> IPopcntOperator:
-        return self._checked(IPopcntOperator(self.int_format, self.options.ipopcnt))
+        return self._built(IPopcntOperator, self.int_format, self.options.ipopcnt)
 
     @cached_property
     def icmp(self) -> ICmpOperator:
-        return self._checked(ICmpOperator(self.int_format, self.options.icmp))
+        return self._built(ICmpOperator, self.int_format, self.options.icmp)
 
-    def _checked(self, operator: _CONFIGURED) -> _CONFIGURED:
+    def _built[**P, T: HardwareOperator](self, build: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         """
         Read off the signature rather than off the operator's `fmt`: a conversion operator carries one format per
         side, and asking a format which family it belongs to can only confirm that it matches its own kind.
         """
+        try:
+            operator = build(*args, **kwargs)
+            latency = operator.latency  # the float library loads a format's tables lazily, some only on this question
+        except KeyError as ex:  # the float library's refusal of a format it holds no precomputed table for
+            (reason,) = ex.args
+            raise UnsupportedConstruct(f"a needed operator cannot be built at {self.float_format}: {reason}") from ex
+        assert latency >= 0
         signature = operator.signature
         assert all(
             (ty.fmt == self.float_format if isinstance(ty, FloatType) else True)
@@ -195,7 +199,7 @@ class OpConfig:
         return operator
 
 
-def require(operator: _CONFIGURED | None, name: str) -> _CONFIGURED:
+def require[T: HardwareOperator](operator: T | None, name: str) -> T:
     """The configured operator with its exact type, or a refusal naming what needs configuring."""
     if operator is None:
         raise UnsupportedConstruct(f"the kernel needs the {name!r} operator, which is not configured")

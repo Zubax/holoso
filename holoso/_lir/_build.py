@@ -1,6 +1,5 @@
 import logging
 from dataclasses import replace
-from typing import assert_never
 
 from .._errors import UnsupportedConstruct
 from .._mir import Mir, MirBoolView, MirBranch, MirPhi, MirStateRead, MirStateSlot, MirWideView
@@ -11,7 +10,7 @@ from .._value import FloatValue, IntValue, WideValue, coerce_scalar
 from ._ir import *
 from ._mir_facts import mir_operation, pred_count
 from ._bankalloc import allocate, converge
-from ._build_base import Boundary, BuildContext, Early
+from ._build_base import BuildContext
 from ._regalloc import RegallocTuning
 from ._construct import (
     bool_operand,
@@ -21,12 +20,11 @@ from ._construct import (
     build_outputs,
     build_pooled_op,
     build_terminator,
-    rebase_op,
     tapped_wide_lanes,
     wide_operand,
 )
 from ._layout import layout_blocks, schedule_blocks
-from ._sources import read_arms, write_arms
+from ._sources import steering
 
 _logger = logging.getLogger(__name__)
 
@@ -132,7 +130,6 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     mir, wide_mir, bool_mir = ctx.mir, ctx.wide_mir, ctx.bool_mir
     coalesced = converge(ctx)
     alloc = allocate(coalesced, tuning)
-    ret_block = mir.ret_block
     offsets = coalesced.offsets
     block_sched = ctx.schedules.block_sched
     instances = alloc.instances
@@ -154,104 +151,45 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
                 key=lambda v: (sched.issue_cycle[v], v),
             )
         ]
-        wide_copies = alloc.wide_copies.get(block.id, [])
-        bool_writes = alloc.bool_writes.get(block.id, [])
-        block_makespan = offsets.block_makespan[block.id]
-        # A branch condition gets exactly one cycle of slack: a bool result committing at the
-        # makespan lands one step before the terminator's boundary read. The schedule's makespan covers every commit by
-        # construction, so this is a tripwire against a future makespan-computation change only; the emitter-side
-        # write-enable placement is guarded by the directed boundary cosim kernel and its white-box twin instead.
-        bool_commits = [op.commit_cycle for op in inline_ops if isinstance(op.write.dst, BoolRegRef)] + [
-            op.commit_cycle for op in ops if any(isinstance(w.dst, BoolRegRef) for w in op.writes)
-        ]
-        assert all(
-            commit <= block_makespan for commit in bool_commits
-        ), f"block {block.id}: a boolean result commits past the block makespan {block_makespan}"
-        # Every phi-arm install must LAND within its block (at or before the terminator). An install landing past the
-        # terminator is enqueued for a PC the block never reaches: a redirect re-keys it onto the taken arm, but an exit
-        # drops it -- a silently dead install. This is the vector-independent structural invariant that a
-        # value cosim cannot see (a dead install that does not change outputs passes every value comparison).
-        term_offset = offsets.block_term_offset[block.id]
-        installs: list[WideCopy | BoolWrite] = [*wide_copies, *bool_writes]
-        install_landings = [x.landing(fetch_lag) for x in installs]
-        assert all(
-            landing <= term_offset for landing in install_landings
-        ), f"block {block.id}: a phi-arm install lands at {max(install_landings)} past the terminator {term_offset}"
-        # A tail install must read its source register strictly before a sibling install's write to that register
-        # lands. Placement guarantees this because a sibling-written source register is always a settled one -- a
-        # non-settled source is live through the boundary (`phi_arm_out`), so interference keeps every sibling install
-        # destination off its register -- and settled installs share one unpushed fire step (`install_issue_cycle`).
-        # The structural tripwire for a placement regression, which the value cosim shares with the model and cannot
-        # see. Cross-bank pairs are inert (RegRef never equals BoolRegRef), so one check serves both banks.
-        for writer in installs:
-            for reader in installs:
-                if reader.source.source == writer.dst:
-                    assert reader.fire_step(fetch_lag) < writer.landing(
-                        fetch_lag
-                    ), f"block {block.id}: a tail install reads {writer.dst} after a sibling install's write lands"
         blocks.append(
             LirBlock(
                 block.id,
                 ops,
                 inline_ops,
-                wide_copies,
-                bool_writes,
+                alloc.copies.get(block.id, []),
                 build_terminator(block.terminator, alloc),
-                block_makespan,
+                offsets.block_makespan[block.id],
                 offsets.block_term_offset[block.id],
             )
         )
 
     laid_out = layout_blocks(mir, ctx.schedules, blocks)
-    block_base = block_bases(laid_out)
-    flat_ops = [rebase_op(op, block_base[block.index]) for block in laid_out for op in block.ops]
 
     def encoded_reset(slot_name: str, scalar_type: FloatType | IntType, raw: float | int | bool) -> WideValue:
         value = coerce_scalar(scalar_type, raw, f"state slot {slot_name!r} reset")
         assert isinstance(value, (FloatValue, IntValue))
         return value
 
-    # In place means exactly that the colorer put the live-out on the slot register under the identity conditioner,
-    # checked both ways per slot: the decision came from the pins and the resolution from the coloring, so the check
-    # binds the two.
-    wide_state_slots: list[WideStateSlot] = []
-    for slot in wide_mir.state_slots:
-        reg = RegRef(alloc.wide_slot_reg[slot.name])
-        source = wide_operand(wide_mir, slot.live_out, slot.conditioner, alloc, const_pool)
-        install: InPlace | WideEarlyInstall | WideBoundaryInstall
-        match alloc.wide_install[slot.name]:
-            case InPlace():
-                install = InPlace()
-            case Early(ret_cycle=ret_cycle):  # a slot belongs to no block: the install cycle is absolute
-                assert ret_block in block_base, "an early install implies work in the Ret block"
-                install = WideEarlyInstall(source, block_base[ret_block] + ret_cycle)
-            case Boundary():
-                install = WideBoundaryInstall(source)
-            case _:
-                assert_never(alloc.wide_install[slot.name])
-        assert isinstance(install, InPlace) == (source.source == reg and source.conditioner.is_identity), slot.name
-        wide_state_slots.append(
-            WideStateSlot(
-                slot.name,
-                reg,
-                encoded_reset(slot.name, wide_mir.scalar_type_of(slot.live_out), slot.reset_value),
-                install,
-            )
+    wide_state_slots = [
+        WideStateSlot(
+            slot.name,
+            RegRef(alloc.wide_slot_reg[slot.name]),
+            encoded_reset(slot.name, wide_mir.scalar_type_of(slot.live_out), slot.reset_value),
+            wide_operand(wide_mir, slot.live_out, slot.conditioner, alloc, const_pool),
+            alloc.wide_install[slot.name],
         )
-    bool_state_slots: list[BoolStateSlot] = []
-    for bslot in bool_mir.state_slots:
-        breg = BoolRegRef(alloc.bool_slot_reg[bslot.name])
-        bsource = bool_operand(bool_mir, bslot.live_out, alloc, bslot.conditioner)
-        binstall: InPlace | BoolBoundaryInstall
-        match alloc.bool_install[bslot.name]:
-            case InPlace():
-                binstall = InPlace()
-            case Boundary():
-                binstall = BoolBoundaryInstall(bsource)
-            case _:
-                assert_never(alloc.bool_install[bslot.name])
-        assert isinstance(binstall, InPlace) == (bsource.source == breg and bsource.inversion.is_identity), bslot.name
-        bool_state_slots.append(BoolStateSlot(bslot.name, breg, bool(bslot.reset_value), binstall))
+        for slot in wide_mir.state_slots
+    ]
+    bool_state_slots = [
+        BoolStateSlot(
+            slot.name,
+            BoolRegRef(alloc.bool_slot_reg[slot.name]),
+            bool(slot.reset_value),
+            bool_operand(bool_mir, slot.live_out, alloc, slot.conditioner),
+            alloc.bool_install[slot.name],
+        )
+        for slot in bool_mir.state_slots
+    ]
     outputs = build_outputs(mir, wide_mir, bool_mir, alloc, const_pool)
     lir = Lir(
         module_name=module_name,
@@ -266,7 +204,6 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             nload=len(wide_mir.input_ids),
         ),
         inputs=build_inputs(mir, wide_mir, bool_mir, alloc),
-        ops=flat_ops,
         outputs=outputs,
         wide_state_slots=wide_state_slots,
         blocks=laid_out,
@@ -275,9 +212,8 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         fetch_lag=fetch_lag,
     )
     # The wide bank was allocated against the steering the emitter builds, arm for arm.
-    emitted_read = sum(max(0, n - 1) for n in read_arms(lir).values())
-    emitted_write = sum(max(0, n - 1) for dst, n in write_arms(lir).items() if isinstance(dst, RegRef))
-    assert (alloc.wide.read_arms, alloc.wide.write_arms) == (emitted_read, emitted_write)
+    emitted = steering(lir)
+    assert (alloc.wide.read_arms, alloc.wide.write_arms) == (emitted.read, emitted.wide_write)
     _logger.info(
         "LIR: %d blocks, last PC %d, exits %s, min II %d, %d instances",
         len(lir.blocks),

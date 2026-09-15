@@ -6,7 +6,7 @@ The controller is a microcode ROM (see ._microcode): one pre-decoded VLIW contro
 synchronous `case` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
 fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
 which the sequencer accounts for: out_valid asserts on a terminator PC whose taken arm exits. The ROM read register's
-declaration carries the `HOLOSO_ATTRIBUTE_ROM` macro, empty unless the flow defines it, so a tool-specific mapping
+declaration carries the `HOLOSO_ATTRIBUTE_ROM` macro only where the flow defines it, so a tool-specific mapping
 attribute can be attached without touching the generated RTL.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
@@ -203,7 +203,8 @@ class _WideRenderer:
             case WideInputLoad() | BoolInputLoad():
                 rhs = f"in_{arm.name}"
                 return "in_ready && in_valid", self._fill_float(rhs) if isinstance(arm.scalar_type, FloatType) else rhs
-            case WideBoundaryInstall(source=source) | BoolBoundaryInstall(source=source):
+            case WideStateSlot(live_out=source) | BoolStateSlot(live_out=source):
+                assert isinstance(arm.install, Boundary)
                 return "out_valid && out_ready", self.write_rhs(dst, MoveWriteSource(source))
             case _:
                 assert_never(arm)
@@ -252,25 +253,7 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_clocked(w, lir, write_books, renderer)
     _emit_outputs(w, lir, renderer)
     w("\nendmodule\n")
-    w(_ROM_ATTRIBUTE_MACRO_TRAILER)
     return VerilogOutput(verilog=w.render(), support_files=support_files())
-
-
-# The defaulted macro is undefined again after the module so that a flow's own definition, read before this file,
-# is the only one that outlives it.
-_ROM_ATTRIBUTE_MACRO_HEADER = """
-`ifndef HOLOSO_ATTRIBUTE_ROM
-`define HOLOSO_ATTRIBUTE_ROM
-`define HOLOSO_ATTRIBUTE_ROM_DEFAULTED
-`endif
-"""
-
-_ROM_ATTRIBUTE_MACRO_TRAILER = """
-`ifdef HOLOSO_ATTRIBUTE_ROM_DEFAULTED
-`undef HOLOSO_ATTRIBUTE_ROM
-`undef HOLOSO_ATTRIBUTE_ROM_DEFAULTED
-`endif
-"""
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:
@@ -284,7 +267,6 @@ def _emit_header(w: _Writer, lir: Lir) -> None:
 """,
         "",
     )
-    w(_ROM_ATTRIBUTE_MACRO_HEADER, "")
     w(f"""
 // Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.
 module {lir.module_name} (
@@ -459,7 +441,10 @@ def _emit_microcode_rom(
     # the ROM from the clocked `case`.
     w("""
 // Microcode VLIW ROM.
-`HOLOSO_ATTRIBUTE_ROM reg [UCW-1:0] ucode_q;  // 2nd fetch stage
+`ifdef HOLOSO_ATTRIBUTE_ROM
+`HOLOSO_ATTRIBUTE_ROM
+`endif
+reg [UCW-1:0] ucode_q;  // 2nd fetch stage
 reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
     packed = sorted((f for f in fields.values() if f.offset >= 0), key=lambda f: f.offset)
     if packed:

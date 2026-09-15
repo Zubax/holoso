@@ -2,7 +2,6 @@
 
 import logging
 from collections import Counter, defaultdict
-from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .._errors import UnsupportedConstruct
@@ -177,20 +176,6 @@ _ROUND_MODE_OF: dict[type[Operator], RoundMode] = {
     FloatCeil: RoundMode.CEIL,
     FloatTrunc: RoundMode.TRUNC,
 }
-
-
-@dataclass(frozen=True, slots=True)
-class _Read:
-    """`site` is None outside any operation."""
-
-    site: ValueId | None
-    absorbing: bool
-
-
-def _absorbable(reads: Iterable[_Read]) -> bool:
-    """Every read of the product is an absorbing port of a distinct addition, so no add rounds it twice."""
-    reads = list(reads)
-    return bool(reads) and all(read.absorbing for read in reads) and len({read.site for read in reads}) == len(reads)
 
 
 def _exact_scale(fmt: FloatFormat, k: int) -> float | None:
@@ -374,14 +359,9 @@ def _contract_fmas(hir: Hir, ops: OpConfig) -> Hir:
     plans = _plan_fma_fusions(hir, ops)
     if not plans:
         return hir
-    # Operations intern per block, so a block and a node name one value -- which is what `BuildValue`, handed the
-    # node and not its id, needs to find the plan.
-    planned = {
-        (block.id, hir.nodes[vid]): plans[vid] for block in hir.blocks for vid in block.operations if vid in plans
-    }
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-        plan = planned.get((builder.current_block, node))
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+        plan = plans.get(vid)
         if plan is None:
             return copy_node(builder, node, remap)
         signed = _signed(builder, remap[plan.a], plan.product_sign)
@@ -418,7 +398,7 @@ def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
     A product is carried by every add that names it or by none, since one add would single-round a product observed
     elsewhere.
     """
-    if ops.ffma is None:
+    if ops.options.ffma is None:
         return {}
     fmt = ops.float_format
     readers = _readers(hir)
@@ -442,8 +422,10 @@ def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
     for product in sorted(sites, key=lambda product: (len(sites[product]), position[product])):
         adds = {add for add, _ in sites[product]}
         cone = {product, *signs[product]}
-        reads = [_Read(site, site in adds) for member in cone for site in readers[member] if site not in cone]
-        if _absorbable(reads) and not any(add in plans for add in adds):
+        reads = [site for member in cone for site in readers[member] if site not in cone]
+        # Every read of the product is an absorbing port of a distinct addition, so no add rounds it twice.
+        absorbable = bool(reads) and set(reads) <= adds and len(set(reads)) == len(reads)
+        if absorbable and not any(add in plans for add in adds):
             plans.update(sites[product])
     return plans
 
@@ -549,7 +531,8 @@ class _LoweringContext:
         mir = self.builder.finish()
         for vid, node in self.hir.nodes.items():
             if isinstance(node, Operation):
-                assert not node.operator.sideband or vid not in self.remap
+                if sign_of(node) is not None or isinstance(node.operator, BoolNot):
+                    assert vid not in self.remap
                 selected = mir.nodes[self.remap[vid]] if vid in self.remap else None
                 if isinstance(selected, MirOperation) and isinstance(selected.operator, PooledHardwareOperator):
                     assert not (node.operator.speculatable and selected.operator.error_ports)
@@ -689,8 +672,7 @@ class _LoweringContext:
                 # inversion conditioner, exactly like FloatSelect's sign folding -- so `a if not c else b` is free.
                 self._lower_bool_logic(old_id, SelectOperator(ScalarBoolType()), [cond, a, b])
                 return True
-            case Operation(operator=BoolNot() as semantic, operands=(_,)):
-                assert semantic.sideband
+            case Operation(operator=BoolNot(), operands=(_,)):
                 return True
             case Operation(operator=FloatToBool(), operands=(a,)):
                 # `bool(x)` reads a float operand (its sign is irrelevant: the exponent test is sign-invariant) and
@@ -767,8 +749,7 @@ class _FloatLowerer:
             case FloatConst(value=value):
                 self.context.remap[old_id] = self._lower_float_const(value)
                 return True
-            case Operation(operator=semantic) if sign_of(node) is not None:
-                assert semantic.sideband
+            case Operation() if sign_of(node) is not None:
                 return True
             case Operation() as operation:
                 if old_id in self.context.absorbed_roundings:

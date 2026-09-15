@@ -7,7 +7,6 @@ from pathlib import Path
 import inspect
 import logging
 import os
-import re
 
 from ._backend.cocotb import generate as generate_testbench, CocotbOutput
 from ._backend.html import generate as generate_html, HtmlOutput
@@ -19,6 +18,7 @@ from ._lir import Branch, ControlPort, DataInputPort, DataOutputPort, Port, Rega
 from ._mir import MirOptions, lower as lower_to_mir
 from ._operators import OperatorOptions
 from ._type import FloatFormat, IntFormat
+from ._util import VERILOG_IDENTIFIER
 
 type Target = Callable[..., Any]
 """
@@ -230,15 +230,13 @@ def _default_module_name(target: Target) -> str:
 
 
 def _validate_module_name(name: str) -> None:
-    if _MODULE_NAME.fullmatch(name) is None:
+    if VERILOG_IDENTIFIER.fullmatch(name) is None:
         raise ValueError(f"module name {name!r} is not a valid identifier; expected [A-Za-z_][A-Za-z0-9_]*")
     if name in _BLACKLIST:
         raise ValueError(f"module name {name!r} is a reserved keyword; choose another name")
     if name.lower().startswith("holoso"):
         raise ValueError(f"module name {name!r} uses the reserved 'holoso' prefix; choose another name")
 
-
-_MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Keywords from supported HDLs etc. that are not valid module names. Includes Verilog and VHDL keywords.
 _BLACKLIST = frozenset("""

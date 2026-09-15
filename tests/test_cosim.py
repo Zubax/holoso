@@ -531,7 +531,7 @@ def test_cosim_two_multiplier_instances_co_issue(sim: str) -> None:
     operators = dataclasses.replace(options.operator, fmul=FMulOptions(instances=2))
     options = dataclasses.replace(options, operator=operators)
     lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "fmul_pair")
-    products = [op for op in lir.ops if op.inst.operator.mnemonic == "fmul"]
+    products = [op for block in lir.blocks for op in block.ops if op.inst.operator.mnemonic == "fmul"]
     assert {op.inst.name for op in products} == {"fmul_0", "fmul_1"}
     assert len({op.issue_cycle for op in products}) == 1, "the products must co-issue for the pool to bind both"
     run_cosim(sim, holoso.synthesize(kernel, options, name="fmul_pair"))

@@ -31,7 +31,6 @@ from ..._lir import (
     WideOperand,
     WriteEvent,
     WriteSource,
-    landing_cycle,
     read_sources_per_port,
     write_sources_per_register,
 )
@@ -140,7 +139,7 @@ def f_op(dst: RegRef | BoolRegRef) -> str:
 
 def tapped_lanes(lir: Lir) -> set[tuple[OperatorInstance, int]]:
     """The operator output ports some firing writes -- an untapped port gets no nets and is left unconnected."""
-    return {(op.inst, write.port) for op in lir.ops for write in op.writes}
+    return {(op.inst, write.port) for block in lir.blocks for op in block.ops for write in op.writes}
 
 
 def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
@@ -208,9 +207,9 @@ def build_microcode(
     for dst, book in write_books.items():
         add(f_op(dst), book.opcode_width, gated=True)
 
-    for op in lir.ops:
+    for op, block in ((op, block) for block in lir.blocks for op in block.ops):
+        ci = lir.block_base[block.index] + op.issue_cycle
         base = op.inst.name
-        ci = op.issue_cycle
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
         put(f_issue(base), ci, 1)
         for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
@@ -238,9 +237,7 @@ def build_microcode(
                 assert isinstance(write.conditioner, IntIdentity)
 
     for event in events:
-        assert (
-            0 <= event.step and landing_cycle(event.step, lir.fetch_lag) <= lir.last_pc
-        ), f"microcode write at step {event.step} lands past the end of the ROM at {lir.last_pc}"
+        assert 0 <= event.step < depth, f"microcode write step out of range: {event.step}, depth={depth}"
         put(f_op(event.dst), event.step, write_books[event.dst].code(event.source))
 
     return fields
@@ -291,10 +288,9 @@ def _landing_label(dst: RegRef | BoolRegRef, source: WriteSource) -> str:
 
 def landings_by_step(events: list[WriteEvent]) -> dict[int, list[str]]:
     """
-    Per ROM step, the non-pooled writes that land there rendered `dst=source` -- inline firings, phi-arm copies,
-    boolean writes, and early state installs. Derived from write_events (pooled commits are excluded, being
-    named by `cycle_summary`'s commit list), so the ROM word comment names every value the opcode installs and the
-    emitted RTL stays mappable onto the HTML schedule report.
+    Per ROM step, the non-pooled writes that land there rendered `dst=source` -- inline firings and copies. Derived from
+    write_events (pooled commits are excluded, being named by `cycle_summary`'s commit list), so the ROM word comment
+    names every value the opcode installs and the emitted RTL stays mappable onto the HTML schedule report.
     """
     landings: dict[int, list[str]] = {}
     for event in events:

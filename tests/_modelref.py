@@ -27,7 +27,7 @@ from holoso import (
 )
 from holoso._api import _mir_options
 from holoso._mir import MirOptions
-from holoso._lir import Lir, RegallocTuning, build
+from holoso._lir import Early, Lir, LirBlock, RegallocTuning, WideCopy, WideStateSlot, build
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
 from holoso._operators._common import PooledOperatorOptions
 from holoso._backend.numerical import NumericalSimulator, generate as generate
@@ -243,6 +243,18 @@ DEFAULT_FETCH_STAGES = 3
 
 # The tuning every frozen allocation figure is taken at, as literals so it cannot follow the environment.
 FROZEN_TUNING = RegallocTuning(effort=3000, register_price=2.0)
+
+
+def early_install(lir: Lir, slot: WideStateSlot) -> tuple[LirBlock, WideCopy]:
+    """The copy that installs an early slot, with the block holding it."""
+    assert isinstance(slot.install, Early)
+    ((block, copy),) = [
+        (b, c)
+        for b in lir.blocks
+        for c in b.copies
+        if isinstance(c, WideCopy) and c.dst == slot.reg and c.source == slot.live_out
+    ]
+    return block, copy
 
 
 def build_lir(mir: Mir, name: str, tuning: RegallocTuning = _DEFAULT_TUNING) -> Lir:
@@ -707,7 +719,7 @@ def phi_swap_computed_loop(x: float, n: float) -> float:
 def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
     """
     The boolean-bank twin of phi_swap_computed_loop: the same cross-referencing loop-header phis with one
-    computed back-edge arm, carried in the 1-bit bank so the latch installs are `BoolWrite`s rather than
+    computed back-edge arm, carried in the 1-bit bank so the latch installs are `BoolCopy`s rather than
     `WideCopy`s. The two banks derive install placement through the same helpers but emit through separate paths,
     so each needs its own pin.
     """

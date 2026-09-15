@@ -907,6 +907,16 @@ def test_atan2_unconfigured_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(with_atan2=False), name="atan2_unconfigured")
 
 
+def test_a_configured_atan2_a_kernel_never_reaches_is_never_built() -> None:
+    # No CORDIC table exists for this significand, so building the operator would fail.
+    def kernel(x: int) -> int:
+        return x + 1
+
+    options = Options(OperatorOptions(fatan2=FAtan2Options()), ffmt=FloatFormat(6, 8), wint_min=8, regalloc_effort=0)
+    (out,) = holoso.synthesize(kernel, options, name="k").numerical_model.elaborate().run(2)
+    assert isinstance(out, holoso.IntValue) and int(out) == 3
+
+
 def test_hypot_fused_with_atan2() -> None:
     # hypot(y, x) beside atan2(y, x) fuses into the atan2 CORDIC's magnitude port (units-free, no scale), exact
     # against the model even at the origin and infinities.
@@ -955,12 +965,12 @@ def test_hypot_lone_decomposition_is_approximate() -> None:
         native = math.hypot(y, x)
         if native == 0.0 or math.isinf(native):
             continue
-        # Two ulps against the divide form's sixty-four; measured worst over 4000 draws is 1.003.
+        # Measured worst over 4000 draws is 1.003 ulps.
         assert abs(float(sim.run(y, x)[0]) - native) <= 2 * _ulp32(native), f"lone hypot y={y} x={x}"
 
 
 def test_hypot_lone_missing_primitive_is_rejected() -> None:
-    # The expansion needs the extractor and the root, but no longer the sorter the divide form did.
+    # The expansion needs the exponent extractor, the root, and the scaler, but not the sorter.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
@@ -1041,7 +1051,7 @@ def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None
 def test_a_constant_zero_base_computes_its_poles_through_the_composite() -> None:
     # `0.0 ** e` denotes a number for every e except a negative one. The general path is `exp2(e * log2(b))`,
     # and log2's evaluate answers the np reference's -inf at the folded zero base, so the
-    # build no longer refuses: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
+    # build is not refused: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
     # e==0 rung, 0.0 for a positive exponent, +inf past the negative pole (np.power semantics; math.pow raises
     # on the host there).
     def zero_base(e: float) -> float:

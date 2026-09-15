@@ -5,6 +5,7 @@ import re
 import unicodedata
 
 from .._errors import UnsupportedConstruct
+from .._util import VERILOG_IDENTIFIER
 
 _GREEK = {
     "α": "alpha",
@@ -36,8 +37,6 @@ _GREEK = {
 _TRANSLITERATION = {ord(letter): word for letter, word in _GREEK.items()}
 _TRANSLITERATION |= {ord(letter.upper()): word.capitalize() for letter, word in _GREEK.items()}
 
-_VERILOG_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-
 
 def spelled(name: str) -> str:
     """
@@ -52,7 +51,7 @@ def spelled(name: str) -> str:
 def hardware_name(name: str) -> str:
     """`spelled`, demanding the result be a name Verilog can carry -- what a synthesized identifier must be."""
     verilog = spelled(name)
-    if not _VERILOG_IDENTIFIER.match(verilog):
+    if VERILOG_IDENTIFIER.fullmatch(verilog) is None:
         stray = "".join(dict.fromkeys(re.findall(r"[^A-Za-z0-9_]", verilog)))
         raise UnsupportedConstruct(
             f"the name {name!r} becomes a synthesized identifier, and Verilog spells {stray!r} no way at all; "

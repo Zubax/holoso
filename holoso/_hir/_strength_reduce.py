@@ -95,12 +95,6 @@ def run(hir: Hir) -> Hir:
         const = known.get(vid)
         return const.value if isinstance(const, IntConst) else None
 
-    def is_one(vid: ValueId) -> bool:
-        return float_of(vid) == 1.0
-
-    def is_neg_one(vid: ValueId) -> bool:
-        return float_of(vid) == -1.0
-
     def involution(builder: HirBuilder, memo: dict[ValueId, ValueId], operator: Operator, value: ValueId) -> ValueId:
         """Apply a self-inverse operator: over one this pass already minted, the base answers instead of a new node."""
         base = memo.get(value)
@@ -261,10 +255,6 @@ def run(hir: Hir) -> Hir:
             return emit_float_const(builder, 1.0)
         if float_of(a) == 0.0:
             return emit_float_const(builder, 0.0)  # `0/x == 0`: a numerator rule, so no operator algebra states it
-        if is_one(b):
-            return a
-        if is_neg_one(b):
-            return make_neg(builder, a)
         divisor = float_of(b)
         # A zero divisor is excluded because there is no reciprocal to multiply by at all. An infinite one is excluded
         # only because nothing has needed the fold; `1/inf` is `0.0`, a perfectly good second factor.
@@ -415,11 +405,7 @@ def run(hir: Hir) -> Hir:
             return reduce_algebra(builder, BoolAnd(), [cond, a])  # (c, a, False) == c and a
         return builder.operation(BoolSelect(), [cond, a, b])  # both arms dynamic: keep the mux
 
-    # Operations intern per block, so a block and a node name one value -- which is what `BuildValue`, handed the
-    # node and not its id, needs to read the old graph's shape under it.
-    ids = {(block.id, hir.nodes[vid]): vid for block in hir.blocks for vid in block.operations}
-
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         if isinstance(node, Operation):
             # Ask what the operation names, but only where every operand is known -- and then no identity applies,
             # because an identity speaks for exactly the operand the compiler cannot see.
@@ -461,9 +447,9 @@ def run(hir: Hir) -> Hir:
             case Operation(operator=FloatAdd(), operands=(a, b)):
                 return reduce_add(builder, remap, a, b)
             case Operation(operator=FloatMul(), operands=(a, b)):
-                return reduce_mul(builder, remap, ids[builder.current_block, node], a, b)
+                return reduce_mul(builder, remap, vid, a, b)
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
-                return reduce_mul_pow2(builder, remap, ids[builder.current_block, node], a, k)
+                return reduce_mul_pow2(builder, remap, vid, a, k)
             case Operation(operator=FloatDiv(), operands=(a, b)):
                 return reduce_div(builder, remap[a], remap[b])
             case Operation(operator=FloatHypot(), operands=legs):

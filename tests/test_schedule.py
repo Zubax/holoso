@@ -38,9 +38,11 @@ from holoso._lir import (
     RegRef,
     Exit,
     ScheduledOp,
-    WideBoundaryInstall,
+    Boundary,
+    Early,
+    BoolCopy,
     WideConstRef,
-    WideEarlyInstall,
+    WideCopy,
     WideOperand,
     landing_cycle,
     operand_read_cycle,
@@ -80,6 +82,7 @@ from holoso._type import BoolType, FloatType
 from holoso._value import FloatValue, ScalarValue
 
 from ._modelref import (
+    early_install,
     branch_boundary_kernel,
     build_model_and_interpreter,
     mir_options,
@@ -303,9 +306,7 @@ def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
     non_entry_empty_branches = [
         b
         for b in lir.blocks
-        if isinstance(b.terminator, Branch)
-        and b.index != lir.entry
-        and not (b.ops or b.inline_ops or b.wide_copies or b.bool_writes)
+        if isinstance(b.terminator, Branch) and b.index != lir.entry and not (b.ops or b.inline_ops or b.copies)
     ]
     assert non_entry_empty_branches, "the kernel shape no longer exercises a non-entry empty branch block"
     for b in non_entry_empty_branches:
@@ -420,7 +421,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         lir = build_lir(_run(kernel, config.make_mir(FMT)), f"{name}_{config.label}")
         # These kernels write every register through an operation (no copies/installs/state), so the model's writeback
         # set is exactly the op-result landings -- the cleanest tie to write_landing_pcs.
-        assert not any(block.wide_copies or block.bool_writes for block in lir.blocks)
+        assert not any(block.copies for block in lir.blocks)
         assert not lir.wide_state_slots and not lir.bool_state_slots
         predicted: dict[tuple[str, int], set[int]] = {}
         multi_arm = 0
@@ -498,7 +499,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     # last-work copy one PC before its read-first lands.
 
     def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
-        return not block.wide_copies and not any(
+        return not any(isinstance(c, WideCopy) for c in block.copies) and not any(
             isinstance(w.dst, RegRef) for op in _block_ops(block) for w in op.writes
         )
 
@@ -509,9 +510,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
 
     pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_bool_drain")
     pfd_ret = next(block for block in pfd.blocks if exits(block.terminator))
-    assert (
-        is_bool_only(pfd_ret) and not pfd_ret.bool_writes and pfd_ret.block_makespan > 0
-    ), "pfd Ret: bool work, no install"
+    assert is_bool_only(pfd_ret) and not pfd_ret.copies and pfd_ret.block_makespan > 0, "pfd Ret: bool work, no install"
     assert pfd_ret.term_offset == boundary_step(pfd_ret.block_makespan, pfd.fetch_lag)
 
     # An install-bearing bool-only block's drain tracks its install's SOURCE. A copy whose source is the block's own
@@ -524,7 +523,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     # sticky-fault installs.)
 
     def bool_install_blocks(lir: Lir) -> list[LirBlock]:  # bool-only blocks carrying a tail bool install
-        return [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]
+        return [b for b in lir.blocks if b.copies and is_bool_only(b)]
 
     def computed_source_install(a: bool, b: bool, c: bool) -> tuple[bool, bool]:
         # The bool twin of _LastWorkArmSource: q's arm value coalesces onto q's register, so r's install in each arm
@@ -542,7 +541,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
         for b in bool_install_blocks(
             build_lir(_run(computed_source_install, replace(OPS, ifconv_max_ops=0)), "computed_source_install")
         )
-        if any(not w.settled_source for w in b.bool_writes)
+        if any(not w.settled_source for w in b.copies)
     ]
     assert computed, "no computed-source bool install to exercise the pushed-drain case"
     for block in computed:
@@ -562,7 +561,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
         build_lir(_run(resident_source_install, replace(OPS, ifconv_max_ops=0)), "resident_source_install")
     )
     assert resident and all(
-        w.settled_source for b in resident for w in b.bool_writes
+        w.settled_source for b in resident for w in b.copies
     ), "no settled-source bool install to exercise the unpushed drain"
     for block in resident:
         assert block.block_makespan == 0, "a settled source must not push the empty block's makespan"
@@ -626,9 +625,7 @@ def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
         return r
 
     lir = build_lir(_run(div_diamond), "div_diamond")
-    arms = [
-        b for b in lir.blocks if b.ops and not b.wide_copies and not b.bool_writes and isinstance(b.terminator, Jump)
-    ]
+    arms = [b for b in lir.blocks if b.ops and not b.copies and isinstance(b.terminator, Jump)]
     assert len(arms) == 2, "the division diamond's two coalesced arm blocks are the B2 target"
     for block in arms:
         last_commit = max(op.commit_cycle for op in _block_ops(block))
@@ -1241,10 +1238,10 @@ def test_write_landing_recursion_handles_multi_hop_spill() -> None:
     # pinning that it re-keys per terminator exactly as write_landing_pcs documents and terminates.
     from holoso._lir._ir import LirBlock, Jump, Branch, BoolRegRef, _trace_landing
 
-    b0 = LirBlock(0, [], [], [], [], Branch(BoolRegRef(0), 1, 2), 0, 3)
-    b1 = LirBlock(1, [], [], [], [], Jump(3), 0, 1)  # inherited landing 3 > offset 1 -> re-spills into b3
-    b2 = LirBlock(2, [], [], [], [], Jump(3), 0, 5)  # inherited landing 3 <= offset 5 -> absorbs in-block
-    b3 = LirBlock(3, [], [], [], [], Jump(Exit()), 0, 4)
+    b0 = LirBlock(0, [], [], [], Branch(BoolRegRef(0), 1, 2), 0, 3)
+    b1 = LirBlock(1, [], [], [], Jump(3), 0, 1)  # inherited landing 3 > offset 1 -> re-spills into b3
+    b2 = LirBlock(2, [], [], [], Jump(3), 0, 5)  # inherited landing 3 <= offset 5 -> absorbs in-block
+    b3 = LirBlock(3, [], [], [], Jump(Exit()), 0, 4)
     by_index = {block.index: block for block in (b0, b1, b2, b3)}
     base = {0: 0, 1: 10, 2: 20, 3: 30}
     # landing 7 in b0 spills (7 > 3) at block-local 3 into both arms; b1 re-spills 3 -> local 1 in b3 (base 30 + 1),
@@ -1370,11 +1367,12 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     (slot,) = lir.wide_state_slots
     # Nothing reads _p's register after the old live-in and its source is an ordinary register, so the copy installs
     # before the boundary -- freeing the source register for the rest of the initiation rather than pinning it there.
-    assert isinstance(slot.install, WideEarlyInstall) and isinstance(slot.install.source.source, RegRef)
-    assert slot.install.fire_step(lir.fetch_lag) < lir.last_pc
+    block, copy = early_install(lir, slot)
+    assert isinstance(copy.source.source, RegRef)
+    assert lir.block_base[block.index] + copy.fire_step(lir.fetch_lag) < lir.last_pc
     # The writeback is a first-class event in the liveness model: the slot register holds a live value from the cycle
     # the new value LANDS (one PC after the copy fires and samples its source, `install_landing`).
-    landing = slot.install.landing(lir.fetch_lag)
+    landing = lir.block_base[block.index] + copy.landing(lir.fetch_lag)
     assert landing in lir.liveness[slot.reg]
     # The next transaction reads the carried live-out, so the slot register stays live from its landing through the
     # boundary -- an early install is not the value's death.
@@ -1384,16 +1382,16 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     # and the read-first edge around fetch_lag); every consumer routes through the shared _ir helpers that own this
     # arithmetic. The literals here are a deliberate independent cross-check of those helpers, not a tautological
     # restatement of them.
-    op = lir.ops[0]
+    op = lir.blocks[0].ops[0]
     assert landing_cycle(op.commit_cycle, _FETCH_LAG) == op.commit_cycle + _FETCH_LAG + READ_FIRST_EDGE
     assert operand_read_cycle(op.inst.operator, op.issue_cycle, _FETCH_LAG) == op.issue_cycle + _FETCH_LAG
 
 
 def test_cfg_phi_merge_register_shows_residence() -> None:
     # A diamond merging two CONSTANT arms: constants are not register-backed, so neither coalesces -- the merged
-    # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Before
-    # phi-copy residence was added to the liveness, such a register had a use but no def and so collapsed to an empty
-    # (untinted) live set -- the CFG-report liveness gap.
+    # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Without
+    # phi-copy residence in the liveness, such a register would have a use but no def and collapse to an empty
+    # (untinted) live set.
     def f(x: float, d: float) -> tuple[float, float]:
         if x > 0.0:
             z = 1.0
@@ -1404,7 +1402,7 @@ def test_cfg_phi_merge_register_shows_residence() -> None:
         return z, w
 
     lir = build_lir(_run(f), "diamond")
-    assert any(block.wide_copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
+    assert any(block.copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
     out = lir.wide_outputs[0]
     assert isinstance(out.tap.source, RegRef)
     assert lir.liveness.get(out.tap.source), "the phi-merged output register must be tinted live in the report"
@@ -1433,7 +1431,7 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
     lir = build_lir(_run(WriteOnlyBranch().__call__), "write_only")
     (slot,) = lir.wide_state_slots
     assert slot.name == "acc" and not isinstance(slot.install, InPlace)
-    assert slot.reg.index not in {write.dst.index for op in lir.ops for write in op.writes}
+    assert slot.reg.index not in {write.dst.index for block in lir.blocks for op in block.ops for write in op.writes}
 
 
 def test_cfg_state_slot_coalesces_onto_its_register() -> None:
@@ -1485,8 +1483,9 @@ def _coalescing_self_copies(lir: Lir) -> int:
     return sum(
         1
         for block in lir.blocks
-        for copy in block.wide_copies
-        if isinstance(copy.source.source, RegRef)
+        for copy in block.copies
+        if isinstance(copy, WideCopy)
+        and isinstance(copy.source.source, RegRef)
         and copy.source.source == copy.dst
         and copy.source.conditioner == FloatSignControl()
     )
@@ -1504,9 +1503,7 @@ def test_diamond_op_result_arms_coalesce() -> None:
         return z * x  # an operator use of the merged value, not only the boundary output
 
     lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "phicoal")
-    assert (
-        sum(len(b.wide_copies) for b in lir.blocks) == 0
-    ), "the diamond's op-result arms must coalesce away their copies"
+    assert sum(len(b.copies) for b in lir.blocks) == 0, "the diamond's op-result arms must coalesce away their copies"
     assert _coalescing_self_copies(lir) == 0
     model = build_model(lir)
     for a, b in ((2.0, 3.0), (-2.0, 3.0), (1.5, -4.0)):
@@ -1530,7 +1527,7 @@ def test_loop_carried_phi_coalesces_only_when_non_interfering() -> None:
 
     lir = build_lir(_run(f), "accum")
     register_source_copies = [
-        copy for block in lir.blocks for copy in block.wide_copies if isinstance(copy.source.source, RegRef)
+        copy for block in lir.blocks for copy in block.copies if isinstance(copy.source.source, RegRef)
     ]
     assert not register_source_copies, "the non-interfering back-edge arms must coalesce (no register-source copy)"
     assert _coalescing_self_copies(lir) == 0
@@ -1547,7 +1544,7 @@ def test_loop_carried_phi_coalesces_only_when_non_interfering() -> None:
         if isinstance(block.terminator, Jump)
         and isinstance(block.terminator.target, int)
         and recip.block_base[block.terminator.target] <= recip.block_base[block.index]
-        for copy in block.wide_copies
+        for copy in block.copies
         if isinstance(copy.source.source, RegRef)
     ]
     assert back_edge_op_copies, "the interfering loop-carried Newton update must keep its back-edge install copy"
@@ -1596,10 +1593,11 @@ def test_state_early_copy_frees_source_register() -> None:
     lir = build_lir(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz")
     (xprev,) = [s for s in lir.wide_state_slots if s.name == "_x_prev"]
     (in_x,) = [load for load in lir.wide_inputs if load.name == "x"]
-    assert isinstance(xprev.install, WideEarlyInstall) and in_x.dst == xprev.install.source.source
-    makespan = max((op.commit_cycle for op in lir.ops), default=0)
-    assert xprev.install.cycle <= makespan  # installs ahead of the boundary
-    assert any(write.dst == in_x.dst for op in lir.ops for write in op.writes)
+    block, copy = early_install(lir, xprev)
+    assert in_x.dst == copy.source.source
+    makespan = max((op.commit_cycle for op in block.ops), default=0)
+    assert copy.issue_cycle <= makespan  # installs ahead of the boundary
+    assert any(write.dst == in_x.dst for op in block.ops for write in op.writes)
 
 
 def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
@@ -1612,7 +1610,13 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
     assert [c for c in lir.wide_consts if c == FloatValue.from_float(FMT, 1000.0)] == [
         FloatValue.from_float(FMT, 1000.0)
     ]
-    operands = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
+    operands = [
+        opnd
+        for block in lir.blocks
+        for op in block.ops
+        for opnd in op.operands
+        if isinstance(opnd.source, WideConstRef)
+    ]
     assert len({opnd.source.index for opnd in operands}) == 1
     assert {opnd.conditioner for opnd in operands} == {FloatSignControl(), FloatSignControl(negate=True)}
 
@@ -1623,7 +1627,13 @@ def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
 
     lir = build_lir(_run(f), "f")
     assert all(isinstance(c, FloatValue) and not c.negative for c in lir.wide_consts)
-    (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
+    (operand,) = [
+        opnd
+        for block in lir.blocks
+        for op in block.ops
+        for opnd in op.operands
+        if isinstance(opnd.source, WideConstRef)
+    ]
     assert lir.wide_consts[operand.source.index] == FloatValue.from_float(FMT, 1000.0)
     assert operand.conditioner == FloatSignControl(negate=True)
 
@@ -1708,9 +1718,9 @@ def _latest_producer_before(
 
 def test_register_sharing_is_hardware_disjoint() -> None:
     # ekf1_stateless time-multiplexes many values onto each register. Verify the hardware-frame interference invariant
-    # directly: within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same
-    # liveness the liveness renders and the relaxed allocator shares against. Reconstructed via the test-only write-
-    # timeline resolver over the model's landing PCs, so the test tracks the allocator's actual sharing decisions.
+    # directly: within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the
+    # liveness the allocator shares against. Reconstructed via the test-only write-timeline resolver over the model's
+    # landing PCs, so the test tracks the allocator's actual sharing decisions.
     import ekf1_stateless
 
     lir = build_lir(_run(ekf1_stateless.update_x_P), "update_x_P")
@@ -1723,7 +1733,8 @@ def test_register_sharing_is_hardware_disjoint() -> None:
             key = (source.index, *producer)
             last_read[key] = max(last_read.get(key, read_cycle), read_cycle)
 
-    for op in lir.ops:
+    (block,) = lir.blocks
+    for op in block.ops:
         for operand in op.operands:
             note(operand.source, operand_read_cycle(op.inst.operator, op.issue_cycle, lir.fetch_lag))
     for exit_pc in lir.exit_pcs:
@@ -1734,11 +1745,12 @@ def test_register_sharing_is_hardware_disjoint() -> None:
             case InPlace():
                 for exit_pc in lir.exit_pcs:
                     note(slot.reg, exit_pc)
-            case WideEarlyInstall() as install:
-                note(install.source.source, install.fire_step(lir.fetch_lag))
-            case WideBoundaryInstall(source=source):
+            case Early():
+                early_block, copy = early_install(lir, slot)
+                note(copy.source.source, lir.block_base[early_block.index] + copy.fire_step(lir.fetch_lag))
+            case Boundary():
                 for exit_pc in lir.exit_pcs:
-                    note(source.source, exit_pc)
+                    note(slot.live_out.source, exit_pc)
 
     shared = 0
     for reg, events in timeline.items():
@@ -1751,14 +1763,9 @@ def test_register_sharing_is_hardware_disjoint() -> None:
     assert shared > 0  # the kernel does pack multiple values per register, so the invariant is actually exercised
 
 
-def _read_mux_fan_in(lir: Lir) -> int:
-    books = read_sources_per_port(lir).values()
-    return sum(max(0, sum(isinstance(source, RegRef) for source in book) - 1) for book in books)
-
-
 def test_is_commutative_marks_only_the_symmetric_operators() -> None:
-    # The port-assignment pass below swaps a commutative operator's operands, which is only sound if the operator is
-    # exactly symmetric. This pins the metadata; the bit-exact symmetry itself is pinned publicly by
+    # The allocator's orientation move below swaps a commutative operator's operands, which is only sound if the
+    # operator is exactly symmetric. This pins the metadata; the bit-exact symmetry itself is pinned publicly by
     # test_arithmetic_behavior.py's commuted-edge sweeps.
     assert FAddOperator(FMT, FAddOptions()).is_commutative and FMulOperator(FMT, FMulOptions(), 0).is_commutative
     assert not FDivOperator(FMT, FDivOptions()).is_commutative
@@ -1805,10 +1812,12 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
         assert isinstance(op.write.dst, RegRef)
         assert landing in lir.liveness[op.write.dst]
     cast_regs = {op.write.dst for _, op in casts}
-    for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
-        for operand in fop.operands:
+    # The consuming multiply must read the cast result within its residence (no late-def gap).
+    for fblock in lir.blocks:
+        for fop, operand in ((fop, operand) for fop in fblock.ops for operand in fop.operands):
             if operand.source in cast_regs:
-                read = operand_read_cycle(fop.inst.operator, fop.issue_cycle, lir.fetch_lag)
+                issue = lir.block_base[fblock.index] + fop.issue_cycle
+                read = operand_read_cycle(fop.inst.operator, issue, lir.fetch_lag)
                 assert isinstance(operand.source, RegRef)
                 assert read in lir.liveness[operand.source]
 
@@ -1965,7 +1974,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
     # transaction). The tapped slot must now install at the boundary, and the model must match plain Python.
     lir = build_lir(_run(ChainedSlots().__call__, config.make_mir(FMT)), f"chained_slots_{config.label}")
     slots = {slot.name: slot for slot in lir.wide_state_slots}
-    assert isinstance(slots["_b"].install, WideBoundaryInstall), "the tapped slot must not install early"
+    assert isinstance(slots["_b"].install, Boundary), "the tapped slot must not install early"
     reference = ChainedSlots()
     model = build_model(lir)
     for x in (2.0, 3.0, 4.0):
@@ -2017,8 +2026,10 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
     select_read_pc = lir.block_base[block.index] + operand_read_cycle(
         select.operator, select.issue_cycle, lir.fetch_lag
     )
-    assert isinstance(slot.install, WideEarlyInstall), "the premise needs an early install"
-    assert slot.install.fire_step(lir.fetch_lag) >= select_read_pc, "the install must not precede the select's read"
+    assert isinstance(slot.install, Early), "the premise needs an early install"
+    early_block, copy = early_install(lir, slot)
+    fire = lir.block_base[early_block.index] + copy.fire_step(lir.fetch_lag)
+    assert fire >= select_read_pc, "the install must not precede the select's read"
     reference = SelectHold()
     model = build_model(lir)
     for x, c in [(2.0, 1.0), (3.0, -1.0), (4.0, 1.0), (5.0, -1.0)]:
@@ -2030,7 +2041,7 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
 def test_an_input_latched_by_a_working_ret_block_installs_on_its_first_cycle() -> None:
     lir = build_lir(_run(InputLatchSelect().__call__), "input_latch_select")
     (slot,) = lir.wide_state_slots
-    assert isinstance(slot.install, WideEarlyInstall) and slot.install.cycle == 0
+    assert early_install(lir, slot)[1].issue_cycle == 0
     assert lir.regfile.nreg == 2, "the input's register must be free for the select's result"
     reference = InputLatchSelect()
     model = build_model(lir)
@@ -2112,7 +2123,12 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: Operato
         return float(flag), d
 
     lir = build_lir(_run(f, config.make_mir(FMT)), f"inverted_arm_{config.label}")
-    sources = [(write.source.source, write.source.inversion) for block in lir.blocks for write in block.bool_writes]
+    sources = [
+        (write.source.source, write.source.inversion)
+        for block in lir.blocks
+        for write in block.copies
+        if isinstance(write, BoolCopy)
+    ]
     flag_sources = [(src, inv) for src, inv in sources if isinstance(src, BoolRegRef)]
     assert len(flag_sources) == 2, flag_sources
     (src_a, inv_a), (src_b, inv_b) = flag_sources
@@ -2210,11 +2226,8 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
     assert all(isinstance(slot.install, InPlace) for slot in flt.wide_state_slots)
 
 
-# CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing -- the first operators with
-# initiation_interval > 1, so the scheduler's busy_until spacing is exercised here for the first time.
-
-# default_mir already carries fexp2/flog2/fsqrt/fsincos/fatan2 and the exponent extractor the lone-hypot
-# expansion asks for, so nothing needs adding here any more.
+# CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing, which exercise the
+# scheduler's busy_until spacing.
 _CORDIC_OPS = default_mir(FMT)
 
 
@@ -2223,7 +2236,7 @@ def _instance_counts(lir: Lir) -> Counter[str]:
 
 
 def _firings(lir: Lir, mnemonic: str) -> list[PooledScheduledOp]:
-    return [op for op in lir.ops if op.inst.operator.mnemonic == mnemonic]
+    return [op for block in lir.blocks for op in block.ops if op.inst.operator.mnemonic == mnemonic]
 
 
 def _multiplier_ops(instances: int) -> MirOptions:
@@ -2304,8 +2317,8 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
     lir = build_lir(_run(kernel, _CORDIC_OPS), "lone_hypot")
     counts = _instance_counts(lir)
     assert "fatan2" not in counts  # no CORDIC is spun up for a hypotenuse that has no angle beside it
-    # The exponent scaling replaced the divide form outright: no sorter and no divider, and the root now sees a sum
-    # of two squares taken at a scale that cannot overflow.
+    # The exponent scaling needs no sorter and no divider, and the root sees a sum of two squares taken at a scale
+    # that cannot overflow.
     assert counts.get("fsqrt") == 1 and counts.get("filog2") == 1
     assert "fsort" not in counts and "fdiv" not in counts
     # Both legs are extracted on the one instance and all three scalings ride one scaler.
@@ -2441,7 +2454,7 @@ def test_inflight_source_install_fires_exactly_at_the_spilled_landing() -> None:
     assert entry.term_offset == producer.commit_cycle, "the entry envelope must be the producer's own write word"
     spilled_landing = successor_local_cycle(landing_cycle(producer.commit_cycle, lir.fetch_lag), entry.term_offset)
     assert spilled_landing == lir.fetch_lag, "the spill must land at the deepest legal step (successor-local 2)"
-    copy = next(c for b in lir.blocks for c in b.wide_copies if not c.settled_source and not (b.ops or b.inline_ops))
+    copy = next(c for b in lir.blocks for c in b.copies if not c.settled_source and not (b.ops or b.inline_ops))
     assert copy.issue_cycle == 0, "a spilled source must not push the install (its virtual commit is negative)"
     assert copy.fire_step(lir.fetch_lag) == spilled_landing, "the install must fire exactly at the spilled landing"
 

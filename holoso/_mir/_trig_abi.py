@@ -37,7 +37,7 @@ def trig_abi(hir: Hir) -> Hir:
     """
     rewrites = 0
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         nonlocal rewrites
         match node:
             case Operation(operator=FloatSin() | FloatCos() as semantic, operands=(a,)):

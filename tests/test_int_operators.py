@@ -458,9 +458,8 @@ def _everything_configured() -> Options:
 
 def test_the_catalogue_builds_every_operator_for_the_machines_own_formats() -> None:
     # A conversion operator carries one format per side, so a check keyed on the operator's own `fmt` could not see
-    # a wrong `ifmt` at all -- it read the float side and agreed with itself. The catalogue now BUILDS each operator
-    # from the machine's formats instead of accepting one built elsewhere, so the mismatch is unrepresentable
-    # rather than merely caught; this walks the whole catalogue and pins that.
+    # a wrong `ifmt` at all. The catalogue BUILDS each operator from the machine's formats, so the mismatch is
+    # unrepresentable rather than merely caught; this walks the whole catalogue and pins that.
     options = _everything_configured()
     ops = build_ops(options, options.wint_min)
     built = 0

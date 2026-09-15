@@ -1,4 +1,5 @@
 {
+  "outputStyle": "Concise",
   "permissions": {
     "allow": [
       "Bash", "PowerShell", "Read", "Write", "Edit", "Grep", "Glob", "WebFetch", "WebSearch", "NotebookEdit", "LSP",

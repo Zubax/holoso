@@ -25,6 +25,11 @@ _N = TypeVar("_N", int, float)
 _POW_INT_PRESERVING = (pow, np.power, np.pow, BinaryOp.POW)
 _POW = (*_POW_INT_PRESERVING, math.pow, np.float_power)
 
+# The float chain needs no transcendental hardware and measures at least as accurate as the general rung at every
+# exponent both can express, so this bound is deliberately a length cap and nothing more: 128 keeps the chain inside
+# a couple of dozen cycles while covering every exponent a kernel spells by hand.
+_CHAIN_MAX = 128
+
 
 def _chain(acc: _N, base: _N, k: int) -> _N:
     """
@@ -48,11 +53,15 @@ def pow_chain_int(b: int, e: StaticWholeNonNegative[int]) -> int:
 
 @lib(*_POW)
 def pow_chain_float(b: float, n: StaticWholeNonNegative[float]) -> float:
+    if n > _CHAIN_MAX:
+        return pow_(b, n)
     return _chain(1.0, b, int(n))
 
 
 @lib(*_POW)
 def pow_reciprocal(b: float, n: StaticWholeNegative[float]) -> float:
+    if n < -_CHAIN_MAX:
+        return pow_(b, n)
     return 1.0 / pow_chain_float(b, -n)
 
 

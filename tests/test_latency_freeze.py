@@ -31,8 +31,7 @@ import pytest
 import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
-from holoso._lir import BoolBoundaryInstall, InPlace, WideBoundaryInstall, WideStateSlot
-from holoso._lir._ir import BoolStateSlot
+from holoso._lir import Boundary, InPlace
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import ExampleSpec, SPECS
@@ -208,9 +207,8 @@ def test_chained_copy_schedule_is_frozen(
     lir = build_lir(
         lower_to_mir(lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)), name
     )
-    slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
     assert all(
-        not isinstance(slot.install, InPlace) for slot in slots
+        not isinstance(slot.install, InPlace) for slot in lir.state_slots
     ), f"{name}: a chained-copy slot unexpectedly coalesced; the tapped_by_other path is no longer exercised"
     got = (lir.min_initiation_interval, lir.last_pc)
     assert got == frozen, (
@@ -250,9 +248,8 @@ def test_a_boundary_install_costs_what_an_output_does(
     options = config.make_options(_FMT)
     mir = lower_to_mir(lower_frontend(stateful(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
     lir = build_lir(mir, "k")
-    slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
     assert not next(block for block in mir.blocks if block.id == mir.ret_block).operations and all(
-        isinstance(slot.install, (WideBoundaryInstall, BoolBoundaryInstall)) for slot in slots
+        isinstance(slot.install, Boundary) for slot in lir.state_slots
     )
     installed = holoso.synthesize(stateful(), options, name="installed").initiation_interval
     assert installed == holoso.synthesize(stateless, options, name="returned").initiation_interval

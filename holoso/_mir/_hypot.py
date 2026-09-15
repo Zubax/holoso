@@ -52,7 +52,7 @@ def plan_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     magnitude port (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR
     firing fusion it feeds; a pair is the only arity that port carries.
     """
-    if ops.fatan2 is None:
+    if ops.options.fatan2 is None:
         return {}
     plans: dict[ValueId, ValueId] = {}
     for block in hir.blocks:
@@ -110,13 +110,10 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
     let an expression cancel, and the cancellation can delete the atan2 another magnitude was to fuse with.
     """
     fused, fmt = plan_fusions(hir, ops), ops.float_format
-    # Operations intern per block, so a block and a node name one value -- which is how `BuildValue`, handed the
-    # node and not its id, recognizes a target.
     targets = {
-        (block.id, node)
-        for block in hir.blocks
-        for vid in block.operations
-        if isinstance(node := hir.nodes[vid], Operation) and isinstance(node.operator, FloatHypot) and vid not in fused
+        vid: node
+        for vid, node in hir.nodes.items()
+        if isinstance(node, Operation) and isinstance(node.operator, FloatHypot) and vid not in fused
     }
     if not targets:
         return None
@@ -124,7 +121,7 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
     # The window's top leaves the smaller legs the most room to flush, and it narrows with the arity. Sorted, so a
     # graph holding several refusable arities names the shortest vector it cannot hold.
     scales: dict[int, int] = {}
-    for arity in sorted({len(node.operands) for _, node in targets}):
+    for arity in sorted({len(node.operands) for node in targets.values()}):
         scale = _scaling_exponent(fmt, arity)
         if scale is None:
             raise UnsupportedConstruct(
@@ -133,8 +130,8 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
             )
         scales[arity] = scale
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-        if (builder.current_block, node) not in targets:
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+        if vid not in targets:
             return copy_node(builder, node, remap)
         assert isinstance(node, Operation)
         assert len(node.operands) >= 2  # strength reduction answers a lone leg with the absolute value
