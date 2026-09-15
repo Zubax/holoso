@@ -208,7 +208,7 @@ class HardwareOperator(ABC):
     def initiation_interval(self) -> int:
         """
         Minimum cycles between successive issues on one physical instance (1 = fully pipelined) -- the per-operator
-        sense of II. Distinct from the module-level `Lir.initiation_interval`, the whole-transaction cost, which is
+        sense of II. Distinct from the module-level `Lir.min_initiation_interval`, the whole-transaction cost, which is
         this project's deliberate usage (see DESIGN.md, Direction).
         """
         return 1

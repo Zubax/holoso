@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import assert_never
 
 from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirWideView, reverse_postorder
 from .._operators import HardwareOperator, PooledHardwareOperator
@@ -184,7 +185,7 @@ def layout_offsets(
     pipeline past its commit, so the latest landing is the makespan's, and a phi tail install lands read-first there
     too (the makespan one past the work only when a source is the block's own last work; see `install_issue_cycle`).
     An empty block ends where its received spills land, the entry no earlier than its input loads on cycle 1. A slot's
-    boundary install asks for no drain: it samples its source on the last PC, as an output does.
+    boundary install asks for no drain: it samples its source on the exit PC, as an output does.
     """
     block_makespan: dict[int, int] = {}
     block_term_offset: dict[int, int] = {}
@@ -206,51 +207,54 @@ def layout_offsets(
     return BlockOffsets(block_makespan, block_term_offset)
 
 
-@dataclass(frozen=True, slots=True)
-class _BlockLayout:
-    """The ROM placement: per-block base PC, the out_valid PC, and the shortest-path initiation interval."""
-
-    block_base: list[int]
-    last_pc: int
-    min_initiation_interval: int
-
-
-def layout_blocks(mir: Mir, blocks: list[LirBlock]) -> _BlockLayout:
+def _pc_less(mir: Mir, schedules: BlockSchedules, blocks: list[LirBlock]) -> dict[int, Arm]:
     """
-    Each block spans `term_offset + 1` fetch steps: its body up to and including the terminator step, the successor
-    frame beginning at `term_pc + 1`.
+    The blocks that take no PC, each mapped to the arm its predecessors take instead: a non-entry block that does no
+    work, receives nothing across an overlapped seam (no spilled value, no busy instance), and jumps. Nothing lands in
+    its frame, so what an exit reads there is already resident at its predecessor's terminator. A cycle of such blocks
+    is a reachable nontermination and keeps its PCs, so a chain running into one resolves to where it enters the cycle.
     """
-    successors: dict[int, list[int]] = {b.index: terminator_arms(b.terminator) for b in blocks}
-    # Blocks are laid out linearly in reverse-postorder, but the single Ret block is forced last so its boundary is the
-    # highest address (out_valid = pc == LASTPC). A loop body is a DFS leaf (its only edge back to the header is a back
-    # edge), so RPO would otherwise place it after the exit; moving Ret last keeps every loop body below the Ret. A
-    # back-edge targets an earlier, lower-addressed block, which the next-PC sequencer redirects like any other jump, so
-    # the linear layout needs no special case; the frontend emits reducible loops, so a back-edge target dominates it.
-    ret_index = next(b.index for b in blocks if isinstance(b.terminator, Ret))
-    order = [bid for bid in reverse_postorder(mir) if bid != ret_index] + [ret_index]
-    position = {bid: i for i, bid in enumerate(order)}
-    term_offset = {b.index: b.term_offset for b in blocks}
-    length = {index: offset + 1 for index, offset in term_offset.items()}
-    base: dict[int, int] = {}
-    cursor = 0
-    for index in order:  # reverse-postorder starts at the entry (block 0), so every block's base is assigned here
-        base[index] = cursor
-        cursor += length[index]
-    last_pc = base[ret_index] + term_offset[ret_index]
-    # Shortest path latency (traversed fetch steps) from entry to the Ret boundary. Back-edges are skipped: the minimum
-    # latency is the path that exits each loop on its first header test (a loop weighted as not-taken), a true lower
-    # bound (the model is the authority on the realized, data-dependent count).
-    dist: dict[int, int] = {mir.entry: 0}
-    for index in order:
-        here = dist.get(index)
-        if here is None:
-            continue
-        for successor in successors[index]:
-            if position[successor] <= position[index]:
-                continue
-            cand = here + length[index]
-            if successor not in dist or cand < dist[successor]:
-                dist[successor] = cand
-    min_ii = dist.get(ret_index, 0) + term_offset[ret_index]
-    block_base = [base[i] for i in range(len(blocks))]
-    return _BlockLayout(block_base, last_pc, min_ii)
+    jumps: dict[int, Arm] = {}
+    for block in blocks:
+        idle = not (block.ops or block.inline_ops or block.wide_copies or block.bool_writes)
+        received = schedules.block_inflight[block.index] or schedules.block_entry_busy[block.index]
+        if block.index != mir.entry and idle and not received and isinstance(block.terminator, Jump):
+            jumps[block.index] = block.terminator.target
+    resolved: dict[int, Arm] = {}
+    for start in jumps:
+        path: list[int] = []
+        arm: Arm = start
+        while isinstance(arm, int) and arm in jumps and arm not in path:
+            path.append(arm)
+            arm = jumps[arm]
+        cycle_entry = path.index(arm) if isinstance(arm, int) and arm in path else len(path)
+        resolved.update(dict.fromkeys(path[:cycle_entry], arm))
+    return resolved
+
+
+def _retarget(terminator: Terminator, pc_less: Mapping[int, Arm]) -> Terminator:
+    def resolve(arm: Arm) -> Arm:
+        return pc_less.get(arm, arm) if isinstance(arm, int) else arm
+
+    match terminator:
+        case Jump(target=target):
+            return Jump(resolve(target))
+        case Branch(cond=cond, if_true=if_true, if_false=if_false):
+            arms = resolve(if_true), resolve(if_false)
+            return Jump(arms[0]) if arms[0] == arms[1] else Branch(cond, *arms)
+        case _:
+            assert_never(terminator)
+
+
+def layout_blocks(mir: Mir, schedules: BlockSchedules, blocks: list[LirBlock]) -> list[LirBlock]:
+    """
+    The blocks that take PCs, laid out linearly in reverse-postorder; each spans `term_offset + 1` fetch steps, the
+    successor frame beginning at `term_pc + 1`. A back-edge targets an earlier, lower-addressed block, which the
+    next-PC sequencer redirects like any other jump; the frontend emits reducible loops, so a back-edge target dominates
+    it. Arms into a block that takes no PC are resolved through it, until a branch folded into a jump leaves none.
+    """
+    while pc_less := _pc_less(mir, schedules, blocks):
+        _logger.info("Layout: blocks %s take no PC", sorted(pc_less))
+        blocks = [replace(b, terminator=_retarget(b.terminator, pc_less)) for b in blocks if b.index not in pc_less]
+    by_index = {block.index: block for block in blocks}
+    return [by_index[index] for index in reverse_postorder(mir) if index in by_index]

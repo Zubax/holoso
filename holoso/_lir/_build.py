@@ -125,8 +125,8 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     """
     Schedule each block, pool operator instances across the mutually-exclusive blocks, color both register banks by
     hardware-frame liveness (reusing registers, coalescing state live-outs, orienting commutative firings), install
-    non-coalesced phi and slot live-outs by pc-gated copy, and lay the blocks out in the ROM with the single `Ret` as
-    the out_valid boundary.
+    non-coalesced phi and slot live-outs by pc-gated copy, and lay the blocks out in the ROM, the transaction ending on
+    every terminator arm that exits.
     """
     ctx = _prepare(mir, fetch_lag)
     mir, wide_mir, bool_mir = ctx.mir, ctx.wide_mir, ctx.bool_mir
@@ -168,8 +168,8 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             commit <= block_makespan for commit in bool_commits
         ), f"block {block.id}: a boolean result commits past the block makespan {block_makespan}"
         # Every phi-arm install must LAND within its block (at or before the terminator). An install landing past the
-        # terminator is enqueued for a PC the block never reaches: a non-Ret terminator re-keys it onto the taken arm,
-        # but a Ret wrap drops it -- a silently dead install. This is the vector-independent structural invariant that a
+        # terminator is enqueued for a PC the block never reaches: a redirect re-keys it onto the taken arm, but an exit
+        # drops it -- a silently dead install. This is the vector-independent structural invariant that a
         # value cosim cannot see (a dead install that does not change outputs passes every value comparison).
         term_offset = offsets.block_term_offset[block.id]
         installs: list[WideCopy | BoolWrite] = [*wide_copies, *bool_writes]
@@ -202,9 +202,9 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             )
         )
 
-    layout = layout_blocks(mir, blocks)
-    block_base, last_pc, min_ii = layout.block_base, layout.last_pc, layout.min_initiation_interval
-    flat_ops = [rebase_op(op, block_base[block.id]) for block in mir.blocks for op in blocks[block.id].ops]
+    laid_out = layout_blocks(mir, ctx.schedules, blocks)
+    block_base = block_bases(laid_out)
+    flat_ops = [rebase_op(op, block_base[block.index]) for block in laid_out for op in block.ops]
 
     def encoded_reset(slot_name: str, scalar_type: FloatType | IntType, raw: float | int | bool) -> WideValue:
         value = coerce_scalar(scalar_type, raw, f"state slot {slot_name!r} reset")
@@ -223,6 +223,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
             case InPlace():
                 install = InPlace()
             case Early(ret_cycle=ret_cycle):  # a slot belongs to no block: the install cycle is absolute
+                assert ret_block in block_base, "an early install implies work in the Ret block"
                 install = WideEarlyInstall(source, block_base[ret_block] + ret_cycle)
             case Boundary():
                 install = WideBoundaryInstall(source)
@@ -261,30 +262,28 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         regfile=RegFileLayout(
             nreg=alloc.wide.nreg,
             nrd=sum(inst.operator.signature.arity for inst in instances),
-            nwr=len(tapped_wide_lanes(blocks)),
+            nwr=len(tapped_wide_lanes(laid_out)),
             nload=len(wide_mir.input_ids),
         ),
         inputs=build_inputs(mir, wide_mir, bool_mir, alloc),
         ops=flat_ops,
         outputs=outputs,
         wide_state_slots=wide_state_slots,
-        blocks=blocks,
-        block_base=block_base,
-        entry=mir.entry,
-        last_pc=last_pc,
-        min_initiation_interval=min_ii,
+        blocks=laid_out,
         bool_regfile=BoolRegFileLayout(nreg=alloc.bool.nreg),
         bool_state_slots=bool_state_slots,
         fetch_lag=fetch_lag,
     )
-    # The model drops a write keyed past the boundary, which would freeze the persistent state.
-    for wide_slot in wide_state_slots:
-        if isinstance(wide_slot.install, WideEarlyInstall):
-            landing = wide_slot.install.landing(fetch_lag)
-            assert landing <= last_pc, f"state slot {wide_slot.name!r} early install lands at {landing} past {last_pc}"
     # The wide bank was allocated against the steering the emitter builds, arm for arm.
     emitted_read = sum(max(0, n - 1) for n in read_arms(lir).values())
     emitted_write = sum(max(0, n - 1) for dst, n in write_arms(lir).items() if isinstance(dst, RegRef))
     assert (alloc.wide.read_arms, alloc.wide.write_arms) == (emitted_read, emitted_write)
-    _logger.info("LIR: %d blocks, last PC %d, min II %d, %d instances", len(blocks), last_pc, min_ii, len(instances))
+    _logger.info(
+        "LIR: %d blocks, last PC %d, exits %s, min II %d, %d instances",
+        len(lir.blocks),
+        lir.last_pc,
+        lir.exit_pcs,
+        lir.min_initiation_interval,
+        len(instances),
+    )
     return lir

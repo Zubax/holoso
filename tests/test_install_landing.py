@@ -1,7 +1,7 @@
 """
 A vector-independent structural guard: every phi-arm install must LAND within its own block, at or before the block's
 terminator step. An install whose landing PC exceeds the terminator is enqueued for a PC the block never reaches -- a
-non-Ret terminator re-keys it onto the taken successor arm, but the Ret wrap silently drops it, a dead install.
+redirect re-keys it onto the taken successor arm, but an exit silently drops it, a dead install.
 
 This class of defect is invisible to every value comparison (cosim, the example-reference suite, the schedule-
 independent MIR interpreter): a dead install that does not alter an output value passes them all, because it is
@@ -59,7 +59,7 @@ def test_phi_arm_installs_land_within_their_block(spec: ExampleSpec) -> None:
             landing = install.landing(lir.fetch_lag)  # block-local; same fire+read-first edge the model/emitter commit
             assert landing <= block.term_offset, (
                 f"{spec.name} block {block.index}: install of {install.dst} lands at {landing}, past the terminator "
-                f"{block.term_offset} -- a dead install the Ret wrap would orphan"
+                f"{block.term_offset} -- a dead install an exit would orphan"
             )
 
 

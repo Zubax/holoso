@@ -323,7 +323,7 @@ def test_a_slot_fed_by_an_integer_input_installs_ahead_of_the_boundary() -> None
     """
     lir = build_lir(_select(InputLatch().step), "input_latch")
     (slot,) = lir.wide_state_slots
-    assert isinstance(slot.install, WideEarlyInstall) and slot.install.cycle == 1 < lir.initiation_interval
+    assert isinstance(slot.install, WideEarlyInstall) and slot.install.cycle == 0
 
 
 def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering() -> None:

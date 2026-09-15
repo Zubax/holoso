@@ -40,3 +40,25 @@ every cheap detector for the shape misfires on the legitimate counter-spelled lo
 A state attribute's shape and type come from the reset snapshot, so a field annotation contradicting it
 (`P: Float64[np.ndarray, "2 2"]` on an instance holding a 3x3) is documentation rather than a checked declaration.
 Parameter and return annotations are checked, so the module boundary is judged while the state boundary is not.
+
+## LIR
+
+### Blocks that only install settled phi-arm copies
+
+A branch arm whose block holds nothing but phi-arm copies of values already settled (constants, inputs, state reads,
+landed results) still drains and takes its own PCs, about four cycles on that path: finite_set_current_controller's
+boolean constant arms (160 -> 156 on its shortest path), foc and imu_fusion arm blocks, image_agc_streamed,
+octave_index, remainder. The narrowest sound fix hands the copies to a predecessor that spills nothing, landing them on
+its terminator so the arm block becomes empty and takes no PC; the phi register then interferes with the other arm's
+live values, which can cost a register under pressure. Arms whose predecessor spills (pid, foc's and imu_fusion's
+first arms) or is the empty entry (flux_observer) gain nothing without draining overlaps into merges. Threading the
+empty arm straight into the merge trades latency between the paths instead (a probe moved `x / y if c else 0.0` from
+6/18 to 4/20 cycles), so a general version needs a schedule-aware acceptance test and was sized above medium.
+
+### List-scheduler priority
+
+`schedule_ops` issues ready firings by latency-weighted height to a sink, which ignores instance contention. A
+randomized slack-based priority, 300 trials per block under an independent timing model, found shorter blocks the
+height order misses: rigid_body_scalar 126 -> 124 cycles, imu_fusion's entry and one arm block one cycle each. Other
+large kernels (both EKFs, cordic_sincos, foc) showed no gain, so the benefit is uneven; a contention-aware priority, or
+a few perturbed orders per block keeping the shortest, are the candidates.

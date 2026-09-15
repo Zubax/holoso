@@ -126,7 +126,7 @@ def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pyt
         lower_to_mir(lower(_cycle0_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
-    assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].ops), "kernel must issue a pooled op on cycle 0"
+    assert any(op.issue_cycle == 0 for op in lir.blocks[0].ops), "kernel must issue a pooled op on cycle 0"
     _run_bench(name, lir, "transacting_edge", {"HOLOSO_DWELL_K": k}, monkeypatch)
 
 

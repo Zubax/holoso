@@ -240,7 +240,7 @@ def build_microcode(
     for event in events:
         assert (
             0 <= event.step and landing_cycle(event.step, lir.fetch_lag) <= lir.last_pc
-        ), f"microcode write at step {event.step} lands past the last PC {lir.last_pc}"
+        ), f"microcode write at step {event.step} lands past the end of the ROM at {lir.last_pc}"
         put(f_op(event.dst), event.step, write_books[event.dst].code(event.source))
 
     return fields

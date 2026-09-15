@@ -7,8 +7,8 @@ which typed storage resources, with which folded port conditioners.
 
 from bisect import bisect_right
 from collections.abc import Iterator
-from dataclasses import dataclass
-from typing import TypeVar, assert_never
+from dataclasses import dataclass, field
+from typing import assert_never
 
 from .._operators import (
     BoolInversion,
@@ -124,10 +124,18 @@ def install_landing(fire_step: int) -> int:
     The step a pc-gated install -- a phi copy, a boolean write, or an early state install -- commits its
     destination and becomes readable: one after the step it fires on. The model writes the destination into `_pending`
     one PC past the fire, so the numerical model and the liveness diagnostic route this +1 through this one helper and
-    cannot drift. A boundary slot install is the lone exception: it reads-then-writes at `last_pc` and does not pass
+    cannot drift. A boundary slot install is the lone exception: it reads-then-writes at an exit and does not pass
     through here.
     """
     return fire_step + READ_FIRST_EDGE
+
+
+def install_ready_cycle(source_commit: int | None) -> int:
+    """
+    The earliest scheduler-frame cycle an install may fire on and still read its source: any for a SETTLED source
+    (`source_commit` None), one past a computed source's commit otherwise.
+    """
+    return 0 if source_commit is None else source_commit + READ_FIRST_EDGE
 
 
 def install_issue_cycle(work_makespan: int, source_commit: int | None) -> int:
@@ -145,10 +153,8 @@ def install_issue_cycle(work_makespan: int, source_commit: int | None) -> int:
     the same +1 into the block makespan exactly when an install issues past the work makespan, so the placement and
     the drain agree and an install cannot land past its block's terminator.
     """
-    if source_commit is None:
-        return work_makespan
-    assert source_commit <= work_makespan, "install source_commit lies outside the install's own block frame"
-    return max(work_makespan, source_commit + READ_FIRST_EDGE)
+    assert source_commit is None or source_commit <= work_makespan, "install source commits outside its block frame"
+    return max(work_makespan, install_ready_cycle(source_commit))
 
 
 def boundary_step(makespan: int, fetch_lag: int) -> int:
@@ -250,7 +256,7 @@ class BoolRegRef:
         return f"b{self.index}"
 
 
-_BankReg = TypeVar("_BankReg", RegRef, BoolRegRef)  # one register bank's reference type (wide or boolean)
+type _Reg = RegRef | BoolRegRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,7 +466,7 @@ class InlineScheduledOp:
 
 @dataclass(frozen=True, slots=True)
 class _OutputWire:
-    """An output port: a named external sink driven at the last PC by a typed source tap."""
+    """An output port: a named external sink driven at an exit PC by a typed source tap."""
 
     name: str
     tap: WideOperand | BoolOperand
@@ -528,35 +534,55 @@ class BoolWrite:
 
 
 @dataclass(frozen=True, slots=True)
+class Exit:
+    """The end of the transaction: the fetch PC presents the outputs there and dwells until they are taken."""
+
+
+type Arm = int | Exit
+
+
+@dataclass(frozen=True, slots=True)
 class Jump:
-    target: int
+    target: Arm
 
 
 @dataclass(frozen=True, slots=True)
 class Branch:
     cond: BoolRegRef
-    if_true: int
-    if_false: int
+    if_true: Arm
+    if_false: Arm
+
+    def __post_init__(self) -> None:
+        assert self.if_true != self.if_false, "a branch to one arm is a jump"
 
 
-@dataclass(frozen=True, slots=True)
-class Ret:
-    """The sole function exit: outputs and persistent state are resident at the block boundary."""
+type Terminator = Jump | Branch
 
 
-type Terminator = Jump | Branch | Ret
-
-
-def terminator_arms(terminator: Terminator) -> list[int]:
+def terminator_arms(terminator: Terminator) -> list[Arm]:
     match terminator:
         case Jump(target=target):
             return [target]
         case Branch(if_true=if_true, if_false=if_false):
             return [if_true, if_false]
-        case Ret():
-            return []
         case _:
             assert_never(terminator)
+
+
+@dataclass(frozen=True, slots=True)
+class ExitPoint:
+    """A fetch PC ending the transaction: always, or when its branch `condition` holds."""
+
+    pc: int
+    condition: BoolOperand | None
+
+
+def successor_blocks(terminator: Terminator) -> list[int]:
+    return [arm for arm in terminator_arms(terminator) if not isinstance(arm, Exit)]
+
+
+def exits(terminator: Terminator) -> bool:
+    return any(isinstance(arm, Exit) for arm in terminator_arms(terminator))
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,8 +610,18 @@ class LirBlock:
     term_offset: int
 
 
+def block_bases(blocks: list[LirBlock]) -> dict[int, int]:
+    """Each block's absolute base PC as the blocks tile the ROM in layout order, each `term_offset + 1` steps long."""
+    bases: dict[int, int] = {}
+    cursor = 0
+    for block in blocks:
+        bases[block.index] = cursor
+        cursor += block.term_offset + 1
+    return bases
+
+
 def _trace_landing(
-    by_index: dict[int, LirBlock], block_base: list[int], block: LirBlock, landing_cycle: int
+    by_index: dict[int, LirBlock], block_base: dict[int, int], block: LirBlock, landing_cycle: int
 ) -> list[int]:
     """
     Resolve a block-local `landing_cycle` to its absolute landing PC(s), following overlap spills across terminators
@@ -593,8 +629,9 @@ def _trace_landing(
     """
     if landing_cycle <= block.term_offset:
         return [block_base[block.index] + landing_cycle]
+    assert not exits(block.terminator), f"block {block.index}: a result spills past an exit"
     spilled = successor_local_cycle(landing_cycle, block.term_offset)
-    arms = terminator_arms(block.terminator)
+    arms = successor_blocks(block.terminator)
     return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
 
 
@@ -652,16 +689,13 @@ class Lir:
     ops: list[PooledScheduledOp]  # the pipelined pooled firings, flattened across blocks with ABSOLUTE issue cycles
     outputs: list[WideOutputWire | BoolOutputWire]
     wide_state_slots: list[WideStateSlot]  # persistent registers, ordered by attribute path
-    # Control-flow overlay. A straight-line kernel has a single block ending in Ret; `blocks[0]` is the entry,
-    # `block_base[i]` is block i's absolute start PC, and `last_pc` is the out_valid boundary (the single Ret).
+    # Control-flow overlay: the blocks that take PCs, tiling the ROM in layout order from the entry; a block that does
+    # no work takes no PC and its arms are resolved through it.
     blocks: list[LirBlock]
-    block_base: list[int]
-    entry: int
-    last_pc: int  # LASTPC: the fetch PC at which out_valid asserts (the single Ret block's boundary)
-    min_initiation_interval: int  # shortest executable path latency; exact for branch-free kernels, else a lower bound
     bool_regfile: BoolRegFileLayout
     bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered by attribute path
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
+    block_base: dict[int, int] = field(init=False)  # block index -> the absolute PC its frame starts at
 
     @property
     def wide_register_width(self) -> int:
@@ -695,7 +729,7 @@ class Lir:
             {type(inst.operator) for inst in self.instances}
         ), "instance names index within the mnemonic, so one operator configuration per pooled class"
         # Cross-block instance reuse on a DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
-        # header, the Ret), which carries no per-instance busy residue -- needs the instance provably idle by the
+        # header), which carries no per-instance busy residue -- needs the instance provably idle by the
         # time that successor first issues on it: the worst case is a firing committing at its block's makespan
         # (issue = makespan - latency), and the redirect-plus-fetch gap to the successor's first issue is at least
         # `latency + drain + 1` (the `drain` below). The drain is bank-independent -- every result lands at the
@@ -711,6 +745,23 @@ class Lir:
                 f"{inst.operator.mnemonic}: initiation_interval {inst.operator.initiation_interval} needs cross-block "
                 f"busy tracking (max supported is latency + {drain + 1})"
             )
+        base = block_bases(self.blocks)
+        object.__setattr__(self, "block_base", base)
+        assert all(arm in base for block in self.blocks for arm in successor_blocks(block.terminator))
+        assert self.exit_pcs and min(self.exit_pcs) >= 1, "PC 0 is the accept dwell"
+        # Nothing lands past an exit: the dwell executes no write, and a conditional exit's condition holds still.
+        for block in self.blocks:
+            if exits(block.terminator):
+                ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
+                installs: list[WideCopy | BoolWrite] = [*block.wide_copies, *block.bool_writes]
+                landings = [landing_cycle(op.commit_cycle, self.fetch_lag) for op in ops]
+                landings += [install.landing(self.fetch_lag) for install in installs]
+                assert all(landing <= block.term_offset for landing in landings), f"block {block.index}: past its exit"
+        for slot in self.wide_state_slots:
+            if isinstance(slot.install, WideEarlyInstall):
+                landing = slot.install.landing(self.fetch_lag)
+                (home,) = [b for b in self.blocks if base[b.index] <= landing <= self.term_pc(b)]
+                assert exits(home.terminator), f"state slot {slot.name!r} installs past its exit"
         # The numerical model evaluates firings in isolation and cannot witness a double issue; the residue across an
         # overlapped seam is asserted in the allocator, where it is known.
         for block in self.blocks:
@@ -774,13 +825,46 @@ class Lir:
         return max(1, (self.last_pc - self.fetch_lag).bit_length())
 
     @property
-    def initiation_interval(self) -> int:
+    def entry(self) -> int:
+        return self.blocks[0].index
+
+    @property
+    def min_initiation_interval(self) -> int:
         """
-        The out_valid boundary PC (`last_pc`). For a straight-line kernel this equals the observable
-        in_valid->out_valid latency; with branches the per-path latency varies and is reported by the numerical model,
-        while `min_initiation_interval` is the statically-known lower bound (exact when branch-free).
+        The shortest path latency (traversed fetch steps) from the entry to an exit, exact for a branch-free kernel.
+        Back-edges, which target a lower address, are skipped: the minimum is the path exiting each loop on its first
+        header test, a true lower bound (the model is the authority on the realized, data-dependent count).
         """
-        return self.last_pc
+        dist = {self.entry: 0}
+        for block in self.blocks:  # layout order is reverse-postorder, so a forward edge reaches every block
+            reach = dist[block.index] + block.term_offset + 1
+            for successor in successor_blocks(block.terminator):
+                if self.block_base[successor] > self.block_base[block.index]:
+                    dist[successor] = min(dist.get(successor, reach), reach)
+        return min(dist[block.index] + block.term_offset for block in self.blocks if exits(block.terminator))
+
+    @property
+    def last_pc(self) -> int:
+        """The last address of the microcode ROM."""
+        return self.term_pc(self.blocks[-1])
+
+    @property
+    def exit_points(self) -> list[ExitPoint]:
+        """Every fetch PC at which out_valid may assert, in address order."""
+        points: list[ExitPoint] = []
+        for block in self.blocks:
+            match block.terminator:
+                case Jump(target=Exit()):
+                    points.append(ExitPoint(self.term_pc(block), None))
+                case Branch(cond=cond, if_true=Exit()):
+                    points.append(ExitPoint(self.term_pc(block), BoolOperand(cond)))
+                case Branch(cond=cond, if_false=Exit()):
+                    points.append(ExitPoint(self.term_pc(block), BoolOperand(cond, BoolInversion(invert=True))))
+        return points
+
+    @property
+    def exit_pcs(self) -> list[int]:
+        return [point.pc for point in self.exit_points]
 
     def term_pc(self, block: LirBlock) -> int:
         """
@@ -833,11 +917,12 @@ class Lir:
 
     def _cfg_residence(
         self,
-        defs: dict[_BankReg, list[int]],
-        uses: dict[_BankReg, list[int]],
-    ) -> dict[_BankReg, set[int]]:
+        defs: dict[_Reg, list[int]],
+        uses: dict[_Reg, list[int]],
+        carried: set[_Reg],
+    ) -> dict[_Reg, set[int]]:
         """
-        Collapse a bank's absolute def/use PCs into the rows each register holds a live value, computed PER BASIC BLOCK
+        Collapse the absolute def/use PCs into the rows each register holds a live value, computed PER BASIC BLOCK
         (where the PC stream is straight-line, so `_residence_rows` is exact) with backward register liveness carrying
         a value across block boundaries. This is path-aware where a single global timeline is not: a value live on two
         mutually-exclusive arms that rejoin at a merge stays resident on BOTH arms, instead of the later-addressed arm's
@@ -846,19 +931,22 @@ class Lir:
 
         `defs`/`uses` are absolute fetch PCs (the report grid's row axis); each falls inside exactly one block's
         `[base, term_pc]` range (the ranges tile the frame contiguously in layout order). Within a block a live-in
-        register is given a pseudo-def at the block base and a live-out one a pseudo-use at the terminator PC, so the
-        per-block `_residence_rows` extends the carried value across the whole block.
+        register is given a pseudo-def at the block base (row 0 being the accept dwell, the entry's at row 1) and a
+        live-out one a pseudo-use at the terminator PC, so the per-block `_residence_rows` extends the carried value
+        across the whole block. A `carried` register (a slot committing its live-out before the boundary) is live out of
+        an exit exactly when the next transaction reads it before writing it.
         """
-        order = sorted(range(len(self.blocks)), key=lambda i: self.block_base[i])
+        order = [block.index for block in self.blocks]
         sorted_bases = [self.block_base[i] for i in order]
         term_pc = {block.index: self.term_pc(block) for block in self.blocks}
-        succ = {block.index: terminator_arms(block.terminator) for block in self.blocks}
+        succ = {block.index: successor_blocks(block.terminator) for block in self.blocks}
+        exiting = {block.index for block in self.blocks if exits(block.terminator)}
 
         def block_of(pc: int) -> int:
             return order[bisect_right(sorted_bases, pc) - 1]
 
-        block_defs: dict[int, dict[_BankReg, list[int]]] = {block.index: {} for block in self.blocks}
-        block_uses: dict[int, dict[_BankReg, list[int]]] = {block.index: {} for block in self.blocks}
+        block_defs: dict[int, dict[_Reg, list[int]]] = {block.index: {} for block in self.blocks}
+        block_uses: dict[int, dict[_Reg, list[int]]] = {block.index: {} for block in self.blocks}
         for reg, pcs in defs.items():
             for pc in pcs:
                 block_defs[block_of(pc)].setdefault(reg, []).append(pc)
@@ -871,175 +959,98 @@ class Lir:
         # landing cycle of its own def reads the just-committed value (the model lands the write, then reads, at that
         # PC), not a live-in -- a same-PC def+use (e.g. an output tap or branch condition read on the cycle it lands)
         # must NOT be treated as live-in, or its residence would be painted spuriously back to the block entry.
-        written: dict[int, set[_BankReg]] = {}
-        upward: dict[int, set[_BankReg]] = {}
+        written: dict[int, set[_Reg]] = {}
+        upward: dict[int, set[_Reg]] = {}
         for index in block_defs:
             ds, us = block_defs[index], block_uses[index]
             written[index] = set(ds)
             upward[index] = {reg for reg, reads in us.items() if reg not in ds or min(reads) < min(ds[reg])}
-        live_in: dict[int, set[_BankReg]] = {index: set() for index in block_defs}
-        live_out: dict[int, set[_BankReg]] = {index: set() for index in block_defs}
+        live_in: dict[int, set[_Reg]] = {index: set() for index in block_defs}
+        live_out: dict[int, set[_Reg]] = {index: set() for index in block_defs}
         changed = True
         while changed:  # backward dataflow over the block CFG; converges (monotone over a finite lattice)
             changed = False
-            for index in block_defs:
-                out: set[_BankReg] = set().union(*(live_in[s] for s in succ[index]), set())
+            for index in reversed(order):
+                out: set[_Reg] = set().union(*(live_in[s] for s in succ[index]), set())
+                if index in exiting:
+                    out |= live_in[self.entry] & carried
                 new_in = upward[index] | (out - written[index])
                 if out != live_out[index] or new_in != live_in[index]:
                     live_out[index], live_in[index] = out, new_in
                     changed = True
 
-        rows: dict[_BankReg, set[int]] = {}
+        rows: dict[_Reg, set[int]] = {}
         for index in block_defs:
             base, boundary = self.block_base[index], term_pc[index]
             active = written[index] | upward[index] | live_in[index] | live_out[index]
             for reg in active:
-                d = block_defs[index].get(reg, []) + ([base] if reg in live_in[index] else [])
+                d = block_defs[index].get(reg, []) + ([max(base, 1)] if reg in live_in[index] else [])
                 u = block_uses[index].get(reg, []) + ([boundary] if reg in live_out[index] else [])
                 resident = _residence_rows(d, u, boundary)
                 if resident:
                     rows.setdefault(reg, set()).update(resident)
         return rows
 
-    def _add_boundary_installs(self, rows: dict[_BankReg, set[int]], boundary_installed: list[_BankReg]) -> None:
-        """
-        A boundary install writes its slot on the accepted-output edge, after every read on the last PC, so the
-        live-out it lands occupies the register on that PC alone and changes no other value's residence.
-        """
-        for reg in boundary_installed:
-            rows.setdefault(reg, set()).add(self.last_pc)
-
-    def _collect_op_events(
-        self, reg_type: type[_BankReg], defs: dict[_BankReg, list[int]], uses: dict[_BankReg, list[int]]
-    ) -> None:
-        """
-        Add one bank's per-block datapath op events to `defs`/`uses`: each result LANDING (stamped via
-        `write_landing_pcs` at every successor-arm PC it spills into) and each operand READ. The single definition of
-        op read/write timing, shared by both banks so reg_liveness and bool_liveness cannot drift.
-        """
-        block: (
-            LirBlock  # explicit binding: the loop target's type is undecidable under the constrained-TypeVar reanalysis
-        )
-        for block in self.blocks:
-            base_pc = self.block_base[block.index]
-            block_ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
-            for op in block_ops:
-                read = operand_read_cycle(op.operator, base_pc + op.issue_cycle, self.fetch_lag)
-                for write in op.writes:
-                    if isinstance(write.dst, reg_type):
-                        defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, op))
-                for operand in op.operands:
-                    if isinstance(operand.source, reg_type):
-                        uses.setdefault(operand.source, []).append(read)
-
     @property
-    def reg_liveness(self) -> dict[RegRef, set[int]]:
+    def liveness(self) -> dict[_Reg, set[int]]:
         """
-        Map each wide register to the actual clock cycles on which it holds a live value.
+        Map each register of both banks to the fetch PCs on which it holds a live value: from a value's landing through
+        its last read, by static register liveness over the CFG paths. It equals the numerical model's residence wherever
+        every CFG path can execute, and over-tints (never under-tints) where branches correlate within or across
+        transactions.
+        A diagnostic for the report and the tests; the emitter and the model never read it.
 
-        This is cycle-accurate to the emitted hardware, in the executing-step (hardware) frame. Timing comes from the
-        shared helpers: an input lands on cycle 1; every operator result lands at `landing_cycle` (which for the last
-        result is the initiation interval), selected per op by `write_landing_pcs`; an operand is read on
-        `operand_read_cycle`; an output tap on the present cycle; and a slot install samples its source on its fire
-        step -- the present cycle for a boundary install, earlier for an early one (the landing follows below). A slot
-        register additionally stays live through the present cycle, since its live-out must reside there for the next
-        initiation. Each row spans a value from when it lands in the array through its last read.
-
-        Diagnostic only -- consumed by the reports (e.g., HTML schedule) and the tests, never by the emitter or the
-        numerical model. Each op-result LANDING is stamped via `write_landing_pcs` at exactly the PC(s) the model
-        writes it -- on every successor arm under overlap, not just the fall-through. A pc-gated install (a phi copy or
-        an early state install) fires and samples its source on the copy step but lands its destination
-        one PC later via `install_landing` -- the same +1 the model commits. A boundary install reads-then-writes
-        at the boundary and lands there. Residence is then resolved per basic block by `_cfg_residence` (CFG-aware
-        register liveness), so a value live on two mutually-exclusive arms that rejoin at a merge stays resident on
-        BOTH arms. The result is cycle-exact to the numerical model on every register and every path.
+        Timing comes from the shared helpers the model uses: an input lands on PC 1, a result at every PC
+        `write_landing_pcs` places it, a pc-gated install one PC after its fire step, an operand read at
+        `operand_read_cycle`, an output tap and a boundary install's source at every exit PC, a branch condition at its
+        terminator PC. A slot's old value is live from PC 1 only while something reads it, and a slot committing its new
+        value before the boundary carries it to the exit only while the next transaction reads it. A boundary install
+        writes on the accepted-output edge, after every read on the exit PC, so its live-out occupies that PC alone.
         """
-        present = self.initiation_interval  # hardware-frame present / boundary step
-        defs: dict[RegRef, list[int]] = {}
-        uses: dict[RegRef, list[int]] = {}
-        boundary_installed: list[RegRef] = []
-        for load in self.wide_inputs:
+        exit_pcs = self.exit_pcs
+        defs: dict[_Reg, list[int]] = {}
+        uses: dict[_Reg, list[int]] = {}
+        boundary_installed: list[_Reg] = []
+        carried: set[_Reg] = set()
+
+        def read(operand: WideOperand | BoolOperand, pcs: list[int]) -> None:
+            if isinstance(operand.source, (RegRef, BoolRegRef)):
+                uses.setdefault(operand.source, []).extend(pcs)
+
+        for load in self.inputs:
             defs.setdefault(load.dst, []).append(1)
-        for slot in self.wide_state_slots:
-            defs.setdefault(slot.reg, []).append(1)  # the live-in is resident in the slot register from the start
+        for wire in self.outputs:
+            read(wire.tap, exit_pcs)
+        slots: list[WideStateSlot | BoolStateSlot] = [*self.wide_state_slots, *self.bool_state_slots]
+        for slot in slots:
             match slot.install:
                 case InPlace():
-                    # An in-place live-out is an ordinary result already in the slot register; it must reside through
-                    # the boundary to carry into the next initiation, even when nothing reads it again this frame.
-                    uses.setdefault(slot.reg, []).append(present)
+                    carried.add(slot.reg)
                 case WideEarlyInstall() as install:
-                    # An early install lands its destination one PC after its fire step and must reside through the
-                    # boundary to carry; installing the new value early is not the slot's death.
-                    step = install.fire_step(self.fetch_lag)
+                    carried.add(slot.reg)
                     defs.setdefault(slot.reg, []).append(install.landing(self.fetch_lag))
-                    uses.setdefault(slot.reg, []).append(present)
-                    if isinstance(install.source.source, RegRef):
-                        uses.setdefault(install.source.source, []).append(step)
-                case WideBoundaryInstall(source=source):
+                    read(install.source, [install.fire_step(self.fetch_lag)])
+                case WideBoundaryInstall(source=source) | BoolBoundaryInstall(source=source):
                     boundary_installed.append(slot.reg)
-                    if isinstance(source.source, RegRef):
-                        uses.setdefault(source.source, []).append(present)
+                    read(source, exit_pcs)
                 case _:
                     assert_never(slot.install)
-        for wire in self.wide_outputs:
-            if isinstance(wire.tap.source, RegRef):
-                uses.setdefault(wire.tap.source, []).append(present)
         for block in self.blocks:
             base_pc = self.block_base[block.index]
-            for copy in block.wide_copies:  # phi copy fires here and samples its source; destination lands one PC later
+            copies: list[WideCopy | BoolWrite] = [*block.wide_copies, *block.bool_writes]
+            for copy in copies:
                 step = base_pc + copy.fire_step(self.fetch_lag)
                 defs.setdefault(copy.dst, []).append(install_landing(step))
-                if isinstance(copy.source.source, RegRef):
-                    uses.setdefault(copy.source.source, []).append(step)
-        self._collect_op_events(RegRef, defs, uses)
-        rows = self._cfg_residence(defs, uses)
-        self._add_boundary_installs(rows, boundary_installed)
-        return rows
-
-    @property
-    def bool_liveness(self) -> dict[BoolRegRef, set[int]]:
-        """
-        Map each boolean register to the cycles on which it holds a live value, the boolean-bank counterpart of
-        reg_liveness in the same executing-step frame. A boolean register is defined when a comparison,
-        boolean-logic op, or float->bool cast commits its result, when a boolean phi/state install lands, and -- for a
-        persistent slot -- at the live-in resident from cycle 1; it is read by a boolean-logic op or a bool->float cast
-        taking it as an operand, by a branch testing it as a condition, by a phi/state install copying it, and at the
-        boundary where a slot's live-out must persist for the next initiation. A boolean result that spills past an
-        overlap-shrunk terminator is stamped on every successor arm via `write_landing_pcs`, exactly as the numerical
-        model re-keys it; a phi/boolean write lands its destination one PC after its fire step via `install_landing`
-        (the model's +1), while a boolean slot always installs read-first at the boundary. Residence is resolved by
-        the same per-block `_cfg_residence` as reg_liveness, so a spilled or merged boolean is cycle-exact too.
-        """
-        present = self.initiation_interval
-        defs: dict[BoolRegRef, list[int]] = {}
-        uses: dict[BoolRegRef, list[int]] = {}
-        boundary_installed: list[BoolRegRef] = []
-        for slot in self.bool_state_slots:
-            defs.setdefault(slot.reg, []).append(1)  # the live-in is resident from the start
-            match slot.install:
-                case InPlace():
-                    uses.setdefault(slot.reg, []).append(present)  # an in-place live-out resides through the boundary
-                case BoolBoundaryInstall(source=source):
-                    boundary_installed.append(slot.reg)
-                    if isinstance(source.source, BoolRegRef):
-                        uses.setdefault(source.source, []).append(present)
-                case _:
-                    assert_never(slot.install)
-        for load in self.bool_inputs:
-            defs.setdefault(load.dst, []).append(1)
-        for wire in self.bool_outputs:
-            if isinstance(wire.tap.source, BoolRegRef):
-                uses.setdefault(wire.tap.source, []).append(present)
-        for block in self.blocks:
-            base_pc = self.block_base[block.index]
-            for bwrite in block.bool_writes:  # bool write fires and samples here; destination lands one PC later
-                step = base_pc + bwrite.fire_step(self.fetch_lag)
-                defs.setdefault(bwrite.dst, []).append(install_landing(step))
-                if isinstance(bwrite.source.source, BoolRegRef):
-                    uses.setdefault(bwrite.source.source, []).append(step)
-            if isinstance(block.terminator, Branch):  # the next-PC case reads the condition at the block boundary PC
+                read(copy.source, [step])
+            ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
+            for op in ops:
+                for write in op.writes:
+                    defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, op))
+                for operand in op.operands:
+                    read(operand, [operand_read_cycle(op.operator, base_pc + op.issue_cycle, self.fetch_lag)])
+            if isinstance(block.terminator, Branch):
                 uses.setdefault(block.terminator.cond, []).append(self.term_pc(block))
-        self._collect_op_events(BoolRegRef, defs, uses)
-        rows = self._cfg_residence(defs, uses)
-        self._add_boundary_installs(rows, boundary_installed)
+        rows = self._cfg_residence(defs, uses, carried)
+        for reg in boundary_installed:
+            rows.setdefault(reg, set()).update(exit_pcs)
         return rows

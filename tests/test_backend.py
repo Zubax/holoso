@@ -505,7 +505,8 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         PooledScheduledOp,
         PortWrite,
         RegFileLayout,
-        Ret,
+        Exit,
+        Jump,
         WideInputLoad,
         WideOperand,
         WideOutputWire,
@@ -544,11 +545,9 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
             WideOutputWire("out_1", WideOperand(RegRef(3), FloatSignControl()), FloatType(fmt)),
         ],
         wide_state_slots=[],
-        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
-        block_base=[0],
-        entry=0,
-        last_pc=boundary_step(op.commit_cycle, _FETCH_LAG),
-        min_initiation_interval=boundary_step(op.commit_cycle, _FETCH_LAG),
+        blocks=[
+            LirBlock(0, [op], [], [], [], Jump(Exit()), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))
+        ],
         bool_regfile=BoolRegFileLayout(nreg=0),
         bool_state_slots=[],
     )
@@ -599,8 +598,8 @@ def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
 @_requires_iverilog
 @pytest.mark.parametrize("bank", ["wide", "bool"])
 def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(bank: str, tmp_path: Path) -> None:
-    # The boundary install outranks the opcode arm on the same register, so this shape used to be refused outright.
-    # It is safe because every opcode write lands by the last PC, so none executes alongside the install; the wide
+    # The boundary install outranks the opcode arm on the same register.
+    # It is safe because every opcode write lands by its exit PC, so none executes alongside the install; the wide
     # kernel is cosimulated in test_cosim.py, so here only the premise and the elaboration are checked.
     from holoso._lir import write_events
 

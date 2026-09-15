@@ -69,7 +69,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
    (equal specificity, declared later) and sit on the left cell's right edge -- the side border-collapse keeps. */
 .grid td.rbk, .grid th.rbk { border-right: 1px solid #000; }
 .grid td.rbk2, .grid th.rbk2 { border-right: 2px solid #000; }
-/* Horizontal basic-block boundary: a heavy 2px seam below the terminator row of each non-Ret block, so a control-flow
+/* Horizontal basic-block boundary: a heavy 2px seam below every terminator row but the last, so a control-flow
    kernel's block structure reads off the grid (the row axis is the model fetch PC; blocks tile it in layout order). */
 .grid tr.bbk > td, .grid tr.bbk > th { border-bottom: 2px solid #000; }
 .clk { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-right: 1px solid #000; }

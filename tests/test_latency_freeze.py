@@ -8,7 +8,7 @@ The differential fuzzer and the example-reference suite compare output VALUES on
 to cycle count, so a schedule that still computes the right result but takes longer -- a wasted cycle, a lost
 cross-block overlap, an over-pipelining congestion regression -- passes them silently. This test pins each
 kernel's (min initiation interval, last microcode PC). The min II is the throughput of the shortest path; the
-last PC is the out_valid boundary PC -- the end of the static schedule across every block (a zero-based PC, not a
+last PC is the last microcode address -- the end of the static schedule across every block (a zero-based PC, not a
 word count) -- so the full schedule is pinned even for a data-dependent branch/loop kernel whose public max II is
 reported as None (its loop body would otherwise be unguarded). Both are fixed by the scheduler before register-
 allocation annealing, so they are independent of `HOLOSO_REGALLOC_EFFORT`. A deliberate schedule change is
@@ -31,7 +31,7 @@ import pytest
 import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
-from holoso._lir import BoolBoundaryInstall, InPlace, Ret, WideBoundaryInstall, WideStateSlot
+from holoso._lir import BoolBoundaryInstall, InPlace, WideBoundaryInstall, WideStateSlot
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import lower as lower_to_mir
 
@@ -50,7 +50,7 @@ from ._modelref import (
     PIPELINE_OPTIONS_CASES,
 )
 
-# Kernel label -> frozen (min initiation interval, last microcode PC). last_pc is the out_valid boundary PC -- the
+# Kernel label -> frozen (min initiation interval, last microcode PC). last_pc is the last microcode address -- the
 # end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
 # kernels. One row per spec per declared format; a spec listing two formats is frozen at both, since the second
 # exists precisely to exercise a different pipeline depth.
@@ -65,7 +65,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "quadrature_encoder-e8m36": (6, 6),
     "phase_frequency_detector-e8m36": (6, 6),
     "latching_fault_register-e8m36": (5, 5),
-    "majority_voter-e6m18": (15, 20),
+    "majority_voter-e6m18": (14, 19),
     # The turn-native trigonometric ABI lets the phase scaling meet the cores' own conversion and cancel, so the I/Q
     # oscillator's two general multiplies collapse to one exponent add.
     "iq_oscillator-e8m36": (55, 55),
@@ -73,8 +73,8 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The sixteen pixel lanes scale, clamp and round independently on the pooled float operators while the
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
-    # the actuator split (measured: 39 against 166 realized cycles).
-    "image_agc_streamed-e8m36": (39, 171),
+    # the actuator split.
+    "image_agc_streamed-e8m36": (38, 170),
     "pwm-e6m18": (11, 11),
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
@@ -83,20 +83,20 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # Branchy kernels whose phi-arm installs have settled sources (boolean/float live-out constants, or an
     # input/state read) on the normal path -- no read-first push, so each lands within the work boundary,
     # shrinking every downstream block base.
-    "uart_tx-e6m18": (12, 37),
-    "uart_rx-e6m18": (6, 51),
+    "uart_tx-e6m18": (11, 36),
+    "uart_rx-e6m18": (5, 50),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
     # The convergence test is statically true on entry (delta is seeded above the tolerance), so the first trip is
     # peeled at compile time and only trips 2..N remain residual: one body's worth of extra microcode, and a realized
     # transaction that is shorter, not longer (test_cycle_model).
-    "recip_newton-e8m36": (29, 46),
+    "recip_newton-e8m36": (28, 45),
     # The all-false early return and the break-terminated candidate scan survive as real branches, so the
     # frozen last PC covers the full active path with every scan trip taken.
     "finite_set_current_controller-e8m36": (160, 204),
     "remainder-e8m36": (37, 51),
-    "octave_index-e6m18": (14, 36),
-    "octave_index-e8m36": (14, 45),
+    "octave_index-e6m18": (13, 35),
+    "octave_index-e8m36": (13, 44),
     "equal_temperament-e8m36": (40, 40),
     "cordic_sincos-e8m36": (104, 104),
     "polar_to-e8m36": (63, 63),
@@ -104,7 +104,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The three pivot-swap diamonds of the 3x3 Gauss-Jordan inversion if-convert into selects, so the whole
     # kernel is one straight-line block serialized on the pooled divider.
     "rigid_body_scalar-e8m36": (126, 126),
-    "kepler-e8m36": (75, 150),
+    "kepler-e8m36": (74, 149),
     "integrator-e8m36": (16, 16),
     "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
@@ -246,12 +246,12 @@ def _passthrough(x: float) -> float:
 def test_a_boundary_install_costs_what_an_output_does(
     config: OptionsCase, stateful: Callable[[], Callable[..., object]], stateless: Callable[..., object]
 ) -> None:
-    # The install samples its source on the last PC, as an output does.
+    # The install samples its source on the exit PC, as an output does.
     options = config.make_options(_FMT)
-    lir = build_lir(lower_to_mir(lower_frontend(stateful(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "k")
-    (ret,) = [block for block in lir.blocks if isinstance(block.terminator, Ret)]
+    mir = lower_to_mir(lower_frontend(stateful(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
+    lir = build_lir(mir, "k")
     slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
-    assert not (ret.ops or ret.inline_ops) and all(
+    assert not next(block for block in mir.blocks if block.id == mir.ret_block).operations and all(
         isinstance(slot.install, (WideBoundaryInstall, BoolBoundaryInstall)) for slot in slots
     )
     installed = holoso.synthesize(stateful(), options, name="installed").initiation_interval
@@ -260,15 +260,22 @@ def test_a_boundary_install_costs_what_an_output_does(
 
 @pytest.mark.parametrize(
     "label,frozen",
-    [("spill_into_ret", {"default": 7, "staged": 10}), ("spill_into_ret_bool", {"default": 8, "staged": 13})],
+    [
+        ("spill_into_ret", {"default": (6, False), "staged": (10, True)}),
+        ("spill_into_ret_bool", {"default": (8, True), "staged": (13, True)}),
+    ],
 )
 @pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
-def test_a_spill_into_an_empty_ret_schedule_is_frozen(config: OptionsCase, label: str, frozen: dict[str, int]) -> None:
-    # A live-out spilling into the Ret block, landing exactly on the last PC, has no stateless twin to compare against.
-    min_ii = holoso.synthesize(EMPTY_RET_KERNELS[label](), config.make_options(_FMT), name="spill").initiation_interval[
-        0
-    ]
-    assert min_ii == frozen[config.label]
+def test_a_spill_into_an_empty_ret_schedule_is_frozen(
+    config: OptionsCase, label: str, frozen: dict[str, tuple[int, bool]]
+) -> None:
+    # A live-out computed in the loop header that lands in the Ret block keeps the Ret's PC and has no stateless twin
+    # to compare against; the second column pins where it does.
+    options = config.make_options(_FMT)
+    min_ii, ret_takes_pc = frozen[config.label]
+    assert holoso.synthesize(EMPTY_RET_KERNELS[label](), options, name="spill").initiation_interval[0] == min_ii
+    mir = lower_to_mir(lower_frontend(EMPTY_RET_KERNELS[label](), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
+    assert (mir.ret_block in build_lir(mir, "spill").block_base) == ret_takes_pc
 
 
 def test_chained_copy_captures_old_values() -> None:

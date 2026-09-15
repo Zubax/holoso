@@ -130,8 +130,8 @@ class Metrics:
     install count (wide copies plus boolean writes), the direct measure of how many phi arms still install by copy
     rather than coalescing onto the merged register.
 
-    `last_pc` is the static ROM length (Lir.initiation_interval) -- the total stage count: blocks tile the
-    ROM, so a per-block drain regression in ANY block inflates it, the primary "excessive stages" guard.
+    `last_pc` is the last ROM address -- the total stage count: blocks tile the ROM, so a per-block drain regression
+    in ANY block inflates it, the primary "excessive stages" guard.
     `max_block_span` is the largest per-block terminator offset (`max term_offset`), localizing a per-block drain
     regression to one block (unlike `last_pc`, it does not move with the number of blocks).
     """
@@ -184,7 +184,7 @@ def _measure(name: str) -> Metrics:
         max_write_select=max((n for dst, n in writes.items() if isinstance(dst, RegRef)), default=0),
         copies=copies,
         min_ii=lir.min_initiation_interval,
-        last_pc=lir.initiation_interval,
+        last_pc=lir.last_pc,
         max_block_span=max(block.term_offset for block in lir.blocks),
     )
 
@@ -280,14 +280,14 @@ _BASELINE: dict[str, Metrics] = {
     ),
     "majority_voter": Metrics(
         False, nreg=5, bnreg=11, steering=15, score=47.0, max_read_port=1, max_write_select=4,
-        copies=0, min_ii=15, last_pc=20, max_block_span=11,
+        copies=0, min_ii=14, last_pc=19, max_block_span=11,
     ),
     # recip_newton's loop opens with a statically-true convergence test, so the partial evaluator peels the first
     # trip: one more live value across the loop entry (nreg, steering) and one body's worth of extra microcode, in
     # exchange for a shorter realized transaction (test_cycle_model).
     "recip_newton": Metrics(
         False, nreg=4, bnreg=1, steering=8, score=18.0, max_read_port=3, max_write_select=3,
-        copies=1, min_ii=29, last_pc=46, max_block_span=23,
+        copies=1, min_ii=28, last_pc=45, max_block_span=23,
     ),
     "remainder": Metrics(
         False, nreg=5, bnreg=4, steering=16, score=34.0, max_read_port=3, max_write_select=3,
@@ -295,7 +295,7 @@ _BASELINE: dict[str, Metrics] = {
     ),
     "octave_index": Metrics(
         False, nreg=3, bnreg=1, steering=5, score=13.0, max_read_port=2, max_write_select=3,
-        copies=3, min_ii=14, last_pc=45, max_block_span=24,
+        copies=3, min_ii=13, last_pc=44, max_block_span=24,
     ),
     "cordic_sincos": Metrics(
         False, nreg=5, bnreg=1, steering=29, score=41.0, max_read_port=14, max_write_select=4,

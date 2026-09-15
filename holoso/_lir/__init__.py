@@ -3,7 +3,9 @@
 from ._build import build as build
 from ._regalloc import RegallocTuning as RegallocTuning
 from ._ir import Lir as Lir
+from ._ir import successor_blocks as successor_blocks
 from ._ir import (
+    Arm as Arm,
     BoolBoundaryInstall as BoolBoundaryInstall,
     BoolConstRef as BoolConstRef,
     BoolInputLoad as BoolInputLoad,
@@ -13,6 +15,7 @@ from ._ir import (
     BoolSource as BoolSource,
     BoolWrite as BoolWrite,
     Branch as Branch,
+    Exit as Exit,
     InPlace as InPlace,
     InlineScheduledOp as InlineScheduledOp,
     Jump as Jump,
@@ -22,8 +25,8 @@ from ._ir import (
     PortWrite as PortWrite,
     RegFileLayout as RegFileLayout,
     RegRef as RegRef,
-    Ret as Ret,
     ScheduledOp as ScheduledOp,
+    Terminator as Terminator,
     WideBoundaryInstall as WideBoundaryInstall,
     WideConstRef as WideConstRef,
     WideCopy as WideCopy,

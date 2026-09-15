@@ -140,7 +140,7 @@ the slow HDL-emission/simulation iteration begins.
   `issue + fetch lag`.
 - Read-first -- within a cycle a register read returns the OLD value, before any same-cycle write: the origin of the
   +1 dependency edge between producer and consumer.
-- Dwell -- the PC stalling at a hold point: pc 0 (accept, awaiting `in_valid`) or LASTPC (present, awaiting the
+- Dwell -- the PC stalling at a hold point: pc 0 (accept, awaiting `in_valid`) or an exit (present, awaiting the
   result being taken before restarting).
 - Handshake -- the ready/valid pair at each end of a transaction: `in_valid && in_ready` accepts the inputs (the
   accept edge), `out_valid && out_ready` releases the outputs (the accepted-output edge). A handshake-gated write is
@@ -547,16 +547,18 @@ read-first, so a same-frame self-update (an accumulator) reads the old value and
 update whose "unchanged" arm is the slot live-in coalesces onto the slot through the same union-find. When it cannot
 commit in place (a genuine overlap, a folded sign, a chained copy `self.a = self.b`), the live-out keeps its own
 register and is installed by a copy -- microcode-driven as early as the old live-in is read where eligible, otherwise
-a handshake-gated write at the output boundary, sampled on the last PC like an output, so the Ret block pays no drain
-for it; two slots that always hold the same value may collapse onto one register. Which of the three a slot gets is
-one explicit decision of the allocator, and the handshake-gated writes are enumerated once.
+a handshake-gated write at the output boundary, sampled at the exit like an output; two slots that always hold the
+same value may collapse onto one register. Which of the three a slot gets is one explicit decision of the allocator,
+and the handshake-gated writes are enumerated once.
 
 ### Control flow
 
 `branch` is the real control transfer: the PC jumps, untaken ops never run, and the II is whatever the executed path
-costs. Blocks lay out in reverse-postorder with the canonical `Ret` forced last as the out_valid boundary, so a
-back-edge is a jump to a lower address; each block's terminator redirects the fetch PC via a small `case(pc)` that,
-for a branch, reads the condition's 1-bit register.
+costs. Blocks lay out in reverse-postorder, so a back-edge is a jump to a lower address; each block's terminator
+redirects the fetch PC via a small `case(pc)` that, for a branch, reads the condition's 1-bit register. A jumping
+block that does no work and receives nothing takes no PC, its predecessors taking its arm directly; the transaction
+ends on whichever terminator arm reaches the canonical `Ret`, out_valid asserting at that terminator, conditionally
+on a branch.
 
 A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the
 block does not forward to a successor, tail installs included. An install's source is classified exactly: a source
@@ -581,9 +583,9 @@ remaining per-block tail, but needs the commit-side control fields replicated in
 the single-writer microcode validator already in place); overlap also stays off across any multi-predecessor edge.
 
 The HIR merge-threading pass, which folds an empty pass-through merge block into its predecessors' jumps, leaves two
-cases a real branch: an empty `else`-arm block (threading would create a forbidden branch-block phi arm) and a merge
-phi read outside a successor phi arm (which would need rematerialization as a self-referential loop-header phi --
-unproven against the emitter, not worth the niche benefit).
+cases a real branch: an empty `else`-arm block (threading would create a forbidden branch-block phi arm), which costs
+cycles only while it carries phi-arm copies, and a merge phi read outside a successor phi arm (which would need
+rematerialization as a self-referential loop-header phi -- unproven against the emitter, not worth the niche benefit).
 
 ## Backend (VLIW/ZISC)
 
@@ -600,7 +602,7 @@ short register-to-register paths rather than a wide combinational cone; the fetc
 under static scheduling only adds to the makespan/II.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
-`in_valid`); the PC advances every clock; at the last PC it asserts `out_valid` while outputs drive combinationally
+`in_valid`); the PC advances every clock; at an exit it asserts `out_valid` while outputs drive combinationally
 from their registers by fixed index. The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP,
 and while the PC dwells, `transacting` (high only while a transaction is in flight) forces every operator's
 `in_valid` and every register's write opcode to the inert NOP code, so the idle re-fetch commits nothing and the
@@ -683,7 +685,8 @@ loop that legitimately runs longer -- an input-fed counter, a counted loop over 
 as a runaway; the numerical model carries its own, far higher ceiling.
 
 The HTML report must give humans an EXACT representation of the generated core behavior -- the tool for understanding
-and debugging what the compiler did -- not a simplified or approximated view.
+and debugging what the compiler did -- not a simplified or approximated view. Only its residence tint is static:
+liveness over CFG paths, which correlated branches may over-tint, never under-tint.
 
 ## Fabric-area exploration
 

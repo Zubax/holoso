@@ -480,9 +480,9 @@ COMPARATOR_OPTIONS_CASES = (
 )
 
 
-# Slots installed at the accepted-output edge from a Ret block that computes nothing, the live-out arriving from a merge,
-# a loop exit, or a spill out of the loop header. The vectors keep every sum, product, halving and power-of-two quotient
-# exact, so the model equals host Python.
+# Slots installed at the accepted-output edge from a Ret block that computes nothing, the live-out arriving from a
+# merge, a loop exit, or a spill out of the loop header. The vectors keep every sum, product, halving and power-of-two
+# quotient exact, so the model equals host Python.
 EMPTY_RET_VECTORS = [(1.5, 2.0), (-1.0, 2.0), (3.25, -0.5), (-2.0, 4.0), (0.75, 1.5), (2.5, 0.25)]
 
 
@@ -577,6 +577,42 @@ EMPTY_RET_KERNELS: dict[str, Callable[[], Callable[..., float | bool]]] = {
 }
 
 
+# Branches taking the transaction's end on either arm, the untaken-path merge and the Ret block doing no work of their
+# own; a chain of such blocks in the nested one. Every divisor in the vectors is a power of two, keeping them exact.
+EXIT_ARM_VECTORS = [(1.5, 2.0), (-1.0, 2.0), (3.25, -0.5), (3.0, 2.0), (0.75, 0.5), (2.5, 0.25), (6.0, 4.0)]
+
+
+def else_exit(x: float, y: float) -> float:
+    a = x * y
+    if a > 1.0:
+        a = a / y
+    return a
+
+
+def then_exit(x: float, y: float) -> float:
+    a = x * y
+    if a > 1.0:
+        pass
+    else:
+        a = a / y
+    return a
+
+
+def nested_exit(x: float, y: float) -> float:
+    a = x * y
+    if a > 1.0:
+        if a > 4.0:
+            a = a / y
+    return a
+
+
+EXIT_ARM_KERNELS: dict[str, Callable[..., float]] = {
+    "else_exit": else_exit,
+    "then_exit": then_exit,
+    "nested_exit": nested_exit,
+}
+
+
 class ChainedSlots:
     """
     Chained persistent slots: `_a` captures `_b`'s OLD value while `_b` advances, behind a long float tail.
@@ -610,6 +646,22 @@ class SelectHold:
         scale = 1.5 / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)
         y = old if c * scale > 0.0 else x
         return y * 2.0 + x * scale
+
+
+class InputLatchSelect:
+    """
+    A slot latching an input straight from a Ret block whose only work is a select committing on its first cycle: the
+    input is resident, so the install fires on that same cycle ahead of the boundary and frees the input's register.
+    Shared by the white-box schedule test and its RTL cosim twin.
+    """
+
+    def __init__(self) -> None:
+        self._p = 0.0
+
+    def __call__(self, x: float, b: bool) -> float:
+        old = self._p
+        self._p = x
+        return old if b else 0.0
 
 
 def phi_swap_loop(x: float, n: float) -> float:

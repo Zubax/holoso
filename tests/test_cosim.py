@@ -43,12 +43,15 @@ from ._modelref import (
     diamond_then_loop_kernel,
     EMPTY_RET_KERNELS,
     EMPTY_RET_VECTORS,
+    EXIT_ARM_KERNELS,
+    EXIT_ARM_VECTORS,
     OptionsCase,
     overlap_dead_arm_spill_kernel,
     overlap_div_err_kernel,
     overlap_spill_kernel,
     phi_swap_computed_loop,
     PIPELINE_OPTIONS_CASES,
+    InputLatchSelect,
     SelectHold,
     SharedLiveOut,
     SharedLiveOutBool,
@@ -221,6 +224,15 @@ def test_cosim_boundary_install_from_an_empty_ret(sim: str, config: OptionsCase,
         EMPTY_RET_KERNELS[label](), config.make_options(fmt), name=f"empty_ret_{label}_{config.label}"
     )
     run_cosim(sim, result, vectors=[{"x": x, "y": y} for x, y in EMPTY_RET_VECTORS])
+
+
+@pytest.mark.parametrize("label", list(EXIT_ARM_KERNELS))
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_branch_arm_ending_the_transaction(sim: str, config: OptionsCase, label: str) -> None:
+    fmt = FloatFormat(6, 18)
+    result = holoso.synthesize(EXIT_ARM_KERNELS[label], config.make_options(fmt), name=f"{label}_{config.label}")
+    run_cosim(sim, result, vectors=[{"x": x, "y": y} for x, y in EXIT_ARM_VECTORS])
 
 
 @pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
@@ -476,7 +488,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OptionsCase) -> None:
         lower_to_mir(lower(overlap_div_err_kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         name,
     )
-    entry = next(block for block in lir.blocks if block.index == lir.entry)
+    entry = lir.blocks[0]
     (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)
     bench = (
@@ -593,6 +605,14 @@ def test_cosim_select_reads_state_live_in_before_early_install(sim: str, config:
     # fire before the Ret-block select reads the OLD live-in value.
     fmt = FloatFormat(6, 18)
     run_cosim(sim, holoso.synthesize(SelectHold().step, config.make_options(fmt), name=f"select_hold_{config.label}"))
+
+
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_input_latch_installs_on_the_ret_blocks_first_cycle(sim: str, config: OptionsCase) -> None:
+    fmt = FloatFormat(6, 18)
+    kernel = InputLatchSelect().__call__
+    run_cosim(sim, holoso.synthesize(kernel, config.make_options(fmt), name=f"input_latch_select_{config.label}"))
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OPTIONS_CASES, ids=lambda config: config.label)

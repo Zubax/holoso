@@ -99,7 +99,7 @@ def _metrics(lir: Lir) -> str:
         ("wide registers", f"{lir.regfile.nreg} × {lir.wide_register_width}-bit"),
         ("wide regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
         ("register muxes, both banks", f"{read_muxes} read + {write_muxes} write = {read_muxes + write_muxes}"),
-        ("II min [cycles]", lir.initiation_interval),
+        ("II min [cycles]", lir.min_initiation_interval),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
     return f"<h2>Metrics</h2><table class='metrics'>{body}</table>"

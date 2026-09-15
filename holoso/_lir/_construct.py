@@ -230,7 +230,7 @@ def build_terminator(terminator: MirTerminator, alloc: Allocation) -> Terminator
         case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
             return Branch(BoolRegRef(alloc.bool.assign[cond]), if_true, if_false)
         case MirRet():
-            return Ret()
+            return Jump(Exit())
 
 
 def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:

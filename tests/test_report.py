@@ -151,8 +151,8 @@ def test_control_arrows_anchor_at_the_terminator_pc() -> None:
     arrows = _control_arrows(lir)
     assert arrows, "the branchy kernel must emit at least one control-transfer arrow"
     term_pcs = {lir.term_pc(block) for block in lir.blocks}
-    bases = set(lir.block_base)
-    bool_live = lir.bool_liveness
+    bases = set(lir.block_base.values())
+    bool_live = lir.liveness
     for arrow in arrows:
         assert arrow.src_cyc in term_pcs, f"arrow root {arrow.src_cyc} is not a terminator PC"
         assert arrow.dst_cyc in bases, f"arrow target {arrow.dst_cyc} is not a block base PC"

@@ -508,7 +508,7 @@ def test_the_stateful_residual_loop_schedule_is_frozen() -> None:
     # No catalogued example combines persistent state with a residual back edge, so this directed row guards the
     # lean carry design (an untouched slot must not grow phis) permanently.
     result = holoso.synthesize(_LoopCalls().step, _OPTIONS, name="loop_calls")
-    assert result.initiation_interval == (10, None), result.initiation_interval
+    assert result.initiation_interval == (9, None), result.initiation_interval
 
 
 class _NestedPromotion:

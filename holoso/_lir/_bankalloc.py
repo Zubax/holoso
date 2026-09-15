@@ -146,7 +146,7 @@ class _BankFacts[D: Early | Boundary]:
     order: list[ValueId]  # every operation and phi in the deterministic coloring order
     last_read_in_ret: dict[ValueId, int]
     ret_block: int
-    ret_makespan: int
+    ret_makespan: int | None  # None when the Ret block schedules nothing, leaving no drain to land an early install in
     fetch_lag: int
 
     def interference(
@@ -316,20 +316,18 @@ class _WideBank(_Bank[Early | Boundary]):
             defined_in_ret = isinstance(node, (MirFloatInput, MirIntInput)) or (
                 live_out in facts.op_nodes and facts.op_block.get(live_out) == facts.ret_block
             )
+            cycle = install_ready_cycle(facts.op_commit.get(live_out))
+            if r_in is not None:
+                cycle = max(cycle, facts.last_read_in_ret.get(r_in, 0) - inline_fire_cycle(0, facts.fetch_lag))
             early = (
-                name not in coalesced
+                facts.ret_makespan is not None
+                and cycle <= facts.ret_makespan
+                and name not in coalesced
                 and name not in facts.tapped_by_other
                 and defined_in_ret
                 and (r_in is None or r_in not in boundary_ret)
             )
-            if early:
-                cycle = (facts.op_commit[live_out] if live_out in facts.op_nodes else 0) + 1  # read-first
-                if r_in is not None:
-                    cycle = max(cycle, facts.last_read_in_ret.get(r_in, 0) - inline_fire_cycle(0, facts.fetch_lag))
-                # An early install lands within the Ret block's own drain, which an empty Ret block does not have.
-                install[name] = Early(cycle) if cycle <= facts.ret_makespan else Boundary()
-            else:
-                install[name] = Boundary()
+            install[name] = Early(cycle) if early else Boundary()
         return install
 
 
@@ -543,7 +541,7 @@ def prepare_bank[D: Early | Boundary](bank: _Bank[D], ctx: BuildContext) -> _Ban
         order=_movable_order(mir, [*op_nodes, *phi_nodes], facts.op_block, facts.phi_block, facts.op_commit),
         last_read_in_ret=last_read_in_ret,
         ret_block=ret_block,
-        ret_makespan=block_sched[ret_block].makespan,
+        ret_makespan=block_sched[ret_block].makespan if block_sched[ret_block].issue_cycle else None,
         fetch_lag=fetch_lag,
     )
 
@@ -628,7 +626,7 @@ def _coalesce_bank[D: Early | Boundary](facts: _BankFacts[D], offsets: BlockOffs
     op_nodes, phi_nodes = facts.op_nodes, facts.phi_nodes
     livein_of, slot_reg, ret_block, fetch_lag = facts.livein_of, facts.slot_reg, facts.ret_block, facts.fetch_lag
     term_offset = offsets.block_term_offset
-    assert offsets.block_makespan[ret_block] == facts.ret_makespan
+    assert facts.ret_makespan is None or offsets.block_makespan[ret_block] == facts.ret_makespan
     phi_order = [vid for vid in facts.order if vid in phi_nodes]
     # The coalescing oracle reads every live-out at the boundary (it must persist) and every live-in at its actual
     # last read, so a live-out that lands after its live-in is fully read shows as non-interfering and coalesces --

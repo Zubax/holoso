@@ -1341,7 +1341,7 @@ def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
     assert isinstance(
         _bool_slot(lir, "_w").install, InPlace
     ), "_w must coalesce for a gap tenant to share its slot register"
-    assert any(op.issue_cycle == 0 for op in lir.blocks[lir.entry].inline_ops), "a cycle-0 entry gap tenant must arise"
+    assert any(op.issue_cycle == 0 for op in lir.blocks[0].inline_ops), "a cycle-0 entry gap tenant must arise"
     model = build_model(lir)
     reference = WriteOnlyDwellTenant()
     t, f = True, False

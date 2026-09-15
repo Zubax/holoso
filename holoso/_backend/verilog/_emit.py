@@ -5,7 +5,7 @@ Render a scheduled Lir into a synthesizable Verilog ZISC module that instantiate
 The controller is a microcode ROM (see ._microcode): one pre-decoded VLIW control word per step, written as a
 synchronous `case` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
 fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
-which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there. The ROM read register's
+which the sequencer accounts for: out_valid asserts on a terminator PC whose taken arm exits. The ROM read register's
 declaration carries the `HOLOSO_ATTRIBUTE_ROM` macro, empty unless the flow defines it, so a tool-specific mapping
 attribute can be attached without touching the generated RTL.
 
@@ -219,7 +219,7 @@ def generate(lir: Lir) -> VerilogOutput:
     assert lir.fetch_lag == 2, "only the 2-lag (3-stage) fetch RTL is implemented; 1-lag awaits the latch-removal mode"
     w = _Writer()
     cycw = lir.cyc_width
-    pcw = max(1, lir.initiation_interval.bit_length())
+    pcw = max(1, lir.last_pc.bit_length())
 
     # The two dual codebooks, built once and threaded to both the microcode packer and the emitters so the
     # code<->source mapping cannot drift: per operand port (read) and per register (write). The write side derives from
@@ -340,12 +340,11 @@ localparam           WINT      ={ifmt.width:4};  // native integer width
 localparam           WREG      ={wreg:4};  // wide register width
 localparam           NREG      ={nreg:4};  // wide register count
 localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step
-localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
+localparam           PCW       ={pcw:4};  // fetch-PC width: counts to the last ROM address
 localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
-localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // out_valid asserts here
 localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
 localparam           NBREG     ={nbreg:4};  // boolean register count
-// pc: 0 = idle/accept; out_valid at pc==LASTPC (fetch leads execution).
+// pc: 0 = idle/accept; out_valid on an exiting terminator PC (fetch leads execution).
 """)
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
     # concatenation implements (bias exponent at the fraction MSb, zero sign/fraction); a format whose codec disagreed
@@ -478,7 +477,7 @@ always @(posedge clk)
         summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []), landings.get(step, []))
         comment = f"  // {summary}" if summary else ""
         w(f"{step}: ucode_q <= {ucw}'h{pack(fields, step):0{digits}x};{comment}")
-    w(f"default: ucode_q <= {ucw}'h0;  // unreached (PC bounded to LASTPC); NOP fill")
+    w(f"default: ucode_q <= {ucw}'h0;  // unreached (PC bounded to the last address); NOP fill")
     w.pop()
     w("endcase")
     w.pop()
@@ -526,7 +525,7 @@ def _emit_datapath_comb(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolReg
 
     redirects = _terminator_redirects(lir)
     w("""
-// Next-PC sequencer (combinational). The PC holds at the accept (pc==0) and present (pc==LASTPC) boundaries; bubble
+// Next-PC sequencer (combinational). The PC holds at the accept (pc==0) and exit (out_valid) boundaries; bubble
 // steps carry a NOP word and the PC keeps advancing. The executing step lags the fetch PC by FETCH_LAG. A block's
 // terminator redirects the fetch PC at the block's boundary step (a branch reads its boolean register). Each branch
 // also sets transacting_in -- 1 for a live accept/body word, 0 at the boundaries -- so each branch tags its own word.
@@ -540,7 +539,7 @@ always @* begin
     w.pop()
     w("end else if (out_valid) begin  // present: hold until the result is taken")
     w.push()
-    w("next_pc        = out_ready ? 0 : LASTPC;")
+    w("next_pc        = out_ready ? 0 : pc;")
     w("transacting_in = 1'b0;")
     w.pop()
     w("end else if (in_ready) begin   // accept: hold until a transaction arrives")
@@ -571,25 +570,33 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
     """
     The non-fall-through fetch-PC redirects, one per block whose terminator is not a plain advance: a `Jump` to a
     non-adjacent block, or a `Branch` selecting a target by its boolean register. Each is keyed by the block's
-    terminator fetch step (its boundary). A `Ret` block is the out_valid boundary and needs no redirect; a `Jump`
-    to the next-laid-out block falls through on `pc + 1` and needs no case arm.
+    terminator fetch step (its boundary). An exit arm needs none, the out_valid dwell outranking the redirects, so a
+    branch with one exit arm redirects to its other arm; an arm to the next-laid-out block falls through on `pc + 1`.
     """
     redirects: list[tuple[int, str]] = []
+    base = lir.block_base
     for block in lir.blocks:
         term_pc = lir.term_pc(block)
         match block.terminator:
-            case Jump(target=target):
-                target_pc = lir.block_base[target]
-                if target_pc != term_pc + 1:
-                    redirects.append((term_pc, str(target_pc)))
-            case Branch(cond=cond, if_true=if_true, if_false=if_false):
-                redirects.append(
-                    (term_pc, f"bregs[{cond.index}] ? {lir.block_base[if_true]} : {lir.block_base[if_false]}")
-                )
-            case Ret():
-                pass
+            case Branch(cond=cond, if_true=int() as if_true, if_false=int() as if_false):
+                redirects.append((term_pc, f"bregs[{cond.index}] ? {base[if_true]} : {base[if_false]}"))
+            case terminator:  # at most one block arm, an exit arm being the out_valid dwell's
+                targets = [base[arm] for arm in successor_blocks(terminator)]
+                redirects += [(term_pc, str(target)) for target in targets if target != term_pc + 1]
     redirects.sort()
     return redirects
+
+
+def _out_valid(lir: Lir) -> str:
+    """The exit points as a sum of products."""
+    return " || ".join(
+        (
+            f"(pc == {point.pc})"
+            if point.condition is None
+            else f"(pc == {point.pc} && {_bool_operand_rhs(point.condition)})"
+        )
+        for point in lir.exit_points
+    )
 
 
 def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> None:
@@ -732,10 +739,10 @@ always @(posedge clk) begin
     # A slot's boundary install rides the accepted-output edge (out_valid && out_ready, so a held boundary copies
     # exactly once), the handshake arm of its register's statement; an early install is an ordinary opcode source
     # (see write_events). The arm outranks the opcode case below it and must not shadow it. It cannot: a word executing
-    # while the PC sits at LASTPC was fetched either on the way there, so a write it carried would land past the last
-    # PC, which no layout allows, or at LASTPC itself, which `transacting` masks. That is what lets a slot register
-    # which also carries opcode writes, the shape a live-out coalesced into another slot's register leaves behind, be
-    # emitted rather than refused.
+    # while the PC sits at an exit was fetched either on the way there, so a write it carried would land past the exit,
+    # which no layout allows, or at the exit itself, which `transacting` masks. The same fact keeps a conditional
+    # exit's condition register stable through the dwell. That is what lets a slot register which also carries opcode
+    # writes, the shape a live-out coalesced into another slot's register leaves behind, be emitted rather than refused.
     slots: list[RegRef | BoolRegRef] = [*map(RegRef, sorted(wide_slots)), *map(BoolRegRef, sorted(bool_slots))]
     for dst in slots:
         _emit_reg_write(w, dst, write_books.get(dst), arms.get(dst), renderer)
@@ -747,9 +754,9 @@ always @(posedge clk) begin
 
 
 def _emit_outputs(w: _Writer, lir: Lir, renderer: _WideRenderer) -> None:
-    w("""
+    w(f"""
 assign in_ready  = (pc == 0);
-assign out_valid = (pc == LASTPC);  // execution lags the fetch by FETCH_LAG
+assign out_valid = {_out_valid(lir)};
 assign err_pc    = err_pc_q;
 """)
     for wire in lir.outputs:
