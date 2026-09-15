@@ -1,6 +1,6 @@
-"""Construct LIR operands, scheduled ops, terminators, outputs, inputs, and the constant pool from selected MIR."""
-
 import math
+from collections.abc import Mapping
+from dataclasses import replace
 from typing import assert_never
 
 from .._errors import UnsupportedConstruct
@@ -29,43 +29,76 @@ from .._operators import (
     FloatSignControl,
     InlineHardwareOperator,
     IntIdentity,
-    PortConditioner,
+    PooledHardwareOperator,
     WideConditioner,
 )
 from .._value import FloatValue, IntValue, WideValue
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
-from ._build_base import Allocation, PooledConst
+from ._sources import BoolOperandTemplate, OperandTemplate, WideOperandTemplate
+from ._build_base import Allocation, ConstPool, PooledConst
 from ._mir_facts import mir_operation
 
 
-def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversion: BoolInversion) -> BoolOperand:
+def bool_operand_template(bool_mir: MirBoolView, vid: ValueId, inversion: BoolInversion) -> BoolOperandTemplate:
     node = bool_mir.nodes[vid]
     if isinstance(node, MirBoolConst):
-        return BoolOperand(BoolConstRef(node.value), inversion)  # folds to the negated immediate at construction
-    return BoolOperand(BoolRegRef(alloc.bool_reg[vid]), inversion)
+        return BoolOperandTemplate(BoolConstRef(node.value), inversion)
+    return BoolOperandTemplate(vid, inversion)
 
 
-def _typed_operand(
+def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversion: BoolInversion) -> BoolOperand:
+    return bool_operand_template(bool_mir, vid, inversion).resolve(alloc.bool.assign.__getitem__)
+
+
+def operand_templates(
+    node: MirOperation, wide_mir: MirWideView, bool_mir: MirBoolView, pool: Mapping[ValueId, PooledConst]
+) -> list[OperandTemplate]:
+    """
+    The one normalization of an operation's operands, shared by the LIR build and the allocator's objective so the
+    two cannot disagree on a write source's identity. The constant pool stores a float as its magnitude and folds
+    the sign onto whoever reads it -- BELOW the MIR normalization that cleared an unconditioned operand, so the sign
+    would reappear on a port with nothing to bind it to. This is the last place that still knows the operator, hence
+    the last that can erase it.
+    """
+    templates: list[OperandTemplate] = []
+    for position, (vid, conditioner) in enumerate(zip(node.operands, node.operand_conditioners, strict=True)):
+        template: OperandTemplate
+        if vid in bool_mir.nodes:
+            assert isinstance(conditioner, BoolInversion)
+            template = bool_operand_template(bool_mir, vid, conditioner)
+        else:
+            assert not isinstance(conditioner, BoolInversion)  # negatively, so a new wide conditioner needs no edit
+            template = wide_operand_template(wide_mir, vid, conditioner, pool)
+        if position in node.operator.unconditioned_operands:
+            assert isinstance(template, WideOperandTemplate)  # the declaration admits float ports alone
+            template = replace(template, conditioner=FloatSignControl())
+        templates.append(template)
+    return templates
+
+
+def _operands_of(
+    node: MirOperation,
     wide_mir: MirWideView,
     bool_mir: MirBoolView,
-    vid: ValueId,
-    conditioner: PortConditioner,
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
-) -> WideOperand | BoolOperand:
-    if vid in bool_mir.nodes:
-        assert isinstance(conditioner, BoolInversion)
-        return bool_operand(bool_mir, vid, alloc, conditioner)
-    assert not isinstance(conditioner, BoolInversion)  # negatively, so a new wide conditioner needs no edit here
-    return wide_operand(wide_mir, vid, conditioner, alloc, pool)
+) -> list[WideOperand | BoolOperand]:
+    return [
+        (
+            template.resolve(alloc.wide.assign.__getitem__)
+            if isinstance(template, WideOperandTemplate)
+            else template.resolve(alloc.bool.assign.__getitem__)
+        )
+        for template in operand_templates(node, wide_mir, bool_mir, pool)
+    ]
 
 
 def _value_dst(wide_mir: MirWideView, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
     if vid in wide_mir.operation_nodes:
-        return RegRef(alloc.wide_reg[vid])
-    return BoolRegRef(alloc.bool_reg[vid])
+        return RegRef(alloc.wide.assign[vid])
+    return BoolRegRef(alloc.bool.assign[vid])
 
 
 def build_inline_op(
@@ -79,10 +112,7 @@ def build_inline_op(
 ) -> InlineScheduledOp:
     node = mir_operation(mir, vid)
     assert isinstance(node.operator, InlineHardwareOperator)
-    operands = [
-        _typed_operand(wide_mir, bool_mir, operand, conditioner, alloc, pool)
-        for operand, conditioner in zip(node.operands, node.operand_conditioners, strict=True)
-    ]
+    operands = _operands_of(node, wide_mir, bool_mir, alloc, pool)
     return InlineScheduledOp(
         operator=node.operator,
         operands=operands,
@@ -100,10 +130,8 @@ def build_pooled_op(
     bool_mir: MirBoolView,
     members: list[ValueId],
     sched: Schedule,
-    inst_of: dict[ValueId, OperatorInstance],
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
-    swap: dict[ValueId, bool],
 ) -> PooledScheduledOp:
     """
     Build one pooled firing: the members share the operator, operands, and operand conditioners (the fusion key), so
@@ -112,11 +140,9 @@ def build_pooled_op(
     """
     leader = min(members)
     node = mir_operation(mir, leader)
-    operands = [
-        _typed_operand(wide_mir, bool_mir, operand, conditioner, alloc, pool)
-        for operand, conditioner in zip(node.operands, node.operand_conditioners, strict=True)
-    ]
-    swapped = bool(swap.get(leader))
+    assert isinstance(node.operator, PooledHardwareOperator)
+    operands = _operands_of(node, wide_mir, bool_mir, alloc, pool)
+    swapped = alloc.wide.swap[leader]
     if swapped:  # commutative operator: exchange operands (with their conditioners) to shrink read muxes
         operands.reverse()
     # A swapped firing's taps move with the operands: each member's output port maps through the operator's
@@ -140,7 +166,7 @@ def build_pooled_op(
         for member in sorted(members, key=tap_port)
     ]
     return PooledScheduledOp(
-        inst=inst_of[leader],
+        inst=OperatorInstance(node.operator, alloc.wide.instance[leader]),
         operands=operands,
         writes=writes,
         issue_cycle=sched.issue_cycle[leader],
@@ -149,13 +175,9 @@ def build_pooled_op(
     )
 
 
-def wide_operand(
-    wide_mir: MirWideView,
-    vid: ValueId,
-    conditioner: WideConditioner,
-    alloc: Allocation,
-    pool: dict[ValueId, PooledConst],
-) -> WideOperand:
+def wide_operand_template(
+    wide_mir: MirWideView, vid: ValueId, conditioner: WideConditioner, pool: Mapping[ValueId, PooledConst]
+) -> WideOperandTemplate:
     node = wide_mir.nodes[vid]
     if isinstance(node, (MirFloatConst, MirIntConst)):
         entry = pool[vid]
@@ -168,8 +190,18 @@ def wide_operand(
                 folded = conditioner
             case _:
                 assert_never(entry.conditioner)
-        return WideOperand(WideConstRef(entry.index), folded)
-    return WideOperand(RegRef(alloc.wide_reg[vid]), conditioner)
+        return WideOperandTemplate(WideConstRef(entry.index), folded)
+    return WideOperandTemplate(vid, conditioner)
+
+
+def wide_operand(
+    wide_mir: MirWideView,
+    vid: ValueId,
+    conditioner: WideConditioner,
+    alloc: Allocation,
+    pool: dict[ValueId, PooledConst],
+) -> WideOperand:
+    return wide_operand_template(wide_mir, vid, conditioner, pool).resolve(alloc.wide.assign.__getitem__)
 
 
 def build_outputs(
@@ -196,27 +228,12 @@ def build_terminator(terminator: MirTerminator, alloc: Allocation) -> Terminator
         case MirJump(target=target):
             return Jump(target)
         case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
-            return Branch(BoolRegRef(alloc.bool_reg[cond]), if_true, if_false)
+            return Branch(BoolRegRef(alloc.bool.assign[cond]), if_true, if_false)
         case MirRet():
-            return Ret()
+            return Jump(Exit())
 
 
-def rebase_op(op: PooledScheduledOp, base: int) -> PooledScheduledOp:
-    if base == 0:
-        return op
-    return PooledScheduledOp(
-        inst=op.inst,
-        operands=op.operands,
-        writes=op.writes,
-        issue_cycle=op.issue_cycle + base,
-        latency=op.latency,
-        immediates=op.immediates,
-    )
-
-
-def build_const_pool(
-    mir: MirWideView, bool_operations: dict[ValueId, MirOperation] | None = None
-) -> tuple[list[WideValue], dict[ValueId, PooledConst]]:
+def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperation]) -> ConstPool:
     """
     Build the immediate/ROM pool shared by both wide families, interned by the typed encoded value, so
     encoding-equal float literals share a word and class-aware equality keeps `1` and `1.0` distinct where raw
@@ -230,7 +247,7 @@ def build_const_pool(
     seen: set[ValueId] = set()
 
     def note(vid: ValueId) -> None:
-        node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the wide view; skip it
+        node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the wide view
         if isinstance(node, (MirFloatConst, MirIntConst)) and vid not in seen:
             seen.add(vid)
             ids.append(vid)
@@ -242,7 +259,7 @@ def build_const_pool(
         elif isinstance(node, MirPhi):  # a constant phi arm becomes a copy source, so it must be pooled
             for _, arm, _ in node.arms:
                 note(arm)
-    for operation in (bool_operations or {}).values():
+    for operation in bool_operations.values():
         for operand in operation.operands:
             note(operand)
     for out in mir.outputs:
@@ -271,7 +288,7 @@ def build_const_pool(
         magnitude = FloatValue.from_float(mir.float_format, abs(value))
         negate = math.copysign(1.0, value) < 0.0
         pool[vid] = PooledConst(intern(magnitude), FloatSignControl(negate=negate))
-    return values, pool
+    return ConstPool(values, pool)
 
 
 def tapped_wide_lanes(blocks: list[LirBlock]) -> set[tuple[OperatorInstance, int]]:
@@ -292,9 +309,9 @@ def build_inputs(
         wide_node = wide_mir.nodes.get(vid)
         bool_node = bool_mir.nodes.get(vid)
         if isinstance(wide_node, (MirFloatInput, MirIntInput)):
-            loads.append(WideInputLoad(wide_node.name, RegRef(alloc.wide_reg[vid]), wide_node.scalar_type))
+            loads.append(WideInputLoad(wide_node.name, RegRef(alloc.wide.assign[vid]), wide_node.scalar_type))
         elif isinstance(bool_node, MirBoolInput):
-            loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool_reg[vid])))
+            loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool.assign[vid])))
         else:
             assert False, f"unhandled MIR input {vid}"
     return loads

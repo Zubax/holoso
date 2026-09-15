@@ -19,7 +19,7 @@ import holoso
 from holoso import BoolType, FloatFormat, IntValue, NumericalSimulator, SynthesisResult
 from holoso._value import ScalarLike, ScalarValue
 
-from ._modelref import default_options
+from ._modelref import EMPTY_RET_VECTORS, EXIT_ARM_KERNELS, EXIT_ARM_VECTORS, LoopExitSlot, default_options
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -81,7 +81,7 @@ def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., obje
 @pytest.mark.parametrize("name", ["madd", "poly3", "cordic_sincos", "ekf1_stateless"])
 def test_single_path_latency_is_the_static_initiation_interval(name: str) -> None:
     # A kernel with one forward path takes exactly `initiation_interval - 1` cycles from the accept edge (pc==1) to
-    # out_valid (pc==LASTPC) -- the cycle count a caller recovers by counting ticks, here the static lower bound.
+    # out_valid at the exit PC -- the cycle count a caller recovers by counting ticks, here the static lower bound.
     factories: dict[str, Callable[[], Callable[..., object]]] = {
         "madd": lambda: madd.madd,
         "poly3": lambda: poly3.poly3,
@@ -185,15 +185,15 @@ _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[l
     "majority_voter": (
         lambda: MajorityVoter().__call__,
         [[_T, _T, _T, _F, _F, _F], [_T, _T, _T, _T, _T, _T], [_T, _F, _T, _F, _T, _F], [_F, _T, _T, _T, _T, _T]],
-        17,
+        15,
     ),
-    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 160),
+    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 159),
     "remainder": (
         lambda: remainder,
         [[1.0, 1.0], [7.0, 3.0], [1000.0, 1.0], [123.0, 4.0], [50.0, 7.0], [2.5, 2.5]],
         297,
     ),
-    "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 112),
+    "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 99),
 }
 
 
@@ -207,3 +207,70 @@ def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
     model = _synthesize(factory, name).numerical_model.elaborate()
     waited = [_drive(model, inputs)[1] for inputs in vectors]
     assert max(waited) <= worst, f"{name}: realized worst-case latency regressed {worst} -> {max(waited)} ({waited})"
+
+
+@pytest.mark.parametrize("name", list(_WORST_CASE_LATENCY))
+def test_every_realized_latency_is_at_least_the_static_lower_bound(name: str) -> None:
+    factory, vectors, _worst = _WORST_CASE_LATENCY[name]
+    result = _synthesize(factory, name)
+    model = result.numerical_model.elaborate()
+    assert all(_drive(model, inputs)[1] + 1 >= result.initiation_interval[0] for inputs in vectors)
+
+
+@pytest.mark.parametrize("label", list(EXIT_ARM_KERNELS))
+def test_the_shortest_realized_latency_is_the_static_lower_bound(label: str) -> None:
+    # The static min II is a lower bound over CFG paths; on these kernels the shortest CFG path is executable, so the
+    # vectors realize it exactly.
+    result = _synthesize(lambda: EXIT_ARM_KERNELS[label], label)
+    model = result.numerical_model.elaborate()
+    realized = [_drive(model, list(vector))[1] + 1 for vector in EXIT_ARM_VECTORS]
+    assert min(realized) == result.initiation_interval[0] and len(set(realized)) > 1
+
+
+def test_a_conditional_exit_holds_its_outputs_under_backpressure() -> None:
+    kernel = LoopExitSlot()
+    model = _synthesize(lambda: LoopExitSlot().__call__, "loop_exit_dwell").numerical_model.elaborate()
+    for x, y in EMPTY_RET_VECTORS:
+        model.set_inputs(x, y)
+        model.tick(in_valid=True, out_ready=False)
+        while not model.out_valid:
+            model.tick(in_valid=False, out_ready=False)
+        presented = model.output_values
+        for _ in range(5):
+            model.tick(in_valid=False, out_ready=False)
+            assert model.out_valid and model.output_values == presented
+        model.tick(in_valid=False, out_ready=True)
+        assert model.in_ready and float(presented[0]) == kernel(x, y)
+
+
+def test_a_kernel_with_an_empty_self_loop_returns_on_its_other_path() -> None:
+    # A block that only jumps to itself is a nontermination only some inputs reach; it keeps its PC, which arm
+    # resolution must not chase forever.
+    def conditional_wait(flag: bool, x: int) -> int:
+        if flag:
+            while x == x:
+                pass
+        return x
+
+    model = holoso.synthesize(conditional_wait, default_options(_FMT), name="conditional_wait").numerical_model
+    (value,) = model.elaborate().run(False, 7)
+    assert isinstance(value, IntValue) and int(value) == 7
+
+
+def test_branches_left_without_work_take_no_cycles() -> None:
+    # Both arms of each branch reach the same exit once their empty blocks are resolved, so the branches fold into jumps
+    # and then take no PCs themselves.
+    def passthrough(x: int, skip: bool, enabled: bool) -> int:
+        if skip:
+            return x
+        if enabled:
+            return x
+        return x
+
+    result = holoso.synthesize(passthrough, default_options(_FMT), name="passthrough")
+    assert result.initiation_interval == (1, 1)
+    model = result.numerical_model.elaborate()
+    for skip in (False, True):
+        for enabled in (False, True):
+            (value,) = model.run(7, skip, enabled)
+            assert isinstance(value, IntValue) and int(value) == 7

@@ -166,7 +166,8 @@ class LogicalPort:
     One logical I/O port of a synthesized kernel: a parameter or output name paired with its scalar type. Both oracles
     speak this signature -- the numerical model and the MIR interpreter expose their inputs/outputs as these, so the two
     are directly comparable. Distinct from the RTL data ports, which carry a port-name prefix and explicit direction;
-    here the name is the logical one (as written in the kernel) and direction is implicit in the inputs/outputs split.
+    here the name carries no port-name prefix and direction is implicit in the inputs/outputs split. It is the name
+    the hardware carries, not necessarily the Python one: a kernel's Greek identifiers are spelled out on the way in.
     """
 
     name: str

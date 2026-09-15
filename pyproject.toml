@@ -42,8 +42,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy~=2.4",
-    "scipy~=1.17",
-    "zkf~=0.5",
+    "zkf~=0.6",
 ]
 
 [project.optional-dependencies]
@@ -94,5 +93,5 @@ files = ["holoso", "tests", "examples", "synth", "tools"]
 exclude = ["examples/build"]
 
 [[tool.mypy.overrides]]
-module = ["scipy.*", "cocotb.*", "cocotb_tools.*"]
+module = ["cocotb.*", "cocotb_tools.*"]
 ignore_missing_imports = true

@@ -26,7 +26,8 @@ Applies whether or not plan mode is in use.
    Every round starts from fresh reviewer contexts.
    A reviewer carrying its own earlier critique defends that critique instead of reading the revised plan on its merits.
 
-   Keep the prompts terse -- goal, plan path, "critique it"; detail breeds tunnel vision.
+   Keep the prompts extremely terse -- goal, plan path, "critique it"; detail breeds tunnel vision.
+   A prompt longer than 2 sentences is a bad prompt; 3 sentences is the absolute limit, anything larger is unacceptable.
    State the remit explicitly: critique the PLAN's reasoning -- sequencing, assumptions, omissions, wrong direction --
    NOT the current state of the worktree.
    Reviewers are read-only; they may read anything to test the plan against reality, but they change nothing

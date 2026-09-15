@@ -16,7 +16,7 @@ import pytest
 
 import holoso
 from synth._synth import BUILD_ROOT, build_compiler_ooc_design
-from synth.flows import make_flow
+from synth.flows import FlowId, make_flow
 
 from ._synth_targets import TARGETS, SynthTarget
 
@@ -52,3 +52,8 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
         f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
     )
+    if target.flow == FlowId.VIVADO_ARTIX7:
+        # The flow's ROM attribute hook is what keeps the microcode ROM out of LUT logic (5-10 percent of a large
+        # machine, DESIGN.md's fabric-area exploration).
+        block_rams = report.resources["RAMB36/FIFO*"].used + report.resources["RAMB18"].used
+        assert block_rams >= 1, f"{target.label}: the microcode ROM is not in block RAM"

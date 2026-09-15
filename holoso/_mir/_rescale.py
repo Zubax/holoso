@@ -23,13 +23,11 @@ from .._hir import (
 from .._operators import OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
+from ._ir import degrades, refuse_degrading
 
 _logger = logging.getLogger(__name__)
 
-
-def _degrades(fmt: FloatFormat, value: float) -> bool:
-    bits = fmt.encode(value)
-    return bits == 0 or not fmt.is_finite(bits)
+_NO_SCALER = "widen wexp, or configure fmul_ilog2 to carry the multiplier as a significand and an exponent"
 
 
 def _reaches(fmt: FloatFormat, k: int) -> bool:
@@ -43,16 +41,9 @@ def _reaches(fmt: FloatFormat, k: int) -> bool:
 
 def rescale(hir: Hir, ops: OpConfig) -> Hir:
     """
-    Split every multiplication by a constant this format cannot hold into one by its significand, which every format
-    holds, and one by its exponent, which no format bounds. Runs once after optimization has settled: strength
-    reduction would compose the pair straight back into the constant that does not fit.
-
-    Declined without the exponent scaler to split into, and declined for a scale beyond the format's reach, so the
-    kernel is refused over the constant it cannot hold -- which names the trouble and the way out -- rather than over
-    an operator it never asked for, or built into a slower way to answer zero.
+    Runs once after optimization has settled, since strength reduction would compose the pair straight back. Without the
+    exponent scaler to split into, the kernel is refused over the constant and told which operator would carry it.
     """
-    if ops.fmul_ilog2 is None:
-        return hir
     fmt = ops.float_format
     rewrites = 0
 
@@ -61,20 +52,27 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
         # the least is at stake against the format's rails.
         assert scaling.k != 0, "a scaling by the significand alone is representable, so it cannot have degraded"
         assert not scaling.is_power_of_two, "an exact power of two is absorbed into the scaler and never materializes"
-        significand = builder.float_const(scaling.signed_significand)
+        assert not scaling.negative
+        significand = builder.float_const(scaling.significand)
         if scaling.k > 0:
             return builder.operation(FloatMulPow2(scaling.k), [builder.operation(FloatMul(), [base, significand])])
         return builder.operation(FloatMul(), [builder.operation(FloatMulPow2(scaling.k), [base]), significand])
 
-    def build_value(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         nonlocal rewrites
         if isinstance(node, Operation) and isinstance(node.operator, FloatMul):
             assert len(node.operands) == 2
             for base, other in (node.operands, node.operands[::-1]):
                 constant = hir.nodes[other]
-                if isinstance(constant, FloatConst) and _degrades(fmt, constant.value):
+                if isinstance(constant, FloatConst) and degrades(constant.value, fmt):
                     scaling = scaling_of(constant.value)
-                    if scaling is not None and _reaches(fmt, scaling.k):
+                    assert scaling is not None
+                    reaches = _reaches(fmt, scaling.k)
+                    if ops.options.fmul_ilog2 is None:
+                        # Past the format's reach the scaler does not help either, so it is not the remedy to name.
+                        remedy = _NO_SCALER if reaches else "widen wexp or rescale"
+                        refuse_degrading(constant.value, fmt, "constant", remedy)
+                    if reaches:
                         rewrites += 1
                         return split(builder, remap[base], scaling)
         return copy_node(builder, node, remap)

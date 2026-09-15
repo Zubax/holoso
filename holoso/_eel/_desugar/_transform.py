@@ -222,15 +222,15 @@ class _Transformer:
         prelude: list[Stmt] = []
         if isinstance(node.target, ast.Name):
             target = self._local_bind(node.target)
-        elif isinstance(node.target, (ast.Tuple, ast.List)):
-            # A tuple target rides a hidden per-item binding unpacked at the body head, one spelling for both.
+        else:
+            # Every other target rides a hidden per-item binding rebound at the body head, so the target
+            # vocabulary keeps one owner.
             hidden = f"for${self._fresh_temp()}u"
             target = LocalBind(self._origin(node.target), hidden)
             self._bind_target(node.target, LocalRef(self._origin(node.target), hidden), prelude)
-        else:
-            self._reject(node.target, "the for-loop target must be a name or a tuple of names")
         iterable = self._atom(node.iter, sink)  # evaluated once, before the loop, as in CPython
-        self._check_region([node.iter])
+        # The target is in the region too: a store path's indexes read names a header walrus could rebind.
+        self._check_region([node.iter, node.target])
         sink.append(For(self._origin(node), target, iterable, (*prelude, *self._suite(node.body))))
 
     def _return(self, node: ast.Return, sink: list[Stmt]) -> None:
@@ -285,14 +285,16 @@ class _Transformer:
             case ast.Name():
                 sink.append(Assign(self._origin(target), self._local_bind(target), value))
             case ast.Tuple(elts=elts) | ast.List(elts=elts):
-                bindings: list[Binding] = []
-                for elt in elts:
-                    if isinstance(elt, ast.Starred):
-                        self._reject(elt, "starred assignment targets are not supported")
-                    if not isinstance(elt, ast.Name):
-                        self._reject(elt, "unpack targets must be plain names")
-                    bindings.append(self._local_bind(elt))
-                sink.append(Unpack(self._origin(target), tuple(bindings), value))
+                names = [elt for elt in elts if isinstance(elt, ast.Name)]
+                if len(names) == len(elts):
+                    sink.append(Unpack(self._origin(target), tuple(map(self._local_bind, names)), value))
+                    return
+                # A store path's indexes may read a name another element rebinds, so every element lands in a
+                # temp and the targets bind left to right after, the order CPython takes.
+                temps = [TempBind(self._origin(elt), self._fresh_temp()) for elt in elts]
+                sink.append(Unpack(self._origin(target), tuple(temps), value))
+                for elt, temp in zip(elts, temps, strict=True):
+                    self._bind_target(elt, TempRef(temp.origin, temp.index), sink)
             case ast.Attribute() | ast.Subscript():
                 root, path = self._store_path(target, sink)
                 sink.append(Store(self._origin(target), root=root, path=path, value=value))
@@ -351,7 +353,7 @@ class _Transformer:
 
     def _check_region(self, exprs: list[ast.expr], aug_target: str | None = None, in_while_test: bool = False) -> None:
         """
-        One expression region — a simple statement's expressions, an if/while test, or a for iterable — may not
+        One expression region — a simple statement's expressions, an if/while test, a for header — may not
         both walrus-bind and read the same name: the hoisted walrus assignment would make later atom reads see
         the new value where CPython sequences some reads before it. Conservatively rejects both directions.
         """
@@ -617,7 +619,7 @@ class _Transformer:
         if gen.is_async:
             self._reject(node, "async comprehensions are not supported")
         if not isinstance(gen.target, ast.Name):
-            self._reject(gen.target, "comprehension target unpacking is not supported")
+            self._reject(gen.target, "a comprehension target must be a plain name")
         if mangles(gen.target.id):
             self._reject(gen.target, f"the private name {gen.target.id!r} is subject to name mangling; rename it")
         iterable = self._atom(gen.iter, sink)  # the enclosing naming context: the target is not yet in scope

@@ -21,9 +21,20 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
 .iface th, .iface td { text-align: left; padding: 2px 12px 2px 0; border-bottom: 1px solid #c2c7cf; white-space: nowrap; }
 .iface th { color: #4b5563; font-weight: 700; }
 .const { display: inline-block; background: #f3f4f6; color: #92400e; border: 1px solid #cbd5e1; margin: 2px; padding: 1px 7px; border-radius: 3px; font-size: 12px; }
-.modhdrsec { flex: 0 1 auto; max-width: 100%; }
+.widesec { flex: 0 1 auto; max-width: 100%; }
+.hscroll { max-width: 100%; overflow-x: auto; }
+.cfg .v { text-align: center; padding: 2px 10px; }
 .modhdr { display: inline-block; max-width: 100%; overflow-x: auto; margin: 0; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 3px; background: #f8fafc; color: #111827; font-size: 10px; line-height: 1.25; }
 .modhdr code { display: inline-block; min-width: max-content; font: inherit; }
+.muxsec h3 { font-size: 12px; color: #111827; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin: 10px 0 4px; }
+.muxtab { border-collapse: collapse; font-size: 12px; }
+.muxtab th, .muxtab td { border: 1px solid #c2c7cf; padding: 1px 7px; text-align: center; white-space: nowrap; }
+/* Under border-collapse a sticky cell paints no borders of its own, hence the box-shadow. */
+.muxtab th { position: sticky; left: 0; z-index: 1; background: #ffffff; text-align: left; color: #4b5563; font-weight: 700; box-shadow: 1px 0 0 #c2c7cf, -1px 0 0 #ffffff; }
+.muxtab td.rl { background: #f3f4f6; color: #111827; font-weight: 700; }
+.muxtab td.n { color: #111827; font-weight: 700; }
+.muxtab td.z { color: #9aa1ab; }
+.muxtab td.bk { border-right: 2px solid #000; }
 .vh-comment { color: #64748b; }
 .vh-keyword { color: #2456a6; font-weight: 700; }
 .vh-number { color: #92400e; }
@@ -58,7 +69,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em; color: 
    (equal specificity, declared later) and sit on the left cell's right edge -- the side border-collapse keeps. */
 .grid td.rbk, .grid th.rbk { border-right: 1px solid #000; }
 .grid td.rbk2, .grid th.rbk2 { border-right: 2px solid #000; }
-/* Horizontal basic-block boundary: a heavy 2px seam below the terminator row of each non-Ret block, so a control-flow
+/* Horizontal basic-block boundary: a heavy 2px seam below every terminator row but the last, so a control-flow
    kernel's block structure reads off the grid (the row axis is the model fetch PC; blocks tile it in layout order). */
 .grid tr.bbk > td, .grid tr.bbk > th { border-bottom: 2px solid #000; }
 .clk { color: #9aa1ab; text-align: right; font-size: 10px; padding: 0 3px; border-right: 1px solid #000; }

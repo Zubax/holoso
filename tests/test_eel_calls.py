@@ -851,3 +851,122 @@ def test_an_integer_trace_keeps_exact_integers() -> None:
     # Fully static, so the word never holds the unholdable operand; a float-domain fold would flip the answer.
     result = holoso.synthesize(_int_trace_stays_exact, _INT_ONLY, name="k")
     assert result.numerical_model.elaborate().run() == [_int_trace_stays_exact()]
+
+
+def _decorated_by_a_wrapper(x: float) -> float:
+    return x * 3.0
+
+
+def test_a_jit_dispatcher_is_the_function_it_wraps() -> None:
+    # The dispatcher resolves to the function it accelerates, as a callee and as the target -- the shape a
+    # SymPy-style code generator produces where numba is installed.
+    numba = pytest.importorskip("numba")
+    jitted = numba.jit(_decorated_by_a_wrapper)
+
+    class Holder:
+        def __init__(self) -> None:
+            self.helper = jitted
+            self.acc = 0.0
+
+        def step(self, x: float) -> float:
+            self.acc = self.helper(self.acc + x)
+            return self.acc
+
+    assert jitted(1.0) == _decorated_by_a_wrapper(1.0)  # specialize it: a compiled dispatcher is still unwrapped
+    sim = holoso.synthesize(Holder().step, _FADD_FMUL, name="jit_callee").numerical_model.elaborate()
+    reference = Holder()
+    # The dispatcher hangs off the receiver, so its own object graph must not be walked as state.
+    assert [port.name for port in sim.outputs] == ["state_acc"]
+    for x in (1.0, -2.0, 0.5):
+        assert float(sim.run(x)[0]) == reference.step(x), x
+
+    target = holoso.synthesize(jitted, _FADD_FMUL, name="jit_target").numerical_model.elaborate()
+    assert float(target.run(3.0)[0]) == 9.0
+
+
+def _jitted_method_impl(self: object, x: float) -> float:
+    self.acc = self.acc + x * 3.0  # type: ignore[attr-defined]
+    return self.acc  # type: ignore[attr-defined,no-any-return]
+
+
+def test_a_class_held_dispatcher_is_the_method_it_wraps() -> None:
+    # A dispatcher is a descriptor, so a jitted method reads back as a bound method whose __func__ is it. That
+    # must resolve as the target and as a callee, and the state-write scan must see the body it holds.
+    numba = pytest.importorskip("numba")
+
+    class Filter:
+        bump = numba.njit(_jitted_method_impl)
+
+        def __init__(self) -> None:
+            self.acc = 0.0
+
+        def step(self, x: float) -> float:
+            return self.bump(x)  # type: ignore[no-any-return]
+
+    for name, target in (("jit_method", Filter().bump), ("jit_class_method", Filter().step)):
+        sim = holoso.synthesize(target, _FADD_FMUL, name=name).numerical_model.elaborate()
+        reference = Filter()
+        for x in (1.0, 2.0, -0.5):
+            assert float(sim.run(x)[0]) == _jitted_method_impl(reference, x), (name, x)
+
+
+def _forces_a_local(x: float) -> float:
+    y = x
+    return y + 0.25
+
+
+def test_a_dispatcher_declaring_its_own_types_is_not_seen_through() -> None:
+    # A declared type -- a signature up front, or a forced local -- converts, so each of these answers something
+    # its own function does not. Fast math declares no type and is still read.
+    numba = pytest.importorskip("numba")
+    forced = numba.njit(locals={"y": numba.int64})(_forces_a_local)
+    assert forced(1.75) == 1.25 and _forces_a_local(1.75) == 2.0
+    with pytest.raises(UnsupportedConstruct, match="not a plain function"):
+        holoso.synthesize(forced, _FADD_FMUL, name="forced_local")
+
+    relaxed = numba.njit(fastmath=True)(_forces_a_local)
+    sim = holoso.synthesize(relaxed, _FADD_FMUL, name="fastmath").numerical_model.elaborate()
+    assert float(sim.run(1.75)[0]) == _forces_a_local(1.75)
+
+    signed = numba.njit("int64(float64)")(_decorated_by_a_wrapper)
+    assert signed(0.5) == 1 and _decorated_by_a_wrapper(0.5) == 1.5
+    with pytest.raises(UnsupportedConstruct, match="not a plain function"):
+        holoso.synthesize(signed, _FADD_FMUL, name="eager_signature")
+
+    class Holder:
+        def __init__(self) -> None:
+            self.helper = signed
+            self.acc = 0.0
+
+        def step(self, x: float) -> float:
+            return self.helper(x)  # type: ignore[no-any-return]
+
+    # Refused as a callee, but not walked as state: the compiler must never blame numba's own source.
+    with pytest.raises(UnsupportedConstruct, match="are not supported yet") as info:
+        holoso.synthesize(Holder().step, _FADD_FMUL, name="eager_signature_held")
+    assert "numba" not in str(info.value)
+
+
+class _RaisingAttrs:
+    """A dict-backed helper whose absent attributes raise the container's own error."""
+
+    def __getattr__(self, name: str) -> object:
+        raise KeyError(name)
+
+
+class _HoldsRaisingAttrs:
+    def __init__(self) -> None:
+        self.cfg = _RaisingAttrs()
+        self.acc = 0.0
+
+    def step(self, x: float) -> float:
+        self.acc = self.acc + x
+        return self.acc
+
+
+def test_state_discovery_does_not_probe_receiver_attributes_for_absent_names() -> None:
+    # The wrapper probe deciding what is a component reads the TYPE: probing an absent attribute would run the
+    # object's own __getattr__, host code the compiler must not run.
+    sim = holoso.synthesize(_HoldsRaisingAttrs().step, _FADD_FMUL, name="raising_attrs").numerical_model.elaborate()
+    assert [port.name for port in sim.outputs] == ["state_acc"]
+    assert float(sim.run(2.0)[0]) == 2.0

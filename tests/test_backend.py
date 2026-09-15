@@ -5,7 +5,6 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +22,15 @@ from holoso import (
     FToIntOptions,
     FloatFormat,
     FloatValue,
+    IAbsOptions,
+    IAddOptions,
+    ICmpOptions,
+    IDivOptions,
     IMulOptions,
+    IPopcntOptions,
+    IShlOptions,
+    IShrOptions,
+    ISubOptions,
     IntFormat,
     IntValue,
     OperatorOptions,
@@ -52,8 +59,7 @@ from holoso import SynthesisResult
 from holoso._type import FloatType, IntType, ScalarType
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._lir import BoolRegRef, Lir, RegRef, WideStateSlot
-from holoso._lir._ir import BoolStateSlot
+from holoso._lir import BoolRegRef, Boundary, Lir, RegRef, WideStateSlot
 from holoso._mir import MirOptions, Mir, lower as lower_to_mir
 
 from .hdl.hdl_float_oracle import HDL_DIR, sources
@@ -66,7 +72,7 @@ from ._modelref import (
     SharedLiveOutBool,
 )
 
-requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
+_requires_iverilog = pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
 
 
 def _ops(fmt: FloatFormat) -> MirOptions:
@@ -121,7 +127,7 @@ def test_operator_instance_names_are_mnemonic_and_copy_index() -> None:
     assert names == ["fmul_ilog2_0"]  # both exponents ride one pooled scaler, named by mnemonic and copy index
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_comparisons_share_one_pooled_fcmp_instance() -> None:
     # Comparisons live in mutually-exclusive blocks and execute sequentially, so they share a single holoso_fcmp
     # (the one-instance-per-operator pooling convention), its operands riding the ordinary microcode read-mux
@@ -168,14 +174,14 @@ endmodule
 
 def _integer_operators(ifmt: IntFormat) -> list[PooledHardwareOperator]:
     return [
-        IAddOperator(ifmt),
-        ISubOperator(ifmt),
-        IDivOperator(ifmt),
-        IAbsOperator(ifmt),
-        IShlOperator(ifmt),
-        IShrOperator(ifmt),
-        ICmpOperator(ifmt),
-        IPopcntOperator(ifmt),
+        IAddOperator(ifmt, IAddOptions()),
+        ISubOperator(ifmt, ISubOptions()),
+        IDivOperator(ifmt, IDivOptions()),
+        IAbsOperator(ifmt, IAbsOptions()),
+        IShlOperator(ifmt, IShlOptions()),
+        IShrOperator(ifmt, IShrOptions()),
+        ICmpOperator(ifmt, ICmpOptions()),
+        IPopcntOperator(ifmt, IPopcntOptions()),
         *(IMulOperator(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
     ]
 
@@ -231,7 +237,7 @@ def _pooled_probe(name: str, operators: list[PooledHardwareOperator]) -> str:
     return "\n".join([*lines, "endmodule", ""])
 
 
-@requires_iverilog
+@_requires_iverilog
 @pytest.mark.parametrize("width", (2, 3, 24, 33, 44))
 def test_integer_operators_elaborate_as_they_declare_themselves(width: int, tmp_path: Path) -> None:
     # A wrong latency instantiates the undefined _holoso_invalid_integer_latency; an odd width is mandatory because
@@ -240,7 +246,7 @@ def test_integer_operators_elaborate_as_they_declare_themselves(width: int, tmp_
     _elaborate(name, _pooled_probe(name, _integer_operators(IntFormat(width))), tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 @pytest.mark.parametrize("wexp,wman,wint", ((6, 18, 44), (8, 36, 24), (3, 4, 12), (6, 18, 17)))
 def test_mixed_format_operators_elaborate_as_they_declare_themselves(
     wexp: int, wman: int, wint: int, tmp_path: Path
@@ -251,7 +257,7 @@ def test_mixed_format_operators_elaborate_as_they_declare_themselves(
     _elaborate(name, _pooled_probe(name, operators), tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 @pytest.mark.parametrize("wexp,wman", ((6, 18), (8, 24), (3, 5), (8, 37)))
 def test_fsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tmp_path: Path) -> None:
     # Both significand parities, which the kernel-level and cocotb coverage (binary32 only) never reach: the core's
@@ -265,10 +271,10 @@ def test_fsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tm
     _elaborate(name, _pooled_probe(name, operators), tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     # The negative twin of the probe above, so its silence means something.
-    operator = IDivOperator(IntFormat(33))
+    operator = IDivOperator(IntFormat(33), IDivOptions())
     verilog = _pooled_probe("wrong_int_latency", [operator]).replace(
         f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
     )
@@ -277,12 +283,12 @@ def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     assert "_holoso_invalid_integer_latency" in result.stderr
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_popcount_wrapper_rejects_wrong_result_width(tmp_path: Path) -> None:
     # The count port is narrower than the word it counts, and Verilog would accept a wrapper that disagreed about
     # how much narrower -- silently padding or truncating. The guard is what makes the width a checked claim, so it
     # needs its own negative twin.
-    operator = IPopcntOperator(IntFormat(33))
+    operator = IPopcntOperator(IntFormat(33), IPopcntOptions())
     width = operator.count_width
     verilog = _pooled_probe("wrong_popcnt_width", [operator]).replace(f".WY({width})", f".WY({width + 1})")
     result = _compile("wrong_popcnt_width", verilog, tmp_path)
@@ -290,7 +296,7 @@ def test_popcount_wrapper_rejects_wrong_result_width(tmp_path: Path) -> None:
     assert "_holoso_invalid_ipopcnt_result_width" in result.stderr
 
 
-@requires_iverilog
+@_requires_iverilog
 @pytest.mark.parametrize(
     "operator",
     (
@@ -311,7 +317,7 @@ def test_mixed_format_wrapper_rejects_wrong_latency(operator: PooledHardwareOper
     assert "_zkf_invalid_latency_mismatch" in result.stderr
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_small_kernel_elaborates(tmp_path: Path) -> None:
     def kernel(a: float, b: float) -> float:
         return (a - b) * 0.25 + a * b
@@ -321,7 +327,7 @@ def test_small_kernel_elaborates(tmp_path: Path) -> None:
     _elaborate("kernel", generate(lir).verilog, tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
     def blend(a: float, b: float, c: float) -> float:
         return a / b + c * 2.0
@@ -331,7 +337,7 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
     _elaborate("blend", generate(lir).verilog, tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_constant_only_module_elaborates(tmp_path: Path) -> None:
     # No inputs and an all-constant output => zero registers; NREG must floor to >=1 so the regfile parameter
     # guard does not instantiate its error stub (BUG1 regression).
@@ -386,7 +392,7 @@ def test_boolean_input_port_is_one_bit_and_loaded() -> None:
     assert re.search(r"\bassign out_0 = bregs\[\d+\];", verilog)
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_boolean_only_stateful_module_elaborates(tmp_path: Path) -> None:
     class Toggle:
         def __init__(self) -> None:
@@ -428,7 +434,7 @@ def test_kernel_without_outputs_is_rejected() -> None:
         _run(empty, _ops(fmt), fmt)
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> None:
     # A public attribute `y_d` becomes the port state_y_d; a sibling slot `y` whose boundary copy carries a folded sign
     # is emitted as an inline holoso_fsgnop() call in the state install. Both must elaborate cleanly together.
@@ -449,7 +455,7 @@ def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> No
     _elaborate("collide_state", generate(lir).verilog, tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateless
@@ -459,7 +465,7 @@ def test_ekf1_stateless_elaborates(tmp_path: Path) -> None:
     _elaborate("update_x_P", generate(lir).verilog, tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
     import ekf1_stateful
@@ -497,7 +503,8 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         PooledScheduledOp,
         PortWrite,
         RegFileLayout,
-        Ret,
+        Exit,
+        Jump,
         WideInputLoad,
         WideOperand,
         WideOutputWire,
@@ -530,17 +537,12 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         fetch_lag=_FETCH_LAG,
         regfile=RegFileLayout(nreg=4, nrd=2, nwr=2, nload=2),
         inputs=[WideInputLoad("a", RegRef(0), FloatType(fmt)), WideInputLoad("b", RegRef(1), FloatType(fmt))],
-        ops=[op],
         outputs=[
             WideOutputWire("out_0", WideOperand(RegRef(2), FloatSignControl()), FloatType(fmt)),
             WideOutputWire("out_1", WideOperand(RegRef(3), FloatSignControl()), FloatType(fmt)),
         ],
         wide_state_slots=[],
-        blocks=[LirBlock(0, [op], [], [], [], Ret(), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
-        block_base=[0],
-        entry=0,
-        last_pc=boundary_step(op.commit_cycle, _FETCH_LAG),
-        min_initiation_interval=boundary_step(op.commit_cycle, _FETCH_LAG),
+        blocks=[LirBlock(0, [op], [], [], Jump(Exit()), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
         bool_regfile=BoolRegFileLayout(nreg=0),
         bool_state_slots=[],
     )
@@ -568,7 +570,7 @@ def _madd_only(a: float, b: float, c: float) -> float:
     return a * b + c
 
 
-@requires_iverilog
+@_requires_iverilog
 def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
     # A purely-boolean kernel uses no wide bank, and an arithmetic kernel with no booleans uses no boolean bank. The
     # count localparam is stated either way; what must not appear is the register array itself, which at zero length
@@ -588,32 +590,24 @@ def test_unused_register_bank_is_omitted(tmp_path: Path) -> None:
     _elaborate("madd_only", float_v, tmp_path)
 
 
-@requires_iverilog
+@_requires_iverilog
 @pytest.mark.parametrize("bank", ["wide", "bool"])
 def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(bank: str, tmp_path: Path) -> None:
-    # The boundary install outranks the opcode arm on the same register, so this shape used to be refused outright.
-    # It is safe because the install executes at present_step and every write event rides a strictly earlier step; the
-    # wide kernel is cosimulated in test_cosim.py, so here only the premise and the elaboration are checked.
-    from holoso._backend.verilog._microcode import write_events
+    # The boundary install outranks the opcode arm on the same register.
+    # It is safe because every opcode write lands by its exit PC, so none executes alongside the install; the wide
+    # kernel is cosimulated in test_cosim.py, so here only the premise and the elaboration are checked.
+    from holoso._lir import write_events
 
     kernel = SharedLiveOut().step if bank == "wide" else SharedLiveOutBool().step
     name = f"shared_live_out_{bank}"
     lir = build_lir(_run(kernel, _ops(FloatFormat(6, 18)), FloatFormat(6, 18)), name)
-    steps: dict[object, list[int]] = {}
-    for event in write_events(lir):
-        steps.setdefault(event.dst, []).append(event.step)
-    coexisting: Sequence[WideStateSlot | BoolStateSlot]
-    if bank == "wide":
-        coexisting = [
-            slot
-            for slot in lir.wide_state_slots
-            if slot.needs_copy and lir.wide_state_install_is_boundary(slot) and slot.reg in steps
-        ]
-    else:  # a boolean state install is boundary-only by construction
-        coexisting = [slot for slot in lir.bool_state_slots if slot.needs_copy and slot.reg in steps]
+    written = {event.dst for event in write_events(lir)}
+    coexisting = [
+        slot
+        for slot in lir.boundary_installs
+        if isinstance(slot, WideStateSlot) == (bank == "wide") and slot.reg in written
+    ]
     assert coexisting, "the premise needs a boundary-installing slot whose own register also takes opcode writes"
-    for slot in coexisting:
-        assert max(steps[slot.reg]) < lir.present_step, f"{slot.name!r}: {sorted(steps[slot.reg])} vs present_step"
     _elaborate(name, generate(lir).verilog, tmp_path)
 
 
@@ -663,7 +657,7 @@ def _instantiation(verilog: str, mnemonic: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def integer_result() -> SynthesisResult:
+def _integer_result() -> SynthesisResult:
     return synthesize(_IntegerKernel().step, _INT_OPTIONS, name="int_kernel")
 
 
@@ -683,13 +677,13 @@ def _decode(value: object) -> int | float | bool:
     return int(value)
 
 
-def test_an_integer_kernel_model_matches_python_beyond_the_float_width(integer_result: SynthesisResult) -> None:
+def test_an_integer_kernel_model_matches_python_beyond_the_float_width(_integer_result: SynthesisResult) -> None:
     """The vectors exceed the signed 24-bit float word in both signs, where a WFLT-sized lane would truncate."""
 
     def wrap(value: int) -> int:
         return ((value - _INT34_MIN) % (2 * -_INT34_MIN)) + _INT34_MIN
 
-    sim = integer_result.numerical_model.elaborate()
+    sim = _integer_result.numerical_model.elaborate()
     n_state, prev_state = -3, 0
     # Each float sum is exactly representable at e6m18 so the reference stays independent of the operator model.
     vectors = [(2**30, -(2**30), 3, 1.5), (-(2**30), 2**30, 1, -(2.0**29)), (2**25, -(2**25), 5, 0.25), (5, 3, 0, 0.5)]
@@ -709,12 +703,12 @@ def test_an_integer_kernel_model_matches_python_beyond_the_float_width(integer_r
         assert [_decode(value) for value in sim.run(a, b, n, x)] == expected, (a, b, n, x)
 
 
-def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width(integer_result: SynthesisResult) -> None:
+def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width(_integer_result: SynthesisResult) -> None:
     """
     The sideband exists only on a float port, and the read mux feeding an integer one must be as wide as the
     register rather than as the float -- the silent half, which elaborates either way and drops the top bits.
     """
-    verilog = integer_result.verilog_output.verilog
+    verilog = _integer_result.verilog_output.verilog
     ffromint, ftoint, iadds = (_instantiation(verilog, name) for name in ("ffromint", "ftoint", "iadds"))
     assert ".a_sgnop(" not in ffromint and ".y_sgnop(" in ffromint  # integer operand, float result
     assert ".a_sgnop(" in ftoint and ".y_sgnop(" not in ftoint  # float operand, integer result
@@ -724,12 +718,12 @@ def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width(integ
     assert re.search(r"reg  \[WFLT-1:0\] s_ftoint_\w+_a;", verilog)
 
 
-def test_only_a_float_port_is_allocated_a_microcode_sign_field(integer_result: SynthesisResult) -> None:
+def test_only_a_float_port_is_allocated_a_microcode_sign_field(_integer_result: SynthesisResult) -> None:
     """
     The literal field set for this known kernel: float operand/result ports only -- no integer port and, the unique
     pruning claim, no field for the untapped `fsort.max` result lane.
     """
-    assert set(re.findall(r"\buc_\w+?sgn\b", integer_result.verilog_output.verilog)) == {
+    assert set(re.findall(r"\buc_\w+?sgn\b", _integer_result.verilog_output.verilog)) == {
         "uc_fadd_0_asgn",
         "uc_fadd_0_bsgn",
         "uc_fadd_0_y0sgn",
@@ -741,16 +735,16 @@ def test_only_a_float_port_is_allocated_a_microcode_sign_field(integer_result: S
     }
 
 
-def test_an_integer_state_slot_resets_to_its_own_word(integer_result: SynthesisResult) -> None:
+def test_an_integer_state_slot_resets_to_its_own_word(_integer_result: SynthesisResult) -> None:
     """
     Silent otherwise: the float codec answers a legal-looking literal for every integer, so the slot comes up
     holding the encoding of a float rather than its own reset, at the float's width rather than the register's.
     """
     snapshots = [
-        text.strip() for text in integer_result.verilog_output.verilog.splitlines() if "reset snapshot" in text
+        text.strip() for text in _integer_result.verilog_output.verilog.splitlines() if "reset snapshot" in text
     ]
     assert any("<= 34'h3fffffffd;" in text for text in snapshots), snapshots  # -3 in two's complement at WREG
-    sim = integer_result.numerical_model.elaborate()
+    sim = _integer_result.numerical_model.elaborate()
     assert _decode(sim.run(10, 2, 0, 0.0)[0]) == -3 + 10
     sim.reset()
     assert _decode(sim.run(1, 2, 0, 0.0)[0]) == -3 + 1, "the reset must restore -3, not clear the register"
@@ -763,37 +757,39 @@ def test_the_boundary_installed_integer_slot_taps_its_conditioner() -> None:
         lower_to_mir(lower(_IntegerKernel().step, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(_INT_OPTIONS)),
         "int_kernel",
     )
-    (slot,) = [s for s in lir.wide_state_slots if s.needs_copy and lir.wide_state_install_is_boundary(s)]
-    assert isinstance(slot.tap.source, RegRef)
+    (slot,) = [s for s in lir.wide_state_slots if isinstance(s.install, Boundary)]
+    assert isinstance(slot.live_out.source, RegRef)
     verilog = generate(lir).verilog
-    assert f"if (out_valid && out_ready) regs[{slot.reg.index}] <= regs[{slot.tap.source.index}];" in verilog
+    assert f"if (out_valid && out_ready) regs[{slot.reg.index}] <= regs[{slot.live_out.source.index}];" in verilog
 
 
-def test_an_integer_port_declares_itself_signed(integer_result: SynthesisResult) -> None:
+def test_an_integer_port_declares_itself_signed(_integer_result: SynthesisResult) -> None:
     """A wider signed consumer zero-fills an unsigned port, so a negative integer arrives as a large positive one."""
     declared = {
         name: qualifiers
-        for qualifiers, name in re.findall(r"wire (.*?)(\w+),$", integer_result.verilog_output.verilog, re.M)
+        for qualifiers, name in re.findall(r"wire (.*?)(\w+),$", _integer_result.verilog_output.verilog, re.M)
     }
     assert declared["in_a"] == "signed [33:0] " and declared["out_0"] == "signed [33:0] "
     assert declared["in_x"] == "[23:0] ", "a float is a bit pattern, not a signed number"
 
 
-@requires_iverilog
-def test_an_integer_kernel_emits_rtl_that_elaborates(integer_result: SynthesisResult, tmp_path: Path) -> None:
+@_requires_iverilog
+def test_an_integer_kernel_emits_rtl_that_elaborates(_integer_result: SynthesisResult, tmp_path: Path) -> None:
     """Every wide site keyed on float rather than on the port's own family, so none of this could be rendered."""
-    _elaborate("int_kernel", integer_result.verilog_output.verilog, tmp_path)
+    _elaborate("int_kernel", _integer_result.verilog_output.verilog, tmp_path)
 
 
-def offset_by_one(x: float) -> float:
+def _offset_by_one(x: float) -> float:
     return x + 1.0
 
 
 def test_a_float_write_fills_the_wide_high_bits_with_dont_care() -> None:
     """The adopted bit-fill policy: don't-care high bits when WREG > WFLT, no fill machinery at all at gap 0."""
     gapped = synthesize(
-        offset_by_one, Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33), name="Gap9"
+        _offset_by_one, Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=33), name="Gap9"
     )
     assert "{{(WREG-WFLT){1'bx}}, s_fadd" in gapped.verilog_output.verilog
-    flat = synthesize(offset_by_one, Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(6, 18)), name="Gap0")
+    flat = synthesize(
+        _offset_by_one, Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(6, 18)), name="Gap0"
+    )
     assert "1'bx" not in flat.verilog_output.verilog

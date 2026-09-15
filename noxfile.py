@@ -2,8 +2,9 @@
 This is the central verification entry point for the project.
 Tests may take a long time to run; if there is no output, assume they are still running, not stuck.
 
-Important: When running locally instead of CI, export HOLOSO_REGALLOC_EFFORT=10 to speed up test execution.
-This speeds up iteration significantly, at the cost of poorer register allocation.
+The `tests` session runs the register allocator at a reduced effort (`HOLOSO_REGALLOC_EFFORT=300` unless the
+environment sets it): the behavior tests need no search quality, and every test that freezes a figure pins its own
+tuning. The cosimulation, fuzzing and synthesis sessions run the `Options` default.
 """
 
 from pathlib import Path
@@ -59,6 +60,7 @@ def tests(session: nox.Session) -> None:
         "-n",
         str(WORKERS),
         "tests",
+        env={"HOLOSO_REGALLOC_EFFORT": os.environ.get("HOLOSO_REGALLOC_EFFORT", "300")},
     )
 
 

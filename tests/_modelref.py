@@ -16,6 +16,7 @@ from holoso import (
     FCmpOptions,
     FDivOptions,
     FExp2Options,
+    FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
@@ -26,12 +27,11 @@ from holoso import (
 )
 from holoso._api import _mir_options
 from holoso._mir import MirOptions
-from holoso._lir import RegallocTuning
-from holoso._lir import build
+from holoso._lir import Early, Lir, LirBlock, RegallocTuning, WideCopy, WideStateSlot, build
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
+from holoso._operators._common import PooledOperatorOptions
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
-from holoso._lir import Lir
 from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
 from holoso._type import FloatFormat, IntFormat
 from holoso._value import FloatValue, ScalarValue
@@ -57,11 +57,7 @@ def default_ifmt(ffmt: FloatFormat) -> IntFormat:
     return IntFormat(max(Options(OperatorOptions()).wint_min, ffmt.width))
 
 
-DEFAULT_TUNING = RegallocTuning(
-    effort=_DEFAULTS.regalloc_effort,
-    reuse_write_cap=_DEFAULTS.regalloc_reuse_write_cap,
-    register_price=_DEFAULTS.regalloc_register_price,
-)
+_DEFAULT_TUNING = RegallocTuning(effort=_DEFAULTS.regalloc_effort, register_price=_DEFAULTS.regalloc_register_price)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +84,7 @@ def build_model_and_interpreter(
     ops: MirOptions,
     name: str,
     fmt: FloatFormat,
+    tuning: RegallocTuning = _DEFAULT_TUNING,
 ) -> tuple[NumericalSimulator, MirInterpreter]:
     """
     Drive one kernel through the internal pipeline and return (numerical model, MIR interpreter) over the SAME MIR --
@@ -96,7 +93,7 @@ def build_model_and_interpreter(
     (upstream of `build`), so the two share everything except the LIR layer.
     """
     mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
-    return build_model(build_lir(mir, name)), MirInterpreter(mir)
+    return build_model(build_lir(mir, name, tuning)), MirInterpreter(mir)
 
 
 def show_value(value: ScalarValue) -> str:
@@ -239,18 +236,41 @@ def _if_supported[O](operator: Callable[..., object], fmt: FloatFormat, opt: O) 
 
 def build_ops(options: Options, width: int) -> OpConfig:
     """For the few tests that inspect a built machine with no kernel to settle its word, so they name the width."""
-    return OpConfig.build(options.operator, options.ffmt, options.wmultiplier or 0, IntFormat(width))
+    return OpConfig(options.operator, options.ffmt, IntFormat(width), options.wmultiplier or 0)
 
 
 DEFAULT_FETCH_STAGES = 3
 
-# Restated as literals so the frozen metric baselines cannot move with the environment overrides below.
-SHIPPED_TUNING = RegallocTuning(effort=5000, reuse_write_cap=2, register_price=2.0)
+# The tuning every frozen allocation figure is taken at, as literals so it cannot follow the environment.
+FROZEN_TUNING = RegallocTuning(effort=3000, register_price=2.0)
 
 
-def build_lir(mir: Mir, name: str, tuning: RegallocTuning = DEFAULT_TUNING) -> Lir:
+def early_install(lir: Lir, slot: WideStateSlot) -> tuple[LirBlock, WideCopy]:
+    """The copy that installs an early slot, with the block holding it."""
+    assert isinstance(slot.install, Early)
+    ((block, copy),) = [
+        (b, c)
+        for b in lir.blocks
+        for c in b.copies
+        if isinstance(c, WideCopy) and c.dst == slot.reg and c.source == slot.live_out
+    ]
+    return block, copy
+
+
+def build_lir(mir: Mir, name: str, tuning: RegallocTuning = _DEFAULT_TUNING) -> Lir:
     """The default machine build shared by the white-box tests."""
     return build(mir, name, DEFAULT_FETCH_STAGES, tuning)
+
+
+def with_instances(options: Options, instances: int) -> Options:
+    """The same options with every pooled operator the configuration enables allowed `instances` copies."""
+    operator = options.operator
+    widened: dict[str, Any] = {
+        field.name: dataclasses.replace(value, instances=instances)
+        for field in dataclasses.fields(operator)
+        if isinstance(value := getattr(operator, field.name), PooledOperatorOptions)
+    }
+    return dataclasses.replace(options, operator=dataclasses.replace(operator, **widened))
 
 
 def default_options(fmt: FloatFormat) -> Options:
@@ -260,6 +280,7 @@ def default_options(fmt: FloatFormat) -> Options:
             fmul=FMulOptions(),
             fdiv=FDivOptions(),
             fmul_ilog2=FMulILog2Options(),
+            filog2=FILog2Options(),
             fcmp=FCmpOptions(),
             fexp2=_if_supported(FExp2Operator, fmt, FExp2Options()),
             flog2=_if_supported(FLog2Operator, fmt, FLog2Options()),
@@ -275,7 +296,7 @@ def default_mir(fmt: FloatFormat) -> MirOptions:
     return mir_options(default_options(fmt))
 
 
-def fcmp_s1_options(fmt: FloatFormat) -> Options:
+def _fcmp_s1_options(fmt: FloatFormat) -> Options:
     """The default config with only the comparator's stage knob raised (latency 2)."""
     options = default_options(fmt)
     operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=1))
@@ -289,8 +310,8 @@ def staged_fadd_options(fmt: FloatFormat) -> Options:
     return dataclasses.replace(options, operator=operator)
 
 
-def fcmp_s1_mir(fmt: FloatFormat) -> MirOptions:
-    return mir_options(fcmp_s1_options(fmt))
+def _fcmp_s1_mir(fmt: FloatFormat) -> MirOptions:
+    return mir_options(_fcmp_s1_options(fmt))
 
 
 def branch_boundary_kernel(a: float, b: float, c: float) -> float:
@@ -415,6 +436,7 @@ def staged_options(fmt: FloatFormat) -> Options:
             fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
             fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
+            filog2=FILog2Options(stage_input=1),
             fcmp=FCmpOptions(stage_input=1),
             fexp2=_if_supported(
                 FExp2Operator,
@@ -454,7 +476,7 @@ PIPELINE_OP_CASES = (
 
 COMPARATOR_OP_CASES = (
     OperatorCase("default", default_mir, 1),
-    OperatorCase("fcmp_s1", fcmp_s1_mir, 2),
+    OperatorCase("fcmp_s1", _fcmp_s1_mir, 2),
     OperatorCase("staged", staged_mir, 2),
 )
 
@@ -465,9 +487,142 @@ PIPELINE_OPTIONS_CASES = (
 
 COMPARATOR_OPTIONS_CASES = (
     OptionsCase("default", default_options),
-    OptionsCase("fcmp_s1", fcmp_s1_options),
+    OptionsCase("fcmp_s1", _fcmp_s1_options),
     OptionsCase("staged", staged_options),
 )
+
+
+# Slots installed at the accepted-output edge from a Ret block that computes nothing, the live-out arriving from a
+# merge, a loop exit, or a spill out of the loop header. The vectors keep every sum, product, halving and power-of-two
+# quotient exact, so the model equals host Python.
+EMPTY_RET_VECTORS = [(1.5, 2.0), (-1.0, 2.0), (3.25, -0.5), (-2.0, 4.0), (0.75, 1.5), (2.5, 0.25)]
+
+
+def merge_wide_output(x: float, y: float) -> float:
+    if x > 0.0:
+        s = x + y
+    else:
+        s = x / y
+    return s
+
+
+def merge_bool_output(x: float, y: float) -> bool:
+    if x > 0.0:
+        f = x / y > 1.0
+    else:
+        f = x < -1.0
+    return f
+
+
+def loop_exit_output(x: float, y: float) -> float:
+    while x > 1.0:
+        x = x * 0.5
+    return x
+
+
+class MergeWideSlot:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def __call__(self, x: float, y: float) -> float:
+        out = self._s
+        self._s = merge_wide_output(x, y)
+        return out
+
+
+class MergeBoolSlot:
+    def __init__(self) -> None:
+        self._f = False
+
+    def __call__(self, x: float, y: float) -> bool:
+        out = self._f
+        self._f = merge_bool_output(x, y)
+        return out
+
+
+class LoopExitSlot:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def __call__(self, x: float, y: float) -> float:
+        out = self._s
+        self._s = loop_exit_output(x, y)
+        return out
+
+
+class SpillIntoRet:
+    def __init__(self) -> None:
+        self._s = 0.0
+
+    def again(self, x: float, y: float) -> bool:
+        self._s = x * y
+        return x > 0.0
+
+    def __call__(self, x: float, y: float) -> float:
+        out = self._s
+        while self.again(x, y):
+            x = x - 1.0
+        return out
+
+
+class SpillIntoRetBool:
+    def __init__(self) -> None:
+        self._f = False
+
+    def again(self, x: float, y: float) -> bool:
+        self._f = x * y < -1.0
+        return x > 0.0
+
+    def __call__(self, x: float, y: float) -> bool:
+        out = self._f
+        while self.again(x, y):
+            x = x - 1.0
+        return out
+
+
+EMPTY_RET_KERNELS: dict[str, Callable[[], Callable[..., float | bool]]] = {
+    "merge_wide": lambda: MergeWideSlot().__call__,
+    "merge_bool": lambda: MergeBoolSlot().__call__,
+    "loop_exit": lambda: LoopExitSlot().__call__,
+    "spill_into_ret": lambda: SpillIntoRet().__call__,
+    "spill_into_ret_bool": lambda: SpillIntoRetBool().__call__,
+}
+
+
+# Branches taking the transaction's end on either arm, the untaken-path merge and the Ret block doing no work of their
+# own; a chain of such blocks in the nested one. Every divisor in the vectors is a power of two, keeping them exact.
+EXIT_ARM_VECTORS = [(1.5, 2.0), (-1.0, 2.0), (3.25, -0.5), (3.0, 2.0), (0.75, 0.5), (2.5, 0.25), (6.0, 4.0)]
+
+
+def else_exit(x: float, y: float) -> float:
+    a = x * y
+    if a > 1.0:
+        a = a / y
+    return a
+
+
+def then_exit(x: float, y: float) -> float:
+    a = x * y
+    if a > 1.0:
+        pass
+    else:
+        a = a / y
+    return a
+
+
+def nested_exit(x: float, y: float) -> float:
+    a = x * y
+    if a > 1.0:
+        if a > 4.0:
+            a = a / y
+    return a
+
+
+EXIT_ARM_KERNELS: dict[str, Callable[..., float]] = {
+    "else_exit": else_exit,
+    "then_exit": then_exit,
+    "nested_exit": nested_exit,
+}
 
 
 class ChainedSlots:
@@ -488,8 +643,10 @@ class ChainedSlots:
 
 class SelectHold:
     """
-    A Ret-block select is the slot live-in's LAST reader while the new live-out commits early: pins the read-step
-    frame of the state early-install bound. Shared by the white-box schedule test and its RTL cosim twin.
+    A Ret-block select is the slot live-in's LAST reader, and reads it only after the new live-out has landed (its
+    condition waits on a divide), so the live-out cannot commit in place and installs early, bounded by that read:
+    pins the read-step frame of the state early-install bound. Shared by the white-box schedule test and its RTL
+    cosim twin.
     """
 
     def __init__(self) -> None:
@@ -498,8 +655,25 @@ class SelectHold:
     def step(self, x: float, c: float) -> float:
         old = self._h
         self._h = x + 1.0
-        y = old if c > 0.0 else x
-        return y * 2.0 + (x * 1.5) / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)
+        scale = 1.5 / (x * x + 0.5)  # structurally nonzero divisor (the bench asserts err_pc == 0)
+        y = old if c * scale > 0.0 else x
+        return y * 2.0 + x * scale
+
+
+class InputLatchSelect:
+    """
+    A slot latching an input straight from a Ret block whose only work is a select committing on its first cycle: the
+    input is resident, so the install fires on that same cycle ahead of the boundary and frees the input's register.
+    Shared by the white-box schedule test and its RTL cosim twin.
+    """
+
+    def __init__(self) -> None:
+        self._p = 0.0
+
+    def __call__(self, x: float, b: bool) -> float:
+        old = self._p
+        self._p = x
+        return old if b else 0.0
 
 
 def phi_swap_loop(x: float, n: float) -> float:
@@ -545,7 +719,7 @@ def phi_swap_computed_loop(x: float, n: float) -> float:
 def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
     """
     The boolean-bank twin of phi_swap_computed_loop: the same cross-referencing loop-header phis with one
-    computed back-edge arm, carried in the 1-bit bank so the latch installs are `BoolWrite`s rather than
+    computed back-edge arm, carried in the 1-bit bank so the latch installs are `BoolCopy`s rather than
     `WideCopy`s. The two banks derive install placement through the same helpers but emit through separate paths,
     so each needs its own pin.
     """

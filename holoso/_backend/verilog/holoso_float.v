@@ -144,6 +144,25 @@ module holoso_ffma#(parameter WEXP = 6, parameter WMAN = 18,
     );
 endmodule
 
+// Exponent extraction: y = ilog2(a), the count the scaler below multiplies by.
+// The result is sign-invariant so no sign conditioning is needed.
+module holoso_filog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = WEXP + WMAN,
+                      parameter STAGE_INPUT = 0, parameter integer LATENCY = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire                 in_valid,
+    input  wire [WEXP+WMAN-1:0] a,
+    output wire                 out_valid,
+    output wire signed [WINT-1:0] y
+);
+    zkf_ilog2#(.WEXP(WEXP), .WMAN(WMAN), .WINT(WINT), .STAGE_INPUT(STAGE_INPUT), .LATENCY(LATENCY)) u_ilog2 (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .a(a),
+        .out_valid(out_valid), .y(y),
+        .zero(), .infinity(), .negative()  // sidebands not used at the moment; this may change if needed
+    );
+endmodule
+
 // Power-of-two scaler with sign conditioning: y = sgnop(sgnop(a) * 2^k).
 // Every representable k is legal; large values collapse to infinities or zero.
 // Scaling is exact while the result remains normal and finite.

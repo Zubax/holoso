@@ -102,7 +102,8 @@ def test_err_pc(sim: str, stage_output: int) -> None:
     # The fdiv asserts div0 at its commit; err_pc latches the write word -- the
     # commit step itself (pooled_write_word). An fdiv output stage pushes the commit later, and the err flag and the
     # result still latch/land together: err_step is recomputed from this build's actual fdiv commit.
-    commit_cycle = next(op.commit_cycle for op in lir.ops if isinstance(op.inst.operator, FDivOperator))
+    (block,) = lir.blocks
+    commit_cycle = next(op.commit_cycle for op in block.ops if isinstance(op.inst.operator, FDivOperator))
     err_step = pooled_write_word(commit_cycle)
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}_s{stage_output}"
     gen_dir.mkdir(parents=True, exist_ok=True)

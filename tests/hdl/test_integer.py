@@ -132,7 +132,8 @@ async def integer_operator_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("operator_class", _OPERATORS, ids=lambda cls: cls.mnemonic)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_integer_operator(sim: str, operator_class: type[IntHardwareOperator], width: int) -> None:
-    hardware = operator_class(IntFormat(width))
+    # Every pooled integer operator is (format, options), which the abstract base does not spell out.
+    hardware = operator_class(IntFormat(width), operator_class.Options())  # type: ignore[call-arg]
     operator = hardware.module_name
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"{operator}_w{width}"

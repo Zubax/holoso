@@ -22,7 +22,7 @@ async def transacting_edge(dut: Any) -> None:
     fetch_lag = int(os.environ["HOLOSO_FETCH_LAG"])
     k = int(os.environ["HOLOSO_DWELL_K"])
 
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    Clock(dut.clk, 10, unit="ns").start()
     await FallingEdge(dut.clk)
     dut.rst.value = 1
     dut.in_valid.value = 0
@@ -64,7 +64,7 @@ async def state_inert_during_dwell(dut: Any) -> None:
     slot_idx = int(os.environ["HOLOSO_SLOT_IDX"])
     reset_bits = int(os.environ["HOLOSO_SLOT_RESET_BITS"])
 
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    Clock(dut.clk, 10, unit="ns").start()
     await FallingEdge(dut.clk)
     dut.rst.value = 1
     dut.in_valid.value = 0

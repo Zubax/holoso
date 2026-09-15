@@ -35,6 +35,7 @@ import numpy as np
 from ..._errors import SynthesisError
 from .._desugar import desugar
 from .._ir import Block, EelFunction, Origin, ScalarType, SlotDecl, SlotPath
+from .._decorator import is_wrapper, plain_function
 from .._names import slot_name
 from ._reject import reject
 from ._residual import assigned_names
@@ -88,10 +89,12 @@ def attribute_dict(obj: object) -> dict[str, object]:
 
 
 def _is_component(raw: object) -> bool:
-    """A plain instance with its own attribute dict -- never a value kind, a callable, or a type."""
+    """A plain instance with its own attribute dict -- never a value kind, a bare function, or a type."""
     if isinstance(raw, _VALUE_KINDS) or raw is None:
         return False
     if isinstance(raw, (types.ModuleType, type, types.FunctionType, types.MethodType, types.BuiltinFunctionType)):
+        return False
+    if is_wrapper(raw):
         return False
     return isinstance(getattr(raw, "__dict__", None), dict)
 
@@ -145,8 +148,9 @@ def _scan_methods(klass: type) -> list[types.FunctionType]:
     found: list[types.FunctionType] = []
     seen: set[int] = set()
     for base in klass.__mro__:
-        for name, member in vars(base).items():
-            if name in ("__init__", "__new__") or not isinstance(member, types.FunctionType):
+        for name, raw in vars(base).items():
+            member = plain_function(raw)
+            if member is None or name in ("__init__", "__new__"):
                 continue
             if id(member) in seen:
                 continue

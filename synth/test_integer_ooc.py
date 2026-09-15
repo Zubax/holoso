@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 
 import pytest
-from holoso import FFromIntOptions, FToIntOptions, FloatFormat, IntFormat
+from holoso import FFromIntOptions, FToIntOptions, FloatFormat, IPopcntOptions, IntFormat
 from holoso._backend.verilog._support import support_files
 from holoso._operators import FFromIntOperator, FToIntOperator, IPopcntOperator
 from synth import OocDesign, SourceFile
@@ -779,7 +779,7 @@ def _render_popcnt_wrapper(top: str, width: int) -> str:
     the count port and the zero fill happens on the way out: a full-width boundary register would hold the constant
     high bits under the keep attribute and charge them to the measurement.
     """
-    operator = IPopcntOperator(IntFormat(width))
+    operator = IPopcntOperator(IntFormat(width), IPopcntOptions())
     count_width = operator.count_width
     parameters = ", ".join(f".{name}({value})" for name, value in operator.params.items())
     return f"""`default_nettype none

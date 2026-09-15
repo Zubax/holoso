@@ -5,7 +5,7 @@ sound only under the carrier contract in DESIGN.md.
 """
 
 from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 from .._value import IntValue, ScalarValue
@@ -15,6 +15,7 @@ from ._common import (
     InlineHardwareOperator,
     IntIdentity,
     PooledHardwareOperator,
+    PooledOperatorOptions,
     PortConditioner,
     ScalarSignature,
 )
@@ -54,10 +55,14 @@ class IntHardwareOperator(PooledHardwareOperator, ABC):
 
 @dataclass(frozen=True, slots=True)
 class IAddOperator(IntHardwareOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "iadds"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -76,9 +81,13 @@ class IAddOperator(IntHardwareOperator):
 class ISubOperator(IntHardwareOperator):
     """Also serves negation as `0-x`: there is no negation module, and this one saturates `-MIN` correctly."""
 
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "isubs"
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -96,7 +105,7 @@ class ISubOperator(IntHardwareOperator):
 @dataclass(frozen=True, slots=True)
 class IMulOperator(IntHardwareOperator):
     @dataclass(frozen=True, slots=True)
-    class Options:
+    class Options(PooledOperatorOptions):
         stage_product: int = 0
         """Splitting the product is useful when the width exceeds the DSP slice input. See Verilog holoso_imuls."""
 
@@ -104,7 +113,7 @@ class IMulOperator(IntHardwareOperator):
     operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
-    opt: Options
+    opt: Options = field()
 
     def __post_init__(self) -> None:
         if not 0 <= self.opt.stage_product <= 4:
@@ -135,10 +144,14 @@ class IMulOperator(IntHardwareOperator):
 class IDivOperator(IntHardwareOperator):
     """Floor division and its remainder together: one firing answers both."""
 
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "idivs"
     operand_hdl_ports: ClassVar[list[str]] = ["num", "den"]
     output_hdl_ports: ClassVar[list[str]] = ["quo", "rem"]
     error_ports: ClassVar[list[str]] = ["div0"]
+    opt: Options = field()
 
     @property
     def latency(self) -> int:
@@ -172,9 +185,13 @@ class IDivOperator(IntHardwareOperator):
 
 @dataclass(frozen=True, slots=True)
 class IAbsOperator(IntHardwareOperator):
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "iabss"
     operand_hdl_ports: ClassVar[list[str]] = ["x"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -197,9 +214,13 @@ class IShlOperator(IntHardwareOperator):
     instead. Which one a shift wants is a lowering decision, so the operator commits to neither.
     """
 
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "ishl"
     operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
     output_hdl_ports: ClassVar[list[str]] = ["shft", "prod"]
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -227,9 +248,13 @@ class IShrOperator(IntHardwareOperator):
     Neither direction can rail, so it emits one raw reading and no saturation.
     """
 
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "ishr"
     operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
     output_hdl_ports: ClassVar[list[str]] = ["shft"]
+    opt: Options = field()
 
     @property
     def signature(self) -> ScalarSignature:
@@ -253,9 +278,13 @@ class IPopcntOperator(IntHardwareOperator):
     as wide as that count needs, which the reader widens; a count is never negative, so the widening is a zero fill.
     """
 
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "ipopcnt"
     operand_hdl_ports: ClassVar[list[str]] = ["x"]
     output_hdl_ports: ClassVar[list[str]] = ["y"]
+    opt: Options = field()
 
     @property
     def count_width(self) -> int:
@@ -288,7 +317,11 @@ class IPopcntOperator(IntHardwareOperator):
 class ICmpOperator(IntHardwareOperator, ComparatorOperator):
     """Two's complement is totally ordered."""
 
+    @dataclass(frozen=True, slots=True)
+    class Options(PooledOperatorOptions): ...
+
     mnemonic: ClassVar[str] = "icmp"
+    opt: Options = field()
 
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands)

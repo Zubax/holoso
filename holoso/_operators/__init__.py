@@ -30,6 +30,7 @@ from ._float import (
     FExp2Operator as FExp2Operator,
     FFmaOperator as FFmaOperator,
     FFromIntOperator as FFromIntOperator,
+    FILog2Operator as FILog2Operator,
     FLog2Operator as FLog2Operator,
     FMulILog2Operator as FMulILog2Operator,
     FMulOperator as FMulOperator,

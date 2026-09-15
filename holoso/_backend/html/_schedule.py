@@ -38,12 +38,11 @@ def render_schedule(lir: Lir) -> str:
     # the register array holds at each PC, including the microcode-fetch staging.
     # For a control-flow kernel this lays out every block's PC range; one transaction follows a single path through it,
     # so the grid is the static program, not one transaction's cycle-accurate trace.
-    compute_cycles = list(range(1, lir.initiation_interval + 1))
+    compute_cycles = list(range(1, lir.last_pc + 1))
     # Block boundaries: the grid row axis is the model fetch PC, and blocks tile it contiguously in layout order, so a
-    # non-Ret block ends at its terminator PC and the next block begins on the following row. A thick horizontal seam
-    # below each such row makes the block structure visible. The single Ret block ends at the grid's last row (the
-    # out_valid boundary), so it needs no seam. A straight-line kernel has one block and no seams.
-    boundary_rows = {lir.term_pc(block) for block in lir.blocks if not isinstance(block.terminator, Ret)}
+    # block ends at its terminator PC and the next block begins on the following row. A thick horizontal seam below each
+    # such row but the last makes the block structure visible. A straight-line kernel has one block and no seams.
+    boundary_rows = {lir.term_pc(block) for block in lir.blocks} - {lir.last_pc}
 
     # The operator-stage block: one square column per pipeline stage of each operator, in instance order.
     stage_cols = _stage_columns(lir)
@@ -70,11 +69,7 @@ def render_schedule(lir: Lir) -> str:
     # Residence tint for both register banks, from the LIR's complete liveness (each accounts for the combinational
     # ops -- comparisons, boolean logic, and the float<->bool casts -- as well as arithmetic, state, and branches),
     # merged into one column-keyed map.
-    live: dict[ColKey, set[int]] = {}
-    for freg, frows in lir.reg_liveness.items():
-        live[freg] = frows
-    for breg, brows in lir.bool_liveness.items():
-        live[breg] = brows
+    live: dict[ColKey, set[int]] = {reg: rows for reg, rows in lir.liveness.items()}
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance `inst` is in stage `k` on cycle `issue + k + fetch_lag`. Keyed to the
     # operation group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
@@ -98,7 +93,7 @@ def render_schedule(lir: Lir) -> str:
         base_pc = lir.block_base[block.index]
         for op in block.ops:
             color = operator_colors[type(op.inst.operator)]
-            # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with reg_liveness. One
+            # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with the liveness. One
             # firing renders one cell per tapped output port (all in one hover group) on EACH arm its writeback reaches,
             # edges from its shared operands, and one pipeline trail. Block-local cycles are rebased to absolute here.
             issue_pc = base_pc + op.issue_cycle
@@ -200,25 +195,21 @@ def render_schedule(lir: Lir) -> str:
         chips_at.setdefault(landing, []).append(f"<span class='opf state' data-op='{group}'>{tip}</span>")
         group += 1
 
-    # The landing per install kind mirrors the model's decode: a pc-gated install (a phi copy, a boolean write) always
-    # lands at `install_landing` (fire + 1); a wide slot lands there only if it fires before the boundary, else it is
-    # a read-first boundary install at `last_pc`; a boolean slot always installs read-first at `last_pc`.
+    # The landing per install kind mirrors the model's decode: a pc-gated copy (a phi arm, an early slot install) lands
+    # at `install_landing` (fire + 1); a boundary install reads first at every exit PC.
+    early_names = {(slot.reg, slot.live_out): slot.name for slot in lir.state_slots}
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
-        for copy in block.wide_copies:  # a non-coalesced wide phi-arm merge copy
+        for copy in block.copies:  # a non-coalesced phi-arm merge copy, or a slot's early install
             fire = base_pc + copy.fire_step(lir.fetch_lag)
-            install_event(copy.dst, copy.dst.stable_label, copy.source, fire, install_landing(fire))
-        for bwrite in block.bool_writes:  # a boolean phi/state install (a constant or another boolean register)
-            fire = base_pc + bwrite.fire_step(lir.fetch_lag)
-            install_event(bwrite.dst, bwrite.dst.stable_label, bwrite.source, fire, install_landing(fire))
-    for slot in lir.wide_state_slots:  # a non-coalesced wide slot latches its tap (early, or read-first at boundary)
-        if slot.needs_copy:
-            fire = lir.state_copy_step(slot)
-            landing = fire if lir.wide_state_install_is_boundary(slot) else install_landing(fire)
-            install_event(slot.reg, slot.name, slot.tap, fire, landing)
-    for bslot in lir.bool_state_slots:  # a non-coalesced boolean slot installs its live-out read-first at the boundary
-        if bslot.needs_copy:
-            install_event(bslot.reg, bslot.name, bslot.live_out, lir.last_pc, lir.last_pc)
+            label = early_names.get((copy.dst, copy.source), copy.dst.stable_label)
+            install_event(copy.dst, label, copy.source, fire, install_landing(fire))
+    for slot in lir.boundary_installs:  # read-first at the boundary
+        for exit_pc in lir.exit_pcs:
+            install_event(slot.reg, slot.name, slot.live_out, exit_pc, exit_pc)
+    for point in lir.exit_points:
+        tip = "" if point.condition is None else f" if {point.condition.stable_label}"
+        chips_at.setdefault(point.pc, []).append(f"<span class='opf'>out_valid{tip}</span>")
 
     # Control-transfer arrows: anchor each conditional arrow's root to the boolean register it tests by making that
     # register's cell at the source row a dataflow endpoint, so the overlay can draw the dotted feed to it -- the
@@ -305,8 +296,8 @@ def render_schedule(lir: Lir) -> str:
     out.append("</tr>")
 
     # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
-    # compute, latch, and fetch-staging cycles 1..II. The row axis is the fetch PC, so out_valid (pc == LASTPC == II)
-    # rises on the last row; the executing PRESENT step shown there lags the fetch by the fetch lag (present==II-lag).
+    # compute, latch, and fetch-staging cycles 1..last PC. The row axis is the fetch PC, so out_valid rises on an exit
+    # row.
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.wide_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
@@ -538,26 +529,23 @@ def _control_arrows(lir: Lir) -> list[_Arrow]:
     outside the grid. A branch arm carries the condition register it reads (for the tooltip and the dotted feed); a jump
     carries `None`.
     """
-    present = lir.initiation_interval
     arrows: list[_Arrow] = []
 
-    def emit(term_pc: int, target: int, tip: str, cond: BoolRegRef | None) -> None:
+    def emit(term_pc: int, target: Arm, tip: str, cond: BoolRegRef | None) -> None:
+        if isinstance(target, Exit) or lir.block_base[target] == term_pc + 1:  # exits and fall-throughs draw no arrow
+            return
         src_cyc, dst_cyc = term_pc, lir.block_base[target]
-        if 1 <= src_cyc <= present and 1 <= dst_cyc <= present:
+        if 1 <= src_cyc <= lir.last_pc and 1 <= dst_cyc <= lir.last_pc:
             arrows.append(_Arrow(src_cyc, dst_cyc, tip, cond))
 
     for block in lir.blocks:
         term_pc = lir.term_pc(block)
-        fall_pc = term_pc + 1  # the physically next ROM step; a target landing here is the fall-through, drawn as none
         match block.terminator:
             case Jump(target=target):
-                if lir.block_base[target] != fall_pc:
-                    emit(term_pc, target, "jump", None)
+                emit(term_pc, target, "jump", None)
             case Branch(cond=cond, if_true=if_true, if_false=if_false):
-                if lir.block_base[if_true] != fall_pc:
-                    emit(term_pc, if_true, _branch_arm_text(cond, taken=True), cond)
-                if lir.block_base[if_false] != fall_pc:
-                    emit(term_pc, if_false, _branch_arm_text(cond, taken=False), cond)
+                emit(term_pc, if_true, _branch_arm_text(cond, taken=True), cond)
+                emit(term_pc, if_false, _branch_arm_text(cond, taken=False), cond)
     return _pack_arrow_lanes(arrows)
 
 
@@ -702,12 +690,12 @@ def _bool_consts(lir: Lir) -> list[bool]:
             for operand in bop.operands:
                 if isinstance(operand.source, BoolConstRef):
                     used.add(operand.source.value)
-        for bwrite in block.bool_writes:
-            if isinstance(bwrite.source.source, BoolConstRef):
-                used.add(bwrite.source.source.value)
-    for bslot in lir.bool_state_slots:
-        if bslot.needs_copy and isinstance(bslot.live_out.source, BoolConstRef):
-            used.add(bslot.live_out.source.value)
+        for copy in block.copies:
+            if isinstance(copy.source.source, BoolConstRef):
+                used.add(copy.source.source.value)
+    for slot in lir.boundary_installs:
+        if isinstance(slot.live_out.source, BoolConstRef):
+            used.add(slot.live_out.source.value)
     return sorted(used)
 
 
@@ -779,7 +767,7 @@ def _schedule_key(
                 _key_item("<span class='wr state'>&#9662;</span>", "persistent state: reset snapshot (cycle 0)"),
                 _key_item(
                     "<span class='sw state'></span>",
-                    "state update: live-out lands the step after its copy fires (boundary copy: read-first at LASTPC)",
+                    "state update: live-out lands the step after its copy fires (boundary copy: read-first at an exit)",
                 ),
             ]
         )

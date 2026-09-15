@@ -3,15 +3,22 @@
 from ._build import build as build
 from ._regalloc import RegallocTuning as RegallocTuning
 from ._ir import Lir as Lir
+from ._ir import successor_blocks as successor_blocks
 from ._ir import (
+    Arm as Arm,
     BoolConstRef as BoolConstRef,
     BoolInputLoad as BoolInputLoad,
     BoolOperand as BoolOperand,
     BoolOutputWire as BoolOutputWire,
     BoolRegRef as BoolRegRef,
     BoolSource as BoolSource,
-    BoolWrite as BoolWrite,
+    BoolCopy as BoolCopy,
+    BoolStateSlot as BoolStateSlot,
+    Boundary as Boundary,
     Branch as Branch,
+    Early as Early,
+    Exit as Exit,
+    InPlace as InPlace,
     InlineScheduledOp as InlineScheduledOp,
     Jump as Jump,
     LirBlock as LirBlock,
@@ -20,8 +27,8 @@ from ._ir import (
     PortWrite as PortWrite,
     RegFileLayout as RegFileLayout,
     RegRef as RegRef,
-    Ret as Ret,
     ScheduledOp as ScheduledOp,
+    Terminator as Terminator,
     WideConstRef as WideConstRef,
     WideCopy as WideCopy,
     WideInputLoad as WideInputLoad,
@@ -34,6 +41,23 @@ from ._ir import (
     landing_cycle as landing_cycle,
     operand_read_cycle as operand_read_cycle,
     pooled_write_word as pooled_write_word,
+)
+from ._sources import (
+    HandshakeArm as HandshakeArm,
+    InlineWriteSource as InlineWriteSource,
+    MoveWriteSource as MoveWriteSource,
+    OpWriteSource as OpWriteSource,
+    ReadSource as ReadSource,
+    handshake_arms as handshake_arms,
+    read_arms as read_arms,
+    Steering as Steering,
+    steering as steering,
+    write_arms as write_arms,
+    WriteEvent as WriteEvent,
+    WriteSource as WriteSource,
+    read_sources_per_port as read_sources_per_port,
+    write_events as write_events,
+    write_sources_per_register as write_sources_per_register,
 )
 from ._ports import (
     ControlInputPort as ControlInputPort,

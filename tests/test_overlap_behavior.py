@@ -17,7 +17,8 @@ The genuine gaps these fill (the white-box twins and the stateless overlap kerne
     before);
   - nested diamonds (pure -> select, and division-bearing -> real branch) and a mixed select+branch kernel, checked by
     output value rather than by HIR block counts;
-  - multi-output mixed float+bool I/O with the typed-port metadata read from the elaborated simulator.
+  - multi-output mixed float+bool I/O with the typed-port metadata read from the elaborated simulator;
+  - slots installed at the accepted-output edge from a Ret block that computes nothing.
 """
 
 import math
@@ -39,7 +40,18 @@ from holoso import (
     Options,
 )
 
-from ._modelref import COMPARATOR_OPTIONS_CASES, OptionsCase, default_tolerance, overlap_dead_arm_spill_kernel, within
+from ._modelref import (
+    COMPARATOR_OPTIONS_CASES,
+    default_tolerance,
+    EMPTY_RET_KERNELS,
+    EMPTY_RET_VECTORS,
+    EXIT_ARM_KERNELS,
+    EXIT_ARM_VECTORS,
+    OptionsCase,
+    overlap_dead_arm_spill_kernel,
+    PIPELINE_OPTIONS_CASES,
+    within,
+)
 
 FMT = FloatFormat(6, 18)
 
@@ -460,8 +472,8 @@ def test_overlap_dead_arm_spill_does_not_clobber_a_sibling_live_value(config: Op
 
 
 def test_octave_index_resident_output_drain_only_ret_matches_reference() -> None:
-    # The resident-output drain-only Ret shape: the loop body produces the float `octaves`, which the exit Ret reads
-    # resident at its base PC with no boundary drain. Exact `==` guards the over-aggressive direction -- a reclaim
+    # The resident-output drain-only Ret shape: the loop body produces the float `octaves`, which the exits read resident
+    # on the loop's terminator, the Ret taking no PC. Exact `==` guards the over-aggressive direction -- a reclaim
     # pushing the boundary BELOW the resident landing would sample `octaves` before the loop's final write lands, an
     # off-by-one octave count.
     #
@@ -526,3 +538,25 @@ def test_cross_bank_chain_edges_match_reference() -> None:
         assert got[1] is want_r, f"r at ({a},{b},{c},{d}): {got[1]} vs {want_r}"
         assert got[2] is want_t, f"t at ({a},{b},{c},{d}): {got[2]} vs {want_t}"
         assert _close(float(got[0]), want_out, op_count=6), f"out at ({a},{b},{c},{d}): {float(got[0])} vs {want_out}"
+
+
+@pytest.mark.parametrize("label", list(EMPTY_RET_KERNELS))
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+def test_an_install_from_an_empty_ret_matches_python(config: OptionsCase, label: str) -> None:
+    make = EMPTY_RET_KERNELS[label]
+    model = holoso.synthesize(make(), config.make_options(FMT), name="empty_ret").numerical_model.elaborate()
+    reference = make()
+    vectors = EMPTY_RET_VECTORS * 2
+    expected = [reference(*vector) for vector in vectors]
+    assert len(set(expected)) > 1, "the vectors must move the state for a lost install to show"
+    assert [type(want)(model.run(*vector)[0]) for want, vector in zip(expected, vectors)] == expected
+
+
+@pytest.mark.parametrize("label", list(EXIT_ARM_KERNELS))
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+def test_a_branch_arm_ending_the_transaction_matches_python(config: OptionsCase, label: str) -> None:
+    kernel = EXIT_ARM_KERNELS[label]
+    model = holoso.synthesize(kernel, config.make_options(FMT), name="exit_arm").numerical_model.elaborate()
+    expected = [kernel(*vector) for vector in EXIT_ARM_VECTORS]
+    assert len({want > 1.0 for want in expected}) > 1, "the vectors must take both arms"
+    assert [float(model.run(*vector)[0]) for vector in EXIT_ARM_VECTORS] == expected

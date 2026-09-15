@@ -139,9 +139,24 @@ class Operator(ABC):
         """
         return None
 
+    @property
+    def mirror(self) -> "Operator | None":
+        """
+        Declared rather than inferred from the algebra, because the answer is about bits: `fmin`/`fmax` break ties
+        toward the second operand, so exchanging them flips the sign of a zero.
+        """
+        return None
+
 
 @dataclass(frozen=True, slots=True)
-class FloatAdd(Operator):
+class CommutativeOperator(Operator, ABC):
+    @property
+    def mirror(self) -> Operator:
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class FloatAdd(CommutativeOperator):
     mnemonic: ClassVar[str] = "fadd"
     speculatable: ClassVar[bool] = True
 
@@ -158,7 +173,7 @@ class FloatAdd(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatMul(Operator):
+class FloatMul(CommutativeOperator):
     mnemonic: ClassVar[str] = "fmul"
     speculatable: ClassVar[bool] = True
 
@@ -235,6 +250,50 @@ class FloatMulPow2(Operator):
         # `np.ldexp` rather than `math.ldexp` because this operator stands for a multiplication, which saturates:
         # the raise is the math module's, not the operation's, and answering it would be inventing a value.
         return _fold_float(operands, "the scaling", lambda a: float(np.ldexp(a, self.k)))
+
+
+@dataclass(frozen=True, slots=True)
+class FloatILog2(Operator):
+    """
+    `floor(log2|x|)`, the extraction half of the pair `FloatMulPow2Dynamic` scales by. Zero answers `-bias` and an
+    infinity `bias + 1`, outside the finite span in the direction their magnitude implies, so an extremum over the
+    answer needs no special case. The bias is told by the machine; HIR asks no format.
+    """
+
+    mnemonic: ClassVar[str] = "filog2"
+    speculatable: ClassVar[bool] = True
+    bias: int
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(),), IntType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        (a,) = [_float_const(operand).value for operand in operands]
+        if a == 0.0:
+            return IntConst(-self.bias)
+        if math.isinf(a):
+            return IntConst(self.bias + 1)
+        return IntConst(math.frexp(abs(a))[1] - 1)  # not floor(log2 x), which answers 3 just below 8
+
+
+@dataclass(frozen=True, slots=True)
+class FloatMulPow2Dynamic(Operator):
+    """
+    Scaling by a power of two whose exponent is data, `FloatMulPow2` being the constant spelling the scaling
+    algebra composes.
+    """
+
+    mnemonic: ClassVar[str] = "fmul_pow2_dyn"
+    speculatable: ClassVar[bool] = True
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((FloatType(), IntType()), FloatType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        a, k = operands  # unpacked here, `_fold_float` taking one family only
+        return FloatMulPow2(_int_const(k).value).evaluate([a])
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,17 +500,23 @@ class FloatAtan2Turns(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatHypot2(Operator):
+class FloatHypot(Operator):
     """
-    A semantic op only because it may be computed as a byproduct of atan2 -- the MIR op selector will manage this.
-    If not, it is expected to be lowered as the ordinary sqrt(x**2+y**2).
+    Semantic because a pair may be computed as a byproduct of atan2, and because the expansion serving every other
+    case needs a scaling window only the float format can supply. Speculatable: every input has an answer, and
+    neither lowering can fault -- the atan2 raises nothing, and the expansion's root sees a sum of squares.
     """
 
-    mnemonic: ClassVar[str] = "fhypot2"
+    mnemonic: ClassVar[str] = "fhypot"
+    speculatable: ClassVar[bool] = True
+    arity: int
+
+    def __post_init__(self) -> None:
+        assert self.arity >= 1
 
     @property
     def signature(self) -> Signature:
-        return _float_signature(2)
+        return _float_signature(self.arity)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the magnitude", math.hypot)
@@ -515,7 +580,7 @@ class FloatIsNegInf(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
-    """Fused multiply-add `a*b + c` from an explicit `math.fma` call: always single-rounds."""
+    """Always single-rounds, so the contraction may not absorb another addition into it."""
 
     mnemonic: ClassVar[str] = "ffma"
     speculatable: ClassVar[bool] = True
@@ -575,6 +640,10 @@ class FloatLess(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value < b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return FloatGreater()
+
 
 @dataclass(frozen=True, slots=True)
 class FloatLessOrEqual(FloatComparison):
@@ -583,6 +652,10 @@ class FloatLessOrEqual(FloatComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value <= b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return FloatGreaterOrEqual()
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,6 +666,10 @@ class FloatEqual(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value == b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class FloatNotEqual(FloatComparison):
@@ -601,6 +678,10 @@ class FloatNotEqual(FloatComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value != b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +692,10 @@ class FloatGreaterOrEqual(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value >= b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return FloatLessOrEqual()
+
 
 @dataclass(frozen=True, slots=True)
 class FloatGreater(FloatComparison):
@@ -620,9 +705,13 @@ class FloatGreater(FloatComparison):
         a, b = [_float_const(operand) for operand in operands]
         return BoolConst(a.value > b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return FloatLess()
+
 
 @dataclass(frozen=True, slots=True)
-class BoolAnd(Operator):
+class BoolAnd(CommutativeOperator):
     mnemonic: ClassVar[str] = "band"
     speculatable: ClassVar[bool] = True
 
@@ -644,7 +733,7 @@ class BoolAnd(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class BoolOr(Operator):
+class BoolOr(CommutativeOperator):
     mnemonic: ClassVar[str] = "bor"
     speculatable: ClassVar[bool] = True
 
@@ -666,7 +755,7 @@ class BoolOr(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class BoolXor(Operator):
+class BoolXor(CommutativeOperator):
     mnemonic: ClassVar[str] = "bxor"
     speculatable: ClassVar[bool] = True
 
@@ -777,7 +866,7 @@ def _int_signature(arity: int) -> Signature:
 
 
 @dataclass(frozen=True, slots=True)
-class IntAdd(Operator):
+class IntAdd(CommutativeOperator):
     mnemonic: ClassVar[str] = "iadd"
     speculatable: ClassVar[bool] = True
 
@@ -806,7 +895,7 @@ class IntSub(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntMul(Operator):
+class IntMul(CommutativeOperator):
     mnemonic: ClassVar[str] = "imul"
     speculatable: ClassVar[bool] = True
 
@@ -938,7 +1027,7 @@ class IntShiftRight(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwAnd(Operator):
+class IntBwAnd(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwand"
     speculatable: ClassVar[bool] = True
 
@@ -958,7 +1047,7 @@ class IntBwAnd(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwOr(Operator):
+class IntBwOr(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwor"
     speculatable: ClassVar[bool] = True
 
@@ -978,7 +1067,7 @@ class IntBwOr(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwXor(Operator):
+class IntBwXor(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwxor"
     speculatable: ClassVar[bool] = True
 
@@ -1025,6 +1114,10 @@ class IntLess(IntComparison):
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value < b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return IntGreater()
+
 
 @dataclass(frozen=True, slots=True)
 class IntLessOrEqual(IntComparison):
@@ -1033,6 +1126,10 @@ class IntLessOrEqual(IntComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value <= b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return IntGreaterOrEqual()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1043,6 +1140,10 @@ class IntEqual(IntComparison):
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value == b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class IntNotEqual(IntComparison):
@@ -1051,6 +1152,10 @@ class IntNotEqual(IntComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value != b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -1061,6 +1166,10 @@ class IntGreaterOrEqual(IntComparison):
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value >= b.value)
 
+    @property
+    def mirror(self) -> Operator:
+        return IntLessOrEqual()
+
 
 @dataclass(frozen=True, slots=True)
 class IntGreater(IntComparison):
@@ -1069,6 +1178,10 @@ class IntGreater(IntComparison):
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
         return BoolConst(a.value > b.value)
+
+    @property
+    def mirror(self) -> Operator:
+        return IntLess()
 
 
 @dataclass(frozen=True, slots=True)

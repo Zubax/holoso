@@ -37,7 +37,7 @@ from .._value import FloatValue, IntValue, ScalarLike, ScalarValue, WideValue, c
 from .._lir import WideConstRef, WideOperand
 from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
-from .._lir import BoolConstRef, BoolOperand, Branch, Jump, Ret
+from .._lir import Arm, BoolConstRef, BoolOperand, Branch, Exit, Jump, Terminator
 from .._lir import install_landing, landing_cycle, operand_read_cycle
 from .._operators import *
 from .._type import FloatFormat, LogicalPort
@@ -67,7 +67,7 @@ class _Kernel:
     """
     Read-only metadata shared by the serializable handle and the runnable simulator: both wrap one compiled kernel and
     describe its module name, float format, and typed I/O ports. `inputs`/`outputs` are the kernel's logical ports
-    -- the parameters and return values named as the user wrote them, each with its ScalarType.
+    -- the parameters and return values under the names the hardware carries, each with its ScalarType.
     Subclasses set the `_lir` instance attribute; this base is never instantiated directly.
     """
 
@@ -114,8 +114,8 @@ class NumericalSimulator(_Kernel):
         self._pending: dict[int, list[tuple[_Dst, ScalarValue]]] = {}  # landing PC -> in-flight (dest, value) writes
         self._op_events: dict[int, list[_OpEvent]] = {}  # read PC -> firings sampling their operands there
         self._installs: dict[int, list[_Install]] = {}  # fire PC -> pc-gated installs (readable one PC later)
-        self._boundary: list[_Install] = []  # state writebacks gated to the accepted-output boundary edge
-        self._terminators: dict[int, Jump | Branch] = {}  # terminator PC -> its redirecting terminator
+        self._boundary = [_Install(slot.live_out, slot.reg) for slot in lir.boundary_installs]  # at the accepted output
+        self._terminators: dict[int, Terminator] = {}
         self._decode()
         self.reset()
 
@@ -145,9 +145,10 @@ class NumericalSimulator(_Kernel):
         `bregs`, the present/accept holds), commit the accepted-boundary state writeback (read-first), advance the
         PC, latch the presented inputs on the accept edge, then apply that PC's datapath.
         """
-        next_pc = self._next_pc(in_valid, out_ready)
+        arm = self._taken_arm()
+        next_pc = self._next_pc(arm, in_valid, out_ready)
         accepted = self.pc == 0 and in_valid  # in_ready && in_valid: the RTL parallel-loads the input lanes here
-        if self.pc in self._terminators:
+        if isinstance(arm, int):
             # A block whose terminator redirects earlier than its drained boundary (cross-block overlap) leaves
             # in-flight results still landing past its terminator PC; those landings belong to whichever arm the
             # redirect takes, so re-key the pending writes from the fall-through frame onto the taken successor's
@@ -158,12 +159,8 @@ class NumericalSimulator(_Kernel):
             shift = next_pc - (self.pc + 1)
             if shift:
                 self._pending = {(pc + shift if pc > self.pc else pc): writes for pc, writes in self._pending.items()}
-        if self.pc == self._lir.last_pc and out_ready:  # accepted boundary edge: advance persistent state (read-first)
-            # The Ret wrap does not re-key _pending (it is excluded from _terminators), so any write still keyed past the
-            # boundary here is orphaned -- a silently dead install. The schedule must drain every landing within last_pc.
-            assert all(
-                k <= self._lir.last_pc for k in self._pending
-            ), f"install orphaned past last_pc {self._lir.last_pc}"
+        if isinstance(arm, Exit) and out_ready:  # accepted boundary edge: advance persistent state (read-first)
+            assert not self._pending, f"a write would land past the exit at PC {self.pc}"
             installed = [(inst.dst, self._read(inst.source)) for inst in self._boundary]
             for dst, value in installed:
                 self._write(dst, value)
@@ -205,8 +202,8 @@ class NumericalSimulator(_Kernel):
 
     @property
     def out_valid(self) -> bool:
-        """last_pc is the Ret boundary the fetch PC reaches once the outputs are presentable in the array."""
-        return self.pc == self._lir.last_pc
+        """The fetch PC sits on a terminator whose taken arm ends the transaction."""
+        return isinstance(self._taken_arm(), Exit)
 
     @property
     def output_values(self) -> list[ScalarValue]:
@@ -221,42 +218,31 @@ class NumericalSimulator(_Kernel):
             for op in block_ops:
                 read_pc = operand_read_cycle(op.operator, base + op.issue_cycle, lir.fetch_lag)
                 self._op_events.setdefault(read_pc, []).append(_OpEvent(op, base + op.commit_cycle))
-            for copy in block.wide_copies:
-                self._installs.setdefault(base + copy.fire_step(lir.fetch_lag), []).append(
-                    _Install(copy.source, copy.dst)
-                )
-            for write in block.bool_writes:
-                self._installs.setdefault(base + write.fire_step(lir.fetch_lag), []).append(
-                    _Install(write.source, write.dst)
-                )
-            if not isinstance(block.terminator, Ret):
-                self._terminators[lir.term_pc(block)] = block.terminator
-        # A non-coalesced wide slot installs by a pc-gated copy -- early (before the boundary, like a phi copy) or at
-        # the boundary (gated on the accepted-output edge). A boolean slot always installs at the accepted boundary
-        # edge.
-        for slot in lir.wide_state_slots:
-            if not slot.needs_copy:
-                continue
-            if lir.wide_state_install_is_boundary(slot):
-                self._boundary.append(_Install(slot.tap, slot.reg))
-            else:
-                self._installs.setdefault(lir.state_copy_step(slot), []).append(_Install(slot.tap, slot.reg))
-        self._boundary += [_Install(slot.live_out, slot.reg) for slot in lir.bool_state_slots if slot.needs_copy]
+            for copy in block.copies:
+                fire = base + copy.fire_step(lir.fetch_lag)
+                self._installs.setdefault(fire, []).append(_Install(copy.source, copy.dst))
+            self._terminators[lir.term_pc(block)] = block.terminator
 
-    def _next_pc(self, in_valid: bool, out_ready: bool) -> int:
-        """The RTL next-PC sequencer: hold at present/accept boundaries, otherwise redirect or advance the fetch."""
-        pc = self.pc
-        if pc == self._lir.last_pc:  # present: hold the result until it is taken
-            return 0 if out_ready else pc
-        if pc == 0:  # accept: hold until a transaction arrives
-            return 1 if in_valid else 0
-        terminator = self._terminators.get(pc)
-        match terminator:
+    def _taken_arm(self) -> Arm | None:
+        """The arm the terminator at the current PC takes, reading its condition; None where no terminator sits."""
+        match self._terminators.get(self.pc):
             case None:
-                return pc + 1
+                return None
             case Branch(cond=cond, if_true=if_true, if_false=if_false):
-                return self._lir.block_base[if_true if self.bregs[cond.index] else if_false]
+                return if_true if self.bregs[cond.index] else if_false
             case Jump(target=target):
+                return target
+
+    def _next_pc(self, arm: Arm | None, in_valid: bool, out_ready: bool) -> int:
+        """The RTL next-PC sequencer: hold at the accept and exit dwells, otherwise redirect or advance the fetch."""
+        if self.pc == 0:  # accept: hold until a transaction arrives
+            return 1 if in_valid else 0
+        match arm:
+            case None:
+                return self.pc + 1
+            case Exit():  # present: hold the result until it is taken
+                return 0 if out_ready else self.pc
+            case int() as target:
                 return self._lir.block_base[target]
 
     def _apply(self, pc: int) -> None:

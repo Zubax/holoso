@@ -18,6 +18,7 @@ from ._ir import (
     StateRead as StateRead,
     StateSlot as StateSlot,
     Terminator as Terminator,
+    references as references,
     successors as successors,
 )
 from ._scaling import Scaling as Scaling, scaling_of as scaling_of
@@ -44,7 +45,8 @@ from ._operators import (
     FloatFma as FloatFma,
     FloatGreater as FloatGreater,
     FloatGreaterOrEqual as FloatGreaterOrEqual,
-    FloatHypot2 as FloatHypot2,
+    FloatHypot as FloatHypot,
+    FloatILog2 as FloatILog2,
     FloatIsFinite as FloatIsFinite,
     FloatIsInf as FloatIsInf,
     FloatIsNegInf as FloatIsNegInf,
@@ -56,6 +58,7 @@ from ._operators import (
     FloatMin as FloatMin,
     FloatMul as FloatMul,
     FloatMulPow2 as FloatMulPow2,
+    FloatMulPow2Dynamic as FloatMulPow2Dynamic,
     FloatNeg as FloatNeg,
     FloatNotEqual as FloatNotEqual,
     FloatRound as FloatRound,

@@ -16,37 +16,42 @@ from holoso import (
     FDivOptions,
     FMulILog2Options,
     FMulOptions,
-    FSortOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
     Options,
 )
-from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, OpConfig, require
+from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator
 from holoso._errors import UnsupportedConstruct
 from holoso._operators import Relation
 from holoso._eel import lower
+from holoso._lir._ir import exits, successor_blocks
 from holoso._lir import (
     BoolOperand,
     BoolRegRef,
     Branch,
+    InPlace,
     Jump,
     Lir,
     LirBlock,
     PooledScheduledOp,
     RegRef,
-    Ret,
+    Exit,
     ScheduledOp,
+    Boundary,
+    Early,
+    BoolCopy,
     WideConstRef,
+    WideCopy,
     WideOperand,
     landing_cycle,
     operand_read_cycle,
+    read_sources_per_port,
 )
 from holoso._lir._ir import (
     READ_FIRST_EDGE,
     boundary_step,
     dependency_edge,
-    inline_fire_cycle,
     install_landing,
     pooled_write_word,
     successor_local_cycle,
@@ -56,10 +61,12 @@ from holoso._mir import (
     MirBuilder,
     MirOptions,
     MirFloatInput,
+    MirJump,
     MirNode,
     MirOperation,
     MirWideView,
     lower as lower_to_mir,
+    successors as mir_successors,
 )
 from holoso._operators import (
     BoolAndOperator,
@@ -69,12 +76,13 @@ from holoso._operators import (
     PooledHardwareOperator,
     SelectOperator,
 )
-from ._modelref import default_ifmt, build_lir, build_model
+from ._modelref import default_ifmt, build_lir, build_model, FROZEN_TUNING
 from holoso._lir._schedule import resolve_pool, schedule_ops, Schedule
 from holoso._type import BoolType, FloatType
 from holoso._value import FloatValue, ScalarValue
 
 from ._modelref import (
+    early_install,
     branch_boundary_kernel,
     build_model_and_interpreter,
     mir_options,
@@ -82,7 +90,6 @@ from ._modelref import (
     ChainedSlots,
     COMPARATOR_OP_CASES,
     default_mir,
-    default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
     diamond_then_loop_kernel,
     OperatorCase,
@@ -90,6 +97,11 @@ from ._modelref import (
     overlap_div_err_kernel,
     overlap_spill_kernel,
     PIPELINE_OP_CASES,
+    EXIT_ARM_VECTORS,
+    InputLatchSelect,
+    else_exit,
+    nested_exit,
+    then_exit,
     SelectHold,
 )
 
@@ -258,7 +270,7 @@ def test_entry_branch_on_resident_condition_skips_the_drained_boundary() -> None
             return r
 
     lir = build_lir(_run(_EntryStateBranch().step), "entry_state_branch")
-    entry = lir.blocks[lir.entry]
+    entry = lir.blocks[0]
     assert isinstance(entry.terminator, Branch)
     assert not entry.ops and not entry.inline_ops
     # The op-less entry rides the issue-side envelope floor (1), strictly below the drain (4) a pin would charge. Only
@@ -289,14 +301,12 @@ def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
             return r
 
     lir = build_lir(_run(_NestedResidentBranch().step), "nested_resident_branch")
-    entry = lir.blocks[lir.entry]
+    entry = lir.blocks[0]
     assert isinstance(entry.terminator, Branch) and entry.term_offset == 1  # the entry still cannot redirect at PC 0
     non_entry_empty_branches = [
         b
         for b in lir.blocks
-        if isinstance(b.terminator, Branch)
-        and b.index != lir.entry
-        and not (b.ops or b.inline_ops or b.wide_copies or b.bool_writes)
+        if isinstance(b.terminator, Branch) and b.index != lir.entry and not (b.ops or b.inline_ops or b.copies)
     ]
     assert non_entry_empty_branches, "the kernel shape no longer exercises a non-entry empty branch block"
     for b in non_entry_empty_branches:
@@ -331,7 +341,7 @@ def test_resident_bound_inline_select_lands_combinationally() -> None:
     landing = base + landing_cycle(op.commit_cycle, lir.fetch_lag)
     assert landing == base + op.commit_cycle + lir.fetch_lag + READ_FIRST_EDGE  # the combinational landing
     assert isinstance(op.write.dst, RegRef), "the select's result is a wide float, not a boolean"
-    assert landing in lir.reg_liveness[op.write.dst]  # the result is live on its true landing
+    assert landing in lir.liveness[op.write.dst]  # the result is live on its true landing
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
@@ -385,7 +395,7 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame(config: OperatorCase) 
 def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase) -> None:
     # Regression (HTML report exactness): a result spilling past an overlap-shrunk terminator lands in EVERY successor
     # arm, exactly where the numerical model re-keys its in-flight write at the redirect. write_landing_pcs -- which
-    # reg_liveness, bool_liveness, the HTML schedule, and the write-timeline test helper all stamp through -- must
+    # the liveness, the HTML schedule, and the write-timeline test helper all stamp through -- must
     # reproduce those PCs on every path, not the linear fall-through frame alone. Crash-before: the old stamping omitted
     # the non-fall-through arm's landing, so the predicted set was a strict subset of the model's actual writes (the
     # report drew the spilled value's residence on the wrong arm). Tied directly to the cosim oracle: every register the
@@ -411,7 +421,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         lir = build_lir(_run(kernel, config.make_mir(FMT)), f"{name}_{config.label}")
         # These kernels write every register through an operation (no copies/installs/state), so the model's writeback
         # set is exactly the op-result landings -- the cleanest tie to write_landing_pcs.
-        assert not any(block.wide_copies or block.bool_writes for block in lir.blocks)
+        assert not any(block.copies for block in lir.blocks)
         assert not lir.wide_state_slots and not lir.bool_state_slots
         predicted: dict[tuple[str, int], set[int]] = {}
         multi_arm = 0
@@ -489,7 +499,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     # last-work copy one PC before its read-first lands.
 
     def is_bool_only(block: LirBlock) -> bool:  # no wide register write and no float copy at the tail
-        return not block.wide_copies and not any(
+        return not any(isinstance(c, WideCopy) for c in block.copies) and not any(
             isinstance(w.dst, RegRef) for op in _block_ops(block) for w in op.writes
         )
 
@@ -499,10 +509,8 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
 
     pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_bool_drain")
-    pfd_ret = next(block for block in pfd.blocks if isinstance(block.terminator, Ret))
-    assert (
-        is_bool_only(pfd_ret) and not pfd_ret.bool_writes and pfd_ret.block_makespan > 0
-    ), "pfd Ret: bool work, no install"
+    pfd_ret = next(block for block in pfd.blocks if exits(block.terminator))
+    assert is_bool_only(pfd_ret) and not pfd_ret.copies and pfd_ret.block_makespan > 0, "pfd Ret: bool work, no install"
     assert pfd_ret.term_offset == boundary_step(pfd_ret.block_makespan, pfd.fetch_lag)
 
     # An install-bearing bool-only block's drain tracks its install's SOURCE. A copy whose source is the block's own
@@ -515,7 +523,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     # sticky-fault installs.)
 
     def bool_install_blocks(lir: Lir) -> list[LirBlock]:  # bool-only blocks carrying a tail bool install
-        return [b for b in lir.blocks if b.bool_writes and is_bool_only(b)]
+        return [b for b in lir.blocks if b.copies and is_bool_only(b)]
 
     def computed_source_install(a: bool, b: bool, c: bool) -> tuple[bool, bool]:
         # The bool twin of _LastWorkArmSource: q's arm value coalesces onto q's register, so r's install in each arm
@@ -533,7 +541,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
         for b in bool_install_blocks(
             build_lir(_run(computed_source_install, replace(OPS, ifconv_max_ops=0)), "computed_source_install")
         )
-        if any(not w.settled_source for w in b.bool_writes)
+        if any(not w.settled_source for w in b.copies)
     ]
     assert computed, "no computed-source bool install to exercise the pushed-drain case"
     for block in computed:
@@ -553,7 +561,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
         build_lir(_run(resident_source_install, replace(OPS, ifconv_max_ops=0)), "resident_source_install")
     )
     assert resident and all(
-        w.settled_source for b in resident for w in b.bool_writes
+        w.settled_source for b in resident for w in b.copies
     ), "no settled-source bool install to exercise the unpushed drain"
     for block in resident:
         assert block.block_makespan == 0, "a settled source must not push the empty block's makespan"
@@ -603,73 +611,6 @@ def test_entry_state_liveout_producer_reclaims_cycle_0() -> None:
     assert sf == 0, "an entry inline op producing a persistent-state live-out issues on cycle 0, reclaiming ucode[0]"
 
 
-def _const_branch_mir(ops: MirOptions) -> Mir:
-    """
-    A block that branches on a literal, nested under a runtime diamond, computing `x + 1.0 if x > y else x`. HIR
-    never hands selection this shape -- pruning settles a decided branch -- so it is built directly, the LIR behavior
-    below being worth covering regardless.
-    """
-    # The machine this case asks for, not the default one: the parametrized cases differ only in operator staging.
-    built = OpConfig.build(ops.operator, ops.float_format, ops.wmultiplier, default_ifmt(FMT))
-    fcmp, fadd = require(built.fcmp, "fcmp"), require(built.fadd, "fadd")
-    port, inversion = fcmp.tap_of(Relation.GT)
-    builder = MirBuilder(FMT, default_ifmt(FMT))
-    entry, decided, taken, untaken, merge, bypass, join = (builder.block() for _ in range(7))
-    builder.position_at(entry)
-    x = builder.float_input("x", FloatType(FMT))
-    y = builder.float_input("y", FloatType(FMT))
-    greater = builder.operation(
-        fcmp, [x, y], [FloatSignControl(), FloatSignControl()], output_port=port, output_conditioner=inversion
-    )
-    builder.branch(greater, decided, bypass)
-    builder.position_at(decided)
-    builder.branch(builder.bool_const(True, BoolType()), taken, untaken)
-    summed = {}
-    for arm, addend in ((taken, 1.0), (untaken, 2.0)):
-        builder.position_at(arm)
-        summed[arm] = builder.operation(
-            fadd, [x, builder.float_const(addend, FloatType(FMT))], [FloatSignControl(), FloatSignControl()]
-        )
-        builder.jump(merge)
-    builder.position_at(merge)
-    merged = builder.phi(FloatType(FMT), [(arm, summed[arm], FloatSignControl()) for arm in (taken, untaken)])
-    builder.jump(join)
-    builder.position_at(bypass)
-    builder.jump(join)
-    builder.position_at(join)
-    builder.float_output(
-        "out_0", builder.phi(FloatType(FMT), [(merge, merged, FloatSignControl()), (bypass, x, FloatSignControl())])
-    )
-    builder.ret()
-    return builder.finish()
-
-
-@pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
-def test_const_branch_install_block_drains_to_its_inline_landing(config: OperatorCase) -> None:
-    # Regression (fuzz-found B1 miscompile): a block whose branch condition is a literal installs that constant with a
-    # tail bool write. The source is settled, so the write fires at the work makespan and lands one read-first edge
-    # later, within the work boundary -- and the block must drain to exactly that landing, where the terminator then
-    # reads the condition the following step. The drain must neither shrink below it (terminator reads a stale
-    # condition -- the original B1 bug) nor pay the wider last-work-copy boundary. Crash-before: KeyError (model) /
-    # stale branch read (RTL).
-    lir = build_lir(_const_branch_mir(config.make_mir(FMT)), f"const_branch_{config.label}")
-    const_blocks = [
-        b
-        for b in lir.blocks
-        if isinstance(b.terminator, Branch) and any(w.dst == b.terminator.cond for w in b.bool_writes)
-    ]
-    assert const_blocks, "the const-branch block did not survive; the corner is no longer exercised"
-    for block in const_blocks:
-        assert all(w.is_const for w in block.bool_writes), "the const-branch condition install is not a literal const"
-        assert block.term_offset == landing_cycle(
-            block.block_makespan, lir.fetch_lag
-        ), "a const-branch block must drain to its entry-resident install's combinational landing"
-    model = build_model(lir)
-    for x, y in [(2.0, 1.0), (1.0, 2.0), (5.0, 3.0), (-1.0, -2.0)]:
-        (got,) = model.run(x, y)
-        assert math.isclose(float(got), x + 1.0 if x > y else x, rel_tol=1e-6)
-
-
 def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
     # B2 (coalesced-install fixpoint): a phi-arm predecessor whose every arm coalesces onto the merged register installs
     # nothing, so the +1 install makespan the CFG-shape predicate would assign is spurious and must be dropped. The two
@@ -684,9 +625,7 @@ def test_coalesced_install_block_pays_no_spurious_install_drain() -> None:
         return r
 
     lir = build_lir(_run(div_diamond), "div_diamond")
-    arms = [
-        b for b in lir.blocks if b.ops and not b.wide_copies and not b.bool_writes and isinstance(b.terminator, Jump)
-    ]
+    arms = [b for b in lir.blocks if b.ops and not b.copies and isinstance(b.terminator, Jump)]
     assert len(arms) == 2, "the division diamond's two coalesced arm blocks are the B2 target"
     for block in arms:
         last_commit = max(op.commit_cycle for op in _block_ops(block))
@@ -700,25 +639,20 @@ def test_empty_merge_block_is_threaded_into_its_successor(config: OperatorCase) 
     # terminated diamond arms. Merge threading eliminates it, composing the diamond's phi arms into the loop header's
     # init arm. Crash-before (no merge threading): that empty Jump merge survives. The bit-exact RTL check of the
     # resulting three-arm loop-header phi is the cosim twin (test_cosim.py test_cosim_diamond_then_loop).
-    lir = build_lir(_run(diamond_then_loop_kernel, config.make_mir(FMT)), f"diamond_then_loop_{config.label}")
-    by_index = {block.index: block for block in lir.blocks}
-    preds: dict[int, list[int]] = {block.index: [] for block in lir.blocks}
-    for block in lir.blocks:
-        terminator = block.terminator
-        targets = (
-            [terminator.target]
-            if isinstance(terminator, Jump)
-            else [terminator.if_true, terminator.if_false] if isinstance(terminator, Branch) else []
-        )
-        for target in targets:
-            preds[target].append(block.index)
+    mir = _run(diamond_then_loop_kernel, config.make_mir(FMT))
+    lir = build_lir(mir, f"diamond_then_loop_{config.label}")
+    by_id = {block.id: block for block in mir.blocks}
+    preds: dict[int, list[int]] = {block.id: [] for block in mir.blocks}
+    for block in mir.blocks:
+        for target in mir_successors(block):
+            preds[target].append(block.id)
     survivors = [
         block
-        for block in lir.blocks
-        if not (block.ops or block.inline_ops or block.wide_copies or block.bool_writes)
-        and isinstance(block.terminator, Jump)
-        and preds[block.index]
-        and all(isinstance(by_index[pred].terminator, Jump) for pred in preds[block.index])
+        for block in mir.blocks
+        if not block.operations
+        and isinstance(block.terminator, MirJump)
+        and preds[block.id]
+        and all(isinstance(by_id[pred].terminator, MirJump) for pred in preds[block.id])
     ]
     assert not survivors, "an empty pass-through merge block survived; merge threading did not fire"
     model = build_model(lir)
@@ -756,7 +690,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
                     if len(landing_pcs) <= 1:
                         continue  # not a multi-arm spill
                     spilled_any = True
-                    for arm in (block.terminator.if_true, block.terminator.if_false):
+                    for arm in successor_blocks(block.terminator):
                         arm_block = by_index[arm]
                         base = lir.block_base[arm_block.index]
                         arm_landing = next(
@@ -826,17 +760,17 @@ def test_entry_busy_gates_a_successor_firing_at_its_inherited_instance_free_cycl
 
 def test_residence_tint_is_path_exact_across_a_merge() -> None:
     # Regression (review P1, all three reviewers): the report's residence tint was not path-exact. Three manifestations,
-    # all fixed: (a) a single global residence_rows collapsed a register's def/use across mutually-exclusive arms, so a
+    # all fixed: (a) a single global _residence_rows collapsed a register's def/use across mutually-exclusive arms, so a
     # value live on two arms that rejoin at a merge had its lower-addressed arm truncated by the other arm's landing
     # (live register tinted DEAD) -- fixed by per-block CFG residence (_cfg_residence); (b) the read-first `<=` bounds
-    # in residence_rows and the upward-exposed test treated a read on a value's own landing PC as reading the PRIOR
+    # in _residence_rows and the upward-exposed test treated a read on a value's own landing PC as reading the PRIOR
     # occupant, painting a register's residence spuriously back toward the block entry (dead register tinted LIVE) --
     # fixed by the write-then-read strict `<`; (c) a pc-gated install (a phi copy, a boolean write, or an early slot
     # writeback) was tinted at its FIRE step, one cycle before the model commits it -- fixed by routing both
     # the model and the diagnostic through `install_landing` (fire + 1), while a boundary slot install is read-first
-    # at the boundary. Tied to the model oracle in BOTH banks: reg_liveness/bool_liveness must equal the union over both
+    # at the boundary. Tied to the model oracle in BOTH banks: the liveness must equal the union over both
     # branch arms (or, for the loop kernel, the executed trace) of the model's per-path residence, computed with an
-    # INDEPENDENT write-then-read liveness that does not share residence_rows' rule. Crash-before: false-arm mid-rows
+    # INDEPENDENT write-then-read liveness that does not share _residence_rows' rule. Crash-before: false-arm mid-rows
     # missing, pre-landing rows spuriously present, and -- for the install skew -- recip_newton's wide phi copies tinted
     # at their fire PC instead of their landing PC and bw's boolean write tinted at its fire step instead of its
     # landing.
@@ -873,6 +807,11 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             d = y * 2.0
         return c, d
 
+    def halve_to_unit(x: float) -> float:  # the transaction ends on the loop header's branch arm
+        while x > 1.0:
+            x = x * 0.5
+        return x
+
     class _Trace(NumericalSimulator):
         def __init__(self, lir: Lir) -> None:
             super().__init__(lir)
@@ -885,7 +824,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
         def tick(self, in_valid: bool, out_ready: bool) -> None:
             # The redirect samples a Branch condition directly out of bregs in _next_pc (not via _read), at the
             # terminator PC before the PC advances; capture it so the oracle counts that read at term_pc.
-            terminator = self._terminators.get(self.pc) if self.pc != self._lir.last_pc else None
+            terminator = self._terminators.get(self.pc)
             self.branch_read = (self.pc, terminator.cond.index) if isinstance(terminator, Branch) else None
             super().tick(in_valid, out_ready)
 
@@ -936,6 +875,9 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
                 guard += 1
             sim.reads, sim.bool_reads = set(), set()
             _ = sim.output_values  # the output taps read their registers at the boundary PC
+            exit_terminator = sim._terminators.get(sim.pc)
+            if isinstance(exit_terminator, Branch):  # out_valid itself reads a conditional exit's condition
+                sim.bool_reads.add(exit_terminator.cond.index)
             pc, rd, wr, brd, bwr = steps[-1]
             steps[-1] = (pc, rd | frozenset(sim.reads), wr, brd | frozenset(sim.bool_reads), bwr)
             live: frozenset[int] = frozenset()
@@ -943,7 +885,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             # Backward per-path liveness in the model's write-then-read order (a write lands then is read at the same
             # PC), so a read on a value's landing reads THAT value, not the prior occupant: kill the carry with the
             # write AFTER folding in the read. A def cell is resident even if its value is never read (it occupies the
-            # register that cycle). Crucially this oracle does NOT share residence_rows' rule, so it is an independent
+            # register that cycle). Crucially this oracle does NOT share _residence_rows' rule, so it is an independent
             # check -- the buggy `<=` and fire-step-install variants over-tint against it.
             for step_pc, reads, writes, breads, bwrites in reversed(steps):
                 for reg in reads | live | writes:
@@ -969,41 +911,37 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
             build_lir(_run(NewtonReciprocal().__call__), "recip_newton"),
             [(0.5,), (1.5,), (2.5,)],
         ),
+        ("nested_exit", build_lir(_run(nested_exit), "nested_exit"), list(EXIT_ARM_VECTORS)),
+        ("loop_exit", build_lir(_run(halve_to_unit), "loop_exit"), [(0.5,), (3.0,), (9.0,)]),
     ]
     for name, lir, vectors in cases:
-        last = lir.initiation_interval
+        last = lir.last_pc
         # No upper clip beyond the grid; deliberately NO lower clip, so a spurious pre-landing row (e.g. PC 0, the bug
         # the strict-`<` upward rule fixes) would surface as a mismatch rather than being silently discarded.
         model_wide, model_bool = model_residence(lir, vectors)
-        for bank_tint, model_bank in ((lir.reg_liveness, model_wide), (lir.bool_liveness, model_bool)):
-            tint = {reg.index: {pc for pc in rows if pc <= last} for reg, rows in bank_tint.items()}
+        for bank, model_bank in ((RegRef, model_wide), (BoolRegRef, model_bool)):
+            tint = {
+                reg.index: {pc for pc in rows if pc <= last}
+                for reg, rows in lir.liveness.items()
+                if isinstance(reg, bank)
+            }
             tint = {index: rows for index, rows in tint.items() if rows}
             model = {index: {pc for pc in rows if pc <= last} for index, rows in model_bank.items()}
             model = {index: rows for index, rows in model.items() if rows}
             assert tint == model, f"{name}: residence tint {tint} != model per-path residence {model}"
         # Convention-independent invariant (catches the same-PC def+use over-tint in either bank): no register holds a
         # live value before the program's first executing step.
-        combined_liveness: dict[RegRef | BoolRegRef, set[int]] = {}
-        for reg, rows in lir.reg_liveness.items():
-            combined_liveness[reg] = rows
-        for breg, brows in lir.bool_liveness.items():
-            combined_liveness[breg] = brows
-        for any_reg, any_rows in combined_liveness.items():
+        for any_reg, any_rows in lir.liveness.items():
             assert min(any_rows) >= 1, f"{name}: {any_reg} tinted resident at PC {min(any_rows)} < 1"
 
 
 def test_state_slot_residence_matches_the_model_under_carry() -> None:
-    # Regression (review): the READ-FIRST boundary-install path -- residence_rows' read_first_defs and _cfg_residence
-    # `upward` refinement -- governs only persistent state slots, which the stateless oracle above never builds. A
-    # boundary state install reads-then-writes at last_pc, so a read there (an output tap of the live-in, or an in-place
-    # install's own source) reads the PRIOR value; the prior strict-`<` rule mis-attributed it to the boundary def and
-    # truncated the carried live-in, tinting a LIVE slot register DEAD mid-frame. Tie reg_liveness/bool_liveness for the
-    # slot registers to a STEADY-STATE model oracle: drive many back-to-back transactions, compute backward
-    # write-then-read liveness over the concatenated executed trace (so a slot live-out carries into the next
-    # transaction's reads and a mid-frame gap surfaces), and union residence by PC over the middle transactions. Covers
-    # a single- and multi-block WIDE boundary slot and a single- and multi-block BOOLEAN boundary slot (the multi-block
-    # cases exercise the `upward` live-in marking of a carried slot). Crash-before: with read-first reverted
-    # the carried slot live-in tints DEAD between cycle 1 and its boundary read.
+    # Regression (review): slot registers carry values across transactions, which the stateless oracle above never
+    # sees. A boundary install writes on the accepted-output edge after every read on the exit PC; a slot's old value
+    # is live only while something reads it; a slot committing early carries to the exit only while the next
+    # transaction reads it. Ties the liveness of every slot register to a STEADY-STATE model oracle:
+    # back-to-back transactions, backward write-then-read liveness over the concatenated trace, residence unioned by
+    # PC over the middle transactions.
     from holoso._lir._ir import Branch, WideOperand
     from holoso._backend.numerical import NumericalSimulator
 
@@ -1040,6 +978,70 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
                 self._f = x < -1.0
             return out, x + 1.0
 
+    class NeverReadChain:  # the chained copy's own old value is never read
+        def __init__(self) -> None:
+            self._a = 0.0
+            self._b = 0.0
+
+        def __call__(self, x: float) -> float:
+            self._a = self._b
+            self._b = x + 1.0
+            return self._a * 2.0 + x
+
+    class WriteOnly:  # in-place slots nothing ever reads, in both banks
+        def __init__(self) -> None:
+            self._p = 0.0
+            self._f = False
+
+        def __call__(self, x: float) -> float:
+            self._p = x * 2.0 + 1.0
+            self._f = x > 1.0
+            return x
+
+    class WriteOnlyConditional:  # a never-read slot updated on one arm only (the division keeps the branch real)
+        def __init__(self) -> None:
+            self._s = 0.0
+
+        def __call__(self, x: float, y: float) -> float:
+            if x > 0.0:
+                self._s = x / y
+            return x + y
+
+    class WriteOnlyEarly:  # a never-read slot latching an input ahead of the boundary
+        def __init__(self) -> None:
+            self._e = 0.0
+
+        def __call__(self, x: float) -> float:
+            self._e = x
+            return x * 3.0 + 1.0
+
+    class Dormant:  # a slot that never changes and is never read
+        def __init__(self) -> None:
+            self._p = 1.0
+
+        def __call__(self, x: float) -> float:
+            self._p = self._p
+            return x + 1.0
+
+    class BoolLatch:  # a one-cycle transaction: the boundary install shares the live-in's landing PC
+        def __init__(self) -> None:
+            self._f = False
+
+        def __call__(self, b: bool) -> bool:
+            prev = self._f
+            self._f = b
+            return prev
+
+    class Swap:  # a one-cycle transaction where each slot register is read on the boundary PC by the other's install
+        def __init__(self) -> None:
+            self._a = 0.0
+            self._b = 1.0
+
+        def __call__(self, x: float) -> float:
+            out = self._a
+            self._a, self._b = self._b, self._a
+            return out
+
     class BoolToggle:  # single-block boolean slot installed in place (_b <= ~_b), also read by the select
         def __init__(self) -> None:
             self._b = False
@@ -1064,7 +1066,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             self.branch: tuple[int, int] | None = None
 
         def tick(self, in_valid: bool, out_ready: bool) -> None:
-            term = self._terminators.get(self.pc) if self.pc != self._lir.last_pc else None
+            term = self._terminators.get(self.pc)
             self.branch = (self.pc, term.cond.index) if isinstance(term, Branch) else None
             super().tick(in_valid, out_ready)
 
@@ -1115,7 +1117,6 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
         lir: Lir, vectors: list[tuple[float, ...]]
     ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
         transactions = 16
-        last_pc = lir.last_pc
         fin = [load.dst.index for load in lir.wide_inputs]
         bin_ = [load.dst.index for load in lir.bool_inputs]
         sim = _Trace(lir)
@@ -1141,15 +1142,18 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
                 run(False, False)
                 guard += 1
             sim.events = []
-            _ = sim.output_values  # the output taps read their registers at the boundary PC (write-then-read with them)
+            _ = sim.output_values  # the output taps read their registers at the exit PC (write-then-read with them)
             events.extend(sim.events)
+            exit_pc, exit_terminator = sim.pc, sim._terminators[sim.pc]
+            if isinstance(exit_terminator, Branch):  # out_valid itself reads a conditional exit's condition
+                events.append((exit_pc, "r", "b", exit_terminator.cond.index))
             steps = substeps(events, False)  # everything up to the accept edge is write-then-read
             sim.events = []
             sim.tick(False, True)  # accept: the boundary state install fires, then the PC advances and _apply runs
-            # The boundary install is a READ-FIRST parallel bundle at last_pc (read every source, then write every
+            # The boundary install is a READ-FIRST parallel bundle at the exit (read every source, then write every
             # destination), so it is split out and tagged; the trailing _apply is ordinary write-then-read.
-            steps += substeps([e for e in sim.events if e[0] == last_pc], True)
-            steps += substeps([e for e in sim.events if e[0] != last_pc], False)
+            steps += substeps([e for e in sim.events if e[0] == exit_pc], True)
+            steps += substeps([e for e in sim.events if e[0] != exit_pc], False)
             per_txn.append(steps)
 
         flat = [step for steps in per_txn for step in steps]
@@ -1188,6 +1192,17 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             [(1.0, 2.0), (-1.0, 2.0), (1.5, 3.0), (-2.0, 4.0)],
         ),
         ("BoolHold", build_lir(_run(BoolHold().__call__), "BoolHold"), [(1.0,), (-2.0,), (-0.5,), (2.0,)]),
+        ("BoolLatch", build_lir(_run(BoolLatch().__call__), "BoolLatch"), [(True,), (False,), (True,), (True,)]),
+        ("Swap", build_lir(_run(Swap().__call__), "Swap"), [(0.5,), (1.5,)]),
+        ("NeverReadChain", build_lir(_run(NeverReadChain().__call__), "NeverReadChain"), [(0.5,), (1.5,), (2.5,)]),
+        ("WriteOnly", build_lir(_run(WriteOnly().__call__), "WriteOnly"), [(0.5,), (1.5,), (2.5,)]),
+        (
+            "WriteOnlyConditional",
+            build_lir(_run(WriteOnlyConditional().__call__), "WriteOnlyConditional"),
+            [(1.0, 2.0), (-1.0, 2.0), (1.5, 4.0), (-2.0, 1.0)],
+        ),
+        ("WriteOnlyEarly", build_lir(_run(WriteOnlyEarly().__call__), "WriteOnlyEarly"), [(0.5,), (1.5,)]),
+        ("Dormant", build_lir(_run(Dormant().__call__), "Dormant"), [(0.5,), (1.5,)]),
         (
             "BoolToggle",
             build_lir(_run(BoolToggle().__call__), "BoolToggle"),
@@ -1197,26 +1212,22 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
     ]
     compared = 0
     for name, lir, vectors in cases:
-        last = lir.initiation_interval
+        last = lir.last_pc
         model_wide, model_bool = model_slot_residence(lir, vectors)
-        # Restrict the comparison to the slot registers the read-first path governs (scratch registers on a not-taken
-        # branch arm would be tinted by the static all-paths tint but absent from a single steady run -- path coverage,
-        # not a defect; a carried slot register is live on every path, so it must match exactly).
-        for slot in [*lir.wide_state_slots]:
-            if slot.needs_copy:
-                tint = {pc for pc in lir.reg_liveness[slot.reg] if pc <= last}
-                model = {pc for pc in model_wide.get(slot.reg.index, set()) if 1 <= pc <= last}
-                assert tint == model, f"{name}: wide slot {slot.reg} tint {sorted(tint)} != model {sorted(model)}"
-                compared += 1
-        for bslot in [*lir.bool_state_slots]:
-            if bslot.needs_copy:
-                tint = {pc for pc in lir.bool_liveness[bslot.reg] if pc <= last}
-                model = {pc for pc in model_bool.get(bslot.reg.index, set()) if 1 <= pc <= last}
-                assert tint == model, f"{name}: bool slot {bslot.reg} tint {sorted(tint)} != model {sorted(model)}"
-                compared += 1
-    # Guard against the kernels silently losing their non-coalesced slots (e.g. a future coalescing change) -- without
-    # this the loop above would vacuously pass and re-open the read-first coverage gap this test exists to close.
-    assert compared >= 5, f"expected every kernel to contribute a non-coalesced slot, compared only {compared}"
+        # Restrict the comparison to the slot registers (scratch registers on a not-taken branch arm would be tinted by
+        # the static all-paths tint but absent from a single steady run -- path coverage, not a defect). The vectors
+        # take every arm, so a slot's carry into the next transaction is exercised on every path.
+        for slot in lir.wide_state_slots:
+            tint = {pc for pc in lir.liveness.get(slot.reg, set()) if pc <= last}
+            model = {pc for pc in model_wide.get(slot.reg.index, set()) if 1 <= pc <= last}
+            assert tint == model, f"{name}: wide slot {slot.name} tint {sorted(tint)} != model {sorted(model)}"
+            compared += 1
+        for bslot in lir.bool_state_slots:
+            tint = {pc for pc in lir.liveness.get(bslot.reg, set()) if pc <= last}
+            model = {pc for pc in model_bool.get(bslot.reg.index, set()) if 1 <= pc <= last}
+            assert tint == model, f"{name}: bool slot {bslot.name} tint {sorted(tint)} != model {sorted(model)}"
+            compared += 1
+    assert compared >= 15, f"expected every kernel to contribute its slots, compared only {compared}"
 
 
 def test_write_landing_recursion_handles_multi_hop_spill() -> None:
@@ -1225,14 +1236,14 @@ def test_write_landing_recursion_handles_multi_hop_spill() -> None:
     # landing). Frontends do not emit that shape -- a single hop lands at most fetch_lag cycles into a successor,
     # below the offset of any successor carrying an op -- so the recursion is exercised here on a hand-built layout,
     # pinning that it re-keys per terminator exactly as write_landing_pcs documents and terminates.
-    from holoso._lir._ir import LirBlock, Jump, Branch, Ret, BoolRegRef, _trace_landing
+    from holoso._lir._ir import LirBlock, Jump, Branch, BoolRegRef, _trace_landing
 
-    b0 = LirBlock(0, [], [], [], [], Branch(BoolRegRef(0), 1, 2), 0, 3)
-    b1 = LirBlock(1, [], [], [], [], Jump(3), 0, 1)  # inherited landing 3 > offset 1 -> re-spills into b3
-    b2 = LirBlock(2, [], [], [], [], Jump(3), 0, 5)  # inherited landing 3 <= offset 5 -> absorbs in-block
-    b3 = LirBlock(3, [], [], [], [], Ret(), 0, 4)
+    b0 = LirBlock(0, [], [], [], Branch(BoolRegRef(0), 1, 2), 0, 3)
+    b1 = LirBlock(1, [], [], [], Jump(3), 0, 1)  # inherited landing 3 > offset 1 -> re-spills into b3
+    b2 = LirBlock(2, [], [], [], Jump(3), 0, 5)  # inherited landing 3 <= offset 5 -> absorbs in-block
+    b3 = LirBlock(3, [], [], [], Jump(Exit()), 0, 4)
     by_index = {block.index: block for block in (b0, b1, b2, b3)}
-    base = [0, 10, 20, 30]
+    base = {0: 0, 1: 10, 2: 20, 3: 30}
     # landing 7 in b0 spills (7 > 3) at block-local 3 into both arms; b1 re-spills 3 -> local 1 in b3 (base 30 + 1),
     # b2 absorbs at base 20 + 3; a landing within b0's offset lands once, in-block.
     assert sorted(_trace_landing(by_index, base, b0, 7)) == [23, 31]
@@ -1312,7 +1323,7 @@ def test_fmul_ilog2_non_concurrent_scalings_share_one_instance() -> None:
     sched = _schedule(mir)
     assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]
     assert sched.inst_of[il[0]] == sched.inst_of[il[1]]
-    assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
+    assert len({i for i in sched.inst_of.values() if isinstance(i.operator, FMulILog2Operator)}) == 1
 
 
 def test_fmul_ilog2_concurrent_scalings_serialize_by_default() -> None:
@@ -1326,7 +1337,7 @@ def test_fmul_ilog2_concurrent_scalings_serialize_by_default() -> None:
 
     one = _schedule(mir)  # default budget 1 -> serialize onto a single instance
     assert one.issue_cycle[il[0]] != one.issue_cycle[il[1]]
-    assert sum(1 for i in one.instances if isinstance(i.operator, FMulILog2Operator)) == 1
+    assert len({i for i in one.inst_of.values() if isinstance(i.operator, FMulILog2Operator)}) == 1
 
 
 def test_fmul_ilog2_different_exponents_share_one_instance() -> None:
@@ -1339,7 +1350,7 @@ def test_fmul_ilog2_different_exponents_share_one_instance() -> None:
     sched = _schedule(mir)
     assert sched.inst_of[il[0]] == sched.inst_of[il[1]]
     assert sched.issue_cycle[il[0]] != sched.issue_cycle[il[1]]
-    assert sum(1 for i in sched.instances if isinstance(i.operator, FMulILog2Operator)) == 1
+    assert len({i for i in sched.inst_of.values() if isinstance(i.operator, FMulILog2Operator)}) == 1
 
 
 def test_state_writeback_installs_early_and_is_first_class() -> None:
@@ -1354,35 +1365,33 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
 
     lir = build_lir(_run(LeakyDelay().__call__), "leaky_delay")
     (slot,) = lir.wide_state_slots
-    assert bool(lir.wide_state_slots or lir.bool_state_slots) and slot.needs_copy and isinstance(slot.tap, WideOperand)
-    assert isinstance(slot.tap.source, RegRef)
-    # The non-coalesced writeback is a first-class event in the liveness model: the slot register holds a live value
-    # from the cycle the new value LANDS (one PC after the copy fires and samples its source, `install_landing`;
-    # previously absent, which is why the report could not render it).
-    landing = install_landing(lir.state_copy_step(slot))
-    assert landing in lir.reg_liveness[slot.reg]
-    assert lir.state_copy_step(slot) == inline_fire_cycle(slot.install_cycle, lir.fetch_lag)
     # Nothing reads _p's register after the old live-in and its source is an ordinary register, so the copy installs
     # before the boundary -- freeing the source register for the rest of the initiation rather than pinning it there.
-    assert lir.state_copy_step(slot) < lir.initiation_interval
-    # The carried live-out must survive to the boundary even though nothing reads it again this frame, so the slot
-    # register stays live from its landing through the boundary -- an early install is not the value's death.
-    assert set(range(landing, lir.initiation_interval + 1)) <= lir.reg_liveness[slot.reg]
+    block, copy = early_install(lir, slot)
+    assert isinstance(copy.source.source, RegRef)
+    assert lir.block_base[block.index] + copy.fire_step(lir.fetch_lag) < lir.last_pc
+    # The writeback is a first-class event in the liveness model: the slot register holds a live value from the cycle
+    # the new value LANDS (one PC after the copy fires and samples its source, `install_landing`).
+    landing = lir.block_base[block.index] + copy.landing(lir.fetch_lag)
+    assert landing in lir.liveness[slot.reg]
+    # The next transaction reads the carried live-out, so the slot register stays live from its landing through the
+    # boundary -- an early install is not the value's death.
+    assert set(range(landing, lir.last_pc + 1)) <= lir.liveness[slot.reg]
     assert all(isinstance(w.tap, WideOperand) for w in lir.wide_outputs)
     # Pin the hardware-frame cycle formulas the report, model, and allocator all depend on (the latch-free wide read
     # and the read-first edge around fetch_lag); every consumer routes through the shared _ir helpers that own this
     # arithmetic. The literals here are a deliberate independent cross-check of those helpers, not a tautological
     # restatement of them.
-    op = lir.ops[0]
+    op = lir.blocks[0].ops[0]
     assert landing_cycle(op.commit_cycle, _FETCH_LAG) == op.commit_cycle + _FETCH_LAG + READ_FIRST_EDGE
     assert operand_read_cycle(op.inst.operator, op.issue_cycle, _FETCH_LAG) == op.issue_cycle + _FETCH_LAG
 
 
 def test_cfg_phi_merge_register_shows_residence() -> None:
     # A diamond merging two CONSTANT arms: constants are not register-backed, so neither coalesces -- the merged
-    # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Before
-    # phi-copy residence was added to reg_liveness, such a register had a use but no def and so collapsed to an empty
-    # (untinted) live set -- the CFG-report liveness gap.
+    # register is written ONLY by the per-arm phi copies and read at the boundary, never by an operator. Without
+    # phi-copy residence in the liveness, such a register would have a use but no def and collapse to an empty
+    # (untinted) live set.
     def f(x: float, d: float) -> tuple[float, float]:
         if x > 0.0:
             z = 1.0
@@ -1393,10 +1402,10 @@ def test_cfg_phi_merge_register_shows_residence() -> None:
         return z, w
 
     lir = build_lir(_run(f), "diamond")
-    assert any(block.wide_copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
+    assert any(block.copies for block in lir.blocks), "the merge must be resolved by phi-arm copies"
     out = lir.wide_outputs[0]
     assert isinstance(out.tap.source, RegRef)
-    assert lir.reg_liveness.get(out.tap.source), "the phi-merged output register must be tinted live in the report"
+    assert lir.liveness.get(out.tap.source), "the phi-merged output register must be tinted live in the report"
 
 
 def test_cfg_write_only_state_slot_is_reserved() -> None:
@@ -1421,8 +1430,8 @@ def test_cfg_write_only_state_slot_is_reserved() -> None:
     # premise that the reserved-but-empty slot register exists and is excluded from ordinary allocation.
     lir = build_lir(_run(WriteOnlyBranch().__call__), "write_only")
     (slot,) = lir.wide_state_slots
-    assert slot.name == "acc" and slot.needs_copy
-    assert slot.reg.index not in {write.dst.index for op in lir.ops for write in op.writes}
+    assert slot.name == "acc" and not isinstance(slot.install, InPlace)
+    assert slot.reg.index not in {write.dst.index for block in lir.blocks for op in block.ops for write in op.writes}
 
 
 def test_cfg_state_slot_coalesces_onto_its_register() -> None:
@@ -1440,8 +1449,7 @@ def test_cfg_state_slot_coalesces_onto_its_register() -> None:
     lir = build_lir(_run(Filt().__call__), "filt")
     assert any(block.inline_ops for block in lir.blocks)
     (slot,) = lir.wide_state_slots
-    assert not slot.needs_copy, "the slot live-out must coalesce onto the slot register (no install copy)"
-    assert slot.tap.source == slot.reg
+    assert isinstance(slot.install, InPlace), "the slot live-out must coalesce onto the slot register (no install copy)"
     model = build_model(lir)
     model.reset()
     first = float(model.run(2.0)[0])  # state <- 0*0.9 + 2 = 2; out = float(2>0)*2 = 2
@@ -1462,7 +1470,7 @@ def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
             a = a + 4.0
         return a
 
-    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches")
+    lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches", FROZEN_TUNING)
     comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.inst.operator, FCmpOperator))
     assert comparisons >= 3
     assert lir.bool_regfile.nreg < comparisons
@@ -1475,8 +1483,9 @@ def _coalescing_self_copies(lir: Lir) -> int:
     return sum(
         1
         for block in lir.blocks
-        for copy in block.wide_copies
-        if isinstance(copy.source.source, RegRef)
+        for copy in block.copies
+        if isinstance(copy, WideCopy)
+        and isinstance(copy.source.source, RegRef)
         and copy.source.source == copy.dst
         and copy.source.conditioner == FloatSignControl()
     )
@@ -1494,9 +1503,7 @@ def test_diamond_op_result_arms_coalesce() -> None:
         return z * x  # an operator use of the merged value, not only the boundary output
 
     lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "phicoal")
-    assert (
-        sum(len(b.wide_copies) for b in lir.blocks) == 0
-    ), "the diamond's op-result arms must coalesce away their copies"
+    assert sum(len(b.copies) for b in lir.blocks) == 0, "the diamond's op-result arms must coalesce away their copies"
     assert _coalescing_self_copies(lir) == 0
     model = build_model(lir)
     for a, b in ((2.0, 3.0), (-2.0, 3.0), (1.5, -4.0)):
@@ -1520,7 +1527,7 @@ def test_loop_carried_phi_coalesces_only_when_non_interfering() -> None:
 
     lir = build_lir(_run(f), "accum")
     register_source_copies = [
-        copy for block in lir.blocks for copy in block.wide_copies if isinstance(copy.source.source, RegRef)
+        copy for block in lir.blocks for copy in block.copies if isinstance(copy.source.source, RegRef)
     ]
     assert not register_source_copies, "the non-interfering back-edge arms must coalesce (no register-source copy)"
     assert _coalescing_self_copies(lir) == 0
@@ -1535,8 +1542,9 @@ def test_loop_carried_phi_coalesces_only_when_non_interfering() -> None:
         copy
         for block in recip.blocks
         if isinstance(block.terminator, Jump)
+        and isinstance(block.terminator.target, int)
         and recip.block_base[block.terminator.target] <= recip.block_base[block.index]
-        for copy in block.wide_copies
+        for copy in block.copies
         if isinstance(copy.source.source, RegRef)
     ]
     assert back_edge_op_copies, "the interfering loop-carried Newton update must keep its back-edge install copy"
@@ -1573,7 +1581,7 @@ def test_copy_slot_residence_unbroken_when_tapped_at_boundary() -> None:
 
     lir = build_lir(_run(Delay().__call__), "delay")
     (slot,) = lir.wide_state_slots
-    assert sorted(lir.reg_liveness[slot.reg]) == list(range(1, lir.initiation_interval + 1))
+    assert sorted(lir.liveness[slot.reg]) == list(range(1, lir.last_pc + 1))
 
 
 def test_state_early_copy_frees_source_register() -> None:
@@ -1585,22 +1593,30 @@ def test_state_early_copy_frees_source_register() -> None:
     lir = build_lir(_run(TrapezoidalLeakyStreamingIntegrator(k=2**-22).__call__), "trapz")
     (xprev,) = [s for s in lir.wide_state_slots if s.name == "_x_prev"]
     (in_x,) = [load for load in lir.wide_inputs if load.name == "x"]
-    assert xprev.needs_copy and in_x.dst == xprev.tap.source
-    makespan = max((op.commit_cycle for op in lir.ops), default=0)
-    assert xprev.install_cycle <= makespan  # installs before the boundary (present cycle == makespan + 1)
-    assert any(write.dst == in_x.dst for op in lir.ops for write in op.writes)
+    block, copy = early_install(lir, xprev)
+    assert in_x.dst == copy.source.source
+    makespan = max((op.commit_cycle for op in block.ops), default=0)
+    assert copy.issue_cycle <= makespan  # installs ahead of the boundary
+    assert any(write.dst == in_x.dst for op in block.ops for write in op.writes)
 
 
 def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
-    # +c and -c share a single nonnegative pool entry; the sign rides the (free) per-operand sign control.
-    def f(a: float) -> float:
-        return a * 1000.0 + a * (-1000.0)
+    # +c and -c share a single nonnegative pool entry; the sign rides the (free) per-operand sign control. Addends,
+    # because the optimizer peels a multiplier's sign into a negation over the product and leaves an addend's alone.
+    def f(a: float, b: float) -> tuple[float, float]:
+        return a + 1000.0, b + (-1000.0)
 
     lir = build_lir(_run(f), "f")
     assert [c for c in lir.wide_consts if c == FloatValue.from_float(FMT, 1000.0)] == [
         FloatValue.from_float(FMT, 1000.0)
     ]
-    operands = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
+    operands = [
+        opnd
+        for block in lir.blocks
+        for op in block.ops
+        for opnd in op.operands
+        if isinstance(opnd.source, WideConstRef)
+    ]
     assert len({opnd.source.index for opnd in operands}) == 1
     assert {opnd.conditioner for opnd in operands} == {FloatSignControl(), FloatSignControl(negate=True)}
 
@@ -1611,7 +1627,13 @@ def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
 
     lir = build_lir(_run(f), "f")
     assert all(isinstance(c, FloatValue) and not c.negative for c in lir.wide_consts)
-    (operand,) = [opnd for op in lir.ops for opnd in op.operands if isinstance(opnd.source, WideConstRef)]
+    (operand,) = [
+        opnd
+        for block in lir.blocks
+        for op in block.ops
+        for opnd in op.operands
+        if isinstance(opnd.source, WideConstRef)
+    ]
     assert lir.wide_consts[operand.source.index] == FloatValue.from_float(FMT, 1000.0)
     assert operand.conditioner == FloatSignControl(negate=True)
 
@@ -1647,8 +1669,11 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
         R_diag=[1e3, 1e-6],
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
-    lir = build_lir(_run(filt.update), "ekf1_stateful")
-    assert lir.regfile.nreg <= 40  # gap-reuse sheds ~6; a regression to the fully-reserved 45 trips this
+    lir = build_lir(_run(filt.update), "ekf1_stateful", FROZEN_TUNING)
+    # Gap reuse sheds the fully-reserved 45 down to the count the frozen tuning settles on, pinned here as a ceiling
+    # (the allocator trades registers for mux arms at the configured price, so the count is a property of the
+    # tuning).
+    assert lir.regfile.nreg <= 42
 
 
 type _Producer = tuple[str, int]
@@ -1693,9 +1718,9 @@ def _latest_producer_before(
 
 def test_register_sharing_is_hardware_disjoint() -> None:
     # ekf1_stateless time-multiplexes many values onto each register. Verify the hardware-frame interference invariant
-    # directly: within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the same
-    # liveness reg_liveness renders and the relaxed allocator shares against. Reconstructed via the test-only write-
-    # timeline resolver over the model's landing PCs, so the test tracks the allocator's actual sharing decisions.
+    # directly: within a register, each value's last read precedes the next value's landing, R(a) < W(b) -- the
+    # liveness the allocator shares against. Reconstructed via the test-only write-timeline resolver over the model's
+    # landing PCs, so the test tracks the allocator's actual sharing decisions.
     import ekf1_stateless
 
     lir = build_lir(_run(ekf1_stateless.update_x_P), "update_x_P")
@@ -1708,13 +1733,24 @@ def test_register_sharing_is_hardware_disjoint() -> None:
             key = (source.index, *producer)
             last_read[key] = max(last_read.get(key, read_cycle), read_cycle)
 
-    for op in lir.ops:
+    (block,) = lir.blocks
+    for op in block.ops:
         for operand in op.operands:
             note(operand.source, operand_read_cycle(op.inst.operator, op.issue_cycle, lir.fetch_lag))
-    for wire in lir.wide_outputs:
-        note(wire.tap.source, lir.initiation_interval)
-    for slot in lir.wide_state_slots:
-        note(slot.tap.source, lir.state_copy_step(slot))
+    for exit_pc in lir.exit_pcs:
+        for wire in lir.wide_outputs:
+            note(wire.tap.source, exit_pc)
+    for slot in lir.wide_state_slots:  # the live-out is read where the slot takes it: the fire step, or the boundary
+        match slot.install:
+            case InPlace():
+                for exit_pc in lir.exit_pcs:
+                    note(slot.reg, exit_pc)
+            case Early():
+                early_block, copy = early_install(lir, slot)
+                note(copy.source.source, lir.block_base[early_block.index] + copy.fire_step(lir.fetch_lag))
+            case Boundary():
+                for exit_pc in lir.exit_pcs:
+                    note(slot.live_out.source, exit_pc)
 
     shared = 0
     for reg, events in timeline.items():
@@ -1727,81 +1763,28 @@ def test_register_sharing_is_hardware_disjoint() -> None:
     assert shared > 0  # the kernel does pack multiple values per register, so the invariant is actually exercised
 
 
-def _read_mux_fan_in(lir: Lir) -> int:
-    return sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
-
-
 def test_is_commutative_marks_only_the_symmetric_operators() -> None:
-    # The port-assignment pass below swaps a commutative operator's operands, which is only sound if the operator is
-    # exactly symmetric. This pins the metadata; the bit-exact symmetry itself is pinned publicly by
+    # The allocator's orientation move below swaps a commutative operator's operands, which is only sound if the
+    # operator is exactly symmetric. This pins the metadata; the bit-exact symmetry itself is pinned publicly by
     # test_arithmetic_behavior.py's commuted-edge sweeps.
     assert FAddOperator(FMT, FAddOptions()).is_commutative and FMulOperator(FMT, FMulOptions(), 0).is_commutative
     assert not FDivOperator(FMT, FDivOptions()).is_commutative
 
 
-def test_commutative_port_assignment_never_increases_read_mux_fan_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import holoso._lir._build as build_module
+def test_orientation_reclaims_multiplier_reach() -> None:
+    # `a * b + c * a`: read in source order the multiplier's first port takes {a, c} and its second {b, a}, two
+    # arms; with the second product read the other way round the first port takes a alone and the second {b, c},
+    # one arm. The allocator owns the orientation, so the build lands at one.
+    def f(a: float, b: float, c: float) -> float:
+        return a * b + c * a
 
-    import ekf1_stateless
-
-    cfg = mir_options(
-        Options(
-            OperatorOptions(
-                fadd=FAddOptions(stage_decode=1),
-                fmul=FMulOptions(stage_input=1),
-                fdiv=FDivOptions(),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
-            ),
-            ffmt=FMT,
-        )
+    lir = build_lir(_run(f), "oriented_products", FROZEN_TUNING)
+    products = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FMulOperator)]
+    assert len(products) == 2, "the premise needs both products to survive HIR as multiplies"
+    books = read_sources_per_port(lir)
+    assert (
+        sum(max(0, len(book) - 1) for (inst, _), book in books.items() if isinstance(inst.operator, FMulOperator)) == 1
     )
-    monkeypatch.setattr(build_module, "assign_commutative_ports", lambda *args, **kwargs: {})
-    baseline = build_lir(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
-    monkeypatch.undo()
-    optimized = build_lir(_run(ekf1_stateless.update_x_P, cfg), "ekf1_stateless")
-
-    assert _read_mux_fan_in(optimized) <= _read_mux_fan_in(baseline)
-    assert _read_mux_fan_in(optimized) < _read_mux_fan_in(baseline)  # ekf1_stateless has commutative reach to reclaim
-
-
-def test_reach_floor_seed_skips_annealing(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The mux-fan-in objective bottoms out at 0 (every read port reaches one register, every register one producer). A
-    # greedy seed already there is globally optimal, so refinement must short-circuit rather than burn the budget.
-    import holoso._lir._regalloc as regalloc
-
-    calls: list[int] = []
-    real = regalloc.dual_annealing  # type: ignore[attr-defined]  # scipy's dual_annealing, not reexported by _regalloc
-
-    def tracking_dual_annealing(*args: object, **kwargs: object) -> object:
-        calls.append(1)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(regalloc, "dual_annealing", tracking_dual_annealing)
-
-    def floor_kernel(a: float, b: float) -> float:
-        return a + b  # no register sharing -> greedy seed is at the reach floor
-
-    def sharing_kernel(a: float, b: float, c: float) -> float:
-        return a * b + c  # the product and the sum reuse registers, lifting the objective above the floor
-
-    build_lir(_run(floor_kernel), "floor")
-    assert calls == []
-    build_lir(_run(sharing_kernel), "sharing")
-    assert calls
-
-
-def test_zero_regalloc_effort_bypasses_annealing(monkeypatch: pytest.MonkeyPatch) -> None:
-    import holoso._lir._regalloc as regalloc
-
-    monkeypatch.setattr(regalloc, "dual_annealing", lambda *args, **kwargs: pytest.fail("annealing was not bypassed"))
-
-    def sharing_kernel(a: float, b: float, c: float) -> float:
-        return a * b + c
-
-    holoso.synthesize(sharing_kernel, replace(default_options(FMT), regalloc_effort=0), name="sharing")
 
 
 def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
@@ -1814,7 +1797,7 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
         return float(x > 0.0) * x
 
     lir = build_lir(_run(f), "cast_mul")
-    interval = lir.initiation_interval
+    interval = lir.last_pc
     casts = [(b, op) for b in lir.blocks for op in b.inline_ops if isinstance(op.write.dst, RegRef)]
     assert casts, "expected a bool->float cast result in the wide bank"
     for block, op in casts:
@@ -1824,17 +1807,19 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
         assert 1 <= landing <= interval  # within the rendered schedule grid, not one row past the boundary
         # The cast write lands at its combinational landing: write_landing_pcs places every result via landing_cycle.
         # Landing it one cycle later would return base + commit + 4 here -- this is the discriminating guard, since
-        # reg_liveness alone is a union over the register's reuse and stays satisfied even with the late landing.
+        # the liveness alone is a union over the register's reuse and stays satisfied even with the late landing.
         assert lir.write_landing_pcs(block, op) == [landing]
         assert isinstance(op.write.dst, RegRef)
-        assert landing in lir.reg_liveness[op.write.dst]
+        assert landing in lir.liveness[op.write.dst]
     cast_regs = {op.write.dst for _, op in casts}
-    for fop in lir.ops:  # the consuming multiply must read the cast result within its residence (no late-def gap)
-        for operand in fop.operands:
+    # The consuming multiply must read the cast result within its residence (no late-def gap).
+    for fblock in lir.blocks:
+        for fop, operand in ((fop, operand) for fop in fblock.ops for operand in fop.operands):
             if operand.source in cast_regs:
-                read = operand_read_cycle(fop.inst.operator, fop.issue_cycle, lir.fetch_lag)
+                issue = lir.block_base[fblock.index] + fop.issue_cycle
+                read = operand_read_cycle(fop.inst.operator, issue, lir.fetch_lag)
                 assert isinstance(operand.source, RegRef)
-                assert read in lir.reg_liveness[operand.source]
+                assert read in lir.liveness[operand.source]
 
 
 def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
@@ -1973,7 +1958,7 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
     firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
     assert len(firings) == 2
     sources = [tuple(operand.source for operand in op.operands) for op in firings]
-    assert sources[0] == sources[1], "the MILP must orient both firings to read the same registers per port"
+    assert sources[0] == sources[1], "the allocator must orient both firings to read the same registers per port"
     gt_port, lt_port = (FCmpOperator.tap_of(rel)[0] for rel in (Relation.GT, Relation.LT))
     ports = sorted(write.port for op in firings for write in op.writes)
     assert ports == sorted((gt_port, lt_port)), "exactly one firing's lt tap must move to gt under the swap"
@@ -1989,7 +1974,7 @@ def test_chained_slot_live_in_blocks_early_install(config: OperatorCase) -> None
     # transaction). The tapped slot must now install at the boundary, and the model must match plain Python.
     lir = build_lir(_run(ChainedSlots().__call__, config.make_mir(FMT)), f"chained_slots_{config.label}")
     slots = {slot.name: slot for slot in lir.wide_state_slots}
-    assert lir.state_copy_step(slots["_b"]) == lir.initiation_interval, "the tapped slot must not install early"
+    assert isinstance(slots["_b"].install, Boundary), "the tapped slot must not install early"
     reference = ChainedSlots()
     model = build_model(lir)
     for x in (2.0, 3.0, 4.0):
@@ -2041,13 +2026,27 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
     select_read_pc = lir.block_base[block.index] + operand_read_cycle(
         select.operator, select.issue_cycle, lir.fetch_lag
     )
-    assert lir.state_copy_step(slot) >= select_read_pc, "the install must not precede the select's operand read"
+    assert isinstance(slot.install, Early), "the premise needs an early install"
+    early_block, copy = early_install(lir, slot)
+    fire = lir.block_base[early_block.index] + copy.fire_step(lir.fetch_lag)
+    assert fire >= select_read_pc, "the install must not precede the select's read"
     reference = SelectHold()
     model = build_model(lir)
     for x, c in [(2.0, 1.0), (3.0, -1.0), (4.0, 1.0), (5.0, -1.0)]:
         got = float(model.run(x, c)[0])
         want = reference.step(x, c)
         assert abs(got - want) <= 1e-2 * max(1.0, abs(want)), f"x={x} c={c}: {got} vs {want}"
+
+
+def test_an_input_latched_by_a_working_ret_block_installs_on_its_first_cycle() -> None:
+    lir = build_lir(_run(InputLatchSelect().__call__), "input_latch_select")
+    (slot,) = lir.wide_state_slots
+    assert early_install(lir, slot)[1].issue_cycle == 0
+    assert lir.regfile.nreg == 2, "the input's register must be free for the select's result"
+    reference = InputLatchSelect()
+    model = build_model(lir)
+    for x, b in [(2.5, True), (-1.0, False), (4.0, True), (0.5, True), (3.0, False), (6.0, True)]:
+        assert float(model.run(x, b)[0]) == reference(x, b)
 
 
 def test_not_folds_into_every_sink_position() -> None:
@@ -2124,7 +2123,12 @@ def test_inverted_bool_phi_arm_installs_with_opposite_polarities(config: Operato
         return float(flag), d
 
     lir = build_lir(_run(f, config.make_mir(FMT)), f"inverted_arm_{config.label}")
-    sources = [(write.source.source, write.source.inversion) for block in lir.blocks for write in block.bool_writes]
+    sources = [
+        (write.source.source, write.source.inversion)
+        for block in lir.blocks
+        for write in block.copies
+        if isinstance(write, BoolCopy)
+    ]
     flag_sources = [(src, inv) for src, inv in sources if isinstance(src, BoolRegRef)]
     assert len(flag_sources) == 2, flag_sources
     (src_a, inv_a), (src_b, inv_b) = flag_sources
@@ -2142,7 +2146,7 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
             x = (x - 1.0) if x > 1.0 else (x + 1.0)
         return x
 
-    lir = build_lir(_run(f), "breg_reuse")
+    lir = build_lir(_run(f), "breg_reuse", FROZEN_TUNING)
     conditions = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     assert conditions == 6, "the unrolled chain carries six comparisons"
     assert lir.bool_regfile.nreg <= 2, f"disjoint condition lifetimes must share registers, got {lir.bool_regfile.nreg}"
@@ -2163,7 +2167,7 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     def f(a: float, b: float, c: float, d: float, e: float, g: float) -> float:
         return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
 
-    lir = build_lir(_run(f), "bool_chain")
+    lir = build_lir(_run(f), "bool_chain", FROZEN_TUNING)
     comparisons = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator))
     ands = sum(1 for block in lir.blocks for op in block.inline_ops if op.operator.mnemonic == "band")
     assert comparisons == 5 and ands >= 4, (comparisons, ands)
@@ -2172,20 +2176,24 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
     # test_cross_bank_chain_edges_match_reference.
 
 
-def test_drain_only_ret_with_a_resident_output_needs_no_boundary_drain() -> None:
-    # A Ret reached by a branch that writes nothing itself, whose output was produced in a PREDECESSOR (resident,
-    # already landed with every pipeline edge -- fetch lag and read-first -- paid), needs NO boundary drain at all:
-    # out_valid asserts at the Ret block's own base PC. A drained block's boundary covers only values that LAND in its
-    # frame; a pure-drain block has none, so its terminator offset is 0 (not the phantom `boundary_step(0)` of a
-    # value that never commits there). This is the structural premise keeping two twins non-vacuous: the value grid at
-    # test_overlap_behavior.py test_octave_index_resident_output_drain_only_ret_matches_reference and the exact
-    # reclaimed latency in test_latency_freeze.py's frozen octave_index row.
+def test_a_branch_ends_the_transaction_on_either_arm_through_blocks_without_pcs() -> None:
+    shapes = {
+        name: (mir := _run(kernel), build_lir(mir, name))
+        for name, kernel in [("else", else_exit), ("then", then_exit), ("nested", nested_exit)]
+    }
+    for name, (mir, lir) in shapes.items():
+        assert mir.ret_block not in lir.block_base, f"{name}: the Ret block does no work and takes no PC"
+        assert len(lir.exit_pcs) >= 2, f"{name}: the transaction ends on more than one PC"
+    entry = {name: lir.blocks[0] for name, (_, lir) in shapes.items()}
+    assert isinstance(entry["else"].terminator, Branch) and entry["else"].terminator.if_false == Exit()
+    assert isinstance(entry["then"].terminator, Branch) and entry["then"].terminator.if_true == Exit()
+    nested_mir, nested_lir = shapes["nested"]
+    assert len(nested_mir.blocks) - len(nested_lir.blocks) >= 2, "a chain of blocks without work is resolved through"
+    # The premise of test_overlap_behavior.py test_octave_index_resident_output_drain_only_ret_matches_reference.
     from octave_index import octave_index  # noqa: PLC0415  (example kernels live under examples/)
 
-    lir = build_lir(_run(octave_index), "octave_drain_only_ret")
-    ret = next(b for b in lir.blocks if isinstance(b.terminator, Ret))
-    assert not (ret.ops or ret.inline_ops or ret.wide_copies or ret.bool_writes), "the exit block must be pure drain"
-    assert ret.term_offset == 0, "a resident-output drain-only Ret needs no boundary drain"
+    octave = _run(octave_index)
+    assert octave.ret_block not in build_lir(octave, "octave_index").block_base
 
 
 class _AliasedFloatState:
@@ -2207,22 +2215,20 @@ def test_aliased_state_slots_merge_onto_one_register() -> None:
     # float path (a public attribute and its write-only alias) is exercised too.
     from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
 
-    pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_merge")
+    pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_merge", FROZEN_TUNING)
     assert pfd.bool_regfile.nreg == 5
     assert pfd.regfile.nreg == 0  # purely boolean: the wide bank is unused
     assert len(pfd.bool_state_slots) == 2  # the four attributes collapse onto two registers
-    assert all(not slot.needs_copy for slot in pfd.bool_state_slots)
+    assert all(isinstance(slot.install, InPlace) for slot in pfd.bool_state_slots)
 
     flt = build_lir(_run(_AliasedFloatState().step), "aliased_float")
     assert len(flt.wide_state_slots) == 1  # pub and _alias share one register
-    assert all(not slot.needs_copy for slot in flt.wide_state_slots)
+    assert all(isinstance(slot.install, InPlace) for slot in flt.wide_state_slots)
 
 
-# CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing -- the first operators with
-# initiation_interval > 1, so the scheduler's busy_until spacing is exercised here for the first time.
-
-# default_mir already carries fexp2/flog2/fsqrt/fsincos/fatan2; the lone-hypot decomposition also needs fsort.
-_CORDIC_OPS = replace(default_mir(FMT), operator=replace(default_mir(FMT).operator, fsort=FSortOptions()))
+# CORDIC operators (fsincos/fatan2): multi-output coalescence and II>1 instance sharing, which exercise the
+# scheduler's busy_until spacing.
+_CORDIC_OPS = default_mir(FMT)
 
 
 def _instance_counts(lir: Lir) -> Counter[str]:
@@ -2230,7 +2236,37 @@ def _instance_counts(lir: Lir) -> Counter[str]:
 
 
 def _firings(lir: Lir, mnemonic: str) -> list[PooledScheduledOp]:
-    return [op for op in lir.ops if op.inst.operator.mnemonic == mnemonic]
+    return [op for block in lir.blocks for op in block.ops if op.inst.operator.mnemonic == mnemonic]
+
+
+def _multiplier_ops(instances: int) -> MirOptions:
+    return mir_options(
+        Options(
+            OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(instances=instances), fcmp=FCmpOptions()), ffmt=FMT
+        )
+    )
+
+
+def _four_products(a: float, b: float, c: float, d: float) -> tuple[float, float, float, float]:
+    return a * b, b * c, c * d, d * a
+
+
+def test_a_second_multiplier_shortens_an_independent_product_chain() -> None:
+    one = build_lir(_run(_four_products, _multiplier_ops(1)), "products_one")
+    two = build_lir(_run(_four_products, _multiplier_ops(2)), "products_two")
+    assert _instance_counts(one)["fmul"] == 1 and _instance_counts(two)["fmul"] == 2
+    assert len(_firings(two, "fmul")) == len(_firings(one, "fmul")) == 4
+    assert two.min_initiation_interval < one.min_initiation_interval
+
+
+def test_a_dependent_product_chain_leaves_the_second_multiplier_uninstantiated() -> None:
+    # The budget is a cap: nothing here can co-issue, so the second instance is configured and never built.
+    def chain(a: float, b: float, c: float, d: float) -> float:
+        return a * b * c * d
+
+    lir = build_lir(_run(chain, _multiplier_ops(2)), "products_chain")
+    assert _instance_counts(lir)["fmul"] == 1
+    assert len(_firings(lir, "fmul")) == 3
 
 
 def test_sincos_coalesces_sin_and_cos_into_one_firing() -> None:
@@ -2280,11 +2316,50 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "lone_hypot")
     counts = _instance_counts(lir)
-    assert "fatan2" not in counts
-    assert counts.get("fsqrt") == 1 and counts.get("fsort") == 1  # the scaled sum of squares under the native root
-    # One sorter firing hands over both magnitudes, and only the smaller one is divided down: the larger one's own
-    # quotient is exactly 1 and is written into the sum instead.
-    assert len(_firings(lir, "fsort")) == 1 and len(_firings(lir, "fdiv")) == 1
+    assert "fatan2" not in counts  # no CORDIC is spun up for a hypotenuse that has no angle beside it
+    # The exponent scaling needs no sorter and no divider, and the root sees a sum of two squares taken at a scale
+    # that cannot overflow.
+    assert counts.get("fsqrt") == 1 and counts.get("filog2") == 1
+    assert "fsort" not in counts and "fdiv" not in counts
+    # Both legs are extracted on the one instance and all three scalings ride one scaler.
+    assert len(_firings(lir, "filog2")) == 2 and len(_firings(lir, "fmul_ilog2")) == 3
+
+
+def test_a_zero_leg_costs_a_magnitude_nothing() -> None:
+    # Otherwise a scaler, a multiply, an add and a compare/select survive for a leg that is identically zero,
+    # which `imu_fusion`'s coarse alignment writes literally.
+    def four(a: float, b: float, c: float) -> float:
+        return math.hypot(a, b, c, 0.0)
+
+    def three(a: float, b: float, c: float) -> float:
+        return math.hypot(a, b, c)
+
+    padded, bare = (build_lir(_run(k, _CORDIC_OPS), n) for k, n in ((four, "zero_leg"), (three, "no_zero_leg")))
+    assert _instance_counts(padded) == _instance_counts(bare)
+    for mnemonic in ("filog2", "fmul_ilog2", "fmul", "fadd", "icmp"):
+        assert len(_firings(padded, mnemonic)) == len(_firings(bare, mnemonic)), mnemonic
+
+
+def test_dropping_a_zero_leg_hands_the_pair_back_to_the_cordic() -> None:
+    # A three-legged magnitude cannot ride the CORDIC's magnitude port, but once the constant leg goes the
+    # survivors are a pair over the atan2's own operands.
+    def kernel(y: float, x: float) -> tuple[float, float]:
+        return math.hypot(y, x, 0.0), math.atan2(y, x)
+
+    lir = build_lir(_run(kernel, _CORDIC_OPS), "zero_leg_fuse")
+    assert len(_firings(lir, "fatan2")) == 1
+    counts = _instance_counts(lir)
+    assert "filog2" not in counts and "fsqrt" not in counts
+
+
+def test_a_two_legged_magnitude_still_fuses_with_an_adjacent_atan2() -> None:
+    # The n-ary operator must not cost the pair its CORDIC.
+    def kernel(y: float, x: float) -> tuple[float, float]:
+        return math.hypot(y, x), math.atan2(y, x)
+
+    lir = build_lir(_run(kernel, _CORDIC_OPS), "narity_pair_fuse")
+    assert len(_firings(lir, "fatan2")) == 1
+    assert "filog2" not in _instance_counts(lir)
 
 
 def test_independent_sincos_share_one_instance_spaced_by_ii() -> None:
@@ -2324,8 +2399,7 @@ def test_forced_install_regrowth_pins_and_stays_correct(
     build must still match Python and the MIR interpreter. White-box is warranted because a black-box witness does
     not exist; if one ever appears, it must replace this fake.
     """
-    from holoso._lir import _build
-    from holoso._lir._bankalloc import actual_install_blocks as real_installs
+    from holoso._lir._bankalloc import CoalescedLayout
 
     def kernel(x: float, n: float) -> float:
         a = 0.0
@@ -2336,16 +2410,17 @@ def test_forced_install_regrowth_pins_and_stays_correct(
             i = i - 1.0
         return a * 2.0 + b
 
+    real_installs = CoalescedLayout.install_blocks
     calls = {"n": 0}
 
-    def fake_installs(*args: object) -> dict[int, bool]:
+    def fake_installs(layout: CoalescedLayout) -> dict[int, bool]:
         calls["n"] += 1
-        real = real_installs(*args)  # type: ignore[arg-type]
+        real = real_installs(layout)
         return {b: False for b in real} if calls["n"] == 1 else real
 
-    monkeypatch.setattr(_build, "actual_install_blocks", fake_installs)
+    monkeypatch.setattr(CoalescedLayout, "install_blocks", fake_installs)
     fmt = FloatFormat(6, 18)
-    with caplog.at_level("INFO", logger="holoso._lir._build"):
+    with caplog.at_level("INFO", logger="holoso._lir._bankalloc"):
         model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "forced_pin", fmt)
     assert any("pinning regrown block" in r.message for r in caplog.records), "the faked narrowing did not pin"
     for x in (1.0, -2.0):
@@ -2354,41 +2429,6 @@ def test_forced_install_regrowth_pins_and_stays_correct(
             model_out = model.run(*vector)
             assert float(model_out[0]) == kernel(x, n), f"model != python at x={x} n={n}"
             assert model_out == interpreter.run(*vector), f"interp != model at x={x} n={n}"
-
-
-def test_forced_state_copy_regrowth_latches_and_stays_correct(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The state-copy latch twin of the forced-pin test: a chained-copy kernel whose charge is faked away once."""
-    from holoso._lir import _build
-
-    class Delay2:
-        def __init__(self) -> None:
-            self.x0 = 0.0
-            self.x1 = 0.0
-
-        def __call__(self, x: float) -> float:
-            out = self.x1
-            self.x1 = self.x0
-            self.x0 = x
-            return out
-
-    real_state = _build._has_state_copy
-    calls = {"n": 0}
-
-    def fake_state(*args: object) -> bool:
-        calls["n"] += 1
-        return False if calls["n"] == 1 else real_state(*args)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(_build, "_has_state_copy", fake_state)
-    fmt = FloatFormat(8, 36)
-    with caplog.at_level("INFO", logger="holoso._lir._build"):
-        model, _interpreter = build_model_and_interpreter(Delay2().__call__, default_mir(fmt), "forced_latch", fmt)
-    assert any("latching the state-copy charge" in r.message for r in caplog.records), "the fake did not latch"
-    reference = Delay2()
-    for raw in (1.0, 2.0, 3.0, 4.0, 5.0):
-        x = fmt.decode(fmt.encode(raw))
-        assert float(model.run(x)[0]) == reference(x)
 
 
 def test_inflight_source_install_fires_exactly_at_the_spilled_landing() -> None:
@@ -2408,13 +2448,13 @@ def test_inflight_source_install_fires_exactly_at_the_spilled_landing() -> None:
         return y * b, x
 
     lir = build_lir(_run(passthrough, mir_options(staged_fadd_options(FMT)), FMT), "inflight_equality")
-    entry = lir.blocks[lir.entry]
+    entry = lir.blocks[0]
     producer = next(op for op in entry.ops if op.operator.mnemonic.startswith("fadd"))
     assert producer.latency >= 2, "the staged fadd must be deep enough for its word to set the entry envelope"
     assert entry.term_offset == producer.commit_cycle, "the entry envelope must be the producer's own write word"
     spilled_landing = successor_local_cycle(landing_cycle(producer.commit_cycle, lir.fetch_lag), entry.term_offset)
     assert spilled_landing == lir.fetch_lag, "the spill must land at the deepest legal step (successor-local 2)"
-    copy = next(c for b in lir.blocks for c in b.wide_copies if not c.settled_source and not (b.ops or b.inline_ops))
+    copy = next(c for b in lir.blocks for c in b.copies if not c.settled_source and not (b.ops or b.inline_ops))
     assert copy.issue_cycle == 0, "a spilled source must not push the install (its virtual commit is negative)"
     assert copy.fire_step(lir.fetch_lag) == spilled_landing, "the install must fire exactly at the spilled landing"
 

@@ -8,6 +8,7 @@ keeps a compact MIR population sentinel for the exact operator count that module
 """
 
 import dataclasses
+import math
 import warnings
 from collections.abc import Callable
 from typing import Any
@@ -217,12 +218,9 @@ def test_matmul_rejections() -> None:
     _refused(boolean, "must hold numbers, not booleans")
 
 
-def test_dot_product_left_fold_contracts_to_fma_chain() -> None:
-    # The documented reason for the left-fold dot expansion: with ffma configured, an n-element dot must lower to one
-    # fmul plus n-1 ffma (each running-sum add fuses the next single-use product). At n=4 any balanced tree must keep a
-    # real fadd (its final add sums two ffma results), so the pooled module set pins the chain publicly, and the
-    # residual text pins the left-fold association; the MIR population sentinel keeps the exact count that module
-    # pooling erases from the Verilog.
+def test_dot_product_left_fold_contracts_to_an_ffma_chain() -> None:
+    # An n-element dot lowers to one fmul plus n-1 ffma, which the MIR counts pin since pooling erases them from the
+    # Verilog; the residual pins the left fold the front end emits.
     def dot(v: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
@@ -687,6 +685,31 @@ def test_np_array_factory_converts_list_and_matches_numpy() -> None:
     assert np.allclose(_run(_sim(mat_minus_rows), m, a, b), np.asarray(mat_minus_rows(m, a, b)).flatten(), rtol=1e-12)
 
 
+def test_numpy_unary_functions_map_over_an_array() -> None:
+    # numpy applies a unary ufunc elementwise, so the kernel must too, in every rank and against numpy itself.
+    def folded(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.sqrt(np.abs(m)) - np.abs(m) / 2.0
+
+    def mixed(v: Float64[np.ndarray, "3"], s: float) -> Float64[np.ndarray, "3"]:
+        return np.sign(v) * np.sqrt(s)  # type: ignore[no-any-return]  # a lifted and a scalar call, one entry
+
+    _assert_python_matches_holoso(folded, np.array([[0.5, -1.0], [2.0, -0.25]]))
+    _assert_python_matches_holoso(mixed, np.array([-2.0, 0.0, 3.0]), 16.0)
+
+
+def test_scalar_only_unary_functions_still_refuse_an_array() -> None:
+    # The `math` twins raise on an array in CPython, and a predicate answers a boolean the module boundary cannot
+    # carry, so neither may quietly acquire the elementwise meaning its numpy namesake has.
+    def with_math(v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return math.sqrt(v)  # type: ignore[return-value]  # math rejects an array in CPython too
+
+    def with_predicate(v: Float64[np.ndarray, "3"]) -> Bool[np.ndarray, "3"]:
+        return np.isfinite(v)
+
+    _refused(with_math, "cannot be used as a scalar")
+    _refused(with_predicate, "cannot be used as a scalar")
+
+
 def test_elementwise_and_globals_match_numpy() -> None:
     def kernel(x: Float64[np.ndarray, "2"], s: float) -> Float64[np.ndarray, "2"]:
         y = GAIN @ (x + COEFFS[0:2]) - x / 4.0
@@ -1087,8 +1110,8 @@ def test_sum_of_products_contracts_at_the_leaves_of_the_tree() -> None:
 
 def test_reductions_are_log_deep() -> None:
     # A whole-array reduction must finish well ahead of an explicit left fold over the same elements: the fold
-    # serializes on the operator's latency, the reduction on its logarithm. Both families, since each rides its own
-    # adder.
+    # serializes on the operator's latency, the reduction on its logarithm. The compiler does not reassociate, so a
+    # fold the source wrote stays a chain in both families.
     def int_tree(v: Int[np.ndarray, "16"]) -> int:
         return np.sum(v)  # type: ignore[no-any-return]
 
@@ -1133,6 +1156,30 @@ def test_reshape_matches_numpy_across_spellings() -> None:
             float(free[1, 0]),
             float(np.sum(pair[0])),
             float(named[2, 1]),
+        )
+
+    v = np.array([1.0, -2.0, 3.5, 0.25, -4.0, 6.0])
+    m = np.array([[0.5, 1.5, -2.5], [3.0, -0.5, 2.0]])
+    _assert_python_matches_holoso(shapes, v, m)
+
+
+def test_reshape_infers_the_one_unknown_dimension_like_numpy() -> None:
+    def shapes(
+        v: Float64[np.ndarray, "6"], m: Float64[np.ndarray, "2 3"]
+    ) -> tuple[float, float, float, float, float, float]:
+        flat = m.reshape(-1)
+        col = v.reshape(-1, 1)
+        row = m.reshape(1, -1)
+        pair = v.reshape((-1, 3))
+        free = np.reshape(m, shape=(2, -1))
+        unbound = np.ndarray.reshape(m, -1)
+        return (
+            float(flat[4]),
+            float(col[5, 0]),
+            float(row[0, 3]),
+            float(pair[1, 0]),
+            float(free[1, 2]),
+            float(np.sum(unbound)),
         )
 
     v = np.array([1.0, -2.0, 3.5, 0.25, -4.0, 6.0])
@@ -1356,6 +1403,105 @@ def test_abs_answers_a_fresh_array() -> None:
         return float(out[0]), src[0] + out[1]
 
     _assert_python_matches_holoso(kernel, 3.0)
+
+
+# ---------------------------------------------------------------- joining arrays
+
+
+def test_concatenate_matches_numpy_across_ranks_and_axes() -> None:
+    def vectors(a: Float64[np.ndarray, "2"], b: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "7"]:
+        return np.concatenate((a, b, a))
+
+    _assert_python_matches_holoso(vectors, np.array([1.0, 2.0]), np.array([3.0, 4.0, 5.0]))
+
+    def rows(m: Float64[np.ndarray, "2 2"], r: Float64[np.ndarray, "1 2"]) -> Float64[np.ndarray, "3 2"]:
+        return np.concat([m, r * 2.0])
+
+    _assert_python_matches_holoso(rows, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([[5.0, 6.0]]))
+
+    def columns(m: Float64[np.ndarray, "2 2"], c: Float64[np.ndarray, "2 1"]) -> Float64[np.ndarray, "2 4"]:
+        return np.concatenate([c, m, c], -1)
+
+    _assert_python_matches_holoso(columns, np.array([[1.0, 2.0], [3.0, 4.0]]), np.array([[5.0], [6.0]]))
+
+
+def test_stacking_matches_numpy_across_spellings() -> None:
+    v, m, x = np.array([1.5, -2.0]), np.array([[1.0, 2.0], [3.0, 4.0]]), 0.5
+
+    def vstack_rows(v: Float64[np.ndarray, "2"], x: float) -> Float64[np.ndarray, "3 2"]:
+        return np.vstack((v, v * x, np.array([[x, 1.0]])))
+
+    def vstack_scalars(x: float) -> Float64[np.ndarray, "2 1"]:
+        return np.vstack((x, 2.0))
+
+    def hstack_vectors(v: Float64[np.ndarray, "2"], x: float) -> Float64[np.ndarray, "4"]:
+        return np.hstack((x, v, 2.0))
+
+    def hstack_matrices(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 4"]:
+        return np.hstack((m, m.T))
+
+    def column_stack_mixed(v: Float64[np.ndarray, "2"], m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 4"]:
+        return np.column_stack((v, m, -v))
+
+    def column_stack_scalars(x: float) -> Float64[np.ndarray, "1 2"]:
+        return np.column_stack((x, 1.0))
+
+    def stack_scalars(x: float) -> Float64[np.ndarray, "2"]:
+        return np.stack((x, 1.0))
+
+    def stack_rows(v: Float64[np.ndarray, "2"], x: float) -> Float64[np.ndarray, "3 2"]:
+        return np.stack([v, v + x, v * x])
+
+    def stack_columns(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.stack((v, v + 1.0), -1)
+
+    _assert_python_matches_holoso(vstack_rows, v, x)
+    _assert_python_matches_holoso(vstack_scalars, x)
+    _assert_python_matches_holoso(hstack_vectors, v, x)
+    _assert_python_matches_holoso(hstack_matrices, m)
+    _assert_python_matches_holoso(column_stack_mixed, v, m)
+    _assert_python_matches_holoso(column_stack_scalars, x)
+    _assert_python_matches_holoso(stack_scalars, x)
+    _assert_python_matches_holoso(stack_rows, v, x)
+    _assert_python_matches_holoso(stack_columns, v)
+
+
+def test_joining_promotes_mixed_families_and_preserves_the_integer_family() -> None:
+    def ints(a: int, b: int) -> Int[np.ndarray, "3"]:
+        return np.hstack((a, np.array([b, 4])))
+
+    got = [value for value in _sim(ints).run(1, -2) if isinstance(value, holoso.IntValue)]
+    assert [int(value) for value in got] == [1, -2, 4]
+
+    def mixed(v: Float64[np.ndarray, "2"], k: int) -> Float64[np.ndarray, "4"]:
+        return np.concatenate((np.array([k]), v, np.array([3])))
+
+    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    sim = holoso.synthesize(mixed, options, name="kernel").numerical_model.elaborate()
+    floats = [value for value in sim.run(1.5, 2.5, 5) if isinstance(value, holoso.FloatValue)]
+    assert [float(value) for value in floats] == mixed(np.array([1.5, 2.5]), 5).tolist()
+
+
+def test_joining_answers_a_fresh_array() -> None:
+    # The parts are shared by the sequence that carries them, so only the results can be written.
+    def kernel(x: float) -> tuple[float, float, float]:
+        src = np.array([[x, -x]])
+        out = np.vstack((src,))
+        cat = np.concatenate((src[0],))
+        columns = np.stack((src[0], src[0]), 1)
+        out[0, 1] = 2.0
+        cat[0] = 4.0
+        columns[0, 1] = 5.0
+        return src[0, 0] + src[0, 1], out[0, 0] + out[0, 1] + cat[0] + cat[1], columns[0, 0] + columns[0, 1]
+
+    _assert_python_matches_holoso(kernel, 3.0)
+
+
+def test_joining_many_parts_fits_the_expansion_budget() -> None:
+    def kernel(x: float) -> float:
+        return float(np.sum(np.hstack([x * float(k) for k in range(500)])))
+
+    _assert_python_matches_holoso(kernel, 0.5)
 
 
 # ---------------------------------------------------------------- matrix inversion

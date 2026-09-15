@@ -8,7 +8,7 @@ The differential fuzzer and the example-reference suite compare output VALUES on
 to cycle count, so a schedule that still computes the right result but takes longer -- a wasted cycle, a lost
 cross-block overlap, an over-pipelining congestion regression -- passes them silently. This test pins each
 kernel's (min initiation interval, last microcode PC). The min II is the throughput of the shortest path; the
-last PC is the out_valid boundary PC -- the end of the static schedule across every block (a zero-based PC, not a
+last PC is the last microcode address -- the end of the static schedule across every block (a zero-based PC, not a
 word count) -- so the full schedule is pinned even for a data-dependent branch/loop kernel whose public max II is
 reported as None (its loop body would otherwise be unguarded). Both are fixed by the scheduler before register-
 allocation annealing, so they are independent of `HOLOSO_REGALLOC_EFFORT`. A deliberate schedule change is
@@ -19,15 +19,19 @@ slots, so one slot's live-out reads another slot's live-in (the register allocat
 committed example exercises it. Two purpose-built kernels (a float delay line and a boolean shift register) pin it in
 both banks, and a behavioral check confirms the chained copy still captures each old value before it is overwritten --
 which the value-blind schedule freeze cannot.
+
+A slot installed at the accepted-output edge from a Ret block that computes nothing is pinned relationally where it can
+be: such a kernel takes exactly as long as its stateless twin returning the live-out instead.
 """
+
+from collections.abc import Callable
 
 import pytest
 
 import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
-from holoso._lir import WideStateSlot
-from holoso._lir._ir import BoolStateSlot
+from holoso._lir import Boundary, InPlace
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import ExampleSpec, SPECS
@@ -37,9 +41,15 @@ from ._modelref import (
     default_mir,
     default_options,
     DEFAULT_UNROLL_MAX_TRIPS,
+    EMPTY_RET_KERNELS,
+    loop_exit_output,
+    merge_bool_output,
+    merge_wide_output,
+    OptionsCase,
+    PIPELINE_OPTIONS_CASES,
 )
 
-# Kernel label -> frozen (min initiation interval, last microcode PC). last_pc is the out_valid boundary PC -- the
+# Kernel label -> frozen (min initiation interval, last microcode PC). last_pc is the last microcode address -- the
 # end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
 # kernels. One row per spec per declared format; a spec listing two formats is frozen at both, since the second
 # exists precisely to exercise a different pipeline depth.
@@ -54,7 +64,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "quadrature_encoder-e8m36": (6, 6),
     "phase_frequency_detector-e8m36": (6, 6),
     "latching_fault_register-e8m36": (5, 5),
-    "majority_voter-e6m18": (15, 20),
+    "majority_voter-e6m18": (14, 19),
     # The turn-native trigonometric ABI lets the phase scaling meet the cores' own conversion and cancel, so the I/Q
     # oscillator's two general multiplies collapse to one exponent add.
     "iq_oscillator-e8m36": (55, 55),
@@ -62,8 +72,8 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The sixteen pixel lanes scale, clamp and round independently on the pooled float operators while the
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
-    # the actuator split (measured: 39 against 166 realized cycles).
-    "image_agc_streamed-e8m36": (39, 171),
+    # the actuator split.
+    "image_agc_streamed-e8m36": (38, 170),
     "pwm-e6m18": (11, 11),
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
@@ -72,20 +82,20 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # Branchy kernels whose phi-arm installs have settled sources (boolean/float live-out constants, or an
     # input/state read) on the normal path -- no read-first push, so each lands within the work boundary,
     # shrinking every downstream block base.
-    "uart_tx-e6m18": (12, 37),
-    "uart_rx-e6m18": (6, 51),
+    "uart_tx-e6m18": (11, 36),
+    "uart_rx-e6m18": (5, 50),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
     # The convergence test is statically true on entry (delta is seeded above the tolerance), so the first trip is
     # peeled at compile time and only trips 2..N remain residual: one body's worth of extra microcode, and a realized
     # transaction that is shorter, not longer (test_cycle_model).
-    "recip_newton-e8m36": (29, 46),
+    "recip_newton-e8m36": (28, 45),
     # The all-false early return and the break-terminated candidate scan survive as real branches, so the
     # frozen last PC covers the full active path with every scan trip taken.
     "finite_set_current_controller-e8m36": (160, 204),
-    "remainder-e8m36": (37, 54),
-    "octave_index-e6m18": (14, 36),
-    "octave_index-e8m36": (14, 45),
+    "remainder-e8m36": (37, 51),
+    "octave_index-e6m18": (13, 35),
+    "octave_index-e8m36": (13, 44),
     "equal_temperament-e8m36": (40, 40),
     "cordic_sincos-e8m36": (104, 104),
     "polar_to-e8m36": (63, 63),
@@ -93,14 +103,15 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The three pivot-swap diamonds of the 3x3 Gauss-Jordan inversion if-convert into selects, so the whole
     # kernel is one straight-line block serialized on the pooled divider.
     "rigid_body_scalar-e8m36": (126, 126),
-    "kepler-e8m36": (80, 155),
+    "kepler-e8m36": (74, 149),
     "integrator-e8m36": (16, 16),
     "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
     # control flow at all), so their whole schedule is one block and min II equals last PC.
     "fir-e8m36": (20, 20),
     "biquad-e8m36": (21, 21),
-    "ekf1_stateful-e8m36": (125, 125),
+    # No sum is computed as a multiple of another, so the two covariance sums run side by side rather than in series.
+    "ekf1_stateful-e8m36": (123, 123),
     # The clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC atan2 tail, and
     # the aligning first transaction is a real branch around the whole integrator -- so the shortest static path is
     # the one that adopts the prior, well under the last PC that covers the integrating arm.
@@ -108,11 +119,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The controller that embeds that observer: the same atan2 tail, then a sincos, a norm, and the divides of the
     # limiter and the modulator, with the alignment, the branch-cut correction and the anti-windup freeze all
     # surviving as real branches -- so the last PC covers arms the shortest static path does not.
-    "foc-e8m36": (284, 335),
+    "foc-e8m36": (298, 349),
     # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
     # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
-    "imu_fusion-e8m36": (233, 409),
-    "imu_fusion-e6m18": (206, 346),
+    "imu_fusion-e8m36": (270, 464),
+    "imu_fusion-e6m18": (243, 401),
 }
 
 
@@ -142,8 +153,7 @@ def test_schedule_length_is_frozen(spec: ExampleSpec, fmt: FloatFormat) -> None:
         f"{frozen_ii}. If this is a deliberate schedule improvement, update the frozen value."
     )
     lir = build_lir(
-        lower_to_mir(lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
-        spec.name,
+        lower_to_mir(lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), spec.name
     )
     assert (lir.min_initiation_interval, lir.last_pc) == (frozen_ii, frozen_last_pc), (
         f"{label}: scheduling efficiency changed -- (min II, last PC) differs from the frozen "
@@ -183,8 +193,8 @@ class _BoolShift3:
 # _BoolShift3 the boolean bank's. _FMT is the wide e8m36 datapath the example matrix uses.
 _FMT = FloatFormat(8, 36)
 _CHAINED_COPY: list[tuple[str, type[_Delay3] | type[_BoolShift3], tuple[int, int]]] = [
-    ("delay3", _Delay3, (3, 3)),
-    ("bool_shift3", _BoolShift3, (3, 3)),
+    ("delay3", _Delay3, (1, 1)),
+    ("bool_shift3", _BoolShift3, (1, 1)),
 ]
 
 
@@ -195,18 +205,74 @@ def test_chained_copy_schedule_is_frozen(
     result = holoso.synthesize(kernel_cls().__call__, default_options(_FMT), name=name)
     assert result.initiation_interval[0] == frozen[0]
     lir = build_lir(
-        lower_to_mir(lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
-        name,
+        lower_to_mir(lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)), name
     )
-    slots: list[WideStateSlot | BoolStateSlot] = [*lir.wide_state_slots, *lir.bool_state_slots]
     assert all(
-        slot.needs_copy for slot in slots
+        not isinstance(slot.install, InPlace) for slot in lir.state_slots
     ), f"{name}: a chained-copy slot unexpectedly coalesced; the tapped_by_other path is no longer exercised"
     got = (lir.min_initiation_interval, lir.last_pc)
     assert got == frozen, (
         f"{name}: scheduling efficiency changed -- (min II, last PC) {got} differs from the frozen {frozen}. "
         f"If this is a deliberate schedule improvement, update the frozen value."
     )
+
+
+class _Delay1:
+    def __init__(self) -> None:
+        self.x = 0.0
+
+    def __call__(self, x: float) -> float:
+        out = self.x
+        self.x = x
+        return out
+
+
+def _passthrough(x: float) -> float:
+    return x
+
+
+@pytest.mark.parametrize(
+    "stateful,stateless",
+    [
+        pytest.param(lambda: _Delay1().__call__, _passthrough, id="delay"),
+        pytest.param(EMPTY_RET_KERNELS["merge_wide"], merge_wide_output, id="merge_wide"),
+        pytest.param(EMPTY_RET_KERNELS["merge_bool"], merge_bool_output, id="merge_bool"),
+        pytest.param(EMPTY_RET_KERNELS["loop_exit"], loop_exit_output, id="loop_exit"),
+    ],
+)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+def test_a_boundary_install_costs_what_an_output_does(
+    config: OptionsCase, stateful: Callable[[], Callable[..., object]], stateless: Callable[..., object]
+) -> None:
+    # The install samples its source on the exit PC, as an output does.
+    options = config.make_options(_FMT)
+    mir = lower_to_mir(lower_frontend(stateful(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
+    lir = build_lir(mir, "k")
+    assert not next(block for block in mir.blocks if block.id == mir.ret_block).operations and all(
+        isinstance(slot.install, Boundary) for slot in lir.state_slots
+    )
+    installed = holoso.synthesize(stateful(), options, name="installed").initiation_interval
+    assert installed == holoso.synthesize(stateless, options, name="returned").initiation_interval
+
+
+@pytest.mark.parametrize(
+    "label,frozen",
+    [
+        ("spill_into_ret", {"default": (6, False), "staged": (10, True)}),
+        ("spill_into_ret_bool", {"default": (8, True), "staged": (13, True)}),
+    ],
+)
+@pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
+def test_a_spill_into_an_empty_ret_schedule_is_frozen(
+    config: OptionsCase, label: str, frozen: dict[str, tuple[int, bool]]
+) -> None:
+    # A live-out computed in the loop header that lands in the Ret block keeps the Ret's PC and has no stateless twin
+    # to compare against; the second column pins where it does.
+    options = config.make_options(_FMT)
+    min_ii, ret_takes_pc = frozen[config.label]
+    assert holoso.synthesize(EMPTY_RET_KERNELS[label](), options, name="spill").initiation_interval[0] == min_ii
+    mir = lower_to_mir(lower_frontend(EMPTY_RET_KERNELS[label](), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
+    assert (mir.ret_block in build_lir(mir, "spill").block_base) == ret_takes_pc
 
 
 def test_chained_copy_captures_old_values() -> None:

@@ -34,6 +34,7 @@ from ._modelref import (
     branch_boundary_kernel,
     branchy_swap_mixed_arm_loop,
     build_model_and_interpreter,
+    with_instances,
     mir_options,
     ChainedSlots,
     const_branch_kernel,
@@ -59,14 +60,22 @@ def _spec_vector(model: NumericalSimulator, row: dict[str, float | bool]) -> Vec
     return [coerce_scalar(port.scalar_type, row[port.name], port.name) for port in model.inputs]
 
 
+# Every example with every pooled class at one instance and then at two, so the allocator's binding (and the
+# scheduler's co-issue) is checked against the interpreter on every CFG shape the examples have.
 _EXAMPLE_CASES = [
-    pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}") for spec in SPECS for fmt in spec.formats
+    pytest.param(spec, fmt, instances, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}-x{instances}")
+    for spec in SPECS
+    for fmt in spec.formats
+    for instances in (1, 2)
 ]
 
 
-@pytest.mark.parametrize("spec,fmt", _EXAMPLE_CASES)
-def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    model, interpreter = build_model_and_interpreter(spec.make_kernel(), mir_options(spec.options(fmt)), spec.name, fmt)
+@pytest.mark.parametrize("spec,fmt,instances", _EXAMPLE_CASES)
+def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatFormat, instances: int) -> None:
+    options = with_instances(spec.options(fmt), instances)
+    model, interpreter = build_model_and_interpreter(
+        spec.make_kernel(), mir_options(options), f"{spec.name}_x{instances}", fmt
+    )
     vectors = [_spec_vector(model, row) for row in spec.raw_vectors()]
     assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
 
@@ -166,7 +175,7 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
 
 
 def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
-    """The boolean-bank twin of the computed-arm swap: the latch installs are BoolWrites, not WideCopys."""
+    """The boolean-bank twin of the computed-arm swap: the latch installs are boolean copies, not wide ones."""
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(
         bool_phi_swap_computed_loop, default_mir(fmt), "bool_phi_swap_computed", fmt

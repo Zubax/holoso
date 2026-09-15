@@ -5,7 +5,9 @@ Render a scheduled Lir into a synthesizable Verilog ZISC module that instantiate
 The controller is a microcode ROM (see ._microcode): one pre-decoded VLIW control word per step, written as a
 synchronous `case` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
 fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
-which the sequencer accounts for: the PC counts up to LASTPC and out_valid is asserted there.
+which the sequencer accounts for: out_valid asserts on a terminator PC whose taken arm exits. The ROM read register's
+declaration carries the `HOLOSO_ATTRIBUTE_ROM` macro only where the flow defines it, so a tool-specific mapping
+attribute can be attached without touching the generated RTL.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
 routing is uniform: each operand port's read mux is a `case` over that port's read codebook (its registers and the
@@ -13,7 +15,6 @@ constants it reads), and each register's write is a `case` over that register's 
 per-register opcode (code 0 == NOP hold). PC drives only the sequencer; it never gates a datapath read or write.
 """
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from textwrap import dedent
 from typing import assert_never
@@ -123,7 +124,7 @@ class _WideRenderer:
     def _fill_float(self, view: str) -> str:
         return f"{{{{(WREG-WFLT){{1'bx}}}}, {view}}}" if self._active else view
 
-    def wide_source(self, source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
+    def _wide_source(self, source: RegRef | WideConstRef, conditioner: WideConditioner) -> str:
         """A wide source's value view with its folded conditioner applied; a float view is WFLT wide at gap > 0."""
         raw = _source_net(source)
         match conditioner:
@@ -140,13 +141,13 @@ class _WideRenderer:
     def operand_rhs(self, operand: WideOperand | BoolOperand) -> str:
         match operand:
             case WideOperand():
-                return self.wide_source(operand.source, operand.conditioner)
+                return self._wide_source(operand.source, operand.conditioner)
             case BoolOperand():
                 return _bool_operand_rhs(operand)
             case _:
                 assert_never(operand)
 
-    def inline_rhs(
+    def _inline_rhs(
         self,
         operator: InlineHardwareOperator,
         operands: tuple[WideOperand | BoolOperand, ...],
@@ -181,7 +182,7 @@ class _WideRenderer:
                 result_type = inst.operator.signature.result_types[port]
                 return self._fill_float(net) if isinstance(result_type, FloatType) else net
             case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
-                expr = self.inline_rhs(operator, operands, conditioner)
+                expr = self._inline_rhs(operator, operands, conditioner)
                 if isinstance(dst, BoolRegRef):
                     return expr
                 assert len(operator.signature.result_types) == 1
@@ -196,9 +197,17 @@ class _WideRenderer:
             case _:
                 assert_never(source)
 
-    def input_load_rhs(self, load: WideInputLoad | BoolInputLoad) -> str:
-        rhs = f"in_{load.name}"
-        return self._fill_float(rhs) if isinstance(load.scalar_type, FloatType) else rhs
+    def handshake_arm(self, dst: RegRef | BoolRegRef, arm: HandshakeArm) -> tuple[str, str]:
+        """The gate condition and the RHS of a register's handshake-gated write."""
+        match arm:
+            case WideInputLoad() | BoolInputLoad():
+                rhs = f"in_{arm.name}"
+                return "in_ready && in_valid", self._fill_float(rhs) if isinstance(arm.scalar_type, FloatType) else rhs
+            case WideStateSlot(live_out=source) | BoolStateSlot(live_out=source):
+                assert isinstance(arm.install, Boundary)
+                return "out_valid && out_ready", self.write_rhs(dst, MoveWriteSource(source))
+            case _:
+                assert_never(arm)
 
     def reset_literal(self, slot: WideStateSlot) -> str:
         """The reset snapshot in the slot's own family width; a float image gets the don't-care high bits."""
@@ -211,11 +220,11 @@ def generate(lir: Lir) -> VerilogOutput:
     assert lir.fetch_lag == 2, "only the 2-lag (3-stage) fetch RTL is implemented; 1-lag awaits the latch-removal mode"
     w = _Writer()
     cycw = lir.cyc_width
-    pcw = max(1, lir.initiation_interval.bit_length())
+    pcw = max(1, lir.last_pc.bit_length())
 
     # The two dual codebooks, built once and threaded to both the microcode packer and the emitters so the
     # code<->source mapping cannot drift: per operand port (read) and per register (write). The write side derives from
-    # a single `write_events` traversal, shared by the codebook, the packer, and the ROM-comment landings.
+    # the one `write_events` traversal, shared by the codebook, the packer, and the ROM-comment landings.
     read_books = read_codebook(lir)
     events = write_events(lir)
     write_books = write_codebook(events)
@@ -250,11 +259,15 @@ def generate(lir: Lir) -> VerilogOutput:
 def _emit_header(w: _Writer, lir: Lir) -> None:
     # Generation time is not included for reproducibility.
     fmt = lir.float_format
-    w(f"""
+    w(
+        f"""
 {output_header("// ")}
 
 `timescale 1ns/1ps
-
+""",
+        "",
+    )
+    w(f"""
 // Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.
 module {lir.module_name} (
 """)
@@ -308,14 +321,12 @@ localparam           WFLT      = WEXP + WMAN;
 localparam           WINT      ={ifmt.width:4};  // native integer width
 localparam           WREG      ={wreg:4};  // wide register width
 localparam           NREG      ={nreg:4};  // wide register count
-localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step (0..present)
-localparam           PCW       ={pcw:4};  // fetch-PC width: counts to LASTPC (execution lags the fetch by FETCH_LAG)
+localparam           CYCW      ={cycw:4};  // err_pc width: enough for any executing step
+localparam           PCW       ={pcw:4};  // fetch-PC width: counts to the last ROM address
 localparam           FETCH_LAG ={fetch_lag:4};  // executing step = pc - FETCH_LAG ({fetch_stages}-stage control fetch)
-localparam [PCW-1:0] PRESENT   ={lir.present_step:4};  // executing step on which the outputs are valid in the array
-localparam [PCW-1:0] LASTPC    ={lir.initiation_interval:4};  // = PRESENT + FETCH_LAG; out_valid asserts here
 localparam           UCW       ={ucw:4};  // microcode word width after lifting out constant control fields
 localparam           NBREG     ={nbreg:4};  // boolean register count
-// pc: 0 = idle/accept, present at executing step PRESENT; out_valid at pc==LASTPC (fetch leads execution).
+// pc: 0 = idle/accept; out_valid on an exiting terminator PC (fetch leads execution).
 """)
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
     # concatenation implements (bias exponent at the fraction MSb, zero sign/fraction); a format whose codec disagreed
@@ -392,8 +403,8 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
             w(f".{imm.name}({f_imm(base, imm.name)}),")
         # Only a FLOAT port has a sign sideband to bind, on either side; a boolean output's inversion is fabric-side
         # at the write, and an integer port folds nothing. An untapped float output is tied to the identity.
-        for port, letter, operand_type in zip(operand_ports, letters, operator.signature.operand_types, strict=True):
-            if has_sign_control(operand_type):
+        for position, (port, letter) in enumerate(zip(operand_ports, letters, strict=True)):
+            if operator.conditions_operand(position):
                 w(f".{port}_sgnop({f_osgn(base, letter)}),")
         for q, result_type in enumerate(operator.signature.result_types):
             if has_sign_control(result_type):
@@ -426,9 +437,14 @@ def _emit_microcode_rom(
     landings: dict[int, list[str]],
 ) -> None:
     digits = (ucw + 3) // 4
+    # The mapping attribute belongs on the read register: it is the declaration a synthesizer inspects when it infers
+    # the ROM from the clocked `case`.
     w("""
 // Microcode VLIW ROM.
-reg [UCW-1:0] ucode_q;     // 2nd fetch stage
+`ifdef HOLOSO_ATTRIBUTE_ROM
+`HOLOSO_ATTRIBUTE_ROM
+`endif
+reg [UCW-1:0] ucode_q;  // 2nd fetch stage
 reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
     packed = sorted((f for f in fields.values() if f.offset >= 0), key=lambda f: f.offset)
     if packed:
@@ -438,7 +454,6 @@ reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
         for f, bits in zip(packed, bit_strs):
             w(f"//   {bits:<{wbit}}  {f.name}")
     w("""
-(* rom_style = "block", syn_romstyle = "EBR" *)
 always @(posedge clk)
     case (ucode_addr_q)""")
     w.push()
@@ -447,7 +462,7 @@ always @(posedge clk)
         summary = cycle_summary(issues_by_cycle.get(step, []), commits_by_cycle.get(step, []), landings.get(step, []))
         comment = f"  // {summary}" if summary else ""
         w(f"{step}: ucode_q <= {ucw}'h{pack(fields, step):0{digits}x};{comment}")
-    w(f"default: ucode_q <= {ucw}'h0;  // unreached (PC bounded to LASTPC); NOP fill")
+    w(f"default: ucode_q <= {ucw}'h0;  // unreached (PC bounded to the last address); NOP fill")
     w.pop()
     w("endcase")
     w.pop()
@@ -495,7 +510,7 @@ def _emit_datapath_comb(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolReg
 
     redirects = _terminator_redirects(lir)
     w("""
-// Next-PC sequencer (combinational). The PC holds at the accept (pc==0) and present (pc==LASTPC) boundaries; bubble
+// Next-PC sequencer (combinational). The PC holds at the accept (pc==0) and exit (out_valid) boundaries; bubble
 // steps carry a NOP word and the PC keeps advancing. The executing step lags the fetch PC by FETCH_LAG. A block's
 // terminator redirects the fetch PC at the block's boundary step (a branch reads its boolean register). Each branch
 // also sets transacting_in -- 1 for a live accept/body word, 0 at the boundaries -- so each branch tags its own word.
@@ -509,7 +524,7 @@ always @* begin
     w.pop()
     w("end else if (out_valid) begin  // present: hold until the result is taken")
     w.push()
-    w("next_pc        = out_ready ? 0 : LASTPC;")
+    w("next_pc        = out_ready ? 0 : pc;")
     w("transacting_in = 1'b0;")
     w.pop()
     w("end else if (in_ready) begin   // accept: hold until a transaction arrives")
@@ -540,25 +555,33 @@ def _terminator_redirects(lir: Lir) -> list[tuple[int, str]]:
     """
     The non-fall-through fetch-PC redirects, one per block whose terminator is not a plain advance: a `Jump` to a
     non-adjacent block, or a `Branch` selecting a target by its boolean register. Each is keyed by the block's
-    terminator fetch step (its boundary). A `Ret` block is the out_valid boundary and needs no redirect; a `Jump`
-    to the next-laid-out block falls through on `pc + 1` and needs no case arm.
+    terminator fetch step (its boundary). An exit arm needs none, the out_valid dwell outranking the redirects, so a
+    branch with one exit arm redirects to its other arm; an arm to the next-laid-out block falls through on `pc + 1`.
     """
     redirects: list[tuple[int, str]] = []
+    base = lir.block_base
     for block in lir.blocks:
         term_pc = lir.term_pc(block)
         match block.terminator:
-            case Jump(target=target):
-                target_pc = lir.block_base[target]
-                if target_pc != term_pc + 1:
-                    redirects.append((term_pc, str(target_pc)))
-            case Branch(cond=cond, if_true=if_true, if_false=if_false):
-                redirects.append(
-                    (term_pc, f"bregs[{cond.index}] ? {lir.block_base[if_true]} : {lir.block_base[if_false]}")
-                )
-            case Ret():
-                pass
+            case Branch(cond=cond, if_true=int() as if_true, if_false=int() as if_false):
+                redirects.append((term_pc, f"bregs[{cond.index}] ? {base[if_true]} : {base[if_false]}"))
+            case terminator:  # at most one block arm, an exit arm being the out_valid dwell's
+                targets = [base[arm] for arm in successor_blocks(terminator)]
+                redirects += [(term_pc, str(target)) for target in targets if target != term_pc + 1]
     redirects.sort()
     return redirects
+
+
+def _out_valid(lir: Lir) -> str:
+    """The exit points as a sum of products."""
+    return " || ".join(
+        (
+            f"(pc == {point.pc})"
+            if point.condition is None
+            else f"(pc == {point.pc} && {_bool_operand_rhs(point.condition)})"
+        )
+        for point in lir.exit_points
+    )
 
 
 def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> None:
@@ -609,26 +632,24 @@ def _emit_read_muxes(
 
 def _emit_reg_write(
     w: _Writer,
-    lhs: str,
     dst: RegRef | BoolRegRef,
     book: WriteCodebook | None,
-    special_arms: list[tuple[str, str]],
+    arm: HandshakeArm | None,
     renderer: _WideRenderer,
 ) -> None:
     """
-    One segregated write statement per register (the multi-assign rule): the handshake-gated special arms first (an
-    input load, a boundary state install), then the opcode `case` over the register's write codebook as the final
-    `else`. Code 0 is the NOP hold -- an unlisted code in this clocked `case` retains the flop -- so the
-    write-enable is folded into the opcode with no extra logic level. A single-source register degenerates to
-    `if (opcode)`.
+    One segregated write statement per register (the multi-assign rule): the handshake-gated arm first, then the
+    opcode `case` over the register's write codebook as the final `else`. Code 0 is the NOP hold -- an unlisted code
+    in this clocked `case` retains the flop -- so the write-enable is folded into the opcode with no extra logic
+    level. A single-source register degenerates to `if (opcode)`.
     """
-    clause = "if"
-    for cond, rhs in special_arms:
-        w(f"{clause} ({cond}) {lhs} <= {rhs};")
-        clause = "else if"
+    lhs = f"regs[{dst.index}]" if isinstance(dst, RegRef) else f"bregs[{dst.index}]"
+    if arm is not None:
+        condition, rhs = renderer.handshake_arm(dst, arm)
+        w(f"if ({condition}) {lhs} <= {rhs};")
     if book is None or not book.sources:
         return
-    prefix = "else " if special_arms else ""
+    prefix = "else " if arm is not None else ""
     opcode = f_op(dst)
     if len(book.sources) == 1:
         w(f"{prefix}if ({opcode}) {lhs} <= {renderer.write_rhs(dst, book.sources[0])};")
@@ -646,14 +667,9 @@ def _emit_clocked(
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, register writes, and control state."""
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
-    wide_slots = {slot.reg.index: slot for slot in lir.wide_state_slots}
-    bool_slots = {slot.reg.index: slot for slot in lir.bool_state_slots}
-    wide_loads = {load.dst.index: load for load in lir.wide_inputs}
-    bool_loads = {load.dst.index: load for load in lir.bool_inputs}
-
-    def load_arm(loads: Mapping[int, WideInputLoad | BoolInputLoad], reg: int) -> list[tuple[str, str]]:
-        load = loads.get(reg)
-        return [("in_ready && in_valid", renderer.input_load_rhs(load))] if load else []
+    wide_slots = {slot.reg.index for slot in lir.wide_state_slots}
+    bool_slots = {slot.reg.index for slot in lir.bool_state_slots}
+    arms = handshake_arms(lir)
 
     w("""
 // All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q, transacting_q) and the
@@ -669,28 +685,20 @@ always @(posedge clk) begin
 
     # Non-slot registers: one reset-unconditional statement each. Datapath payload carries no reset, keeping the
     # high-fanout reset net off the wide cone (only control/valid state is reset); contents are don't-care until a
-    # valid write lands. A register with neither an input load nor any opcode source is simply omitted.
+    # valid write lands.
     nonslot_wide = [
-        reg for reg in range(nreg) if reg not in wide_slots and (RegRef(reg) in write_books or reg in wide_loads)
+        reg for reg in range(nreg) if reg not in wide_slots and (RegRef(reg) in write_books or RegRef(reg) in arms)
     ]
     nonslot_bool = [
-        reg for reg in range(nbreg) if reg not in bool_slots and (BoolRegRef(reg) in write_books or reg in bool_loads)
+        reg
+        for reg in range(nbreg)
+        if reg not in bool_slots and (BoolRegRef(reg) in write_books or BoolRegRef(reg) in arms)
     ]
     if nonslot_wide or nonslot_bool:
         w("// Register writes (reset-unconditional): one opcode-selected statement per register.")
-        for reg in nonslot_wide:
-            _emit_reg_write(
-                w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), load_arm(wide_loads, reg), renderer
-            )
-        for reg in nonslot_bool:
-            _emit_reg_write(
-                w,
-                f"bregs[{reg}]",
-                BoolRegRef(reg),
-                write_books.get(BoolRegRef(reg)),
-                load_arm(bool_loads, reg),
-                renderer,
-            )
+        nonslot: list[RegRef | BoolRegRef] = [*map(RegRef, nonslot_wide), *map(BoolRegRef, nonslot_bool)]
+        for dst in nonslot:
+            _emit_reg_write(w, dst, write_books.get(dst), arms.get(dst), renderer)
         w("")
 
     # Control and persistent state are the reset-gated registers: the slot snapshot (under rst) and the slot's update
@@ -713,24 +721,16 @@ always @(posedge clk) begin
     w("transacting_q <= (transacting_q << 1) | transacting_in;")
     w("if (err) err_pc_q <= pc - FETCH_LAG;  // err wins; execution lags the fetch PC by FETCH_LAG, so step is pc-lag")
     w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
-    # A non-coalesced slot installs its live-out read-first at the accepted-output boundary (out_valid && out_ready, so
-    # a held boundary copies exactly once), a lower-priority arm of the same statement; an early install is an ordinary
-    # opcode source (see write_events). Boolean state installs are boundary-only.
-    for reg, slot in sorted(wide_slots.items()):
-        arms = load_arm(wide_loads, reg)
-        if slot.needs_copy and lir.wide_state_install_is_boundary(slot):
-            # This arm outranks the opcode case below it and must not shadow it, here or in the boolean bank below.
-            # It cannot: the install executes at `present_step`, and `build_microcode` -- already run, over every
-            # write event -- asserts each rides a strictly earlier step, so the word presented alongside the install
-            # holds the write NOP. That is what lets a slot register which also carries opcode writes, the shape a
-            # live-out coalesced into another slot's register leaves behind, be emitted rather than refused.
-            arms.append(("out_valid && out_ready", renderer.write_rhs(slot.reg, MoveWriteSource(slot.tap))))
-        _emit_reg_write(w, f"regs[{reg}]", RegRef(reg), write_books.get(RegRef(reg)), arms, renderer)
-    for reg, bslot in sorted(bool_slots.items()):
-        arms = load_arm(bool_loads, reg)
-        if bslot.needs_copy:
-            arms.append(("out_valid && out_ready", renderer.write_rhs(bslot.reg, MoveWriteSource(bslot.live_out))))
-        _emit_reg_write(w, f"bregs[{reg}]", BoolRegRef(reg), write_books.get(BoolRegRef(reg)), arms, renderer)
+    # A slot's boundary install rides the accepted-output edge (out_valid && out_ready, so a held boundary copies
+    # exactly once), the handshake arm of its register's statement; an early install is an ordinary opcode source
+    # (see write_events). The arm outranks the opcode case below it and must not shadow it. It cannot: a word executing
+    # while the PC sits at an exit was fetched either on the way there, so a write it carried would land past the exit,
+    # which no layout allows, or at the exit itself, which `transacting` masks. The same fact keeps a conditional
+    # exit's condition register stable through the dwell. That is what lets a slot register which also carries opcode
+    # writes, the shape a live-out coalesced into another slot's register leaves behind, be emitted rather than refused.
+    slots: list[RegRef | BoolRegRef] = [*map(RegRef, sorted(wide_slots)), *map(BoolRegRef, sorted(bool_slots))]
+    for dst in slots:
+        _emit_reg_write(w, dst, write_books.get(dst), arms.get(dst), renderer)
     w.pop()
     w("end")
 
@@ -739,9 +739,9 @@ always @(posedge clk) begin
 
 
 def _emit_outputs(w: _Writer, lir: Lir, renderer: _WideRenderer) -> None:
-    w("""
+    w(f"""
 assign in_ready  = (pc == 0);
-assign out_valid = (pc == LASTPC);  // result valid on PRESENT; execution lags the fetch by FETCH_LAG
+assign out_valid = {_out_valid(lir)};
 assign err_pc    = err_pc_q;
 """)
     for wire in lir.outputs:

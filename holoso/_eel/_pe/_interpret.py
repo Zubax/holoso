@@ -55,7 +55,8 @@ from ..._errors import HolosoError, SynthesisError
 from .._annotations import accepted_stypes, annotation_stype, unaliased
 from .._desugar import desugar
 from .._ir import *
-from .._names import indexed_names, port_name, public_slot, state_port_name
+from .._decorator import plain_function
+from .._names import hardware_name, indexed_names, port_name, public_slot
 from . import _aggregate, _express, _mutate, _ops
 from ._ownership import allocations, borrow, escape, release, share
 from ._reject import reattribute, reject
@@ -63,7 +64,6 @@ from ._residual import assigned_names, drop_return_rows, prune, rechained
 from ._snapshot import Snapshotter, describe_opaque as _describe_opaque
 from ._state import (
     READ_PROTOCOLS,
-    ComponentTree,
     ScalarSpec,
     SequenceSpec,
     Spec,
@@ -440,7 +440,7 @@ class Interpreter:
         params: list[Param] = []
         for param in remaining:
             params.extend(self._param(param, frame))
-        names = [param.name for param in params]
+        names = [hardware_name(param.name) for param in params]
         if len(set(names)) != len(names):
             collision = next(name for name in names if names.count(name) > 1)
             reject(eel.origin, f"the decomposed parameter names collide on {collision!r}; rename the parameters")
@@ -450,10 +450,6 @@ class Interpreter:
             self._decls = self.state.decls()
             for key in sorted(self.specs):
                 frame.env[key] = self._init_slot(key, self.specs[key], eel.origin, sink)
-            ports = names + [state_port_name(decl.slot) for decl in self._decls if public_slot(decl.slot)]
-            if len(set(ports)) != len(ports):
-                collision = next(name for name in ports if ports.count(name) > 1)
-                reject(eel.origin, f"a state port collides with a parameter on {collision!r}; rename one of them")
         flow = self._block(eel.body, frame, [sink], Ctx())
         assert not flow.exits, "no exit lane escapes the root frame"
         if flow.fall is not None:
@@ -1046,8 +1042,8 @@ class Interpreter:
             release(held)
         current = self._meet_lanes(stmt.origin, frame, breaks, current, sinks if not escaped else None)
         if stmt.target.name.startswith("for$"):
-            # A desugared tuple target's hidden binding is dead past the loop (only the body-head unpack reads
-            # it); leaving it bound would leak the internal name into an enclosing residual loop's carried set.
+            # A desugared non-name target's hidden binding is dead past the loop (only the body head reads it);
+            # leaving it bound would leak the internal name into an enclosing residual loop's carried set.
             frame.env.pop(stmt.target.name, None)
         return _Flow(escaped, current)
 
@@ -1755,10 +1751,8 @@ class Interpreter:
             assert not isinstance(bound, (_Moved, _SlotAlias)), "slot bindings never ride the conduits"
             return self.readable(bound, origin)
         found: object = mro_attr(type(base.value), attr, _MISSING)
-        if isinstance(found, property) and isinstance(found.fget, types.FunctionType):
-            return self.inline(
-                origin, f"{base.name}.{attr}", found.fget, [base], {}, frame, sink, positional_only=False
-            )
+        if isinstance(found, property) and (fget := plain_function(found.fget)) is not None:
+            return self.inline(origin, f"{base.name}.{attr}", fget, [base], {}, frame, sink, positional_only=False)
         if isinstance(found, types.MemberDescriptorType):
             if dataclasses.is_dataclass(type(base.value)) and inadmissible_reason(type(base.value)) is None:
                 return self.snapshot.admit(f"{base.name}.{attr}", getattr(base.value, attr), origin)
@@ -1778,8 +1772,8 @@ class Interpreter:
             reject(origin, f"{base.name!r} has no attribute {attr!r}")
         if isinstance(found, staticmethod):
             return self.snapshot.admit(f"{base.name}.{attr}", found.__func__, origin)
-        if isinstance(found, types.FunctionType):
-            return self.snapshot.admit(f"{base.name}.{attr}", types.MethodType(found, base.value), origin)
+        if (fn := plain_function(found)) is not None:
+            return self.snapshot.admit(f"{base.name}.{attr}", types.MethodType(fn, base.value), origin)
         if isinstance(found, classmethod):
             return self.snapshot.admit(
                 f"{base.name}.{attr}", types.MethodType(found.__func__, type(base.value)), origin

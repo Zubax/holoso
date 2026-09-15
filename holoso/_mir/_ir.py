@@ -1,9 +1,9 @@
 """Selected mid-level IR (MIR): concrete hardware operators with typed scalar sidebands, arranged into a CFG."""
 
-from abc import ABC, abstractmethod
 from collections.abc import Mapping
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import assert_never
 
 from .._operators import (
     BoolInversion,
@@ -11,12 +11,14 @@ from .._operators import (
     HardwareOperator,
     InlineHardwareOperator,
     IntIdentity,
+    PooledHardwareOperator,
     PortConditioner,
+    has_sign_control,
     identity_conditioner,
 )
 from .._errors import UnsupportedConstruct
 from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType, ScalarType
-from .._util import BlockId, ValueId
+from .._util import BlockId, ValueId, reverse_postorder_of
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,20 +40,40 @@ class MirConst:
     scalar_type: ScalarType
 
 
-def _refuse_degrading(value: float, fmt: FloatFormat, what: str) -> None:
+def degrades(value: float, fmt: FloatFormat) -> bool:
     """
-    A literal that encodes to zero or infinity is not the number it was written as, so it is refused rather than
-    silently becoming what it encodes to -- the float dual of the integer range refusal. Ordinary rounding is not
-    degradation: an infinity is representable, and zero is what zero already encodes to.
-
-    Asked of the ENCODED bits rather than the decoded value: a coarse mantissa can round a magnitude UP past the
-    double range, so `decode` saturates to an infinity for a target value that is perfectly finite.
+    Whether a literal encodes to zero or infinity and so is not the number written. Asked of the encoded bits: a coarse
+    mantissa can round a magnitude up past the double range, so `decode` saturates for a target value that is finite.
     """
     if not math.isfinite(value) or value == 0.0:
-        return
+        return False
     bits = fmt.encode(value)
-    if bits == 0 or not fmt.is_finite(bits):
-        raise UnsupportedConstruct(f"{what} {value!r} degrades to {fmt.decode(bits)!r} in {fmt}; widen wexp or rescale")
+    return bits == 0 or not fmt.is_finite(bits)
+
+
+def refuse_degrading(value: float, fmt: FloatFormat, what: str, remedy: str = "widen wexp or rescale") -> None:
+    """`remedy` is the way out the caller knows of beyond the format itself."""
+    if degrades(value, fmt):
+        raise UnsupportedConstruct(f"{what} {value!r} degrades to {fmt.decode(fmt.encode(value))!r} in {fmt}; {remedy}")
+
+
+def _check_unconditioned_operands(operator: HardwareOperator) -> None:
+    """
+    The declaration asserts what the operator READS, which nothing can derive, so these three rules close the ways
+    it can be wrong. They run per operation because an operator has no constructor of its own to hang them on.
+    """
+    declined = operator.unconditioned_operands
+    if not declined:
+        return
+    signature = operator.signature
+    # Declining a sideband the port never had would say nothing; only a float port carries one to decline.
+    assert all(has_sign_control(signature.operand_types[position]) for position in declined)
+    # An ERROR sideband is an observable output that "unchanged across every RESULT port" does not cover, so the
+    # claim would be unsound rather than merely unverified; an operator raising one may decline nothing.
+    assert not (isinstance(operator, PooledHardwareOperator) and operator.error_ports)
+    # A firing may exchange a commutative operator's operands together with their conditioners, so a claim covering
+    # one of them would migrate onto the other. `swap_output_permutation` maps RESULT ports and cannot say this.
+    assert not operator.is_commutative or declined == frozenset(range(signature.arity))
 
 
 def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType) -> None:
@@ -75,6 +97,7 @@ class MirOperation:
     output_port: int
     output_conditioner: PortConditioner
     immediates: tuple[int, ...]  # per-firing immediate values, aligned with operator.immediate_ports
+    scalar_type: ScalarType = field(init=False, compare=False)
 
     def __post_init__(self) -> None:
         signature = self.operator.signature
@@ -84,14 +107,18 @@ class MirOperation:
         assert all(0 <= value < (1 << port.width) for value, port in zip(self.immediates, ports, strict=True))
         assert len(self.operands) == signature.arity
         assert len(self.operand_conditioners) == signature.arity
-        for conditioner, operand_type in zip(self.operand_conditioners, signature.operand_types, strict=True):
+        _check_unconditioned_operands(self.operator)
+        for position, (conditioner, operand_type) in enumerate(
+            zip(self.operand_conditioners, signature.operand_types, strict=True)
+        ):
             _check_conditioner(conditioner, operand_type)
+            # The invariant the whole design rests on: a declined sideband leaves nothing to bind. Stated over the
+            # declaration rather than over `conditions_operand`, which also answers no for the boolean and integer
+            # ports -- and a boolean port carries a real inversion.
+            assert position not in self.operator.unconditioned_operands or conditioner.is_identity
         assert 0 <= self.output_port < len(signature.result_types)
         _check_conditioner(self.output_conditioner, signature.result_types[self.output_port])
-
-    @property
-    def scalar_type(self) -> ScalarType:
-        return self.operator.signature.result_types[self.output_port]
+        object.__setattr__(self, "scalar_type", signature.result_types[self.output_port])
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +170,7 @@ class MirFloatConst(MirConst):
     def __post_init__(self) -> None:
         assert isinstance(self.scalar_type, FloatType)
         assert isinstance(self.value, float)
-        _refuse_degrading(self.value, self.scalar_type.fmt, "constant")
+        refuse_degrading(self.value, self.scalar_type.fmt, "constant")
         # ZKF has no negative zero, and neither does HIR; normalizing here keeps the pool from ever holding one.
         object.__setattr__(self, "value", self.value + 0.0)
 
@@ -332,21 +359,37 @@ class Mir:
         return next(block.id for block in self.blocks if isinstance(block.terminator, MirRet))
 
 
-class _MirBankView(ABC):
+def successors(block: MirBlock) -> list[BlockId]:
+    match block.terminator:
+        case MirJump(target=target):
+            return [target]
+        case MirBranch(if_true=if_true, if_false=if_false):
+            return [if_true, if_false]
+        case MirRet():
+            return []
+        case _:
+            assert_never(block.terminator)
+
+
+def reverse_postorder(mir: Mir) -> list[BlockId]:
+    return reverse_postorder_of(mir.entry, {block.id: successors(block) for block in mir.blocks})
+
+
+class _MirBankView:
     """
-    Common structure of a single-bank MIR resource view: the phi-arm subset and the per-block operation listing, both
-    derived identically from the bank's narrowed node table. Each concrete view fixes the element types of `nodes`
-    and supplies `operation_nodes` -- the bank's defining membership predicate over the operations.
+    The phi-arm subset and the per-block operation listing of one bank; `operation_nodes` is filled once since the
+    scheduler reads it per operation.
     """
 
     __slots__ = ()
 
     # Each concrete view narrows this to its bank's node element type (e.g. `dict[ValueId, MirWideNode]`).
     nodes: Mapping[ValueId, MirNode]
+    operation_nodes: dict[ValueId, MirOperation]
 
-    @property
-    @abstractmethod
-    def operation_nodes(self) -> dict[ValueId, MirOperation]: ...
+    def __post_init__(self) -> None:
+        operations = {vid: node for vid, node in self.nodes.items() if isinstance(node, MirOperation)}
+        object.__setattr__(self, "operation_nodes", operations)
 
     @property
     def phi_nodes(self) -> dict[ValueId, MirPhi]:
@@ -373,6 +416,7 @@ class MirWideView(_MirBankView):
     state_slots: list[MirWideStateSlot]
     float_format: FloatFormat
     int_format: IntFormat
+    operation_nodes: dict[ValueId, MirOperation] = field(init=False, compare=False)
 
     @property
     def input_nodes(self) -> dict[ValueId, MirWideInput]:
@@ -387,12 +431,6 @@ class MirWideView(_MirBankView):
     @property
     def const_nodes(self) -> dict[ValueId, MirWideConst]:
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, (MirFloatConst, MirIntConst))}
-
-    @property
-    def operation_nodes(self) -> dict[ValueId, MirOperation]:
-        return {
-            vid: node for vid, node in self.nodes.items() if isinstance(node, MirOperation) and node.scalar_type.is_wide
-        }
 
     def scalar_type_of(self, vid: ValueId) -> FloatType | IntType:
         """Which family a wide value belongs to: the bank is physical, so only the value itself names its type."""
@@ -466,6 +504,7 @@ class MirBoolView(_MirBankView):
     input_ids: list[ValueId]
     outputs: list[MirBoolOutput]
     state_slots: list[MirBoolStateSlot]
+    operation_nodes: dict[ValueId, MirOperation] = field(init=False, compare=False)
 
     @property
     def input_nodes(self) -> dict[ValueId, MirBoolInput]:
@@ -478,14 +517,6 @@ class MirBoolView(_MirBankView):
     @property
     def const_nodes(self) -> dict[ValueId, MirBoolConst]:
         return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolConst)}
-
-    @property
-    def operation_nodes(self) -> dict[ValueId, MirOperation]:
-        return {
-            vid: node
-            for vid, node in self.nodes.items()
-            if isinstance(node, MirOperation) and isinstance(node.scalar_type, BoolType)
-        }
 
     @classmethod
     def from_mir(cls, mir: Mir) -> MirBoolView:
@@ -578,19 +609,7 @@ class MirBuilder:
         return vid
 
     def _type_of(self, vid: ValueId) -> ScalarType:
-        node = self._nodes[vid]
-        match node:
-            case MirInput(scalar_type=scalar_type):
-                return scalar_type
-            case MirStateRead(scalar_type=scalar_type):
-                return scalar_type
-            case MirConst(scalar_type=scalar_type):
-                return scalar_type
-            case MirPhi(scalar_type=scalar_type):
-                return scalar_type
-            case MirOperation() as operation:
-                return operation.scalar_type
-        assert False, f"MIR node {vid} has no scalar type"
+        return self._nodes[vid].scalar_type
 
     def float_input(self, name: str, scalar_type: FloatType) -> ValueId:
         vid = self._fresh(MirFloatInput(name, scalar_type))
@@ -653,6 +672,14 @@ class MirBuilder:
             self._type_of(operand) == expected
             for operand, expected in zip(operands, signature.operand_types, strict=True)
         )
+        # Normalized BEFORE the key below, so every conditioned view of one unconditioned operand interns to a
+        # single value. Discarding the transform is what the declaration licenses: it cannot be observed.
+        operand_conditioners = [
+            identity_conditioner(operand_type) if position in operator.unconditioned_operands else conditioner
+            for position, (conditioner, operand_type) in enumerate(
+                zip(operand_conditioners, signature.operand_types, strict=True)
+            )
+        ]
         if output_conditioner is None:
             output_conditioner = identity_conditioner(signature.result_types[output_port])
         key = (
@@ -724,7 +751,7 @@ class MirBuilder:
         conditioner: FloatSignControl = FloatSignControl(),
     ) -> None:
         assert isinstance(self._type_of(live_out), FloatType)
-        _refuse_degrading(float(reset_value), self._float_format, f"state slot {name!r} reset")
+        refuse_degrading(float(reset_value), self._float_format, f"state slot {name!r} reset")
         self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, conditioner))
 
     def int_state_slot(

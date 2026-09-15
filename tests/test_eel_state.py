@@ -1621,3 +1621,22 @@ class _StateAliasesParameterDefault:
 
 def test_a_state_tree_aliasing_a_parameter_default_rejects_at_conversion() -> None:
     _rejects(_StateAliasesParameterDefault().step, "overlaps the environment name 'a parameter default'")
+
+
+class _ParameterNamedLikeAStatePort:
+    def __init__(self) -> None:
+        self.s = 0.0
+
+    def step(self, state_s: float) -> float:
+        self.s = self.s + state_s
+        return self.s
+
+
+def test_a_parameter_spelled_like_a_state_port_is_not_a_collision() -> None:
+    # Parameters reach the interface as `in_<name>`, so nothing a parameter is called can collide with a `state_`
+    # port; a name that merely looks like one is an ordinary parameter.
+    result = _synthesized(_ParameterNamedLikeAStatePort().step)
+    assert {"in_state_s", "state_s"} <= {port.name for port in result.ports}
+    sim, ref = result.numerical_model.elaborate(), _ParameterNamedLikeAStatePort()
+    for x in (2.0, -1.0, 0.5):
+        assert float(sim.run(x)[0]) == ref.step(x), f"x={x}"

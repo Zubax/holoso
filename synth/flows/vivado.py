@@ -10,6 +10,7 @@ from .._flow_id import FlowId
 from ._flow import Flow
 
 _TCL = "run_vivado.tcl"
+_DEFINES = "holoso_defines.v"
 _XDC = "ooc.xdc"
 _LOG = "vivado_run.log"  # our captured stdout; Vivado writes its own vivado.log in the same dir
 _UTIL = "utilization.rpt"
@@ -32,7 +33,10 @@ class VivadoArtix7Flow(Flow):
 
     def prepare(self, design: OocDesign) -> SynthArtifact:
         top = design.top
-        src = design.files
+        # Vivado keeps a `case` ROM in LUT logic (5-10 percent of a large machine) unless its read register carries the
+        # attribute; every other tool decides by its own cost model.
+        defines = SourceFile(Path(_DEFINES), '`define HOLOSO_ATTRIBUTE_ROM (* rom_style = "block" *)\n')
+        src = [defines, *design.files]
         verilog_paths = [source.path for source in src]
 
         period_ns = 1000.0 / self.target_frequency_MHz

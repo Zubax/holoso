@@ -1,25 +1,20 @@
 """
 Steering/area non-regression gate for the LIR build.
 
-Every currently-synthesizing example is built to LIR and measured on the metrics that bound the synthesized
-fabric (here
-"straight-line" means the pure-float flat path: single block, no boolean fabric -- an if-converted kernel can be
-single-block without being straight-line in this sense): the wide and
-boolean register counts, the per-port read-mux fan-in and per-register write-select fan-in (the steering cost that
-dominates the LUTs), and the statically-known latency lower bound. The baseline below was re-frozen on the converged
-build with the bank-independent read/landing model, at the default register-allocation effort. Value numbering is
-seed-independent (`tests/test_determinism.py` proves byte-identical Verilog across `PYTHONHASHSEED` values), so
-these figures hold in any process without pinning the hash seed.
+Every currently-synthesizing example is built to LIR and measured on the figures that bound the synthesized fabric:
+the wide and boolean register counts, the register-file steering -- the arms of every operand port's read mux and of
+every register's write select, counted off the same source lists the Verilog codebooks are numbered from
+(`read_sources_per_port`, `write_sources_per_register`) plus the handshake-gated arms the emitter adds beside them,
+so a frozen figure is the emitted mux on every kernel, straight-line or not -- the widest read port and the widest
+wide write select, and the statically known latency figures. Here "straight-line" means the pure-float flat path:
+single block, no boolean fabric (an if-converted kernel can be single-block without being straight-line in this
+sense). The baseline is frozen at a fixed allocator tuning, passed explicitly so no environment speed-up leaks in.
+Value numbering is seed-independent (`tests/test_determinism.py` proves byte-identical Verilog across `PYTHONHASHSEED`
+values), so these figures hold in any process without pinning the hash seed.
 
-The contract: NO example may regress past its frozen baseline on any metric. A single-block (straight-line) kernel is
-expected to hit equality -- the unified allocator subsumes the former straight-line path. The control-flow rows
-themselves encode the convergence win (cross-block reuse and coalescing collapsed the former fresh-per-value register
-explosion), so any backslide toward it fails the same gate.
-
-These read/write fan-in figures are exact steering proxies only for single-block kernels (the read-set/write-set
-properties union across the flat op stream, which conflates mutually-exclusive blocks on a CFG); for control-flow
-kernels the register counts are the directly-comparable figures, with the fan-in kept as a same-kernel before/after
-monotonicity guard.
+The contract: no figure may regress; a deliberate register-for-arm trade re-freezes `nreg` (or `bnreg`) and
+`steering` together. The control-flow rows encode the convergence win (cross-block reuse and
+coalescing keep registers from growing per value), so any backslide toward it fails the same gate.
 """
 
 import sys
@@ -30,12 +25,30 @@ from pathlib import Path
 
 import pytest
 
-from holoso import FloatFormat, FSortOptions, OperatorOptions
+from holoso import FloatFormat, FMulOptions, FSortOptions, OperatorOptions
 from holoso._eel import lower
-from holoso._lir import Lir
+from holoso._lir import (
+    BoolRegRef,
+    Early,
+    Lir,
+    MoveWriteSource,
+    RegRef,
+    read_arms,
+    read_sources_per_port,
+    steering,
+    write_arms,
+    write_events,
+)
 from holoso._mir import MirOptions
 from holoso._mir import lower as lower_to_mir
-from ._modelref import build_lir, default_mir, default_options, mir_options, DEFAULT_UNROLL_MAX_TRIPS, SHIPPED_TUNING
+from ._modelref import (
+    build_lir,
+    default_mir,
+    default_options,
+    mir_options,
+    DEFAULT_UNROLL_MAX_TRIPS,
+    FROZEN_TUNING,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import madd  # noqa: E402
@@ -66,6 +79,7 @@ _FMT = FloatFormat(8, 36)
 
 # Kernels the shared default operator set cannot lower take their spec-style adjustment here.
 _EXTRA_OPERATORS: dict[str, Callable[[OperatorOptions], OperatorOptions]] = {
+    "ekf1_stateless_fmul2": lambda ops: dataclasses.replace(ops, fmul=FMulOptions(instances=2)),
     "imu_fusion": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     "finite_set_current_controller": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     "foc": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
@@ -92,6 +106,7 @@ _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
     "fir": lambda: Fir4().__call__,
     "biquad": lambda: Biquad().__call__,
     "ekf1_stateless": lambda: update_x_P,
+    "ekf1_stateless_fmul2": lambda: update_x_P,
     "finite_set_current_controller": lambda: FiniteSetCurrentController().__call__,
     "ekf1_stateful": lambda: Ekf1().update,
     "foc": lambda: FocController().tick,
@@ -103,15 +118,18 @@ class Metrics:
     """
     The non-regression figures sampled off a built Lir.
 
-    `steering` is the total sparse-regfile mux fan-in -- read-mux fan-in plus the upper-bound write-select fan-in
-    (Lir.write_select_fanin, which counts every write-chain driver the backend synthesizes: pooled lanes,
-    inline casts, phi-arm copies, and slot installs). Counting the copies matters here: phi-arm coalescing trades
-    pc-gated copies for shared pooled writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a
-    regression. `copies` is the total phi-arm install count (wide copies plus boolean writes), the direct measure
-    of how many phi arms still install by copy rather than coalescing onto the merged register.
+    `steering` is the total register-file mux fan-in: over every operand port, its read sources beyond the first
+    (registers and constants alike, a constant being an arm of the same mux), plus over every register, its write
+    sources beyond the first -- the structurally distinct opcode sources of its write select (a pooled lane, an inline
+    result, a move; one arm however many steps select it) and the handshake-gated arms beside them (an input load, a
+    boundary state install). Counting the moves matters: phi-arm coalescing trades pc-gated copies for shared pooled
+    writeback lanes, so a copy-blind proxy would mis-report a coalescing win as a regression. `max_read_port` and
+    `max_write_select` are the widest read mux and the widest wide-bank write select, the localized view a total cannot
+    give. `copies` is the total phi-arm install count (wide and boolean copies, the early slot installs aside), the
+    direct measure of how many phi arms still install by copy rather than coalescing onto the merged register.
 
-    `last_pc` is the static ROM length (Lir.initiation_interval) -- the total stage count: blocks tile the
-    ROM, so a per-block drain regression in ANY block inflates it, the primary "excessive stages" guard.
+    `last_pc` is the last ROM address -- the total stage count: blocks tile the ROM, so a per-block drain regression
+    in ANY block inflates it, the primary "excessive stages" guard.
     `max_block_span` is the largest per-block terminator offset (`max term_offset`), localizing a per-block drain
     regression to one block (unlike `last_pc`, it does not move with the number of blocks).
     """
@@ -120,14 +138,14 @@ class Metrics:
     nreg: int
     bnreg: int
     steering: int
+    max_read_port: int
+    max_write_select: int
     copies: int
     min_ii: int
     last_pc: int
     max_block_span: int
 
 
-# The baselines are frozen against the shipped allocator defaults, passed explicitly so no environment speed-up can
-# leak in here; changing a default deliberately re-freezes them.
 def _mir_for(name: str) -> MirOptions:
     """The shared default, adjusted per kernel where the default operator set cannot lower it (min/max needs fsort)."""
     if name in _EXTRA_OPERATORS:
@@ -137,28 +155,33 @@ def _mir_for(name: str) -> MirOptions:
     return default_mir(_FMT)
 
 
+def _build(kernel: Callable[..., object], name: str, options: MirOptions) -> Lir:
+    return build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, options), name, FROZEN_TUNING)
+
+
 def _measure(name: str) -> Metrics:
-    lir: Lir = build_lir(
-        lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, _mir_for(name)),
-        name,
-        SHIPPED_TUNING,
-    )
+    lir = _build(_EXAMPLES[name](), name, _mir_for(name))
+    early = sum(isinstance(slot.install, Early) for slot in lir.wide_state_slots)
+    copies = sum(len(block.copies) for block in lir.blocks) - early
     straight = (
         len(lir.blocks) == 1
         and not lir.bool_state_slots
-        and not any(b.inline_ops or b.wide_copies or b.bool_writes for b in lir.blocks)
+        and not any(b.inline_ops for b in lir.blocks)
+        and copies == 0
         and lir.bool_regfile.nreg == 0
     )
-    read_fanin = sum(max(0, len(regs) - 1) for regs in lir.read_set_per_port.values())
-    copies = sum(len(block.wide_copies) + len(block.bool_writes) for block in lir.blocks)
+    reads, writes, arms = read_arms(lir), write_arms(lir), steering(lir)
+    nreg, bnreg = lir.regfile.nreg, lir.bool_regfile.nreg
     return Metrics(
         straight_line=straight,
-        nreg=lir.regfile.nreg,
-        bnreg=lir.bool_regfile.nreg,
-        steering=read_fanin + lir.write_select_fanin,
+        nreg=nreg,
+        bnreg=bnreg,
+        steering=arms.read + arms.wide_write + arms.bool_write,
+        max_read_port=max(reads.values(), default=0),
+        max_write_select=max((n for dst, n in writes.items() if isinstance(dst, RegRef)), default=0),
         copies=copies,
         min_ii=lir.min_initiation_interval,
-        last_pc=lir.initiation_interval,
+        last_pc=lir.last_pc,
         max_block_span=max(block.term_offset for block in lir.blocks),
     )
 
@@ -168,10 +191,17 @@ def _measure(name: str) -> Metrics:
 #
 # - Registers and steering reflect the unified cross-block allocator: liveness-bounded reuse with coalesced state
 #   slots, per-(instance, port) lane accounting of both banks' write selects, the comparator's read ports steered like
-#   any other operand muxes, and commutative orientation (the comparator swaps with its gt/lt tap exchange). steering
-#   counts the upper-bound write-select fan-in (the emitter's full per-register write chain incl. phi-arm copies), not
-#   a pooled-lane-only proxy. Cordic's read-mux steering sits a couple of arms above the best coloring in its
-#   near-equal-cost band -- the disclosed price of deterministic value numbering; deeper annealing is optional.
+#   any other operand muxes, and commutative orientation (the comparator swaps with its gt/lt tap exchange), all
+#   decided by one annealer minimizing `steering + 2 * registers`. steering is the emitted mux arm count: a constant
+#   operand is a read arm (cordic's 23 constant arms are its angle table), and a write source repeated on several
+#   steps is one arm. Rows where nreg and steering moved in opposite directions are the annealer's trades at that
+#   price: the large kernels spent registers to remove arms (ekf1_stateless 41 -> 44 registers for 100 -> 91 arms,
+#   ekf1_stateful 39 -> 42 for 99 -> 79), the phi-dense and small kernels spent arms to remove registers (imu_fusion
+#   51 -> 41 registers for 151 -> 160 arms, remainder 9 -> 5 for 13 -> 17, pid 9 -> 6 for 15 -> 17). max_write_select
+#   records how wide those merges made the widest wide-bank write select, the localized view the total hides (foc
+#   reaches 9). Write keys are the emitted opcodes (an inline result over the same registers is one arm, two arms
+#   moving one operand are one), so the widest port and select of foc and imu_fusion are those of the allocations that
+#   exact count chose.
 # - copies and the phi-dense figures reflect phi-arm coalescing: a phi whose register-backed, identity-conditioner arms
 #   do not interfere with it shares their register (the install-free oracle decides), so the install copy vanishes.
 #   recip_newton keeps its one loop-carried copy (its phi overlaps the back-edge arm), proving the oracle refuses
@@ -198,74 +228,151 @@ def _measure(name: str) -> Metrics:
 #   every block's span (a per-block drain regression anywhere inflates it); max_block_span localizes it to one
 #   block. These timing rules move the schedule-length guards but not nreg/bnreg/steering/copies; signal_window
 #   carries a deliberately-loosened steering arm (one freed boolean register traded for one write-select mux) --
-#   refrozen rather than chased, since the rules are global and correctness-neutral.
+#   refrozen rather than chased, since the rules are global and correctness-neutral. Settling a commutative operator's
+#   constant operand on one side re-colors what it interns, at an unchanged schedule, and is refrozen the same way.
 # - pid uses a variable sample interval: the derivative path contains a real divide, and the first-sample and saturation
 #   guards keep the kernel multi-block with one residual copy. The larger PID row is therefore a property of the example
 #   itself, not a scheduler regression to chase.
-BASELINE: dict[str, Metrics] = {
-    "madd": Metrics(True, nreg=4, bnreg=0, steering=3, copies=0, min_ii=14, last_pc=14, max_block_span=14),
-    "poly3": Metrics(True, nreg=5, bnreg=0, steering=5, copies=0, min_ii=23, last_pc=23, max_block_span=23),
-    "signal_window": Metrics(False, nreg=4, bnreg=5, steering=8, copies=0, min_ii=9, last_pc=9, max_block_span=9),
-    "iir1_hpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=20, last_pc=20, max_block_span=20),
-    "iir1_lpf": Metrics(False, nreg=3, bnreg=1, steering=2, copies=0, min_ii=15, last_pc=15, max_block_span=15),
-    "pid": Metrics(False, nreg=10, bnreg=2, steering=13, copies=1, min_ii=36, last_pc=68, max_block_span=31),
-    "schmitt_trigger": Metrics(False, nreg=1, bnreg=2, steering=2, copies=0, min_ii=6, last_pc=6, max_block_span=6),
-    "quadrature_encoder": Metrics(False, nreg=0, bnreg=7, steering=7, copies=0, min_ii=6, last_pc=6, max_block_span=6),
+# fmt: off
+_BASELINE: dict[str, Metrics] = {
+    "madd": Metrics(
+        True, nreg=3, bnreg=0, steering=5, max_read_port=2, max_write_select=4,
+        copies=0, min_ii=14, last_pc=14, max_block_span=14,
+    ),
+    "poly3": Metrics(
+        True, nreg=5, bnreg=0, steering=4, max_read_port=3, max_write_select=3,
+        copies=0, min_ii=23, last_pc=23, max_block_span=23,
+    ),
+    "signal_window": Metrics(
+        False, nreg=4, bnreg=5, steering=8, max_read_port=2, max_write_select=2,
+        copies=0, min_ii=9, last_pc=9, max_block_span=9,
+    ),
+    "iir1_hpf": Metrics(
+        False, nreg=3, bnreg=1, steering=2, max_read_port=2, max_write_select=2,
+        copies=0, min_ii=20, last_pc=20, max_block_span=20,
+    ),
+    "iir1_lpf": Metrics(
+        False, nreg=3, bnreg=1, steering=2, max_read_port=2, max_write_select=2,
+        copies=0, min_ii=15, last_pc=15, max_block_span=15,
+    ),
+    "pid": Metrics(
+        False, nreg=6, bnreg=2, steering=17, max_read_port=4, max_write_select=5,
+        copies=1, min_ii=36, last_pc=68, max_block_span=31,
+    ),
+    "schmitt_trigger": Metrics(
+        False, nreg=1, bnreg=2, steering=2, max_read_port=1, max_write_select=1,
+        copies=0, min_ii=6, last_pc=6, max_block_span=6,
+    ),
+    "quadrature_encoder": Metrics(
+        False, nreg=0, bnreg=7, steering=7, max_read_port=0, max_write_select=0,
+        copies=0, min_ii=6, last_pc=6, max_block_span=6,
+    ),
     "phase_frequency_detector": Metrics(
-        False, nreg=0, bnreg=5, steering=5, copies=0, min_ii=6, last_pc=6, max_block_span=6
+        False, nreg=0, bnreg=5, steering=5, max_read_port=0, max_write_select=0,
+        copies=0, min_ii=6, last_pc=6, max_block_span=6,
     ),
     "latching_fault_register": Metrics(
-        False, nreg=0, bnreg=6, steering=2, copies=0, min_ii=5, last_pc=5, max_block_span=5
+        False, nreg=0, bnreg=6, steering=2, max_read_port=0, max_write_select=0,
+        copies=0, min_ii=5, last_pc=5, max_block_span=5,
     ),
-    "majority_voter": Metrics(False, nreg=7, bnreg=11, steering=13, copies=0, min_ii=15, last_pc=20, max_block_span=11),
+    "majority_voter": Metrics(
+        False, nreg=5, bnreg=11, steering=15, max_read_port=1, max_write_select=4,
+        copies=0, min_ii=14, last_pc=19, max_block_span=11,
+    ),
     # recip_newton's loop opens with a statically-true convergence test, so the partial evaluator peels the first
     # trip: one more live value across the loop entry (nreg, steering) and one body's worth of extra microcode, in
     # exchange for a shorter realized transaction (test_cycle_model).
-    "recip_newton": Metrics(False, nreg=5, bnreg=1, steering=7, copies=1, min_ii=29, last_pc=46, max_block_span=23),
-    "remainder": Metrics(False, nreg=9, bnreg=4, steering=11, copies=2, min_ii=37, last_pc=54, max_block_span=17),
-    "octave_index": Metrics(False, nreg=3, bnreg=1, steering=6, copies=3, min_ii=14, last_pc=47, max_block_span=24),
-    "cordic_sincos": Metrics(
-        False, nreg=7, bnreg=1, steering=53, copies=0, min_ii=104, last_pc=104, max_block_span=104
+    "recip_newton": Metrics(
+        False, nreg=4, bnreg=1, steering=8, max_read_port=3, max_write_select=3,
+        copies=1, min_ii=28, last_pc=45, max_block_span=23,
     ),
-    "integrator": Metrics(True, nreg=5, bnreg=0, steering=4, copies=0, min_ii=16, last_pc=16, max_block_span=16),
+    "remainder": Metrics(
+        False, nreg=5, bnreg=4, steering=16, max_read_port=3, max_write_select=3,
+        copies=2, min_ii=37, last_pc=51, max_block_span=17,
+    ),
+    "octave_index": Metrics(
+        False, nreg=3, bnreg=1, steering=5, max_read_port=2, max_write_select=3,
+        copies=3, min_ii=13, last_pc=44, max_block_span=24,
+    ),
+    "cordic_sincos": Metrics(
+        False, nreg=5, bnreg=1, steering=29, max_read_port=14, max_write_select=4,
+        copies=0, min_ii=104, last_pc=104, max_block_span=104,
+    ),
+    "integrator": Metrics(
+        True, nreg=4, bnreg=0, steering=5, max_read_port=2, max_write_select=2,
+        copies=0, min_ii=16, last_pc=16, max_block_span=16,
+    ),
     # The capability-probe controller: records, reductions, reshape, dtype conversions, and a branchy scan in one
     # kernel, so it gates the whole new-frontend surface against fabric regressions. The pairwise extrema over the
     # six active drives hold two partial maxima live where a fold held one, at no cost in latency: the dot products
     # bound that block, not the max.
     "finite_set_current_controller": Metrics(
-        False, nreg=24, bnreg=4, steering=68, copies=12, min_ii=160, last_pc=204, max_block_span=108
+        False, nreg=16, bnreg=4, steering=69, max_read_port=8, max_write_select=7,
+        copies=12, min_ii=160, last_pc=204, max_block_span=108,
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
-    # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced.
+    # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced. Its
+    # three Euclidean norms carry an exponent extraction per leg and the scalings around it, which this row prices.
     "imu_fusion": Metrics(
-        False, nreg=48, bnreg=5, steering=117, copies=14, min_ii=252, last_pc=439, max_block_span=129
+        False, nreg=42, bnreg=5, steering=158, max_read_port=26, max_write_select=8,
+        copies=14, min_ii=270, last_pc=464, max_block_span=139,
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's.
-    "fir": Metrics(True, nreg=8, bnreg=0, steering=5, copies=0, min_ii=20, last_pc=20, max_block_span=20),
-    "biquad": Metrics(True, nreg=6, bnreg=0, steering=5, copies=0, min_ii=21, last_pc=21, max_block_span=21),
-    # The two largest kernels carry slightly higher register pressure as a deliberate latency-for-area point: the
-    # uniform landing keeps min_ii/last_pc tight, so a result resides a cycle longer, raising register
-    # pressure (nreg, and ekf1_stateless's steering with it). The baselines are non-regression ceilings (`<=`) pinned
-    # tight to the converged build, so a later improvement may sit below its bound until the next re-freeze.
+    "fir": Metrics(
+        True, nreg=8, bnreg=0, steering=8, max_read_port=4, max_write_select=1,
+        copies=0, min_ii=20, last_pc=20, max_block_span=20,
+    ),
+    "biquad": Metrics(
+        True, nreg=5, bnreg=0, steering=6, max_read_port=3, max_write_select=2,
+        copies=0, min_ii=21, last_pc=21, max_block_span=21,
+    ),
+    # The two largest kernels carry the highest register pressure: the uniform landing keeps min_ii/last_pc tight,
+    # so a result resides a cycle longer, and the allocator spends a few more registers still to cut their read
+    # muxes. The baselines are non-regression ceilings (`<=`) pinned tight to the converged build, so a later
+    # improvement may sit below its bound until the next re-freeze.
     "ekf1_stateless": Metrics(
-        True, nreg=41, bnreg=0, steering=100, copies=0, min_ii=125, last_pc=125, max_block_span=125
+        True, nreg=44, bnreg=0, steering=91, max_read_port=26, max_write_select=3,
+        copies=0, min_ii=125, last_pc=125, max_block_span=125,
+    ),
+    # The EKF with a second multiplier, the knob this allocator was built for: the co-issued products shorten the
+    # transaction by 38 stages and the allocator binds them across the two instances (the scheduler's first-free binding
+    # measured 140 arms here, the annealer 112). A monotonicity guard for the binding, not its proof -- the directed
+    # kernels in test_regalloc.py are that.
+    "ekf1_stateless_fmul2": Metrics(
+        True, nreg=50, bnreg=0, steering=112, max_read_port=21, max_write_select=3,
+        copies=0, min_ii=87, last_pc=87, max_block_span=87,
     ),
     "ekf1_stateful": Metrics(
-        True, nreg=40, bnreg=0, steering=89, copies=0, min_ii=127, last_pc=127, max_block_span=127
+        True, nreg=42, bnreg=0, steering=79, max_read_port=30, max_write_select=3,
+        copies=0, min_ii=125, last_pc=125, max_block_span=125,
     ),
     # A deep composition: a nested component instance (the flux observer) whose state joins the controller's own,
     # every transcendental the library offers, and two data-dependent branches -- so it gates cross-component slot
     # allocation against the register and steering blowup that inlining a component can cause.
-    "foc": Metrics(False, nreg=32, bnreg=3, steering=73, copies=4, min_ii=284, last_pc=335, max_block_span=217),
+    "foc": Metrics(
+        False, nreg=28, bnreg=3, steering=89, max_read_port=14, max_write_select=9,
+        copies=4, min_ii=298, last_pc=349, max_block_span=231,
+    ),
 }
+# fmt: on
 
 
 @pytest.mark.parametrize("name", list(_EXAMPLES))
 def test_metrics_do_not_regress(name: str) -> None:
-    base = BASELINE[name]
+    base = _BASELINE[name]
     got = _measure(name)
     assert got.straight_line == base.straight_line, f"{name}: control-flow classification changed"
-    for field in ("nreg", "bnreg", "steering", "copies", "min_ii", "last_pc", "max_block_span"):
+    for field in (
+        "nreg",
+        "bnreg",
+        "steering",
+        "max_read_port",
+        "max_write_select",
+        "copies",
+        "min_ii",
+        "last_pc",
+        "max_block_span",
+    ):
         assert getattr(got, field) <= getattr(
             base, field
         ), f"{name}: {field} regressed {getattr(base, field)} -> {getattr(got, field)}"
@@ -276,3 +383,46 @@ def test_build_is_deterministic() -> None:
     first = _measure("ekf1_stateless")
     second = _measure("ekf1_stateless")
     assert first == second
+
+
+def test_constant_operands_are_read_arms() -> None:
+    # A constant is an arm of the operand mux like any register. Three products of one input by three distinct
+    # non-power-of-two constants (separate outputs, so the linear-combination fold cannot merge them; a power-of-two
+    # scale would never reach the pool) put three constants on the multiplier's two ports, at least two of them
+    # sharing a port whichever way the firings orient -- arms a register-only count reports as zero.
+    def kernel(x: float) -> tuple[float, float, float]:
+        return x * 1.3, x * 2.7, x * 3.9
+
+    lir = _build(kernel, "three_scales", default_mir(_FMT))
+    assert len(lir.wide_consts) == 3
+    books = read_sources_per_port(lir)
+    registers_only = sum(max(0, sum(isinstance(source, RegRef) for source in book) - 1) for book in books.values())
+    assert sum(max(0, n - 1) for n in read_arms(lir).values()) - registers_only >= 2
+
+
+def test_a_move_repeated_on_several_steps_is_one_write_arm() -> None:
+    # The loop counter's initial value installs into its phi register from both arms of the real diamond ahead of the
+    # loop (the divide keeps it a branch): two steps, one structurally identical move, one arm of the write select --
+    # the emitter selects it by one opcode on both steps, so a per-step count overstates the mux.
+    def kernel(x: float) -> int:
+        if x >= 1.0:
+            scaled = x
+        else:
+            scaled = 1.0 / x
+        octaves = 0
+        while scaled > 1.0:
+            scaled = scaled * 0.5
+            octaves = octaves + 1
+        return octaves
+
+    lir = _build(kernel, "counter_seed", default_mir(_FMT))
+    moves: dict[RegRef | BoolRegRef, list[MoveWriteSource]] = {}
+    for event in write_events(lir):
+        if isinstance(event.source, MoveWriteSource):
+            moves.setdefault(event.dst, []).append(event.source)
+    repeated = [dst for dst, sources in moves.items() if len(sources) > len(set(sources))]
+    assert repeated, "the premise needs one move source installed on several steps"
+    arms = write_arms(lir)
+    for dst in repeated:
+        sources = [event.source for event in write_events(lir) if event.dst == dst]
+        assert arms[dst] == len(set(sources)) < len(sources)

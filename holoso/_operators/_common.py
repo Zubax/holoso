@@ -187,6 +187,19 @@ class HardwareOperator(ABC):
     # The permutation must preserve each port's type, so a swapped firing's taps stay in their banks.
     swap_output_permutation: ClassVar[tuple[int, ...] | None] = None
 
+    # Operand positions that bind NO conditioner sideband, their port being fixed to the identity: the operator
+    # cannot observe the transform, so offering one would buy a second firing for one answer.
+    unconditioned_operands: ClassVar[frozenset[int]] = frozenset()
+
+    def conditions_operand(self, position: int) -> bool:
+        """
+        Whether this operand port binds a conditioner sideband. A RESULT port's is decided by its type alone -- a
+        conditioned result is always observable -- so only the operand side admits a per-operator answer.
+        """
+        if position in self.unconditioned_operands:
+            return False
+        return has_sign_control(self.signature.operand_types[position])
+
     @property
     @abstractmethod
     def latency(self) -> int: ...
@@ -195,7 +208,7 @@ class HardwareOperator(ABC):
     def initiation_interval(self) -> int:
         """
         Minimum cycles between successive issues on one physical instance (1 = fully pipelined) -- the per-operator
-        sense of II. Distinct from the module-level `Lir.initiation_interval`, the whole-transaction cost, which is
+        sense of II. Distinct from the module-level `Lir.min_initiation_interval`, the whole-transaction cost, which is
         this project's deliberate usage (see DESIGN.md, Direction).
         """
         return 1
@@ -247,6 +260,19 @@ class HardwareOperator(ABC):
         """
 
 
+@dataclass(frozen=True, slots=True)
+class PooledOperatorOptions:
+    """
+    The knobs of one pooled operator. Every pooled operator subclasses this.
+    """
+
+    instances: int = 1
+    """How many physical copies of this operator the machine may emit. A cap: only the copies the schedule uses."""
+
+    def __post_init__(self) -> None:
+        assert self.instances >= 1
+
+
 @dataclass(frozen=True)
 class PooledHardwareOperator(HardwareOperator, ABC):
     """
@@ -254,6 +280,13 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     The scheduler pools and contends equal operators over shared instances; every port is microcode-driven in the
     generated RTL (a per-operand read opcode selects each operand, a per-register write opcode installs each result).
     """
+
+    Options: ClassVar[type[PooledOperatorOptions]]  # the type of the `opt` field below
+
+    @property
+    @abstractmethod
+    def opt(self) -> PooledOperatorOptions:
+        """This operator's knobs. Each subclass satisfies it with a field declared `opt: Options = field()`."""
 
     error_ports: ClassVar[list[str]] = []
     operand_hdl_ports: ClassVar[list[str]]  # module port name per operand, aligned with the arity

@@ -10,8 +10,8 @@ Protocol, per transaction of the ordered vector sequence:
   attribute leaves, not frozen attributes the kernel never lowers -- contain a NaN the compiler refuses to
   represent, lies outside the comparable domain and is discarded; a stateful kernel's remaining sequence goes with
   it, since the instance is no longer trustworthy. At least one transaction must survive comparison.
-- The module interface itself is checked: input ports must mirror the reference's parameters name-for-name in
-  order, output port names must be unique, every public slot must be observable through its `state_<slot>` port
+- The module interface itself is checked: input ports must mirror the reference's parameters in order, under the
+  names the hardware spells them, output port names must be unique, every public slot must be observable through its `state_<slot>` port
   -- whose produced value is compared against the post-call attribute leaf, so a mis-wired port diverges from its
   own slot -- and no state port may expose a private slot.
 - `out_<path>` ports are compared against the flattened return leaves by name (a `None` return has no leaves).
@@ -46,7 +46,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 import numpy as np
 
 from holoso._eel._annotations import unaliased
-from holoso._eel._names import indexed_names
+from holoso._eel._names import indexed_names, spelled
 from holoso._hir import Hir, HirEvaluator, NoNumber
 
 from ._modelref import flatten_value, port_name
@@ -120,7 +120,7 @@ def walk_instance_leaves(instance: object) -> list[tuple[str, bool, object]]:
             return
         seen.add(id(obj))
         for attr, value in vars(obj).items():
-            name = prefix + attr
+            name = prefix + spelled(attr)
             hidden = private or attr.startswith("_")
             if isinstance(value, (list, tuple, np.ndarray)):
                 for path, leaf in flatten_value(value):
@@ -190,7 +190,7 @@ def _leaf_names(name: str, annotation: object) -> list[str]:
         args = typing.get_args(annotation)
         return [leaf for k, arg in enumerate(args) for leaf in _leaf_names(f"{name}_{k}", unaliased(arg))]
     shape = _annotation_shape(annotation)
-    return [name] if shape is None else indexed_names(name, shape)
+    return [spelled(name)] if shape is None else indexed_names(spelled(name), shape)
 
 
 def _leaf_value(name: str, annotation: object, row: InputRow) -> object:
@@ -207,8 +207,8 @@ def _leaf_value(name: str, annotation: object, row: InputRow) -> object:
         return tuple(_leaf_value(f"{name}_{k}", unaliased(arg), row) for k, arg in enumerate(args))
     shape = _annotation_shape(annotation)
     if shape is None:
-        return row[name]
-    return np.array([row[leaf] for leaf in indexed_names(name, shape)]).reshape(shape)
+        return row[spelled(name)]
+    return np.array([row[leaf] for leaf in indexed_names(spelled(name), shape)]).reshape(shape)
 
 
 def expected_input_names(reference: Callable[..., object]) -> list[str]:

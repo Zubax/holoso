@@ -52,10 +52,7 @@ def flatten(a: np.ndarray) -> Any:
         raise ValueError("cannot flatten a scalar value")
     if a.ndim > 2:
         raise ValueError(f"flatten of a {a.ndim}-D value is not supported")
-    if a.ndim == 1:
-        return a
-    width = len(a[0])
-    return np.asarray([a[k // width, k % width] for k in range(len(a) * width)])
+    return a.reshape(-1)
 
 
 @array(np.dot, np.ndarray.dot, np.matmul, np.linalg.matmul, BinaryOp.MATMUL)
@@ -127,35 +124,29 @@ def norm(x: np.ndarray, order: Any = None) -> Any:
     The vector norms over a 1-D operand: Euclidean (the default, or ord 2), absolute sum (ord 1), and the Chebyshev
     extremes (ord of either infinity); a 2-D operand answers the Frobenius norm (the default). numpy defines no
     squared-magnitude order -- that spelling is the plain dot product `x @ x`.
+
+    The Euclidean orders answer the n-ary magnitude rather than `sqrt(x @ x)`, which rails wherever a leg's square
+    leaves the format as numpy's own answer does; the exponent scaling that keeps it costs the root, the extractor
+    and the scaler, which these orders therefore need.
     FIXME The matrix orders beyond Frobenius (the operator norms and the nuclear norm) are not supported.
     """
     x = x + 0.0  # numpy answers every norm in float, so int elements promote before any arithmetic can saturate
     if x.ndim == 2:
         if order is not None:
             raise ValueError(f"unsupported matrix norm order {order}")
-        flat = flatten(x)
-        return np.sqrt(_dot(flat, flat))
+        return math.hypot(*flatten(x))
     if x.ndim != 1:
         raise ValueError(f"norm requires a 1-D or 2-D operand, got a {x.ndim}-D value")
     if order is None:
         order = 2
     if order == 2:
-        return np.sqrt(_dot(x, x))
+        return math.hypot(*x)
     if order == 1:
-        acc = abs(x[0])
-        for k in range(1, len(x)):
-            acc += abs(x[k])
-        return acc
+        return np.sum(abs(x))
     if order == math.inf:
-        acc = abs(x[0])
-        for k in range(1, len(x)):
-            acc = max(acc, abs(x[k]))
-        return acc
+        return np.max(abs(x))
     if order == -math.inf:
-        acc = abs(x[0])
-        for k in range(1, len(x)):
-            acc = min(acc, abs(x[k]))
-        return acc
+        return np.min(abs(x))
     raise ValueError(f"unsupported vector norm order {order}")
 
 

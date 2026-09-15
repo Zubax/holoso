@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import numpy as np
 import pytest
+from jaxtyping import Float64
 
 import holoso
 from holoso import (
@@ -18,6 +19,7 @@ from holoso import (
     FDivOptions,
     FExp2Options,
     FFmaOptions,
+    FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
@@ -32,8 +34,9 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
+from holoso._operators import FAtan2Operator, FSincosOperator
 from holoso._value import ScalarValue
-from ._modelref import instantiated_modules as _modules, random_legal_bits
+from ._modelref import _if_supported, instantiated_modules as _modules, random_legal_bits
 
 # Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -58,13 +61,17 @@ def _ops(
     with_sqrt: bool = True,
     with_sincos: bool = True,
     with_atan2: bool = True,
+    with_ilog2: bool = True,
+    with_scaler: bool = True,
+    fmt: FloatFormat = FMT,
 ) -> Options:
     return Options(
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
             fdiv=FDivOptions(),
-            fmul_ilog2=FMulILog2Options(),
+            fmul_ilog2=FMulILog2Options() if with_scaler else None,
+            filog2=FILog2Options() if with_ilog2 else None,
             fcmp=FCmpOptions(),
             fround=FRoundOptions() if with_round else None,
             ffma=FFmaOptions() if with_fma else None,
@@ -72,10 +79,10 @@ def _ops(
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
             fsqrt=FSqrtOptions() if with_sqrt else None,
-            fsincos=FSincosOptions() if with_sincos else None,
-            fatan2=FAtan2Options() if with_atan2 else None,
+            fsincos=_if_supported(FSincosOperator, fmt, FSincosOptions()) if with_sincos else None,
+            fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options()) if with_atan2 else None,
         ),
-        ffmt=FMT,
+        ffmt=fmt,
     )
 
 
@@ -492,6 +499,20 @@ def test_min_max_is_not_bit_commutative() -> None:
         assert _bits(out[1]) == ref1.bits, f"min(y,-x) x={x} y={y}"
 
 
+def test_min_max_against_a_constant_keeps_its_operand_order() -> None:
+    # At x=0 the tie is between the written +0 and the conditioned -0, so swapping the constant operand flips the sign.
+    def kernel(x: float) -> tuple[float, float]:
+        return min(0.0, -x), max(0.0, -x)
+
+    sim = _sim(kernel, "min_max_const")
+    for x in [0.0, 2.5, -2.5]:
+        neg_x = _v(x).apply_sign(negate=True, absolute=False)
+        low, high = FloatValue.sort(_v(0.0), neg_x)
+        out = sim.run(x)
+        assert _bits(out[0]) == low.bits, f"min(0.0,-x) x={x}"
+        assert _bits(out[1]) == high.bits, f"max(0.0,-x) x={x}"
+
+
 def test_min_max_of_constants_fold() -> None:
     # min/max of two constants fold in the format-agnostic HIR, so a kernel using only constant min/max needs no
     # fsort hardware; synthesizing with fsort unconfigured proves the fold (an unfolded min/max would be rejected).
@@ -886,6 +907,16 @@ def test_atan2_unconfigured_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(with_atan2=False), name="atan2_unconfigured")
 
 
+def test_a_configured_atan2_a_kernel_never_reaches_is_never_built() -> None:
+    # No CORDIC table exists for this significand, so building the operator would fail.
+    def kernel(x: int) -> int:
+        return x + 1
+
+    options = Options(OperatorOptions(fatan2=FAtan2Options()), ffmt=FloatFormat(6, 8), wint_min=8, regalloc_effort=0)
+    (out,) = holoso.synthesize(kernel, options, name="k").numerical_model.elaborate().run(2)
+    assert isinstance(out, holoso.IntValue) and int(out) == 3
+
+
 def test_hypot_fused_with_atan2() -> None:
     # hypot(y, x) beside atan2(y, x) fuses into the atan2 CORDIC's magnitude port (units-free, no scale), exact
     # against the model even at the origin and infinities.
@@ -914,15 +945,17 @@ def test_hypot_sign_flipped_still_fuses_with_atan2() -> None:
 
 
 def test_hypot_lone_decomposition_is_approximate() -> None:
-    # A lone hypot (no adjacent atan2) falls back to the primitive decomposition (needs fsort/fsqrt); the root is
-    # exact but the scaling divisions and squares are not, so the composite stays approximate on finite nonzero inputs.
+    # A lone hypot is expanded by exact exponent scaling, so only the two squares and their sum round before the
+    # correctly-rounded root, and it stays in range where a written `sqrt(x*x + y*y)` overflows or flushes.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
     sim = _sim(kernel, "hypot_lone")
     assert _bits(sim.run(0.0, 0.0)[0]) == _v(0.0).bits
     assert _bits(sim.run(_POS_INF, 2.0)[0]) == _v(_POS_INF).bits
-    assert _bits(sim.run(_POS_INF, _POS_INF)[0]) == _v(_POS_INF).bits  # the only pair that could divide inf by inf
+    assert _bits(sim.run(_POS_INF, _POS_INF)[0]) == _v(_POS_INF).bits
+    assert _bits(sim.run(0.0, -7.5)[0]) == _v(7.5).bits  # a zero leg leaves the other exactly, no rounding at all
+    assert _bits(sim.run(-3.0, 4.0)[0]) == _v(5.0).bits  # signs are dropped, the squares being sign-blind
     rng = np.random.default_rng(0x4F0)
     for _ in range(200):
         # Spread over ±20 decades, which is what the magnitude scaling is FOR: the naive sqrt(y*y + x*x) overflows
@@ -932,17 +965,19 @@ def test_hypot_lone_decomposition_is_approximate() -> None:
         native = math.hypot(y, x)
         if native == 0.0 or math.isinf(native):
             continue
-        assert abs(float(sim.run(y, x)[0]) - native) <= 64 * _ulp32(native), f"lone hypot y={y} x={x}"
+        # Measured worst over 4000 draws is 1.003 ulps.
+        assert abs(float(sim.run(y, x)[0]) - native) <= 2 * _ulp32(native), f"lone hypot y={y} x={x}"
 
 
 def test_hypot_lone_missing_primitive_is_rejected() -> None:
-    # The decomposition needs fsort/fsqrt; absent either, a lone hypot is a clear configuration error.
+    # The expansion needs the exponent extractor, the root, and the scaler, but not the sorter.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
-    for ops in (_ops(with_sort=False), _ops(with_sqrt=False)):
+    for ops in (_ops(with_ilog2=False), _ops(with_sqrt=False), _ops(with_scaler=False)):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(kernel, ops, name="hypot_lone_reject")
+    holoso.synthesize(kernel, _ops(with_sort=False), name="hypot_lone_no_sorter")
 
 
 def _sqrt_ref(x: float) -> int:
@@ -1004,12 +1039,6 @@ def test_trig_of_constants_fold() -> None:
 def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None:
     # The composite steers a zero base away from log2's pole, but only a POSITIVE exponent leaves the base itself:
     # 0**-1 diverges. Regression: the shortcut returned the base for every exponent, so 0**-1 answered 0.0.
-    # A constant pole folds through that same composite, answering +inf as the datapath does; the host raises here.
-    def constant_pole(x: float) -> float:
-        return x + math.pow(0.0, -1.0)
-
-    assert math.isinf(float(_sim(constant_pole, "pow_zero_negative").run(1.0)[0]))
-
     def runtime_pole(b: float, e: float) -> float:
         return math.pow(b, e)
 
@@ -1022,7 +1051,7 @@ def test_a_zero_base_raised_to_a_negative_power_is_a_pole_not_the_base() -> None
 def test_a_constant_zero_base_computes_its_poles_through_the_composite() -> None:
     # `0.0 ** e` denotes a number for every e except a negative one. The general path is `exp2(e * log2(b))`,
     # and log2's evaluate answers the np reference's -inf at the folded zero base, so the
-    # build no longer refuses: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
+    # build is not refused: every exponent reaches exactly what the runtime datapath computes -- 1.0 at the
     # e==0 rung, 0.0 for a positive exponent, +inf past the negative pole (np.power semantics; math.pow raises
     # on the host there).
     def zero_base(e: float) -> float:
@@ -1166,22 +1195,37 @@ def test_composite_unconfigured_operator_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(with_exp2=False), name="lib_cbrt_unconfigured")
 
 
-def test_pow_needs_transcendentals_even_for_a_constant_exponent() -> None:
-    # The rung ladder never prunes the general exp2/log2 path, so even a compile-time exponent requires both
-    # configured -- unlike ** which is a bare multiply chain. Guards the DESIGN.md claim.
-    def kernel(x: float) -> float:
-        return pow(x, 3.0)  # type: ignore[no-any-return]
+def test_pow_needs_transcendentals_only_for_a_fractional_exponent() -> None:
+    # A compile-time FRACTIONAL exponent still needs both operators; a whole one needs neither, however spelled.
+    def fractional(x: float) -> float:
+        return pow(x, 3.5)  # type: ignore[no-any-return]
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_exp2=False), name="lib_pow_needs_exp2")
+        holoso.synthesize(fractional, _ops(with_exp2=False), name="lib_pow_needs_exp2")
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_log2=False), name="lib_pow_needs_log2")
+        holoso.synthesize(fractional, _ops(with_log2=False), name="lib_pow_needs_log2")
+
+    def whole(x: float) -> float:
+        return pow(x, 3.0)  # type: ignore[no-any-return]
+
+    def reciprocal(x: float) -> float:
+        return x**-1.0  # type: ignore[no-any-return]
+
+    def long_reciprocal(x: float) -> float:
+        return np.power(x, -13)  # type: ignore[no-any-return]
+
+    lean = _ops(with_exp2=False, with_log2=False)
+    for kernel, want in ((whole, 8.0), (reciprocal, 0.5)):
+        sim = holoso.synthesize(kernel, lean, name=f"lib_pow_whole_{kernel.__name__}").numerical_model
+        assert float(sim.elaborate().run(2.0)[0]) == want, kernel.__name__
+    # 3**13 is exact, so the chain's one rounding is the reciprocal's and the result is the correctly rounded one.
+    model = holoso.synthesize(long_reciprocal, lean, name="lib_pow_long_reciprocal").numerical_model.elaborate()
+    assert _bits(model.run(3.0)[0]) == _v(3.0**-13).bits
 
 
 def test_a_static_integer_exponent_chain_expands_in_every_spelling() -> None:
-    # A static INTEGER exponent expands into a multiplication chain -- exact, and identical whichever way the power is
-    # spelled. A FLOAT exponent of the same magnitude is a different lane by design (the exp2/log2 identity of the
-    # pow_ stub), so it is compared against the host rather than against the chain.
+    # A static WHOLE exponent expands into a multiplication chain, identical whichever way the power is spelled,
+    # the float spelling of the same whole number included: wholeness selects the chain, not the type.
     def with_pow(x: float) -> float:
         return pow(x, 3)
 
@@ -1194,12 +1238,11 @@ def test_a_static_integer_exponent_chain_expands_in_every_spelling() -> None:
     def with_float_exponent(x: float) -> float:
         return x**3.0  # type: ignore[no-any-return]
 
-    sims = [_sim(fn, f"lib_pow_{fn.__name__}") for fn in (with_pow, with_math, with_star)]
-    general = _sim(with_float_exponent, "lib_pow_float_exponent")
+    sims = [_sim(fn, f"lib_pow_{fn.__name__}") for fn in (with_pow, with_math, with_star, with_float_exponent)]
     for x in (2.0, -2.0, 0.5, -1.5, 100.0):
         bits = {_bits(sim.run(x)[0]) for sim in sims}
-        assert len(bits) == 1, f"the static-integer spellings disagree at x={x}"
-        assert float(general.run(x)[0]) == pytest.approx(x**3.0, rel=1e-5), x
+        assert len(bits) == 1, f"the static-whole spellings disagree at x={x}"
+        assert float(sims[0].run(x)[0]) == pytest.approx(x**3.0, rel=1e-5), x
     assert float(sims[0].run(-2.0)[0]) == -8.0
 
 
@@ -1367,3 +1410,144 @@ def test_other_exponents_keep_the_general_power() -> None:
     assert "holoso_fsqrt" not in _modules(holoso.synthesize(fourth_root, _ops(), name="pow_quarter"))
     assert "holoso_fsqrt" not in _modules(holoso.synthesize(runtime_exponent, _ops(), name="pow_runtime_e"))
     assert _modules(holoso.synthesize(cube, _ops(), name="pow_cube")) == {"holoso_fmul"}
+
+
+def test_a_hypotenuse_orphaned_by_a_cancelled_fusion_is_still_expanded() -> None:
+    """
+    The two over `(x, y)` and `(-x, y)` expand alike, signs being dropped; their difference cancels, taking the
+    atan2 with it and orphaning `hypot(a, b)`, which was planned as fused. So expansion cannot be a single pass.
+    """
+
+    def kernel(a: float, b: float, x: float, y: float) -> float:
+        delta = math.hypot(x, y) - math.hypot(-x, y)
+        return math.hypot(a, b) + delta * math.atan2(a, b)
+
+    modules = _modules(holoso.synthesize(kernel, _ops(), name="hypot_orphan_modules"))
+    assert "holoso_fatan2" not in modules, "the cancellation must have deleted the only atan2"
+    assert {"holoso_filog2", "holoso_fsqrt", "holoso_fmul_ilog2"} <= modules
+    assert "holoso_fsort" not in modules and "holoso_fdiv" not in modules
+    sim = _sim(kernel, "hypot_orphan")
+    for a, b in ((3.0, 4.0), (0.0, 0.0), (-3.0, 4.0)):
+        assert float(sim.run(a, b, 1.0, 2.0)[0]) == float(_v(math.hypot(a, b))), (a, b)
+
+
+def test_a_hypotenuse_beside_an_unholdable_multiplier_still_builds() -> None:
+    # Pins the pass order: rescaling stays last. Were anything to optimize after it, strength reduction would
+    # recompose the pair it split and the kernel would be refused over a constant it never wrote.
+    def kernel(x: float, y: float) -> tuple[float, float]:
+        return math.hypot(x, y), (x * 2.0**40) * 3.0
+
+    modules = _modules(holoso.synthesize(kernel, _ops(fmt=FloatFormat(6, 18)), name="hypot_beside_wide_scale"))
+    assert {"holoso_filog2", "holoso_fsqrt"} <= modules
+
+
+def test_a_magnitude_is_refused_where_no_scaling_keeps_the_square_in_range() -> None:
+    # Two exponent bits cannot hold a normalized operand's square, so no scale satisfies both ends of the window.
+    def kernel(y: float, x: float) -> float:
+        return math.hypot(y, x)
+
+    with pytest.raises(UnsupportedConstruct, match="magnitude"):
+        holoso.synthesize(kernel, _ops(fmt=FloatFormat(2, 12)), name="hypot_narrow_exponent")
+
+
+_NARROW = FloatFormat(6, 18)  # bias 31, so the finite span tops out just under 2**32
+
+
+def _magnitude3(v: Float64[np.ndarray, "3"]) -> float:
+    return math.hypot(*v)
+
+
+def _magnitude5(v: Float64[np.ndarray, "5"]) -> float:
+    return math.hypot(*v)
+
+
+def _magnitude8(v: Float64[np.ndarray, "8"]) -> float:
+    return math.hypot(*v)
+
+
+def _magnitude9(v: Float64[np.ndarray, "9"]) -> float:
+    return math.hypot(*v)
+
+
+def test_the_scaling_window_accounts_for_the_operand_count() -> None:
+    # The pair's scale 2**14 lifts eight 1.5s to a sum of 18*2**28, past the finite span; the arity's is 2**13.
+    model = holoso.synthesize(_magnitude8, _ops(fmt=_NARROW), name="magnitude_eight").numerical_model.elaborate()
+    assert float(model.run(*([1.5] * 8))[0]) == pytest.approx(math.sqrt(18.0), rel=1e-5)
+
+
+def test_a_magnitude_answers_where_the_written_sum_of_squares_overflows() -> None:
+    # Squares of 2**40 against a span topping out under 2**32: the written form rails, the scaled one answers.
+    model = holoso.synthesize(_magnitude3, _ops(fmt=_NARROW), name="magnitude_big").numerical_model.elaborate()
+    assert float(model.run(*([2.0**20] * 3))[0]) == pytest.approx(2.0**20 * math.sqrt(3.0), rel=1e-5)
+
+
+def test_a_magnitude_answers_where_the_written_sum_of_squares_underflows() -> None:
+    # The legs are representable but their squares 2**-40 fall under the smallest normal, so the written form
+    # answers zero.
+    model = holoso.synthesize(_magnitude3, _ops(fmt=_NARROW), name="magnitude_small").numerical_model.elaborate()
+    assert float(model.run(*([2.0**-20] * 3))[0]) == pytest.approx(2.0**-20 * math.sqrt(3.0), rel=1e-5)
+
+
+def test_a_magnitude_of_zeros_is_zero() -> None:
+    # Every exponent extraction answers the same floor at once, which is where an n-ary maximum goes wrong.
+    model = holoso.synthesize(_magnitude5, _ops(fmt=_NARROW), name="magnitude_zeros").numerical_model.elaborate()
+    assert float(model.run(*([0.0] * 5))[0]) == 0.0
+
+
+def _norm3(v: Float64[np.ndarray, "3"]) -> float:
+    return float(np.linalg.norm(v))
+
+
+def _frobenius(m: Float64[np.ndarray, "2 3"]) -> float:
+    return float(np.linalg.norm(m))
+
+
+def test_the_euclidean_norm_answers_where_the_written_sum_of_squares_rails() -> None:
+    # `sqrt(x @ x)` rails both ways inside this format: 2**20 squares past the finite span and 2**-20 under the
+    # normal floor.
+    model = holoso.synthesize(_norm3, _ops(fmt=_NARROW), name="norm_rails").numerical_model.elaborate()
+    assert float(model.run(*([2.0**20] * 3))[0]) == pytest.approx(2.0**20 * math.sqrt(3.0), rel=1e-5)
+    assert float(model.run(*([2.0**-20] * 3))[0]) == pytest.approx(2.0**-20 * math.sqrt(3.0), rel=1e-5)
+
+
+def test_the_frobenius_norm_takes_the_same_expansion() -> None:
+    # The 2-D default flattens onto the same operator.
+    model = holoso.synthesize(_frobenius, _ops(fmt=_NARROW), name="norm_frobenius").numerical_model.elaborate()
+    assert float(model.run(*([2.0**20] * 6))[0]) == pytest.approx(2.0**20 * math.sqrt(6.0), rel=1e-5)
+
+
+def test_a_euclidean_norm_needs_the_scaling_operators() -> None:
+    # Refused by name rather than silently answered by the weaker form.
+    with pytest.raises(UnsupportedConstruct, match="filog2"):
+        holoso.synthesize(_norm3, _ops(fmt=_NARROW, with_ilog2=False), name="norm_without_ilog2")
+
+
+def _norm1(v: Float64[np.ndarray, "1"]) -> float:
+    return float(np.linalg.norm(v))
+
+
+def _mixed_arity(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "8"]) -> tuple[float, float]:
+    return float(np.linalg.norm(v)), float(np.linalg.norm(w))
+
+
+def test_a_one_element_norm_needs_none_of_the_scaling_operators() -> None:
+    # A lone leg is its absolute value, which rides a sign conditioner, so nothing is instantiated at all.
+    model = holoso.synthesize(_norm1, Options(OperatorOptions()), name="norm_one").numerical_model.elaborate()
+    assert float(model.run(-3.5)[0]) == 3.5
+    assert not _modules(holoso.synthesize(_norm1, Options(OperatorOptions()), name="norm_one"))
+
+
+def test_two_arities_in_one_kernel_each_take_their_own_window() -> None:
+    # A graph holding both must scale each magnitude by its own window.
+    model = holoso.synthesize(_mixed_arity, _ops(fmt=_NARROW), name="norm_mixed").numerical_model.elaborate()
+    got = model.run(*([1.5] * 3), *([1.5] * 8))
+    assert float(got[0]) == pytest.approx(1.5 * math.sqrt(3.0), rel=1e-5)
+    assert float(got[1]) == pytest.approx(1.5 * math.sqrt(8.0), rel=1e-5)
+
+
+def test_an_arity_the_format_cannot_hold_is_refused_by_name() -> None:
+    # The window narrows with the arity, so a format serving a pair can refuse a longer vector by name.
+    with pytest.raises(UnsupportedConstruct, match="magnitude over 9 operands"):
+        holoso.synthesize(_magnitude9, _ops(fmt=FloatFormat(3, 12)), name="magnitude_arity_refused")
+    # The same format holds every shorter one, so the refusal is about the arity rather than the format alone.
+    holoso.synthesize(_magnitude8, _ops(fmt=FloatFormat(3, 12)), name="magnitude_arity_admitted")

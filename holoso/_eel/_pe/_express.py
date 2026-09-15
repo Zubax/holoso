@@ -4,13 +4,14 @@ import dataclasses
 import inspect
 import math
 import types
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import numpy as np
 
 from .._annotations import annotation_stype, host_type
 from .._ir import *
-from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, resolve
+from .._decorator import plain_function
+from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, VariadicFunction, resolve
 from . import _aggregate, _ops
 from ._ownership import share
 from ._record import inadmissible_reason as record_inadmissible
@@ -322,6 +323,9 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         case ScalarFunction() as match:
             values = _operand_arguments(interp, node, callee.name, frame, sink)
             return _scalar_call(interp, node.origin, callee.name, match, values, frame, sink)
+        case VariadicFunction() as match:
+            values = _operand_arguments(interp, node, callee.name, frame, sink)
+            return _variadic_call(interp, node.origin, callee.name, match, values, sink)
         case Lifted(scalar=lifted):
             values = _operand_arguments(interp, node, callee.name, frame, sink)
             if len(values) == 1 and isinstance(values[0], TensorValue):
@@ -385,20 +389,19 @@ def _inlinable(
     The plain-Python callee behind any calling spelling, with the receiver arguments CPython's descriptor
     protocol would prepend; an admitted receiver's frozen attributes fold and its state reads see the current
     slots. A C-level callable (a numpy dispatcher or ufunc, a partial) resolves to None: a callee the
-    registry does not carry.
+    registry does not carry, save for a wrapper the compiler reads through.
     """
-    if isinstance(raw, types.FunctionType):
-        return raw, []
+    if (fn := plain_function(raw)) is not None:
+        return fn, []
     if inspect.ismethod(raw):
-        if not isinstance(raw.__func__, types.FunctionType):
-            return None
-        return raw.__func__, [interp.snapshot.admit(display, raw.__self__, origin)]
+        fn = plain_function(raw.__func__)
+        return None if fn is None else (fn, [interp.snapshot.admit(display, raw.__self__, origin)])
     if callable(raw):
         call_attr = mro_attr(type(raw), "__call__")
-        if isinstance(call_attr, staticmethod) and isinstance(call_attr.__func__, types.FunctionType):
-            return call_attr.__func__, []
-        if isinstance(call_attr, types.FunctionType):
-            return call_attr, [interp.snapshot.admit(display, raw, origin)]
+        if isinstance(call_attr, staticmethod) and (fn := plain_function(call_attr.__func__)) is not None:
+            return fn, []
+        if (fn := plain_function(call_attr)) is not None:
+            return fn, [interp.snapshot.admit(display, raw, origin)]
     return None
 
 
@@ -496,11 +499,7 @@ def _scalar_call(
     operands = [scalar(value, origin) for value in values]
     chosen = match.select([_operand(operand) for operand in operands])
     if chosen is None:
-        served = " or ".join(stype.value for stype in match.domains)
-        got = ", ".join(operand.stype.value for operand in operands)
-        boolean = any(operand.stype is ScalarType.BOOL for operand in operands)
-        note = "; a boolean is not a number, cast explicitly with int(...) or float(...)" if boolean else ""
-        reject(origin, f"{display}() takes {served} operands, got {got}{note}")
+        _refuse_domains(origin, display, operands, match.domains)
     # Both kinds of lowering, so inlining judges base types alone and never learns what a refinement is.
     conformed = [
         interp.conform(operand, declared.stype, origin, sink, f"argument {i + 1} of {display}()")
@@ -510,6 +509,34 @@ def _scalar_call(
         promoted: list[Value] = list(conformed)
         return interp.inline(origin, display, chosen.stub, promoted, {}, frame, sink, positional_only=True)
     return apply(interp, chosen.operator, conformed, origin, sink)
+
+
+def _refuse_domains(origin: Origin, display: str, operands: list[Scalar], domains: list[ScalarType]) -> NoReturn:
+    served = " or ".join(stype.value for stype in domains)
+    got = ", ".join(operand.stype.value for operand in operands)
+    boolean = any(operand.stype is ScalarType.BOOL for operand in operands)
+    note = "; a boolean is not a number, cast explicitly with int(...) or float(...)" if boolean else ""
+    reject(origin, f"{display}() takes {served} operands, got {got}{note}")
+
+
+def _variadic_call(
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    match: VariadicFunction,
+    values: list[Value],
+    sink: Sink,
+) -> Value:
+    if len(values) < match.minimum:
+        reject(origin, f"{display}() takes at least {match.minimum} argument(s), got {len(values)}")
+    operands = [scalar(value, origin) for value in values]
+    if not all(match.domain.accepts(_operand(operand)) for operand in operands):
+        _refuse_domains(origin, display, operands, match.domains)
+    conformed = [
+        interp.conform(operand, match.domain.stype, origin, sink, f"argument {i + 1} of {display}()")
+        for i, operand in enumerate(operands)
+    ]
+    return apply(interp, match.operator(len(conformed)), conformed, origin, sink)
 
 
 def _lifted_call(
@@ -625,10 +652,15 @@ def _reshape(origin: Origin, display: str, base: Value, dim_values: list[Value])
     if not dim_values:
         reject(origin, f"{display}() requires a shape (an int or a tuple of ints)")
     dims = [_aggregate.static_index(origin, value, "a reshape dimension") for value in dim_values]
-    if any(dim < 0 for dim in dims):
-        reject(origin, f"{display}() does not support dimension inference (-1); spell the dimension explicitly")
+    if any(dim < -1 for dim in dims) or dims.count(-1) > 1:
+        reject(origin, f"{display}() infers at most one dimension, spelled -1, got {tuple(dims)}")
     if len(dims) > 2 or 0 in dims:
         reject(origin, f"{display}() supports only non-empty 1-D and 2-D shapes, got {tuple(dims)}")
+    if -1 in dims:
+        known = math.prod(dim for dim in dims if dim != -1)
+        assert known > 0
+        if len(base.leaves) % known == 0:
+            dims[dims.index(-1)] = len(base.leaves) // known
     if math.prod(dims) != len(base.leaves):
         reject(origin, f"cannot reshape an array of size {len(base.leaves)} into shape {tuple(dims)}")
     share(base)

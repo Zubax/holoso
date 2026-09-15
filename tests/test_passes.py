@@ -64,7 +64,7 @@ from holoso._hir import (
     FloatExp2,
     FloatFloor,
     FloatFma,
-    FloatHypot2,
+    FloatHypot,
     FloatIsFinite,
     FloatIsInf,
     FloatIsNegInf,
@@ -387,7 +387,8 @@ def test_without_the_scaler_the_constant_is_still_what_is_refused() -> None:
     with pytest.raises(UnsupportedConstruct) as exc:
         _synth(f, options, name="no_scaler_to_split_into")
     assert exc.value.message == (
-        "constant 3.333333333333333e-10 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
+        "constant 3.333333333333333e-10 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp, or configure "
+        "fmul_ilog2 to carry the multiplier as a significand and an exponent"
     )
 
 
@@ -693,6 +694,27 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
     assert "holoso_fdiv" in _instantiated(result)
     sim = result.numerical_model.elaborate()
     for a, b in [(3.0, 1.0), (1.0, 2.0), (1.0, 4.0)]:
+        assert float(sim.run(a, b)[0]) == f(a, b)
+
+
+def test_if_conversion_speculates_a_hypotenuse() -> None:
+    # Unlike the division above, a hypotenuse cannot fault on a never-taken path: the atan2 lowering raises nothing
+    # and the expansion's only error-bearing primitive is a root over a sum of squares.
+    def f(a: float, b: float) -> float:
+        if a > b:
+            y = a + b
+        else:
+            y = math.hypot(a, b)
+        return y
+
+    options = dataclasses.replace(
+        OPTIONS,
+        operator=dataclasses.replace(OPTIONS.operator, filog2=holoso.FILog2Options(), fsqrt=holoso.FSqrtOptions()),
+    )
+    result = _synth(f, options, name="spec_hypot")
+    assert result.initiation_interval[1] is not None  # the diamond collapsed rather than surviving as a branch
+    sim = result.numerical_model.elaborate()
+    for a, b in [(3.0, 1.0), (3.0, 4.0), (5.0, 12.0)]:  # exact in the format on both arms
         assert float(sim.run(a, b)[0]) == f(a, b)
 
 
@@ -1320,9 +1342,9 @@ def test_an_integer_self_division_erases_an_operand_that_names_no_number() -> No
         (FloatExp2(), (1e10,), math.inf),  # past the carrier, upward only
         (FloatLog2(), (math.inf,), math.inf),
         (FloatSqrt(), (math.inf,), math.inf),
-        (FloatHypot2(), (math.inf, 1.0), math.inf),
-        (FloatHypot2(), (1.5e308, 1.5e308), math.inf),  # math.hypot saturates rather than raising, so the fold does
-        (FloatHypot2(), (-math.inf, 1.0), math.inf),  # a magnitude is never negative
+        (FloatHypot(2), (math.inf, 1.0), math.inf),
+        (FloatHypot(2), (1.5e308, 1.5e308), math.inf),  # math.hypot saturates rather than raising, so the fold does
+        (FloatHypot(2), (-math.inf, 1.0), math.inf),  # a magnitude is never negative
         (FloatAtan2(), (math.inf, math.inf), math.pi / 4.0),
         (FloatFloor(), (2.7,), 2.0),
         (FloatTrunc(), (-2.7,), -2.0),

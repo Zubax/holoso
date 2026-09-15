@@ -65,11 +65,7 @@ def capture(out_path: str) -> None:
                 lower_to_mir(lower(target.kernel(), target.ops.unroll_max_trips).hir, mir_options(target.ops)),
                 target.name,
                 target.ops.ucode_fetch_stages,
-                RegallocTuning(
-                    effort=target.ops.regalloc_effort,
-                    reuse_write_cap=target.ops.regalloc_reuse_write_cap,
-                    register_price=target.ops.regalloc_register_price,
-                ),
+                RegallocTuning(effort=target.ops.regalloc_effort, register_price=target.ops.regalloc_register_price),
             )
             row["min_ii"] = lir.min_initiation_interval
             row["last_pc"] = lir.last_pc

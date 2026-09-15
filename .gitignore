@@ -40,6 +40,7 @@ hdr_log
 *.html
 *.tab
 *.tmp
+*.tmp.*
 *.vcd
 *.lock
 *.history

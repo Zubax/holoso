@@ -1,6 +1,6 @@
 """HIR data model: an SSA value DAG arranged into a control-flow graph of basic blocks."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import assert_never
 
 from .._util import BlockId, ValueId
@@ -53,6 +53,19 @@ class Phi:
 type Node = InPort | Const | Operation | StateRead | Phi
 
 
+def references(node: Node) -> tuple[ValueId, ...]:
+    """The one place that knows, so a use count or a liveness cannot miss an operand."""
+    match node:
+        case Operation(operands=operands):
+            return operands
+        case Phi(arms=arms):
+            return tuple(value for _, value in arms)
+        case InPort() | Const() | StateRead():
+            return ()
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 @dataclass(frozen=True, slots=True)
 class Jump:
     target: BlockId
@@ -96,8 +109,7 @@ def predecessors(blocks: list[Block]) -> dict[BlockId, set[BlockId]]:
 @dataclass(frozen=True, slots=True)
 class Block:
     """
-    Inputs, constants, and state reads are entry-global pure values and do not appear in any block's `operations`
-    list; `operations` holds only the block's straight-line operations in evaluation order.
+    Inputs, constants, and state reads are entry-global and appear in no block's `operations`.
     """
 
     id: BlockId
@@ -135,7 +147,7 @@ def renumber(hir: Hir) -> Hir:
         Block(id=new_id[block.id], phis=block.phis, operations=block.operations, terminator=retarget(block.terminator))
         for block in hir.blocks
     ]
-    return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
+    return replace(hir, nodes=nodes, blocks=blocks)
 
 
 def validate_phi_predecessors(hir: Hir) -> None:
@@ -181,8 +193,8 @@ class StateSlot:
 @dataclass(frozen=True, slots=True)
 class Hir:
     """
-    A complete HIR: the value DAG, the CFG of basic blocks (`blocks[0]` is the entry), ordered inputs, named
-    outputs, and persistent state slots. The frontend emits structured, reducible control flow with a single exit.
+    The value DAG, the CFG (`blocks[0]` is the entry), ordered inputs, named outputs, and persistent state slots;
+    control flow is structured and reducible with a single exit.
     """
 
     nodes: dict[ValueId, Node]
@@ -205,6 +217,16 @@ class Hir:
             if isinstance(block.terminator, Branch):
                 refs.append(block.terminator.cond)
         return refs
+
+    def use_counts(self) -> dict[ValueId, int]:
+        """Total reference count per value across every use site: operation operands, phi arms, external references."""
+        counts: dict[ValueId, int] = {vid: 0 for vid in self.nodes}
+        for node in self.nodes.values():
+            for referenced in references(node):
+                counts[referenced] += 1
+        for vid in self.external_value_references():
+            counts[vid] += 1
+        return counts
 
     def value_types(self) -> frozenset[Type]:
         """
@@ -273,7 +295,7 @@ class HirBuilder:
         self.set_terminator(self.current_block, Jump(target))
 
     def branch(self, cond: ValueId, if_true: BlockId, if_false: BlockId) -> None:
-        if not isinstance(self._type_of(cond), BoolType):
+        if not isinstance(self.type_of(cond), BoolType):
             raise ValueError("a branch condition must be a boolean value")
         self.set_terminator(self.current_block, Branch(cond, if_true, if_false))
 
@@ -292,24 +314,8 @@ class HirBuilder:
             self._global_intern[node] = vid
         return vid
 
-    def _type_of(self, vid: ValueId) -> Type:
-        node = self._nodes[vid]
-        match node:
-            case InPort(type=type):
-                return type
-            case StateRead(type=type):
-                return type
-            case Phi(type=type):
-                return type
-            case Const():
-                return node.type
-            case Operation():
-                return node.type
-        raise TypeError(f"HIR node {vid} has no semantic type")
-
     def type_of(self, vid: ValueId) -> Type:
-        """The semantic type of a value, used by the frontend when merging environments into phis."""
-        return self._type_of(vid)
+        return self._nodes[vid].type
 
     def input(self, name: str, type: Type) -> ValueId:
         # Input ports are never interned: each parameter is a distinct, ordered port.
@@ -346,7 +352,7 @@ class HirBuilder:
         signature = operator.signature
         if len(operands) != signature.arity:
             raise ValueError(f"{operator.mnemonic} expects {signature.arity} operand(s), got {len(operands)}")
-        operand_types = tuple(self._type_of(operand) for operand in operands)
+        operand_types = tuple(self.type_of(operand) for operand in operands)
         if operand_types != signature.operand_types:
             raise ValueError(f"{operator.mnemonic} expects operands of {signature.operand_types}, got {operand_types}")
         node = Operation(operator, tuple(operands))
@@ -360,8 +366,8 @@ class HirBuilder:
 
     def phi(self, type: Type, arms: list[tuple[BlockId, ValueId]]) -> ValueId:
         for _, arm in arms:
-            if arm in self._nodes and self._type_of(arm) != type:
-                raise ValueError(f"phi arm {arm} has type {self._type_of(arm)}, expected {type}")
+            if arm in self._nodes and self.type_of(arm) != type:
+                raise ValueError(f"phi arm {arm} has type {self.type_of(arm)}, expected {type}")
         vid = self._fresh(Phi(type, tuple(arms)))
         self._blocks[self.current_block].phis.append(vid)
         return vid
@@ -380,8 +386,8 @@ class HirBuilder:
         if not isinstance(node, Phi):
             raise ValueError(f"value {phi} is not a phi")
         for _, arm in arms:
-            if arm in self._nodes and self._type_of(arm) != node.type:
-                raise ValueError(f"phi arm {arm} has type {self._type_of(arm)}, expected {node.type}")
+            if arm in self._nodes and self.type_of(arm) != node.type:
+                raise ValueError(f"phi arm {arm} has type {self.type_of(arm)}, expected {node.type}")
         self._nodes[phi] = Phi(node.type, tuple(arms))
 
     def output(self, name: str, value: ValueId) -> None:

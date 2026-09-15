@@ -32,6 +32,8 @@ from ._ir import (
     MirStateSlot as MirStateSlot,
     MirTerminator as MirTerminator,
     MirWideView as MirWideView,
+    reverse_postorder as reverse_postorder,
+    successors as successors,
 )
 from ._interpret import MirInterpreter as MirInterpreter
 from ._lower import lower as lower

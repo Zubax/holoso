@@ -22,6 +22,7 @@ self-latch rematerialization case (see DESIGN.md). Chained merges (an `M` whose 
 by repeating to a fixpoint, innermost-reachable first.
 """
 
+from dataclasses import replace
 import logging
 
 from .._util import BlockId, ValueId
@@ -114,7 +115,7 @@ def _thread(hir: Hir, merge: Block, successor: BlockId) -> Hir:
         for block in hir.blocks
         if block.id != merge.id
     ]
-    return Hir(nodes=nodes, blocks=blocks, input_ids=hir.input_ids, outputs=hir.outputs, state_slots=hir.state_slots)
+    return replace(hir, nodes=nodes, blocks=blocks)
 
 
 def run(hir: Hir) -> Hir | None:

@@ -12,9 +12,10 @@ After a change or milestone, or when prompted, dispatch fresh-context review age
 MAXIMUM THINKING EFFORT, then consolidate, fix, and repeat.
 The goal is adversarial, diverse, independent coverage.
 
-The prompts given to the agents shall be extremely terse, at most a few sentences.
-Giving excessive detail may constrain their thinking causing the tunnel vision syndrome.
+The prompts given to the agents shall be extremely terse.
+Giving excessive detail constrains their thinking causing the tunnel vision syndrome.
 They must be given the opportunity to look at the work without bias or prejudice.
+A prompt longer than 2 sentences is a bad prompt; 3 sentences is the absolute limit, anything larger is unacceptable.
 
 ## The reviewer pair
 
@@ -24,7 +25,7 @@ Run two reviewers in parallel per round:
   ROBUSTNESS first, then SIMPLIFICATION opportunities, ARCHITECTURAL CLEANLINESS and CODE QUALITY,
   and POLICY/STYLE compliance with the project's own docs.
 
-- Codex running the *most advanced model* in *ultra* effort focusing on CORRECTNESS only, to maximize perspective
+- Codex running the *most advanced model* at *maximum reasoning effort* focusing on CORRECTNESS only, to maximize perspective
   diversity and minimize blind spots.
 
 ## Reviewers are read-only

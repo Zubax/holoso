@@ -16,6 +16,7 @@ and operator configs are ordinary, type-checked Python rather than templated sou
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 _REPO = Path(__file__).resolve().parent.parent
 
 
-class TwoCarried:
+class _TwoCarried:
     """
     Two persistent attributes first WRITTEN inside a `while`: materializing their live-ins creates StateRead nodes
     whose creation order is decided by the carried-attribute iteration -- the second historical hash-order leak.
@@ -49,7 +50,7 @@ class TwoCarried:
         return self.s1 + self._s2
 
 
-def coalesce_conflict(x: float, b: float, cc: float) -> tuple[float, float, float]:
+def _coalesce_conflict(x: float, b: float, cc: float) -> tuple[float, float, float]:
     """
     The phi-coalescing residual-install hazard: `a` coalesces onto `x` while `x` is still live as `z`'s arm,
     so the soundness fixpoint must de-coalesce. The fixpoint's de-coalescing is set-driven, so this exercises that its
@@ -67,16 +68,16 @@ def coalesce_conflict(x: float, b: float, cc: float) -> tuple[float, float, floa
     return a, z, d
 
 
-def emit_coalesce_conflict() -> None:
+def _emit_coalesce_conflict() -> None:
     from holoso import FloatFormat, synthesize
 
     from ._modelref import default_options
 
-    result = synthesize(coalesce_conflict, default_options(FloatFormat(6, 18)))
+    result = synthesize(_coalesce_conflict, default_options(FloatFormat(6, 18)))
     _dump(result)
 
 
-def emit_cordic() -> None:
+def _emit_cordic() -> None:
     sys.path.insert(0, str(_REPO / "examples"))
     from cordic_sincos import CordicSinCos
 
@@ -88,6 +89,27 @@ def emit_cordic() -> None:
     _dump(result)
 
 
+def _emit_ekf_two_multipliers() -> None:
+    sys.path.insert(0, str(_REPO / "examples"))
+    from ekf1_stateless import update_x_P
+
+    from holoso import FloatFormat, FMulOptions, synthesize
+
+    from ._modelref import default_options
+
+    options = default_options(FloatFormat(6, 18))
+    options = replace(options, operator=replace(options.operator, fmul=FMulOptions(instances=2)))
+    _dump(synthesize(update_x_P, options))
+
+
+def _emit_coalesce_conflict_two_instances() -> None:
+    from holoso import FloatFormat, synthesize
+
+    from ._modelref import default_options, with_instances
+
+    _dump(synthesize(_coalesce_conflict, with_instances(default_options(FloatFormat(6, 18)), 2)))
+
+
 def _dump(result: SynthesisResult) -> None:
     # The frontend IR rides along because it is a shipped artifact whose canonical text is a determinism claim in
     # its own right, and it sits closest to the merge points this suite exists to pin.
@@ -95,7 +117,7 @@ def _dump(result: SynthesisResult) -> None:
     sys.stdout.writelines(result.frontend_ir)
 
 
-def counted_hash_order(n: int, m: int) -> tuple[int, int]:
+def _counted_hash_order(n: int, m: int) -> tuple[int, int]:
     s = 0
     t = 0
     for i in range(n, m):
@@ -104,21 +126,21 @@ def counted_hash_order(n: int, m: int) -> tuple[int, int]:
     return s, t
 
 
-def emit_counted() -> None:
+def _emit_counted() -> None:
     from holoso import FloatFormat, synthesize
 
     from ._modelref import default_options
 
-    result = synthesize(counted_hash_order, default_options(FloatFormat(6, 18)))
+    result = synthesize(_counted_hash_order, default_options(FloatFormat(6, 18)))
     _dump(result)
 
 
-def dump_two_carried_hir() -> None:
+def _dump_two_carried_hir() -> None:
     from holoso._eel import lower
 
     from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 
-    hir = lower(TwoCarried().step, DEFAULT_UNROLL_MAX_TRIPS).hir
+    hir = lower(_TwoCarried().step, DEFAULT_UNROLL_MAX_TRIPS).hir
     for vid in sorted(hir.nodes):
         print(vid, repr(hir.nodes[vid]))
 
@@ -139,15 +161,15 @@ def _entry_output_under_seed(entry: str, seed: str) -> str:
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
 def test_verilog_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
-    assert _entry_output_under_seed("emit_cordic", "0") == _entry_output_under_seed("emit_cordic", other_seed)
+    assert _entry_output_under_seed("_emit_cordic", "0") == _entry_output_under_seed("_emit_cordic", other_seed)
 
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
 def test_phi_coalescing_de_coalescing_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
     # The coalescing soundness fixpoint forbids whole conflicting classes via a set; the byte-identical Verilog across
     # seeds proves its de-coalescing decisions (and the register coloring that follows) are order-independent.
-    assert _entry_output_under_seed("emit_coalesce_conflict", "0") == _entry_output_under_seed(
-        "emit_coalesce_conflict", other_seed
+    assert _entry_output_under_seed("_emit_coalesce_conflict", "0") == _entry_output_under_seed(
+        "_emit_coalesce_conflict", other_seed
     )
 
 
@@ -156,10 +178,19 @@ def test_loop_carried_state_numbering_is_identical_across_hash_seeds(other_seed:
     # Regression (review): carried state attributes were iterated in set hash order when materializing their
     # live-ins, permuting StateRead value ids (and everything downstream) whenever a while loop first-writes two
     # or more persistent attributes.
-    reference = _entry_output_under_seed("dump_two_carried_hir", "0")
-    assert reference == _entry_output_under_seed("dump_two_carried_hir", other_seed)
+    reference = _entry_output_under_seed("_dump_two_carried_hir", "0")
+    assert reference == _entry_output_under_seed("_dump_two_carried_hir", other_seed)
 
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
 def test_counted_loop_lowering_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
-    assert _entry_output_under_seed("emit_counted", "0") == _entry_output_under_seed("emit_counted", other_seed)
+    assert _entry_output_under_seed("_emit_counted", "0") == _entry_output_under_seed("_emit_counted", other_seed)
+
+
+@pytest.mark.parametrize("entry", ["_emit_ekf_two_multipliers", "_emit_coalesce_conflict_two_instances"])
+@pytest.mark.parametrize("other_seed", ["3", "31337"])
+def test_instance_binding_is_byte_identical_across_hash_seeds(entry: str, other_seed: str) -> None:
+    # The allocator's binding and orientation are decided by an annealer whose random number generator is seeded
+    # and whose candidate lists are built from dicts and sorted sets; a two-multiplier straight-line kernel and a
+    # multi-instance CFG kernel pin that no hash-ordered structure leaks into the emitted machine.
+    assert _entry_output_under_seed(entry, "0") == _entry_output_under_seed(entry, other_seed)

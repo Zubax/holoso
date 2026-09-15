@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 import pytest
 
+import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
@@ -21,15 +22,28 @@ from holoso import (
     OperatorOptions,
     Options,
 )
+import holoso._operators as operators
+from holoso._backend.verilog._emit import generate
 from holoso._eel import lower as lower_frontend
 from holoso._hir import FloatFloor, FloatNeg, FloatToInt, FloatType as HirFloatType, HirBuilder
-from holoso._lir import Lir, PooledScheduledOp
+from holoso._lir import Lir, PooledScheduledOp, WideOperand
 from holoso._mir import Mir, MirBuilder, MirIntConst, MirInterpreter, MirOperation, lower as lower_to_mir
-from holoso._operators import FMulILog2Operator, FloatSignControl, IntIdentity, RoundMode
+from holoso._operators import (
+    FILog2Operator,
+    HardwareOperator,
+    FMulILog2Operator,
+    FloatIsFiniteOperator,
+    FloatIsNegInfOperator,
+    FloatIsPosInfOperator,
+    FloatSignControl,
+    FloatToBoolOperator,
+    IntIdentity,
+    RoundMode,
+)
 from holoso._type import FloatType, IntType
 from holoso._value import FloatValue, IntValue
 
-from ._modelref import default_ifmt, build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import default_ifmt, build_lir, early_install, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 from .test_eel_calls import _min_max_of_ints
 from .test_int_synthesis import (
     cross_boundary,
@@ -203,6 +217,43 @@ def test_a_runtime_exponent_scaling_carries_mixed_conditioner_lists() -> None:
         assert interpreter.run(exponent) == [FloatValue.from_float(fmt, 1.5 * 2.0**exponent)], exponent
 
 
+def test_exponent_extraction_places_the_limit_cases_outside_the_finite_span() -> None:
+    """
+    A hand-built graph reaches the operator directly, without the hypotenuse expansion that is its only source in a
+    real kernel. The limit answers carry the weight: zero and an infinity must fall below and above every finite
+    exponent, or an
+    extremum taken over the answer -- which is how a scaled magnitude picks its normalizing exponent -- would need a
+    special case for each of them.
+    """
+    fmt = OPTIONS.ffmt
+    ifmt = default_ifmt(fmt)
+    bias = (1 << (fmt.wexp - 1)) - 1
+    builder = MirBuilder(fmt, ifmt)
+    builder.block()
+    builder.int_output(
+        "exponent",
+        builder.operation(
+            FILog2Operator(fmt, ifmt, FILog2Operator.Options()),
+            [builder.float_input("x", FloatType(fmt))],
+            [FloatSignControl()],
+        ),
+    )
+    builder.ret()
+    interpreter = MirInterpreter(builder.finish())
+
+    def extracted(value: float) -> int:
+        (answer,) = interpreter.run(FloatValue.from_float(fmt, value))
+        assert isinstance(answer, IntValue)  # the extraction crosses into the integer family
+        return answer.value
+
+    assert extracted(0.0) == -bias
+    assert extracted(math.inf) == extracted(-math.inf) == bias + 1
+    # The finite span's own ends included, since that is where the limit answers must not collide with a real one.
+    for magnitude in (1.0, 1.5, 3.0, 0.5, 2.0 ** (1 - bias), 2.0**bias):
+        assert extracted(magnitude) == extracted(-magnitude) == math.floor(math.log2(magnitude))
+        assert -bias < extracted(magnitude) < bias + 1
+
+
 def test_conversions_share_one_instance_and_read_the_unrounded_value() -> None:
     """
     Values cannot distinguish a conversion that reads the already-rounded node in this format, nor one shared
@@ -272,4 +323,100 @@ def test_a_slot_fed_by_an_integer_input_installs_ahead_of_the_boundary() -> None
     """
     lir = build_lir(_select(InputLatch().step), "input_latch")
     (slot,) = lir.wide_state_slots
-    assert slot.install_cycle == 1 < lir.initiation_interval
+    assert early_install(lir, slot)[1].issue_cycle == 0
+
+
+def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering() -> None:
+    """
+    `filog2` reads the exponent field alone, so its operand is declared unconditioned: no conditioner may reach it
+    and the wrapper binds no sign port. The NEGATIVE constant is the case that matters -- the pool stores a float as
+    its magnitude and folds the sign onto whoever reads it, below the normalization in the builder, so it is the one
+    way a sign could reappear on a port that has none.
+    """
+    fmt = OPTIONS.ffmt
+    ifmt = default_ifmt(fmt)
+    operator = FILog2Operator(fmt, ifmt, FILog2Operator.Options())
+
+    for value, expected in ((3.5, 1), (-3.5, 1)):
+        builder = MirBuilder(fmt, ifmt)
+        builder.block()
+        builder.int_output(
+            "exponent",
+            builder.operation(operator, [builder.float_const(value, FloatType(fmt))], [FloatSignControl()]),
+        )
+        builder.ret()
+        mir = builder.finish()
+        assert MirInterpreter(mir).run() == [IntValue.from_int(ifmt, expected)], value
+
+        lir = build_lir(mir, f"filog2_sign_{'neg' if value < 0 else 'pos'}")
+        (firing,) = [op for block in lir.blocks for op in block.ops]
+        for operand in firing.operands:
+            assert isinstance(operand, WideOperand)  # a float port, so the wide bank
+            assert operand.conditioner.is_identity, value
+        assert ".a_sgnop(" not in generate(lir).verilog, value
+
+
+def test_a_sign_that_cannot_be_observed_costs_no_conditioner() -> None:
+    """
+    `bool(x)` reads the exponent alone, so the negation feeding the second call is unobservable. The two must name
+    ONE operation and the emitted datapath must carry no sign conditioner at all.
+    """
+
+    def kernel(x: float) -> tuple[bool, bool]:
+        return bool(x), bool(-x)
+
+    # The conditioner count is the sentinel; `bool(x)` and `bool(-x)` agree for every x, so the values below only
+    # confirm that the erasure left the answer intact.
+    result = holoso.synthesize(kernel, OPTIONS, name="unobservable_sign")
+    assert result.verilog_output.verilog.count("holoso_fsgnop(") == 0
+    model = result.numerical_model.elaborate()
+    for x in (2.5, -2.5, 0.0):
+        assert tuple(bool(value) for value in model.run(x)) == kernel(x), x
+
+
+def _declaring_classes() -> set[str]:
+    """
+    Read off the package's exported catalogue, NOT `__subclasses__`, which `@dataclass(slots=True)` makes unusable:
+    it builds a new class object and leaves the pre-slots original registered, so every operator appears twice.
+    """
+    return {
+        name
+        for name, value in vars(operators).items()
+        if isinstance(value, type) and issubclass(value, HardwareOperator) and value.unconditioned_operands
+    }
+
+
+def test_every_unconditioned_declaration_holds_over_every_result() -> None:
+    """
+    The compiler ERASES a sign transform on the strength of these declarations and nothing derives them, so each is
+    swept directly: all four transforms must leave every result port alone. The expected set is named as well, or
+    the sweep would pass vacuously the day a declaration goes missing -- and the directional classifiers, which DO
+    read the sign bit, are pinned as declaring nothing.
+    """
+    fmt = OPTIONS.ffmt
+    ifmt = default_ifmt(fmt)
+    bias = (1 << (fmt.wexp - 1)) - 1
+    declaring = [
+        FILog2Operator(fmt, ifmt, FILog2Operator.Options()),
+        FloatToBoolOperator(fmt),
+        FloatIsFiniteOperator(fmt),
+    ]
+    assert all(operator.unconditioned_operands == frozenset({0}) for operator in declaring)
+    assert FloatIsPosInfOperator(fmt).unconditioned_operands == frozenset()
+    assert FloatIsNegInfOperator(fmt).unconditioned_operands == frozenset()
+    # Walked rather than listed, so a fourth declaration cannot slip past this sweep: nothing else would catch it,
+    # the numerical model and the RTL both reading the conditioner the compiler erased and so agreeing.
+    assert _declaring_classes() == {type(operator).__name__ for operator in declaring}
+
+    # Zero under a negation is the reachable NEGATIVE ZERO encoding, which is the case the weaker argument
+    # ("no negative zero exists") would have missed. ZKF has no NaN, so none appears.
+    magnitudes = [0.0, 1.0, 3.5, 2.0 ** (1 - bias), 2.0**bias, math.inf]
+    for operator in declaring:
+        for magnitude in magnitudes:
+            base = FloatValue.from_float(fmt, magnitude)
+            answers = {
+                operator.evaluate(base.apply_sign(negate=negate, absolute=absolute))
+                for negate in (False, True)
+                for absolute in (False, True)
+            }
+            assert len(answers) == 1, (operator.mnemonic, magnitude, answers)

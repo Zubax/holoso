@@ -10,31 +10,31 @@ dense per-endpoint opcodes parsed by `case` statements -- the two endpoints are 
 
 Everything a register can take on a cycle is thus one tiny opcode, carrying its write-enable, destination select,
 const-pool select, and boolean inversion together; PC is left to control flow alone. This module is pure data -- the
-emitter owns the Verilog text and renders each source key.
+emitter owns the Verilog text and renders each source key. The source lists themselves are the Lir's
+(`read_sources_per_port`, `write_sources_per_register`), so the steering the codebooks encode is what the metric
+freezes.
 """
 
 from dataclasses import dataclass
 from string import ascii_letters
 
 from ..._lir import (
-    BoolOperand,
     BoolRegRef,
+    InlineWriteSource,
     Lir,
+    MoveWriteSource,
     OperatorInstance,
+    OpWriteSource,
     PooledScheduledOp,
+    ReadSource,
     RegRef,
-    WideConstRef,
     WideOperand,
-    pooled_write_word,
+    WriteEvent,
+    WriteSource,
+    read_sources_per_port,
+    write_sources_per_register,
 )
-from ..._operators import (
-    BoolInversion,
-    FloatSignControl,
-    InlineHardwareOperator,
-    IntIdentity,
-    PortConditioner,
-    has_sign_control,
-)
+from ..._operators import FloatSignControl, IntIdentity, has_sign_control
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -67,60 +67,9 @@ class Field:
         return 0 if self.gated else None
 
 
-def code_width(count: int) -> int:
+def _code_width(count: int) -> int:
     """Bit width of a dense code enumerating `count` distinct values (at least 1 bit)."""
     return max(1, (count - 1).bit_length()) if count > 1 else 1
-
-
-# Source descriptors: value-equal keys the codebooks dedup on, and which the emitter renders to an RHS net/expression.
-# A read source reuses the LIR refs directly (`regs[i]` / `const_i`); the write sources below discriminate
-# the three ways a register takes a value.
-type ReadSource = RegRef | WideConstRef
-
-
-@dataclass(frozen=True, slots=True)
-class OpWriteSource:
-    """
-    A pooled operator output lane. A boolean lane folds its fabric inversion into `invert`; a wide lane conditions on
-    the wrapper instead (a float's sign on the `y*sgn` field, nothing at all for any other family), so its `invert`
-    is always False and equal conditioners never split the opcode.
-    """
-
-    inst: OperatorInstance
-    port: int
-    invert: bool
-
-
-@dataclass(frozen=True, slots=True)
-class InlineWriteSource:
-    """An inline-operator combinational result; structurally identical results dedup to one opcode (loop bodies)."""
-
-    operator: InlineHardwareOperator
-    operands: tuple[WideOperand | BoolOperand, ...]
-    conditioner: PortConditioner
-
-
-@dataclass(frozen=True, slots=True)
-class MoveWriteSource:
-    """A move of one operand into a register: a phi-arm copy/write, a constant install, or an early state writeback."""
-
-    operand: WideOperand | BoolOperand
-
-
-type WriteSource = OpWriteSource | InlineWriteSource | MoveWriteSource
-
-
-@dataclass(frozen=True, slots=True)
-class WriteEvent:
-    """One microcode-driven register write: which register takes which `source` on which ROM (executing) `step`."""
-
-    dst: RegRef | BoolRegRef
-    source: WriteSource
-    step: int
-
-    def __post_init__(self) -> None:
-        if isinstance(self.source, OpWriteSource) and self.source.invert:
-            assert isinstance(self.dst, BoolRegRef), "a wide lane conditions on the wrapper, so it never inverts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +83,7 @@ class ReadCodebook:
 
     @property
     def opcode_width(self) -> int:
-        return code_width(len(self.sources))
+        return _code_width(len(self.sources))
 
     def code(self, source: ReadSource) -> int:
         return self.sources.index(source)
@@ -154,7 +103,7 @@ class WriteCodebook:
 
     @property
     def opcode_width(self) -> int:
-        return code_width(len(self.sources) + 1)  # +1: code 0 is the NOP hold
+        return _code_width(len(self.sources) + 1)  # +1: code 0 is the NOP hold
 
     def code(self, source: WriteSource) -> int:
         return self.sources.index(source) + 1
@@ -190,74 +139,21 @@ def f_op(dst: RegRef | BoolRegRef) -> str:
 
 def tapped_lanes(lir: Lir) -> set[tuple[OperatorInstance, int]]:
     """The operator output ports some firing writes -- an untapped port gets no nets and is left unconnected."""
-    return {(op.inst, write.port) for op in lir.ops for write in op.writes}
+    return {(op.inst, write.port) for block in lir.blocks for op in block.ops for write in op.writes}
 
 
 def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
     """
-    Per operand port `(instance, position)`, the ordered distinct read sources: the registers it reads (read-set
-    order) then each distinct constant magnitude it reads (first-appearance over the schedule). The read opcode carries
-    the position over `code_width` bits; a single-source port keeps its lone source and needs no opcode field.
+    Per operand port `(instance, position)`, the ordered distinct read sources (`read_sources_per_port`). The read
+    opcode carries the position over `_code_width` bits; a single-source port keeps its lone source and needs no
+    opcode field.
     """
-    sources: dict[tuple[OperatorInstance, int], list[ReadSource]] = {
-        (inst, pos): [] for inst in lir.instances for pos in range(inst.operator.signature.arity)
-    }
-    for key, regs in lir.read_set_per_port.items():
-        sources[key] = [RegRef(reg) for reg in regs]
-    for op in lir.ops:
-        for pos, operand in enumerate(op.operands):
-            if isinstance(operand, WideOperand) and isinstance(operand.source, WideConstRef):
-                book = sources[(op.inst, pos)]
-                if operand.source not in book:
-                    book.append(operand.source)
-    return {key: ReadCodebook(tuple(srcs)) for key, srcs in sources.items()}
+    return {port: ReadCodebook(tuple(sources)) for port, sources in read_sources_per_port(lir).items()}
 
 
-def write_events(lir: Lir) -> list[WriteEvent]:
-    """
-    Every microcode-driven register write as `(dst, source, ROM step)`, in one deterministic traversal shared by the
-    codebook builder and the packer so the code<->source mapping cannot drift. The ROM step is the source's executing
-    step (the fetch PC it fires on, minus the fetch lag): a pooled write rides its commit cycle, an inline/copy/write
-    rides `block_base + issue/commit`, an early state install rides `state_copy_step - fetch_lag`. Boundary state
-    installs (and all boolean state installs, which are boundary-only) are handshake-gated special arms, not opcode
-    sources, so they are excluded here.
-    """
-    events: list[WriteEvent] = []
-    for op in lir.ops:
-        for write in op.writes:
-            if isinstance(write.dst, RegRef):
-                invert = False  # a wide lane conditions on the wrapper, not on the opcode
-            else:
-                assert isinstance(write.conditioner, BoolInversion)
-                invert = write.conditioner.invert
-            events.append(
-                WriteEvent(write.dst, OpWriteSource(op.inst, write.port, invert), pooled_write_word(op.commit_cycle))
-            )
-    for block in lir.blocks:
-        base = lir.block_base[block.index]
-        for inline_op in block.inline_ops:
-            source = InlineWriteSource(inline_op.operator, tuple(inline_op.operands), inline_op.write.conditioner)
-            events.append(WriteEvent(inline_op.write.dst, source, base + inline_op.commit_cycle))
-        for copy in block.wide_copies:
-            events.append(WriteEvent(copy.dst, MoveWriteSource(copy.source), base + copy.issue_cycle))
-        for bwrite in block.bool_writes:
-            events.append(WriteEvent(bwrite.dst, MoveWriteSource(bwrite.source), base + bwrite.issue_cycle))
-    for slot in lir.wide_state_slots:
-        if slot.needs_copy and not lir.wide_state_install_is_boundary(slot):
-            events.append(WriteEvent(slot.reg, MoveWriteSource(slot.tap), lir.state_copy_step(slot) - lir.fetch_lag))
-    return events
-
-
-def write_codebook(
-    events: list[WriteEvent],
-) -> dict[RegRef | BoolRegRef, WriteCodebook]:
-    """Per register, the ordered distinct write sources (first-appearance dedup over write_events)."""
-    sources: dict[RegRef | BoolRegRef, list[WriteSource]] = {}
-    for event in events:
-        book = sources.setdefault(event.dst, [])
-        if event.source not in book:
-            book.append(event.source)
-    return {dst: WriteCodebook(tuple(srcs)) for dst, srcs in sources.items()}
+def write_codebook(events: list[WriteEvent]) -> dict[RegRef | BoolRegRef, WriteCodebook]:
+    """Per register, the ordered distinct write sources (`write_sources_per_register`, first-appearance dedup)."""
+    return {dst: WriteCodebook(tuple(sources)) for dst, sources in write_sources_per_register(events).items()}
 
 
 def build_microcode(
@@ -273,8 +169,8 @@ def build_microcode(
     Control is placed on the step each operation requires: the issue strobe, the operand signs, the read opcodes, and a
     wide result's sign ride the ISSUE step (the read is latch-free, so the datapath samples an operand a fetch lag
     later); each register's WRITE opcode rides the source's executing step (see write_events). A write opcode
-    carries `code_width(N+1)` bits over its `N` sources with code 0 reserved for the NOP hold; the read opcode
-    carries `code_width(K)` over its `K` sources with no NOP (a don't-care idle read is harmless).
+    carries `_code_width(N+1)` bits over its `N` sources with code 0 reserved for the NOP hold; the read opcode
+    carries `_code_width(K)` over its `K` sources with no NOP (a don't-care idle read is harmless).
     """
     depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
@@ -299,8 +195,8 @@ def build_microcode(
         for imm in inst.operator.immediate_ports:
             add(f_imm(base, imm.name), imm.width)
         # A sign field exists for a FLOAT port alone, on either side: it drives a sideband only a float module has.
-        for pos, operand_type in enumerate(inst.operator.signature.operand_types):
-            if has_sign_control(operand_type):
+        for pos in range(inst.operator.signature.arity):
+            if inst.operator.conditions_operand(pos):
                 add(f_osgn(base, PORT_LETTERS[pos]), 2)
             read_book = read_books[(inst, pos)]
             if len(read_book.sources) > 1:
@@ -311,9 +207,9 @@ def build_microcode(
     for dst, book in write_books.items():
         add(f_op(dst), book.opcode_width, gated=True)
 
-    for op in lir.ops:
+    for op, block in ((op, block) for block in lir.blocks for op in block.ops):
+        ci = lir.block_base[block.index] + op.issue_cycle
         base = op.inst.name
-        ci = op.issue_cycle
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
         put(f_issue(base), ci, 1)
         for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
@@ -321,11 +217,13 @@ def build_microcode(
         signature = op.operator.signature
         for pos, operand in enumerate(op.operands):
             assert isinstance(operand, WideOperand), "pooled operators read only wide operands today (no read lane)"
-            if has_sign_control(signature.operand_types[pos]):
+            if op.operator.conditions_operand(pos):
                 assert isinstance(operand.conditioner, FloatSignControl)
                 put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
             else:
-                assert isinstance(operand.conditioner, IntIdentity)
+                # No sideband to drive: an integer port, or a float one whose sign this operator cannot observe.
+                # Type agreement is `_check_conditioner`'s at MIR; what is left to hold here is emptiness.
+                assert operand.conditioner.is_identity
             field = f_rd(base, PORT_LETTERS[pos])
             if field in fields:
                 put(field, ci, read_books[(op.inst, pos)].code(operand.source))
@@ -339,9 +237,7 @@ def build_microcode(
                 assert isinstance(write.conditioner, IntIdentity)
 
     for event in events:
-        assert (
-            0 <= event.step < lir.present_step
-        ), f"microcode write step past present: step={event.step}, present={lir.present_step}"
+        assert 0 <= event.step < depth, f"microcode write step out of range: {event.step}, depth={depth}"
         put(f_op(event.dst), event.step, write_books[event.dst].code(event.source))
 
     return fields
@@ -392,10 +288,9 @@ def _landing_label(dst: RegRef | BoolRegRef, source: WriteSource) -> str:
 
 def landings_by_step(events: list[WriteEvent]) -> dict[int, list[str]]:
     """
-    Per ROM step, the non-pooled writes that land there rendered `dst=source` -- inline firings, phi-arm copies,
-    boolean writes, and early state installs. Derived from write_events (pooled commits are excluded, being
-    named by `cycle_summary`'s commit list), so the ROM word comment names every value the opcode installs and the
-    emitted RTL stays mappable onto the HTML schedule report.
+    Per ROM step, the non-pooled writes that land there rendered `dst=source` -- inline firings and copies. Derived from
+    write_events (pooled commits are excluded, being named by `cycle_summary`'s commit list), so the ROM word comment
+    names every value the opcode installs and the emitted RTL stays mappable onto the HTML schedule report.
     """
     landings: dict[int, list[str]] = {}
     for event in events:
