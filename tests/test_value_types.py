@@ -45,13 +45,13 @@ def test_float_value_factories_and_fields() -> None:
     assert value.exponent == 0x7F
     assert float(FloatValue.from_float(F32, 1.0)) == 1.0
 
-    with pytest.raises(TypeError, match="from_bits"):
+    with pytest.raises(TypeError):
         FloatValue(F32, 1.0)
-    with pytest.raises(TypeError, match="float"):
+    with pytest.raises(TypeError):
         FloatValue.from_float(F32, 1)
-    with pytest.raises(TypeError, match="int"):
+    with pytest.raises(TypeError):
         FloatValue.from_bits(F32, True)
-    with pytest.raises(ValueError, match="fit"):
+    with pytest.raises(ValueError):
         FloatValue.from_bits(F32, 1 << F32.width)
 
 

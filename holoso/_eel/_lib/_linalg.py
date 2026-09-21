@@ -11,6 +11,7 @@ reject a scalar operand by asking its rank rather than by a type test the subset
 """
 
 import math
+import operator
 from typing import Any
 
 import numpy as np
@@ -55,7 +56,7 @@ def flatten(a: np.ndarray) -> Any:
     return a.reshape(-1)
 
 
-@array(np.dot, np.ndarray.dot, np.matmul, np.linalg.matmul, BinaryOp.MATMUL)
+@array(np.dot, np.ndarray.dot, np.matmul, np.linalg.matmul, operator.matmul, BinaryOp.MATMUL)
 def matmul(a: np.ndarray, b: np.ndarray) -> Any:
     """
     numpy's shape rules for 1-D and 2-D operands: inner dimensions must agree, a 1-D left operand is promoted to a row

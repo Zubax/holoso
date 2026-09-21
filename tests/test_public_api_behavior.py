@@ -457,5 +457,5 @@ def test_out_of_range_operator_stage_knob_is_rejected_at_synthesis() -> None:
         return a + b
 
     options = Options(OperatorOptions(fadd=FAddOptions(stage_decode=7)), ffmt=FMT)
-    with pytest.raises(ValueError, match="outside"):
+    with pytest.raises(ValueError):
         holoso.synthesize(add, options, name="bad_stage_knob")

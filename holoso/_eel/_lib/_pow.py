@@ -15,15 +15,10 @@ saturates where the host raises: `2.0 ** 10000` is `inf`, as `exp2(1e30)` alread
 import math
 from typing import TypeVar
 
-import numpy as np
-
-from .._ir import BinaryOp
 from ._registry import StaticOneHalf, StaticWholeNegative, StaticWholeNonNegative, lib
 from ._intrinsics import exp2, isinf, log2, round_, sqrt
 
 _N = TypeVar("_N", int, float)
-_POW_INT_PRESERVING = (pow, np.power, np.pow, BinaryOp.POW)
-_POW = (*_POW_INT_PRESERVING, math.pow, np.float_power)
 
 # The float chain needs no transcendental hardware and measures at least as accurate as the general rung at every
 # exponent both can express, so this bound is deliberately a length cap and nothing more: 128 keeps the chain inside
@@ -45,27 +40,27 @@ def _chain(acc: _N, base: _N, k: int) -> _N:
     return acc
 
 
-@lib(*_POW_INT_PRESERVING)
+@lib
 def pow_chain_int(b: int, e: StaticWholeNonNegative[int]) -> int:
     """The base's sign needs no case of its own: it rides the multiplies."""
     return _chain(1, b, e)
 
 
-@lib(*_POW)
+@lib
 def pow_chain_float(b: float, n: StaticWholeNonNegative[float]) -> float:
     if n > _CHAIN_MAX:
         return pow_(b, n)
     return _chain(1.0, b, int(n))
 
 
-@lib(*_POW)
+@lib
 def pow_reciprocal(b: float, n: StaticWholeNegative[float]) -> float:
     if n < -_CHAIN_MAX:
         return pow_(b, n)
     return 1.0 / pow_chain_float(b, -n)
 
 
-@lib(*_POW)
+@lib
 def pow_root(b: float, e: StaticOneHalf[float]) -> float:
     """
     One correctly-rounded root instead of the general path's exp2/log2 pair, and none of its guards: the root
@@ -74,7 +69,7 @@ def pow_root(b: float, e: StaticOneHalf[float]) -> float:
     return sqrt(b)
 
 
-@lib(*_POW)
+@lib
 def pow_(b: float, e: float) -> float:
     """
     Optimized for exactly one exp2 and one log2 as they dominate the hardware cost.

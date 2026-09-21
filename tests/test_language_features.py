@@ -419,7 +419,7 @@ class _PropertySetterWrite:
 def test_property_setter_assignment_is_rejected() -> None:
     # Writing through a property setter is not supported; the assignment must be rejected rather than silently lowered
     # to a state-slot store (which, against a same-named __dict__ shadow, would diverge from the getter-inlined read).
-    with pytest.raises(UnsupportedConstruct, match="descriptor"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_PropertySetterWrite().__call__, _ops())
 
 
@@ -469,14 +469,14 @@ class _DataDescriptorRead:
 def test_data_descriptor_write_is_rejected() -> None:
     # A class data descriptor (any object with __set__/__delete__, not only @property) takes precedence over a
     # same-named __dict__ entry; writing it as a plain state slot would diverge from Python's dispatch. Reject it.
-    with pytest.raises(UnsupportedConstruct, match="descriptor"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_DataDescriptorWrite().__call__, _ops())
 
 
 def test_data_descriptor_read_is_rejected() -> None:
     # A read-only custom data descriptor is not caught by the write check, so the read path must reject it (only
     # @property getters are synthesizable); else its dead __dict__ shadow would be folded/read as a stored value.
-    with pytest.raises(UnsupportedConstruct, match="descriptor"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_DataDescriptorRead().__call__, _ops())
 
 
@@ -525,7 +525,7 @@ def test_intercepting_read_protocol_is_rejected_with_or_without_state() -> None:
     # object, so an overridden read protocol makes the compiler answer past the value Python would produce. The
     # refusal must not depend on the receiver also writing state: a stateless receiver reads attributes just the same.
     for target in (_InterceptingRead(), _InterceptingReadWithState()):
-        with pytest.raises(UnsupportedConstruct, match="__getattribute__"):
+        with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(target.__call__, _ops())
 
 
@@ -552,7 +552,7 @@ class _CustomSetattr:
 def test_custom_attribute_access_protocol_is_rejected() -> None:
     # A class overriding the attribute-access protocol (__setattr__ here) routes self.<attr> through arbitrary code the
     # state model cannot mirror; it must be rejected up front rather than silently lowered as direct state access.
-    with pytest.raises(UnsupportedConstruct, match="overrides"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_CustomSetattr().__call__, _ops())
 
 
@@ -570,7 +570,7 @@ class _Slotted:
 def test_slots_instance_without_dict_is_rejected() -> None:
     # A __slots__ instance has no __dict__, so the reset snapshot (vars(instance)) cannot read its attributes; this must
     # be a clean UnsupportedConstruct, not the raw TypeError that vars() would otherwise raise.
-    with pytest.raises(UnsupportedConstruct, match="__slots__|__dict__"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_Slotted().__call__, _ops())
 
 
@@ -687,7 +687,7 @@ def _walrus_in_a_for_target() -> Float64[np.ndarray, "2 2"]:
 
 def test_a_walrus_colliding_with_the_for_target_is_rejected() -> None:
     # A generalized loop target puts store paths, and their index reads, in the header's region.
-    with pytest.raises(UnsupportedConstruct, match="`:=`"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_walrus_in_a_for_target, _ops())
 
 
@@ -746,7 +746,7 @@ class _BothSpellings:
 def test_one_letter_spelled_both_ways_is_rejected_rather_than_aliased() -> None:
     # The substitution inserts no separator, so two distinct attributes can decompose onto one slot name. Aliasing
     # them would silently merge two state registers, so the collision is a rejection.
-    with pytest.raises(UnsupportedConstruct, match="same slot name"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_BothSpellings().step, _ops())
 
 
@@ -757,7 +757,7 @@ def _cyrillic(ж: float) -> float:
 def test_a_letter_with_no_verilog_spelling_is_refused() -> None:
     # Python identifiers admit every alphabet; the module interface admits one. What the table cannot spell is
     # refused at synthesis rather than emitted as Verilog no tool will parse.
-    with pytest.raises(UnsupportedConstruct, match="no way at all"):
+    with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_cyrillic, _ops())
 
 

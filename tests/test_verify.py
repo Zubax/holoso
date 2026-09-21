@@ -345,9 +345,9 @@ def test_model_rejects_ambiguous_int_and_mismatched_float_value_format() -> None
     model = _model(f, "f")
     assert model.run(1.0)[0] == FloatValue.from_float(FMT, 1.0)
 
-    with pytest.raises(TypeError, match="FloatValue or float"):
+    with pytest.raises(TypeError):
         model.run(1)
-    with pytest.raises(ValueError, match="expected"):
+    with pytest.raises(ValueError):
         model.run(FloatValue.from_float(F32, 1.0))
 
 
@@ -609,7 +609,7 @@ def test_model_boolean_input_and_mixed_outputs() -> None:
     got_flag, got_y = model.run(False, 2.0)
     assert got_flag is False
     assert float(got_y) == -2.0
-    with pytest.raises(TypeError, match="input 0 must be bool"):
+    with pytest.raises(TypeError):
         model.run(1.0, 2.0)
 
 

@@ -167,7 +167,7 @@ def _state_store(
             interp.note_state_write()
             interp.bump_root_epoch(key)
             return
-        value = _express.binary(interp, origin, stmt.op, slot_value, rhs, frame, sink)
+        value = _express.operator_call(interp, origin, stmt.op, [slot_value, rhs], frame, sink)
     else:
         value = rhs
     match value:
@@ -296,7 +296,7 @@ def _element_store(
     if isinstance(stmt, AugStore):
         if isinstance(old, Opaque):
             reject(origin, _describe_opaque(old))
-        value = _express.binary(interp, origin, stmt.op, old, rhs, frame, sink)
+        value = _express.operator_call(interp, origin, stmt.op, [old, rhs], frame, sink)
     else:
         value = rhs
     if isinstance(value, BoundMethod):
@@ -414,13 +414,13 @@ def aug_aggregate(
         case RecordValue():
             reject(origin, f"the operator `{op.value}=` is not supported on a record")
         case TensorValue():
-            if op not in (BinaryOp.ADD, BinaryOp.SUB, BinaryOp.MUL, BinaryOp.DIV):
-                reject(origin, f"the operator `{op.value}=` is not supported on arrays yet")
-            if isinstance(rhs, SequenceValue):
-                reject(origin, "cannot mix an array with a Python list/tuple; convert with np.array([...])")
+            # A matrix product would leave its operands shared, so only an elementwise operator updates in place.
+            if not _express.maps_over_arrays(op):
+                reject(origin, f"`{op.value}=` cannot update an array in place")
             if not mutable(current.allocation):
                 reject(origin, f"cannot update {name!r} in place: {blame(current.allocation)}")
-            computed = _express.elementwise(interp, origin, op, current, rhs, frame, sink)
+            computed = _express.operator_call(interp, origin, op, [current, rhs], frame, sink)
+            assert isinstance(computed, TensorValue)
             if computed.family is not current.family:
                 reject(
                     origin,

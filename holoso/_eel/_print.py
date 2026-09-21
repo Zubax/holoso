@@ -7,6 +7,7 @@ import dataclasses
 import math
 import os
 
+from .._errors import SourceLocation
 from ._ir import *
 
 _INDENT = " " * 4
@@ -257,8 +258,10 @@ def _store_path(root: LocalRef | EnvRead, path: tuple[Selector, ...]) -> str:
 
 
 def _loc_suffix(origin: Origin) -> str:
-    location = origin.location
-    text = f"  # {os.path.basename(location.filename)}:{location.lineno}"
-    if origin.frames:
-        text += " via " + ",".join(frame.callee for frame in origin.frames)
-    return text
+    """Every call site the expansion passed through, outermost first, then the line itself."""
+
+    def spelled(location: SourceLocation) -> str:
+        return f"{os.path.basename(location.filename)}:{location.lineno}"
+
+    hops = [f"{spelled(frame.site)} via {frame.callee}" for frame in origin.frames]
+    return "  # " + ", ".join([*hops, spelled(origin.location)])

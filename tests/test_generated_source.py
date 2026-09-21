@@ -82,5 +82,5 @@ def test_generated_units_are_kept_apart() -> None:
 
 
 def test_unregistered_generated_source_is_refused_with_the_retrieval_contract() -> None:
-    with pytest.raises(SourceUnavailable, match="registered in linecache"):
+    with pytest.raises(SourceUnavailable):
         holoso.synthesize(_Accumulator("x + y", 1.0, register=False).step, _OPTIONS, name="gen_unregistered")

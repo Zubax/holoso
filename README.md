@@ -243,15 +243,16 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
   or growing like Python's unbounded ints; the raw left shift `<<` is the one deliberate exception -- it truncates
   past the word. Mixed int/float expressions promote to float, C-style.
 
-- Negative shift amount is well-defined: `x << 3` is equivalent to `x >> -3`, and the other way around.
+- A shift by a negative runtime amount is well-defined in hardware, reversing the direction.
+  A count the compiler knows is negative is refused.
 
 - Dynamically-sized tensors are not supported. Dimensions of runtime tensors must be annotated using jaxtyping
   (e.g., `Float64[np.ndarray, "3 3"]`).
   Constant tensors may not require annotations if they are visible to the optimizer, depending on context.
 
-- Augmented assignment (`+=`, `@=`, etc.) is supported only for scalars, where it simply rebinds the result.
-  Tensors mutate in place, which diverges from a rebind when the tensor is aliased; supporting it correctly would
-  require complex escape analysis.
+- Augmented assignment rebinds the result for scalars.
+  An in-place update of an array that something else may still hold is rejected rather than silently aliased;
+  the judgement is conservative, so where it refuses, rebind instead (`x = x + y`).
 
 - Math optimizations are non-bit-exact, fastmath style, aggressive. Holoso assumes commutativity/associativity,
   may perform constant folding using higher-precision arithmetic than the target format,

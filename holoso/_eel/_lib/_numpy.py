@@ -7,22 +7,20 @@ with the error output signals asserted; refer to the operator RTL for details. A
 prove statically is refused at build time instead -- a liberty it takes where a fold reaches, never a guarantee.
 
 Composites compute through the intrinsic stubs (exp2, atan2, ...) instead of the library functions directly even
-though the library spellings would lower identically (they are registered intrinsic keys too). The intrinsic stub
-pins each primitive to the numpy/math variant matching the hardware behavior -- e.g. exp2 saturates to inf like
-the hardware where math.exp2 would raise -- so a composite built on the stubs inherits that hardware-faithful behavior,
-and its plain-Python run uses exactly the primitives (and fast-math choices) it lowers to.
-
-Stub names are irrelevant to dispatch.
+though the library spellings would lower identically (they select the same lowerings). `clip` is the
+exception: its bounds are arrays as readily as scalars, so it composes `np.maximum`/`np.minimum`, which map over one.
+The intrinsic stub pins each primitive to the numpy/math variant matching the hardware behavior -- e.g. exp2 saturates
+to inf like the hardware where math.exp2 would raise -- so a composite built on the stubs inherits that
+hardware-faithful behavior, and its plain-Python run uses exactly the primitives (and fast-math choices) it lowers to.
 """
 
 import math
-from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 
 from ._intrinsics import atan2, ceil, cos, exp2, floor, isinf, log2, round_, sin, sqrt
-from ._registry import array, lib, lift
+from ._registry import array, lib
 
 _LOG2E = math.log2(math.e)
 _LN2 = math.log(2.0)
@@ -31,87 +29,69 @@ _DEG_PER_RAD = 180.0 / math.pi
 _RAD_PER_DEG = math.pi / 180.0
 
 
-@lib(math.floor, np.floor, math.ceil, np.ceil, math.trunc, np.trunc, np.fix, round, np.round, np.around)
-def integral(x: int) -> int:
-    """An integer entry exists exactly where the Python spelling's own answer is an integer."""
+@lib
+def identity_bool(x: bool) -> bool:
     return x
 
 
-# On a float the math spellings answer an int where the numpy ones answer a float, so the two share no symbol.
+@lib
+def identity_int(x: int) -> int:
+    """The identity every spelling whose own answer on an integer IS that integer lowers to, unary plus included."""
+    return x
+
+
 # A float consumer reduces the cast back to the bare rounder.
-@lib(math.floor)
+@lib
 def floor_to_int(x: float) -> int:
     return int(floor(x))
 
 
-@lib(math.ceil)
+@lib
 def ceil_to_int(x: float) -> int:
     return int(ceil(x))
 
 
-@lib(math.trunc)
-def trunc_to_int(x: float) -> int:
-    return int(x)  # truncation toward zero is what the cast already is
-
-
-@lib(round)
+@lib
 def round_to_int(x: float) -> int:
     return int(round_(x))
 
 
-@lib(min)
+@lib
 def min_int(a: int, b: int) -> int:
     """There is no hardware min/max operator for integers."""
     return a if a <= b else b  # the tie answers a, as CPython's min does
 
 
-@lib(max)
+@lib
 def max_int(a: int, b: int) -> int:
     return a if b <= a else b
 
 
-def _elementwise(f: Callable[[Any, Any], Any], a: np.ndarray, b: np.ndarray) -> Any:
-    """
-    Rank <= 2 with scalar broadcast against either side; the general vector-against-matrix broadcast is not
-    supported. Operands are numpy-typed, as everywhere in this library: a scalar answers ndim 0, which a native
-    Python number does not. A mixed-dtype result carries the winning elements' own types, and each comparison is
-    exact where numpy compares after promotion -- so past the float's exact-integer range a mixed pair can answer
-    the unpromoted neighbor of numpy's value. The compiled path conforms mixed operands C-style and follows numpy.
-    """
-    if a.ndim > 2 or b.ndim > 2:
-        raise ValueError(f"elementwise operands must be at most 2-D, got {a.ndim}-D and {b.ndim}-D")
-    if a.ndim == 0 and b.ndim == 0:
-        return f(a, b)
-    if a.ndim != 0 and b.ndim != 0:
-        if a.ndim != b.ndim:
-            raise ValueError(
-                f"elementwise shape mismatch: {a.ndim}-D against {b.ndim}-D; broadcasting is not supported"
-            )
-        if len(a) != len(b):
-            raise ValueError(f"elementwise shape mismatch: length {len(a)} against {len(b)}")
-        if a.ndim == 2:
-            if len(a[0]) != len(b[0]):
-                raise ValueError(f"elementwise shape mismatch: rows of length {len(a[0])} against {len(b[0])}")
-    s = b if a.ndim == 0 else a
-    if s.ndim == 1:
-        return np.array([f(a if a.ndim == 0 else a[i], b if b.ndim == 0 else b[i]) for i in range(len(s))])
-    return np.array(
-        [
-            [f(a if a.ndim == 0 else a[i][j], b if b.ndim == 0 else b[i][j]) for j in range(len(s[0]))]
-            for i in range(len(s))
-        ]
-    )
+@lib
+def subtract_float(a: float, b: float) -> float:
+    """HIR has no float subtraction."""
+    return a + -b
 
 
-# The NaN-propagation difference between np.minimum/np.fmin (and np.maximum/np.fmax) is moot under the no-NaN policy.
-@array(np.minimum, np.fmin)
-def minimum(a: np.ndarray, b: np.ndarray) -> Any:
-    return _elementwise(min, a, b)
+@lib
+def identity_float(x: float) -> float:
+    return x
 
 
-@array(np.maximum, np.fmax)
-def maximum(a: np.ndarray, b: np.ndarray) -> Any:
-    return _elementwise(max, a, b)
+@lib
+def equal_bool(a: bool, b: bool) -> bool:
+    """HIR has no boolean equality. The body avoids `==`, which would resolve back to this meaning."""
+    return not (a != b)
+
+
+@lib
+def square_int(x: int) -> int:
+    return x * x
+
+
+@lib
+def square_float(x: float) -> float:
+    return x * x
 
 
 @array(np.ndarray.clip)
@@ -119,13 +99,14 @@ def clip(x: np.ndarray, lo: Any = None, hi: Any = None) -> Any:
     """
     Saturation as the maximum/minimum composition, following numpy: the lower bound applies first, so an inverted
     pair answers `hi`, and an omitted bound skips that side (the subset admits no `None` argument, so one-sided
-    saturation from above is spelled `np.minimum`). Bounds broadcast per the elementwise rules.
+    saturation from above is spelled `np.minimum`). The bounds broadcast as the extrema do, which on the host
+    reaches further than the compiler admits, so this stub is a reference for the values and not for the shapes.
     """
     r = x
     if lo is not None:
-        r = maximum(r, lo)
+        r = np.maximum(r, lo)
     if hi is not None:
-        r = minimum(r, hi)
+        r = np.minimum(r, hi)
     return r
 
 
@@ -150,7 +131,7 @@ def polyval(p: np.ndarray, x: Any) -> Any:
     return acc
 
 
-@lib(np.sign)
+@lib
 def sign_int(x: int) -> int:
     if x > 0:
         r = 1
@@ -161,7 +142,7 @@ def sign_int(x: int) -> int:
     return r
 
 
-@lib(np.sign)
+@lib
 def sign_float(x: float) -> float:
     if x > 0.0:
         r = +1.0
@@ -172,13 +153,13 @@ def sign_float(x: float) -> float:
     return r
 
 
-@lib(math.cbrt, np.cbrt)
+@lib
 def cbrt(x: float) -> float:
     """Fastmath: cbrt(−0.0) may return +0.0"""
     return sign_float(x) * exp2(log2(abs(x)) / 3.0) if bool(x) else 0.0
 
 
-@lib(math.tan, np.tan)
+@lib
 def tan(x: float) -> float:
     """
     tan = sin/cos may diverge to +-inf at a pole where cos rounds to zero (the format-nearest pi/2),
@@ -192,7 +173,7 @@ def tan(x: float) -> float:
     return r
 
 
-@lib(math.atan, np.arctan, np.atan)
+@lib
 def atan(x: float) -> float:
     return atan2(x, 1.0)
 
@@ -200,60 +181,60 @@ def atan(x: float) -> float:
 # `1 - x*x` cancels as |x| approaches 1, exactly where these are steepest, and `ffma` answers it by not rounding
 # the product first. Spelling it `(1-x)*(1+x)` would buy the same without `ffma`, but it destroys the `a*b + c`
 # shape and costs a cycle everywhere -- so an accuracy-sensitive build configures `ffma` instead.
-@lib(math.asin, np.arcsin, np.asin)
+@lib
 def asin(x: float) -> float:
     return atan2(x, sqrt(1.0 - x * x))
 
 
-@lib(math.acos, np.arccos, np.acos)
+@lib
 def acos(x: float) -> float:
     return atan2(sqrt(1.0 - x * x), x)
 
 
-@lib(math.exp, np.exp)
+@lib
 def exp(x: float) -> float:
     return exp2(x * _LOG2E)
 
 
-@lib(math.log, np.log)
+@lib
 def log(x: float) -> float:
     return log2(x) * _LN2
 
 
-@lib(math.log10, np.log10)
+@lib
 def log10(x: float) -> float:
     return log2(x) * _LOG10_2
 
 
-@lib(math.expm1, np.expm1)
+@lib
 def expm1(x: float) -> float:
     """FIXME Loses the small-argument precision the reference exists to preserve."""
     return exp(x) - 1.0
 
 
-@lib(math.log1p, np.log1p)
+@lib
 def log1p(x: float) -> float:
     """FIXME Loses the small-argument precision the reference exists to preserve."""
     return log(1.0 + x)
 
 
-@lib(math.sinh, np.sinh)
+@lib
 def sinh(x: float) -> float:
     return exp(x - _LN2) - exp(-x - _LN2)  # the /2 folded into the exponent, so exp does not overflow before it
 
 
-@lib(math.cosh, np.cosh)
+@lib
 def cosh(x: float) -> float:
     return exp(x - _LN2) + exp(-x - _LN2)
 
 
-@lib(math.tanh, np.tanh)
+@lib
 def tanh(x: float) -> float:
     """Stable sigmoid form: no exp overflow for large |x|. FIXME Loses precision to cancellation near zero."""
     return 2.0 / (1.0 + exp(-2.0 * x)) - 1.0
 
 
-@lib(math.asinh, np.asinh, np.arcsinh)
+@lib
 def asinh(x: float) -> float:
     """
     Sign/abs form avoids the large-negative-x cancellation; the branch avoids x*x overflowing (to +inf, over a huge
@@ -267,7 +248,7 @@ def asinh(x: float) -> float:
     return r
 
 
-@lib(math.acosh, np.acosh, np.arccosh)
+@lib
 def acosh(x: float) -> float:
     """The branch avoids x*x overflowing before the sqrt; there sqrt(x*x - 1) == x, so acosh(x) == ln(2x)."""
     t = x * x
@@ -278,29 +259,16 @@ def acosh(x: float) -> float:
     return r
 
 
-@lib(math.atanh, np.atanh, np.arctanh)
+@lib
 def atanh(x: float) -> float:
     return 0.5 * log((1.0 + x) / (1.0 - x))
 
 
-@lib(math.degrees, np.degrees, np.rad2deg)
+@lib
 def degrees(x: float) -> float:
     return x * _DEG_PER_RAD
 
 
-@lib(math.radians, np.radians, np.deg2rad)
+@lib
 def radians(x: float) -> float:
     return x * _RAD_PER_DEG
-
-
-# The array-capable spellings, declared here because this module and the intrinsics it imports register them all.
-# Only numpy keys qualify: their `math` twins raise on an array, and a lifted predicate or bit count would mint a
-# boolean or unsigned array, families the subset does not have.
-lift(
-    abs, np.abs, np.absolute, np.fabs, np.sign,
-    np.floor, np.ceil, np.trunc, np.fix, np.round, np.around, np.rint,
-    np.sqrt, np.cbrt, np.exp, np.exp2, np.expm1, np.log, np.log2, np.log10, np.log1p,
-    np.sin, np.cos, np.tan, np.arcsin, np.arccos, np.arctan,
-    np.sinh, np.cosh, np.tanh, np.arcsinh, np.arccosh, np.arctanh,
-    np.degrees, np.rad2deg, np.radians, np.deg2rad,
-)  # fmt: skip

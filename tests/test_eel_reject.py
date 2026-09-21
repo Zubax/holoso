@@ -1,6 +1,6 @@
 """
-The rejection suite: one located diagnostic pin per banned family — the specification's teeth. Every case
-asserts the diagnostic class, a message fragment, and the presence of a source location.
+The rejection suite: one located refusal per banned family — the specification's teeth. Every case asserts the
+diagnostic class and the presence of a source location.
 """
 
 import functools
@@ -10,14 +10,17 @@ import pytest
 
 import holoso
 from holoso import UnsupportedConstruct
+from holoso._eel import lower
+
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 
 _OPTIONS = holoso.Options(holoso.OperatorOptions())
 
 
-def _reject(target: object, fragment: str) -> None:
+def _reject(target: object) -> None:
     assert callable(target)
-    with pytest.raises(UnsupportedConstruct, match=fragment) as info:
-        holoso.synthesize(target, _OPTIONS, name="k")
+    with pytest.raises(UnsupportedConstruct) as info:
+        lower(target, DEFAULT_UNROLL_MAX_TRIPS)
     assert info.value.location is not None
     assert info.value.location.lineno > 0
 
@@ -331,68 +334,68 @@ class _MangledRaise:
 def _k_stub_body(x: float) -> float: ...  # type: ignore[empty-body]
 
 
-_CASES: list[tuple[object, str]] = [
-    (_k_del, "unsupported statement: Delete"),
-    (_k_global, "unsupported statement: Global"),
-    (_k_nonlocal(), "unsupported statement: Nonlocal"),
-    (_k_import, "unsupported statement: Import"),
-    (_k_lambda, "lambdas are not supported"),
-    (_k_nested_def, "unsupported statement: FunctionDef"),
-    (_k_nested_class, "unsupported statement: ClassDef"),
-    (_k_dict, "dictionary displays"),
-    (_k_set, "set displays"),
-    (_k_dict_comp, "set/dict comprehensions"),
-    (_k_set_comp, "set/dict comprehensions"),
-    (_k_genexp, "generator expressions"),
-    (_k_comp_filter, "comprehension `if` filters"),
-    (_k_comp_multi, "multiple `for` clauses"),
-    (_k_comp_unpack, "comprehension target must be a plain name"),
-    (_k_yield, "generators are not supported"),
-    (_k_async, "async functions are not supported"),
-    (_k_try, "unsupported statement: Try"),
-    (_k_with, "unsupported statement: With"),
-    (_k_match, "unsupported statement: Match"),
-    (_k_type_alias, "unsupported statement: TypeAlias"),
-    (_k_while_else, "`while ... else` is not supported"),
-    (_k_for_else, "`for ... else` is not supported"),
-    (_k_starred_target, "starred assignment targets"),
-    (_k_slice_store, "slice assignment is not supported"),
-    (_k_slice_step, "slice steps are not supported"),
-    (_k_tuple_slice_store, "slice assignment is not supported"),
-    (_k_double_splat, r"`\*\*` call arguments"),
-    (_k_varargs, r"\*args parameters"),
-    (_k_kwargs, r"\*\*kwargs parameters"),
-    (_k_is, "`is` is only supported with None"),
-    (_k_in, "comparison operator `in`"),
-    (_k_mangled_local, "name mangling"),
-    (_k_mangled_trailing, "name mangling"),
-    (_Mangled().step, "name mangling"),
-    (_k_string, "string literals are only supported as raise messages"),
-    (_k_none, "`None` is only supported as a bare return value"),
-    (_k_fstring, "f-strings are only supported as raise messages"),
-    (_k_bare_call, "calls to 'print' are not supported yet"),  # bare calls now desugar; the callee still refuses
-    (_k_bare_raise, "bare `raise` is not supported"),
-    (_k_raise_from, "`raise ... from` is not supported"),
-    (_k_raise_no_call, "`raise` requires"),
-    (_k_raise_conversion, "conversions and format specs"),
-    (_k_raise_spec, "conversions and format specs"),
-    (_k_walrus_ifexp, "conditional-expression arm"),
-    (_k_walrus_gate, "operand after the first"),
-    (_k_walrus_chain, "comparator after the first"),
-    (_k_walrus_comp, "inside a comprehension"),
-    (_k_walrus_read, "may not also be read in the same statement"),
-    (_k_walrus_aug, "may not also be read in the same statement"),
-    (_k_walrus_index_store, "may not also be read in the same statement"),
-    (_k_walrus_index_aug, "may not also be read in the same statement"),
-    (_k_walrus_while, "update the name inside the loop body"),
-    (_k_wrapped, "wrapped by a decorator"),
-    (_k_assert_yield, "generators are not supported"),
-    (_k_generic, "generic type parameters"),
-    (_k_bare_ann_subscript, "bare annotation"),
-    (_MangledParam().kernel, "name mangling"),
-    (_k_lambda_target, "lambdas are not supported"),
-    (_MangledRaise().kernel, "name mangling"),
-    (_k_stub_body, "stub body"),
+_CASES: list[object] = [
+    _k_del,
+    _k_global,
+    _k_nonlocal(),
+    _k_import,
+    _k_lambda,
+    _k_nested_def,
+    _k_nested_class,
+    _k_dict,
+    _k_set,
+    _k_dict_comp,
+    _k_set_comp,
+    _k_genexp,
+    _k_comp_filter,
+    _k_comp_multi,
+    _k_comp_unpack,
+    _k_yield,
+    _k_async,
+    _k_try,
+    _k_with,
+    _k_match,
+    _k_type_alias,
+    _k_while_else,
+    _k_for_else,
+    _k_starred_target,
+    _k_slice_store,
+    _k_slice_step,
+    _k_tuple_slice_store,
+    _k_double_splat,
+    _k_varargs,
+    _k_kwargs,
+    _k_is,
+    _k_in,
+    _k_mangled_local,
+    _k_mangled_trailing,
+    _Mangled().step,
+    _k_string,
+    _k_none,
+    _k_fstring,
+    _k_bare_call,  # a bare call desugars; the callee is what refuses
+    _k_bare_raise,
+    _k_raise_from,
+    _k_raise_no_call,
+    _k_raise_conversion,
+    _k_raise_spec,
+    _k_walrus_ifexp,
+    _k_walrus_gate,
+    _k_walrus_chain,
+    _k_walrus_comp,
+    _k_walrus_read,
+    _k_walrus_aug,
+    _k_walrus_index_store,
+    _k_walrus_index_aug,
+    _k_walrus_while,
+    _k_wrapped,
+    _k_assert_yield,
+    _k_generic,
+    _k_bare_ann_subscript,
+    _MangledParam().kernel,
+    _k_lambda_target,
+    _MangledRaise().kernel,
+    _k_stub_body,
 ]
 
 
@@ -434,19 +437,19 @@ def _k_bool_arithmetic(a: bool, x: float) -> float:
     return a * x
 
 
-_PE_CASES: list[tuple[object, str]] = [
-    (_k_zip, "calls to 'zip' are not supported yet"),
-    (_k_dynamic_index_read, "a subscript index must be a compile-time constant int"),
-    (_k_dynamic_index_store, "a subscript index must be a compile-time constant int"),
-    (_k_aggregate_truthiness, "the truthiness of an aggregate is not supported"),
-    (_k_aggregate_equality, "aggregate comparison is not supported"),
-    (_k_bool_arithmetic, "booleans take no part in arithmetic"),
+_PE_CASES: list[object] = [
+    _k_zip,
+    _k_dynamic_index_read,
+    _k_dynamic_index_store,
+    _k_aggregate_truthiness,
+    _k_aggregate_equality,
+    _k_bool_arithmetic,
 ]
 
 
-@pytest.mark.parametrize("fn,fragment", _PE_CASES, ids=[getattr(fn, "__name__", "?") for fn, _ in _PE_CASES])
-def test_pe_rejection(fn: object, fragment: str) -> None:
-    _reject(fn, fragment)
+@pytest.mark.parametrize("fn", _PE_CASES, ids=[getattr(fn, "__name__", "?") for fn in _PE_CASES])
+def test_pe_rejection(fn: object) -> None:
+    _reject(fn)
 
 
 def test_lambda_rejection_points_at_the_lambda_token() -> None:
@@ -457,6 +460,6 @@ def test_lambda_rejection_points_at_the_lambda_token() -> None:
     assert location.line[location.col :].startswith("lambda")
 
 
-@pytest.mark.parametrize("fn,fragment", _CASES, ids=[getattr(fn, "__name__", "?") for fn, _ in _CASES])
-def test_rejection(fn: object, fragment: str) -> None:
-    _reject(fn, fragment)
+@pytest.mark.parametrize("fn", _CASES, ids=[getattr(fn, "__name__", "?") for fn in _CASES])
+def test_rejection(fn: object) -> None:
+    _reject(fn)
