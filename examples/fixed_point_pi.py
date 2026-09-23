@@ -35,8 +35,12 @@ class Fix:
         return cls.saturated(round(value * 2**cls.frac))
 
     @classmethod
-    def product(cls, a: Fix, b: Fix, /) -> Self:
-        return cls.saturated((a.word * b.word) >> (a.frac + b.frac - cls.frac))
+    def product(cls, a: Fix, b: Fix, /) -> int:
+        return (a.word * b.word) >> (a.frac + b.frac - cls.frac)
+
+    @classmethod
+    def rescaled(cls, x: Fix, /) -> int:
+        return x.word >> (x.frac - cls.frac)
 
     def __int__(self) -> int:
         return self.word
@@ -49,6 +53,9 @@ class CurrentError(Fix, width=13, frac=4): ...  # [A] the difference of two curr
 
 
 class Voltage(Fix, width=12, frac=4): ...  # [V]
+
+
+class Integral(Fix, width=16, frac=8): ...  # [V] Voltage's range at a finer LSB, so a small error still integrates
 
 
 class Gain(Fix, width=8, frac=4): ...  # [V/A]
@@ -71,16 +78,16 @@ class CurrentRegulator:
     def __init__(self, *, ki: Gain = Gain.encode(0.125), overcurrent: Current = Current.encode(120.0)) -> None:
         self.ki = ki  # per tick
         self.overcurrent = overcurrent
-        self.integral = 0  # [V] in Voltage words
+        self.integral = 0  # in Integral words
 
     def __call__(self, reference: Current, measurement: Current, kp: Gain, /) -> Command:
         error = CurrentError(int(reference) - int(measurement))
-        candidate = self.integral + int(Voltage.product(self.ki, error))
-        demand = int(Voltage.product(kp, error)) + candidate
+        integral = Integral.saturated(self.integral + Integral.product(self.ki, error))
+        demand = Voltage.product(kp, error) + Voltage.rescaled(integral)
         voltage = Voltage.saturated(demand)
         saturated = int(voltage) != demand
         if not saturated:
-            self.integral = candidate
+            self.integral = int(integral)
         fault = Fault.SATURATED if saturated else Fault(0)
         if abs(int(measurement)) >= int(self.overcurrent):
             fault |= Fault.OVERCURRENT
@@ -88,7 +95,7 @@ class CurrentRegulator:
 
 
 def main() -> None:
-    # The widest intermediate is the gain product: 4095 * 128 needs 19 bits plus the sign.
+    # The widest intermediate is the proportional product, at most 4095 * 128 in magnitude: 19 bits plus the sign.
     options = holoso.Options(holoso.OperatorOptions(), wint_min=20)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(CurrentRegulator().__call__, options)

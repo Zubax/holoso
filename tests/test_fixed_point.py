@@ -8,7 +8,7 @@ from pathlib import Path
 import holoso
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-from fixed_point_pi import Current, Fault, Fix  # noqa: E402
+from fixed_point_pi import Current, Fault  # noqa: E402
 
 
 class Mode(enum.IntEnum):
@@ -40,16 +40,32 @@ def test_enumerations_and_records_cross_the_boundary_as_integers() -> None:
         assert [int(v) for v in got] == list(Monitor()(Sample(Current(word), mode), mask))
 
 
-def _doubled(value: Fix) -> int:
-    return 2 * int(value)
+@dataclasses.dataclass(frozen=True)
+class _Reading:
+    word: int
+
+    def __int__(self) -> int:
+        return self.word
+
+
+@dataclasses.dataclass(frozen=True)
+class _Offset(_Reading):
+    offset: int
+
+    def __int__(self) -> int:
+        return self.word + self.offset
+
+
+def _doubled(reading: _Reading) -> int:
+    return 2 * int(reading)
 
 
 def test_a_base_class_annotation_admits_a_subclass_record() -> None:
-    def kernel(current: Current) -> int:
-        return _doubled(current)
+    def kernel(word: int) -> int:
+        return _doubled(_Offset(word, 3))
 
     result = holoso.synthesize(kernel, holoso.Options(holoso.OperatorOptions()), name="doubled")
     sim = result.numerical_model.elaborate()
     for word in (0, 5, -2048):
         got = sim.run(word)[0]
-        assert isinstance(got, holoso.IntValue) and int(got) == kernel(Current(word))
+        assert isinstance(got, holoso.IntValue) and int(got) == kernel(word)

@@ -354,7 +354,8 @@ documented deviation that keeps the compiler simple is preferred to machinery re
 faithful meaning the hardware cannot express -- a data-dependent exception, for instance -- is rejected; one raised
 unconditionally folds into a compile-time diagnostic instead, which is how library stubs self-validate with plain
 `raise`. The module boundary is explicitly typed: parameters and the return value require annotations, decomposed to
-scalar ports and checked against the inferred result.
+scalar ports and checked against the inferred result. A record annotation there, or on a record's field, demands its
+exact class, which decides the fields; an inlined function's admits a subclass, as Python does.
 
 ## HIR
 

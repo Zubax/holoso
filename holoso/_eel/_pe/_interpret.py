@@ -1557,28 +1557,30 @@ class Interpreter:
                 if not root:
                     return value
                 reject(origin, f"{what}: {reason}")
-            if isinstance(value, RecordValue) and (
-                value.cls is annotation or (not root and issubclass(value.cls, annotation))
-            ):
-                annotations = self.record_annotations(value.cls, origin)
-                fields = tuple(
-                    self._conform_value(
-                        item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root
-                    )
-                    for (name, field_annotation), item in zip(annotations.items(), value.fields, strict=True)
-                )
-                return dataclasses.replace(value, fields=fields)
-            if isinstance(value, Opaque) and isinstance(value.value, annotation):
-                if not root:
-                    return value  # frozen-folding reads keep serving the captured instance
-                if type(value.value) is annotation:
-                    return self._admit_record(what, annotation, value.value, origin, sink)
+            found = (
+                value.cls
+                if isinstance(value, RecordValue)
+                else type(value.value) if isinstance(value, Opaque) else None
+            )
+            if found is None or not issubclass(found, annotation):
+                reject(origin, f"{what} is not a {annotation.__name__} record")
+            if root and found is not annotation:
                 reject(
                     origin,
-                    f"{what} is a {type(value.value).__name__}, a subclass of the annotated "
+                    f"{what} is a {found.__name__}, a subclass of the annotated "
                     f"{annotation.__name__}; projecting it to the base would silently drop its extra fields",
                 )
-            reject(origin, f"{what} is not a {annotation.__name__} record")
+            if not isinstance(value, RecordValue):
+                assert isinstance(value, Opaque)
+                if not root:
+                    return value  # frozen-folding reads keep serving the captured instance
+                return self._admit_record(what, annotation, value.value, origin, sink)
+            annotations = self.record_annotations(found, origin)
+            fields = tuple(
+                self._conform_value(item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root)
+                for (name, field_annotation), item in zip(annotations.items(), value.fields, strict=True)
+            )
+            return dataclasses.replace(value, fields=fields)
         annotated = _aggregate.array_annotation_shape(annotation, origin, what)
         if annotated is not None:
             shape, family = annotated

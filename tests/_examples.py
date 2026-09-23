@@ -1712,6 +1712,6 @@ SPECS = [
         edge_values=(0, 1, -1, Current.hi, Current.lo),
         edge_overrides={"kp_word": (0, 1, -1, Gain.hi, Gain.lo)},
         formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
-        wint_min=20,  # the gain product of two rails needs 19 bits, plus the sign bit
+        wint_min=20,  # the proportional product is at most 4095 * 128 in magnitude: 19 bits, plus the sign bit
     ),
 ]
