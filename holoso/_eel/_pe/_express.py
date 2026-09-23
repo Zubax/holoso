@@ -199,10 +199,14 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     if not isinstance(callee, Opaque):
         reject(node.origin, "the callee is not a callable object")
     raw = callee.value
+    if isinstance(raw, type) and (declared := annotation_stype(raw)) is not None:
+        raw = host_type(declared)
     display = f"{callee.name}()"
     match resolve(raw) if callable(raw) else None:
         case Spelling() as match:
             values = _positional_arguments(interp, node, display, frame, sink, shares=False)
+            if match.protocol is not None:
+                values = [_answer(interp, node.origin, match.protocol, value, frame, sink) for value in values]
             return _spelling_call(interp, node.origin, display, match, values, frame, sink)
         case VariadicFunction() as match:
             values = _positional_arguments(interp, node, display, frame, sink, shares=False)
@@ -245,6 +249,20 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     if callable(raw):
         reject(node.origin, f"calls to {callee.name!r} are not supported yet")
     reject(node.origin, f"the captured object {callee.name!r} is not callable")
+
+
+def _answer(interp: Interpreter, origin: Origin, method: str, value: Value, frame: Frame, sink: Sink) -> Value:
+    """A record or captured object answers through its class's own method; the meaning then applies to the answer."""
+    if isinstance(value, RecordValue):
+        cls = value.cls
+    elif isinstance(value, Opaque):
+        cls = type(value.value)
+    else:
+        return value
+    fn = plain_function(mro_attr(cls, method))
+    if fn is None:
+        return value
+    return interp.inline(origin, f"{cls.__name__}.{method}", fn, [value], {}, frame, sink, stub=False)
 
 
 def _inlinable(
@@ -707,14 +725,17 @@ def _conversion_arguments(
     interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink
 ) -> tuple[Value, ScalarType | None]:
     source, dtype = _option_arguments(interp, node, display, frame, sink, option="dtype")
-    if dtype is None:
+    if dtype is None or (isinstance(dtype, Opaque) and dtype.value is None):  # np.dtype(None) would be float64
         return source, None
-    family = annotation_stype(dtype.value) if isinstance(dtype, Opaque) else None
-    if family is ScalarType.BOOL:
+    try:
+        kind = np.dtype(dtype.value).kind if isinstance(dtype, Opaque) else None  # type: ignore[call-overload]
+    except TypeError:
+        kind = None
+    if kind == "b":
         reject(node.origin, "an array must hold numbers, not booleans")
-    if family is None:
-        reject(node.origin, f"the dtype of {display} must be the Python type float or int")
-    return source, family
+    if kind not in ("f", "i", "u"):
+        reject(node.origin, f"the dtype of {display} must be a float or integer type")
+    return source, ScalarType.FLOAT if kind == "f" else ScalarType.INT
 
 
 def _to_tensor(

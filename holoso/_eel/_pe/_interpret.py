@@ -1557,8 +1557,10 @@ class Interpreter:
                 if not root:
                     return value
                 reject(origin, f"{what}: {reason}")
-            if isinstance(value, RecordValue) and value.cls is annotation:
-                annotations = self.record_annotations(annotation, origin)
+            if isinstance(value, RecordValue) and (
+                value.cls is annotation or (not root and issubclass(value.cls, annotation))
+            ):
+                annotations = self.record_annotations(value.cls, origin)
                 fields = tuple(
                     self._conform_value(
                         item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root

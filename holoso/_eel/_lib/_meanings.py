@@ -122,6 +122,6 @@ meaning(_intrinsics.fma, scalar=[math.fma])
 
 # CASTS
 
-meaning(_numpy.identity_int, _intrinsics.int_from_float, _intrinsics.int_from_bool, scalar=[int])
+meaning(_numpy.identity_int, _intrinsics.int_from_float, _intrinsics.int_from_bool, scalar=[int], protocol="__int__")
 meaning(_numpy.identity_float, _intrinsics.float_from_int, _intrinsics.float_from_bool, scalar=[float])
 meaning(_numpy.identity_bool, _intrinsics.bool_from_int, _intrinsics.bool_from_float, scalar=[bool])

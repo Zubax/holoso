@@ -246,6 +246,9 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
 - A shift by a negative runtime amount is well-defined in hardware, reversing the direction.
   A count the compiler knows is negative is refused.
 
+- A subclass of `int`, such as an integer enumeration, is its integer value: its own methods and operators are not
+  consulted, so `~` of an `IntFlag` member gives the plain integer complement.
+
 - Dynamically-sized tensors are not supported. Dimensions of runtime tensors must be annotated using jaxtyping
   (e.g., `Float64[np.ndarray, "3 3"]`).
   Constant tensors may not require annotations if they are visible to the optimizer, depending on context.

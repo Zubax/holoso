@@ -6,6 +6,7 @@ and through located-rejection pins where it is not.
 import math
 import types
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pytest
@@ -715,6 +716,17 @@ def _huge_int_construction(x: float) -> float:
     return float(a[0])
 
 
+def _converted(source: Any, dtype: Any = None) -> Any:
+    return np.asarray(source, dtype=dtype)
+
+
+def _dtype_spellings(x: int) -> float:
+    narrow = _converted([x, 2 * x], np.float32)
+    signed = np.array([x, -x], dtype=np.int32)
+    kept = _converted(np.array([x, 3], dtype=np.uint8))  # the source's family, where np.dtype(None) is float64
+    return float(narrow[1] + _converted(signed, np.int64)[1] + (kept[1] >> 1))
+
+
 def test_dtype_widths_fold_into_the_width_less_model() -> None:
     _oracle(_np_int_scalar, [{"x": 3}])
     _oracle(_narrow_float_reads, [{"x": 2.0}])
@@ -722,6 +734,7 @@ def test_dtype_widths_fold_into_the_width_less_model() -> None:
     _oracle(_int_param, [{"v_0": 3, "v_1": 4}])
     _oracle(_int_filled_factory, [{"x": 2.5}])
     _oracle(_huge_int_construction, [{"x": 1.0}])
+    _oracle(_dtype_spellings, [{"x": 5}])
 
 
 def _factory_budget(x: float) -> float:

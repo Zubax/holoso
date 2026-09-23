@@ -38,7 +38,7 @@ def unaliased(annotation: object) -> object:
 def annotation_stype(annotation: object) -> ScalarType | None:
     if annotation is bool:
         return ScalarType.BOOL
-    if annotation is int:
+    if isinstance(annotation, type) and issubclass(annotation, int):
         return ScalarType.INT
     if annotation is float:
         return ScalarType.FLOAT

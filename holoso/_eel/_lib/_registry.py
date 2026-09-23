@@ -214,10 +214,14 @@ class Reshape:
 
 @dataclass(frozen=True, slots=True)
 class Spelling:
-    """Array capability is the spelling's, not the meaning's: `np.minimum` maps over an array where `min` does not."""
+    """
+    Array capability is the spelling's, not the meaning's: `np.minimum` maps over an array where `min` does not.
+    `protocol` names the method a record or captured object answers the call with before the meaning applies.
+    """
 
     meaning: ScalarMeaning
     elementwise: bool = False
+    protocol: str | None = None
 
 
 type Match = Spelling | VariadicFunction | Array | Factory | Conversion | Reshape
@@ -242,13 +246,15 @@ def _register(match: Match, keys: Iterable[object]) -> None:
         _REGISTRY[key] = match
 
 
-def meaning(*stubs: object, scalar: Sequence[object] = (), elementwise: Sequence[object] = ()) -> None:
+def meaning(
+    *stubs: object, scalar: Sequence[object] = (), elementwise: Sequence[object] = (), protocol: str | None = None
+) -> None:
     assert scalar or elementwise, "a meaning with no spelling"
     served = ScalarMeaning(tuple(_lowering_of(stub) for stub in stubs))
     if elementwise:
         _admit_elementwise(served)
     for keys, over_arrays in ((scalar, False), (elementwise, True)):
-        _register(Spelling(served, over_arrays), keys)
+        _register(Spelling(served, over_arrays, protocol), keys)
 
 
 def _lowering_of(stub: object) -> ScalarLowering:

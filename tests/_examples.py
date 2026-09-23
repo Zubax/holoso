@@ -34,6 +34,7 @@ from debouncer import Debouncer  # noqa: E402
 from equal_temperament import equal_temperament as equal_temperament  # noqa: E402
 from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
+from fixed_point_pi import Current, CurrentRegulator, Gain  # noqa: E402
 from flux_observer import FluxObserver  # noqa: E402
 from foc import FocController  # noqa: E402
 from iir1_hpf import IIR1HPF as IIR1HPF  # noqa: E402
@@ -834,6 +835,27 @@ _FUSION_INV_GYRO_CAL = np.linalg.inv(_FUSION_GYRO_CAL)
 _FUSION_INV_ACCEL_CAL = np.linalg.inv(_FUSION_ACCEL_CAL)
 # The frozen post-manual attitude's body-frame image of the world direction the random rows aim near.
 _FUSION_ACCEL_DIR = np.array([0.5431691419956042, -0.6765799876735006, 0.497198957625099])
+
+
+def _fixed_point_row(reference: int, measurement: int, kp: int = 1 << Gain.frac) -> InputVector:
+    return {"reference_word": reference, "measurement_word": measurement, "kp_word": kp}
+
+
+_FIXED_POINT_MANUAL = [
+    _fixed_point_row(160, 0),
+    _fixed_point_row(160, 80),
+    _fixed_point_row(Current.hi, Current.lo),  # the command rails and the integrator holds
+    _fixed_point_row(Current.hi, Current.lo),
+    _fixed_point_row(0, int(CurrentRegulator().overcurrent)),  # overcurrent alongside saturation
+    _fixed_point_row(0, -int(CurrentRegulator().overcurrent)),
+    _fixed_point_row(160, 80),  # off the rails, integration resumes from what it held
+    _fixed_point_row(-160, 0, 0),  # a zero gain leaves the integrator alone in command
+]
+
+
+def _draw_fixed_point(rng: np.random.Generator) -> InputVector:
+    reference, measurement = (int(word) for word in rng.integers(Current.lo, Current.hi + 1, size=2))
+    return _fixed_point_row(reference, measurement, int(rng.integers(Gain.lo, Gain.hi + 1)))
 
 
 def _draw_imu_fusion(rng: np.random.Generator) -> InputVector:
@@ -1679,5 +1701,17 @@ SPECS = [
         },
         edge_values=(0.0, 5.0, -5.0, 40.0, -40.0),  # the current lanes: quiet, nominal, and both saturating rails
         operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
+    ),
+    ExampleSpec(
+        name="fixed_point_pi",
+        inputs=("reference_word", "measurement_word", "kp_word"),
+        make_kernel=lambda: CurrentRegulator().__call__,
+        nominal=_fixed_point_row(160, 0),
+        manual=_FIXED_POINT_MANUAL,
+        draw_random=_draw_fixed_point,
+        edge_values=(0, 1, -1, Current.hi, Current.lo),
+        edge_overrides={"kp_word": (0, 1, -1, Gain.hi, Gain.lo)},
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=20,  # the gain product of two rails needs 19 bits, plus the sign bit
     ),
 ]
