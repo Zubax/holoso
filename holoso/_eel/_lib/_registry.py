@@ -6,22 +6,20 @@ whether the read already is the call. Only pure readers and derivations may bind
 express receiver mutation, so a mutating method (`.fill`, `.sort`) must stay unregistered and draw the
 no-supported-attribute rejection.
 
-A scalar callee resolves to a group of typed lowerings: `min` is a hardware operator over floats and a
-compare-and-select composite over integers. A lowering's domain is its stub's own annotations.
-A domain is per operand position and may carry a refinement (`StaticWholeNonNegative[int]`) --
-which a subset operator reaches as a key like any other, so an operator and its spellings cannot part.
+A scalar callee resolves to a spelling of a meaning; DESIGN.md states that model. A lowering's domain is its stub's
+own annotations, per operand position, and may carry a refinement (`StaticWholeNonNegative[int]`).
 """
 
 import inspect
 import types
 import typing
 from typing import TypeAliasType
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from ..._hir import BoolType, FloatType, IntType, Operator
 from .._annotations import accepted_stypes, annotation_stype
-from .._ir import BinaryOp, ScalarType
+from .._ir import BinaryOp, CompareOp, ScalarType, UnaryOp
 
 _HIR_TYPES: dict[ScalarType, type] = {
     ScalarType.BOOL: BoolType,
@@ -114,20 +112,37 @@ class ScalarLowering:
 
 
 @dataclass(frozen=True, slots=True)
-class ScalarFunction:
-    """No two lowerings are ever selectable by the same operands."""
+class ScalarMeaning:
+    """The typed lowerings that implement one meaning; no two are ever selectable by the same operands."""
 
     lowerings: tuple[ScalarLowering, ...]
+
+    def __post_init__(self) -> None:
+        assert self.lowerings
+        for index, lowering in enumerate(self.lowerings):
+            name = lowering.stub.__name__
+            assert len(lowering.operands) == self.arity, name
+            for other in self.lowerings[:index]:
+                assert other.operands != lowering.operands, name
+                # Selection takes the most refined candidate, so any two an operand tuple could both reach must be
+                # ordered.
+                assert (
+                    lowering.within(other) or other.within(lowering) or lowering.apart(other)
+                ), f"{name}: the lowering domains are neither ordered nor separated"
 
     @property
     def arity(self) -> int:
         return len(self.lowerings[0].operands)
 
     @property
-    def domains(self) -> list[ScalarType]:
-        """Fixed order, so a diagnostic reads the same however the decorations landed."""
-        served = {domain.stype for lowering in self.lowerings for domain in lowering.operands}
-        return [stype for stype in (ScalarType.INT, ScalarType.FLOAT) if stype in served]
+    def signatures(self) -> list[list[ScalarType]]:
+        """In fixed order, so a diagnostic reads the same however the lowerings are listed."""
+        order = list(ScalarType)
+        served = {tuple(domain.stype for domain in lowering.operands) for lowering in self.lowerings}
+        return [list(one) for one in sorted(served, key=lambda one: [order.index(stype) for stype in one])]
+
+    def selects_by_value(self, position: int) -> bool:
+        return any(lowering.operands[position].refinement is not None for lowering in self.lowerings)
 
     def select(self, operands: list[Operand]) -> ScalarLowering | None:
         assert len(operands) == self.arity
@@ -135,7 +150,7 @@ class ScalarFunction:
         if not candidates:
             return None
         chosen = next((low for low in candidates if all(low.within(other) for other in candidates)), None)
-        assert chosen is not None, "registration keeps the accepting lowerings of any operand tuple ordered"
+        assert chosen is not None, "a meaning keeps the accepting lowerings of any operand tuple ordered"
         return chosen
 
 
@@ -150,10 +165,6 @@ class VariadicFunction:
     operator: Callable[[int], Operator]
     domain: Domain
     minimum: int
-
-    @property
-    def domains(self) -> list[ScalarType]:
-        return [self.domain.stype]
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,16 +213,20 @@ class Reshape:
 
 
 @dataclass(frozen=True, slots=True)
-class Lifted:
+class Spelling:
     """
-    A scalar entry made array-capable for its key: a single tensor operand applies the scalar selection
-    leafwise; anything else falls through to the scalar path unchanged.
+    Array capability is the spelling's, not the meaning's: `np.minimum` maps over an array where `min` does not.
+    `protocol` names the method a record or captured object answers the call with before the meaning applies.
     """
 
-    scalar: ScalarFunction
+    meaning: ScalarMeaning
+    elementwise: bool = False
+    protocol: str | None = None
 
 
-type Match = ScalarFunction | VariadicFunction | Array | Factory | Conversion | Reshape | Lifted
+type Match = Spelling | VariadicFunction | Array | Factory | Conversion | Reshape
+
+_OPERATOR_KEYS = (BinaryOp, CompareOp, UnaryOp)
 
 _REGISTRY: dict[object, Match] = {}
 
@@ -226,28 +241,32 @@ def _register(match: Match, keys: Iterable[object]) -> None:
         if inspect.isdatadescriptor(key):
             assert isinstance(match, Array), "only array entries may bind class members"
         else:
-            assert callable(key) or isinstance(key, BinaryOp), key
+            assert callable(key) or isinstance(key, _OPERATOR_KEYS), key
         assert key not in _REGISTRY, key
         _REGISTRY[key] = match
 
 
-def _register_scalar(lowering: ScalarLowering, keys: Iterable[object]) -> None:
-    for key in _keys(keys):
-        assert (callable(key) and not inspect.isdatadescriptor(key)) or isinstance(key, BinaryOp), key
-        found = _REGISTRY.get(key)
-        if found is None:
-            _REGISTRY[key] = ScalarFunction((lowering,))
-            continue
-        assert isinstance(found, ScalarFunction), key
-        assert found.arity == len(lowering.operands), key
-        for other in found.lowerings:
-            assert other.operands != lowering.operands, key
-            # Selection takes the most refined candidate, so any two an operand tuple could both reach must be
-            # ordered.
-            assert (
-                lowering.within(other) or other.within(lowering) or lowering.apart(other)
-            ), f"{key}: the lowering domains are neither ordered nor separated"
-        _REGISTRY[key] = ScalarFunction((*found.lowerings, lowering))
+def meaning(
+    *stubs: object, scalar: Sequence[object] = (), elementwise: Sequence[object] = (), protocol: str | None = None
+) -> None:
+    assert scalar or elementwise, "a meaning with no spelling"
+    served = ScalarMeaning(tuple(_lowering_of(stub) for stub in stubs))
+    if elementwise:
+        _admit_elementwise(served)
+    for keys, over_arrays in ((scalar, False), (elementwise, True)):
+        _register(Spelling(served, over_arrays, protocol), keys)
+
+
+def _lowering_of(stub: object) -> ScalarLowering:
+    found = _REGISTRY[stub]
+    assert isinstance(found, Spelling), stub
+    (lowering,) = found.meaning.lowerings
+    return lowering
+
+
+def _stub(lowering: ScalarLowering) -> None:
+    """A stub spells its own lowering alone: a composite calls the primitive it needs, not a meaning it lowers."""
+    _register(Spelling(ScalarMeaning((lowering,))), (lowering.stub,))
 
 
 def _declared(stub: types.FunctionType, name: str) -> Domain:
@@ -258,9 +277,10 @@ def _declared(stub: types.FunctionType, name: str) -> Domain:
 
 def _scalar_lowering(fn: object, operator: Operator | None) -> ScalarLowering:
     assert isinstance(fn, types.FunctionType)
+    assert not fn.__kwdefaults__, "a stub binds positionally"
     code = fn.__code__
     operands = tuple(_declared(fn, name) for name in code.co_varnames[: code.co_argcount])
-    assert operands and all(d.stype in (ScalarType.INT, ScalarType.FLOAT) for d in operands), "numeric operands"
+    assert operands
     if operator is not None:
         # A single HIR operation consumes whatever the datapath carries, so it cannot demand a binding time.
         assert all(d.refinement is None for d in operands), "an intrinsic takes unrefined operands"
@@ -271,9 +291,9 @@ def _scalar_lowering(fn: object, operator: Operator | None) -> ScalarLowering:
     return ScalarLowering(fn, operator, operands)
 
 
-def intrinsic[F: Callable[..., object]](operator: Operator, *substituted: object) -> Callable[[F], F]:
+def intrinsic[F: Callable[..., object]](operator: Operator) -> Callable[[F], F]:
     def register(fn: F) -> F:
-        _register_scalar(_scalar_lowering(fn, operator), (fn, *substituted))
+        _stub(_scalar_lowering(fn, operator))
         return fn
 
     return register
@@ -300,14 +320,9 @@ def variadic[F: Callable[..., object]](
     return register
 
 
-def lib[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:
-    assert substituted
-
-    def register(fn: F) -> F:
-        _register_scalar(_scalar_lowering(fn, None), (fn, *substituted))
-        return fn
-
-    return register
+def lib[F: Callable[..., object]](fn: F) -> F:
+    _stub(_scalar_lowering(fn, None))
+    return fn
 
 
 def array[F: Callable[..., object]](
@@ -317,6 +332,7 @@ def array[F: Callable[..., object]](
 
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
+        assert not fn.__kwdefaults__, "a stub binds positionally"
         assert not derives or fn.__code__.co_argcount == 1, "a derivation's result tracks its sole argument"
         _register(Array(fn, derives, frozenset(sequences)), (fn, *substituted))
         return fn
@@ -324,11 +340,16 @@ def array[F: Callable[..., object]](
     return register
 
 
-def lift(*keys: object) -> None:
-    for key in _keys(keys):
-        found = _REGISTRY.get(key)
-        assert isinstance(found, ScalarFunction) and found.arity == 1, key
-        _REGISTRY[key] = Lifted(found)
+def _admit_elementwise(served: ScalarMeaning) -> None:
+    # An all-boolean lowering is unreachable from a leaf, as no array holds booleans.
+    reachable = [low for low in served.lowerings if any(d.stype is not ScalarType.BOOL for d in low.operands)]
+    assert reachable, f"{served.lowerings[0].stub.__name__}: no array leaf can reach this meaning"
+    for lowering in reachable:
+        answer = _declared(lowering.stub, "return").stype
+        assert answer in (
+            ScalarType.INT,
+            ScalarType.FLOAT,
+        ), f"{served.lowerings[0].stub.__name__}: no array family holds this answer"
 
 
 def factory[F: Callable[..., object]](*substituted: object) -> Callable[[F], F]:

@@ -65,5 +65,5 @@ IShlOptions = _operators.IShlOperator.Options
 IShrOptions = _operators.IShrOperator.Options
 ISubOptions = _operators.ISubOperator.Options
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __url__ = "https://holoso.digital"

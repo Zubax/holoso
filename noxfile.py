@@ -14,7 +14,8 @@ import nox
 
 nox.options.reuse_existing_virtualenvs = True
 
-WORKERS = max(2, int((os.cpu_count() or 4) * 2 / 3))
+# `HOLOSO_TEST_WORKERS=1` serializes the suite, which a memory-starved machine needs more than it needs speed.
+WORKERS = int(os.environ.get("HOLOSO_TEST_WORKERS", max(2, int((os.cpu_count() or 4) * 2 / 3))))
 
 
 @nox.session(python=False, default=False)

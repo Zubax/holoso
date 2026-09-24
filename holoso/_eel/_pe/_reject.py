@@ -30,7 +30,7 @@ def _located(origin: Origin) -> SourceLocation:
 
 
 def _prefix(origin: Origin) -> str:
-    return "".join(f"in {frame.callee}(): " for frame in origin.frames)
+    return "".join(f"in {frame.callee}: " for frame in origin.frames)
 
 
 def _chained(origin: Origin, message: str) -> str:

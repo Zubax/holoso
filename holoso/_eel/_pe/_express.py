@@ -4,6 +4,7 @@ import dataclasses
 import inspect
 import math
 import types
+from collections.abc import Callable
 from typing import TYPE_CHECKING, NoReturn
 
 import numpy as np
@@ -11,7 +12,17 @@ import numpy as np
 from .._annotations import annotation_stype, host_type
 from .._ir import *
 from .._decorator import plain_function
-from .._lib import Array, Conversion, Factory, Lifted, Operand, Reshape, ScalarFunction, VariadicFunction, resolve
+from .._lib import (
+    Array,
+    Conversion,
+    Factory,
+    Operand,
+    Reshape,
+    ScalarLowering,
+    Spelling,
+    VariadicFunction,
+    resolve,
+)
 from . import _aggregate, _ops
 from ._ownership import share
 from ._record import inadmissible_reason as record_inadmissible
@@ -38,9 +49,33 @@ from ._values import (
 if TYPE_CHECKING:
     from ._interpret import Frame, Interpreter, Sink
 
-_LIST_ADVICE = "an array operation on a Python list/tuple is not supported; build one with np.array([...])"
 
-# ------------------------------------------------------------------ attribute reads
+_ABSENT = object()
+
+# What a scalar-only spelling can only refuse, a range among them though it is no aggregate value.
+_AGGREGATE_OPERANDS = AGGREGATES + (RangeValue,)
+
+
+def _demand_an_array(origin: Origin, value: Value) -> NoReturn:
+    # np.array() takes a range as readily as a sequence, so one piece of advice covers both.
+    reject(origin, f"{_aggregate.a_kind(value)} is not an array operand; build one with np.array(...)")
+
+
+def _admit_operands(
+    origin: Origin, display: str, values: list[Value], *, arrays: bool, sequences: frozenset[int] = frozenset()
+) -> None:
+    """The one gate on aggregate operands: an array where the callee takes arrays, a sequence where it names one."""
+    for position, value in enumerate(values):
+        if not isinstance(value, _AGGREGATE_OPERANDS) or (arrays and isinstance(value, TensorValue)):
+            continue
+        if isinstance(value, SequenceValue) and position in sequences:
+            continue
+        if arrays and isinstance(value, (SequenceValue, RangeValue)):
+            _demand_an_array(origin, value)
+        reject(origin, f"{display} does not support {_aggregate.kind_label(value)} operands")
+
+
+# ATTRIBUTE READS
 
 
 def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str, frame: Frame, sink: Sink) -> Value:
@@ -50,8 +85,15 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
         case RecordValue(cls=cls, fields=fields):
             names = [field.name for field in dataclasses.fields(cls)]
             if attr not in names:
+                found = mro_attr(cls, attr, _ABSENT)
+                if isinstance(found, property) and (fget := plain_function(found.fget)) is not None:
+                    return interp.inline(
+                        origin, f"{cls.__name__}.{attr}", fget, [base_value], {}, frame, sink, stub=False
+                    )
                 if callable(getattr(cls, attr, None)):
                     reject(origin, f"calling methods on a record value is not supported; {attr!r} is not a field")
+                if found is not _ABSENT and not hasattr(type(found), "__get__"):
+                    return interp.snapshot.admit(f"{cls.__name__}.{attr}", found, origin)  # a class constant
                 reject(origin, f"the record {cls.__name__} has no field {attr!r}")
             item = fields[names.index(attr)]
             if isinstance(item, AGGREGATES):
@@ -71,7 +113,7 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
             if attr == "shape":
                 return SequenceValue((), Allocation())
             found = resolve(getattr(host_type(base_value.stype), attr, None))
-            if isinstance(found, ScalarFunction):
+            if isinstance(found, Spelling):
                 return BoundMethod(base_value, attr)
             reject(origin, f"a scalar has no supported attribute {attr!r}")
         case BoundMethod():
@@ -110,7 +152,7 @@ def _tensor_attr(
     reject(origin, f"an array has no supported attribute {attr!r}")
 
 
-# ------------------------------------------------------------------ scalars and operators
+# SCALARS AND OPERATORS
 
 
 def scalar(value: Value, origin: Origin) -> Scalar:
@@ -147,169 +189,7 @@ def apply(interp: Interpreter, operator: _ops.Operator, operands: list[Scalar], 
     return ResidualScalar(stype, TempRef(origin, index))
 
 
-def unary(interp: Interpreter, origin: Origin, op: UnaryOp, value: Value, sink: Sink) -> Value:
-    if isinstance(value, TensorValue) and op in (UnaryOp.NEG, UnaryOp.POS):
-        leaves = tuple(_unary_leaf(interp, origin, op, leaf, sink) for leaf in value.leaves)
-        interp.budget.spend(len(leaves), origin, "the elementwise operation")
-        return TensorValue(value.shape, value.family, leaves, Allocation())
-    if isinstance(value, AGGREGATES):
-        if op is UnaryOp.NOT:
-            reject(origin, "the truthiness of an aggregate is not supported")
-        reject(origin, f"`{op.value}` is not supported on {_aggregate.a_kind(value)}")
-    operand = scalar(value, origin)
-    match op:
-        case UnaryOp.NEG | UnaryOp.POS:
-            if operand.stype is ScalarType.BOOL:
-                reject(origin, "booleans take no part in arithmetic; cast explicitly with int(...) or float(...)")
-            if op is UnaryOp.POS:
-                return operand
-            negate = _ops.INT_NEG if operand.stype is ScalarType.INT else _ops.FLOAT_NEG
-            return apply(interp, negate, [operand], origin, sink)
-        case UnaryOp.NOT:
-            if operand.stype is not ScalarType.BOOL:
-                reject(origin, "`not` requires a bool operand; Python truthiness is not supported")
-            return apply(interp, _ops.BOOL_NOT, [operand], origin, sink)
-        case UnaryOp.INVERT:
-            if operand.stype is not ScalarType.INT:
-                reject(origin, "`~` is integer-only")
-            return apply(interp, _ops.INT_BW_NOT, [operand], origin, sink)
-
-
-def _unary_leaf(interp: Interpreter, origin: Origin, op: UnaryOp, leaf: Scalar | Opaque, sink: Sink) -> Scalar | Opaque:
-    if op is UnaryOp.POS:
-        return leaf
-    result = unary(interp, origin, op, _scalar_leaf(origin, leaf), sink)
-    assert isinstance(result, (StaticScalar, ResidualScalar))
-    return result
-
-
-def _scalar_leaf(origin: Origin, leaf: Scalar | Opaque) -> Scalar:
-    if isinstance(leaf, Opaque):
-        reject(origin, _describe_opaque(leaf))
-    return leaf
-
-
-def binary(interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink) -> Value:
-    if op is BinaryOp.MATMUL:
-        for operand in (lv, rv):
-            if isinstance(operand, AGGREGATES):
-                share(operand)
-        return _operator_call(interp, origin, op, [lv, rv], frame, sink)
-    tensors = isinstance(lv, TensorValue) or isinstance(rv, TensorValue)
-    sequences = isinstance(lv, SequenceValue) or isinstance(rv, SequenceValue)
-    if (tensors or sequences) and op in (BinaryOp.AND, BinaryOp.OR):
-        reject(origin, "the truthiness of an aggregate is not supported")
-    if tensors and sequences:
-        reject(origin, "cannot mix an array with a Python list/tuple; convert with np.array([...])")
-    if tensors:
-        return elementwise(interp, origin, op, lv, rv, frame, sink)
-    if sequences:
-        return _sequence_binary(origin, op)
-    return _binary_scalars(interp, origin, op, lv, rv, frame, sink)
-
-
-def elementwise(
-    interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink
-) -> TensorValue:
-    if op not in (BinaryOp.ADD, BinaryOp.SUB, BinaryOp.MUL, BinaryOp.DIV):
-        reject(origin, f"the operator `{op.value}` is not supported on arrays yet")
-    pairs: list[tuple[Scalar, Scalar]]
-    shape: tuple[int, ...]
-    if isinstance(lv, TensorValue) and isinstance(rv, TensorValue):
-        if lv.shape != rv.shape:
-            reject(origin, f"array shapes {lv.shape} and {rv.shape} do not match; broadcasting is not supported")
-        shape = lv.shape
-        pairs = [(_scalar_leaf(origin, a), _scalar_leaf(origin, b)) for a, b in zip(lv.leaves, rv.leaves, strict=True)]
-    elif isinstance(lv, TensorValue):
-        operand = scalar(rv, origin)
-        shape = lv.shape
-        pairs = [(_scalar_leaf(origin, a), operand) for a in lv.leaves]
-    else:
-        assert isinstance(rv, TensorValue)
-        operand = scalar(lv, origin)
-        shape = rv.shape
-        pairs = [(operand, _scalar_leaf(origin, b)) for b in rv.leaves]
-    leaves: list[Scalar | Opaque] = []
-    for a, b in pairs:
-        leaves.append(_binary_scalars(interp, origin, op, a, b, frame, sink))
-    interp.budget.spend(len(leaves), origin, "the elementwise operation")
-    family = next(leaf.stype for leaf in leaves if not isinstance(leaf, Opaque))
-    return TensorValue(shape, family, tuple(leaves), Allocation())
-
-
-def _sequence_binary(origin: Origin, op: BinaryOp) -> Value:
-    reject(origin, f"the operator `{op.value}` is not supported on a sequence; build a numpy array instead")
-
-
-def _binary_scalars(
-    interp: Interpreter, origin: Origin, op: BinaryOp, lv: Value, rv: Value, frame: Frame, sink: Sink
-) -> Scalar:
-    left = scalar(lv, origin)
-    right = scalar(rv, origin)
-    both_bool = left.stype is ScalarType.BOOL and right.stype is ScalarType.BOOL
-    both_int = left.stype is ScalarType.INT and right.stype is ScalarType.INT
-    match op:
-        case BinaryOp.AND | BinaryOp.OR:
-            if not both_bool:
-                reject(origin, "the boolean gates require bool operands; Python truthiness is not supported")
-            return apply(interp, _ops.BOOL_GATES[op], [left, right], origin, sink)
-        case BinaryOp.BITAND | BinaryOp.BITOR | BinaryOp.BITXOR:
-            if both_bool:
-                return apply(interp, _ops.BOOL_GATES[op], [left, right], origin, sink)
-            if both_int:
-                return apply(interp, _ops.INT_BINARY[op], [left, right], origin, sink)
-            reject(origin, f"the bitwise operator `{op.value}` requires two ints or two bools")
-        case BinaryOp.POW:
-            return scalar(_operator_call(interp, origin, op, [left, right], frame, sink), origin)
-        case _:
-            pass
-    if ScalarType.BOOL in (left.stype, right.stype):
-        reject(origin, "booleans take no part in arithmetic; cast explicitly with int(...) or float(...)")
-    match op:
-        case BinaryOp.FLOORDIV | BinaryOp.MOD | BinaryOp.LSHIFT | BinaryOp.RSHIFT:
-            if not both_int:
-                reject(origin, f"the operator `{op.value}` is integer-only")
-            return apply(interp, _ops.INT_BINARY[op], [left, right], origin, sink)
-        case BinaryOp.DIV:
-            dividend = interp.as_float(left, origin, sink)
-            divisor = interp.as_float(right, origin, sink)
-            return apply(interp, _ops.FLOAT_DIV, [dividend, divisor], origin, sink)
-        case BinaryOp.ADD | BinaryOp.SUB | BinaryOp.MUL:
-            if both_int:
-                return apply(interp, _ops.INT_BINARY[op], [left, right], origin, sink)
-            left = interp.as_float(left, origin, sink)
-            right = interp.as_float(right, origin, sink)
-            if op is BinaryOp.SUB:
-                negated = apply(interp, _ops.FLOAT_NEG, [right], origin, sink)
-                return apply(interp, _ops.FLOAT_ADD, [left, negated], origin, sink)
-            operator = _ops.FLOAT_ADD if op is BinaryOp.ADD else _ops.FLOAT_MUL
-            return apply(interp, operator, [left, right], origin, sink)
-        case _:
-            raise AssertionError(op)
-
-
-def compare(interp: Interpreter, origin: Origin, op: CompareOp, lv: Value, rv: Value, sink: Sink) -> Scalar:
-    if isinstance(lv, AGGREGATES) or isinstance(rv, AGGREGATES):
-        reject(origin, "aggregate comparison is not supported")
-    left = scalar(lv, origin)
-    right = scalar(rv, origin)
-    if left.stype is ScalarType.BOOL and right.stype is ScalarType.BOOL:
-        if op is CompareOp.EQ:
-            distinct = apply(interp, _ops.BOOL_XOR, [left, right], origin, sink)
-            return apply(interp, _ops.BOOL_NOT, [distinct], origin, sink)
-        if op is CompareOp.NE:
-            return apply(interp, _ops.BOOL_XOR, [left, right], origin, sink)
-        reject(origin, "ordering comparisons of booleans are not supported")
-    if ScalarType.BOOL in (left.stype, right.stype):
-        reject(origin, "a boolean cannot be compared with a number; cast explicitly")
-    if left.stype is ScalarType.INT and right.stype is ScalarType.INT:
-        return apply(interp, _ops.INT_COMPARE[op], [left, right], origin, sink)
-    left = interp.as_float(left, origin, sink)
-    right = interp.as_float(right, origin, sink)
-    return apply(interp, _ops.FLOAT_COMPARE[op], [left, right], origin, sink)
-
-
-# ------------------------------------------------------------------ calls
+# CALLS
 
 
 def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
@@ -319,47 +199,38 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     if not isinstance(callee, Opaque):
         reject(node.origin, "the callee is not a callable object")
     raw = callee.value
+    if isinstance(raw, type) and (declared := annotation_stype(raw)) is not None:
+        raw = host_type(declared)
+    display = f"{callee.name}()"
     match resolve(raw) if callable(raw) else None:
-        case ScalarFunction() as match:
-            values = _operand_arguments(interp, node, callee.name, frame, sink)
-            return _scalar_call(interp, node.origin, callee.name, match, values, frame, sink)
+        case Spelling() as match:
+            values = _positional_arguments(interp, node, display, frame, sink, shares=False)
+            if match.protocol is not None:
+                values = [_answer(interp, node.origin, match.protocol, value, frame, sink) for value in values]
+            return _spelling_call(interp, node.origin, display, match, values, frame, sink)
         case VariadicFunction() as match:
-            values = _operand_arguments(interp, node, callee.name, frame, sink)
-            return _variadic_call(interp, node.origin, callee.name, match, values, sink)
-        case Lifted(scalar=lifted):
-            values = _operand_arguments(interp, node, callee.name, frame, sink)
-            if len(values) == 1 and isinstance(values[0], TensorValue):
-                return _lifted_call(interp, node.origin, callee.name, lifted, values[0], frame, sink)
-            if any(isinstance(value, (SequenceValue, RangeValue)) for value in values):
-                reject(
-                    node.origin,
-                    _LIST_ADVICE,
-                )
-            return _scalar_call(interp, node.origin, callee.name, lifted, values, frame, sink)
+            values = _positional_arguments(interp, node, display, frame, sink, shares=False)
+            return _variadic_call(interp, node.origin, display, match, values, sink)
         case Array() as match:
-            values = _positional_arguments(interp, node, callee.name, frame, sink)
-            _demand_descriptor_receiver(node.origin, callee.name, raw, values)
-            return _array_call(interp, node.origin, callee.name, match, values, frame, sink)
+            values = _positional_arguments(interp, node, display, frame, sink, shares=True)
+            _demand_descriptor_receiver(node.origin, display, raw, values)
+            return _array_call(interp, node.origin, display, match, values, frame, sink)
         case Factory() as match:
-            return _factory(interp, node, callee.name, match, frame, sink)
+            return _factory(interp, node, display, match, frame, sink)
         case Conversion(copies=copies):
-            source, family = _conversion_arguments(interp, node, callee.name, frame, sink)
-            return _to_tensor(interp, node.origin, callee.name, source, sink, copies=copies, family=family)
+            source, family = _conversion_arguments(interp, node, display, frame, sink)
+            return _to_tensor(interp, node.origin, display, source, sink, copies=copies, family=family)
         case Reshape():
             if getattr(raw, "__objclass__", None) is np.ndarray:
-                values = _operand_arguments(interp, node, callee.name, frame, sink)
-                _demand_descriptor_receiver(node.origin, callee.name, raw, values)
-                return _reshape(node.origin, callee.name, values[0], values[1:])
-            base, shape = _option_arguments(interp, node, callee.name, frame, sink, option="shape")
+                values = _positional_arguments(interp, node, display, frame, sink, shares=False)
+                _demand_descriptor_receiver(node.origin, display, raw, values)
+                return _reshape(node.origin, display, values[0], values[1:])
+            base, shape = _option_arguments(interp, node, display, frame, sink, option="shape")
             if shape is None:
-                reject(node.origin, f"{callee.name}() takes an array and a shape (an int or a tuple of ints)")
-            return _reshape(node.origin, callee.name, base, [shape])
+                reject(node.origin, f"{display} takes an array and a shape (an int or a tuple of ints)")
+            return _reshape(node.origin, display, base, [shape])
         case None:
             pass
-    if raw is float or raw is int or raw is bool:
-        target = raw
-        assert isinstance(target, type)
-        return _cast(interp, node, target, frame, sink)
     if raw is len:
         return _len(interp, node, frame, sink)
     if raw is range:
@@ -367,19 +238,31 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     if raw is enumerate:
         return _enumerate(interp, node, frame, sink)
     if raw is list or raw is tuple:
-        return _rebuild_sequence(interp, node, callee.name, frame, sink)
+        return _rebuild_sequence(interp, node, display, frame, sink)
     if isinstance(raw, type) and dataclasses.is_dataclass(raw):
-        return _construct_record(interp, node, callee.name, raw, frame, sink)
+        return _construct_record(interp, node, display, raw, frame, sink)
     resolved = _inlinable(interp, node.origin, callee.name, raw)
     if resolved is not None:
         fn, leading = resolved
-        positional, keywords = _signature_arguments(interp, node, frame, sink)
-        return interp.inline(
-            node.origin, callee.name, fn, [*leading, *positional], keywords, frame, sink, positional_only=False
-        )
+        positional, keywords = _arguments(interp, node, frame, sink, shares=True)
+        return interp.inline(node.origin, display, fn, [*leading, *positional], keywords, frame, sink, stub=False)
     if callable(raw):
         reject(node.origin, f"calls to {callee.name!r} are not supported yet")
     reject(node.origin, f"the captured object {callee.name!r} is not callable")
+
+
+def _answer(interp: Interpreter, origin: Origin, method: str, value: Value, frame: Frame, sink: Sink) -> Value:
+    """A record or captured object answers through its class's own method; the meaning then applies to the answer."""
+    if isinstance(value, RecordValue):
+        cls = value.cls
+    elif isinstance(value, Opaque):
+        cls = type(value.value)
+    else:
+        return value
+    fn = plain_function(mro_attr(cls, method))
+    if fn is None:
+        return value
+    return interp.inline(origin, f"{cls.__name__}.{method}", fn, [value], {}, frame, sink, stub=False)
 
 
 def _inlinable(
@@ -405,57 +288,44 @@ def _inlinable(
     return None
 
 
-def _argument(interp: Interpreter, atom: Atom, frame: Frame, sink: Sink) -> Value:
-    value = interp.expr(atom, frame, sink)
-    if isinstance(value, AGGREGATES) and (isinstance(atom, LocalRef) or interp.alias_conduit(frame, atom)):
-        share(value)
-    return value
-
-
-def _operand_arguments(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> list[Value]:
-    """Arguments for a callee that retains no handle: no aliasing event, unlike parameter binding."""
-    values: list[Value] = []
-    for arg in node.args:
-        match arg:
-            case PosArg(value=value):
-                values.append(interp.expr(value, frame, sink))
-            case StarArg(value=value):
-                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
-                values.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
-            case KwArg():
-                reject(node.origin, f"{display}() takes no keyword arguments")
-    return values
-
-
-def _positional_arguments(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> list[Value]:
-    values: list[Value] = []
-    for arg in node.args:
-        match arg:
-            case PosArg(value=value):
-                values.append(_argument(interp, value, frame, sink))
-            case StarArg(value=value):
-                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
-                values.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
-            case KwArg():
-                reject(node.origin, f"{display}() takes no keyword arguments")
-    return values
-
-
-def _signature_arguments(
-    interp: Interpreter, node: Call, frame: Frame, sink: Sink
+def _arguments(
+    interp: Interpreter, node: Call, frame: Frame, sink: Sink, *, shares: bool
 ) -> tuple[list[Value], dict[str, Value]]:
+    """
+    The call's arguments as written. `shares` tells a callee that may retain a handle, where binding a named
+    aggregate is an aliasing event, from one that only reads its operands.
+    """
+
+    def read(atom: Atom) -> Value:
+        value = interp.expr(atom, frame, sink)
+        if (
+            shares
+            and isinstance(value, AGGREGATES)
+            and (isinstance(atom, LocalRef) or interp.alias_conduit(frame, atom))
+        ):
+            share(value)
+        return value
+
     positional: list[Value] = []
     keywords: dict[str, Value] = {}
     for arg in node.args:
         match arg:
             case PosArg(value=value):
-                positional.append(_argument(interp, value, frame, sink))
+                positional.append(read(value))
             case StarArg(value=value):
                 spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
                 positional.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
             case KwArg(name=name, value=value):
-                keywords[name] = _argument(interp, value, frame, sink)
+                keywords[name] = read(value)
     return positional, keywords
+
+
+def _positional_arguments(
+    interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink, *, shares: bool
+) -> list[Value]:
+    if any(isinstance(arg, KwArg) for arg in node.args):
+        reject(node.origin, f"{display} takes no keyword arguments")
+    return _arguments(interp, node, frame, sink, shares=shares)[0]
 
 
 def _demand_descriptor_receiver(origin: Origin, display: str, raw: object, values: list[Value]) -> None:
@@ -469,54 +339,126 @@ def _demand_descriptor_receiver(origin: Origin, display: str, raw: object, value
         reject(origin, f"{display} is an unbound ndarray method, so its first argument must be an array")
 
 
-def _operator_call(
-    interp: Interpreter, origin: Origin, op: BinaryOp, values: list[Value], frame: Frame, sink: Sink
-) -> Value:
-    """The spelled call resolves this same entry, so an operator and its spellings cannot drift apart."""
+def maps_over_arrays(op: BinaryOp) -> bool:
     found = resolve(op)
-    assert found is not None, op
-    display = op.value
-    match found:
-        case ScalarFunction() as match:
-            return _scalar_call(interp, origin, display, match, values, frame, sink)
-        case Array() as match:
-            return _array_call(interp, origin, display, match, values, frame, sink)
-        case _:
-            raise AssertionError(found)
+    return isinstance(found, Spelling) and found.elementwise
 
 
-def _scalar_call(
+def operator_call(
     interp: Interpreter,
     origin: Origin,
-    display: str,
-    match: ScalarFunction,
+    op: BinaryOp | CompareOp | UnaryOp,
     values: list[Value],
     frame: Frame,
     sink: Sink,
 ) -> Value:
-    if len(values) != match.arity:
-        reject(origin, f"{display}() takes {match.arity} argument(s), got {len(values)}")
-    operands = [scalar(value, origin) for value in values]
-    chosen = match.select([_operand(operand) for operand in operands])
+    """An operator is a spelling like any other, so it and the calls that spell it cannot drift apart."""
+    found = resolve(op)
+    assert isinstance(found, (Spelling, Array)), op
+    display = f"`{op.value}`"
+    if isinstance(found, Array):
+        # A spelled call shares a named aggregate it binds, since a composite may derive its result from one. An
+        # operator has no argument atom to judge, so every aggregate is shared: conservative, never unsound.
+        for value in values:
+            if isinstance(value, AGGREGATES):
+                share(value)
+        return _array_call(interp, origin, display, found, values, frame, sink)
+    return _spelling_call(interp, origin, display, found, values, frame, sink)
+
+
+def _spelling_call(
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    match: Spelling,
+    values: list[Value],
+    frame: Frame,
+    sink: Sink,
+) -> Value:
+    """One path for an operator and for each of its spellings, over scalars and, elementwise, over arrays."""
+    meaning = match.meaning
+    if len(values) != meaning.arity:
+        reject(origin, f"{display} takes {meaning.arity} argument(s), got {len(values)}")
+    _admit_operands(origin, display, values, arrays=match.elementwise)
+    operands = [value if isinstance(value, TensorValue) else scalar(value, origin) for value in values]
+    tensors = [operand for operand in operands if isinstance(operand, TensorValue)]
+    assert match.elementwise or not tensors
+    # One selection serves every leaf, so an operand whose value selects the lowering must be the same for all of them.
+    for i, operand in enumerate(operands):
+        if isinstance(operand, TensorValue) and meaning.selects_by_value(i):
+            reject(origin, f"argument {i + 1} of {display} must be a scalar")
+    # Selected before the shapes are compared, so an unsupported operation is named even where the shapes also differ.
+    chosen = meaning.select([Operand(o.family) if isinstance(o, TensorValue) else _operand(o) for o in operands])
     if chosen is None:
-        _refuse_domains(origin, display, operands, match.domains)
+        given = [_Given(o.family, True) if isinstance(o, TensorValue) else _Given(o.stype) for o in operands]
+        _refuse_domains(origin, display, given, meaning.signatures)
+    if not tensors:
+        scalars = [operand for operand in operands if not isinstance(operand, TensorValue)]
+        return _lowering_call(interp, origin, display, chosen, scalars, frame, sink)
+    shape = tensors[0].shape
+    for tensor in tensors[1:]:
+        if tensor.shape != shape:
+            reject(origin, f"array shapes {shape} and {tensor.shape} do not match; broadcasting is not supported")
+    assert all(len(tensor.leaves) == len(tensors[0].leaves) for tensor in tensors)
+    # Charged before the leaves are built, where a composite lowering would otherwise inline once per leaf first.
+    interp.budget.spend(len(tensors[0].leaves), origin, "the elementwise operation")
+    leaves: list[Scalar] = []
+    for leaf in range(len(tensors[0].leaves)):
+        row = [scalar(o.leaves[leaf], origin) if isinstance(o, TensorValue) else o for o in operands]
+        leaves.append(scalar(_lowering_call(interp, origin, display, chosen, row, frame, sink), origin))
+    assert all(leaf.stype is leaves[0].stype for leaf in leaves)
+    return TensorValue(shape, leaves[0].stype, tuple(leaves), Allocation())
+
+
+def _lowering_call(
+    interp: Interpreter,
+    origin: Origin,
+    display: str,
+    chosen: ScalarLowering,
+    operands: list[Scalar],
+    frame: Frame,
+    sink: Sink,
+) -> Value:
     # Both kinds of lowering, so inlining judges base types alone and never learns what a refinement is.
     conformed = [
-        interp.conform(operand, declared.stype, origin, sink, f"argument {i + 1} of {display}()")
+        interp.conform(operand, declared.stype, origin, sink, f"argument {i + 1} of {display}")
         for i, (operand, declared) in enumerate(zip(operands, chosen.operands, strict=True))
     ]
     if chosen.operator is None:
-        promoted: list[Value] = list(conformed)
-        return interp.inline(origin, display, chosen.stub, promoted, {}, frame, sink, positional_only=True)
+        arguments: list[Value] = list(conformed)
+        return interp.inline(origin, display, chosen.stub, arguments, {}, frame, sink, stub=True)
     return apply(interp, chosen.operator, conformed, origin, sink)
 
 
-def _refuse_domains(origin: Origin, display: str, operands: list[Scalar], domains: list[ScalarType]) -> NoReturn:
-    served = " or ".join(stype.value for stype in domains)
-    got = ", ".join(operand.stype.value for operand in operands)
-    boolean = any(operand.stype is ScalarType.BOOL for operand in operands)
-    note = "; a boolean is not a number, cast explicitly with int(...) or float(...)" if boolean else ""
-    reject(origin, f"{display}() takes {served} operands, got {got}{note}")
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Given:
+    """An operand as a refusal names it: `array` tells a leaf family from a scalar operand of the same family."""
+
+    stype: ScalarType
+    array: bool = False
+
+
+def _refuse_domains(
+    origin: Origin, display: str, operands: list[_Given], signatures: list[list[ScalarType]]
+) -> NoReturn:
+    served = " or ".join("(" + ", ".join(stype.value for stype in one) + ")" for one in signatures)
+    got = ", ".join(given.stype.value + (" array" if given.array else "") for given in operands)
+    stypes = [given.stype for given in operands]
+    accepted = {stype for one in signatures for stype in one}
+    boolean = ScalarType.BOOL in stypes
+    number = any(stype is not ScalarType.BOOL for stype in stypes)
+    serves_boolean = ScalarType.BOOL in accepted
+    serves_number = accepted != {ScalarType.BOOL}
+    casts = " or ".join(f"{stype.value}(...)" for stype in (ScalarType.INT, ScalarType.FLOAT) if stype in accepted)
+    if boolean and not serves_boolean:
+        note = f"; a boolean is not a number, cast explicitly with {casts}"
+    elif number and not serves_number:
+        note = "; Python truthiness is not supported, compare explicitly (e.g. x != 0)"
+    elif boolean and number:
+        note = f"; a boolean and a number cannot mix, cast explicitly with {casts}"
+    else:
+        note = ""
+    reject(origin, f"{display} takes {served}, got ({got}){note}")
 
 
 def _variadic_call(
@@ -528,32 +470,16 @@ def _variadic_call(
     sink: Sink,
 ) -> Value:
     if len(values) < match.minimum:
-        reject(origin, f"{display}() takes at least {match.minimum} argument(s), got {len(values)}")
+        reject(origin, f"{display} takes at least {match.minimum} argument(s), got {len(values)}")
+    _admit_operands(origin, display, values, arrays=False)
     operands = [scalar(value, origin) for value in values]
     if not all(match.domain.accepts(_operand(operand)) for operand in operands):
-        _refuse_domains(origin, display, operands, match.domains)
+        _refuse_domains(origin, display, [_Given(operand.stype) for operand in operands], [[match.domain.stype]])
     conformed = [
-        interp.conform(operand, match.domain.stype, origin, sink, f"argument {i + 1} of {display}()")
+        interp.conform(operand, match.domain.stype, origin, sink, f"argument {i + 1} of {display}")
         for i, operand in enumerate(operands)
     ]
     return apply(interp, match.operator(len(conformed)), conformed, origin, sink)
-
-
-def _lifted_call(
-    interp: Interpreter,
-    origin: Origin,
-    display: str,
-    match: ScalarFunction,
-    tensor: TensorValue,
-    frame: Frame,
-    sink: Sink,
-) -> TensorValue:
-    leaves: list[Scalar] = []
-    for leaf in tensor.leaves:
-        result = _scalar_call(interp, origin, display, match, [_scalar_leaf(origin, leaf)], frame, sink)
-        leaves.append(scalar(result, origin))
-    interp.budget.spend(len(leaves), origin, "the elementwise operation")
-    return TensorValue(tensor.shape, leaves[0].stype, tuple(leaves), Allocation())
 
 
 def _operand(value: Scalar) -> Operand:
@@ -573,13 +499,8 @@ def _array_call(
     frame: Frame,
     sink: Sink,
 ) -> Value:
-    if any(
-        isinstance(value, RangeValue) or (isinstance(value, SequenceValue) and position not in match.sequences)
-        for position, value in enumerate(values)
-    ):
-        # Before the stub, so the rejection reads the same however the operation was spelled.
-        reject(origin, _LIST_ADVICE)
-    result = interp.inline(origin, display, match.stub, values, {}, frame, sink, positional_only=True)
+    _admit_operands(origin, display, values, arrays=True, sequences=match.sequences)
+    result = interp.inline(origin, display, match.stub, values, {}, frame, sink, stub=True)
     if match.derives and isinstance(values[0], TensorValue) and isinstance(result, TensorValue):
         share(values[0])
         result = dataclasses.replace(result, allocation=values[0].allocation)
@@ -588,27 +509,22 @@ def _array_call(
 
 def _bound_method(interp: Interpreter, node: Call, method: BoundMethod, frame: Frame, sink: Sink) -> Value:
     receiver = method.receiver
-    display = f".{method.name}"
+    display = f".{method.name}()"
     if isinstance(receiver, TensorValue):
         found = resolve(getattr(np.ndarray, method.name))
         if isinstance(found, Reshape):
-            values = _operand_arguments(interp, node, display, frame, sink)
+            values = _positional_arguments(interp, node, display, frame, sink, shares=False)
             return _reshape(node.origin, display, receiver, values)
         assert isinstance(found, Array), "a minted method stays resolvable"
-        values = _positional_arguments(interp, node, display, frame, sink)
-        high = found.stub.__code__.co_argcount - 1
-        low = high - len(found.stub.__defaults__ or ())
-        if not low <= len(values) <= high:
-            expected = str(low) if low == high else f"{low} to {high}"
-            reject(node.origin, f"{display}() takes {expected} argument(s), got {len(values)}")
+        values = _positional_arguments(interp, node, display, frame, sink, shares=True)
         return _array_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
     scalar_found = resolve(getattr(host_type(receiver.stype), method.name))
-    assert isinstance(scalar_found, ScalarFunction), "a minted method stays resolvable"
-    values = _operand_arguments(interp, node, display, frame, sink)
-    arity = scalar_found.arity - 1
+    assert isinstance(scalar_found, Spelling), "a minted method stays resolvable"
+    values = _positional_arguments(interp, node, display, frame, sink, shares=False)
+    arity = scalar_found.meaning.arity - 1
     if len(values) != arity:
-        reject(node.origin, f"{display}() takes {arity} argument(s), got {len(values)}")
-    return _scalar_call(interp, node.origin, display, scalar_found, [receiver, *values], frame, sink)
+        reject(node.origin, f"{display} takes {arity} argument(s), got {len(values)}")
+    return _spelling_call(interp, node.origin, display, scalar_found, [receiver, *values], frame, sink)
 
 
 def _option_arguments(
@@ -618,23 +534,15 @@ def _option_arguments(
     The non-aliasing one-option binder: exactly one positional subject, plus `option` given as the second
     positional or as its keyword -- the shape numpy's own conversion/reshape signatures share.
     """
-    positional: list[Value] = []
-    named: Value | None = None
     for arg in node.args:
-        match arg:
-            case PosArg(value=value):
-                positional.append(interp.expr(value, frame, sink))
-            case StarArg(value=value):
-                spliced = _aggregate.decay(interp.budget, interp.expr(value, frame, sink), node.origin)
-                positional.extend(_aggregate.splice_items(node.origin, spliced, interp.loop_passes()))
-            case KwArg(name=name, value=value) if name == option:
-                named = interp.expr(value, frame, sink)
-            case KwArg(name=name):
-                reject(node.origin, f"{display}() takes no keyword argument {name!r} (only {option})")
+        if isinstance(arg, KwArg) and arg.name != option:
+            reject(node.origin, f"{display} takes no keyword argument {arg.name!r} (only {option})")
+    positional, keywords = _arguments(interp, node, frame, sink, shares=False)
+    named = keywords.get(option)
     if len(positional) == 2 and named is None:
         named = positional.pop()
     if len(positional) != 1:
-        reject(node.origin, f"{display}() takes one positional argument plus an optional {option}")
+        reject(node.origin, f"{display} takes one positional argument plus an optional {option}")
     return positional[0], named
 
 
@@ -644,18 +552,18 @@ def _reshape(origin: Origin, display: str, base: Value, dim_values: list[Value])
     sharing the source allocation since the host MAY answer a view.
     """
     if isinstance(base, SequenceValue):
-        reject(origin, _LIST_ADVICE)
+        _demand_an_array(origin, base)
     if not isinstance(base, TensorValue):
-        reject(origin, f"{display}() requires an array, not {_aggregate.a_kind(base)}")
+        reject(origin, f"{display} requires an array, not {_aggregate.a_kind(base)}")
     if len(dim_values) == 1 and isinstance(dim_values[0], SequenceValue):
         dim_values = list(dim_values[0].items)
     if not dim_values:
-        reject(origin, f"{display}() requires a shape (an int or a tuple of ints)")
+        reject(origin, f"{display} requires a shape (an int or a tuple of ints)")
     dims = [_aggregate.static_index(origin, value, "a reshape dimension") for value in dim_values]
     if any(dim < -1 for dim in dims) or dims.count(-1) > 1:
-        reject(origin, f"{display}() infers at most one dimension, spelled -1, got {tuple(dims)}")
+        reject(origin, f"{display} infers at most one dimension, spelled -1, got {tuple(dims)}")
     if len(dims) > 2 or 0 in dims:
-        reject(origin, f"{display}() supports only non-empty 1-D and 2-D shapes, got {tuple(dims)}")
+        reject(origin, f"{display} supports only non-empty 1-D and 2-D shapes, got {tuple(dims)}")
     if -1 in dims:
         known = math.prod(dim for dim in dims if dim != -1)
         assert known > 0
@@ -675,36 +583,48 @@ def _construct_record(interp: Interpreter, node: Call, display: str, cls: type, 
     reason = record_inadmissible(cls)
     if reason is not None:
         reject(node.origin, reason)
-    positional, keywords = _signature_arguments(interp, node, frame, sink)
-    try:
-        bound = inspect.signature(cls).bind(*positional, **keywords)
-    except TypeError as error:
-        reject(node.origin, f"the arguments do not bind: {error}")
-    bound.apply_defaults()
+    positional, keywords = _arguments(interp, node, frame, sink, shares=True)
+    bindings = bind_signature(interp, node.origin, cls, positional, keywords, prefix=f"{cls.__name__}.")
     annotations = interp.record_annotations(cls, node.origin)
-    fields: list[Value] = []
-    for field in dataclasses.fields(cls):
-        value = bound.arguments[field.name]
-        if not isinstance(value, VALUE_KINDS):
-            value = interp.snapshot.admit(f"{display}.{field.name}", value, node.origin)
-        fields.append(
-            interp.conform_annotation(
-                value, annotations[field.name], node.origin, sink, f"the field {field.name!r} of {display}()"
-            )
+    fields: list[Value] = [
+        interp.conform_annotation(
+            bindings[field.name], annotations[field.name], node.origin, sink, f"the field {field.name!r} of {display}"
         )
+        for field in dataclasses.fields(cls)
+    ]
     return RecordValue(cls, tuple(fields), Allocation())
 
 
+def bind_signature(
+    interp: Interpreter,
+    site: Origin,
+    target: Callable[..., object],
+    positional: list[Value],
+    keywords: dict[str, Value],
+    prefix: str = "",
+) -> dict[str, Value]:
+    """An injected default is a plain Python object, admitted under `prefix` and its parameter's name."""
+    try:
+        bound = inspect.signature(target).bind(*positional, **keywords)
+    except TypeError as error:
+        reject(site, f"the arguments do not bind: {error}")
+    bound.apply_defaults()
+    return {
+        name: value if isinstance(value, VALUE_KINDS) else interp.snapshot.admit(prefix + name, value, site)
+        for name, value in bound.arguments.items()
+    }
+
+
 def _factory(interp: Interpreter, node: Call, display: str, match: Factory, frame: Frame, sink: Sink) -> Value:
-    values = _operand_arguments(interp, node, display, frame, sink)
+    values = _positional_arguments(interp, node, display, frame, sink, shares=False)
     host = [_static_argument(node.origin, display, value) for value in values]
     try:
         built = match.build(*host)
     except Exception as error:  # a registered library builder, not user code; its refusal is a diagnostic
-        reject(node.origin, f"{display}() rejects its arguments: {error}")
+        reject(node.origin, f"{display} rejects its arguments: {error}")
     tensor = tensor_of(built, display)
     if tensor is None:
-        reject(node.origin, f"{display}() must build a non-empty 1-D or 2-D numeric array")
+        reject(node.origin, f"{display} must build a non-empty 1-D or 2-D numeric array")
     interp.budget.spend(len(tensor.leaves), node.origin, "the array factory")
     return tensor
 
@@ -716,11 +636,11 @@ def _static_argument(origin: Origin, display: str, value: Value) -> object:
         case SequenceValue(items=items):
             return tuple(_static_argument(origin, display, item) for item in items)
         case _:
-            reject(origin, f"the arguments of {display}() must be compile-time constants")
+            reject(origin, f"the arguments of {display} must be compile-time constants")
 
 
 def _len(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
-    values = _operand_arguments(interp, node, "len", frame, sink)
+    values = _positional_arguments(interp, node, "len()", frame, sink, shares=False)
     if len(values) != 1:
         reject(node.origin, f"len() takes exactly one argument, got {len(values)}")
     match values[0]:
@@ -741,7 +661,7 @@ def _len(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
 
 
 def _range(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> RangeValue:
-    values = _operand_arguments(interp, node, "range", frame, sink)
+    values = _positional_arguments(interp, node, "range()", frame, sink, shares=False)
     if not 1 <= len(values) <= 3:
         reject(node.origin, f"range() takes 1 to 3 arguments, got {len(values)}")
     bounds: list[Scalar] = []
@@ -776,7 +696,7 @@ def _enumerate(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Ite
     store would read stale leaves -- the conservative refusal mirrors the borrow on a directly iterated
     aggregate); the iterator kind itself carries the exhausted-after-one-pass semantics.
     """
-    source, start = _option_arguments(interp, node, "enumerate", frame, sink, option="start")
+    source, start = _option_arguments(interp, node, "enumerate()", frame, sink, option="start")
     begin = 0 if start is None else _aggregate.static_index(node.origin, start, "the enumerate start")
     decayed = _aggregate.decay(interp.budget, source, node.origin)
     items = _aggregate.splice_items(node.origin, decayed, interp.loop_passes())
@@ -790,12 +710,12 @@ def _enumerate(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Ite
 
 
 def _rebuild_sequence(interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink) -> Value:
-    values = _operand_arguments(interp, node, display, frame, sink)
+    values = _positional_arguments(interp, node, display, frame, sink, shares=False)
     if len(values) != 1:
-        reject(node.origin, f"{display}() takes exactly one aggregate argument here")
+        reject(node.origin, f"{display} takes exactly one aggregate argument here")
     source = _aggregate.decay(interp.budget, values[0], node.origin)
     if not isinstance(source, (*AGGREGATES, IteratorValue)):
-        reject(node.origin, f"{display}() requires an aggregate argument")
+        reject(node.origin, f"{display} requires an aggregate argument")
     children = _aggregate.splice_items(node.origin, source, interp.loop_passes())
     interp.budget.spend(max(len(children), 1), node.origin, "the sequence conversion")
     return SequenceValue(tuple(children), Allocation())
@@ -805,14 +725,17 @@ def _conversion_arguments(
     interp: Interpreter, node: Call, display: str, frame: Frame, sink: Sink
 ) -> tuple[Value, ScalarType | None]:
     source, dtype = _option_arguments(interp, node, display, frame, sink, option="dtype")
-    if dtype is None:
+    if dtype is None or (isinstance(dtype, Opaque) and dtype.value is None):  # np.dtype(None) would be float64
         return source, None
-    family = annotation_stype(dtype.value) if isinstance(dtype, Opaque) else None
-    if family is ScalarType.BOOL:
+    try:
+        kind = np.dtype(dtype.value).kind if isinstance(dtype, Opaque) else None  # type: ignore[call-overload]
+    except TypeError:
+        kind = None
+    if kind == "b":
         reject(node.origin, "an array must hold numbers, not booleans")
-    if family is None:
-        reject(node.origin, f"the dtype of {display}() must be the Python type float or int")
-    return source, family
+    if kind not in ("f", "i", "u"):
+        reject(node.origin, f"the dtype of {display} must be a float or integer type")
+    return source, ScalarType.FLOAT if kind == "f" else ScalarType.INT
 
 
 def _to_tensor(
@@ -843,7 +766,7 @@ def _to_tensor(
             return TensorValue(value.shape, value.family, value.leaves, value.allocation)
         case SequenceValue(items=items):
             if not items:
-                reject(origin, f"{display}() of an empty sequence is not supported")
+                reject(origin, f"{display} of an empty sequence is not supported")
             shape, leaves = _tensor_rows(origin, display, items)
             explicit = family is not None
             if family is None:
@@ -853,7 +776,7 @@ def _to_tensor(
             interp.budget.spend(len(conformed), origin, "the array conversion")
             return TensorValue(shape, family, tuple(conformed), Allocation())
         case _:
-            reject(origin, f"{display}() requires a sequence or array argument, not {_aggregate.a_kind(value)}")
+            reject(origin, f"{display} requires a sequence or array argument, not {_aggregate.a_kind(value)}")
 
 
 def _tensor_rows(
@@ -870,16 +793,16 @@ def _tensor_rows(
                 row: list[Scalar | Opaque] = []
                 for element in row_items:
                     if not isinstance(element, (StaticScalar, ResidualScalar, Opaque)):
-                        reject(origin, f"{display}() supports only 1-D and 2-D rectangular constructions")
+                        reject(origin, f"{display} supports only 1-D and 2-D rectangular constructions")
                     row.append(element)
                 rows.append(row)
             case TensorValue(shape=shape, leaves=leaves) if len(shape) == 1:
                 rows.append(list(leaves))
             case _:
-                reject(origin, f"{display}() supports only 1-D and 2-D rectangular constructions")
+                reject(origin, f"{display} supports only 1-D and 2-D rectangular constructions")
     widths = {len(row) for row in rows}
     if len(widths) != 1 or 0 in widths:
-        reject(origin, f"{display}() requires rectangular rows of equal nonzero length")
+        reject(origin, f"{display} requires rectangular rows of equal nonzero length")
     return (len(rows), widths.pop()), [leaf for row in rows for leaf in row]
 
 
@@ -912,38 +835,3 @@ def tensor_leaf(
     if not explicit:
         reject(origin, "storing a float into an integer array truncates on the host; rebind a float array instead")
     return apply(interp, _ops.CONVERT[(ScalarType.FLOAT, ScalarType.INT)], [leaf], origin, sink)
-
-
-def bind_signature(
-    interp: Interpreter,
-    site: Origin,
-    fn: types.FunctionType,
-    params: tuple[Param, ...],
-    positional: list[Value],
-    keywords: dict[str, Value],
-) -> dict[str, Value]:
-    signature = inspect.signature(fn)
-    assert [param.name for param in params] == list(signature.parameters), "desugared params mirror the signature"
-    try:
-        bound = signature.bind(*positional, **keywords)
-    except TypeError as error:
-        reject(site, f"the arguments do not bind: {error}")
-    bound.apply_defaults()
-    bindings: dict[str, Value] = {}
-    for name, value in bound.arguments.items():
-        if isinstance(value, VALUE_KINDS):
-            bindings[name] = value
-        else:
-            bindings[name] = interp.snapshot.admit(name, value, site)  # an injected default: a plain Python object
-    return bindings
-
-
-def _cast(interp: Interpreter, node: Call, target: type, frame: Frame, sink: Sink) -> Value:
-    if len(node.args) != 1 or not isinstance(node.args[0], PosArg):
-        reject(node.origin, f"{target.__name__}() takes exactly one positional argument here")
-    operand = scalar(interp.expr(node.args[0].value, frame, sink), node.origin)
-    declared = annotation_stype(target)
-    assert declared is not None
-    if operand.stype is declared:
-        return operand
-    return apply(interp, _ops.CONVERT[(operand.stype, declared)], [operand], node.origin, sink)

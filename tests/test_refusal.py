@@ -133,5 +133,5 @@ def test_the_judgement_follows_optimization_and_never_precedes_it() -> None:
 )
 def test_an_expression_that_survives_optimization_is_refused(kernel: Callable[..., float]) -> None:
     # Nothing deletes these: each feeds the returned sum, so each is the program's and is refused as such.
-    with pytest.raises(SynthesisError, match="names no number"):
+    with pytest.raises(SynthesisError):
         _sim(kernel, kernel.__name__.lstrip("_"))

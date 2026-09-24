@@ -544,7 +544,9 @@ class Interpreter:
             params: list[Param] = []
             items: list[Value] = []
             for position, arg in enumerate(args):
-                arg_params, item = self._decompose(param, f"{name}_{position}", arg, stack, what)
+                arg_params, item = self._decompose(
+                    param, f"{name}_{position}", arg, stack, f"item {position} of {what}"
+                )
                 params.extend(arg_params)
                 items.append(item)
             return params, SequenceValue(tuple(items), Allocation(AllocationState.ESCAPED))
@@ -561,7 +563,11 @@ class Interpreter:
             fields: list[Value] = []
             for field_name, field_annotation in annotations.items():
                 field_params, item = self._decompose(
-                    param, f"{name}_{field_name}", field_annotation, [*stack, annotation], what
+                    param,
+                    f"{name}_{field_name}",
+                    field_annotation,
+                    [*stack, annotation],
+                    f"the field {field_name!r} of {what}",
                 )
                 params.extend(field_params)
                 fields.append(item)
@@ -610,7 +616,7 @@ class Interpreter:
                     if isinstance(current_value, AGGREGATES):
                         updated = _mutate.aug_aggregate(self, origin, target.name, current_value, op, rhs, frame, piece)
                     else:
-                        updated = _express.binary(self, origin, op, current_value, rhs, frame, piece)
+                        updated = _express.operator_call(self, origin, op, [current_value, rhs], frame, piece)
                     frame.env[target.name] = updated
                 case Unpack(origin=origin, targets=targets, value=value):
                     source = _aggregate.decay(self.budget, self.expr(value, frame, piece), origin)
@@ -1551,26 +1557,30 @@ class Interpreter:
                 if not root:
                     return value
                 reject(origin, f"{what}: {reason}")
-            if isinstance(value, RecordValue) and value.cls is annotation:
-                annotations = self.record_annotations(annotation, origin)
-                fields = tuple(
-                    self._conform_value(
-                        item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root
-                    )
-                    for (name, field_annotation), item in zip(annotations.items(), value.fields, strict=True)
-                )
-                return dataclasses.replace(value, fields=fields)
-            if isinstance(value, Opaque) and isinstance(value.value, annotation):
-                if not root:
-                    return value  # frozen-folding reads keep serving the captured instance
-                if type(value.value) is annotation:
-                    return self._admit_record(what, annotation, value.value, origin, sink)
+            found = (
+                value.cls
+                if isinstance(value, RecordValue)
+                else type(value.value) if isinstance(value, Opaque) else None
+            )
+            if found is None or not issubclass(found, annotation):
+                reject(origin, f"{what} is not a {annotation.__name__} record")
+            if root and found is not annotation:
                 reject(
                     origin,
-                    f"{what} is a {type(value.value).__name__}, a subclass of the annotated "
+                    f"{what} is a {found.__name__}, a subclass of the annotated "
                     f"{annotation.__name__}; projecting it to the base would silently drop its extra fields",
                 )
-            reject(origin, f"{what} is not a {annotation.__name__} record")
+            if not isinstance(value, RecordValue):
+                assert isinstance(value, Opaque)
+                if not root:
+                    return value  # frozen-folding reads keep serving the captured instance
+                return self._admit_record(what, annotation, value.value, origin, sink)
+            annotations = self.record_annotations(found, origin)
+            fields = tuple(
+                self._conform_value(item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root)
+                for (name, field_annotation), item in zip(annotations.items(), value.fields, strict=True)
+            )
+            return dataclasses.replace(value, fields=fields)
         annotated = _aggregate.array_annotation_shape(annotation, origin, what)
         if annotated is not None:
             shape, family = annotated
@@ -1641,15 +1651,13 @@ class Interpreter:
             case EnvRead():
                 return self._env_read(expr, frame)
             case Unary(origin=origin, op=op, operand=operand):
-                return _express.unary(self, origin, op, self.expr(operand, frame, sink), sink)
-            case Binary(origin=origin, op=op, left=left, right=right):
+                return _express.operator_call(self, origin, op, [self.expr(operand, frame, sink)], frame, sink)
+            case Binary(origin=origin, op=op, left=left, right=right) | Compare(
+                origin=origin, op=op, left=left, right=right
+            ):
                 lv = self.expr(left, frame, sink)
                 rv = self.expr(right, frame, sink)
-                return _express.binary(self, origin, op, lv, rv, frame, sink)
-            case Compare(origin=origin, op=op, left=left, right=right):
-                lv = self.expr(left, frame, sink)
-                rv = self.expr(right, frame, sink)
-                return _express.compare(self, origin, op, lv, rv, sink)
+                return _express.operator_call(self, origin, op, [lv, rv], frame, sink)
             case IsNone(operand=operand, negated=negated):
                 probed = self.expr(operand, frame, sink)
                 answer = isinstance(probed, Opaque) and probed.value is None
@@ -1752,7 +1760,7 @@ class Interpreter:
             return self.readable(bound, origin)
         found: object = mro_attr(type(base.value), attr, _MISSING)
         if isinstance(found, property) and (fget := plain_function(found.fget)) is not None:
-            return self.inline(origin, f"{base.name}.{attr}", fget, [base], {}, frame, sink, positional_only=False)
+            return self.inline(origin, f"{base.name}.{attr}", fget, [base], {}, frame, sink, stub=False)
         if isinstance(found, types.MemberDescriptorType):
             if dataclasses.is_dataclass(type(base.value)) and inadmissible_reason(type(base.value)) is None:
                 return self.snapshot.admit(f"{base.name}.{attr}", getattr(base.value, attr), origin)
@@ -1806,8 +1814,11 @@ class Interpreter:
         frame: Frame,
         sink: Sink,
         *,
-        positional_only: bool,
+        stub: bool,
     ) -> Value:
+        """Only a body the program asked for is an expansion; `ExpansionBudget` says why a stub's is not."""
+        if not stub:
+            self.budget.spend(1, origin, "the inlined call")
         site = Origin(origin.location, origin.frames + (CallFrame(display, origin.location),))
         if fn in self._inlining:
             reject(site, "recursive inlining is not supported")
@@ -1815,18 +1826,11 @@ class Interpreter:
             eel = self._desugared(fn)
         except SynthesisError as error:
             reattribute(site, error)
-        annotations = self._annotations_of(site, fn)
-        self.budget.spend(1, site, "the inlined call")
         callee = rechained(eel, site.frames)
         assert isinstance(callee, EelFunction)
-        if positional_only:
-            assert not keywords
-            assert not getattr(fn, "__kwdefaults__", None), "registry stubs bind positionally"
-            low = len(callee.params) - len(fn.__defaults__ or ())
-            if not low <= len(positional) <= len(callee.params):
-                expected = str(low) if low == len(callee.params) else f"{low} to {len(callee.params)}"
-                reject(site, f"{display}() takes {expected} argument(s), got {len(positional)}")
-        bindings = _express.bind_signature(self, site, fn, callee.params, positional, keywords)
+        annotations = self._annotations_of(site, fn)
+        bindings = _express.bind_signature(self, site, fn, positional, keywords)
+        assert [param.name for param in callee.params] == list(bindings), "desugared params mirror the signature"
         env: _Env = {}
         for param in callee.params:
             value = bindings[param.name]

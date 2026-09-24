@@ -5,7 +5,7 @@ the promoted tests that must not reach into compiler internals.
 
 import re
 
-_LOCATION_SUFFIX = re.compile(r"  # \S+:\d+(?: via \S+)?$", re.MULTILINE)
+_LOCATION_SUFFIX = re.compile(r"  # (?:\S+:\d+ via [^,\n]+, )*\S+:\d+$", re.MULTILINE)
 
 _PRELUDE_BEGIN = "// BEGIN holoso_support_inline.vh"
 _PRELUDE_END = "// END of holoso_support_inline.vh"
@@ -13,9 +13,10 @@ _PRELUDE_END = "// END of holoso_support_inline.vh"
 
 def strip_locations(text: str) -> str:
     """
-    Drop the per-statement location suffix (`  # file.py:NN` plus an optional ` via callee,...` chain) from a
-    `frontend_ir` dump, yielding the canonical location-free Eel text. The pattern is anchored at end of line
-    because bare substring assertions on the raw dump collide with the suffixes (basenames and line numbers).
+    Drop the per-statement location suffix (`  # file.py:NN`, preceded by a `file.py:NN via callee, ` hop per call
+    site it expanded through) from a `frontend_ir` dump, yielding the canonical location-free Eel text. The pattern
+    is anchored at end of line because bare substring assertions on the raw dump collide with the suffixes
+    (basenames and line numbers).
     """
     return _LOCATION_SUFFIX.sub("", text)
 

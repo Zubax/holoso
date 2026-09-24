@@ -79,6 +79,8 @@ _BASELINE: dict[str, dict[str, tuple[float, float]]] = {
     "priority_encoder-e6m18-ffma": {},
     "crc32-e6m18": {},
     "crc32-e6m18-ffma": {},
+    "fixed_point_pi-e6m18": {},
+    "fixed_point_pi-e6m18-ffma": {},
     "lfsr16-e6m18": {},
     "lfsr16-e6m18-ffma": {},
     "uart_tx-e6m18": {},

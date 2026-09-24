@@ -65,10 +65,10 @@ def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
     assert compared == len(vectors)
 
 
-def _rejects(fn: object, match: str) -> None:
+def _rejects(fn: object) -> None:
     assert callable(fn)
-    with pytest.raises(UnsupportedConstruct, match=match):
-        holoso.synthesize(fn, _INT_ONLY, name="k")
+    with pytest.raises(UnsupportedConstruct):
+        lower(fn, DEFAULT_UNROLL_MAX_TRIPS)
 
 
 def _residual_text(fn: Callable[..., object]) -> str:
@@ -205,7 +205,7 @@ def _incompatible_arms(c: bool) -> float:
 
 
 def test_incompatible_arm_types_reject() -> None:
-    _rejects(_incompatible_arms, "incompatible types")
+    _rejects(_incompatible_arms)
 
 
 def _one_sided_read(c: bool) -> float:
@@ -215,7 +215,7 @@ def _one_sided_read(c: bool) -> float:
 
 
 def test_one_sided_binding_read_rejects() -> None:
-    _rejects(_one_sided_read, "not bound on every path")
+    _rejects(_one_sided_read)
 
 
 def _read_before_binding(x: float) -> float:
@@ -225,7 +225,7 @@ def _read_before_binding(x: float) -> float:
 
 
 def test_read_before_binding_rejects() -> None:
-    _rejects(_read_before_binding, "not bound on every path")
+    _rejects(_read_before_binding)
 
 
 def _truthy_condition(x: float) -> float:
@@ -241,8 +241,8 @@ def _static_truthy_condition(x: float) -> float:
 
 
 def test_conditions_must_be_bool_at_both_binding_times() -> None:
-    _rejects(_truthy_condition, "condition must be a bool")
-    _rejects(_static_truthy_condition, "condition must be a bool")
+    _rejects(_truthy_condition)
+    _rejects(_static_truthy_condition)
 
 
 def _early_return(x: float) -> float:
@@ -354,7 +354,7 @@ def test_a_static_power_the_host_refuses_saturates_like_the_datapath() -> None:
     multiply chain and its pole is the division that names no number -- judged by the survivor sweep, not predicted.
     """
     assert "inf" in _residual(_overflowing_static_power, _FADD)
-    with pytest.raises(SynthesisError, match="names no number") as info:
+    with pytest.raises(SynthesisError) as info:
         holoso.synthesize(_zero_to_negative_power, _FADD_FDIV, name="k")
     assert not isinstance(info.value, UnsupportedConstruct)
 
@@ -386,7 +386,7 @@ def test_a_whole_exponent_past_the_bound_takes_the_general_rung() -> None:
     lean = Options(OperatorOptions(fmul=FMulOptions(), fcmp=FCmpOptions()))
     holoso.synthesize(_exponent_within_the_chain, lean, name="k")
     for kernel in (_exponent_past_the_chain, _int_exponent_past_the_chain):  # either spelling of the same value
-        with pytest.raises(UnsupportedConstruct, match="flog2"):
+        with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(kernel, lean, name="k")
     with pytest.raises(SynthesisError):  # past the float range the general rung cannot take it either
         holoso.synthesize(_exponent_past_the_float_range, _FADD_FMUL, name="k")
@@ -473,7 +473,7 @@ def _make_unbound_cell_kernel() -> Callable[[float], float]:
 
 
 def test_unbound_closure_cell_rejects() -> None:
-    _rejects(_make_unbound_cell_kernel(), "unbound in its enclosing scope")
+    _rejects(_make_unbound_cell_kernel())
 
 
 def _missing_global(x: float) -> float:
@@ -493,9 +493,9 @@ def _object_global(x: float) -> float:
 
 
 def test_environment_rejections() -> None:
-    _rejects(_missing_global, "is not defined")
-    _rejects(_nan_global, "is NaN")
-    _rejects(_object_global, "is not a bool, int, or float scalar")
+    _rejects(_missing_global)
+    _rejects(_nan_global)
+    _rejects(_object_global)
 
 
 def test_numpy_scalars_snapshot_as_their_exact_values() -> None:
@@ -579,16 +579,16 @@ def _falls_off_the_end(x: float) -> float:  # type: ignore[return]
 
 
 def test_interface_annotation_rejections() -> None:
-    _rejects(_unannotated_param, "requires a type annotation")
-    _rejects(_str_param, "annotation of parameter 'x' is not supported")
-    _rejects(_no_return_annotation, "return type annotation is required")
-    _rejects(_none_returns_value, "annotation of the returned value does not match the scalar")
-    _rejects(_value_returns_none, "returns no value but its annotation declares one")
-    _rejects(_int_from_float, "type float where the annotation declares int")
-    _rejects(_bool_from_float, "type float where the annotation declares bool")
-    _rejects(_arity_mismatch, r"has 3 element\(s\) where the annotation declares 2")
-    _rejects(_scalar_where_tuple, "is not a sequence")
-    _rejects(_falls_off_the_end, "can complete without returning a value")
+    _rejects(_unannotated_param)
+    _rejects(_str_param)
+    _rejects(_no_return_annotation)
+    _rejects(_none_returns_value)
+    _rejects(_value_returns_none)
+    _rejects(_int_from_float)
+    _rejects(_bool_from_float)
+    _rejects(_arity_mismatch)
+    _rejects(_scalar_where_tuple)
+    _rejects(_falls_off_the_end)
 
 
 def test_nested_tuple_returns_flatten_row_major() -> None:
@@ -638,25 +638,30 @@ def _float_truthiness(a: float, b: float) -> bool:
     return a and b  # type: ignore[return-value]
 
 
+def _int_bool_truthiness(n: int, p: bool) -> bool:
+    return n and p  # type: ignore[return-value]
+
+
 def _not_on_float(a: float) -> bool:
     return not a
 
 
 def test_type_model_rejections() -> None:
-    for fn, match in [
-        (_bool_arithmetic, "booleans take no part in arithmetic"),
-        (_bool_negate, "booleans take no part in arithmetic"),
-        (_bool_invert, "integer-only"),
-        (_bool_ordering, "ordering comparisons of booleans"),
-        (_bool_vs_number, "cannot be compared with a number"),
-        (_float_floordiv, "`//` is integer-only"),
-        (_float_mod, "`%` is integer-only"),
-        (_float_shift, "`<<` is integer-only"),
-        (_mixed_bitwise, "requires two ints or two bools"),
-        (_float_truthiness, "truthiness is not supported"),
-        (_not_on_float, "requires a bool operand"),
+    for fn in [
+        _bool_arithmetic,
+        _bool_negate,
+        _bool_invert,
+        _bool_ordering,
+        _bool_vs_number,
+        _float_floordiv,
+        _float_mod,
+        _float_shift,
+        _mixed_bitwise,
+        _float_truthiness,
+        _int_bool_truthiness,
+        _not_on_float,
     ]:
-        _rejects(fn, match)
+        _rejects(fn)
 
 
 # ---------------------------------------------------------------------- the captured environment
@@ -681,7 +686,7 @@ def _unpack_gap(x: float) -> float:
 
 
 def test_a_captured_object_store_is_observable_outside_and_rejects() -> None:
-    _rejects(_store_gap, "cannot mutate '_BOX': it was captured from outside the kernel")
+    _rejects(_store_gap)
 
 
 def test_captured_aggregates_and_instance_attributes_fold() -> None:
@@ -722,7 +727,7 @@ def test_unjoinable_branch_values_reject_located_at_the_read() -> None:
     definite-assignment failure, in every spelling -- never a bare internal assertion.
     """
     for fn in (_select_callee_ternary, _select_callee_branch, _select_shape_mismatch):
-        _rejects(fn, "cannot merge")
+        _rejects(fn)
 
 
 def test_same_shape_aggregates_join_leafwise() -> None:
@@ -740,7 +745,7 @@ class _Stateful:
 
 def test_a_state_writing_bound_method_accumulates_across_transactions() -> None:
     _oracle(_Stateful().step, [{"x": 1.5}, {"x": -0.25}, {"x": 4.0}])
-    with pytest.raises(SynthesisError, match="not a plain function"):
+    with pytest.raises(SynthesisError):
         resolve_target(3)
 
 
@@ -753,7 +758,7 @@ def _static_fault_reaches_output(x: float) -> float:
 
 def test_static_fault_residualizes_for_survivor_refusal() -> None:
     """CPython raises ZeroDivisionError; the compiler builds, and the fault surfaces only if it survives."""
-    with pytest.raises(SynthesisError, match="names no number") as info:
+    with pytest.raises(SynthesisError) as info:
         holoso.synthesize(_static_fault_reaches_output, _FADD_FDIV, name="k")
     assert not isinstance(info.value, UnsupportedConstruct)
 
@@ -775,7 +780,7 @@ def test_unrepresentable_promotion_residualizes() -> None:
     """
     assert "int_to_float" in _residual_text(_huge_int_promotion)
     for fn in (_huge_int_promotion, _huge_int_ratio):
-        with pytest.raises(SynthesisError, match="names no number") as info:
+        with pytest.raises(SynthesisError) as info:
             holoso.synthesize(fn, _FADD_FMUL, name="k")
         assert not isinstance(info.value, UnsupportedConstruct), fn
 

@@ -231,7 +231,8 @@ class ExpansionBudget:
     """
     The one graph-expansion bound of the whole lowering: every structure-producing expansion spends units at
     its expansion site, regardless of whether the produced structure later folds away, so a blow-up is a
-    located rejection, never a hang. Exact constant arithmetic never spends: folding is not expansion.
+    located rejection, never a hang. A registry stub's own inlining is free, being an operator's lowering rather
+    than structure the program asked for. Exact constant arithmetic never spends: folding is not expansion.
     """
 
     def __init__(self, limit: int = 100_000) -> None:

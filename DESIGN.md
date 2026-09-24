@@ -253,34 +253,39 @@ ignored wholesale, as under `-O`. Name resolution reproduces CPython's static cl
 the kernel must mean what it means when the host runs it.
 
 Partial evaluation is the sole semantic owner -- binding time, types, shapes, reachability, unrolling, inlining, and
-state: a specializing interpreter producing residual Eel, a pure function over an immutable tree re-run from its
-inputs rather than patched in place. Static structure folds here while value arithmetic stays the graph's business
-per the fastmath charter: every fold runs the very lowering the hardware runs, and the host is never consulted for a
-value. The residual program is scalar and typed; early returns and loop exits lower to real control edges rather
-than predication, leaving emission mechanical. Three policies bound the evaluation: the compiler never predicts host
-failures it is not itself forced to evaluate (inputs are trusted, and hostile-input hardening is rejected as
-policy); conservatism may cost a diagnostic, never a wrong value; and every structure-producing expansion draws on
-one graph-size budget, so an accidental blow-up is a located rejection rather than a hang.
+state: a specializing interpreter producing residual Eel, a pure function over an immutable tree re-run from its inputs
+rather than patched in place. Static structure folds here while value arithmetic stays the graph's business per the
+fastmath charter: every fold runs the very lowering the hardware runs, and the host is never consulted for a value. The
+residual program is scalar and typed; early returns and loop exits lower to real control edges rather than predication,
+leaving emission mechanical. Three policies bound the evaluation: the compiler never predicts host failures it is not
+itself forced to evaluate (inputs are trusted, and hostile-input hardening is rejected as policy); conservatism may cost
+a diagnostic, never a wrong value; and every expansion -- a materialized range, an unrolled trip, an array's leaves, an
+inlined call -- draws on one graph-size budget, so an accidental blow-up is a located rejection rather than a hang.
+Inlining a library stub is the one exemption, being an operator's lowering rather than structure the program asked for.
 
-Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below. Four deviations from Python are
+Scalars are width-less Bool, Int, and Float; hardware formats bind at MIR and below. Five deviations from Python are
 deliberate: mixed int/float expressions promote to float C-style, a power yields float unless its base is an int and
 its exponent a compile-time nonnegative int (the float-computing spellings `math.pow` and `np.float_power` convert an
-integer base as the host does), booleans take no part in arithmetic, and `and`/`or` are eager gates evaluating both
-operands as combinational logic does, while other conditional positions still branch.
+integer base as the host does), booleans take no part in arithmetic, a subclass of `int` other than `bool` -- an
+integer enumeration above all -- is the integer `int()` gives (a captured instance is that integer, an annotation naming
+the class declares an int, and calling the class converts as `int` does; the class's own methods and operators are never
+consulted, so `~` of a flag member answers the integer's way), and `and`/`or` are eager gates evaluating both operands
+as combinational logic does, while other conditional positions still branch.
 One join rule governs every meeting point: Int meeting Float promotes to Float, Bool joins only with Bool, and
 aggregates only with identical kind and shape -- for a record, identical class.
 
-Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an
-array the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle
-fixed by its class -- a plain generated frozen dataclass, so construction is structural and field reads fold.
-One assignment-target vocabulary serves every statement that binds one -- a plain assignment, an unpack, a `for`
-header: a name, an attribute, an element, or a tuple of those nested arbitrarily, bound left to right off one
-evaluation of the right-hand side as CPython binds it. A comprehension keeps its own narrower rule, a plain name.
-`enumerate` answers a one-shot iterator exactly as in Python: consumed by a single iteration, refused elsewhere.
-Arrays and records never exist as hardware aggregates: they are compile-time bookkeeping over scalar wires,
-decomposed at the module boundary into indexed and field-path ports, and only scalar leaves reach HIR. Structural
-transforms (slices, transposes, reshapes) restructure the same storage; a dtype-changing conversion mints a fresh
-array exactly where the host copies.
+Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an array
+the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle fixed by its
+class -- a plain generated frozen dataclass, so construction is structural and field reads fold, while a property of the
+class is inlined as the user's code it is and a class constant reads as the value it holds. One assignment-target
+vocabulary serves every statement that binds one -- a plain assignment, an unpack, a `for` header: a name, an attribute,
+an element, or a tuple of those nested arbitrarily, bound left to right off one evaluation of the right-hand side as
+CPython binds it. A comprehension keeps its own narrower rule, a plain name. `enumerate` answers a one-shot iterator
+exactly as in Python: consumed by a single iteration, refused elsewhere. Arrays and records never exist as hardware
+aggregates: they are compile-time bookkeeping over scalar wires, decomposed at the module boundary into indexed and
+field-path ports, and only scalar leaves reach HIR. Structural transforms (slices, transposes, reshapes) restructure the
+same storage; a family-changing conversion mints a fresh array exactly where the host copies, a dtype naming only its
+family since widths are erased throughout the value model.
 
 Mutation is admitted only where reference and value semantics cannot be told apart, and rejected with advice
 everywhere else, sparing the compiler a heap model and escape analysis. Persistent state is the one mutable
@@ -309,31 +314,48 @@ keeps old handles valid, exactly as in Python).
 A residual loop carries the state roots its region syntactically writes plus whatever reached stores reveal through a
 driver-level restart -- lean-first, since carrying an untouched leaf would destroy static folds.
 
-Calls dispatch on the object identity the callee resolves to, not its spelled name, so every spelling of a symbol (`**`
-or its function form, `@` or `np.matmul`) resolves one registry entry. A scalar callee carries a group of typed
-lowerings, each either a single semantic HIR operator or an inlined composite, declaring a domain per operand position
-and optionally a refinement demanding a compile-time value -- of known sign and wholeness, or of one named value where
-neither tells the lowerings apart (a one-half exponent is the square root, a small whole one a chain); selection takes
-the unique most refined lowering every one of whose positions accepts the operand. An entry of no fixed arity mints its
-operator for the call's own count, which is what `math.hypot` and the Euclidean norms are. An array composite declares
-no scalar domain, rank and shape deciding its meaning; whole-array reductions are static pairwise trees, log-deep in the
-operator's latency, while the dot product stays a left fold so FMA contraction remains reachable. Joins along an axis
-(concatenation and the stacking spellings) are copying composites over a sequence of parts, promoting the whole result
-across the parts' families as numpy's conversion does. A composite may admit a sequence at a declared argument position,
-and a scalar entry may be lifted per key to apply elementwise over an array's leaves, which a unary numpy spelling is
-wherever its answer stays in a family the subset has, and its `math` twin never is. Every stub is ordinary Python in the
-supported subset, so each is its own numerical reference.
+Calls dispatch on the object identity the callee resolves to (a subclass of `int` resolving to `int`), not its spelled
+name. The registry is a table of MEANINGS, each owning the lowerings that implement it, and of the SPELLINGS bound to
+them: `*`, `np.multiply` and `operator.mul` are three spellings of one meaning and share its lowerings by identity, so
+they cannot drift apart, while spellings whose answers differ are meanings apart (`abs` keeps an integer where
+`math.fabs` answers a float). Every subset operator is a spelling too -- of a meaning, or, where rank and shape decide
+the answer, of an array composite as `@` is -- and so are the casts, so typing rules live in the meanings and the
+interpreter keeps no operator special case. A spelling may name the method through which a record or captured object
+answers it before the meaning applies to the answer, as `int` names `__int__`. numpy's logical functions take booleans
+only, as `and`, `or` and `not` do. A meaning carries typed lowerings, each either a single semantic HIR operator or an
+inlined composite, declaring a domain per operand position and optionally a refinement demanding a compile-time value --
+of known sign and wholeness, or of one named value where neither tells the lowerings apart (a one-half exponent is the
+square root, a small whole one a chain); selection takes the unique most refined lowering every one of whose positions
+accepts the operand. An entry of no fixed arity mints its operator for the call's own count, which is what `math.hypot`
+is and what the Euclidean norms reach.
+
+An array composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
+pairwise trees, log-deep in the operator's latency, while the dot product stays a left fold so FMA contraction remains
+reachable. Joins along an axis (concatenation and the stacking spellings) are copying composites over a sequence of
+parts, promoting the whole result across the parts' families as numpy's conversion does. A composite may admit a
+sequence at a declared argument position.
+
+A spelling may map elementwise over arrays of one shape, scalars broadcasting: it does wherever the host maps it over an
+array and its answer stays in a family the subset has (an unsigned answer erasing to integer), as the arithmetic
+operators and most numpy spellings do and a `math` twin or a predicate does not. One lowering is selected per call and
+serves every leaf, so an operand whose value selects the lowering (a power's exponent) must be a scalar. An array
+updates in place exactly under an elementwise operator its own family serves. An operator the hardware lacks (a float
+difference, an identity) lowers through an inlined stub per leaf, which costs compile time rather than hardware -- the
+trade the one-meaning rule is worth. Every stub is ordinary Python in the supported subset, so each is its own numerical
+reference.
 
 A JIT dispatcher (numba's) is read through to the Python function it accelerates, as a callee and as the compile
 root, and is never state; one declaring types of its own converts rather than accelerates, so it is refused.
 
-The guiding principle for the subset is to follow Python semantics where the hardware can express them and otherwise
-reject rather than silently reinterpret, so kernels stay ordinary executable Python/numpy, each its own
-(non-bit-exact) reference on the host. A construct whose faithful meaning the hardware cannot express -- a
-data-dependent exception, for instance -- is rejected; one raised unconditionally folds into a compile-time
-diagnostic instead, which is how library stubs self-validate with plain `raise`. The module boundary is explicitly
-typed: parameters and the return value require annotations, decomposed to scalar ports and checked against the
-inferred result.
+The guiding principle for the subset is to follow Python semantics where the hardware can express them, save for the
+documented deviations, and otherwise reject rather than silently reinterpret, so kernels stay ordinary executable
+Python/numpy, each its own (non-bit-exact) reference on the host. The fastmath charter is not only about floats: a
+documented deviation that keeps the compiler simple is preferred to machinery reproducing the host. A construct whose
+faithful meaning the hardware cannot express -- a data-dependent exception, for instance -- is rejected; one raised
+unconditionally folds into a compile-time diagnostic instead, which is how library stubs self-validate with plain
+`raise`. The module boundary is explicitly typed: parameters and the return value require annotations, decomposed to
+scalar ports and checked against the inferred result. A record annotation there, or on a record's field, demands its
+exact class, which decides the fields; an inlined function's admits a subclass, as Python does.
 
 ## HIR
 

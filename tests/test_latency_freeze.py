@@ -78,6 +78,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
     "crc32-e6m18": (45, 45),
+    "fixed_point_pi-e6m18": (37, 37),
     "lfsr16-e6m18": (12, 12),
     # Branchy kernels whose phi-arm installs have settled sources (boolean/float live-out constants, or an
     # input/state read) on the normal path -- no read-first push, so each lands within the work boundary,

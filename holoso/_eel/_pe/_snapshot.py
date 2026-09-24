@@ -32,11 +32,9 @@ def describe_opaque(value: Opaque) -> str:
 
 
 def scalar_of(raw: object, name: str) -> StaticScalar | Opaque | None:
-    if type(raw) is bool or type(raw) is int:
-        return StaticScalar(make_const(raw))
-    if isinstance(raw, np.bool_):
+    if isinstance(raw, (bool, np.bool_)):
         return StaticScalar(make_const(bool(raw)))
-    if isinstance(raw, np.integer):
+    if isinstance(raw, (int, np.integer)):
         return StaticScalar(make_const(int(raw)))
     if type(raw) is float or isinstance(raw, np.floating):
         if nan_payload(raw):
