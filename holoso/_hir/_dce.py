@@ -17,4 +17,4 @@ def eliminate_dead_code(hir: Hir) -> Hir:
         if vid not in kept:
             kept.add(vid)
             pending.extend(references(hir.nodes[vid]))
-    return rebuild(hir, keep=kept | set(hir.input_ids))
+    return rebuild(hir, keep=kept)

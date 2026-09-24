@@ -51,8 +51,8 @@ class Scaling:
     multiplied together they may not be a number at all, which is why the product is formed once, by whoever
     materializes it, and declined there rather than guarded against at every composition.
 
-    The significand lies in `[1, 2)`, which every float format represents exactly, so a scaling that cannot be
-    one constant can always be two.
+    The significand lies in `[1, 2)`, which every float format holds without degrading it, so a scaling that cannot
+    be one constant can always be two.
     """
 
     significand: float

@@ -5,11 +5,11 @@ two operators that belong to no one family.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
 from typing import ClassVar, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
 from .._type import BoolType, FloatType, IntType, ScalarType
+from .._util import Relation
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,21 +105,6 @@ def apply_conditioner(conditioner: PortConditioner, value: ScalarValue) -> Scala
             return conditioner.apply(value)
         case _:
             assert_never(conditioner)
-
-
-class Relation(Enum):
-    """
-    The relations a comparator serves, shared by every comparator family. Naming them here rather than in the
-    semantic IR keeps this layer below the HIR, whose operators carry the relation in their own identity; MIR maps
-    the two. The value is the symbol used when rendering a tapped flag back as the relation it implements.
-    """
-
-    LT = "<"
-    LE = "≤"
-    GT = ">"
-    GE = "≥"
-    EQ = "="
-    NE = "≠"
 
 
 @dataclass(frozen=True, slots=True)

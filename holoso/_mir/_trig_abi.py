@@ -35,23 +35,25 @@ def trig_abi(hir: Hir) -> Hir:
     Running before optimization rather than after also treats every trigonometric operand alike: one that only a later
     round reveals as constant folds through the same conversion as one constant from the start.
     """
-    rewrites = 0
+    radian = sum(
+        1
+        for node in hir.nodes.values()
+        if isinstance(node, Operation) and isinstance(node.operator, (FloatSin, FloatCos, FloatAtan2))
+    )
+    if not radian:
+        return hir
 
     def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-        nonlocal rewrites
         match node:
             case Operation(operator=FloatSin() | FloatCos() as semantic, operands=(a,)):
-                rewrites += 1
                 turns = builder.operation(FloatMul(), [remap[a], builder.float_const(1.0 / math.tau)])
                 turned = FloatSinTurns() if isinstance(semantic, FloatSin) else FloatCosTurns()
                 return builder.operation(turned, [turns])
             case Operation(operator=FloatAtan2(), operands=(y, x)):
-                rewrites += 1
                 turns = builder.operation(FloatAtan2Turns(), [remap[y], remap[x]])
                 return builder.operation(FloatMul(), [turns, builder.float_const(math.tau)])
             case _:
                 return copy_node(builder, node, remap)
 
-    result = rebuild(hir, build_value)
-    _logger.info("Trigonometric ABI: %d radian operation(s) restated over turns", rewrites)
-    return result
+    _logger.info("Trigonometric ABI: %d radian operation(s) restated over turns", radian)
+    return rebuild(hir, build_value)

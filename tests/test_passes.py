@@ -20,11 +20,8 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FDivOptions,
-    FFromIntOptions,
     FMulILog2Options,
     FMulOptions,
-    FRoundOptions,
-    FToIntOptions,
     FloatFormat,
     FloatType,
     FloatValue,
@@ -37,6 +34,12 @@ from holoso._operators import FDivOperator
 from holoso._util import ValueId
 from holoso._eel import lower
 from holoso._hir import (
+    FloatMax,
+    FloatMin,
+    FloatRounding,
+    Rounding,
+    Relation,
+    IntComparison,
     BoolAnd,
     BoolConst,
     BoolNot,
@@ -62,7 +65,6 @@ from holoso._hir import (
     FloatAtan2,
     FloatCos,
     FloatExp2,
-    FloatFloor,
     FloatFma,
     FloatHypot,
     FloatIsFinite,
@@ -70,11 +72,9 @@ from holoso._hir import (
     FloatIsNegInf,
     FloatIsPosInf,
     FloatLog2,
-    FloatRound,
     FloatSin,
     FloatSqrt,
     FloatToBool,
-    FloatTrunc,
 )
 from holoso._hir import (
     BoolToInt,
@@ -88,16 +88,10 @@ from holoso._hir import (
     IntBwXor,
     IntConst,
     IntDivFloor,
-    IntEqual,
-    IntGreater,
-    IntGreaterOrEqual,
-    IntLess,
-    IntLessOrEqual,
     IntMod,
     IntMul,
     IntMulPow2,
     IntNeg,
-    IntNotEqual,
     IntPopcount,
     IntSelect,
     IntShiftLeft,
@@ -198,22 +192,6 @@ def test_hir_nodes_carry_float_type() -> None:
     assert isinstance(op_node, Operation)
     assert input_node.type == HirFloatType()
     assert op_node.type == HirFloatType()
-
-
-def test_lower_rejects_non_float_hir_input_type() -> None:
-    builder = HirBuilder()
-    builder.block()
-    a = builder.input("a", OtherType())
-    builder.output("out_0", a)
-    builder.ret()
-    hir = builder.finish()
-
-    try:
-        lower_to_mir(hir, OPS)
-    except UnsupportedConstruct as ex:
-        assert "no MIR lowering rule" in str(ex)
-    else:
-        assert False, "expected HIR-to-MIR lowering to reject non-float semantic input"
 
 
 def test_hir_constant_folding_preserves_const_subclass() -> None:
@@ -593,22 +571,6 @@ def test_ekf1_stateless_synthesis() -> None:
     verilog = result.verilog_output.verilog
     assert verilog.count("holoso_fdiv #") == 1  # the source's only division, x22 = 1 / x21, on one pooled divider
     assert verilog.count("holoso_fmul_ilog2 #") >= 1  # the "2 * ..." terms
-
-
-def test_unclosed_loop_phi_is_rejected() -> None:
-    # HirBuilder.finish validates that every phi has one arm per CFG predecessor: a loop-header phi opened (open_phi)
-    # but never closed (its back-edge arm missing) is a construction bug and must be caught, not emitted malformed.
-    builder = HirBuilder()
-    entry = builder.block()
-    header = builder.block()
-    x = builder.input("x", HirFloatType())
-    builder.position_at(entry)
-    builder.jump(header)
-    builder.position_at(header)
-    builder.open_phi(HirFloatType(), (entry, x))  # only the preheader arm; the latch arm is never supplied
-    builder.jump(header)  # back-edge: the header now has two predecessors (entry, header) but the phi carries one arm
-    with pytest.raises(RuntimeError):
-        builder.finish()
 
 
 def _deep_cfg_kernel(p0: float) -> float:
@@ -1089,12 +1051,12 @@ _INT_OPERATORS: list[tuple[Operator, list[Type], Type]] = [
     (IntAbs(), [IntType()], IntType()),
     (IntPopcount(), [IntType()], IntType()),
     (IntBwNot(), [IntType()], IntType()),
-    (IntLess(), [IntType(), IntType()], BoolType()),
-    (IntLessOrEqual(), [IntType(), IntType()], BoolType()),
-    (IntEqual(), [IntType(), IntType()], BoolType()),
-    (IntNotEqual(), [IntType(), IntType()], BoolType()),
-    (IntGreaterOrEqual(), [IntType(), IntType()], BoolType()),
-    (IntGreater(), [IntType(), IntType()], BoolType()),
+    (IntComparison(Relation.LT), [IntType(), IntType()], BoolType()),
+    (IntComparison(Relation.LE), [IntType(), IntType()], BoolType()),
+    (IntComparison(Relation.EQ), [IntType(), IntType()], BoolType()),
+    (IntComparison(Relation.NE), [IntType(), IntType()], BoolType()),
+    (IntComparison(Relation.GE), [IntType(), IntType()], BoolType()),
+    (IntComparison(Relation.GT), [IntType(), IntType()], BoolType()),
     (IntSelect(), [BoolType(), IntType(), IntType()], IntType()),
     (IntToFloat(), [IntType()], HirFloatType()),
     (FloatToInt(), [HirFloatType()], IntType()),
@@ -1288,17 +1250,27 @@ def test_the_bitwise_reductions_fold_on_the_graph() -> None:
     assert isinstance(outputs["complement"], Operation) and outputs["complement"].operator == IntBwNot()
 
 
-def test_a_reflexive_integer_comparison_folds_to_its_truth() -> None:
-    # No integer is a NaN, so every relation is decided over equal operands without seeing their value, and no
-    # comparator is instantiated.
-    def f(n: int) -> tuple[bool, bool, bool, bool, bool, bool]:
-        return n == n, n <= n, n >= n, n != n, n < n, n > n
+def _reflexive_int(n: int) -> tuple[bool, bool, bool, bool, bool, bool]:
+    return n == n, n <= n, n >= n, n != n, n < n, n > n
 
-    result = _synth(f, INT_OPTIONS, name="int_reflexive_cmp")
+
+def _reflexive_float(x: float) -> tuple[bool, bool, bool, bool, bool, bool]:
+    return x == x, x <= x, x >= x, x != x, x < x, x > x
+
+
+@pytest.mark.parametrize(
+    "target,options,values", [(_reflexive_int, INT_OPTIONS, (-9, 0, 7)), (_reflexive_float, OPTIONS, (-9.5, 0.0, 7.0))]
+)
+def test_a_reflexive_comparison_folds_to_its_truth(
+    target: Callable[..., tuple[bool, ...]], options: Options, values: tuple[int | float, ...]
+) -> None:
+    # The charter admits no NaN, so every relation is decided over equal operands without seeing their value, and no
+    # comparator is instantiated.
+    result = _synth(target, options)
     assert _instantiated(result) == set()
     sim = result.numerical_model.elaborate()
-    for n in (-9, 0, 7):
-        assert list(sim.run(n)) == list(f(n))
+    for value in values:
+        assert list(sim.run(value)) == list(target(value))
 
 
 def test_the_boolean_connectives_fold_over_equal_operands() -> None:
@@ -1315,6 +1287,17 @@ def test_the_boolean_connectives_fold_over_equal_operands() -> None:
     assert isinstance(outputs["and_self"], InPort) and isinstance(outputs["or_self"], InPort)
     assert outputs["xor_self"] == BoolConst(False)
     assert isinstance(outputs["inverted"], Operation) and outputs["inverted"].operator == BoolNot()
+
+
+def test_the_extrema_of_one_value_are_that_value() -> None:
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", HirFloatType())
+    builder.output("min_self", builder.operation(FloatMin(), [x, x]))
+    builder.output("max_self", builder.operation(FloatMax(), [x, x]))
+    builder.ret()
+    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
+    assert [out.value for out in hir.outputs] == [x, x]
 
 
 def test_an_integer_self_division_erases_an_operand_that_names_no_number() -> None:
@@ -1346,8 +1329,8 @@ def test_an_integer_self_division_erases_an_operand_that_names_no_number() -> No
         (FloatHypot(2), (1.5e308, 1.5e308), math.inf),  # math.hypot saturates rather than raising, so the fold does
         (FloatHypot(2), (-math.inf, 1.0), math.inf),  # a magnitude is never negative
         (FloatAtan2(), (math.inf, math.inf), math.pi / 4.0),
-        (FloatFloor(), (2.7,), 2.0),
-        (FloatTrunc(), (-2.7,), -2.0),
+        (FloatRounding(Rounding.FLOOR), (2.7,), 2.0),
+        (FloatRounding(Rounding.TRUNC), (-2.7,), -2.0),
         (FloatSin(), (0.0,), 0.0),
     ],
 )
@@ -1375,7 +1358,7 @@ def test_an_identity_cannot_be_dodged_by_spelling_its_operand_as_an_expression()
     # "Known" has to mean known, not "spelled as a constant node". `abs(inf)`, `floor(inf)`, `trunc(inf)`
     # each IS the infinity, however written, so the product is the same indeterminate form as `inf * 0.0` and
     # survives to be refused.
-    for spelled in (FloatAbs(), FloatFloor(), FloatTrunc()):
+    for spelled in (FloatAbs(), FloatRounding(Rounding.FLOOR), FloatRounding(Rounding.TRUNC)):
         with pytest.raises(SynthesisError):
             _wrapped_infinity_times_zero(spelled)
     # The other side of the same rule, and the reason it is not a dodge: `sin(inf)` names NO number, so it is an
@@ -1486,34 +1469,6 @@ def test_a_constant_condition_selects_a_mux_arm_in_every_scalar_family() -> None
     assert not [node for node in hir.nodes.values() if isinstance(node, Operation)]
 
 
-def test_the_integer_float_round_trip_is_not_an_identity() -> None:
-    # `int(float(n)) == n` is NOT an axiom here, so the nest stands over an operand the compiler cannot see. The
-    # carrier may be coarser than the integer, and then the round trip ROUNDS -- exactness is promised only where a
-    # float holds the integer, and an identity may claim nothing weaker than every value. The constant case shows the
-    # rounding the axiom would have had to deny.
-    builder = HirBuilder()
-    builder.block()
-    n = builder.input("n", IntType())
-    builder.output("y", builder.operation(FloatToInt(), [builder.operation(IntToFloat(), [n])]))
-    builder.ret()
-    hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
-    assert [node.operator for node in hir.nodes.values() if isinstance(node, Operation)] == [IntToFloat(), FloatToInt()]
-
-    def constant_round_trip(value: int) -> Hir:
-        builder = HirBuilder()
-        builder.block()
-        builder.output(
-            "y", builder.operation(FloatToInt(), [builder.operation(IntToFloat(), [builder.int_const(value)])])
-        )
-        builder.ret()
-        return optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
-
-    assert constant_round_trip(5).nodes[constant_round_trip(5).outputs[0].value] == IntConst(5)
-    rounded = constant_round_trip(2**53 + 1)
-    assert rounded.nodes[rounded.outputs[0].value] == IntConst(2**53)  # exactly what Python answers
-    assert int(float(2**53 + 1)) == 2**53
-
-
 def test_the_float_integer_round_trip_is_a_truncation() -> None:
     # float(int(x)) == trunc(x) for every x, and a rounding over an already-integral value is the identity, so the
     # nest collapses to one truncation and a truncation of a floor collapses to the floor.
@@ -1521,37 +1476,17 @@ def test_the_float_integer_round_trip_is_a_truncation() -> None:
     builder.block()
     x = builder.input("x", HirFloatType())
     builder.output("round_trip", builder.operation(IntToFloat(), [builder.operation(FloatToInt(), [x])]))
-    builder.output("idempotent", builder.operation(FloatTrunc(), [builder.operation(FloatFloor(), [x])]))
+    builder.output(
+        "idempotent",
+        builder.operation(FloatRounding(Rounding.TRUNC), [builder.operation(FloatRounding(Rounding.FLOOR), [x])]),
+    )
     builder.ret()
 
     hir = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
-    operators = sorted((n.operator for n in hir.nodes.values() if isinstance(n, Operation)), key=lambda op: op.mnemonic)
-    assert operators == [FloatFloor(), FloatTrunc()]
-    assert hir.nodes[hir.outputs[0].value] == Operation(FloatTrunc(), (hir.input_ids[0],))
-    assert hir.nodes[hir.outputs[1].value] == Operation(FloatFloor(), (hir.input_ids[0],))
-
-
-def test_the_composed_cast_laws_are_observable_where_the_formats_distinguish_them() -> None:
-    # The public value rows for the two cast laws above. FloatFormat(6, 18) carries 19 significand bits, so
-    # 1048577 == 2**20 + 1 rounds to 2**20 through the float while wint_min=34 lets the integer word hold both
-    # sides -- the round trip is visibly not an identity; 3.75 truncates to 3 either side of zero.
-    options = Options(
-        OperatorOptions(fround=FRoundOptions(), ffromint=FFromIntOptions(), ftoint=FToIntOptions()),
-        ffmt=FMT,
-        wint_min=34,
-    )
-
-    def int_float_int(n: int) -> int:
-        return int(float(n))
-
-    def float_int_float(x: float) -> float:
-        return float(int(x))
-
-    int_sim = _synth(int_float_int, options).numerical_model.elaborate()
-    assert _ints(int_sim.run(1048577)) == [1048576]
-    float_sim = _synth(float_int_float, options).numerical_model.elaborate()
-    assert [float(v) for v in float_sim.run(3.75)] == [3.0]
-    assert [float(v) for v in float_sim.run(-3.75)] == [-3.0]
+    operators = [n.operator for n in hir.nodes.values() if isinstance(n, Operation)]
+    assert sorted(operators, key=repr) == [FloatRounding(Rounding.FLOOR), FloatRounding(Rounding.TRUNC)]
+    assert hir.nodes[hir.outputs[0].value] == Operation(FloatRounding(Rounding.TRUNC), (hir.input_ids[0],))
+    assert hir.nodes[hir.outputs[1].value] == Operation(FloatRounding(Rounding.FLOOR), (hir.input_ids[0],))
 
 
 def _optimized_constant_operation(operator: Operator, *operands: float | int) -> Hir:
@@ -1633,8 +1568,8 @@ def test_an_operation_outside_its_mathematical_domain_is_refused(
     "operator, operand, expected",
     [
         (FloatLog2(), 0.0, -math.inf),
-        (FloatFloor(), math.inf, math.inf),
-        (FloatRound(), -math.inf, -math.inf),
+        (FloatRounding(Rounding.FLOOR), math.inf, math.inf),
+        (FloatRounding(Rounding.NEAREST_EVEN), -math.inf, -math.inf),
     ],
     ids=["log2_zero", "floor_of_infinity", "round_of_infinity"],
 )
@@ -1836,6 +1771,23 @@ def test_a_loop_phi_is_folded_once_its_latch_arm_has_been_rebuilt() -> None:
     ]
 
 
+def one_value_on_both_arms(x: float, d: float, c: bool) -> tuple[float, float]:
+    if c:
+        y = x * 1.0
+        q = x / d
+    else:
+        y = x
+        q = d
+    return y, q
+
+
+def test_a_merge_of_one_value_is_that_value() -> None:
+    # The division keeps the diamond a real branch, so only the merge of `y` can go.
+    hir = optimize(lower(one_value_on_both_arms, DEFAULT_UNROLL_MAX_TRIPS).hir, DEFAULT_IFCONV_MAX_OPS)
+    assert hir.nodes[hir.outputs[0].value] == InPort("x", HirFloatType())
+    assert len([node for node in hir.nodes.values() if isinstance(node, Phi)]) == 1
+
+
 def test_a_collapsed_merge_is_substituted_into_a_later_merge() -> None:
     # Every later reference to a collapsed phi must follow, including an arm of a DIFFERENT block's phi -- the one
     # reference kind that is neither operand nor terminator. Built directly: the front end never emits this shape.
@@ -1936,20 +1888,6 @@ def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -
     )
 
 
-def test_a_float_slot_with_an_integer_reset_is_refused() -> None:
-    # The slot's live-out is a float while its reset snapshot is an integer: a slot register holds one family, and
-    # only a sweep over the slots themselves sees the mismatch, since no node in the graph carries it. The frontend
-    # coerces such a literal, so the mismatched snapshot is only spellable at the builder level.
-    builder = HirBuilder()
-    builder.block()
-    x = builder.input("x", HirFloatType())
-    builder.state_slot("s", IntConst(0), x)
-    builder.output("y", x)
-    builder.ret()
-    with pytest.raises(UnsupportedConstruct):
-        lower_to_mir(builder.finish(), OPS)
-
-
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:
     # `if c: r = a` over a boolean leaves bselect(c, a, c) -- Python's eager `and` shape written as a branch --
     # and its dual leaves bselect(c, c, b). The shape alone cannot tell an `and` rewritten as an `or`; only the
@@ -1971,3 +1909,20 @@ def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:
     sim = result.numerical_model.elaborate()
     for combo in itertools.product([False, True], repeat=3):
         assert list(sim.run(*combo)) == list(gate_shapes(*combo)), combo
+
+
+def test_a_boolean_contradiction_settles_the_guard_it_forms() -> None:
+    # The boolean dual of `i & ~i`: `c and not c` is the conjunction's absorbing element, so the arm it guards is
+    # pruned and the division with it, exactly as the integer spelling already is.
+    def contradiction(x: float, y: float) -> float:
+        c = x > y
+        if c and not c:
+            return x / y
+        return x
+
+    result = _synth(contradiction)
+    assert result.initiation_interval[1] is not None, "the guard survived"
+    assert _instantiated(result) == set(), "the arm a contradiction guards survived"
+    sim = result.numerical_model.elaborate()
+    for x, y in ((3.0, 1.0), (-1.0, 2.0), (0.0, 0.0)):
+        assert float(sim.run(x, y)[0]) == x

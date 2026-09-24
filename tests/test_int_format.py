@@ -84,7 +84,7 @@ def test_integer_ports_condition_with_the_identity_and_nothing_else(width: int) 
     assert IntIdentity().decorate("r3") == "r3"
 
     operation = MirOperation(
-        SelectOperator(ty), [0, 1, 2], [BoolInversion(), IntIdentity(), IntIdentity()], 0, IntIdentity(), ()
+        SelectOperator(ty), (0, 1, 2), (BoolInversion(), IntIdentity(), IntIdentity()), 0, IntIdentity(), ()
     )
     assert operation.scalar_type == ty
 
@@ -225,6 +225,19 @@ def test_a_narrowing_that_leaves_nothing_buildable_keeps_the_widest_word() -> No
     """A refusal inside the speculative narrow derivation is a failed narrowing, not a kernel that cannot be built."""
     options = dataclasses.replace(default_options(FMT), wint_min=16)
     result = holoso.synthesize(_loop_behind_a_shift, options, name="LoopBehindShift")
+    assert result.int_format == IntFormat(24)
+    (out,) = result.numerical_model.elaborate().run(1)
+    assert isinstance(out, IntValue) and int(out) == 0
+
+
+def _division_by_a_shift_past_the_narrow_word(x: int) -> int:
+    return 5 // (x << 20)  # a real division at the wide word; at the narrow one the divisor is zero
+
+
+def test_a_narrowing_the_refusal_gate_convicts_keeps_the_widest_word() -> None:
+    """The gate's verdict on the narrow graph is part of whether the narrow word can build it at all."""
+    options = dataclasses.replace(default_options(FMT), wint_min=16)
+    result = holoso.synthesize(_division_by_a_shift_past_the_narrow_word, options, name="DivBehindShift")
     assert result.int_format == IntFormat(24)
     (out,) = result.numerical_model.elaborate().run(1)
     assert isinstance(out, IntValue) and int(out) == 0

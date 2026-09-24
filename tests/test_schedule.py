@@ -60,7 +60,7 @@ from holoso._mir import (
     Mir,
     MirBuilder,
     MirOptions,
-    MirFloatInput,
+    MirInput,
     MirJump,
     MirNode,
     MirOperation,
@@ -1263,15 +1263,15 @@ def test_phi_install_does_not_clobber_the_branch_condition() -> None:
     then = builder.block()
     merge = builder.block()
     builder.position_at(entry)
-    flag = builder.bool_input("flag", BoolType())
-    other = builder.bool_input("other", BoolType())
+    flag = builder.input("flag", BoolType())
+    other = builder.input("other", BoolType())
     builder.branch(flag, then, merge)
     builder.position_at(then)
     inverted = builder.operation(BoolAndOperator(), [other, other], [BoolInversion(True), BoolInversion(True)])
     builder.jump(merge)
     builder.position_at(merge)
     merged = builder.phi(BoolType(), [(entry, other, BoolInversion()), (then, inverted, BoolInversion())])
-    builder.bool_output("out", merged)
+    builder.output("out", merged)
     builder.ret()
     model = build_model(build_lir(builder.finish(), "phi_cond_clobber"))
     for flag_value in (False, True):
@@ -1292,7 +1292,7 @@ def test_branch_on_phi_installed_in_the_branching_block_is_rejected() -> None:
     header = builder.block()
     exit_block = builder.block()
     builder.position_at(entry)
-    start = builder.bool_input("start", BoolType())
+    start = builder.input("start", BoolType())
     builder.jump(header)
     builder.position_at(header)
     looping = builder.open_phi(BoolType(), (entry, start, BoolInversion()))
@@ -1300,7 +1300,7 @@ def test_branch_on_phi_installed_in_the_branching_block_is_rejected() -> None:
     builder.set_phi_arms(looping, [(entry, start, BoolInversion()), (header, inverted, BoolInversion())])
     builder.branch(looping, header, exit_block)
     builder.position_at(exit_block)
-    builder.bool_output("out", looping)
+    builder.output("out", looping)
     builder.ret()
     with pytest.raises(UnsupportedConstruct):
         build_lir(builder.finish(), "self_loop_cond")
@@ -1873,13 +1873,13 @@ def test_initiation_interval_spaces_firings_on_one_instance() -> None:
     # first's busy window elapses, so their issues are at least II cycles apart (with II=1 they would share cycle 1).
     builder = MirBuilder(FMT, default_ifmt(FMT))
     builder.block()
-    a = builder.float_input("a", FloatType(FMT))
-    b = builder.float_input("b", FloatType(FMT))
+    a = builder.input("a", FloatType(FMT))
+    b = builder.input("b", FloatType(FMT))
     slow = _ThrottledAdd(FMT, FAddOptions())
     first = builder.operation(slow, [a, b], [FloatSignControl(), FloatSignControl()])
     second = builder.operation(slow, [b, a], [FloatSignControl(), FloatSignControl()])
-    builder.float_output("out_0", first)
-    builder.float_output("out_1", second)
+    builder.output("out_0", first)
+    builder.output("out_1", second)
     builder.ret()
     mir = builder.finish()
     sched = schedule_ops(mir.nodes, resolve_pool(mir.nodes), {first, second}, _FETCH_LAG)
@@ -1907,10 +1907,10 @@ def test_progress_cap_accommodates_long_initiation_intervals() -> None:
     # II with this many firings). Same-port duplicates do not fuse, so the
     # hand-built identical operations below are forty separate firings serialized on one instance.
     slow = _HeavilyThrottledAdd(FMT, FAddOptions())
-    nodes: dict[int, MirNode] = {0: MirFloatInput("a", FloatType(FMT)), 1: MirFloatInput("b", FloatType(FMT))}
+    nodes: dict[int, MirNode] = {0: MirInput("a", FloatType(FMT)), 1: MirInput("b", FloatType(FMT))}
     count = 40
     for i in range(count):
-        nodes[2 + i] = MirOperation(slow, [0, 1], [FloatSignControl(), FloatSignControl()], 0, FloatSignControl(), ())
+        nodes[2 + i] = MirOperation(slow, (0, 1), (FloatSignControl(), FloatSignControl()), 0, FloatSignControl(), ())
     sched = schedule_ops(nodes, {type(slow): 1}, set(range(2, 2 + count)), _FETCH_LAG)
     issues = sorted(sched.issue_cycle.values())
     assert len(issues) == count
@@ -1926,9 +1926,9 @@ def test_cross_block_reuse_bound_pins_the_drained_edge_boundary() -> None:
     def _sum_mir(fadd: FAddOperator) -> Mir:
         builder = MirBuilder(FMT, default_ifmt(FMT))
         builder.position_at(builder.block())
-        a = builder.float_input("a", FloatType(FMT))
-        b = builder.float_input("b", FloatType(FMT))
-        builder.float_output("out_0", builder.operation(fadd, [a, b], [FloatSignControl(), FloatSignControl()]))
+        a = builder.input("a", FloatType(FMT))
+        b = builder.input("b", FloatType(FMT))
+        builder.output("out_0", builder.operation(fadd, [a, b], [FloatSignControl(), FloatSignControl()]))
         builder.ret()
         return builder.finish()
 

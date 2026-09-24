@@ -99,7 +99,7 @@ def _fuse_block_firings(nodes: dict[ValueId, MirNode], schedulable: set[ValueId]
         if not isinstance(node.operator, PooledHardwareOperator):
             firings[vid] = [vid]
             continue
-        key: _FiringKey = (node.operator, tuple(node.operands), tuple(node.operand_conditioners), node.immediates)
+        key: _FiringKey = (node.operator, node.operands, node.operand_conditioners, node.immediates)
         by_key.setdefault(key, []).append(vid)
     for members in by_key.values():
         open_groups: list[tuple[set[int], list[ValueId]]] = []  # (ports taken, members) per firing being assembled

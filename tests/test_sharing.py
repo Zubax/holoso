@@ -29,7 +29,7 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower
-from holoso._mir import MirFloatConst, MirOperation
+from holoso._mir import MirConst, MirOperation
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import (
@@ -107,7 +107,7 @@ def _standing_multiply_reads_a_constant(fn: Callable[..., object]) -> bool:
     (multiply,) = [
         node for node in mir.nodes.values() if isinstance(node, MirOperation) and node.operator.mnemonic == "fmul"
     ]
-    return any(isinstance(mir.nodes[operand], MirFloatConst) for operand in multiply.operands)
+    return any(isinstance(mir.nodes[operand], MirConst) for operand in multiply.operands)
 
 
 def test_an_add_offered_two_products_contracts_the_one_computed_first() -> None:

@@ -41,7 +41,42 @@ A state attribute's shape and type come from the reset snapshot, so a field anno
 (`P: Float64[np.ndarray, "2 2"]` on an instance holding a 3x3) is documentation rather than a checked declaration.
 Parameter and return annotations are checked, so the module boundary is judged while the state boundary is not.
 
+## HIR
+
+### Jump chains left by a settled branch, and trivial loop phis
+
+When pruning settles a branch the front end could not (a guard only an identity decides, such as `if x*0.0 > 1.0`),
+the surviving path is left as a chain of blocks joined by jumps, `P -> T -> M`, each single-predecessor. Nothing fuses
+them, and every block boundary drains, so the guard costs latency though not hardware: a straight-line kernel with a
+settled guard took 19 cycles against 18 without it, and inside a 100-trip loop 2409 against 2109 (24 against 21 per
+trip). The fix fuses a block into its sole predecessor when that predecessor jumps to it -- append its operations, take
+its terminator, retarget successor phi arms as if-conversion's splice already does. It cannot form the branch on a phi
+with an arm from its own block that LIR refuses, since fusion follows only jump edges and the emitter never points a
+branch at a loop entry. Once it exists, the emitter's single-return-site special case becomes removable.
+
+The same pass should fold a phi whose arms other than itself all name one value: pruning substitutes only single-armed
+merges, and `rebuild` defers every loop-header phi past strength reduction, so `acc = 2.0; while ...: acc *= 1.0`
+keeps a header phi that stops `acc * x` from becoming a scaling. The substitution is dominance-safe (the other value
+reaches the merge on every first arrival) and must iterate with pruning, since a substituted boolean merge can settle
+another branch. A prototype of both took about 64 lines in `_prune.py`, left all bundled examples unchanged (none has
+either shape) and matched the model on about 1000 generated programs. They are optimizations rather than
+simplifications, which is why the middle-layer cleanup left them out.
+
 ## LIR
+
+### Pruning state slots nothing reads
+
+A state slot whose live-in nothing reads is unobservable -- a public attribute's `state_<attr>` port reads the live-out
+as an ordinary output -- yet it keeps its register, its install and its whole computation cone: `self._last = y * 7.0`,
+never read, costs a register and a multiply, and fir keeps the shifted-out `_line_0` (8 registers where 7 suffice). The
+fix belongs in HIR dead-code elimination: root the slots through their state reads instead of unconditionally, so a
+slot survives only while its live-in is read, and drop the others. That subsumes LIR's
+`_drop_redundant_state_slots`, whose aliases are exactly the unread members. It is deferred because about 15 LIR
+witness tests build their shapes out of write-only slots (`test_aliased_state_slots_merge_onto_one_register`,
+`test_cfg_write_only_state_slot_is_reserved`, `test_chained_slot_live_in_blocks_early_install`,
+`test_two_slots_ending_on_one_value_hold_it_once_and_copy_once`, the `shared_live_out` steering witnesses, the
+boundary-install and gap-tenant verification tests and their cosimulation twins) and must be rebuilt on slots that are
+read, while the write-only slot reservation in `_bankalloc.py` becomes unreachable and goes with them.
 
 ### Blocks that only install settled phi-arm copies
 

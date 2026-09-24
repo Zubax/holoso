@@ -52,7 +52,7 @@ def _coerce(value: Scalar, ty: Type, index: int) -> Const:
 def _evaluate(operation: Operation, operands: list[_Value]) -> _Value:
     consts = [operand for operand in operands if isinstance(operand, Const)]
     if len(consts) != len(operands):
-        absorbing = operation.operator.absorbing()
+        absorbing = operation.operator.absorbing
         if absorbing is not None and absorbing in consts:
             return absorbing
         return next(operand for operand in operands if isinstance(operand, _Poison))

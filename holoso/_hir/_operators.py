@@ -6,38 +6,27 @@ import numpy as np
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import ClassVar
 
 from .._errors import HolosoError
-from ._const import BoolConst, Const, FloatConst, IntConst
+from .._util import Relation
+from ._const import BoolConst, Const, FloatConst, IntConst, const_value
 from ._types import BoolType, FloatType, IntType, Signature
 
 
-def _float_signature(arity: int) -> Signature:
-    ty = FloatType()
-    return Signature((ty,) * arity, ty)
-
-
-def _bool_signature(arity: int) -> Signature:
-    ty = BoolType()
-    return Signature((ty,) * arity, ty)
-
-
 def _float_const(const: Const) -> FloatConst:
-    if not isinstance(const, FloatConst):
-        raise TypeError(f"expected FloatConst, got {const!r}")
+    assert isinstance(const, FloatConst), const
     return const
 
 
 def _bool_const(const: Const) -> BoolConst:
-    if not isinstance(const, BoolConst):
-        raise TypeError(f"expected BoolConst, got {const!r}")
+    assert isinstance(const, BoolConst), const
     return const
 
 
 def _int_const(const: Const) -> IntConst:
-    if not isinstance(const, IntConst):
-        raise TypeError(f"expected IntConst, got {const!r}")
+    assert isinstance(const, IntConst), const
     return const
 
 
@@ -62,6 +51,10 @@ class NoNumber(HolosoError):
         self.what = what
 
 
+def _spelled(operands: list[Const]) -> str:
+    return ", ".join(repr(const_value(operand)) for operand in operands)
+
+
 def _fold_float(operands: list[Const], name: str, evaluate: Callable[..., float]) -> Const:
     """
     Host-precision float folding -- never the target format. Whatever the operator's own reference declines to answer,
@@ -78,7 +71,7 @@ def _fold_float(operands: list[Const], name: str, evaluate: Callable[..., float]
     except (ValueError, OverflowError, ZeroDivisionError):
         value = math.nan
     if math.isnan(value):
-        raise NoNumber(f"{name} of {operands}")
+        raise NoNumber(f"{name} of {_spelled(operands)}")
     return FloatConst(value)
 
 
@@ -91,7 +84,7 @@ def _fold_int(operands: list[Const], name: str, evaluate: Callable[..., int]) ->
     try:
         return IntConst(evaluate(*[_int_const(operand).value for operand in operands]))
     except (ZeroDivisionError, ValueError, OverflowError):
-        raise NoNumber(f"{name} of {operands}") from None
+        raise NoNumber(f"{name} of {_spelled(operands)}") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +98,12 @@ class Operator(ABC):
     # The default is False so a future error-bearing operator that omits the declaration is a missed optimization
     # rather than a silent spurious-error bug; pure operators opt in explicitly.
     speculatable: ClassVar[bool] = False
+    # The algebra strength reduction states once for every operator: the constant operand that forces the result to
+    # itself whatever the other is (`False` for `and`), the constant RIGHT operand that leaves the left one unchanged
+    # (`True` for `and`, `0` for `-` and `<<`), and whether `x op x == x`.
+    absorbing: ClassVar[Const | None] = None
+    identity: ClassVar[Const | None] = None
+    idempotent: ClassVar[bool] = False
 
     @property
     @abstractmethod
@@ -123,21 +122,6 @@ class Operator(ABC):
         algebraic identities below speak for it instead -- which is why `x*0` is zero for an unknown `x` while
         `inf*0` names no number.
         """
-
-    def absorbing(self) -> Const | None:
-        """
-        The constant operand that forces the result to that constant regardless of the others (the absorbing element):
-        `True` for `or`, `False` for `and`. None if the operator has none. Strength reduction uses it to reduce
-        a partially-constant expression like `x or True` to a constant.
-        """
-        return None
-
-    def identity(self) -> Const | None:
-        """
-        The constant operand that leaves the result unchanged (the identity element): `False` for `or`,
-        `True` for `and`. None if the operator has none. Strength reduction drops it (`x and True` -> x).
-        """
-        return None
 
     @property
     def mirror(self) -> "Operator | None":
@@ -158,49 +142,33 @@ class CommutativeOperator(Operator, ABC):
 @dataclass(frozen=True, slots=True)
 class FloatAdd(CommutativeOperator):
     mnemonic: ClassVar[str] = "fadd"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(2)
+    identity: ClassVar[Const | None] = FloatConst(0.0)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the sum", lambda a, b: a + b)
-
-    def identity(self) -> Const | None:
-        # `x + 0 == x`, declared rather than hand-coded so every rewrite agrees about it
-        return FloatConst(0.0)
 
 
 @dataclass(frozen=True, slots=True)
 class FloatMul(CommutativeOperator):
     mnemonic: ClassVar[str] = "fmul"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(2)
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the product", lambda a, b: a * b)
-
     # `x*0 == 0` is the charter's identity, declared here rather than hand-coded in one pass so that every rewrite
     # reasoning about known values sees it. It cannot fire on two constants: an all-known product is evaluated first,
     # and `inf*0` names no number.
-    def absorbing(self) -> Const | None:
-        return FloatConst(0.0)
+    absorbing: ClassVar[Const | None] = FloatConst(0.0)
+    identity: ClassVar[Const | None] = FloatConst(1.0)
 
-    def identity(self) -> Const | None:
-        return FloatConst(1.0)
+    def evaluate(self, operands: list[Const]) -> Const:
+        return _fold_float(operands, "the product", lambda a, b: a * b)
 
 
 @dataclass(frozen=True, slots=True)
 class FloatDiv(Operator):
     mnemonic: ClassVar[str] = "fdiv"
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(2)
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the quotient", lambda a, b: a / b)
@@ -209,11 +177,8 @@ class FloatDiv(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatNeg(Operator):
     mnemonic: ClassVar[str] = "fneg"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
@@ -223,11 +188,8 @@ class FloatNeg(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatAbs(Operator):
     mnemonic: ClassVar[str] = "fabs"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
@@ -239,12 +201,9 @@ class FloatMulPow2(Operator):
     """Exact semantic scaling by a power of two, introduced by strength reduction."""
 
     mnemonic: ClassVar[str] = "fmul_pow2"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
     k: int
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         # `np.ldexp` rather than `math.ldexp` because this operator stands for a multiplication, which saturates:
@@ -261,12 +220,9 @@ class FloatILog2(Operator):
     """
 
     mnemonic: ClassVar[str] = "filog2"
+    signature: ClassVar[Signature] = Signature((FloatType(),), IntType())
     speculatable: ClassVar[bool] = True
     bias: int
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(),), IntType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand).value for operand in operands]
@@ -285,85 +241,55 @@ class FloatMulPow2Dynamic(Operator):
     """
 
     mnemonic: ClassVar[str] = "fmul_pow2_dyn"
+    signature: ClassVar[Signature] = Signature((FloatType(), IntType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(), IntType()), FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, k = operands  # unpacked here, `_fold_float` taking one family only
         return FloatMulPow2(_int_const(k).value).evaluate([a])
 
 
+class Rounding(Enum):
+    """How a float becomes an integral value: to the nearest (ties to even), or toward -inf, +inf or zero."""
+
+    NEAREST_EVEN = "rounding"
+    FLOOR = "floor"
+    CEIL = "ceiling"
+    TRUNC = "truncation"
+
+    def __repr__(self) -> str:
+        return self.name
+
+    def apply(self, a: float) -> float:
+        return float(_ROUNDINGS[self](a))
+
+
+_ROUNDINGS: dict[Rounding, Callable[[float], float]] = {
+    Rounding.NEAREST_EVEN: np.rint,
+    Rounding.FLOOR: np.floor,
+    Rounding.CEIL: np.ceil,
+    Rounding.TRUNC: np.trunc,
+}
+
+
 @dataclass(frozen=True, slots=True)
-class FloatRound(Operator):
-    """Round a float to the nearest integral-valued float, ties to even."""
+class FloatRounding(Operator):
+    """The integral-valued float `rounding` makes of its operand."""
 
     mnemonic: ClassVar[str] = "fround"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
+    rounding: Rounding
 
     def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the rounding", lambda a: float(np.rint(a)))
-
-
-@dataclass(frozen=True, slots=True)
-class FloatFloor(Operator):
-    """Round a float toward negative infinity to an integral-valued float."""
-
-    mnemonic: ClassVar[str] = "ffloor"
-    speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the floor", lambda a: float(np.floor(a)))
-
-
-@dataclass(frozen=True, slots=True)
-class FloatCeil(Operator):
-    """Round a float toward positive infinity to an integral-valued float."""
-
-    mnemonic: ClassVar[str] = "fceil"
-    speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the ceiling", lambda a: float(np.ceil(a)))
-
-
-@dataclass(frozen=True, slots=True)
-class FloatTrunc(Operator):
-    """Round a float toward zero to an integral-valued float."""
-
-    mnemonic: ClassVar[str] = "ftrunc"
-    speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        return _fold_float(operands, "the truncation", lambda a: float(np.trunc(a)))
+        return _fold_float(operands, f"the {self.rounding.value}", self.rounding.apply)
 
 
 @dataclass(frozen=True, slots=True)
 class FloatExp2(Operator):
     mnemonic: ClassVar[str] = "fexp2"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         # `np.exp2` is this operator's reference -- the intrinsic stub is registered against it -- and it saturates.
@@ -374,10 +300,7 @@ class FloatExp2(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatLog2(Operator):
     mnemonic: ClassVar[str] = "flog2"
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         # np.log2 answers -inf at the 0.0 pole like the hardware; math.log2 raises there.
@@ -387,11 +310,8 @@ class FloatLog2(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatSin(Operator):
     mnemonic: ClassVar[str] = "fsin"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the sine", math.sin)
@@ -400,11 +320,8 @@ class FloatSin(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatCos(Operator):
     mnemonic: ClassVar[str] = "fcos"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the cosine", math.cos)
@@ -438,11 +355,8 @@ class FloatSinTurns(Operator):
     """
 
     mnemonic: ClassVar[str] = "fsin_turns"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the sine", lambda a: _turn_sincos(a)[0])
@@ -451,11 +365,8 @@ class FloatSinTurns(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatCosTurns(Operator):
     mnemonic: ClassVar[str] = "fcos_turns"
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the cosine", lambda a: _turn_sincos(a)[1])
@@ -464,10 +375,7 @@ class FloatCosTurns(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatSqrt(Operator):
     mnemonic: ClassVar[str] = "fsqrt"
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(1)
+    signature: ClassVar[Signature] = Signature((FloatType(),), FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the square root", math.sqrt)
@@ -476,11 +384,8 @@ class FloatSqrt(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatAtan2(Operator):
     mnemonic: ClassVar[str] = "fatan2"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(2)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the arctangent", math.atan2)
@@ -489,11 +394,8 @@ class FloatAtan2(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatAtan2Turns(Operator):
     mnemonic: ClassVar[str] = "fatan2_turns"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(2)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the arctangent", lambda y, x: math.atan2(y, x) / math.tau)
@@ -516,7 +418,7 @@ class FloatHypot(Operator):
 
     @property
     def signature(self) -> Signature:
-        return _float_signature(self.arity)
+        return Signature((FloatType(),) * self.arity, FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the magnitude", math.hypot)
@@ -525,11 +427,8 @@ class FloatHypot(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatIsFinite(Operator):
     mnemonic: ClassVar[str] = "fisfinite"
+    signature: ClassVar[Signature] = Signature((FloatType(),), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(),), BoolType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
@@ -539,11 +438,8 @@ class FloatIsFinite(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatIsInf(Operator):
     mnemonic: ClassVar[str] = "fisinf"
+    signature: ClassVar[Signature] = Signature((FloatType(),), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(),), BoolType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
@@ -553,11 +449,8 @@ class FloatIsInf(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatIsPosInf(Operator):
     mnemonic: ClassVar[str] = "fisposinf"
+    signature: ClassVar[Signature] = Signature((FloatType(),), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(),), BoolType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
@@ -567,11 +460,8 @@ class FloatIsPosInf(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatIsNegInf(Operator):
     mnemonic: ClassVar[str] = "fisneginf"
+    signature: ClassVar[Signature] = Signature((FloatType(),), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(),), BoolType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
@@ -583,11 +473,8 @@ class FloatFma(Operator):
     """Always single-rounds, so the contraction may not absorb another addition into it."""
 
     mnemonic: ClassVar[str] = "ffma"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(3)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_float(operands, "the fused multiply-add", math.fma)
@@ -596,11 +483,9 @@ class FloatFma(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatMin(Operator):
     mnemonic: ClassVar[str] = "fmin"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(2)
+    idempotent: ClassVar[bool] = True
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
@@ -610,11 +495,9 @@ class FloatMin(Operator):
 @dataclass(frozen=True, slots=True)
 class FloatMax(Operator):
     mnemonic: ClassVar[str] = "fmax"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _float_signature(2)
+    idempotent: ClassVar[bool] = True
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
@@ -622,164 +505,67 @@ class FloatMax(Operator):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatComparison(Operator, ABC):
-    """One relation over two floats; the six spellings are distinct operators sharing everything but their truth."""
-
+class FloatComparison(Operator):
+    mnemonic: ClassVar[str] = "fcmp"
+    signature: ClassVar[Signature] = Signature((FloatType(), FloatType()), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(), FloatType()), BoolType())
-
-
-@dataclass(frozen=True, slots=True)
-class FloatLess(FloatComparison):
-    mnemonic: ClassVar[str] = "flt"
+    relation: Relation
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(a.value < b.value)
+        return BoolConst(self.relation.holds(a.value, b.value))
 
     @property
     def mirror(self) -> Operator:
-        return FloatGreater()
-
-
-@dataclass(frozen=True, slots=True)
-class FloatLessOrEqual(FloatComparison):
-    mnemonic: ClassVar[str] = "fle"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(a.value <= b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return FloatGreaterOrEqual()
-
-
-@dataclass(frozen=True, slots=True)
-class FloatEqual(FloatComparison):
-    mnemonic: ClassVar[str] = "feq"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(a.value == b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return self
-
-
-@dataclass(frozen=True, slots=True)
-class FloatNotEqual(FloatComparison):
-    mnemonic: ClassVar[str] = "fne"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(a.value != b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return self
-
-
-@dataclass(frozen=True, slots=True)
-class FloatGreaterOrEqual(FloatComparison):
-    mnemonic: ClassVar[str] = "fge"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(a.value >= b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return FloatLessOrEqual()
-
-
-@dataclass(frozen=True, slots=True)
-class FloatGreater(FloatComparison):
-    mnemonic: ClassVar[str] = "fgt"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_float_const(operand) for operand in operands]
-        return BoolConst(a.value > b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return FloatLess()
+        return FloatComparison(self.relation.mirror)
 
 
 @dataclass(frozen=True, slots=True)
 class BoolAnd(CommutativeOperator):
     mnemonic: ClassVar[str] = "band"
+    signature: ClassVar[Signature] = Signature((BoolType(), BoolType()), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _bool_signature(2)
+    idempotent: ClassVar[bool] = True
+    absorbing: ClassVar[Const | None] = BoolConst(False)
+    identity: ClassVar[Const | None] = BoolConst(True)
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_bool_const(operand) for operand in operands]
         return BoolConst(a.value and b.value)
 
-    def absorbing(self) -> Const | None:
-        # x and False == False
-        return BoolConst(False)
-
-    def identity(self) -> Const | None:
-        # x and True == x
-        return BoolConst(True)
-
 
 @dataclass(frozen=True, slots=True)
 class BoolOr(CommutativeOperator):
     mnemonic: ClassVar[str] = "bor"
+    signature: ClassVar[Signature] = Signature((BoolType(), BoolType()), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _bool_signature(2)
+    idempotent: ClassVar[bool] = True
+    absorbing: ClassVar[Const | None] = BoolConst(True)
+    identity: ClassVar[Const | None] = BoolConst(False)
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_bool_const(operand) for operand in operands]
         return BoolConst(a.value or b.value)
 
-    def absorbing(self) -> Const | None:
-        # x or True == True
-        return BoolConst(True)
-
-    def identity(self) -> Const | None:
-        # x or False == x
-        return BoolConst(False)
-
 
 @dataclass(frozen=True, slots=True)
 class BoolXor(CommutativeOperator):
     mnemonic: ClassVar[str] = "bxor"
+    signature: ClassVar[Signature] = Signature((BoolType(), BoolType()), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _bool_signature(2)
+    # x ^ False == x (there is no absorbing element: x ^ True == ~x, not a constant)
+    identity: ClassVar[Const | None] = BoolConst(False)
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_bool_const(operand) for operand in operands]
         return BoolConst(a.value != b.value)
 
-    def identity(self) -> Const | None:
-        # x ^ False == x (there is no absorbing element: x ^ True == ~x, not a constant)
-        return BoolConst(False)
-
 
 @dataclass(frozen=True, slots=True)
 class BoolNot(Operator):
     mnemonic: ClassVar[str] = "bnot"
+    signature: ClassVar[Signature] = Signature((BoolType(),), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _bool_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_bool_const(operand) for operand in operands]
@@ -788,17 +574,11 @@ class BoolNot(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatSelect(Operator):
-    """
-    A data mux `a if cond else b` over float values. In HIR it is produced by the if-conversion pass, which refuses
-    constant conditions; MIR composite lowerings may also use the selected inline hardware mux directly.
-    """
+    """A data mux `a if cond else b` over float values, produced by if-conversion."""
 
     mnemonic: ClassVar[str] = "fselect"
+    signature: ClassVar[Signature] = Signature((BoolType(), FloatType(), FloatType()), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((BoolType(), FloatType(), FloatType()), FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         cond, a, b = operands
@@ -814,11 +594,8 @@ class BoolSelect(Operator):
     """
 
     mnemonic: ClassVar[str] = "bselect"
+    signature: ClassVar[Signature] = Signature((BoolType(), BoolType(), BoolType()), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((BoolType(), BoolType(), BoolType()), BoolType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         cond, a, b = operands
@@ -830,11 +607,8 @@ class FloatToBool(Operator):
     """A scalar cast `bool(x)`: a float is truthy iff it is nonzero."""
 
     mnemonic: ClassVar[str] = "float_to_bool"
+    signature: ClassVar[Signature] = Signature((FloatType(),), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(),), BoolType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
@@ -844,11 +618,8 @@ class FloatToBool(Operator):
 @dataclass(frozen=True, slots=True)
 class BoolToFloat(Operator):
     mnemonic: ClassVar[str] = "bool_to_float"
+    signature: ClassVar[Signature] = Signature((BoolType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((BoolType(),), FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_bool_const(operand) for operand in operands]
@@ -860,35 +631,23 @@ class BoolToFloat(Operator):
 # Floor-division and modulo assert the div-by-zero error flag, so they are not speculatable.
 
 
-def _int_signature(arity: int) -> Signature:
-    ty = IntType()
-    return Signature((ty,) * arity, ty)
-
-
 @dataclass(frozen=True, slots=True)
 class IntAdd(CommutativeOperator):
     mnemonic: ClassVar[str] = "iadd"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    identity: ClassVar[Const | None] = IntConst(0)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the sum", lambda a, b: a + b)
-
-    def identity(self) -> Const | None:
-        return IntConst(0)
 
 
 @dataclass(frozen=True, slots=True)
 class IntSub(Operator):
     mnemonic: ClassVar[str] = "isub"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    identity: ClassVar[Const | None] = IntConst(0)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the difference", lambda a, b: a - b)
@@ -897,20 +656,13 @@ class IntSub(Operator):
 @dataclass(frozen=True, slots=True)
 class IntMul(CommutativeOperator):
     mnemonic: ClassVar[str] = "imul"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    absorbing: ClassVar[Const | None] = IntConst(0)
+    identity: ClassVar[Const | None] = IntConst(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the product", lambda a, b: a * b)
-
-    def absorbing(self) -> Const | None:
-        return IntConst(0)
-
-    def identity(self) -> Const | None:
-        return IntConst(1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -922,16 +674,12 @@ class IntMulPow2(Operator):
     """
 
     mnemonic: ClassVar[str] = "imul_pow2"
+    signature: ClassVar[Signature] = Signature((IntType(),), IntType())
     speculatable: ClassVar[bool] = True
     k: int
 
     def __post_init__(self) -> None:
-        if self.k < 1:
-            raise ValueError(f"scaling by 2**{self.k} is no multiplication for a shift to serve")
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(1)
+        assert self.k >= 1
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the scaling", lambda a: a << self.k)
@@ -940,11 +688,8 @@ class IntMulPow2(Operator):
 @dataclass(frozen=True, slots=True)
 class IntNeg(Operator):
     mnemonic: ClassVar[str] = "ineg"
+    signature: ClassVar[Signature] = Signature((IntType(),), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the negation", lambda a: -a)
@@ -953,11 +698,8 @@ class IntNeg(Operator):
 @dataclass(frozen=True, slots=True)
 class IntAbs(Operator):
     mnemonic: ClassVar[str] = "iabs"
+    signature: ClassVar[Signature] = Signature((IntType(),), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the magnitude", abs)
@@ -966,11 +708,8 @@ class IntAbs(Operator):
 @dataclass(frozen=True, slots=True)
 class IntPopcount(Operator):
     mnemonic: ClassVar[str] = "ipopcnt"
+    signature: ClassVar[Signature] = Signature((IntType(),), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the population count", int.bit_count)
@@ -979,10 +718,8 @@ class IntPopcount(Operator):
 @dataclass(frozen=True, slots=True)
 class IntDivFloor(Operator):
     mnemonic: ClassVar[str] = "idivfloor"
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
+    identity: ClassVar[Const | None] = IntConst(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the quotient", lambda a, b: a // b)
@@ -991,10 +728,7 @@ class IntDivFloor(Operator):
 @dataclass(frozen=True, slots=True)
 class IntMod(Operator):
     mnemonic: ClassVar[str] = "imod"
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the remainder", lambda a, b: a % b)
@@ -1003,11 +737,9 @@ class IntMod(Operator):
 @dataclass(frozen=True, slots=True)
 class IntShiftLeft(Operator):
     mnemonic: ClassVar[str] = "ishl"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    identity: ClassVar[Const | None] = IntConst(0)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the left shift", lambda a, b: a << b)
@@ -1016,11 +748,9 @@ class IntShiftLeft(Operator):
 @dataclass(frozen=True, slots=True)
 class IntShiftRight(Operator):
     mnemonic: ClassVar[str] = "ishr"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    identity: ClassVar[Const | None] = IntConst(0)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the right shift", lambda a, b: a >> b)
@@ -1029,159 +759,66 @@ class IntShiftRight(Operator):
 @dataclass(frozen=True, slots=True)
 class IntBwAnd(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwand"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    idempotent: ClassVar[bool] = True
+    absorbing: ClassVar[Const | None] = IntConst(0)
+    # all ones at every width
+    identity: ClassVar[Const | None] = IntConst(-1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the conjunction", lambda a, b: a & b)
-
-    def absorbing(self) -> Const | None:
-        return IntConst(0)
-
-    def identity(self) -> Const | None:
-        # all ones at every width
-        return IntConst(-1)
 
 
 @dataclass(frozen=True, slots=True)
 class IntBwOr(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwor"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    idempotent: ClassVar[bool] = True
+    # all ones at every width
+    absorbing: ClassVar[Const | None] = IntConst(-1)
+    identity: ClassVar[Const | None] = IntConst(0)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the disjunction", lambda a, b: a | b)
-
-    def absorbing(self) -> Const | None:
-        # all ones at every width
-        return IntConst(-1)
-
-    def identity(self) -> Const | None:
-        return IntConst(0)
 
 
 @dataclass(frozen=True, slots=True)
 class IntBwXor(CommutativeOperator):
     mnemonic: ClassVar[str] = "ibwxor"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(2)
+    identity: ClassVar[Const | None] = IntConst(0)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the exclusive disjunction", lambda a, b: a ^ b)
-
-    def identity(self) -> Const | None:
-        return IntConst(0)
 
 
 @dataclass(frozen=True, slots=True)
 class IntBwNot(Operator):
     mnemonic: ClassVar[str] = "ibwnot"
+    signature: ClassVar[Signature] = Signature((IntType(),), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return _int_signature(1)
 
     def evaluate(self, operands: list[Const]) -> Const:
         return _fold_int(operands, "the complement", lambda a: ~a)
 
 
 @dataclass(frozen=True, slots=True)
-class IntComparison(Operator, ABC):
-    """The integer dual of FloatComparison: one relation per operator, exact at any magnitude."""
-
+class IntComparison(Operator):
+    mnemonic: ClassVar[str] = "icmp"
+    signature: ClassVar[Signature] = Signature((IntType(), IntType()), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((IntType(), IntType()), BoolType())
-
-
-@dataclass(frozen=True, slots=True)
-class IntLess(IntComparison):
-    mnemonic: ClassVar[str] = "ilt"
+    relation: Relation
 
     def evaluate(self, operands: list[Const]) -> Const:
         a, b = [_int_const(operand) for operand in operands]
-        return BoolConst(a.value < b.value)
+        return BoolConst(self.relation.holds(a.value, b.value))
 
     @property
     def mirror(self) -> Operator:
-        return IntGreater()
-
-
-@dataclass(frozen=True, slots=True)
-class IntLessOrEqual(IntComparison):
-    mnemonic: ClassVar[str] = "ile"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_int_const(operand) for operand in operands]
-        return BoolConst(a.value <= b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return IntGreaterOrEqual()
-
-
-@dataclass(frozen=True, slots=True)
-class IntEqual(IntComparison):
-    mnemonic: ClassVar[str] = "ieq"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_int_const(operand) for operand in operands]
-        return BoolConst(a.value == b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return self
-
-
-@dataclass(frozen=True, slots=True)
-class IntNotEqual(IntComparison):
-    mnemonic: ClassVar[str] = "ine"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_int_const(operand) for operand in operands]
-        return BoolConst(a.value != b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return self
-
-
-@dataclass(frozen=True, slots=True)
-class IntGreaterOrEqual(IntComparison):
-    mnemonic: ClassVar[str] = "ige"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_int_const(operand) for operand in operands]
-        return BoolConst(a.value >= b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return IntLessOrEqual()
-
-
-@dataclass(frozen=True, slots=True)
-class IntGreater(IntComparison):
-    mnemonic: ClassVar[str] = "igt"
-
-    def evaluate(self, operands: list[Const]) -> Const:
-        a, b = [_int_const(operand) for operand in operands]
-        return BoolConst(a.value > b.value)
-
-    @property
-    def mirror(self) -> Operator:
-        return IntLess()
+        return IntComparison(self.relation.mirror)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1189,11 +826,8 @@ class IntSelect(Operator):
     """A data mux `a if cond else b` over integer values, the integer dual of FloatSelect."""
 
     mnemonic: ClassVar[str] = "iselect"
+    signature: ClassVar[Signature] = Signature((BoolType(), IntType(), IntType()), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((BoolType(), IntType(), IntType()), IntType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         cond, a, b = operands
@@ -1203,11 +837,8 @@ class IntSelect(Operator):
 @dataclass(frozen=True, slots=True)
 class IntToFloat(Operator):
     mnemonic: ClassVar[str] = "int_to_float"
+    signature: ClassVar[Signature] = Signature((IntType(),), FloatType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((IntType(),), FloatType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_int_const(operand) for operand in operands]
@@ -1219,31 +850,26 @@ class IntToFloat(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatToInt(Operator):
-    """A truncation-toward-zero cast `int(x)`; no error sideband, so speculatable."""
+    """`int(rounding(x))`: `int(x)` truncates, and a conversion reading a rounding converts in that rounding's mode."""
 
     mnemonic: ClassVar[str] = "float_to_int"
+    signature: ClassVar[Signature] = Signature((FloatType(),), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((FloatType(),), IntType())
+    rounding: Rounding = Rounding.TRUNC
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_float_const(operand) for operand in operands]
         try:
-            return IntConst(int(a.value))
+            return IntConst(int(self.rounding.apply(a.value)))
         except OverflowError:
-            raise NoNumber(f"the integer part of {operands}") from None
+            raise NoNumber(f"the integer part of {_spelled(operands)}") from None
 
 
 @dataclass(frozen=True, slots=True)
 class IntToBool(Operator):
     mnemonic: ClassVar[str] = "int_to_bool"
+    signature: ClassVar[Signature] = Signature((IntType(),), BoolType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((IntType(),), BoolType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_int_const(operand) for operand in operands]
@@ -1253,11 +879,8 @@ class IntToBool(Operator):
 @dataclass(frozen=True, slots=True)
 class BoolToInt(Operator):
     mnemonic: ClassVar[str] = "bool_to_int"
+    signature: ClassVar[Signature] = Signature((BoolType(),), IntType())
     speculatable: ClassVar[bool] = True
-
-    @property
-    def signature(self) -> Signature:
-        return Signature((BoolType(),), IntType())
 
     def evaluate(self, operands: list[Const]) -> Const:
         (a,) = [_bool_const(operand) for operand in operands]

@@ -229,6 +229,12 @@ pooled one also the port names of the module it stands for, so the fully specifi
 resource-sharing key; a machine holds one configuration per pooled class. An operator may declare per-firing
 microcode-driven immediate inputs, and declares a per-instance initiation interval (most are II=1, fully pipelined).
 
+Hardware operators split structurally into POOLED -- physical streaming modules the scheduler contends for -- and
+INLINE -- pure expressions folded into a register write; the split is load-bearing for scheduling and emission.
+Hardware is never materialized where a shared firing or a sideband suffices: relations over one operand pair share a
+comparator firing, min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer
+sidebands.
+
 Every pooled operator, float or integer, is named by exactly one field of the public options and carries its own knobs
 there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
 reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every
@@ -366,11 +372,6 @@ kind rather than overloading one spelling, which is what let the integer kind ar
 ones without disturbing them. Value sharing respects control flow: an expression is interned only where one value
 can legally serve every consumer, so identical expressions in mutually exclusive arms stay distinct.
 
-Operators split structurally into POOLED -- physical streaming modules the scheduler contends for -- and INLINE --
-pure expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is
-never materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparator
-firing, min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer sidebands.
-
 A branch the graph itself decides is neither: it is pruned, along with everything only its untaken edge reached, so a
 guard the optimizer can settle costs no hardware. The front end decides a condition by evaluating it, never by
 algebra over a residual operand, so a condition constant only under a value identity the graph owns (`x*0 == 0`)
@@ -408,19 +409,22 @@ erase an expression before it is judged, exactly as the survivor-based charter r
 through an inlined library composite may name an expression the kernel never spelled; an accepted limitation of the
 composites, not of the rule.
 
-Strength reduction speaks all three scalar families with one grammar. Each binary operator also declares its MIRROR,
-the operator that means the same with its operands exchanged, so a constant operand settles on the right and every
-spelling of one product or relation names one node; it is declared rather than inferred because the answer is about
-bits, `fmin` and `fmax` breaking ties toward the second operand. Beyond that and the identity and absorbing elements
-the operators declare, it states the rules the shared algebra cannot: the one-sided constant rules of the
-non-commutative operators, the value-equality and complement folds (under the same license as `x/x`), negation and
-complement tracked as involutions so every spelling of a negation names one node and `-(-x)` costs nothing, and the
-constant power-of-two rewrites -- the product into the saturating semantic `imul_pow2`, the quotient into the right
-shift (exactly the floor division, negative dividends included), the remainder into the two's-complement mask. No
-rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR) is bounded by the count of left shifts
-in the graph. An absorbed scale never becomes a word -- only its exponent materializes -- and constant scalings
-compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width and composing
-two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of their sum.
+Strength reduction speaks all three scalar families with one grammar. Each binary operator also declares its MIRROR, the
+operator that means the same with its operands exchanged, so a constant operand settles on the right and a product or
+relation by a constant names one node whichever side it was written on; it is declared rather than inferred because the
+answer is about bits, `fmin` and `fmax` breaking ties toward the second operand. Beyond that and the identity and
+absorbing elements and the idempotence the operators declare, it states the rules the shared algebra cannot: the
+one-sided constant rules of the non-commutative operators, the value-equality and complement folds (under the same
+license as `x/x`), negation and complement tracked as involutions so every spelling of a negation names one node and
+`-(-x)` costs nothing, and the constant power-of-two rewrites -- the product into the saturating semantic `imul_pow2`,
+the quotient into the right shift (exactly the floor division, negative dividends included), the remainder into the
+two's-complement mask. No rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR) is bounded by the
+count of left shifts in the graph. An absorbed scale never becomes a word -- only its exponent materializes -- and
+constant scalings compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width
+and composing two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of
+their sum. A conversion to an integer converts in the mode of a rounding it reads, and converting back is that rounding.
+An infinity test conjoined with a sign test of the same value is the directional classifier it amounts to (`isinf(x) and
+x > 0` is `x == inf`), taken where it retires a test nothing else reads.
 
 A constant scaling over a value has one HIR shape, decided in one place and read back by one reader: the value itself,
 an exponent scaling, or a multiplication by a positive constant with the sign peeled into a negation over it, so
@@ -467,33 +471,31 @@ round can reveal one as a constant no word holds -- a left shift past the word i
 right shift's sign fill holds only for a value the word already holds, so that clamp stays at lowering.
 
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
-RESULT is its own. The float lowerer maps each semantic float operator to its configured hardware operator and
-collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands, results, or output
-wires -- except onto an operand its operator declares UNCONDITIONED, where the builder drops the chain outright
-rather than folding it, for EVERY producer of MIR operations and not this lowerer alone, since a transform no
-result can observe would otherwise buy a second firing for one answer;
-multiply-by-power-of-two selects the `fmul_ilog2` scaler, its exponent an ordinary integer operand,
-unless an adjacent addition absorbs it into an fma instead; and the four rounding operators map to one shared `fround`
-distinguished by an immediate mode, which a float-to-integer conversion reading one of them absorbs as its own.
+RESULT is its own. Every operand, output wire and phi arm folds its own family's sideband chain into its conditioner
+-- a negation/absolute-value chain into a float's sign control, a NOT chain into a boolean's inversion, nothing for an
+integer -- except onto an operand its operator declares UNCONDITIONED, where the builder drops the chain outright
+rather than folding it, for EVERY producer of MIR operations and not the lowering alone, since a transform no
+result can observe would otherwise buy a second firing for one answer. Multiply-by-power-of-two selects the
+`fmul_ilog2` scaler, its exponent an ordinary integer operand, unless an adjacent addition absorbs it into an fma
+instead; and every rounding, the float-to-integer conversion's included, is one immediate mode of a shared module.
 Which operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel
 can be refused for want of an operator it never wrote.
-The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill,
-a negative count is refused, and a count no other use reads is never lowered; `imul_pow2` rides the same shifter
-through its saturating product tap.
+The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill
+(a negative count being the refusal gate's), and a count no other use reads is never lowered; `imul_pow2` rides the
+same shifter through its saturating product tap.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
 sin/cos computed simultaneously by the sincos operator, FMA contraction of `a*b+c` wherever the additions that read
 the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
-left alone), a directional infinity classifier for an infinity predicate adjacent to a sign test -- matched at MIR
-because this is the first layer aware of hardware semantics. Some semantic operators lower into combinations of
-hardware operators depending on availability and context (e.g. a two-legged magnitude via fatan2).
+left alone) -- matched at MIR because this is the first layer aware of hardware semantics. Some semantic operators
+lower into combinations of hardware operators depending on availability and context (e.g. a two-legged magnitude via
+fatan2).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is carried through as per-bank views sharing the block
 skeleton -- the wide data bank and the boolean bank -- then scheduled per block and register-allocated over the
-whole CFG. The wide view selects operations and phis structurally, on scalar width, so it is neutral storage rather
-than a float family; its leaves are still selected nominally, so a float and an integer share the bank with neither
-privileged.
+whole CFG. Each view selects every node structurally, on scalar width, so the wide bank is neutral storage rather
+than a float family, and a float and an integer share it with neither privileged.
 
 ## LIR
 

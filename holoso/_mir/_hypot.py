@@ -14,7 +14,8 @@ from .._hir import (
     FloatSqrt,
     Hir,
     HirBuilder,
-    IntGreater,
+    IntComparison,
+    Relation,
     IntNeg,
     IntSelect,
     IntSub,
@@ -140,7 +141,7 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
         exponents = [builder.operation(FloatILog2(bias), [leg]) for leg in legs]
         largest = _tree(
             exponents,
-            lambda a, b: builder.operation(IntSelect(), [builder.operation(IntGreater(), [a, b]), a, b]),
+            lambda a, b: builder.operation(IntSelect(), [builder.operation(IntComparison(Relation.GT), [a, b]), a, b]),
         )
         k = builder.operation(IntSub(), [builder.int_const(scale), largest])
         squares = [

@@ -8,7 +8,7 @@ import logging
 from typing import assert_never
 
 from .._errors import UnsupportedConstruct
-from .._util import BlockId, ValueId
+from .._util import BlockId, ValueId, reverse_postorder_of
 from ._const import BoolConst
 from ._ir import (
     Block,
@@ -46,18 +46,6 @@ def _proven_branch(hir: Hir) -> tuple[Block, BlockId] | None:
     return None
 
 
-def _reachable(blocks: list[Block], entry: BlockId) -> set[BlockId]:
-    by_id = {block.id: block for block in blocks}
-    seen = {entry}
-    stack = [entry]
-    while stack:
-        for target in successors(by_id[stack.pop()]):
-            if target not in seen:
-                seen.add(target)
-                stack.append(target)
-    return seen
-
-
 def _resolve(substitution: dict[ValueId, ValueId], value: ValueId) -> ValueId:
     seen: set[ValueId] = set()
     while (target := substitution.get(value)) is not None:
@@ -69,7 +57,7 @@ def _resolve(substitution: dict[ValueId, ValueId], value: ValueId) -> ValueId:
 
 def _take(hir: Hir, decided: Block, target: BlockId) -> Hir:
     blocks = _taking(hir.blocks, decided.id, target)
-    live = _reachable(blocks, hir.entry)
+    live = set(reverse_postorder_of(hir.entry, {block.id: successors(block) for block in blocks}))
     if not any(isinstance(block.terminator, Ret) for block in blocks if block.id in live):
         raise UnsupportedConstruct("the kernel provably never returns, so no output of it is ever raised")
     blocks = [block for block in blocks if block.id in live]

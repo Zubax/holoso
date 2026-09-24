@@ -3,20 +3,12 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import assert_never
 
-from .._errors import UnsupportedConstruct
 from .._mir import (
     Mir,
-    MirBoolConst,
-    MirBoolInput,
-    MirBoolOutput,
     MirBoolView,
     MirBranch,
-    MirFloatConst,
-    MirFloatInput,
-    MirFloatOutput,
-    MirIntConst,
-    MirIntInput,
-    MirIntOutput,
+    MirConst,
+    MirInput,
     MirJump,
     MirOperation,
     MirPhi,
@@ -30,6 +22,7 @@ from .._operators import (
     InlineHardwareOperator,
     IntIdentity,
     PooledHardwareOperator,
+    PortConditioner,
     WideConditioner,
 )
 from .._value import FloatValue, IntValue, WideValue
@@ -41,14 +34,16 @@ from ._build_base import Allocation, ConstPool, PooledConst
 from ._mir_facts import mir_operation
 
 
-def bool_operand_template(bool_mir: MirBoolView, vid: ValueId, inversion: BoolInversion) -> BoolOperandTemplate:
+def bool_operand_template(bool_mir: MirBoolView, vid: ValueId, inversion: PortConditioner) -> BoolOperandTemplate:
+    assert isinstance(inversion, BoolInversion)
     node = bool_mir.nodes[vid]
-    if isinstance(node, MirBoolConst):
+    if isinstance(node, MirConst):
+        assert type(node.value) is bool
         return BoolOperandTemplate(BoolConstRef(node.value), inversion)
     return BoolOperandTemplate(vid, inversion)
 
 
-def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversion: BoolInversion) -> BoolOperand:
+def bool_operand(bool_mir: MirBoolView, vid: ValueId, alloc: Allocation, inversion: PortConditioner) -> BoolOperand:
     return bool_operand_template(bool_mir, vid, inversion).resolve(alloc.bool.assign.__getitem__)
 
 
@@ -66,10 +61,8 @@ def operand_templates(
     for position, (vid, conditioner) in enumerate(zip(node.operands, node.operand_conditioners, strict=True)):
         template: OperandTemplate
         if vid in bool_mir.nodes:
-            assert isinstance(conditioner, BoolInversion)
             template = bool_operand_template(bool_mir, vid, conditioner)
         else:
-            assert not isinstance(conditioner, BoolInversion)  # negatively, so a new wide conditioner needs no edit
             template = wide_operand_template(wide_mir, vid, conditioner, pool)
         if position in node.operator.unconditioned_operands:
             assert isinstance(template, WideOperandTemplate)  # the declaration admits float ports alone
@@ -176,10 +169,10 @@ def build_pooled_op(
 
 
 def wide_operand_template(
-    wide_mir: MirWideView, vid: ValueId, conditioner: WideConditioner, pool: Mapping[ValueId, PooledConst]
+    wide_mir: MirWideView, vid: ValueId, conditioner: PortConditioner, pool: Mapping[ValueId, PooledConst]
 ) -> WideOperandTemplate:
-    node = wide_mir.nodes[vid]
-    if isinstance(node, (MirFloatConst, MirIntConst)):
+    assert not isinstance(conditioner, BoolInversion)  # negatively, so a new wide conditioner needs no edit
+    if isinstance(wide_mir.nodes[vid], MirConst):
         entry = pool[vid]
         match entry.conditioner:
             case FloatSignControl():
@@ -197,7 +190,7 @@ def wide_operand_template(
 def wide_operand(
     wide_mir: MirWideView,
     vid: ValueId,
-    conditioner: WideConditioner,
+    conditioner: PortConditioner,
     alloc: Allocation,
     pool: dict[ValueId, PooledConst],
 ) -> WideOperand:
@@ -213,13 +206,11 @@ def build_outputs(
 ) -> list[WideOutputWire | BoolOutputWire]:
     outputs: list[WideOutputWire | BoolOutputWire] = []
     for out in mir.outputs:
-        if isinstance(out, (MirFloatOutput, MirIntOutput)):
+        if out.value in wide_mir.nodes:
             tap = wide_operand(wide_mir, out.value, out.conditioner, alloc, pool)
             outputs.append(WideOutputWire(out.name, tap, wide_mir.scalar_type_of(out.value)))
-        elif isinstance(out, MirBoolOutput):
-            outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.conditioner)))
         else:
-            assert False, f"unhandled MIR output {out!r}"
+            outputs.append(BoolOutputWire(out.name, bool_operand(bool_mir, out.value, alloc, out.conditioner)))
     return outputs
 
 
@@ -248,7 +239,7 @@ def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperati
 
     def note(vid: ValueId) -> None:
         node = mir.nodes.get(vid)  # a bool operand of a bool-result op is not in the wide view
-        if isinstance(node, (MirFloatConst, MirIntConst)) and vid not in seen:
+        if isinstance(node, MirConst) and vid not in seen:
             seen.add(vid)
             ids.append(vid)
 
@@ -278,13 +269,11 @@ def build_const_pool(mir: MirWideView, bool_operations: dict[ValueId, MirOperati
         return index
 
     for vid in ids:
-        const = mir.const_nodes[vid]
-        if isinstance(const, MirIntConst):
-            pool[vid] = PooledConst(intern(IntValue.from_int(mir.int_format, const.value)), IntIdentity())
+        value = mir.const_nodes[vid].value
+        if type(value) is int:
+            pool[vid] = PooledConst(intern(IntValue.from_int(mir.int_format, value)), IntIdentity())
             continue
-        value = const.value
-        if math.isnan(value):
-            raise UnsupportedConstruct(f"Cannot represent a NaN constant. Only [in]finite numbers are supported.")
+        assert type(value) is float
         magnitude = FloatValue.from_float(mir.float_format, abs(value))
         negate = math.copysign(1.0, value) < 0.0
         pool[vid] = PooledConst(intern(magnitude), FloatSignControl(negate=negate))
@@ -306,12 +295,10 @@ def build_inputs(
 ) -> list[WideInputLoad | BoolInputLoad]:
     loads: list[WideInputLoad | BoolInputLoad] = []
     for vid in mir.input_ids:
-        wide_node = wide_mir.nodes.get(vid)
-        bool_node = bool_mir.nodes.get(vid)
-        if isinstance(wide_node, (MirFloatInput, MirIntInput)):
-            loads.append(WideInputLoad(wide_node.name, RegRef(alloc.wide.assign[vid]), wide_node.scalar_type))
-        elif isinstance(bool_node, MirBoolInput):
-            loads.append(BoolInputLoad(bool_node.name, BoolRegRef(alloc.bool.assign[vid])))
+        node = mir.nodes[vid]
+        assert isinstance(node, MirInput)
+        if vid in wide_mir.nodes:
+            loads.append(WideInputLoad(node.name, RegRef(alloc.wide.assign[vid]), wide_mir.scalar_type_of(vid)))
         else:
-            assert False, f"unhandled MIR input {vid}"
+            loads.append(BoolInputLoad(node.name, BoolRegRef(alloc.bool.assign[vid])))
     return loads

@@ -25,9 +25,9 @@ from holoso import (
 import holoso._operators as operators
 from holoso._backend.verilog._emit import generate
 from holoso._eel import lower as lower_frontend
-from holoso._hir import FloatFloor, FloatNeg, FloatToInt, FloatType as HirFloatType, HirBuilder
+from holoso._hir import FloatNeg, FloatRounding, Rounding, FloatToInt, FloatType as HirFloatType, HirBuilder
 from holoso._lir import Lir, PooledScheduledOp, WideOperand
-from holoso._mir import Mir, MirBuilder, MirIntConst, MirInterpreter, MirOperation, lower as lower_to_mir
+from holoso._mir import Mir, MirBuilder, MirConst, MirInterpreter, MirOperation, lower as lower_to_mir
 from holoso._operators import (
     FILog2Operator,
     HardwareOperator,
@@ -189,7 +189,11 @@ def test_strength_selection_shares_the_shifter_and_keeps_the_divider() -> None:
         write.port for op in _wide_firings(lir) if op.inst.operator.mnemonic == "ishl" for write in op.writes
     }
     assert shifter_taps == {0, 1}, "the raw reading and the saturating reading must come off the one module"
-    assert 3 not in {node.value for node in mir.nodes.values() if isinstance(node, MirIntConst)}
+    assert 3 not in {
+        node.value
+        for node in mir.nodes.values()
+        if isinstance(node, MirConst) and isinstance(node.scalar_type, IntType)
+    }
 
 
 def test_a_runtime_exponent_scaling_carries_mixed_conditioner_lists() -> None:
@@ -202,12 +206,12 @@ def test_a_runtime_exponent_scaling_carries_mixed_conditioner_lists() -> None:
     ifmt = default_ifmt(fmt)  # hand-built, so the word is named rather than settled
     builder = MirBuilder(fmt, ifmt)
     builder.block()
-    k = builder.int_input("k", IntType(ifmt))
-    builder.float_output(
+    k = builder.input("k", IntType(ifmt))
+    builder.output(
         "scaled",
         builder.operation(
             FMulILog2Operator(fmt, ifmt, FMulILog2Operator.Options()),
-            [builder.float_const(1.5, FloatType(fmt)), k],
+            [builder.const(1.5, FloatType(fmt)), k],
             [FloatSignControl(), IntIdentity()],
         ),
     )
@@ -230,11 +234,11 @@ def test_exponent_extraction_places_the_limit_cases_outside_the_finite_span() ->
     bias = (1 << (fmt.wexp - 1)) - 1
     builder = MirBuilder(fmt, ifmt)
     builder.block()
-    builder.int_output(
+    builder.output(
         "exponent",
         builder.operation(
             FILog2Operator(fmt, ifmt, FILog2Operator.Options()),
-            [builder.float_input("x", FloatType(fmt))],
+            [builder.input("x", FloatType(fmt))],
             [FloatSignControl()],
         ),
     )
@@ -295,7 +299,7 @@ def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", HirFloatType())
-    floored = builder.operation(FloatFloor(), [x])
+    floored = builder.operation(FloatRounding(Rounding.FLOOR), [x])
     builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [floored])]))
     builder.ret()
     mir = lower_to_mir(builder.finish(), mir_options(OPTIONS))
@@ -340,9 +344,9 @@ def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering(
     for value, expected in ((3.5, 1), (-3.5, 1)):
         builder = MirBuilder(fmt, ifmt)
         builder.block()
-        builder.int_output(
+        builder.output(
             "exponent",
-            builder.operation(operator, [builder.float_const(value, FloatType(fmt))], [FloatSignControl()]),
+            builder.operation(operator, [builder.const(value, FloatType(fmt))], [FloatSignControl()]),
         )
         builder.ret()
         mir = builder.finish()

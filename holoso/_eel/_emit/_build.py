@@ -146,16 +146,19 @@ def _block(em: _Emit, stmts: tuple[Stmt, ...], env: _Env) -> bool:
                 return True
             case ResidualBreak():
                 assert em.loops, "a break terminator lies inside a residual loop body"
+                assert not pending_slots
                 em.loops[-1].breaks.append((builder.current_block, dict(env)))
                 return True
             case ResidualContinue():
                 assert em.loops, "a continue terminator lies inside a residual loop body"
+                assert not pending_slots
                 em.loops[-1].continues.append((builder.current_block, dict(env)))
                 return True
             case ResidualFrame():
                 _frame(em, stmt, env)
             case ResidualFrameReturn(values=values):
                 assert em.frames, "a frame return lies inside a residual frame body"
+                assert not pending_slots
                 em.frames[-1].returns.append(
                     (builder.current_block, tuple(_atom(builder, atom, env) for atom in values))
                 )

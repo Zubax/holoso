@@ -1,5 +1,6 @@
 """Hardware operator models, their folded port conditioners, and the configuration that selects them."""
 
+from .._util import Relation as Relation
 from .._value import RoundMode as RoundMode
 from ._common import (
     BoolInversion as BoolInversion,
@@ -9,7 +10,6 @@ from ._common import (
     IntIdentity as IntIdentity,
     PooledHardwareOperator as PooledHardwareOperator,
     PortConditioner as PortConditioner,
-    Relation as Relation,
     SelectOperator as SelectOperator,
     WideConditioner as WideConditioner,
     apply_conditioner as apply_conditioner,

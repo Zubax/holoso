@@ -12,11 +12,8 @@ from typing import ClassVar, assert_never
 from .._mir import (
     Mir,
     reverse_postorder,
-    MirBoolOutput,
     MirBoolView,
     MirBranch,
-    MirFloatOutput,
-    MirIntOutput,
     MirOperation,
     MirPhi,
     MirStateRead,
@@ -24,7 +21,6 @@ from .._mir import (
     MirWideView,
 )
 from .._operators import (
-    BoolInversion,
     InlineHardwareOperator,
     PooledHardwareOperator,
     PortConditioner,
@@ -238,7 +234,7 @@ class _WideBank(_Bank[_Placement | Boundary]):
     def boundary_base(self, mir: Mir, values: set[ValueId], ret_block: int) -> dict[int, set[ValueId]]:
         boundary: dict[int, set[ValueId]] = {block.id: set() for block in mir.blocks}
         for out in mir.outputs:
-            if isinstance(out, (MirFloatOutput, MirIntOutput)) and out.value in values:
+            if out.value in values:
                 boundary[ret_block].add(out.value)
         return boundary
 
@@ -258,7 +254,6 @@ class _WideBank(_Bank[_Placement | Boundary]):
             )
             producers[vid] = [InlineWriter(node.operator, operands, node.output_conditioner)]
         for _pred, vid, value, conditioner in coalesced.residual_arms():
-            assert not isinstance(conditioner, BoolInversion)
             template = wide_operand_template(ctx.wide_mir, value, conditioner, ctx.const_pool.entries)
             producers[vid].append(MoveWriter(template))
         return producers
@@ -335,7 +330,7 @@ class _BoolBank(_Bank[Boundary]):
                 assert block.terminator.cond in values
                 boundary[block.id].add(block.terminator.cond)
         for out in mir.outputs:
-            if isinstance(out, MirBoolOutput) and out.value in values:
+            if out.value in values:
                 boundary[ret_block].add(out.value)
         return boundary
 
@@ -347,7 +342,6 @@ class _BoolBank(_Bank[Boundary]):
         # adds.
         producers: dict[ValueId, list[FixedProducer]] = {vid: [] for vid in coalesced.facts.values}
         for _pred, vid, value, inversion in coalesced.residual_arms():
-            assert isinstance(inversion, BoolInversion)
             producers[vid].append(MoveWriter(bool_operand_template(layout.ctx.bool_mir, value, inversion)))
         return producers
 
@@ -868,7 +862,6 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
     ctx = layout.ctx
     copies: dict[int, list[WideCopy | BoolCopy]] = {}
     for pred, vid, value, conditioner in layout.wide_bank.residual_arms():
-        assert not isinstance(conditioner, BoolInversion)
         placement = layout.wide_bank.facts.placement[(pred, vid)]
         source = wide_operand_template(ctx.wide_mir, value, conditioner, ctx.const_pool.entries)
         copy = WideCopy(
@@ -876,7 +869,6 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
         )
         copies.setdefault(pred, []).append(copy)
     for pred, vid, value, inversion in layout.bool_bank.residual_arms():
-        assert isinstance(inversion, BoolInversion)
         placement = layout.bool_bank.facts.placement[(pred, vid)]
         bool_source = bool_operand_template(ctx.bool_mir, value, inversion).resolve(bool_coloring.assign.__getitem__)
         bool_copy = BoolCopy(BoolRegRef(bool_coloring.assign[vid]), bool_source, placement.issue, placement.settled)
@@ -886,7 +878,6 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
     for slot in wide_facts.slots:
         match decision := layout.wide_bank.install[slot.name]:
             case _Placement(issue=issue, settled=settled):
-                assert not isinstance(slot.conditioner, BoolInversion)
                 source = wide_operand_template(ctx.wide_mir, slot.live_out, slot.conditioner, ctx.const_pool.entries)
                 reg = RegRef(wide_facts.slot_reg[slot.name])
                 early = WideCopy(reg, source.resolve(wide.assign.__getitem__), issue, settled)

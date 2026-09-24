@@ -88,9 +88,9 @@ def _prepare(mir: Mir, fetch_lag: int) -> BuildContext:
     # A branch whose condition is a phi with an arm FROM THE BRANCHING BLOCK cannot be sequenced: the arm's install
     # copy lands in the condition register exactly when the terminator reads it, so the branch would consult the next
     # iteration's value instead of the current one -- and no register assignment can help, since the conflict is the
-    # value with itself. The frontend never emits this shape (every arm predecessor is jump-terminated); reject it
-    # here so a future pass that creates branch-block arm predecessors fails loudly instead of miscompiling. A branch on
-    # a constant never reaches here either: HIR pruning settles every decided branch.
+    # value with itself. The frontend never emits this shape: such a phi sits in a loop header whose latch branches,
+    # and every latch jumps. Reject it here so a future pass that creates it fails loudly instead of miscompiling. A
+    # branch on a constant never reaches here either: HIR pruning settles every decided branch.
     for mir_block in mir.blocks:
         terminator = mir_block.terminator
         if isinstance(terminator, MirBranch):
