@@ -2,18 +2,20 @@
 Statement-free aggregate structure: everything here maps values to values, while anything that must emit
 residual statements lives with the interpreter.
 
-Subscript semantics are CPython's, delegated to host indexing over the children where possible. A
-multi-axis subscript validates the rank and EVERY integer axis against the full shape before any selection,
-so an empty slice on one axis cannot mask a bounds fault on another.
+Subscript semantics are CPython's, delegated to host indexing over the children where possible. An array
+subscript validates EVERY integer axis against the full shape before refusing an empty selection, so an empty
+slice on one axis cannot mask a bounds fault on another.
 """
 
 import dataclasses
 
+import numpy as np
+
 from .._ir import Origin, ScalarType
-from ._ops import const_value, make_const
+from .._names import element_index
 from ._ownership import share
 from ._reject import reject
-from ._snapshot import describe_opaque, ndarray_annotation
+from ._snapshot import describe_opaque
 from ._values import (
     AGGREGATES,
     Allocation,
@@ -66,10 +68,8 @@ def kind_label(value: Value) -> str:
 
 def static_range(value: RangeValue) -> range | None:
     match value.start, value.stop:
-        case StaticScalar(const=start), StaticScalar(const=stop):
-            a, b = const_value(start), const_value(stop)
-            assert isinstance(a, int) and isinstance(b, int)
-            return range(a, b, value.step)
+        case StaticScalar(value=int() as start), StaticScalar(value=int() as stop):
+            return range(start, stop, value.step)
         case _:
             return None
 
@@ -87,14 +87,12 @@ def decay(budget: ExpansionBudget, value: Value, origin: Origin) -> Value:
     if span is None:
         reject(origin, "a range with a runtime bound can only drive a for loop")
     budget.spend(max(range_length(span), 1), origin, "the range materialization")
-    return SequenceValue(tuple(StaticScalar(make_const(i)) for i in span), Allocation())
+    return SequenceValue(tuple(StaticScalar.of(i) for i in span), Allocation())
 
 
 def static_index(origin: Origin, value: Value, what: str) -> int:
     match value:
-        case StaticScalar(const=const) if value.stype is ScalarType.INT:
-            index = const_value(const)
-            assert isinstance(index, int)
+        case StaticScalar(value=int() as index) if value.stype is ScalarType.INT:
             return index
         case StaticScalar() | ResidualScalar() if value.stype is not ScalarType.INT:
             reject(origin, f"{what} must be an int, not a {value.stype.value}")
@@ -102,84 +100,77 @@ def static_index(origin: Origin, value: Value, what: str) -> int:
             reject(origin, f"{what} must be a compile-time constant int")
 
 
-def index_read(origin: Origin, base: Value, index: Value) -> Value:
+def index_read(origin: Origin, base: Value, axis: ResolvedAxis) -> Value:
+    """`b[i]` or `b[lo:hi]`; a sliced axis arrives as its resolved `(lo, hi)` bounds pair."""
     match base:
         case SequenceValue(items=items):
-            position = static_index(origin, index, "a subscript index")
-            item = _select(origin, items, position, base)
+            if isinstance(axis, tuple):
+                lo, hi = axis
+                taken = items[lo:hi]
+                for item in taken:
+                    if isinstance(item, AGGREGATES):
+                        share(item)
+                return SequenceValue(taken, Allocation())
+            position = static_index(origin, axis, "a subscript index")
+            item = items[resolved_index(origin, position, len(items), a_kind(base))]
             if isinstance(item, AGGREGATES):
                 share(base)
                 share(item)
             return item
-        case TensorValue(shape=shape, leaves=leaves):
-            if isinstance(index, SequenceValue):
-                reject(origin, "a sequence index on an array is not supported; spell the axes directly (m[i, j])")
-            position = static_index(origin, index, "a subscript index")
-            if len(shape) == 1:
-                return _select(origin, leaves, position, base)
-            return _derive_row(origin, base, position)
+        case TensorValue(shape=shape):
+            return _tensor_read(origin, base, (axis, *[(None, None)] * (len(shape) - 1)))
+        case _ if isinstance(axis, tuple):
+            reject(origin, f"{a_kind(base)} cannot be sliced")
         case Opaque(name=name):
             reject(origin, f"cannot index {name!r}: the captured value is not a supported aggregate")
         case _:
             reject(origin, f"{a_kind(base)} is not subscriptable")
 
 
-def slice_read(origin: Origin, base: Value, lo: int | None, hi: int | None) -> Value:
-    match base:
-        case SequenceValue(items=items):
-            taken = list(items)[lo:hi]
-            for item in taken:
-                if isinstance(item, AGGREGATES):
-                    share(item)
-            return SequenceValue(tuple(taken), Allocation())
-        case TensorValue(shape=shape, leaves=leaves):
-            selected = _axis_range(shape[0], lo, hi)
-            if not selected:
-                reject(origin, "the slice selects no elements; an empty array is not supported")
-            if len(shape) == 1:
-                return _derived(base, (len(selected),), tuple(leaves[i] for i in selected))
-            width = shape[1]
-            picked = tuple(leaves[i * width + j] for i in selected for j in range(width))
-            return _derived(base, (len(selected), width), picked)
-        case _:
-            reject(origin, f"{a_kind(base)} cannot be sliced")
-
-
 def multi_index_read(origin: Origin, base: Value, axes: tuple[ResolvedAxis, ...]) -> Value:
-    """
-    The `m[i, j]` / `m[:, k]` / `m[a:b, c:d]` read; a sliced axis arrives as its resolved
-    `(lo, hi)` bounds pair, an indexed axis as its value.
-    """
+    """The `m[i, j]` / `m[:, k]` / `m[a:b, c:d]` read, one resolved axis per dimension."""
     if not isinstance(base, TensorValue):
         reject(origin, f"too many indices: a multi-axis subscript works only on an array, not {a_kind(base)}")
-    shape = base.shape
-    if len(axes) != len(shape):
-        reject(origin, f"a multi-axis subscript must name every axis: the array is {len(shape)}-D, got {len(axes)}")
+    if len(axes) != len(base.shape):
+        reject(
+            origin, f"a multi-axis subscript must name every axis: the array is {len(base.shape)}-D, got {len(axes)}"
+        )
+    return _tensor_read(origin, base, axes)
+
+
+def axis_position(origin: Origin, index: Value, dim: int) -> int:
+    if isinstance(index, SequenceValue):
+        reject(origin, "a sequence index on an array is not supported; spell the axes directly (m[i, j])")
+    return resolved_index(origin, static_index(origin, index, "a subscript index"), dim, "an axis")
+
+
+def resolved_index(origin: Origin, position: int, length: int, what: str) -> int:
+    resolved = position + length if position < 0 else position
+    if not 0 <= resolved < length:
+        reject(origin, f"index {position} is out of bounds for {what} of length {length}")
+    return resolved
+
+
+def _tensor_read(origin: Origin, base: TensorValue, axes: tuple[ResolvedAxis, ...]) -> Value:
+    """An indexed axis drops out of the result and a sliced one stays, so indexing every axis reads a leaf."""
     selections: list[list[int]] = []
-    kept_dims: list[int | None] = []
-    for dim, axis in zip(shape, axes, strict=True):
+    kept: list[int] = []
+    for dim, axis in zip(base.shape, axes, strict=True):
         if isinstance(axis, tuple):
             lo, hi = axis
-            selection = _axis_range(dim, lo, hi)
-            selections.append(selection)
-            kept_dims.append(len(selection))
+            selections.append(list(range(dim))[lo:hi])
+            kept.append(len(selections[-1]))
         else:
-            position = static_index(origin, axis, "a subscript index")
-            resolved = position + dim if position < 0 else position
-            if not 0 <= resolved < dim:
-                reject(origin, f"index {position} is out of bounds for an axis of length {dim}")
-            selections.append([resolved])
-            kept_dims.append(None)
-    if any(not selection for selection in selections):
+            selections.append([axis_position(origin, axis, dim)])
+    if not all(selections):
         reject(origin, "the slice selects no elements; an empty array is not supported")
-    columns = selections[1] if len(shape) == 2 else [0]
-    width = shape[1] if len(shape) == 2 else 1
+    columns = selections[1] if len(base.shape) == 2 else [0]
+    width = base.shape[1] if len(base.shape) == 2 else 1
     picked = tuple(base.leaves[i * width + j] for i in selections[0] for j in columns)
-    kept = tuple(dim for dim in kept_dims if dim is not None)
     if not kept:
         assert len(picked) == 1
         return picked[0]
-    return _derived(base, kept, picked)
+    return derive(base, tuple(kept), picked)
 
 
 def unpack_items(origin: Origin, value: Value, count: int, loops: list[LoopPass]) -> list[Value]:
@@ -208,10 +199,7 @@ def flatten(origin: Origin, value: Value) -> list[tuple[LeafPath, Scalar]]:
                     walk(value, (*path, field.name))
             case TensorValue(shape=shape, leaves=tensor_leaves):
                 for position, leaf in enumerate(tensor_leaves):
-                    if len(shape) == 1:
-                        walk(leaf, (*path, position))
-                    else:
-                        walk(leaf, (*path, position // shape[1], position % shape[1]))
+                    walk(leaf, (*path, *element_index(shape, position)))
             case StaticScalar() | ResidualScalar():
                 leaves.append((path, node))
             case Opaque():
@@ -244,7 +232,8 @@ def splice_items(origin: Origin, value: Value, loops: list[LoopPass]) -> list[Va
             if len(shape) == 1:
                 found = list(value.leaves)
             else:
-                found = [_derive_row(origin, value, row) for row in range(shape[0])]
+                rows, width = shape
+                found = [derive(value, (width,), value.leaves[row * width : (row + 1) * width]) for row in range(rows)]
         case _:
             reject(origin, f"cannot unpack {a_kind(value)}: it is not iterable")
     for item in found:
@@ -254,29 +243,7 @@ def splice_items(origin: Origin, value: Value, loops: list[LoopPass]) -> list[Va
     return found
 
 
-def _select(
-    origin: Origin, items: tuple[Value, ...] | tuple[Scalar | Opaque, ...], position: int, base: Value
-) -> Value:
-    try:
-        selected = list(items)[position]
-    except IndexError:
-        reject(origin, f"index {position} is out of bounds for {a_kind(base)} of length {len(items)}")
-    return selected
-
-
-def _axis_range(dim: int, lo: int | None, hi: int | None) -> list[int]:
-    return list(range(dim))[lo:hi]
-
-
-def _derive_row(origin: Origin, base: TensorValue, position: int) -> TensorValue:
-    rows, width = base.shape
-    resolved = position + rows if position < 0 else position
-    if not 0 <= resolved < rows:
-        reject(origin, f"index {position} is out of bounds for an array of length {rows}")
-    return _derived(base, (width,), tuple(base.leaves[resolved * width : (resolved + 1) * width]))
-
-
-def _derived(base: TensorValue, shape: tuple[int, ...], leaves: tuple[Scalar | Opaque, ...]) -> TensorValue:
+def derive(base: TensorValue, shape: tuple[int, ...], leaves: tuple[Scalar | Opaque, ...]) -> TensorValue:
     # The derivation reuses the source allocation as a storage-equivalence token: store blocking is identical
     # (one shared allocation either way), and the state-install disjointness checks see views for free.
     result = TensorValue(shape, base.family, leaves, base.allocation)
@@ -291,7 +258,7 @@ def array_annotation_shape(annotation: object, origin: Origin, what: str) -> tup
     """
     if not (isinstance(annotation, type) and hasattr(annotation, "dims")):
         return None
-    if not ndarray_annotation(annotation):
+    if getattr(annotation, "array_type", None) is not np.ndarray:
         reject(origin, f"{what}: only numpy array containers are supported in shaped annotations")
     dims = getattr(annotation, "dims", None)
     if not isinstance(dims, tuple):

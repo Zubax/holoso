@@ -1,4 +1,6 @@
-"""The registry only decides WHICH callees mean a structural conversion or reshape; the semantics are the evaluator's."""
+"""
+The registry only decides WHICH callees mean a structural conversion or reshape; the semantics are the evaluator's.
+"""
 
 import numpy as np
 

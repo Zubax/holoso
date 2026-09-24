@@ -51,3 +51,17 @@ class IntConst(Const):
     @property
     def type(self) -> IntType:
         return IntType()
+
+
+def make_const(value: bool | int | float) -> Const:
+    if type(value) is bool:
+        return BoolConst(value)
+    if type(value) is int:
+        return IntConst(value)
+    assert type(value) is float
+    return FloatConst(value)
+
+
+def const_value(const: Const) -> bool | int | float:
+    assert isinstance(const, (BoolConst, IntConst, FloatConst)), f"constant {const!r} carries no scalar"
+    return const.value

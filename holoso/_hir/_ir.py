@@ -330,9 +330,6 @@ class HirBuilder:
     def float_state_read(self, slot: str) -> ValueId:
         return self.state_read(slot, FloatType())
 
-    def bool_state_read(self, slot: str) -> ValueId:
-        return self.state_read(slot, BoolType())
-
     def state_slot(self, name: str, reset_value: Const, live_out: ValueId) -> None:
         self._state_slots.append(StateSlot(name, reset_value, live_out))
 

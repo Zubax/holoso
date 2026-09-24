@@ -1,6 +1,7 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
 from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst, IntConst as IntConst
+from ._const import const_value as const_value, make_const as make_const
 from ._copy import copy_node as copy_node, rebuild as rebuild, reverse_postorder as reverse_postorder
 from ._dce import eliminate_dead_code as eliminate_dead_code
 from ._evaluate import HirEvaluator as HirEvaluator

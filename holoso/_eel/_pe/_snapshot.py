@@ -14,10 +14,16 @@ from collections.abc import Callable
 
 import numpy as np
 
-from ._ops import make_const
+from .._names import element_index
 from ._ownership import escape
 from .._ir import Origin, ScalarType
 from ._values import Allocation, Opaque, Scalar, SequenceValue, StaticScalar, TensorValue, Value
+
+CAPTURED_AGGREGATES = (list, tuple, np.ndarray)
+
+
+def dtype_family(kind: str) -> ScalarType | None:
+    return {"f": ScalarType.FLOAT, "i": ScalarType.INT, "u": ScalarType.INT}.get(kind)
 
 
 def nan_payload(raw: object) -> bool:
@@ -33,13 +39,13 @@ def describe_opaque(value: Opaque) -> str:
 
 def scalar_of(raw: object, name: str) -> StaticScalar | Opaque | None:
     if isinstance(raw, (bool, np.bool_)):
-        return StaticScalar(make_const(bool(raw)))
+        return StaticScalar.of(bool(raw))
     if isinstance(raw, (int, np.integer)):
-        return StaticScalar(make_const(int(raw)))
+        return StaticScalar.of(int(raw))
     if type(raw) is float or isinstance(raw, np.floating):
         if nan_payload(raw):
             return Opaque(name, raw)
-        return StaticScalar(make_const(float(raw)))
+        return StaticScalar.of(float(raw))
     return None
 
 
@@ -48,22 +54,15 @@ def tensor_of(array: object, name: str) -> TensorValue | None:
         return None
     if array.ndim not in (1, 2) or 0 in array.shape:
         return None
-    if array.dtype.kind == "f":
-        family = ScalarType.FLOAT
-    elif array.dtype.kind in "iu":
-        family = ScalarType.INT
-    else:
+    family = dtype_family(array.dtype.kind)
+    if family is None:
         return None
     leaves: list[Scalar | Opaque] = []
     for position, element in enumerate(array.flatten().tolist()):
-        leaf = scalar_of(element, f"{name}[{position}]")
+        leaf = scalar_of(element, f"{name}[{', '.join(map(str, element_index(array.shape, position)))}]")
         assert leaf is not None
         leaves.append(leaf)
     return TensorValue(tuple(array.shape), family, tuple(leaves), Allocation())
-
-
-def ndarray_annotation(annotation: object) -> bool:
-    return getattr(annotation, "array_type", None) is np.ndarray
 
 
 class Snapshotter:
@@ -71,25 +70,19 @@ class Snapshotter:
 
     def __init__(self, guard: Callable[[str, object, Origin], None] | None = None) -> None:
         self._memo: dict[int, tuple[object, Value]] = {}
-        self._converting: set[int] = set()
         self._guard = guard
 
     def admit(self, name: str, raw: object, origin: Origin) -> Value:
         scalar = scalar_of(raw, name)
         if scalar is not None:
             return scalar
-        if isinstance(raw, (list, tuple, np.ndarray)):
+        if isinstance(raw, CAPTURED_AGGREGATES):
             found = self._memo.get(id(raw))
             if found is not None:
                 return found[1]
             if self._guard is not None:
                 self._guard(name, raw, origin)
-            assert id(raw) not in self._converting, "a captured value cannot contain a reference cycle"
-            self._converting.add(id(raw))
-            try:
-                value = self._aggregate(name, raw, origin)
-            finally:
-                self._converting.discard(id(raw))
+            value = self._aggregate(name, raw, origin)
             escape(value)
             self._memo[id(raw)] = (raw, value)
             return value

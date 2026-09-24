@@ -29,7 +29,7 @@ A while header evaluated speculatively (to see whether the test folds) rolls bac
 when the loop residualizes, but the ownership events it fired persist -- allocation states are global
 monotone facts, so speculation is at worst stricter, never wrong.
 
-Store admission is PATH-QUANTIFIED (amended A1): a mutation is admitted iff EVERY allocation along the
+Store admission is PATH-QUANTIFIED: a mutation is admitted iff EVERY allocation along the
 store path -- from the root handle through the allocation holding the written scalar leaf -- is unique and
 unborrowed at the store step, checked after the RHS and index temps are evaluated. The final holder must be
 a tensor (sequences are immutable structure; a sequence may still sit mid-path), the path must end at a

@@ -7,9 +7,9 @@ root gets a canonical attribute-path prefix, first registration winning. An edge
 object records a second address, which convicts at `prepare` only when admitted state lies at or beneath
 that object -- naming and privacy would otherwise depend on traversal choice.
 
-S seeds from the syntactic may-write scan of every desugarable plain instance method over every component
-class MRO, dead arms included. Seeded chains are canonicalized by walking the actual objects, so a child
-method's `self.parent.x` names the root's own slot. Runs re-trim S to the paths whose write was reached --
+The assumed-state set seeds from the syntactic may-write scan of every desugarable plain instance method over every
+component class MRO, dead arms included. Seeded chains are canonicalized by walking the actual objects, so a child
+method's `self.parent.x` names the root's own slot. Runs re-trim the set to the paths whose write was reached --
 folding only kills writes, so the loop is monotone.
 
 A seeded path whose snapshot cannot be state (an unrepresentable value, an absent attribute, a component
@@ -36,9 +36,10 @@ from ..._errors import SynthesisError
 from .._desugar import desugar
 from .._ir import Block, EelFunction, Origin, ScalarType, SlotDecl, SlotPath
 from .._decorator import is_wrapper, plain_function
-from .._names import slot_name
+from .._names import access_path, element_index, slot_name
 from ._reject import reject
 from ._residual import assigned_names
+from ._snapshot import CAPTURED_AGGREGATES, dtype_family, nan_payload
 
 type Reset = bool | int | float
 
@@ -67,19 +68,12 @@ class TensorSpec:
 type Spec = ScalarSpec | SequenceSpec | TensorSpec
 
 
-def _is_nan(raw: object) -> bool:
-    return isinstance(raw, (float, np.floating)) and math.isnan(float(raw))
-
-
 def spell_state(path: SlotPath) -> str:
     assert path and isinstance(path[0], str)
-    text = "self." + str(path[0])
-    for key in path[1:]:
-        text += f"[{key}]" if isinstance(key, int) else f".{key}"
-    return text
+    return "self" + access_path(path)
 
 
-_VALUE_KINDS = (bool, int, float, complex, str, bytes, list, tuple, dict, set, frozenset, np.ndarray, np.generic)
+_PLAIN_DATA = (bool, int, float, complex, str, bytes, list, tuple, dict, set, frozenset, np.ndarray, np.generic)
 
 
 def attribute_dict(obj: object) -> dict[str, object]:
@@ -90,7 +84,7 @@ def attribute_dict(obj: object) -> dict[str, object]:
 
 def _is_component(raw: object) -> bool:
     """A plain instance with its own attribute dict -- never a value kind, a bare function, or a type."""
-    if isinstance(raw, _VALUE_KINDS) or raw is None:
+    if isinstance(raw, _PLAIN_DATA) or raw is None:
         return False
     if isinstance(raw, (types.ModuleType, type, types.FunctionType, types.MethodType, types.BuiltinFunctionType)):
         return False
@@ -182,7 +176,7 @@ def seed_state(tree: ComponentTree, entry: EelFunction) -> dict[StateKey, Origin
 
 
 def _seed_from(tree: ComponentTree, prefix: StateKey, body: Block, receiver: str, seed: dict[StateKey, Origin]) -> None:
-    for (root, chain), origin in assigned_names(body)[2].items():
+    for (root, chain), origin in assigned_names(body).attrs.items():
         if root != receiver:
             continue
         key = resolve_chain(tree, prefix, chain)
@@ -196,21 +190,14 @@ def resolve_chain(tree: ComponentTree, prefix: StateKey, chain: tuple[str, ...])
     components, which canonicalizes back-references.
     """
     assert chain
-    holder = tree.objects.get(prefix)
-    if holder is None:
+    if prefix not in tree.objects:
         return None
-    for step, attr in enumerate(chain):
-        if step == len(chain) - 1:
-            return (*prefix, attr)
-        child = attribute_dict(holder).get(attr)
-        if child is None or not _is_component(child):
+    for attr in chain[:-1]:
+        found = tree.prefix_of(attribute_dict(tree.objects[prefix]).get(attr))
+        if found is None:
             return None
-        child_prefix = tree.prefix_of(child)
-        if child_prefix is None:
-            return None
-        prefix = child_prefix
-        holder = child
-    raise AssertionError("the loop returns at the final attr")
+        prefix = found
+    return (*prefix, chain[-1])
 
 
 _WRITE_PROTOCOLS = ("__setattr__", "__delattr__")
@@ -436,7 +423,7 @@ class StateModel:
         )
 
     def _scalar_spec(self, raw: object, path: SlotPath, origin: Origin) -> ScalarSpec | None:
-        if _is_nan(raw):
+        if nan_payload(raw):
             reject(origin, f"the reset value of {spell_state(path)} is NaN, which the compiler cannot represent")
         if isinstance(raw, (bool, np.bool_)):
             return ScalarSpec(path, ScalarType.BOOL, bool(raw))
@@ -453,11 +440,8 @@ class StateModel:
             reject(origin, f"the state attribute {spell_state(path)} is a numpy subclass, which is not supported")
         if raw.ndim not in (1, 2) or 0 in raw.shape:
             reject(origin, f"the state attribute {spell_state(path)} must be a non-empty 1-D or 2-D array")
-        if raw.dtype.kind == "f":
-            family = ScalarType.FLOAT
-        elif raw.dtype.kind in "iu":
-            family = ScalarType.INT
-        else:
+        family = dtype_family(raw.dtype.kind)
+        if family is None:
             reject(origin, f"the state attribute {spell_state(path)} must hold a float or integer dtype")
         if any(promoted[: len(path)] == path for promoted in self._promoted):
             family = ScalarType.FLOAT
@@ -466,8 +450,8 @@ class StateModel:
         shape = tuple(raw.shape)
         leaves: list[ScalarSpec] = []
         for position, element in enumerate(raw.flatten().tolist()):
-            leaf_path = (*path, *((position,) if len(shape) == 1 else (position // shape[1], position % shape[1])))
-            if _is_nan(element):
+            leaf_path = (*path, *element_index(shape, position))
+            if nan_payload(element):
                 reject(
                     origin, f"the reset value of {spell_state(leaf_path)} is NaN, which the compiler cannot represent"
                 )
@@ -567,24 +551,21 @@ def spec_leaves(spec: Spec) -> list[ScalarSpec]:
             return list(leaves)
 
 
-def environment_aggregates(fn: object) -> list[tuple[str, object]]:
+def environment_aggregates(fn: types.FunctionType) -> list[tuple[str, object]]:
     """
     Everything the environment could hand the kernel: module globals, closure cells, and the entry method's
-    own default values -- aggregates only, the roots A1 names as entering escaped.
+    own default values -- aggregates only, the roots that enter the ownership model escaped.
     """
     found: list[tuple[str, object]] = [
-        (name, value)
-        for name, value in getattr(fn, "__globals__", {}).items()
-        if isinstance(value, (list, tuple, np.ndarray))
+        (name, value) for name, value in fn.__globals__.items() if isinstance(value, CAPTURED_AGGREGATES)
     ]
-    code = getattr(fn, "__code__")
-    for name, cell in zip(code.co_freevars, getattr(fn, "__closure__") or (), strict=True):
+    for name, cell in zip(fn.__code__.co_freevars, fn.__closure__ or (), strict=True):
         try:
             value = cell.cell_contents
         except ValueError:
             continue
-        if isinstance(value, (list, tuple, np.ndarray)):
+        if isinstance(value, CAPTURED_AGGREGATES):
             found.append((name, value))
-    defaults = list(getattr(fn, "__defaults__") or ()) + list((getattr(fn, "__kwdefaults__") or {}).values())
-    found.extend(("a parameter default", value) for value in defaults if isinstance(value, (list, tuple, np.ndarray)))
+    defaults = [*(fn.__defaults__ or ()), *(fn.__kwdefaults__ or {}).values()]
+    found.extend(("a parameter default", value) for value in defaults if isinstance(value, CAPTURED_AGGREGATES))
     return found

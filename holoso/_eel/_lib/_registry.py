@@ -195,9 +195,7 @@ class Factory:
 class Conversion:
     """
     A structural to-array conversion with an optional dtype (positional or keyword). `copies` distinguishes
-    np.array (always an independent copy -- the A5 escape hatch) from np.asarray, which shares a
-    family-preserving array input; a family-CHANGING dtype copies on the host, so both spellings mint fresh
-    there. Dtype widths are erased, so a same-family host copy (float32 to float) conservatively shares.
+    np.array, always an independent copy, from np.asarray, which may share its source.
     """
 
     copies: bool
@@ -231,13 +229,9 @@ _OPERATOR_KEYS = (BinaryOp, CompareOp, UnaryOp)
 _REGISTRY: dict[object, Match] = {}
 
 
-def _keys(keys: Iterable[object]) -> list[object]:
-    """numpy spells one object under several names (np.abs IS np.absolute), so one decoration may name a key twice."""
-    return list(dict.fromkeys(keys))
-
-
 def _register(match: Match, keys: Iterable[object]) -> None:
-    for key in _keys(keys):
+    # numpy spells one object under several names (np.abs IS np.absolute), so one decoration may name a key twice.
+    for key in dict.fromkeys(keys):
         if inspect.isdatadescriptor(key):
             assert isinstance(match, Array), "only array entries may bind class members"
         else:

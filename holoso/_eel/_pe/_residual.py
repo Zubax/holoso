@@ -27,11 +27,10 @@ def rechained(node: object, frames: tuple[CallFrame, ...]) -> object:
     return node
 
 
-def assigned_names(
-    stmts: tuple[Stmt, ...],
-) -> tuple[set[str], set[str], dict[tuple[str, tuple[str, ...]], Origin]]:
+@dataclasses.dataclass(slots=True)
+class Assigned:
     """
-    The syntactic (rebound, store-rooted, attr-chain-stored) sets: the loop-carry over-approximation for
+    The syntactic rebinds, store roots, and attr-chain stores: the loop-carry over-approximation for
     residualization and the raw material of the assumed-state seed. Rebinds and stores are kept apart
     because a store mutates its root in place rather than rebinding it, so a non-aggregate store root is no
     carry at all -- the store step itself owns the precise rejection. Attr-chain stores keep the FIRST
@@ -39,16 +38,25 @@ def assigned_names(
     at seeding, the live bindings at loop residualization). Comprehension bodies bind only temps and their
     renamed targets never collide with user locals, so the uniform walk stays exact for names.
     """
-    rebound: set[str] = set()
-    stored: set[str] = set()
-    attrs: dict[tuple[str, tuple[str, ...]], Origin] = {}
+
+    rebound: set[str] = dataclasses.field(default_factory=set)
+    stored: set[str] = dataclasses.field(default_factory=set)
+    attrs: dict[tuple[str, tuple[str, ...]], Origin] = dataclasses.field(default_factory=dict)
+
+
+def assigned_names(stmts: tuple[Stmt, ...]) -> Assigned:
+    found = Assigned()
+    _collect(stmts, found)
+    return found
+
+
+def _collect(stmts: tuple[Stmt, ...], found: Assigned) -> None:
     for stmt in stmts:
-        parts: tuple[tuple[Stmt, ...], ...] = ()
         match stmt:
             case Assign(target=LocalBind(name=name)) | AugAssign(target=LocalBind(name=name)):
-                rebound.add(name)
+                found.rebound.add(name)
             case Unpack(targets=targets):
-                rebound |= {target.name for target in targets if isinstance(target, LocalBind)}
+                found.rebound |= {target.name for target in targets if isinstance(target, LocalBind)}
             case Store(root=LocalRef(name=name)) | AugStore(root=LocalRef(name=name)):
                 chain: list[str] = []
                 for selector in stmt.path:
@@ -56,25 +64,19 @@ def assigned_names(
                         break
                     chain.append(selector.name)
                 if chain:
-                    attrs.setdefault((name, tuple(chain)), stmt.origin)
+                    found.attrs.setdefault((name, tuple(chain)), stmt.origin)
                 else:
-                    stored.add(name)
+                    found.stored.add(name)
             case If(then=then, orelse=orelse):
-                parts = (then, orelse)
+                _collect((*then, *orelse), found)
             case While(header=header, body=body):
-                parts = (header, body)
+                _collect((*header, *body), found)
             case For(target=target, body=body):
-                rebound.add(target.name)
-                parts = (body,)
+                if isinstance(target, LocalBind):
+                    found.rebound.add(target.name)
+                _collect(body, found)
             case _:
                 pass
-        for part in parts:
-            inner_rebound, inner_stored, inner_attrs = assigned_names(part)
-            rebound |= inner_rebound
-            stored |= inner_stored
-            for pair, origin in inner_attrs.items():
-                attrs.setdefault(pair, origin)
-    return rebound, stored, attrs
 
 
 def drop_return_rows(stmts: list[Stmt] | tuple[Stmt, ...], keep: list[bool]) -> list[Stmt]:
@@ -202,14 +204,8 @@ def reads(expr: Expr) -> set[int]:
         case TempRef(index=index):
             return {index}
         case IntrinsicCall(args=args):
-            found: set[int] = set()
-            for arg in args:
-                if isinstance(arg, TempRef):
-                    found.add(arg.index)
-            return found
-        case SlotRead():
-            return set()
-        case LocalRef() | Const():
+            return {arg.index for arg in args if isinstance(arg, TempRef)}
+        case SlotRead() | LocalRef() | Const():
             return set()
         case _:
             raise AssertionError(expr)

@@ -15,7 +15,7 @@ agree across sites because the partial evaluator conformed every site against th
 
 from dataclasses import dataclass
 
-from ..._hir import BoolConst, BoolType, Const as HirConst, FloatConst, FloatType, Hir, HirBuilder, IntConst, IntType
+from ..._hir import BoolType, Const as HirConst, FloatType, Hir, HirBuilder, IntType, make_const
 from ..._hir import Operator, Type
 from .._ir import *
 from .._names import hardware_name, port_name, public_slot, slot_name, state_port_name
@@ -95,7 +95,7 @@ def _key_order(key: str | int) -> tuple[bool, str]:
 
 
 def _meet(builder: HirBuilder, arms: list[tuple[int, int]], what: object) -> int:
-    """One phi per differing value, none when the arms already agree; the types were fixed by the PE."""
+    """One phi per differing value, none when the arms already agree; the partial evaluator fixed the types."""
     first = arms[0][1]
     if all(vid == first for _, vid in arms):
         return first
@@ -119,16 +119,9 @@ def _finish(builder: HirBuilder, fn: EelFunction, outputs: list[int], slots: dic
 
 
 def _reset(slot: SlotDecl) -> HirConst:
-    match slot.stype:
-        case ScalarType.BOOL:
-            assert isinstance(slot.reset, bool)
-            return BoolConst(slot.reset)
-        case ScalarType.INT:
-            assert isinstance(slot.reset, int) and not isinstance(slot.reset, bool)
-            return IntConst(slot.reset)
-        case ScalarType.FLOAT:
-            assert isinstance(slot.reset, float)
-            return FloatConst(slot.reset)
+    const = make_const(slot.reset)
+    assert const.type == _TYPES[slot.stype]
+    return const
 
 
 def _block(em: _Emit, stmts: tuple[Stmt, ...], env: _Env) -> bool:
@@ -320,9 +313,4 @@ def _atom(builder: HirBuilder, atom: Atom, env: _Env) -> int:
         case LocalRef(name=name):
             return env[name]
         case Const(value=value):
-            if type(value) is bool:
-                return builder.bool_const(value)
-            if type(value) is int:
-                return builder.int_const(value)
-            assert type(value) is float
-            return builder.float_const(value)
+            return builder.const_node(make_const(value))
