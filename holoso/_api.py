@@ -200,8 +200,6 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     model = generate_model(lir)
     cocotb_output = generate_testbench(model)
 
-    # Only a branch makes the path data-dependent. Counting blocks instead would call a pruned kernel inexact for
-    # the jump chain pruning leaves behind, which every transaction walks identically.
     latency_is_exact = not any(isinstance(block.terminator, Branch) for block in lir.blocks)
     ii = (lir.min_initiation_interval, lir.min_initiation_interval if latency_is_exact else None)
     _logger.info("Generated Verilog: %s; II [min,max]: %s cycles", verilog_output, ii)

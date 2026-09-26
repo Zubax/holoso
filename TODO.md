@@ -41,27 +41,6 @@ A state attribute's shape and type come from the reset snapshot, so a field anno
 (`P: Float64[np.ndarray, "2 2"]` on an instance holding a 3x3) is documentation rather than a checked declaration.
 Parameter and return annotations are checked, so the module boundary is judged while the state boundary is not.
 
-## HIR
-
-### Jump chains left by a settled branch, and trivial loop phis
-
-When pruning settles a branch the front end could not (a guard only an identity decides, such as `if x*0.0 > 1.0`),
-the surviving path is left as a chain of blocks joined by jumps, `P -> T -> M`, each single-predecessor. Nothing fuses
-them, and every block boundary drains, so the guard costs latency though not hardware: a straight-line kernel with a
-settled guard took 19 cycles against 18 without it, and inside a 100-trip loop 2409 against 2109 (24 against 21 per
-trip). The fix fuses a block into its sole predecessor when that predecessor jumps to it -- append its operations, take
-its terminator, retarget successor phi arms as if-conversion's splice already does. It cannot form the branch on a phi
-with an arm from its own block that LIR refuses, since fusion follows only jump edges and the emitter never points a
-branch at a loop entry. Once it exists, the emitter's single-return-site special case becomes removable.
-
-The same pass should fold a phi whose arms other than itself all name one value: pruning substitutes only single-armed
-merges, and `rebuild` defers every loop-header phi past strength reduction, so `acc = 2.0; while ...: acc *= 1.0`
-keeps a header phi that stops `acc * x` from becoming a scaling. The substitution is dominance-safe (the other value
-reaches the merge on every first arrival) and must iterate with pruning, since a substituted boolean merge can settle
-another branch. A prototype of both took about 64 lines in `_prune.py`, left all bundled examples unchanged (none has
-either shape) and matched the model on about 1000 generated programs. They are optimizations rather than
-simplifications, which is why the middle-layer cleanup left them out.
-
 ## LIR
 
 ### Copy-only arms behind an overlapping predecessor
@@ -72,6 +51,15 @@ pid's first arm, foc's and imu_fusion's first arms, image_agc_streamed's and maj
 makes the predecessor drain into the merge, trading latency between the paths (a probe moved `x / y if c else 0.0`
 from 6/18 to 4/20 cycles); flux_observer's arm sits behind the empty entry, whose frame would grow from 2 to 4 PCs.
 Gaining here needs overlap across a multi-predecessor edge.
+
+### Interference that keeps a copy-only arm
+
+A copy-only arm, such as an empty `continue` path, keeps its frame when its phi-arm copy cannot coalesce, and the
+allocator has no live-range splitting to make it coalesce. In three nested `while` loops whose middle-loop value stays
+live across the innermost loop, each of the middle loop's two `continue` arms pays a frame, 4 cycles per middle-loop
+trip (80, 652 and 1307 cycles at n = 1, 3 and 4). A variant with an unchanged innermost carry (`b = b * 1.0`) folds to
+this kernel and pays the same, although the carry's phi, were it kept, would hold the two ranges apart and save those
+cycles (76, 616 and 1243).
 
 ### Arm-threading trial cost
 

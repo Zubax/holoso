@@ -1,6 +1,6 @@
 """
 Shared HIR rewrite helpers: a CFG-aware rebuild driver for passes that keep the block structure; the passes that
-delete blocks (pruning, if-conversion, merge threading) edit by hand.
+delete blocks (pruning, fusion, if-conversion, merge threading) edit by hand.
 """
 
 from collections.abc import Callable, Set

@@ -121,8 +121,8 @@ class Block:
 def renumber(hir: Hir) -> Hir:
     """
     Compact block ids to a dense 0..n-1 range, rewriting terminator targets and phi-arm predecessors. The CFG passes
-    (pruning, if-conversion, merge threading) delete blocks and leave gaps; the downstream rebuild machinery relies on
-    dense ids. Shared by every block-deleting pass so the recompaction rule lives in one place.
+    (pruning, fusion, if-conversion, merge threading) delete blocks and leave gaps; the downstream rebuild machinery
+    relies on dense ids. Shared by every block-deleting pass so the recompaction rule lives in one place.
     """
     new_id = {block.id: index for index, block in enumerate(hir.blocks)}
     if all(old == new for old, new in new_id.items()):

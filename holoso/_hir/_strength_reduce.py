@@ -11,7 +11,7 @@ from ._const import BoolConst, Const, FloatConst, IntConst
 from ._copy import copy_node, rebuild
 from ._scaling import Identity, Rendering, Scaling, read_scaling, rendering_of, scaled_node, scaling_of
 from .._util import Relation, ValueId
-from ._ir import Hir, HirBuilder, Node, Operation, Phi
+from ._ir import Hir, HirBuilder, Node, Operation
 from ._operators import (
     BoolAnd,
     BoolNot,
@@ -425,9 +425,6 @@ def run(hir: Hir) -> Hir:
         match node:
             case Const():
                 return emit_const(builder, node)
-            case Phi(arms=arms) if len({remap[arm] for _, arm in arms}) == 1:
-                # Every arm merges one value, which is available on every incoming edge and so dominates the merge.
-                return remap[arms[0][1]]
             case Operation(operator=mux, operands=(cond, a, b)) if (
                 isinstance(mux, _MUX) and bool_of(remap[cond]) is not None
             ):

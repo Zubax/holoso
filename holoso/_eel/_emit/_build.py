@@ -8,9 +8,10 @@ already dropped (and any later read rejected) by the partial evaluator's definit
 become input ports in declaration order whether read or not: the module interface mirrors the signature.
 
 Every `ResidualReturn` is one return SITE: an arm that returns simply never jumps to its local join. All
-sites meet in a single exit block -- one phi per output row and per slot leaf when there are several -- so
-`Ret` stays the sole function exit and each `StateSlot.live_out` is the value at that exit. The phi types
-agree across sites because the partial evaluator conformed every site against the one annotation-fixed table.
+sites, a lone one included, meet in a single exit block -- one phi per output row and per slot leaf where the sites
+disagree -- so `Ret` stays the sole function exit and each `StateSlot.live_out` is the value at that exit; HIR fusion
+folds a lone site's jump to it. The phi types agree across sites because the partial evaluator conformed every site
+against the one annotation-fixed table.
 """
 
 from dataclasses import dataclass
@@ -69,24 +70,17 @@ def emit(fn: EelFunction) -> Hir:
     terminated = _block(_Emit(builder, fn, sites, [], []), fn.body, env)
     assert terminated, "the residual body ends in a return site on every path"
     assert sites
-    if len(sites) == 1:
-        (site,) = sites
+    exit_block = builder.block()
+    for site in sites:
         builder.position_at(site.block)
-        _finish(builder, fn, list(site.outputs), site.slots)
-    else:
-        exit_block = builder.block()
-        for site in sites:
-            builder.position_at(site.block)
-            builder.jump(exit_block)
-        builder.position_at(exit_block)
-        outputs = [
-            _meet(builder, [(site.block, site.outputs[row]) for site in sites], decl.path)
-            for row, decl in enumerate(fn.outputs)
-        ]
-        slots = {
-            name: _meet(builder, [(site.block, site.slots[name]) for site in sites], name) for name in sites[0].slots
-        }
-        _finish(builder, fn, outputs, slots)
+        builder.jump(exit_block)
+    builder.position_at(exit_block)
+    outputs = [
+        _meet(builder, [(site.block, site.outputs[row]) for site in sites], decl.path)
+        for row, decl in enumerate(fn.outputs)
+    ]
+    slots = {name: _meet(builder, [(site.block, site.slots[name]) for site in sites], name) for name in sites[0].slots}
+    _finish(builder, fn, outputs, slots)
     return builder.finish()
 
 

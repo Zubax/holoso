@@ -379,8 +379,15 @@ A branch the graph itself decides is neither: it is pruned, along with everythin
 guard the optimizer can settle costs no hardware. The front end decides a condition by evaluating it, never by
 algebra over a residual operand, so a condition constant only under a value identity the graph owns (`x*0 == 0`)
 survives partial evaluation and is settled here, the branch folding to a single arm and the other never lowered.
-Where that leaves the sole exit unreachable the kernel provably never returns, and is refused rather than built into
-a module that can never raise `out_valid`.
+Where that leaves the sole exit unreachable the kernel provably never returns, and is refused rather than built into a
+module that can never raise `out_valid`. A merge left with one value to merge is that value -- the arm a pruned branch
+leaves, or a loop header whose latch only carries the value around, so `acc *= 1.0` in a loop leaves `acc` its initial
+value -- and folding it can settle another branch, so the folding shares pruning's loop. What a settled branch leaves
+behind is a chain of blocks joined by jumps; a block reached only by a jump from one predecessor is fused into it. Every
+block boundary costs the machine a drain, and a block also bounds if-conversion and the sharing of identical
+expressions, so an unfused chain costs cycles and operators alike. Fusion takes a block with one predecessor; an empty
+merge of several is merge threading's. The front end sends every return site, a lone one included, through a jump to one
+exit block and leaves that jump to fusion.
 
 Branch vs. select is the core control-flow decision for the branches that remain. Real branches are the default: only
 the taken side executes, the merge is resolved at register allocation with no runtime mux, and an untaken arm can
