@@ -241,10 +241,6 @@ class _Emitter:
     def add_bool(self, name: str) -> None:
         self._bools.append(name)
 
-    def drop_float(self, name: str) -> None:
-        """A name that has come to alias another in the pool: comparing the two would fold and settle a branch."""
-        self._floats.remove(name)
-
     @property
     def floats(self) -> list[str]:
         return self._floats
@@ -600,10 +596,14 @@ def _emit_diamond_then_loop(em: _Emitter) -> _Fragment:
 def _emit_reduction(em: _Emitter) -> _Fragment:
     n = em.randint(2, 6)
     acc = em.fresh("acc")
-    em.emit(f"{acc} = {em.pick_float()}")
+    start, term = em.pick_floats(2)
+    em.emit(f"{acc} = {start}")
     em.emit(f"for _i in range({n}):")
-    em.emit(f"{acc} = ({acc} + {em.pick_float()}) * 0.5", indent=2)
-    em.add_float(acc)
+    em.emit(f"{acc} = ({acc} + {term}) * 0.5", indent=2)
+    # Averaging a value with itself leaves it unchanged, so from a pool of one name the result is that name under the
+    # optimizer's `(x + x) * 0.5 == x`, and comparing the two would fold and settle a branch.
+    if start != term:
+        em.add_float(acc)
     return _fragment(acc, Mode.CONTINUOUS, frozenset({Shape.REDUCTION}))
 
 
@@ -925,8 +925,6 @@ def _generate_stateful_kernel(
     fragments: list[_Fragment] = []
     for p in inputs:
         em.add_float(p)
-    for s in slots:
-        em.add_float(f"self.{s}")
 
     # Capture every slot's OLD value first, so updates that reference each other use the live-in, like the chained
     # pattern.
@@ -935,12 +933,17 @@ def _generate_stateful_kernel(
         em.emit(f"{olds[s]} = self.{s}")
         em.add_float(olds[s])
 
+    # A pool name must hold a value no other pool name holds, or comparing the two folds and settles a branch. A slot
+    # holds its old value until rewritten and the next slot's after a chained copy, so it joins the pool only once it
+    # computes a new value. Each update adds its own power of two, and a signed sum of distinct powers of two never
+    # cancels, so no chain of updates repeats another or returns to the value it started from.
     for i, s in enumerate(slots):
         if i + 1 < n_slots and em.chance(0.6):
             em.emit(f"self.{s} = {olds[slots[i + 1]]}")
-            em.drop_float(f"self.{s}")
         else:
-            em.emit(f"self.{s} = {em.pick_float()} + {em.small_literal()}")
+            sign = "-" if em.chance(0.5) else ""
+            em.emit(f"self.{s} = {em.pick_float()} + {sign}{_power2_literal(i - 1)}")
+            em.add_float(f"self.{s}")
 
     # Optionally fold a real diamond into the update so a stateful kernel also exercises branchy scheduling. Its result
     # is threaded into the return so the diamond stays LIVE -- otherwise DCE could drop it and erase the branch.
