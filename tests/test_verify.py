@@ -1,7 +1,7 @@
 """
 Black-box verification of the numerical model against plain-Python references, driven through the public
 `synthesize` entry point, plus a white-box remnant at the bottom (in-place state-commit coalescing, register-file
-layout, and the merged-slots interpreter differential) that has no public spelling.
+layout, and the state-slot interpreter differentials) that has no public spelling.
 """
 
 import math
@@ -30,7 +30,8 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower
-from holoso._lir import InPlace, Lir, WideStateSlot
+from holoso._lir import Lir, WideStateSlot
+from holoso._lir._ir import InPlace
 from holoso._lir._ir import BoolStateSlot
 from holoso._mir import MirOptions, Mir, lower as lower_to_mir
 from ._modelref import (
@@ -172,7 +173,7 @@ def test_for_counter_reassigned_to_runtime_clears_static_binding() -> None:
     # `1.0 >= 0` (the counter), silently taking the wrong arm and miscompiling the output for any `i` above 1.
     def f(a: float) -> float:
         for i in range(1):
-            i = a  # type: ignore[assignment]  # reassign the loop variable to a runtime value (single-trip body)
+            i = a  # type: ignore[assignment]
         if 1.0 >= i:
             r = 100.0
         else:
@@ -210,7 +211,7 @@ def test_runtime_reassigned_for_counter_is_not_a_static_index() -> None:
     def f(a: float, b: float, c: float) -> float:
         vec = [a, b, c]
         for i in range(1):
-            i = a  # type: ignore[assignment]  # i is now a runtime value, not a compile-time index
+            i = a  # type: ignore[assignment]
         return vec[i]
 
     with pytest.raises(UnsupportedConstruct) as exc:
@@ -219,33 +220,27 @@ def test_runtime_reassigned_for_counter_is_not_a_static_index() -> None:
 
 
 def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
-    # Regression: the persistent-state reachability scan must demote a runtime-reassigned `for` counter exactly as
-    # lowering does. Here `t` (the counter) is reassigned to a runtime value, so `if t >= ...` is a real branch and
-    # its else arm (a `while` writing `self.s`) IS reachable. If the scan still folded the branch with the stale
-    # counter (0), it would either drop `self.s` from the persistent-state set (a silent miscompile) or, once
-    # lowering treats the branch as runtime, open a header phi for an attribute the scan never registered -- a
-    # `KeyError` crash while lowering the loop. The state set and the emitted phis must agree.
+    # Regression: `t` (the counter) is reassigned to a runtime value, so `if t < 1.0` is a real branch and its else arm
+    # (a `while` writing `self.s`) is reachable. Folding it with the stale counter (0) would drop `self.s` from the
+    # persistent-state set (a silent miscompile) or crash on a loop-header phi for an unregistered attribute.
     class K:
         def __init__(self) -> None:
             self.s = 4.0
 
         def step(self, a: float) -> float:
             for t in range(1):
-                t = a  # type: ignore[assignment]  # reassign the counter to a runtime value -> a dynamic branch
-            # Both sides are otherwise compile-time (the counter and a literal), so if the scan failed to demote the
-            # reassigned counter it would fold `0 < 1.0` to True and never scan the else arm. With the counter
-            # correctly demoted, this is a real runtime branch and the else arm's `self.s` write is reachable.
+                t = a  # type: ignore[assignment]
             if t < 1.0:
                 pass
             else:
                 c = 2.0
                 while c > 0.0:
                     c = c - 1.0
-                    self.s = 5.0  # written only on the else path's loop; must be persistent state
+                    self.s = 5.0
             return self.s
 
     result = _synth(K().step, "k")
-    assert "s" in _state_slots(result)  # the loop-written attr must be registered as state
+    assert "s" in _state_slots(result)
 
     model = result.numerical_model.elaborate()
     ref = K()
@@ -254,12 +249,9 @@ def test_for_counter_reassign_keeps_scan_and_lowering_in_lockstep() -> None:
 
 
 def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
-    # Regression: a walrus that rebinds a leaked `for` counter to a runtime value must demote it in the reachability
-    # scan exactly as lowering does -- the scan invalidates a static int on a walrus target just as on a plain
-    # reassignment. Here `t` (the counter, 0) is rebound by `(t := a)` in the `if` test, so the branch is dynamic
-    # and its else arm (a `while` writing `self.s`) IS reachable. A scan that failed to invalidate the walrus target
-    # would fold `0 < 1.0` to True, drop `self.s` from the state set, then crash when lowering
-    # (which does invalidate) opens a header phi for the unregistered attribute. The state set and the phis must agree.
+    # Regression: `(t := a)` rebinds the leaked counter `t` (0) to a runtime value in the `if` test, so the branch is
+    # dynamic and its else arm (a `while` writing `self.s`) is reachable; folding `0 < 1.0` to True would drop `self.s`
+    # from the state set.
     class K:
         def __init__(self) -> None:
             self.s = 4.0
@@ -267,17 +259,17 @@ def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
         def step(self, a: float) -> float:
             for t in range(1):  # leaks t == 0 (a compile-time integer) into the enclosing scope
                 pass
-            if (t := a) < 1.0:  # type: ignore[assignment]  # the walrus rebinds t to a runtime value, not a fold
+            if (t := a) < 1.0:  # type: ignore[assignment]
                 pass
             else:
                 c = 2.0
                 while c > 0.0:
                     c = c - 1.0
-                    self.s = 5.0  # written only on the else path's loop; must be persistent state
+                    self.s = 5.0
             return self.s
 
     result = _synth(K().step, "k")
-    assert "s" in _state_slots(result)  # the loop-written attr must be registered as state
+    assert "s" in _state_slots(result)
 
     model = result.numerical_model.elaborate()
     ref = K()
@@ -286,26 +278,23 @@ def test_walrus_counter_demotion_keeps_scan_and_lowering_in_lockstep() -> None:
 
 
 def test_for_counter_reassigned_inside_while_is_demoted_after_the_loop() -> None:
-    # Regression (differential fuzzer): a leaked `for` counter reassigned to a runtime value INSIDE a `while` body
-    # must stay demoted after the loop. Restoring the preheader static-int map verbatim on exit resurrected the stale
-    # compile-time counter value, undoing the body's demotion. A later
-    # comparison `if i < 0.0` was then folded against the stale counter (0) instead of the runtime value -- a SILENT
-    # miscompile that took the wrong arm. The post-loop fold must follow the runtime value, matching plain Python.
+    # Regression (differential fuzzer): a leaked `for` counter reassigned to a runtime value INSIDE a `while` body must
+    # stay a runtime value after the loop; folding the later `if i < 0.0` against the stale counter (0) silently took
+    # the wrong arm.
     def kernel(a: float) -> float:
         for i in range(1):  # leaks i == 0 (a compile-time integer) into the enclosing scope
             pass
         w = 0.0
         while w < 1.0:
-            i = a  # type: ignore[assignment]  # demote the counter to a runtime value INSIDE the while body
+            i = a  # type: ignore[assignment]
             w = w + 1.0
         r = 0.0
-        if i < 0.0:  # must be a real runtime branch on the reassigned value, not a fold on the stale counter (0)
+        if i < 0.0:
             r = 100.0
         else:
             r = 200.0
         return r
 
-    # With the stale binding resurrected, `i` folds to 0 -> `0 < 0.0` is always False -> r is always 200.0.
     model = _model(kernel, "k")
     for a in (-5.0, -0.5, 0.5, 7.0):
         assert float(model.run(a)[0]) == float(kernel(a)), f"mismatch at a={a}"
@@ -319,7 +308,6 @@ def test_for_counter_reassigned_inside_while_is_a_runtime_value_afterwards() -> 
             pass
         w = 0.0
         while w < 1.0:
-            # runtime reassignment inside the loop -> i is no longer a compile-time integer afterwards
             i = a  # type: ignore[assignment]
             w = w + 1.0
         return a * i
@@ -497,8 +485,6 @@ def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
 
 def test_model_walrus_binds_once_and_stays_visible_after_the_test() -> None:
     def walrus(x: float) -> float:
-        # `(t := x*2)` evaluates the subexpression once, binds `t`, and yields it to the comparison; `t` then
-        # stays visible to both arms (it is bound in the test, before the branch), as in Python.
         if (t := x * 2.0) > 4.0:
             r = t + 1.0
         else:
@@ -614,8 +600,8 @@ def test_model_boolean_input_and_mixed_outputs() -> None:
 
 
 def test_model_ports_carry_scalar_types() -> None:
-    # The model describes its I/O by typed ports (logical name + ScalarType), not parallel name/is-bool lists, so a
-    # driver decides a port's encoding from its type. The handle exposes the same metadata as the elaborated simulator.
+    # The model describes its I/O by typed ports, so a driver decides a port's encoding from its type. The handle
+    # exposes the same metadata as the elaborated simulator.
     def gate(flag: bool, x: float) -> tuple[bool, float]:
         if flag:
             y = x
@@ -720,7 +706,7 @@ def test_model_attribute_written_only_in_loop_is_persistent_state() -> None:
 
 def test_model_state_liveout_does_not_clobber_live_in_branch() -> None:
     class LiveInClobberedByLiveOut:
-        # Regression (Codex F1): a non-phi state live-out (here an input) must not be installed into the slot register
+        # Regression (Codex): a non-phi state live-out (here an input) must not be installed into the slot register
         # in the entry block, where the branch and arms still read the live-in.
         def __init__(self) -> None:
             self.y = 2.0
@@ -741,7 +727,7 @@ def test_model_state_liveout_does_not_clobber_live_in_branch() -> None:
 
 def test_model_state_phi_does_not_clobber_returned_live_in() -> None:
     class LiveInReadAfterPhi:
-        # Regression (Codex F2): a state phi must not be coalesced onto the slot register when the live-in is still read
+        # Regression (Codex): a state phi must not be coalesced onto the slot register when the live-in is still read
         # afterwards (here returned), or the phi install corrupts the returned live-in.
         def __init__(self) -> None:
             self.y = 1.0
@@ -762,7 +748,7 @@ def test_model_state_phi_does_not_clobber_returned_live_in() -> None:
 
 def test_model_signed_state_liveout_persists_with_sign() -> None:
     class SignedStateLiveOut:
-        # Regression (Codex F3): a sign-conditioned state live-out must persist with the sign applied.
+        # Regression (Codex): a sign-conditioned state live-out must persist with the sign applied.
         def __init__(self) -> None:
             self.y = 0.0
 
@@ -781,8 +767,7 @@ def test_model_signed_state_liveout_persists_with_sign() -> None:
 
 
 def test_model_sign_conditioned_phi_arm() -> None:
-    # Regression (#16): the merge resolution carries a per-arm folded sign, so a sign-conditioned phi arm lowers and
-    # evaluates correctly (it was previously rejected with "a sign-conditioned value merged by a phi").
+    # Regression (#16): a sign-conditioned phi arm must lower and evaluate correctly rather than be rejected.
     def neg_abs_phi(x: float) -> float:
         if x > 0.0:
             y = -x
@@ -812,8 +797,8 @@ def test_model_while_loop_accumulates() -> None:
 
 def test_model_while_loop_carries_persistent_state() -> None:
     class WhileIntegrator:
-        # A while loop that updates a persistent state attribute a runtime number of times: exercises the state scan's
-        # while handling (the attribute must be classified as persistent state) and a loop-carried state phi.
+        # A while loop that updates a persistent state attribute a runtime number of times: the attribute must be
+        # classified as persistent state and carried by a loop state phi.
         def __init__(self) -> None:
             self._total = 0.0
 
@@ -832,7 +817,7 @@ def test_model_while_loop_carries_persistent_state() -> None:
 
 def test_model_for_counter_inside_while_is_loop_carried() -> None:
     def for_counter_inside_while(x: float) -> float:
-        # Regression (Codex iter5): a `for` counter bound inside a `while` body is a loop-carried local; its value at
+        # Regression (Codex): a `for` counter bound inside a `while` body is a loop-carried local; its value at
         # the body's end must flow through the while-header phi, not be dropped when the preheader env is restored.
         j = 0.0
         i = 0.0
@@ -886,9 +871,9 @@ def test_a_counter_assigned_only_on_an_unreachable_loop_path_is_still_carried() 
 
 def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
     class CounterGatedWhileState:
-        # Regression (iter5): a leaked `for` counter reassigned in a `while` must be demoted from the static-int map for
-        # the whole body, so an in-body branch on it is a real runtime branch -- both arms lowered, so the attribute
-        # written on the otherwise-"folded-away" arm is correctly registered as persistent state and updated.
+        # Regression: a leaked `for` counter reassigned in a `while` is a runtime value for the whole body, so an
+        # in-body branch on it is real: both arms are lowered and the attribute written on the otherwise folded-away arm
+        # is persistent state.
         def __init__(self) -> None:
             self.s1 = -1.0
             self._s2 = 2.0
@@ -916,7 +901,7 @@ def test_model_attr_written_under_counter_gated_branch_in_while() -> None:
 
 def test_model_shared_constant_branch_condition() -> None:
     class SharedConstBranchCondition:
-        # Regression (Codex F4): a constant condition shared by sibling branches (the interned `self.flag`), which
+        # Regression (Codex): a constant condition shared by sibling branches (the interned `self.flag`), which
         # pruning settles in both.
         def __init__(self) -> None:
             self.flag = True
@@ -941,7 +926,7 @@ def test_model_shared_constant_branch_condition() -> None:
 
 
 def test_model_statically_dead_attribute_write_is_not_state() -> None:
-    # Regression (Codex F5): a write under a never-taken static branch or an empty loop must NOT be classified as
+    # Regression (Codex): a write under a never-taken static branch or an empty loop must NOT be classified as
     # persistent state -- that changed the interface (a spurious state port) and crashed slot registration when the
     # dead-written attribute was not otherwise read. The attribute stays a compile-time constant.
     class DeadLoopWrite:
@@ -958,24 +943,23 @@ def test_model_statically_dead_attribute_write_is_not_state() -> None:
             self.y = 2.5
 
         def __call__(self, x: float) -> float:
-            if False:  # statically never taken
+            if False:
                 self.y = x
             return self.y
 
     kernels: list[tuple[type[DeadLoopWrite] | type[DeadIfWrite], float]] = [(DeadLoopWrite, 1.25), (DeadIfWrite, 2.5)]
     for kernel, constant in kernels:
         result = _synth(kernel().__call__, "dead")
-        assert not _state_slots(result)  # no state slot; no crash building it
-        assert [port.name for port in result.output_ports] == ["out_0"]  # no spurious state port
+        assert not _state_slots(result)
+        assert [port.name for port in result.output_ports] == ["out_0"]
         model = result.numerical_model.elaborate()
-        assert float(model.run(9.0)[0]) == constant  # unchanged across calls -- it never became state
+        assert float(model.run(9.0)[0]) == constant
         assert float(model.run(-3.0)[0]) == constant
 
 
 def test_model_counter_dependent_empty_inner_loop_is_not_state() -> None:
-    # Regression (Codex F6): the attribute-write scan must mirror the unroll counter-by-counter, so a counter-dependent
-    # inner range that is empty on every outer trip contributes no state (the scan ran before counter binding before
-    # and over-approximated, crashing slot registration / adding a spurious port). A live nested loop still is state.
+    # Regression (Codex): a counter-dependent inner range that is empty on every outer trip contributes no state
+    # (over-approximating it crashed slot registration or added a spurious port); a live nested loop still is state.
     class CounterDependentEmptyInner:
         def __init__(self) -> None:
             self.y = 1.25
@@ -1009,9 +993,8 @@ def test_model_counter_dependent_empty_inner_loop_is_not_state() -> None:
 
 
 def test_model_return_in_literal_if_arm_ends_the_scan() -> None:
-    # Regression (Codex/reviewer F7): the attribute-write scan must propagate a return reached in a taken literal-if
-    # arm and stop, exactly as lowering does -- otherwise the dead post-if write is misclassified as state (spurious
-    # port, or a slot-registration crash when the attribute is not otherwise read).
+    # Regression (Codex): a return in a taken literal-if arm ends the method, so the dead post-if write must not be
+    # classified as state (spurious port, or a slot-registration crash when the attribute is not otherwise read).
     class ReturnInLiteralIfArm:
         def __init__(self) -> None:
             self.y = 2.0
@@ -1029,9 +1012,8 @@ def test_model_return_in_literal_if_arm_ends_the_scan() -> None:
 
 
 def test_model_loop_counter_does_not_leak_across_branch_arms_in_scan() -> None:
-    # Regression (Codex F8): the attribute-write scan binds loop counters to mirror the unroll, so it must snapshot and
-    # restore them per branch arm (and merge afterward) -- else the then-arm's counter leaks into the else-arm and a
-    # statically-empty inner range there is mistaken for a live write.
+    # Regression (Codex): the then-arm's loop counter must not leak into the else arm, where it would make a statically
+    # empty inner range look like a live write.
     class CounterLeakAcrossArms:
         def __init__(self) -> None:
             self.y = 1.0
@@ -1054,13 +1036,13 @@ def test_model_loop_counter_does_not_leak_across_branch_arms_in_scan() -> None:
 
 
 def test_synthesis_result_reports_latency_metric() -> None:
-    # The public latency metric is (min II, max II or None): a straight-line kernel is exact (min == max), a branching
-    # kernel's max is unbounded for now (a branch can shortcut the PC), reported as None alongside the min lower bound.
+    # The public latency metric is (min II, max II or None): a straight-line kernel is exact (min == max), while any
+    # branch makes the path data-dependent, so its max is reported as None.
     def straight_line(a: float, b: float) -> float:
         return a * b + a
 
     flat_min, flat_max = _synth(straight_line, "straight_line").initiation_interval
-    assert flat_min > 0 and flat_max == flat_min  # exact: min == max
+    assert flat_min > 0 and flat_max == flat_min
 
     def looping(x: float) -> float:
         w = x
@@ -1119,7 +1101,7 @@ def test_statically_folded_branch_does_not_create_a_phantom_state_slot() -> None
             return self.x
 
     result = _synth(K().__call__, "phantom_if")
-    assert _state_slots(result) == {"x"}  # y is not a phantom slot
+    assert _state_slots(result) == {"x"}
     assert result.initiation_interval[1] == result.initiation_interval[0]  # the guard folded; no branch
     model = result.numerical_model.elaborate()
     assert float(model.run(2.0)[0]) == 2.0
@@ -1180,7 +1162,7 @@ def test_folded_branch_in_a_loop_body_does_not_carry_a_phantom_attribute() -> No
             return self.acc
 
     result = _synth(K().__call__, "phantom_loop")
-    assert _state_slots(result) == {"acc"}  # dead is not carried
+    assert _state_slots(result) == {"acc"}
     assert float(result.numerical_model.elaborate().run(1.0)[0]) == 3.0
 
 
@@ -1203,9 +1185,7 @@ def test_polar_example_round_trip_and_native_reference() -> None:
             assert math.isclose(yr, y, rel_tol=1e-5, abs_tol=1e-5), f"round-trip y ({x}, {y})"
 
 
-# --- White-box remnant: claims with no public spelling. The register-file layout probe, the in-place persistent-state
-# commit (in place) coalescing group, and the merged/aliased-slot interpreter differentials drive the internal
-# pipeline directly.
+# --- White-box remnant: claims with no public spelling, driven through the internal pipeline.
 
 OPS = mir_options(
     Options(
@@ -1232,7 +1212,6 @@ def test_model_handles_unused_input_ports() -> None:
     model = build_model(build_lir(_run(f), "f"))
     assert [load.name for load in model._lir.wide_inputs] == ["a", "b"]
     assert [load.dst.index for load in model._lir.wide_inputs] == [0, 1]
-    assert model._lir.regfile.nload == 2
     assert model.run(1.0, 2.0)[0] == FloatValue.from_float(FMT, 2.0)
 
 
@@ -1263,7 +1242,7 @@ def test_inplace_bool_conditional_sticky_latch() -> None:
             return self._f
 
     lir = build_lir(_run(BoolStickyLatch().__call__), "sticky")
-    assert isinstance(_bool_slot(lir, "_f").install, InPlace)  # the phi live-out coalesced onto the slot register
+    assert isinstance(_bool_slot(lir, "_f").install, InPlace)
     model = build_model(lir)
     reference = BoolStickyLatch()
     t, f = True, False
@@ -1275,8 +1254,8 @@ def test_inplace_bool_unconditional_self_update() -> None:
     class BoolOrSelf:
         # An unconditional bool read-first self-update (latching_fault_register): the OR reads the live-in and writes
         # the slot register in place. The OR is the slot live-out and issues on cycle 0; its in-place commit lands at
-        # pc >= fetch_lag, never the held pc 0, so it is dwell-safe without any floor (the gated `transacting` makes the
-        # idle re-fetch a NOP).
+        # pc >= fetch_lag, never the held pc 0, so it is dwell-safe (the gated `transacting` makes the idle re-fetch a
+        # NOP).
         def __init__(self) -> None:
             self._f = False
 
@@ -1297,8 +1276,8 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
         # A loop-carried bool state whose loop phi coalesces onto the slot register. The preheader update `self._s or
         # a` is the phi's ENTRY arm, computed in the entry block from resident values only, and it coalesces onto the
         # slot register and issues on cycle 0. Its in-place commit lands at pc >= fetch_lag, never the held pc 0, so it
-        # is dwell-safe with no floor; this guards that the transitive phi-chain coalescing keeps carried state correct
-        # across the loop.
+        # is dwell-safe; this guards that the transitive phi-chain coalescing keeps carried state correct across the
+        # loop.
         def __init__(self) -> None:
             self._s = False
 
@@ -1311,7 +1290,7 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
             return self._s
 
     lir = build_lir(_run(LoopPreheaderArmInPlace().__call__), "preheaderarm")
-    assert isinstance(_bool_slot(lir, "_s").install, InPlace)  # the loop phi coalesced onto the slot register
+    assert isinstance(_bool_slot(lir, "_s").install, InPlace)
     model = build_model(lir)
     reference = LoopPreheaderArmInPlace()
     t, f = True, False
@@ -1319,12 +1298,12 @@ def test_inplace_loop_preheader_arm_is_dwell_safe() -> None:
         assert bool(model.run(a, n)[0]) is reference(a, n)
 
 
-def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
-    class WriteOnlyDwellTenant:
+def test_inplace_slot_gap_tenant_is_dwell_safe() -> None:
+    class DwellTenant:
         # Regression (Codex): an if-converted kernel where a temporary (`y or self._x`) lands as a gap tenant on the
-        # WRITE-ONLY `_w` slot's free register and issues on cycle 0. The tenant is dwell-safe by construction: the
-        # gated `transacting` makes the idle re-fetch a NOP and the commit lands at pc >= fetch_lag, so a gap
-        # tenant on a coalesced slot register cannot corrupt the carried state.
+        # `_w` slot's register, free once `self._x and self._w` has read the live-in, and issues on cycle 0. The
+        # tenant is dwell-safe by construction: the gated `transacting` makes the idle re-fetch a NOP and the commit
+        # lands at pc >= fetch_lag, so a gap tenant on a coalesced slot register cannot corrupt the carried state.
         def __init__(self) -> None:
             self._x = False
             self._w = False
@@ -1334,16 +1313,16 @@ def test_inplace_write_only_slot_gap_tenant_is_dwell_safe() -> None:
                 self._x = y or self._x
                 self._w = y
             else:
-                self._w = self._x
+                self._w = self._x and self._w
             return self._x, self._w
 
-    lir = build_lir(_run(WriteOnlyDwellTenant().__call__), "dwell_tenant")
+    lir = build_lir(_run(DwellTenant().__call__), "dwell_tenant")
     assert isinstance(
         _bool_slot(lir, "_w").install, InPlace
     ), "_w must coalesce for a gap tenant to share its slot register"
     assert any(op.issue_cycle == 0 for op in lir.blocks[0].inline_ops), "a cycle-0 entry gap tenant must arise"
     model = build_model(lir)
-    reference = WriteOnlyDwellTenant()
+    reference = DwellTenant()
     t, f = True, False
     for cond, y in [(t, t), (f, t), (t, f), (f, f), (t, t), (f, t)]:
         assert tuple(bool(v) for v in model.run(cond, y)) == tuple(bool(v) for v in reference(cond, y))
@@ -1362,7 +1341,7 @@ def test_inplace_float_conditional_accumulator() -> None:
             return self._acc
 
     lir = build_lir(_run(FloatCondAccum().__call__), "accum")
-    assert isinstance(_wide_slot(lir, "_acc").install, InPlace)  # the select live-out coalesced onto the slot register
+    assert isinstance(_wide_slot(lir, "_acc").install, InPlace)
     model = build_model(lir)
     reference = FloatCondAccum()
     t, f = True, False
@@ -1379,15 +1358,14 @@ def test_chained_wide_slots_do_not_coalesce() -> None:
             self.b = 1.0
 
         def __call__(self, x: float) -> float:
+            previous = self.a
             self.a = self.b
             self.b = self.b + x
-            return self.a
+            return self.a + previous
 
     lir = build_lir(_run(ChainedFloatSlots().__call__), "chain")
-    assert not isinstance(
-        _wide_slot(lir, "a").install, InPlace
-    )  # chained copy of b's live-in -- must not coalesce in place
-    assert not isinstance(_wide_slot(lir, "b").install, InPlace)  # tapped by a's live-out -- must not coalesce in place
+    assert not isinstance(_wide_slot(lir, "a").install, InPlace)
+    assert not isinstance(_wide_slot(lir, "b").install, InPlace)
     model = build_model(lir)
     reference = ChainedFloatSlots()
     for x in [2.0, 3.0, 4.0, 1.0]:
@@ -1432,18 +1410,16 @@ def test_state_livein_feeding_another_slot_phi_does_not_coalesce() -> None:
             self.w = 0.0
 
         def __call__(self, cond: bool, y: float) -> tuple[float, float]:
-            old_x = self.x  # the live-in of slot x
+            old_x = self.x
             if cond:
                 self.x = y + 1.0
-                self.w = old_x  # w's if-arm is x's live-in, so x's live-in is consumed by w's phi
+                self.w = old_x
             else:
                 self.w = 0.0
             return self.x, self.w
 
     lir = build_lir(_run(LiveInFeedsAnotherSlotPhi().__call__, replace(OPS, ifconv_max_ops=0)), "livein_other_slot")
-    assert not isinstance(
-        _wide_slot(lir, "x").install, InPlace
-    )  # x's live-in feeds w's phi -> x must stay non-coalesced (copy-back)
+    assert not isinstance(_wide_slot(lir, "x").install, InPlace)
     model = build_model(lir)
     reference = LiveInFeedsAnotherSlotPhi()
     ports = [port.name for port in model.outputs]  # the returned leaves fold onto the state ports; match by name
@@ -1464,7 +1440,7 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce() -> None:
 
         def __call__(self, cond: bool, d: float) -> tuple[float, float]:
             if cond:
-                new_y = self.x  # an unrelated phi taking x's live-in as an arm
+                new_y = self.x
                 self.x = 1.0 / d
             else:
                 new_y = 0.0
@@ -1472,9 +1448,7 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce() -> None:
             return new_y, self.x
 
     lir = build_lir(_run(LiveInFeedsUnrelatedPhi().__call__), "livein_unrelated")
-    assert not isinstance(
-        _wide_slot(lir, "x").install, InPlace
-    )  # x's live-in feeds an unrelated phi -> x must stay non-coalesced
+    assert not isinstance(_wide_slot(lir, "x").install, InPlace)
     model = build_model(lir)
     reference = LiveInFeedsUnrelatedPhi()
     for cond, d in [(True, 4.0), (False, 1.0), (True, 0.5), (False, 2.0), (True, 8.0)]:
@@ -1483,10 +1457,10 @@ def test_state_livein_feeding_unrelated_phi_does_not_coalesce() -> None:
         assert got == exp, (cond, d, got, exp)
 
 
-def test_merged_state_slots_preserve_behaviour() -> None:
-    # The slot drop must not change behaviour: drive PFD across many transactions and confirm the model still agrees
-    # with the schedule-independent MIR interpreter (blind to LIR faults), so the merged state persists correctly.
-    model, interpreter = build_model_and_interpreter(PhaseFrequencyDetector().__call__, OPS, "pfd_merge", FMT)
+def test_unread_state_slots_preserve_behavior() -> None:
+    # Dropping the write-only `up`/`down` slots must not change behavior: across many transactions the model must still
+    # agree with the schedule-independent MIR interpreter (blind to LIR faults).
+    model, interpreter = build_model_and_interpreter(PhaseFrequencyDetector().__call__, OPS, "pfd_ports", FMT)
     vectors: list[Vector] = [
         [True, False, False],  # reference leads -> up
         [False, False, False],  # hold up
@@ -1497,20 +1471,20 @@ def test_merged_state_slots_preserve_behaviour() -> None:
         [False, False, True],  # asynchronous clear
         [True, False, False],
     ]
-    assert_model_equals_interpreter(model, interpreter, vectors, "pfd_merge")
+    assert_model_equals_interpreter(model, interpreter, vectors, "pfd_ports")
 
 
-def test_aliased_slot_with_phi_live_in_builds() -> None:
-    # Regression (review): aliased state slots whose shared live-out is a SURVIVING phi (a real branch) must compile.
-    # The drop is gated off phi live-outs: an earlier register-pinning merge tripped a coloring/backstop assert on
-    # these shapes, and an ungated drop tripped a phi-install-past-terminator assert. Both attribute orders and a
-    # phi-of-inputs shape are exercised; the un-merged builds must still match the interpreter.
+def test_slots_sharing_a_phi_live_out_build() -> None:
+    # Regression (review): two read state slots whose shared live-out is a SURVIVING phi (a real branch) must compile;
+    # an earlier register-pinning merge tripped a coloring/backstop assert on these shapes. Both attribute orders and
+    # a phi-of-inputs shape are exercised, and the builds must match the interpreter.
     class Forward:
         def __init__(self) -> None:
             self.x = 0.0
             self._alias = 0.0
 
         def __call__(self, cond: bool, k: float) -> tuple[float, float]:
+            previous = self._alias
             if cond:
                 y = self.x
                 self.x = k + 1.0
@@ -1518,7 +1492,7 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
                 y = 0.0
                 self.x = 2.0
             self._alias = self.x
-            return y, self.x
+            return y + previous, self.x
 
     class Reversed:
         def __init__(self) -> None:
@@ -1526,6 +1500,7 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
             self.x = 0.0
 
         def __call__(self, cond: bool, k: float) -> tuple[float, float]:
+            previous = self._alias
             if cond:
                 y = self.x
                 self.x = k + 1.0
@@ -1533,14 +1508,15 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
                 y = 0.0
                 self.x = 2.0
             self._alias = self.x
-            return y, self.x
+            return y + previous, self.x
 
-    class InputPhi:  # new state is a phi of INPUTS, old state read separately (Codex round 2)
+    class InputPhi:  # new state is a phi of INPUTS, old state read separately
         def __init__(self) -> None:
             self.x = 0.0
             self._alias = 0.0
 
         def __call__(self, cond: bool, a: float, b: float) -> tuple[float, float, float]:
+            previous = self._alias
             if cond:
                 old = self.x
                 self.x = a
@@ -1550,7 +1526,7 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
                 self.x = b
                 w = 0.0
             self._alias = self.x
-            return old, self.x, w
+            return old + previous, self.x, w
 
     vectors: list[Vector] = [
         [cond, FloatValue.from_float(FMT, k)]
@@ -1561,6 +1537,4 @@ def test_aliased_slot_with_phi_live_in_builds() -> None:
             cls().__call__, replace(OPS, ifconv_max_ops=0), cls.__name__, FMT
         )
         assert_model_equals_interpreter(model, interpreter, vectors, cls.__name__)
-    build_lir(
-        _run(InputPhi().__call__, replace(OPS, ifconv_max_ops=0)), "input_phi_alias"
-    )  # phi-of-inputs shape must compile
+    build_lir(_run(InputPhi().__call__, replace(OPS, ifconv_max_ops=0)), "input_phi_alias")

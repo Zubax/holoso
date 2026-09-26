@@ -339,8 +339,8 @@ def test_kernel_with_division_elaborates(tmp_path: Path) -> None:
 
 @_requires_iverilog
 def test_constant_only_module_elaborates(tmp_path: Path) -> None:
-    # No inputs and an all-constant output => zero registers; NREG must floor to >=1 so the regfile parameter
-    # guard does not instantiate its error stub (BUG1 regression).
+    # No inputs and an all-constant output leave the wide bank empty, so the register array must be omitted rather
+    # than declared zero-length.
     def const_only() -> float:
         return 3.5
 
@@ -446,7 +446,7 @@ def test_state_slot_folded_sign_coexists_with_sibling_port(tmp_path: Path) -> No
 
         def __call__(self, x: float) -> float:
             self.y_d = self._p
-            self.y = -self._p  # sign-flipped state boundary copy -> inline holoso_fsgnop() in the state install
+            self.y = -self._p
             self._p = x
             return self.y
 
@@ -501,16 +501,12 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         LirBlock,
         OperatorInstance,
         PooledScheduledOp,
-        PortWrite,
-        RegFileLayout,
         Exit,
         Jump,
         WideInputLoad,
         WideOperand,
-        WideOutputWire,
-        boundary_step,
     )
-    from holoso._lir._ir import BoolRegFileLayout
+    from holoso._lir._ir import PortWrite, RegFileLayout, WideOutputWire, boundary_step
     from holoso._operators import FloatSignControl
 
     _FETCH_LAG = 2  # datapath lag matching the 3-stage control fetch: one less than fetch_stages
@@ -525,7 +521,6 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
             PortWrite(1, RegRef(3), FloatSignControl(negate=True)),
         ],
         issue_cycle=1,
-        latency=inst.operator.latency,
         immediates=(),
     )
     lir = Lir(
@@ -535,21 +530,19 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         float_format=fmt,
         int_format=default_ifmt(fmt),
         fetch_lag=_FETCH_LAG,
-        regfile=RegFileLayout(nreg=4, nrd=2, nwr=2, nload=2),
+        regfile=RegFileLayout(nreg=4),
         inputs=[WideInputLoad("a", RegRef(0), FloatType(fmt)), WideInputLoad("b", RegRef(1), FloatType(fmt))],
         outputs=[
             WideOutputWire("out_0", WideOperand(RegRef(2), FloatSignControl()), FloatType(fmt)),
             WideOutputWire("out_1", WideOperand(RegRef(3), FloatSignControl()), FloatType(fmt)),
         ],
         wide_state_slots=[],
-        blocks=[LirBlock(0, [op], [], [], Jump(Exit()), op.commit_cycle, boundary_step(op.commit_cycle, _FETCH_LAG))],
-        bool_regfile=BoolRegFileLayout(nreg=0),
+        blocks=[LirBlock(0, [op], [], [], Jump(Exit()), boundary_step(op.commit_cycle, _FETCH_LAG))],
+        bool_regfile=RegFileLayout(nreg=0),
         bool_state_slots=[],
     )
     verilog = generate(lir).verilog
     for q in (0, 1):
-        # Each per-port result is a combinational output wire (s_..._y{q}, no _q register) that drives the register
-        # write directly.
         assert f"_y{q}_q" not in verilog, "the per-port result register must not be emitted"
         assert re.search(rf"wire\s+\[WFLT-1:0\]\s+s_fsort_0_y{q}\s*;", verilog), "per-port combinational result wire"
         assert re.search(

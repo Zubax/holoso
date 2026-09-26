@@ -205,8 +205,8 @@ class Hir:
 
     def external_value_references(self) -> list[ValueId]:
         """
-        Every value referenced from outside the value DAG: outputs, state live-outs, branch conditions. The live roots
-        for DCE, and (with the in-DAG operand and phi-arm references) the complete use-site set for a use-count.
+        Every value referenced from outside the value DAG: outputs, state live-outs, branch conditions. With the in-DAG
+        operand and phi-arm references, the complete use-site set for a use-count.
         """
         refs = [out.value for out in self.outputs] + [slot.live_out for slot in self.state_slots]
         for block in self.blocks:

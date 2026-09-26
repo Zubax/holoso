@@ -41,7 +41,6 @@ from holoso._hir import (
     Relation,
     IntComparison,
     BoolAnd,
-    BoolConst,
     BoolNot,
     BoolOr,
     BoolType,
@@ -55,10 +54,11 @@ from holoso._hir import (
     InPort,
     Operation,
     Operator,
-    Signature,
     Type,
     optimize,
 )
+from holoso._hir._const import BoolConst
+from holoso._hir._types import Signature
 from holoso._hir import Branch, BoolSelect, FloatDiv as HirFloatDiv, Phi, FloatSelect
 from holoso._hir import (
     FloatAbs,
@@ -248,8 +248,10 @@ def test_div_by_nonpow2_const_becomes_reciprocal_multiply() -> None:
 
 
 _WIDE_OPTIONS = dataclasses.replace(OPTIONS, ffmt=FloatFormat(12, 24))
-"""An exponent field wide enough to hold values the compiler's own binary64 cannot, which is what makes the host-side
-declinations below reachable through the public API at all."""
+"""
+An exponent field wide enough to hold values the compiler's own binary64 cannot, which is what makes the host-side
+declinations below reachable through the public API at all.
+"""
 
 
 def test_a_reciprocal_the_host_cannot_hold_leaves_the_division_standing() -> None:
@@ -458,7 +460,7 @@ def test_the_absorbing_zero_outranks_a_composition() -> None:
 def test_a_composition_can_migrate_the_multiplier_the_kernel_needs() -> None:
     # The composed constant faces operator availability on its own: a product landing exactly on a power of two
     # selects the exponent scaler, so a kernel spelling only general products can be refused over an operator it
-    # never asked for. Documented under the optimizer's DEFERRED note rather than prevented.
+    # never asked for. Documented in DESIGN.md (MIR) rather than prevented.
     options = Options(OperatorOptions(fmul=FMulOptions()), ffmt=FMT)
 
     def f(a: float) -> float:
@@ -591,8 +593,8 @@ def test_deep_cfg_does_not_overflow_recursion() -> None:
     # Regression: the HIR/MIR/LIR reverse-postorder traversals walked the block CFG recursively, so a deep CFG -- here
     # nested unrolled loops chaining thousands of blocks -- overflowed Python's recursion limit with a RecursionError;
     # the iterative DFS compiles cleanly. The whole front-to-back pipeline runs (each layer contains a CFG DFS), and
-    # the bit-exact model is checked against the plain-Python reference.
-    options = Options(OperatorOptions(fadd=FAddOptions(), fcmp=FCmpOptions()), ffmt=FMT)
+    # the bit-exact model is checked against the plain-Python reference; the allocation's quality is beside the point.
+    options = Options(OperatorOptions(fadd=FAddOptions(), fcmp=FCmpOptions()), ffmt=FMT, regalloc_effort=0)
     sim = _synth(_deep_cfg_kernel, options, name="deep_cfg").numerical_model.elaborate()
     for x in (0.5, 2.0, 8.0):  # acc stays positive -> +900 every time; 0.5/2.0/8.0 are exact in ZKF
         assert float(sim.run(x)[0]) == _deep_cfg_kernel(x)
@@ -613,10 +615,10 @@ def test_absorbing_and_identity_boolean_connectives_reduce() -> None:
     builder.ret()
     reduced = optimize(builder.finish(), DEFAULT_IFCONV_MAX_OPS)
     out = {o.name: reduced.nodes[o.value] for o in reduced.outputs}
-    assert out["or_abs"] == BoolConst(True)  # x or True  -> True   (absorbing)
-    assert out["and_abs"] == BoolConst(False)  # x and False -> False  (absorbing)
-    assert isinstance(out["or_id"], InPort) and out["or_id"].name == "x"  # x or False -> x  (identity dropped)
-    assert isinstance(out["and_id"], InPort) and out["and_id"].name == "x"  # x and True -> x  (identity dropped)
+    assert out["or_abs"] == BoolConst(True)
+    assert out["and_abs"] == BoolConst(False)
+    assert isinstance(out["or_id"], InPort) and out["or_id"].name == "x"
+    assert isinstance(out["and_id"], InPort) and out["and_id"].name == "x"
 
 
 def _hir_of(target: object, ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Hir:
@@ -960,10 +962,9 @@ def test_if_conversion_repoints_loop_header_phi_arms() -> None:
 
 
 def test_speculatable_hir_operators_map_to_error_free_hardware() -> None:
-    # The speculation flag and the hardware error sideband are two declarations of one fact: division is the only
-    # error-bearing operator today, and it must stay unspeculatable. A future error-bearing operator must declare
-    # speculatable=False (the default) on its HIR side, or if-conversion would assert the module error flag for a
-    # never-taken path.
+    # The speculation flag and the hardware error sideband are two declarations of one fact: an error-bearing operator
+    # such as division must keep the default speculatable=False on its HIR side, or if-conversion would assert the
+    # module error flag for a never-taken path.
     assert FDivOperator(FMT, FDivOptions()).error_ports and not HirFloatDiv.speculatable
 
 
@@ -971,7 +972,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
     # Conversion turns control dependence into data dependence: when a diamond's merged results are entirely unused,
     # its condition cone becomes ordinary dead code -- INCLUDING an error-bearing division feeding only the
     # condition, which then reports nothing (exactly as an unused division without a branch around it reports
-    # nothing today). This pins the documented semantics of the error sideband: executed operators only.
+    # nothing). This pins the documented semantics of the error sideband: executed operators only.
     def f(a: float, b: float, x: float) -> float:
         if bool(a / b):
             y = x + 1.0
@@ -991,8 +992,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
 def test_operator_layer_does_not_import_hir() -> None:
     """
     The hardware operator models are a base vocabulary layer below the IR pipeline; they must never reach back into the
-    semantic HIR -- the smell W12 removed (importing a relation enum from `_hir`). Locks the severed edge
-    transitively.
+    semantic HIR, even transitively.
     """
     offenders = forbidden_imports("holoso._operators", "holoso._hir")
     assert not offenders, f"the operator layer transitively imports HIR: {offenders}"
@@ -1763,7 +1763,8 @@ def test_a_loop_phi_is_folded_once_its_latch_arm_has_been_rebuilt() -> None:
     hir = optimize(
         lower(never_uniform_until_the_latch_arm_is_rebuilt, DEFAULT_UNROLL_MAX_TRIPS).hir, DEFAULT_IFCONV_MAX_OPS
     )
-    assert [node.type for node in hir.nodes.values() if isinstance(node, Phi)] == [HirFloatType()]  # the counter's
+    # Only the counter's phi survives.
+    assert [node.type for node in hir.nodes.values() if isinstance(node, Phi)] == [HirFloatType()]
     out = hir.nodes[hir.outputs[0].value]
     assert isinstance(out, Operation) and [hir.nodes[o] for o in out.operands] == [
         InPort("x", HirFloatType()),
@@ -1878,14 +1879,54 @@ def test_a_state_slot_resetting_to_a_value_the_format_cannot_hold_is_refused() -
             self.s = 1e-12
 
         def __call__(self, x: float) -> float:
+            previous = self.s
             self.s = x
-            return x
+            return x + previous
 
     with pytest.raises(UnsupportedConstruct) as exc:
         holoso.synthesize(TinyReset().__call__, OPTIONS, name="tiny_reset")
     assert exc.value.message == (
         "state slot 's' reset 1e-12 degrades to 0.0 in FloatFormat(wexp=6, wman=18); widen wexp or rescale"
     )
+
+
+def test_a_state_slot_nothing_reads_is_not_refused_over_its_reset() -> None:
+    # The unread counterpart of the refusal above: the slot is dead code, so its reset is never judged.
+    class UnreadTinyReset:
+        def __init__(self) -> None:
+            self.s = 1e-12
+
+        def __call__(self, x: float) -> float:
+            self.s = x
+            return x + 1.0
+
+    sim = _synth(UnreadTinyReset().__call__, name="unread_tiny_reset").numerical_model.elaborate()
+    reference = UnreadTinyReset()
+    for x in (0.5, -2.0):
+        assert [float(value) for value in sim.run(x)] == [reference(x), reference.s]
+
+
+def test_a_state_slot_nothing_reads_costs_nothing() -> None:
+    # A slot is observable only through its read, a public attribute's `state_` port being an ordinary output of its
+    # live-out: an unread private slot takes the cone computing it along, and an unread public one keeps only its port.
+    class Unread:
+        def __init__(self) -> None:
+            self._last = 0.0
+            self.shown = 0.0
+
+        def __call__(self, x: float, y: float) -> float:
+            self._last = y * 7.0
+            self.shown = x - y
+            return x + y
+
+    result = _synth(Unread().__call__, name="unread_slots")
+    assert _instantiated(result) == {"holoso_fadd"}
+    assert [port.name for port in result.output_ports] == ["out_0", "state_shown"]
+    sim = result.numerical_model.elaborate()
+    reference = Unread()
+    for x, y in [(1.0, 2.0), (3.5, -1.25), (-0.5, 0.75)]:
+        want = [reference(x, y), reference.shown]
+        assert [float(value) for value in sim.run(x, y)] == want
 
 
 def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:

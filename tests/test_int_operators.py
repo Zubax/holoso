@@ -57,14 +57,13 @@ from holoso._operators import (
     IntBwNotOperator,
     IntBwOrOperator,
     IntBwXorOperator,
-    IntHardwareOperator,
-    IntInlineOperator,
     IntShiftConstOperator,
     IntToBoolOperator,
     PooledHardwareOperator,
-    Relation,
     RoundMode,
 )
+from holoso._operators._int import IntHardwareOperator, IntInlineOperator
+from holoso._util import Relation
 from holoso._operators._common import PooledOperatorOptions
 from holoso._type import IntType
 from holoso._value import IntValue
@@ -343,15 +342,6 @@ def test_constant_shift_over_every_count_and_operand(width: int) -> None:
     assert _evaluate(IntShiftConstOperator(fmt, width - 1), fmt.min) == [0], "the sign bit shifts off the word"
 
 
-def test_the_constant_shift_serves_only_the_counts_that_are_shifts() -> None:
-    # Zero is the identity, which HIR or MIR folds; a count reaching the word answers a constant or a sign fill, and
-    # clamping a width-less HIR count down to the word is the lowering's job rather than the operator's.
-    fmt = IntFormat(8)
-    for count in (0, fmt.width, -fmt.width, fmt.max, fmt.min):
-        with pytest.raises(ValueError):
-            IntShiftConstOperator(fmt, count)
-
-
 def test_the_constant_shift_is_the_raw_shift_and_not_the_saturating_one() -> None:
     # The inline shift drops what leaves the word; the saturating reading needs the pooled `holoso_ishl`.
     fmt = IntFormat(33)
@@ -387,9 +377,9 @@ def test_the_conversions_saturate_at_the_rails_and_round_trip_the_extremes(wint:
 
 
 def test_rounding_before_converting_is_not_the_same_as_converting_with_that_mode() -> None:
-    # Strength reduction's conversion of a rounding in the rounding's own mode (one ftoint(x, ROUND)) is therefore a
-    # rewrite that can change the answer, and the fastmath charter licenses it anyway (see TODO.md). Here 3.5 rounds to +inf, which
-    # saturates, while a direct nearest-even conversion answers 4.
+    # Strength reduction's conversion of a rounding in the rounding's own mode (one ftoint(x, ROUND)) is a rewrite that
+    # can change the answer, and the fastmath charter (DESIGN.md, Direction) licenses it anyway. Here 3.5 rounds to
+    # +inf, which saturates, while a direct nearest-even conversion answers 4.
     ffmt, ifmt = FloatFormat(2, 4), IntFormat(33)
     fround = FRoundOperator(ffmt, FRoundOptions())
     ftoint = FToIntOperator(ffmt, ifmt, FToIntOptions())

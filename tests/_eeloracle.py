@@ -47,7 +47,8 @@ import numpy as np
 
 from holoso._eel._annotations import unaliased
 from holoso._eel._names import indexed_names, spelled
-from holoso._hir import Hir, HirEvaluator, InPort, NoNumber
+from holoso._hir import Hir, InPort, NoNumber
+from holoso._hir._evaluate import HirEvaluator
 
 from ._modelref import flatten_value, port_name
 

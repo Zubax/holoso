@@ -11,8 +11,8 @@ boundary drain (the fetch refill plus the result-landing tail) for zero work.
 This pass threads such a block `M` onto its predecessors: each predecessor's `Jump` is retargeted from `M` to
 `M`'s successor `S`, and `M`'s phi arms compose into `S`'s phis -- an arm `(M, v)` of an `S` phi becomes one
 arm per predecessor `Q` of `M` (`(Q, a_Q)` when `v` is an `M` phi `phi(Q: a_Q)`, else the pass-through value
-`(Q, v)`). The forbidden branch-block-arm shape cannot arise: a predecessor `Q` is `Jump`-terminated, so `Q` is
-never the branching block `S`.
+`(Q, v)`). No composed arm comes from a branching block, whose install would fire on every edge out of it: every
+predecessor `Q` of `M` is `Jump`-terminated.
 
 Scope. The pass fires only when every `M` phi is consumed SOLELY as the arm an `S` phi takes FROM `M`, the one arm
 composition rewrites; a merge phi reached any other way keeps `M` a real branch (see DESIGN.md). Chained merges (an

@@ -64,31 +64,22 @@ simplifications, which is why the middle-layer cleanup left them out.
 
 ## LIR
 
-### Pruning state slots nothing reads
+### Copy-only arms behind an overlapping predecessor
 
-A state slot whose live-in nothing reads is unobservable -- a public attribute's `state_<attr>` port reads the live-out
-as an ordinary output -- yet it keeps its register, its install and its whole computation cone: `self._last = y * 7.0`,
-never read, costs a register and a multiply, and fir keeps the shifted-out `_line_0` (8 registers where 7 suffice). The
-fix belongs in HIR dead-code elimination: root the slots through their state reads instead of unconditionally, so a
-slot survives only while its live-in is read, and drop the others. That subsumes LIR's
-`_drop_redundant_state_slots`, whose aliases are exactly the unread members. It is deferred because about 15 LIR
-witness tests build their shapes out of write-only slots (`test_aliased_state_slots_merge_onto_one_register`,
-`test_cfg_write_only_state_slot_is_reserved`, `test_chained_slot_live_in_blocks_early_install`,
-`test_two_slots_ending_on_one_value_hold_it_once_and_copy_once`, the `shared_live_out` steering witnesses, the
-boundary-install and gap-tenant verification tests and their cosimulation twins) and must be rebuilt on slots that are
-read, while the write-only slot reservation in `_bankalloc.py` becomes unreachable and goes with them.
+The LIR build threads an arm block holding nothing but phi-arm installs into its predecessor wherever that shortens
+the arm's path and lengthens none. An arm whose predecessor overlaps keeps its frame, about four cycles on that path:
+pid's first arm, foc's and imu_fusion's first arms, image_agc_streamed's and majority_voter's block 2. Threading them
+makes the predecessor drain into the merge, trading latency between the paths (a probe moved `x / y if c else 0.0`
+from 6/18 to 4/20 cycles); flux_observer's arm sits behind the empty entry, whose frame would grow from 2 to 4 PCs.
+Gaining here needs overlap across a multi-predecessor edge.
 
-### Blocks that only install settled phi-arm copies
+### Arm-threading trial cost
 
-A branch arm whose block holds nothing but phi-arm copies of values already settled (constants, inputs, state reads,
-landed results) still drains and takes its own PCs, about four cycles on that path: finite_set_current_controller's
-boolean constant arms (160 -> 156 on its shortest path), foc and imu_fusion arm blocks, image_agc_streamed,
-octave_index, remainder. The narrowest sound fix hands the copies to a predecessor that spills nothing, landing them on
-its terminator so the arm block becomes empty and takes no PC; the phi register then interferes with the other arm's
-live values, which can cost a register under pressure. Arms whose predecessor spills (pid, foc's and imu_fusion's
-first arms) or is the empty entry (flux_observer) gain nothing without draining overlaps into merges. Threading the
-empty arm straight into the merge trades latency between the paths instead (a probe moved `x / y if c else 0.0` from
-6/18 to 4/20 cycles), so a general version needs a schedule-aware acceptance test and was sized above medium.
+Arm threading judges each candidate by rescheduling and reconverging the whole graph, so build time grows with the
+candidate count times the graph size: negligible on every example, but a generated 4,896-block kernel with 1,693
+threadable arms spends about 13 minutes in it at regalloc effort 0 (0.45 s per candidate). A candidate's effect is
+local to its predecessor's frame and the merge phi's interference, so an incremental judgement is possible; it is
+deferred until a real kernel needs it.
 
 ### List-scheduler priority
 

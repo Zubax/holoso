@@ -33,7 +33,7 @@ from holoso._eel._pe import partial_evaluate
 
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from holoso._eel._print import print_eel
-from holoso._hir import HirEvaluator
+from holoso._hir._evaluate import HirEvaluator
 
 from ._eeloracle import assert_hir_matches_reference
 from ._public import strip_locations

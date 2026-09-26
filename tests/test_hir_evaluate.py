@@ -1,5 +1,5 @@
 """
-Acceptance gate + independence guard for the HIR evaluator (`holoso._hir.HirEvaluator`) and the front-end
+Acceptance gate + independence guard for the HIR evaluator (`holoso._hir._evaluate.HirEvaluator`) and the front-end
 differential-oracle harness (`tests/_eeloracle.py`).
 
 Hand-built builder graphs pin the semantics no lowered kernel reaches: the poison family, the integer vocabulary,
@@ -34,7 +34,6 @@ from holoso._hir import (
     FloatType,
     Hir,
     HirBuilder,
-    HirEvaluator,
     IntAdd,
     IntConst,
     IntDivFloor,
@@ -43,6 +42,7 @@ from holoso._hir import (
     IntType,
     NoNumber,
 )
+from holoso._hir._evaluate import HirEvaluator
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS

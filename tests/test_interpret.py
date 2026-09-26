@@ -1,5 +1,5 @@
 """
-Acceptance gate + independence guard for the MIR interpreter (`holoso._mir.MirInterpreter`).
+Acceptance gate + independence guard for the MIR interpreter (`holoso._mir._interpret.MirInterpreter`).
 
 The interpreter is the schedule-independent bit-exact oracle: it evaluates the MIR dataflow graph directly, sharing the
 front/mid-end and `operator.evaluate` with the numerical model but NONE of the LIR scheduling/binding/regalloc/overlap
@@ -19,7 +19,8 @@ import pytest
 
 from holoso._backend.numerical import NumericalSimulator
 from holoso._eel import lower as lower_frontend
-from holoso._mir import MirOptions, MirInterpreter, MirPhi, lower as lower_to_mir
+from holoso._mir import MirOptions, MirPhi, lower as lower_to_mir
+from holoso._mir._interpret import MirInterpreter
 from holoso._type import BoolType, FloatFormat, IntType
 from holoso._value import FloatValue, coerce_scalar
 

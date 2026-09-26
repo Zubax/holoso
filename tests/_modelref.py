@@ -27,12 +27,14 @@ from holoso import (
 )
 from holoso._api import _mir_options
 from holoso._mir import MirOptions
-from holoso._lir import Early, Lir, LirBlock, RegallocTuning, WideCopy, WideStateSlot, build
+from holoso._lir import Lir, LirBlock, RegallocTuning, WideStateSlot, build
+from holoso._lir._ir import Early, WideCopy
 from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
 from holoso._operators._common import PooledOperatorOptions
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
-from holoso._mir import Mir, MirInterpreter, lower as lower_to_mir
+from holoso._mir import Mir, lower as lower_to_mir
+from holoso._mir._interpret import MirInterpreter
 from holoso._type import FloatFormat, IntFormat
 from holoso._value import FloatValue, ScalarValue
 from holoso._eel._names import port_name as port_name
@@ -73,6 +75,12 @@ class OptionsCase:
 
     label: str
     make_options: Callable[[FloatFormat], Options]
+
+
+def block_makespan(block: LirBlock) -> int:
+    """The block's install-inclusive makespan: the last cycle an operation commits or a copy issues."""
+    commits = [op.commit_cycle for op in block.ops] + [op.commit_cycle for op in block.inline_ops]
+    return max([0, *commits, *(copy.issue_cycle for copy in block.copies)])
 
 
 def build_model(lir: Lir) -> NumericalSimulator:
@@ -166,7 +174,6 @@ def default_tolerance(
 
 
 def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
-    """Whether `actual` is within `atol + rtol*|expected|` of `expected` (infinities must match exactly)."""
     if math.isinf(expected) or math.isinf(actual) or math.isnan(expected) or math.isnan(actual):
         return actual == expected
     return abs(actual - expected) <= atol + rtol * abs(expected)
@@ -246,7 +253,6 @@ FROZEN_TUNING = RegallocTuning(effort=3000, register_price=2.0)
 
 
 def early_install(lir: Lir, slot: WideStateSlot) -> tuple[LirBlock, WideCopy]:
-    """The copy that installs an early slot, with the block holding it."""
     assert isinstance(slot.install, Early)
     ((block, copy),) = [
         (b, c)
@@ -258,7 +264,6 @@ def early_install(lir: Lir, slot: WideStateSlot) -> tuple[LirBlock, WideCopy]:
 
 
 def build_lir(mir: Mir, name: str, tuning: RegallocTuning = _DEFAULT_TUNING) -> Lir:
-    """The default machine build shared by the white-box tests."""
     return build(mir, name, DEFAULT_FETCH_STAGES, tuning)
 
 
@@ -339,11 +344,11 @@ def overlap_spill_kernel(x: float, y: float, z: float) -> float:
     for `w`'s in-flight landing in the successor frame. The unspeculatable division in the else arm keeps the diamond
     a real branch under default if-conversion (so the spill crosses a genuine branch, replicated onto both arms).
     """
-    w = (x * z + y) * z + y  # a wide chain whose result outlives the early comparison's commit
+    w = (x * z + y) * z + y
     if x < y:
-        r = w + 1.0  # then-arm reads the spilled w
+        r = w + 1.0
     else:
-        r = w / (y * y + 1.0)  # else-arm reads the spilled w; the division keeps this a branch (structurally nonzero)
+        r = w / (y * y + 1.0)  # structurally nonzero divisor
     return r
 
 
@@ -357,12 +362,12 @@ def overlap_dead_arm_spill_kernel(x: float, y: float, z: float) -> float:
     catch, since the numerical model shares the same register file). The else arm's value must therefore be checked
     against the source semantics, not just RTL==model. The unspeculatable division keeps this a real branch.
     """
-    v = x + y  # lives across the branch, read only in the else arm
-    w = (x * z + y) * z + y  # wide chain commits late -> spills into both arms; DEAD in the else arm
+    v = x + y
+    w = (x * z + y) * z + y
     if x < y:
-        r = w * 2.0  # then-arm uses the spilled w
+        r = w * 2.0
     else:
-        a = v + z  # else-arm reads v (must survive w's dead-arm spill); w is unused here
+        a = v + z
         r = a / (z * z + 1.0)
     return r
 
@@ -376,7 +381,7 @@ def const_branch_kernel(x: float, y: float) -> float:
     """
     r = x
     if x > y:
-        if (x * 0.0) > -1.0:  # constant-true under the graph's x*0 identity alone
+        if (x * 0.0) > -1.0:
             r = x + 1.0
         else:
             r = x + 2.0
@@ -385,7 +390,7 @@ def const_branch_kernel(x: float, y: float) -> float:
 
 def diamond_then_loop_kernel(x: float, y: float) -> float:
     """
-    Empty merge-block elimination (B4) corner shared by the cosim test and its white-box twin. The variable-divisor
+    Empty merge-block elimination corner shared by the cosim test and its white-box twin. The variable-divisor
     division keeps the diamond a REAL branch (unspeculatable), so its merge stays a separate block; that merge holds
     only the merged phi (no operation) and jumps into the following loop header, making it an empty pass-through merge
     whose predecessors (the two diamond arms) are both jump-terminated. Merge threading eliminates it, composing the
@@ -403,19 +408,19 @@ def diamond_then_loop_kernel(x: float, y: float) -> float:
 
 def overlap_div_err_kernel(x: float, y: float, z: float) -> float:
     """
-    Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division -- the
-    one error-bearing op -- commits late, so its result spills past the shrunk terminator. The data write lands in the
-    taken arm correctly, but the err_pc diagnostic latches `pc - fetch_lag` when the write-
-    enable executes, fetch_lag steps after its write word; if the terminator redirected to the NON-fall-through arm by
-    then, err_pc would capture the successor frame instead of the division's step. The shrink floor must keep that
-    latch in-block. `x < z` selects the non-fall-through (true) arm, the only arm with a PC discontinuity; `y == 0`
-    makes the division error. The else arm's division keeps this a real branch under default if-conversion.
+    Cross-block overlap err_pc corner (shared by the white-box twin and the directed err_pc cosim). A division commits
+    late, so its result spills past the shrunk terminator. The data write lands in the taken arm correctly, but the
+    err_pc diagnostic latches `pc - fetch_lag` when the write-enable executes, fetch_lag steps after its write word; if
+    the terminator redirected to the NON-fall-through arm by then, err_pc would capture the successor frame instead of
+    the division's step. The shrink floor must keep that latch in-block. `x < z` selects the non-fall-through (true)
+    arm, the only arm with a PC discontinuity; `y == 0` makes the division error. The else arm's division keeps this a
+    real branch under default if-conversion.
     """
     q = x / y
     if x < z:
-        r = q + 1.0  # non-fall-through arm: a PC redirect coincides with the division's err-latch cycle
+        r = q + 1.0
     else:
-        r = q / (z * z + 1.0)  # structurally nonzero divisor; keeps the diamond a real branch
+        r = q / (z * z + 1.0)  # structurally nonzero divisor
     return r
 
 
@@ -636,9 +641,10 @@ class ChainedSlots:
         self._b = 0.0
 
     def __call__(self, x: float) -> float:
+        previous = self._a
         self._a = self._b
         self._b = x + 1.0
-        return self._a * 2.0 + (x * 1.5) / (x - 0.5)
+        return self._a * 2.0 + previous + (x * 1.5) / (x - 0.5)
 
 
 class SelectHold:
@@ -734,13 +740,11 @@ def bool_phi_swap_computed_loop(x: bool, n: float) -> tuple[bool, bool]:
 
 def branchy_swap_mixed_arm_loop(x: float, d: float, n: float) -> tuple[float, float]:
     """
-    A loop whose header phis mix arm kinds across a real in-body branch (the unspeculatable division keeps it a
-    branch): one diamond arm carries computed values, the other a phi-sourced pair. Phi sources being settled, a
-    block's push classification narrows after its computed arm coalesces, and the next allocation round's coalescing
-    holds that arm TRANSIENTLY de-coalesced -- its install past the shortened boundary -- so this kernel pins that the
+    A loop whose header phis mix arm kinds across a real in-body branch (the unspeculatable division keeps it a branch):
+    one diamond arm carries computed values, the other a phi-sourced pair. An intermediate install-fixpoint round's
+    coalescing can leave that arm's install landing past the round's terminator, so this kernel pins that the
     interference residence tolerates the transient (the failure mode is a loud residence assert at build time, not a
-    value divergence). The pin/latch regrowth backstops in the same fixpoint remain analytically motivated with no
-    known witness kernel.
+    value divergence).
     """
     a = 1.0
     b = 2.0
@@ -761,13 +765,12 @@ def overlap_drained_passthrough_kernel(x: float, y: float, z: float) -> float:
     no-work arm. This exercises the drained-block-receiving-a-spill path and pins the `term_offset <= drained
     boundary` invariant: the spill lands within the successor's drained-boundary cap because the predecessor's
     issue-side envelope already tracks `w`'s late write word, so the successor-local spill is only the fixed
-    fetch/latch gap regardless of the chain depth (a reviewer hypothesized a chain-depth-scaled spill could exceed the
-    cap; it cannot, and this kernel locks that in). The else arm's unspeculatable division keeps the diamond a real
+    fetch/latch gap regardless of the chain depth. The else arm's unspeculatable division keeps the diamond a real
     branch.
     """
     w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y
     if x < y:
-        r = w  # then arm: pass-through, no work; w spills in and is the live-out to the merge
+        r = w
     else:
         r = w / (z * z + 1.0)
     return r * 2.0
@@ -781,10 +784,10 @@ def overlap_livein_branch_arm_kernel(x: float, y: float, z: float) -> float:
     issue-side envelope (the resident condition adds no read floor) rather than pinning to the drained boundary. Every
     divisor is structurally nonzero, so each diamond stays a real branch.
     """
-    c = z > 2.0  # a live-in boolean condition, computed in the entry block (both arms reachable over the input range)
-    w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y  # wide chain, spills past the shrunk entry terminator
+    c = z > 2.0  # both arms reachable over the input range
+    w = ((((x * z + y) * z + y) * z + y) * z + y) * z + y
     if x < y:
-        if c:  # this arm branches on the LIVE-IN c while receiving w's spill
+        if c:
             r = w + 1.0
         else:
             r = w / (z * z + 1.0)
@@ -808,16 +811,17 @@ class SlotSwap:
     def step(self, x: float) -> float:
         old_a = self._a
         old_b = self._b
-        self._a = old_b  # swap: a <- old b
-        self._b = old_a  # swap: b <- old a
-        return old_a * 2.0 + old_b * 4.0 + x  # exact for integer x; reads both OLD slot values to observe the swap
+        self._a = old_b
+        self._b = old_a
+        return old_a * 2.0 + old_b * 4.0 + x  # exact for integer x
 
 
 class SharedLiveOut:
     """
-    Two slots ending the transaction holding one value. The read-modify-write pair frees `a`'s home register
-    mid-transaction and the allocator reuses it, so a boundary-installing slot's register also carries opcode writes --
-    the shape the emitter used to refuse outright. Shared by the backend elaboration/premise test and its cosim twin.
+    Two slots ending the transaction holding one value: `b` commits it in place and `a` copies it at the boundary.
+    Both live-ins are read first, which frees `a`'s home register mid-transaction for the allocator to reuse, so a
+    boundary-installing slot's register also carries opcode writes.
+    Shared by the backend elaboration/premise test and its cosim twin.
     """
 
     def __init__(self) -> None:
@@ -825,17 +829,18 @@ class SharedLiveOut:
         self.b = 1.0
 
     def step(self, x: float) -> float:
+        self.a = self.b + self.a
         self.a = x + self.a
-        self.a = x + self.a
+        self.a = x * self.a
         self.b = self.a
         return self.b
 
 
 class SharedLiveOutBool:
     """
-    The boolean-bank twin (emission is bank-specific, so each bank needs its own coexistence witness): three slots
-    ending the transaction holding one value, with `d`'s early read freeing `a`'s register so the allocator lands
-    an opcode write on it -- a boundary-installing bool slot whose own register also takes one.
+    The boolean-bank twin (emission is bank-specific, so each bank needs its own coexistence witness): `a` and `b`
+    ending the transaction holding one value, with the early reads freeing `a`'s register so the allocator lands an
+    opcode write on it -- a boundary-installing bool slot whose own register also takes one.
     """
 
     def __init__(self) -> None:
@@ -846,7 +851,7 @@ class SharedLiveOutBool:
     def step(self, x: bool, y: bool) -> tuple[bool, bool, bool]:
         keep = self.d
         self.d = x and self.a
-        self.a = y or self.a
+        self.a = y or (self.a and self.b)
         self.a = x and self.a
         self.b = self.a
         return keep, self.b, self.d

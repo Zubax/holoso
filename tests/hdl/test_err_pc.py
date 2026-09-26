@@ -30,7 +30,7 @@ from holoso import (
 from holoso._operators import FDivOperator
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._lir import pooled_write_word
+from holoso._lir._ir import pooled_write_word
 from holoso._mir import MirOptions, lower as lower_to_mir
 
 from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock

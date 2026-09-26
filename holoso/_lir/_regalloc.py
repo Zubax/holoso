@@ -26,9 +26,8 @@ swapping moves each operand from one port's mux to the other's and permutes the 
 operator's `swap_output_permutation`, a pure relabeling at zero latency (Chen & Cong, ASP-DAC 2004). Binding
 belongs to it for the same reason: the instance a firing runs on decides which ports read its operands and which
 lanes write its results, and the scheduler's first-free choice is only the seed. A firing may move to any instance of
-its class whose busy windows -- the other firings' in the block and the busy residue an overlapping predecessor
-left, the cycles its instance stays busy in this block's frame -- leave its own window free, so neither the instance
-count nor the latency changes.
+its class where the other firings of its block leave its busy window free, so neither the instance count nor the
+latency changes.
 
 The search starts from the seed, a greedy allocation guided by port affinity, refined by simulated annealing over value
 moves, instance moves, pair swaps and orientation flips with incremental cost deltas, then a first-improvement descent
@@ -184,10 +183,9 @@ type _WriterKey = _StaticWriter | InlineWriteSource | MoveWriteSource
 class Firing:
     """
     One pooled firing as the bank's objective sees it: the leader the build keys the orientation and the binding by,
-    the operator, the block and block-local issue cycle, the instance the scheduler bound and whether the annealer may
-    rebind it (its class has more than one realized instance and its busy window ends inside the block, so it leaves
-    no residue on a successor), its operand sources in source order (a value of this bank or a constant-pool word),
-    and the tapped output ports landing in this bank with the value each writes. A firing tapping nothing into this
+    the operator, the block and block-local issue cycle, the instance the scheduler bound, its operand sources in source
+    order (a value of this bank or a constant-pool word), and the tapped output ports landing in this bank with the
+    value each writes. A firing tapping nothing into this
     bank (a comparator's boolean taps) still reads its wide operands.
     """
 
@@ -196,7 +194,6 @@ class Firing:
     block: int
     issue: int
     seed_instance: int
-    bindable: bool
     reads: list[_Source]
     writes: list[tuple[int, ValueId]]
 
@@ -214,8 +211,7 @@ class ColoringProblem:
     value may join; `fresh_start` is the first register index above the pinned registers; `firings` are the bank's
     pooled firings, whose reads and writes are keyed by the values here (a coalesced class appears as its leader, so a
     merged register is read and written by every member's port and lane); `instances` is the realized instance count
-    per operator, the bound a firing may be rebound within; `entry_busy` is, per (block, operator, instance), the
-    block-local cycle before which the instance is still busy with an overlapping predecessor's firing. The boolean
+    per operator, the bound a firing may be rebound within. The boolean
     bank passes no firings, only its residual arms and slot installs, so its objective is nearly the register count.
     """
 
@@ -227,7 +223,6 @@ class ColoringProblem:
     fresh_start: int
     firings: list[Firing]
     instances: dict[PooledHardwareOperator, int]
-    entry_busy: dict["InstanceSlot", int]
     tuning: RegallocTuning
 
 
@@ -261,7 +256,7 @@ class _Lane(NamedTuple):
     port: int
 
 
-class InstanceSlot(NamedTuple):
+class _InstanceSlot(NamedTuple):
     """One instance of a pooled class within one block: what a firing occupies for its busy window."""
 
     block: int
@@ -295,7 +290,7 @@ class _State:
         self.price = problem.tuning.register_price
         self.flip = list(start.flip)
         self.instance = list(start.instance)
-        self.occupancy: dict[tuple[InstanceSlot, int], int] = {}  # (slot, cycle) -> the firing busy there
+        self.occupancy: dict[tuple[_InstanceSlot, int], int] = {}  # (slot, cycle) -> the firing busy there
         self.assign: dict[ValueId, int] = {}
         self.members: dict[int, set[ValueId]] = {}
         self.port_sources: dict[_Port, Counter[_ReadSource]] = {}
@@ -375,9 +370,9 @@ class _State:
             port = permutation[port]
         return _Lane(firing.operator, self.instance[i], port)
 
-    def _slot(self, i: int, instance: int) -> InstanceSlot:
+    def _slot(self, i: int, instance: int) -> _InstanceSlot:
         firing = self.problem.firings[i]
-        return InstanceSlot(firing.block, firing.operator, instance)
+        return _InstanceSlot(firing.block, firing.operator, instance)
 
     def _read_source(self, source: _Source) -> _ReadSource:
         return source if isinstance(source, WideConstRef) else self.assign[source]
@@ -448,11 +443,8 @@ class _State:
         self._attach(i, 1)
 
     def instance_free(self, i: int, instance: int) -> bool:
-        """Whether firing `i` may run on `instance`: past the inherited residue, clashing with no other firing there."""
         firing = self.problem.firings[i]
         slot = self._slot(i, instance)
-        if firing.issue < self.problem.entry_busy.get(slot, 0):
-            return False
         return all(self.occupancy.get((slot, cycle), i) == i for cycle in firing.window)
 
     def move_instance(self, i: int, instance: int) -> None:
@@ -609,7 +601,7 @@ class _Decisions:
     @classmethod
     def of(cls, problem: ColoringProblem) -> "_Decisions":
         flippable = [i for i, firing in enumerate(problem.firings) if firing.operator.is_commutative]
-        bindable = [i for i, firing in enumerate(problem.firings) if firing.bindable]
+        bindable = [i for i, firing in enumerate(problem.firings) if problem.instances[firing.operator] > 1]
         by_class: dict[PooledHardwareOperator, list[int]] = {}
         for i in bindable:
             by_class.setdefault(problem.firings[i].operator, []).append(i)
@@ -759,8 +751,7 @@ def _compact(problem: ColoringProblem, assign: dict[ValueId, int]) -> tuple[dict
 def _canonical_instances(problem: ColoringProblem, instance: list[int]) -> dict[ValueId, int]:
     """
     Per firing leader, its instance relabeled per class by first use in block, cycle, leader order, so the labels
-    are dense and every labeled instance is used. The relabeling is one bijection per class over every block, so the
-    cross-seam residue the search honored on the raw labels holds on the canonical ones too.
+    are dense and every labeled instance is used.
     """
     labels: dict[tuple[PooledHardwareOperator, int], int] = {}
     used: Counter[PooledHardwareOperator] = Counter()
@@ -778,7 +769,6 @@ def color(problem: ColoringProblem) -> Coloring:
     """Allocate one bank."""
     for operator in {firing.operator for firing in problem.firings if firing.operator.is_commutative}:
         _check_swappable(operator)
-    assert all(not firing.bindable or problem.instances[firing.operator] > 1 for firing in problem.firings)
     ports_of, writers_of = _seed_incidence(problem)
     seed = _Snapshot(
         _greedy(problem, ports_of, writers_of),

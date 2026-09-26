@@ -159,9 +159,9 @@ def test_noop_state_writeback_streams_and_matches_reference() -> None:
 
 
 def test_write_only_state_slot_matches_reference() -> None:
-    # The behavior half of test_schedule.py test_cfg_write_only_state_slot_is_reserved: a state slot written on every
-    # arm but never read before the write. The returned value is the assign-and-return leaf of the public `acc`
-    # state, so the model exposes it through the `state_acc` port; both arms' values are exact independent literals.
+    # A public state slot written on every arm and never read keeps no register, only its port. The returned value is
+    # the assign-and-return leaf of the public `acc` state, so the model exposes it through the `state_acc` port; both
+    # arms' values are exact independent literals.
     class WriteOnlyBranch:
         def __init__(self) -> None:
             self.acc = 0.0

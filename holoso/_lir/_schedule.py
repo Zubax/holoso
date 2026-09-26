@@ -38,9 +38,8 @@ class Schedule:
     The scheduler's output: per-value issue cycle, per pooled firing leader the bound instance and the members, and
     the makespan. Members of one firing share an issue cycle, an instance, and a leader (the smallest member id); the
     LIR build collapses each leader group into one scheduled op with one write per member. The binding is the
-    first-free one and only a SEED, the binding the register allocator starts from: it rebinds firings whose busy
-    windows end inside their block among the realized instances, honoring the busy residue an overlapping predecessor
-    leaves (the cycles an instance stays busy in this block's frame).
+    first-free one and only a SEED, the binding the register allocator starts from: it rebinds firings among the
+    realized instances.
     """
 
     issue_cycle: dict[ValueId, int]
@@ -50,10 +49,6 @@ class Schedule:
     # Per scheduled value, its operator latency, so the commit cycle (issue + latency) has a single owner here rather
     # than being recomputed by every consumer of the schedule.
     latency: dict[ValueId, int]
-    # Per pooled instance slot, the first cycle it is free again (last firing's issue + initiation_interval). An
-    # overlapping successor inherits this residue as its `entry_busy` so a firing bound to the same physical slot
-    # waits out the predecessor's in-flight activation instead of double-driving it across the overlapped boundary.
-    busy_until: dict[tuple[PooledHardwareOperator, int], int]
 
     def commit_cycle(self, vid: ValueId) -> int:
         return self.issue_cycle[vid] + self.latency[vid]
@@ -143,7 +138,6 @@ def schedule_ops(
     pool: Mapping[type[HardwareOperator], int],
     schedulable: set[ValueId],
     fetch_lag: int,
-    entry_busy: Mapping[tuple[PooledHardwareOperator, int], int] | None = None,
     livein_landing: Mapping[ValueId, int] | None = None,
 ) -> Schedule:
     """
@@ -154,12 +148,8 @@ def schedule_ops(
     resident at the block start (a prior block's drained result, a state read, an input, or a phi), but a predecessor
     result spilled past an OVERLAPPED boundary lands mid-block instead -- `livein_landing` carries its block-local
     landing cycle, and a consumer's operand read must not precede it. A pooled instance accepts a new firing every
-    `initiation_interval` cycles; `entry_busy` starts each instance's busy window at the busy residue inherited from an
-    overlapping predecessor (empty under draining, where an instance is necessarily idle by the boundary for every
-    operator whose initiation interval stays within `Lir.__post_init__`'s bound). Both carries are empty
-    for a fully-drained block, leaving the schedule identical to an isolated per-block pass.
+    `initiation_interval` cycles, and is free again by the time any successor frame begins (see `OperatorInstance`).
     """
-    entry_busy = entry_busy or {}
     livein_landing = livein_landing or {}
     op_ids = sorted(schedulable)
     if not op_ids:
@@ -169,7 +159,6 @@ def schedule_ops(
             firings={},
             makespan=0,
             latency={},
-            busy_until=dict(entry_busy),
         )
     schedulable_set = set(op_ids)
 
@@ -177,9 +166,7 @@ def schedule_ops(
     height = _critical_path(nodes, op_ids, schedulable_set, fetch_lag)
     issue_cycle: dict[ValueId, int] = {}
     inst_of: dict[ValueId, OperatorInstance] = {}
-    # instance slot -> first cycle it is free again, starting from the busy residue inherited from overlapping
-    # predecessors
-    busy_until: dict[tuple[PooledHardwareOperator, int], int] = dict(entry_busy)
+    busy_until: dict[tuple[PooledHardwareOperator, int], int] = {}  # instance slot -> first cycle it is free again
 
     def commit_cycle(vid: ValueId) -> int:
         return issue_cycle[vid] + _op(nodes, vid).operator.latency
@@ -253,5 +240,4 @@ def schedule_ops(
         firings=pooled_firings,
         makespan=makespan,
         latency=latency,
-        busy_until=busy_until,
     )

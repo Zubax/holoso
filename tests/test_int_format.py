@@ -139,6 +139,24 @@ def test_a_kernel_carrying_no_float_answers_to_the_floor_alone(wint_min: int) ->
         assert _word_of(_flags, options, "WintBool")[0] == IntFormat(wint_min), ffmt
 
 
+class _UnreadFloatState:
+    def __init__(self) -> None:
+        self._f = 0.0
+
+    def step(self, n: int) -> int:
+        self._f = float(n)
+        return n * 2
+
+
+def test_a_float_only_an_unread_slot_holds_sizes_nothing() -> None:
+    """An unread slot is dead code, so its float family is as absent as any other dead float's."""
+    options = dataclasses.replace(default_options(FloatFormat(8, 36)), wint_min=16)
+    result = holoso.synthesize(_UnreadFloatState().step, options, name="UnreadFloatSlot")
+    assert result.int_format == IntFormat(16)
+    (out,) = result.numerical_model.elaborate().run(20000)
+    assert isinstance(out, IntValue) and int(out) == 32767
+
+
 def test_the_machine_word_sizes_the_wide_register_bank_in_the_rtl() -> None:
     # The end-to-end pin: driven through the public entry point, so a build that dropped the derivation anywhere
     # between here and the Verilog backend -- or substituted a plausible-but-wrong width -- fails right here.
@@ -273,7 +291,7 @@ def test_a_state_reset_past_the_floor_is_refused_by_its_own_gate() -> None:
 
 
 def test_a_literal_past_the_floor_is_refused_where_a_wide_float_used_to_carry_it() -> None:
-    """The float format no longer lends its width to an integer kernel, so the kernel must ask for what it needs."""
+    """The float format lends no width to a kernel carrying no float, so the kernel must ask for what it needs."""
 
     def big(n: int) -> int:
         return n + 100_000

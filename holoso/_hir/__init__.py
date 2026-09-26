@@ -1,10 +1,9 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
-from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst, IntConst as IntConst
+from ._const import Const as Const, FloatConst as FloatConst, IntConst as IntConst
 from ._const import const_value as const_value, make_const as make_const
 from ._copy import copy_node as copy_node, rebuild as rebuild, reverse_postorder as reverse_postorder
 from ._dce import eliminate_dead_code as eliminate_dead_code
-from ._evaluate import HirEvaluator as HirEvaluator
 from ._ir import (
     Branch as Branch,
     Hir as Hir,
@@ -16,10 +15,8 @@ from ._ir import (
     Phi as Phi,
     Ret as Ret,
     StateRead as StateRead,
-    StateSlot as StateSlot,
     Terminator as Terminator,
     references as references,
-    successors as successors,
 )
 from ._scaling import Scaling as Scaling, scaling_of as scaling_of
 from ._operators import (
@@ -89,6 +86,5 @@ from ._types import (
     BoolType as BoolType,
     FloatType as FloatType,
     IntType as IntType,
-    Signature as Signature,
     Type as Type,
 )

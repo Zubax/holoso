@@ -3,9 +3,7 @@
 from ._ir import (
     Mir as Mir,
     MirBlock as MirBlock,
-    MirBoolView as MirBoolView,
     MirBranch as MirBranch,
-    MirBuilder as MirBuilder,
     MirConst as MirConst,
     MirInput as MirInput,
     MirJump as MirJump,
@@ -16,10 +14,11 @@ from ._ir import (
     MirStateRead as MirStateRead,
     MirStateSlot as MirStateSlot,
     MirTerminator as MirTerminator,
-    MirWideView as MirWideView,
     reverse_postorder as reverse_postorder,
     successors as successors,
+    thread_arm as thread_arm,
+    threadable_arms as threadable_arms,
+    predecessors as predecessors,
 )
-from ._interpret import MirInterpreter as MirInterpreter
 from ._lower import lower as lower
 from ._options import MirOptions as MirOptions

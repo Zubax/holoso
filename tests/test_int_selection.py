@@ -27,7 +27,9 @@ from holoso._backend.verilog._emit import generate
 from holoso._eel import lower as lower_frontend
 from holoso._hir import FloatNeg, FloatRounding, Rounding, FloatToInt, FloatType as HirFloatType, HirBuilder
 from holoso._lir import Lir, PooledScheduledOp, WideOperand
-from holoso._mir import Mir, MirBuilder, MirConst, MirInterpreter, MirOperation, lower as lower_to_mir
+from holoso._mir import Mir, MirConst, MirOperation, lower as lower_to_mir
+from holoso._mir._ir import MirBuilder
+from holoso._mir._interpret import MirInterpreter
 from holoso._operators import (
     FILog2Operator,
     HardwareOperator,

@@ -1,6 +1,5 @@
 """Hardware operator models, their folded port conditioners, and the configuration that selects them."""
 
-from .._util import Relation as Relation
 from .._value import RoundMode as RoundMode
 from ._common import (
     BoolInversion as BoolInversion,
@@ -40,7 +39,6 @@ from ._float import (
     FSqrtOperator as FSqrtOperator,
     FToIntOperator as FToIntOperator,
     FloatClassificationOperator as FloatClassificationOperator,
-    FloatHardwareOperator as FloatHardwareOperator,
     FloatIsFiniteOperator as FloatIsFiniteOperator,
     FloatIsNegInfOperator as FloatIsNegInfOperator,
     FloatIsPosInfOperator as FloatIsPosInfOperator,
@@ -61,8 +59,6 @@ from ._int import (
     IntBwNotOperator as IntBwNotOperator,
     IntBwOrOperator as IntBwOrOperator,
     IntBwXorOperator as IntBwXorOperator,
-    IntHardwareOperator as IntHardwareOperator,
-    IntInlineOperator as IntInlineOperator,
     IntShiftConstOperator as IntShiftConstOperator,
     IntToBoolOperator as IntToBoolOperator,
 )

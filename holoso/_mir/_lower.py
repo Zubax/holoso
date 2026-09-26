@@ -183,15 +183,13 @@ class _LoweringContext:
     def run(self) -> Mir:
         for _ in self.hir.blocks:
             self.builder.block()  # preserve block ids 0..n-1
-        # Entry-global pure values first: inputs in signature order, then constants and state reads.
         self.builder.position_at(self.hir.entry)
         for vid in self.hir.input_ids:
             self._lower_node(vid, self.hir.nodes[vid])
         for vid in sorted(self.hir.nodes):
             if isinstance(self.hir.nodes[vid], (Const, StateRead)):
                 self._lower_node(vid, self.hir.nodes[vid])
-        # Then each block's phis and operations in reverse-postorder (predecessors first), then its terminator, so
-        # every operand and phi arm is remapped before use even when branches nest.
+        # Reverse postorder, so every operand and phi arm is remapped before use even when branches nest.
         blocks_by_id = {block.id: block for block in self.hir.blocks}
         deferred: list[ValueId] = []  # loop-header phis whose latch arm is a body value lowered later; closed below
         for bid in reverse_postorder(self.hir):

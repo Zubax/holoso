@@ -1,7 +1,7 @@
 """Selected mid-level IR (MIR): concrete hardware operators with typed scalar sidebands, arranged into a CFG."""
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import assert_never
 
 from .._operators import (
@@ -107,8 +107,7 @@ class MirOperation:
     A selected hardware-operator use producing ONE value: the `output_port`-th result, conditioned by
     `output_conditioner`. Operations sharing one block, operator, operands, and operand conditioners while tapping
     DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all its results at
-    once. The operation belongs to the resource family of its tapped port's type; operands may reference either family
-    (a comparison reads float operands and produces booleans; the bool->float cast the reverse).
+    once.
     """
 
     operator: HardwareOperator
@@ -220,6 +219,15 @@ class Mir:
     outputs: list[MirOutput]
     state_slots: list[MirStateSlot]
 
+    def __post_init__(self) -> None:
+        # One phi arm per predecessor edge, whoever built or rewrote the graph.
+        preds = predecessors(self)
+        for block in self.blocks:
+            for vid in block.phis:
+                phi = self.nodes[vid]
+                assert isinstance(phi, MirPhi)
+                assert sorted(pred for pred, _, _ in phi.arms) == sorted(preds[block.id]), f"phi {vid} arms"
+
     @property
     def entry(self) -> BlockId:
         return self.blocks[0].id
@@ -242,110 +250,71 @@ def successors(block: MirBlock) -> list[BlockId]:
             assert_never(block.terminator)
 
 
+def predecessors(mir: Mir) -> dict[BlockId, list[BlockId]]:
+    """Per block, the source of every edge into it: a branch with both arms on one block counts twice."""
+    preds: dict[BlockId, list[BlockId]] = {block.id: [] for block in mir.blocks}
+    for block in mir.blocks:
+        for succ in successors(block):
+            preds[succ].append(block.id)
+    return preds
+
+
 def reverse_postorder(mir: Mir) -> list[BlockId]:
     return reverse_postorder_of(mir.entry, {block.id: successors(block) for block in mir.blocks})
 
 
-class _MirBankView:
+def threadable_arms(mir: Mir) -> list[BlockId]:
     """
-    The phi-arm subset and the per-block operation listing of one bank; `operation_nodes` is filled once since the
-    scheduler reads it per operation.
+    The blocks `thread_arm` may take out, in reverse postorder: each does nothing but jump FORWARD into a merge with
+    phis, from a sole predecessor that is not already the merge's. Its predecessor then installs the merge phis' arms
+    on every edge out of it, which is sound because the merge does not dominate the predecessor: every use of a merge
+    phi is dominated by the merge, so none is reachable from the predecessor except through the merge, which redefines
+    it.
     """
-
-    __slots__ = ()
-
-    nodes: dict[ValueId, MirNode]
-    operation_nodes: dict[ValueId, MirOperation]
-
-    def __post_init__(self) -> None:
-        operations = {vid: node for vid, node in self.nodes.items() if isinstance(node, MirOperation)}
-        object.__setattr__(self, "operation_nodes", operations)
-
-    @property
-    def phi_nodes(self) -> dict[ValueId, MirPhi]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
-
-    @property
-    def state_read_nodes(self) -> dict[ValueId, MirStateRead]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirStateRead)}
-
-    @property
-    def const_nodes(self) -> dict[ValueId, MirConst]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirConst)}
-
-    def block_operations(self, block: MirBlock) -> list[ValueId]:
-        """The bank's operation ids defined in `block`, in evaluation order."""
-        return [vid for vid in block.operations if vid in self.operation_nodes]
+    preds = predecessors(mir)
+    order = reverse_postorder(mir)
+    position = {bid: i for i, bid in enumerate(order)}
+    by_id = {block.id: block for block in mir.blocks}
+    arms: list[BlockId] = []
+    for bid in order:
+        block = by_id[bid]
+        if block.operations or not isinstance(block.terminator, MirJump) or len(preds[bid]) != 1:
+            continue
+        merge = block.terminator.target
+        if by_id[merge].phis and position[merge] > position[bid] and preds[bid][0] not in preds[merge]:
+            arms.append(bid)
+    return arms
 
 
-def _bank_nodes(mir: Mir, wide: bool) -> dict[ValueId, MirNode]:
-    """A bank is physical, not a scalar family, so it admits every node by the width of its type alone."""
-    return {vid: node for vid, node in mir.nodes.items() if node.scalar_type.is_wide == wide}
-
-
-@dataclass(frozen=True, slots=True)
-class MirWideView(_MirBankView):
+def thread_arm(mir: Mir, arm: BlockId) -> Mir:
     """
-    The wide data bank narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per block. It holds
-    floats and integers alike.
+    Thread out one of the `threadable_arms`: its sole predecessor goes straight to the merge, whose phis take the
+    block's arms from the predecessor instead.
     """
+    assert arm in threadable_arms(mir)
+    by_id = {block.id: block for block in mir.blocks}
+    block = by_id[arm]
+    assert isinstance(block.terminator, MirJump)
+    merge = block.terminator.target
+    (pred,) = predecessors(mir)[arm]
 
-    nodes: dict[ValueId, MirNode]
-    blocks: list[MirBlock]
-    entry: BlockId
-    input_ids: list[ValueId]
-    outputs: list[MirOutput]
-    state_slots: list[MirStateSlot]
-    float_format: FloatFormat
-    int_format: IntFormat
-    operation_nodes: dict[ValueId, MirOperation] = field(init=False, compare=False)
+    def retarget(target: BlockId) -> BlockId:
+        return merge if target == arm else target
 
-    def scalar_type_of(self, vid: ValueId) -> FloatType | IntType:
-        """Which family a wide value belongs to: the bank is physical, so only the value itself names its type."""
-        scalar_type = self.nodes[vid].scalar_type
-        assert isinstance(scalar_type, (FloatType, IntType))
-        return scalar_type
-
-    @classmethod
-    def from_mir(cls, mir: Mir) -> MirWideView:
-        nodes = _bank_nodes(mir, wide=True)
-        machine = {FloatType(mir.float_format), IntType(mir.int_format)}
-        assert all(node.scalar_type in machine for node in nodes.values())
-        return cls(
-            nodes=nodes,
-            blocks=mir.blocks,
-            entry=mir.entry,
-            input_ids=[vid for vid in mir.input_ids if vid in nodes],
-            outputs=[out for out in mir.outputs if out.value in nodes],
-            state_slots=[slot for slot in mir.state_slots if slot.live_out in nodes],
-            float_format=mir.float_format,
-            int_format=mir.int_format,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class MirBoolView(_MirBankView):
-    """The boolean bank narrowed out of a MIR graph, carrying the shared CFG."""
-
-    nodes: dict[ValueId, MirNode]
-    blocks: list[MirBlock]
-    entry: BlockId
-    input_ids: list[ValueId]
-    outputs: list[MirOutput]
-    state_slots: list[MirStateSlot]
-    operation_nodes: dict[ValueId, MirOperation] = field(init=False, compare=False)
-
-    @classmethod
-    def from_mir(cls, mir: Mir) -> MirBoolView:
-        nodes = _bank_nodes(mir, wide=False)
-        return cls(
-            nodes=nodes,
-            blocks=mir.blocks,
-            entry=mir.entry,
-            input_ids=[vid for vid in mir.input_ids if vid in nodes],
-            outputs=[out for out in mir.outputs if out.value in nodes],
-            state_slots=[slot for slot in mir.state_slots if slot.live_out in nodes],
-        )
+    match by_id[pred].terminator:
+        case MirJump(target=target):
+            terminator: MirTerminator = MirJump(retarget(target))
+        case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
+            terminator = MirBranch(cond, retarget(if_true), retarget(if_false))
+        case unexpected:
+            raise AssertionError(unexpected)
+    nodes = dict(mir.nodes)
+    for vid in by_id[merge].phis:
+        phi = nodes[vid]
+        assert isinstance(phi, MirPhi)
+        nodes[vid] = replace(phi, arms=tuple((pred if p == arm else p, v, c) for p, v, c in phi.arms))
+    blocks = [replace(other, terminator=terminator) if other.id == pred else other for other in mir.blocks]
+    return replace(mir, nodes=nodes, blocks=[other for other in blocks if other.id != arm])
 
 
 @dataclass
@@ -438,11 +407,8 @@ class MirBuilder:
         immediates: tuple[int, ...] = (),
     ) -> ValueId:
         """
-        Append a hardware-operator use producing the `output_port`-th result, interned within the current block.
-        The value's resource family follows the tapped port's type; operands are type-checked against the operator
-        signature and may reference either resource family. `output_conditioner` defaults to the tapped port's
-        identity conditioner. `immediates` carries the per-firing immediate values (e.g. a rounding mode). Interned by
-        the node, so two relations over one comparator firing -- or two rounding modes over one operand -- stay
+        Append a hardware-operator use producing the `output_port`-th result, interned by the whole node within the
+        current block, so two relations over one comparator firing -- or two rounding modes over one operand -- stay
         distinct values while identical taps collapse.
         """
         signature = operator.signature

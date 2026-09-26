@@ -67,7 +67,7 @@ class MirInterpreter:
             self._resolve_phis(block, previous, env)
             for op_id in block.operations:
                 operation = self._mir.nodes[op_id]
-                assert isinstance(operation, MirOperation), f"node {op_id} in block.operations is not a MirOperation"
+                assert isinstance(operation, MirOperation)
                 operands = [
                     apply_conditioner(conditioner, env[operand])
                     for operand, conditioner in zip(operation.operands, operation.operand_conditioners, strict=True)
@@ -82,7 +82,7 @@ class MirInterpreter:
                     previous, current = current, target
                 case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
                     condition = env[cond]
-                    assert isinstance(condition, bool), "a branch condition must evaluate to a bool"
+                    assert isinstance(condition, bool)
                     previous, current = current, (if_true if condition else if_false)
                 case _:
                     assert_never(terminator)
@@ -129,7 +129,7 @@ class MirInterpreter:
         snapshot: dict[ValueId, ScalarValue] = {}
         for phi_id in block.phis:
             phi = self._mir.nodes[phi_id]
-            assert isinstance(phi, MirPhi), f"node {phi_id} in phis is not a phi"
+            assert isinstance(phi, MirPhi)
             arm = next((entry for entry in phi.arms if entry[0] == previous), None)
             assert arm is not None, f"phi {phi_id} has no arm for predecessor {previous}"
             _pred, value, conditioner = arm

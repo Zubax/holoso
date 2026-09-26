@@ -23,7 +23,7 @@ read-first rule `R(a) < W(b)`. Values that live entirely within mutually-exclusi
 share no block, so they never interfere -- path-awareness falls out of the per-block quantification with no explicit
 reasoning about which arms are exclusive.
 
-This module is bank-agnostic: the caller supplies one register family (the wide bank or the 1-bit boolean bank).
+This module is bank-agnostic: the caller supplies one register bank (the wide bank or the 1-bit boolean bank).
 """
 
 from dataclasses import dataclass, field
@@ -34,7 +34,7 @@ from .._util import ValueId
 @dataclass(frozen=True, slots=True)
 class BankLiveness:
     """
-    One register family's liveness inputs. For a drained block every result lands before the next block fetches, so a
+    One register bank's liveness inputs. For a drained block every result lands before the next block fetches, so a
     cross-block live-in is resident from its block's first step; under cross-block software pipelining a predecessor's
     result may instead spill past its (shrunk) terminator and land inside this block, which `inflight_defs` records.
 

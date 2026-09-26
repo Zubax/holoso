@@ -12,7 +12,8 @@ the graph computes operands CPython may short-circuit past, and convicting one o
 answers happily (`x > 1.0 and 1.0 / y > 0.0` at `y == 0`). Poison flows through consumers, except that an
 operator's declared absorbing element swallows it -- an AND gate with a constant-0 input outputs 0 whatever garbage
 sits on the other input -- and only a poison reaching an observable sink raises: a branch condition, an output, or
-a state live-out, the last with the whole transaction's state left uncommitted. A poisoned BRANCH CONDITION inside
+a state live-out, the last with the whole transaction's state left uncommitted (conservatively: optimization prunes a
+slot nothing reads, which the unoptimized graph judged here cannot know). A poisoned BRANCH CONDITION inside
 a short-circuited gate operand is the one shape the absorbing rule cannot reach (control cannot carry poison), so
 such a kernel fails here even where CPython and the gate-level hardware would both answer through the gate;
 accepted as a documented limitation rather than speculating both arms into loops and nontermination.

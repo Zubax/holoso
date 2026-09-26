@@ -644,11 +644,11 @@ module holoso_ishl#(parameter W = 44, parameter integer LATENCY = 0) (
     endgenerate
     wire [SW-1:0] right_amount = shamt_narrow ^ (right_prefix[PW] << 1);
     wire [SW:0] left_amount_ext = {1'b0, shamt_narrow};
-    // The left flag keeps its explicit test because `left_overflow` below reads it to decide the saturation flag,
-    // where a count past the word overflows for every operand but zero -- which the magnitude cannot see. The right
-    // flag only steers the mux, so it drops the test it used to carry, `| ({1'b0, right_amount} >= W_AMOUNT)`: a
-    // count filling the whole word vacates every bit position, and IEEE 1364-2005 section 5.1.12 fills each one
-    // with the sign for `>>>` on a signed result, which is the word the fill arm below would have written anyway.
+    // The left flag tests for a count past the word because `left_overflow` below reads it to decide the saturation
+    // flag, where such a count overflows for every operand but zero -- which the magnitude cannot see. The right flag
+    // only steers the mux and needs no such test: a count filling the whole word vacates every bit position, and
+    // IEEE 1364-2005 section 5.1.12 fills each one with the sign for `>>>` on a signed result, which is the word the
+    // fill arm writes.
     wire left_large = (|shamt_q[W-1:SW]) | (left_amount_ext >= W_AMOUNT);
     wire right_large = (~&shamt_q[W-1:SW]) | (~|shamt_narrow);
     wire signed [W-1:0] shifted_left = x_q << shamt_narrow;
@@ -748,10 +748,9 @@ module holoso_ishr#(parameter W = 44, parameter integer LATENCY = 0) (
         end
     endgenerate
     wire [SW-1:0] left_amount = shamt_narrow ^ (left_prefix[PW] << 1);
-    // Neither flag reaches an overflow test here, so both drop the count-past-the-word test they used to carry,
-    // `| ({1'b0, shamt_narrow} >= W_AMOUNT)` and `| ({1'b0, left_amount} >= W_AMOUNT)`: such a count vacates every
-    // bit position, and IEEE 1364-2005 section 5.1.12 fills each one with the sign for `>>>` on a signed result and
-    // with zero for `<<`, which is exactly the word the fill arm below would have written.
+    // Neither flag reaches an overflow test here, so neither tests for a count past the word: such a count vacates
+    // every bit position, and IEEE 1364-2005 section 5.1.12 fills each one with the sign for `>>>` on a signed result
+    // and with zero for `<<`, which is exactly the word the fill arm writes.
     wire right_large = |shamt_q[W-1:SW];
     wire left_large = (~&shamt_q[W-1:SW]) | (~|shamt_narrow);
     wire signed [W-1:0] shifted_right = x_q >>> shamt_narrow;
