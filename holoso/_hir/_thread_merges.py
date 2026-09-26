@@ -4,29 +4,27 @@ Empty merge-block elimination (jump-threading).
 If-conversion collapses a small, speculatable diamond into an `fselect`; a diamond whose arm holds a non-speculatable
 operation (a variable-divisor division) stays a real branch with a separate phi merge block. When that merge feeds a
 following control structure -- a loop header, a sibling/cascade merge, another diamond -- and has no operation of its
-own to host, it is a pure pass-through: phis but no operations, a single `Jump` out, and (because every phi-arm
-predecessor is jump-terminated) predecessors that are all `Jump`. Such a block contributes only a fixed per-block
+own to host, it is a pure pass-through: phis but no operations, a single `Jump` out, and predecessors that all jump
+to it. Such a block contributes only a fixed per-block
 boundary drain (the fetch refill plus the result-landing tail) for zero work.
 
 This pass threads such a block `M` onto its predecessors: each predecessor's `Jump` is retargeted from `M` to
 `M`'s successor `S`, and `M`'s phi arms compose into `S`'s phis -- an arm `(M, v)` of an `S` phi becomes one
 arm per predecessor `Q` of `M` (`(Q, a_Q)` when `v` is an `M` phi `phi(Q: a_Q)`, else the pass-through value
-`(Q, v)`). The forbidden branch-block-arm shape cannot arise: a predecessor `Q` is `Jump`-terminated, so `Q` is
-never the branching block `S`.
+`(Q, v)`). No composed arm comes from a branching block, whose install would fire on every edge out of it: every
+predecessor `Q` of `M` is `Jump`-terminated.
 
-Scope. The pass fires only when every `M` phi is consumed SOLELY as the arm an `S` phi takes FROM `M` -- the one
-arm composition rewrites -- so deleting `M`'s phis dangles nothing. A merge phi reached any other way stays a real
-branch: notably a loop-invariant value that `S` (a loop header) carries on its BACK-EDGE arm (`M` dominates the
-back-edge through `S`, so its value reaches that arm), which composition would not rewrite. That is the deferred
-self-latch rematerialization case (see DESIGN.md). Chained merges (an `M` whose successor is itself an `M`) collapse
-by repeating to a fixpoint, innermost-reachable first.
+Scope. The pass fires only when every `M` phi is consumed SOLELY as the arm an `S` phi takes FROM `M`, the one arm
+composition rewrites; a merge phi reached any other way keeps `M` a real branch (see DESIGN.md). Chained merges (an
+`M` whose successor is itself an `M`) collapse by repeating to a fixpoint, innermost-reachable first.
 """
 
+from collections import Counter
 from dataclasses import replace
 import logging
 
 from .._util import BlockId, ValueId
-from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumber, validate_phi_predecessors
+from ._ir import Block, Hir, Jump, Phi, predecessors, renumber, validate_phi_predecessors
 
 _logger = logging.getLogger(__name__)
 
@@ -47,21 +45,14 @@ def _phis_consumed_only_as_successor_arms(
     block dominates the back-edge through the header, so its value legitimately reaches that arm). Such a merge stays a
     real branch: it is exactly the deferred self-latch rematerialization case.
     """
-    successor_phis = {phi for block in hir.blocks if block.id == successor for phi in block.phis}
-    for vid, node in hir.nodes.items():
-        if isinstance(node, Operation):
-            if any(operand in merge_phis for operand in node.operands):
-                return False
-        elif isinstance(node, Phi):
-            for pred, value in node.arms:
-                if value in merge_phis and (vid not in successor_phis or pred != merge_id):
-                    return False
-    for block in hir.blocks:
-        if isinstance(block.terminator, Branch) and block.terminator.cond in merge_phis:
-            return False
-    if any(output.value in merge_phis for output in hir.outputs):
-        return False
-    return not any(slot.live_out in merge_phis for slot in hir.state_slots)
+    (block,) = [block for block in hir.blocks if block.id == successor]
+    permitted: Counter[ValueId] = Counter()
+    for phi_id in block.phis:
+        phi = hir.nodes[phi_id]
+        assert isinstance(phi, Phi)
+        permitted.update(value for pred, value in phi.arms if pred == merge_id)
+    uses = hir.use_counts()
+    return all(uses[phi] == permitted[phi] for phi in merge_phis)
 
 
 def _find_empty_merge(hir: Hir) -> tuple[Block, BlockId] | None:

@@ -41,13 +41,24 @@ class BoolConst(Const):
 
 @dataclass(frozen=True, slots=True)
 class IntConst(Const):
-    """
-    Normally, the lower levels that are hardware-aware should refuse lowering of constants that would saturate the
-    machine's integer type. E.g., 2^63 would refuse on a 32-bit machine.
-    """
+    """Unbounded; one the machine must hold is refused at selection where its word cannot, e.g. 2**63 on 32 bits."""
 
     value: int
 
     @property
     def type(self) -> IntType:
         return IntType()
+
+
+def make_const(value: bool | int | float) -> Const:
+    if type(value) is bool:
+        return BoolConst(value)
+    if type(value) is int:
+        return IntConst(value)
+    assert type(value) is float
+    return FloatConst(value)
+
+
+def const_value(const: Const) -> bool | int | float:
+    assert isinstance(const, (BoolConst, IntConst, FloatConst)), f"constant {const!r} carries no scalar"
+    return const.value

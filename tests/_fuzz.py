@@ -43,7 +43,8 @@ from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
 from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
 from holoso._lir import operand_read_cycle
-from holoso._mir import MirOptions, Mir, MirBranch, MirInterpreter, MirJump, MirTerminator
+from holoso._mir import MirOptions, Mir, MirBranch, MirJump, MirTerminator
+from holoso._mir._interpret import MirInterpreter
 from holoso._mir import lower as lower_to_mir
 from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue, IntValue, ScalarValue
@@ -62,8 +63,7 @@ from ._modelref import (
     within,
 )
 
-# The directory the generated kernel modules are rendered into. `build/` is gitignored, so the fuzz corpus never
-# pollutes the tree; the directory is created on demand.
+# `build/` is gitignored, so the fuzz corpus never pollutes the tree.
 _REPO = Path(__file__).resolve().parent.parent
 _FUZZ_TMP = _REPO / "build" / "fuzz_tmp"
 
@@ -372,10 +372,7 @@ class _Emitter:
         return _fragment(f"({bounded} * {_power2_literal(shift)})")
 
     def exact_clamp_value(self) -> _Fragment:
-        """
-        Emit a clamp of one live float into `[-1, 1]` via two selects (each arm an operand verbatim) and return the
-        result variable name. A clamp routes an operand or a literal verbatim, so it is exact in the format.
-        """
+        """A clamp into `[-1, 1]`, exact because each select arm is an operand or a literal verbatim."""
         x = self.pick_float()
         lo, hi = "-1.0", "1.0"
         below = self.fresh("clmp")
@@ -599,18 +596,19 @@ def _emit_diamond_then_loop(em: _Emitter) -> _Fragment:
 def _emit_reduction(em: _Emitter) -> _Fragment:
     n = em.randint(2, 6)
     acc = em.fresh("acc")
-    em.emit(f"{acc} = {em.pick_float()}")
+    start, term = em.pick_floats(2)
+    em.emit(f"{acc} = {start}")
     em.emit(f"for _i in range({n}):")
-    em.emit(f"{acc} = ({acc} + {em.pick_float()}) * 0.5", indent=2)
-    em.add_float(acc)
+    em.emit(f"{acc} = ({acc} + {term}) * 0.5", indent=2)
+    # Averaging a value with itself leaves it unchanged, so from a pool of one name the result is that name under the
+    # optimizer's `(x + x) * 0.5 == x`, and comparing the two would fold and settle a branch.
+    if start != term:
+        em.add_float(acc)
     return _fragment(acc, Mode.CONTINUOUS, frozenset({Shape.REDUCTION}))
 
 
 def _emit_bool_logic(em: _Emitter) -> _Fragment:
-    """
-    Cross-domain bool/float logic: build a boolean from a float relation, combine bools with `and`/`or`/`not`/
-    `^`, and cast back to float with `float(cond)`. Exact (the result is 0.0 or 1.0).
-    """
+    """Cross-domain bool/float logic, exact because the float cast of a boolean is 0.0 or 1.0."""
     a, b = em.pick_floats(2)
     c1 = em.fresh("c")
     em.emit(f"{c1} = {a} < {b}")
@@ -702,6 +700,17 @@ def _emit_forced_overbudget_branch(em: _Emitter) -> _Fragment:
     return _merge_fragment(r, [cond, then_value, else_fragment], frozenset({Shape.BRANCH}))
 
 
+def _emit_constant_arm_branch(em: _Emitter) -> _Fragment:
+    """A real branch whose then arm only installs a constant, so LIR threads that arm into the comparing block."""
+    cond = _fragment(f"({em.floats[0]} < {em.floats[1]})")
+    r = em.fresh("ca")
+    then_value = _fragment(em.small_literal())
+    else_body, else_fragment = _overbudget_arm(em, r)
+    _emit_if_else(em, cond.value, _assign_body(r, then_value), else_body)
+    em.add_float(r)
+    return _merge_fragment(r, [cond, then_value, else_fragment], frozenset({Shape.BRANCH}))
+
+
 def _emit_exact_select(em: _Emitter) -> _Fragment:
     cond = _emit_condition(em)
     return em.exact_select_value(cond)
@@ -729,6 +738,7 @@ _DIRECTED_TEMPLATES: list[Callable[[_Emitter], _Fragment]] = [
     _emit_exact_division_wiring,
     _emit_sterbenz_subtract,
     _emit_forced_overbudget_branch,
+    _emit_constant_arm_branch,
     # The nested diamond runs in EVERY campaign (including the smoke, whose random draw need not produce one), so
     # `_assert_danger_survived` enforces the two-forward-branch nested invariant on every run.
     lambda em: _emit_diamond(em, nested=True),
@@ -803,7 +813,6 @@ def _generate_stateless_kernel(
         template = cast(Callable[[_Emitter], _Fragment], rng.choice(_STATELESS_TEMPLATES))  # type: ignore[arg-type]
         produced.append(template(em))
 
-    # Combining the produced fragments keeps every one LIVE so DCE cannot drop the diamonds/divisions feeding output.
     return_mode = _emit_return(em, produced)
 
     return _finish_function_kernel(
@@ -872,7 +881,7 @@ def _emit_return(em: _Emitter, produced: list[_Fragment]) -> Mode:
     Build the return line, combining every produced fragment so each stays live (DCE cannot drop a diamond feeding the
     output). A single fragment is returned verbatim (exactness-preserving); multiple fragments are returned either as a
     TUPLE of verbatim lanes -- each an output port, still exact -- or as a SUM, which rounds and so demotes the kernel
-    to CONTINUOUS mode. A summed return of one fragment does not round (it is the fragment itself).
+    to CONTINUOUS mode.
     """
     live = [fragment.value for fragment in produced] or [em.pick_float()]
     if len(live) == 1:
@@ -916,22 +925,25 @@ def _generate_stateful_kernel(
     fragments: list[_Fragment] = []
     for p in inputs:
         em.add_float(p)
-    for s in slots:
-        em.add_float(f"self.{s}")
 
-    # Capture every slot's OLD value first (so updates that reference each other use the live-in, like the chained
-    # pattern) -- the frontend's parallel slot semantics make this faithful, but binding locals keeps the source clear.
+    # Capture every slot's OLD value first, so updates that reference each other use the live-in, like the chained
+    # pattern.
     olds = {s: em.fresh("old") for s in slots}
     for s in slots:
         em.emit(f"{olds[s]} = self.{s}")
         em.add_float(olds[s])
 
-    # The chained-slot pattern: slot i captures slot (i+1)'s old value; the last slot advances from an input.
+    # A pool name must hold a value no other pool name holds, or comparing the two folds and settles a branch. A slot
+    # holds its old value until rewritten and the next slot's after a chained copy, so it joins the pool only once it
+    # computes a new value. Each update adds its own power of two, and a signed sum of distinct powers of two never
+    # cancels, so no chain of updates repeats another or returns to the value it started from.
     for i, s in enumerate(slots):
         if i + 1 < n_slots and em.chance(0.6):
             em.emit(f"self.{s} = {olds[slots[i + 1]]}")
         else:
-            em.emit(f"self.{s} = {em.pick_float()} + {em.small_literal()}")
+            sign = "-" if em.chance(0.5) else ""
+            em.emit(f"self.{s} = {em.pick_float()} + {sign}{_power2_literal(i - 1)}")
+            em.add_float(f"self.{s}")
 
     # Optionally fold a real diamond into the update so a stateful kernel also exercises branchy scheduling. Its result
     # is threaded into the return so the diamond stays LIVE -- otherwise DCE could drop it and erase the branch.
@@ -939,8 +951,11 @@ def _generate_stateful_kernel(
     if diamond_result is not None:
         fragments.append(diamond_result)
 
+    # The first slot's old value always reaches the result: a slot nothing reads is pruned, which could otherwise strip
+    # a kernel of all its state.
     head = diamond_result.value if diamond_result is not None else em.pick_float()
-    em.return_line = f"return ({head}) * 2.0 + ({em.pick_float()} * 1.5) / {em.nonzero_divisor()}"
+    carried = olds[slots[0]]
+    em.return_line = f"return ({head}) * 2.0 + ({em.pick_float()} * 1.5) / {em.nonzero_divisor()} + {carried}"
 
     source = _assemble_class(name, inputs, slots, resets, em.render_body(base_indent=1), em.return_line)
     module = _render_module(name, source)
@@ -1426,22 +1441,16 @@ class _Differential:
             if self._mode is Mode.EXACT:
                 detail = f"EXACT-mode float64 reference raised for inputs {[show_value(v) for v in vector]}"
                 return _SecondaryOutcome(checked=False, latch_off=False, exact_failure=detail)
-            # The float64 reference raised; a stateful kernel's reference state is now out of step, so latch off.
             return _SecondaryOutcome(checked=False, latch_off=self._is_stateful, exact_failure=None)
         result, detail = _secondary_ok(self._mode, model_out, reference, self._fmt, self._op_count)
         match result:
             case _SecondaryResult.PASS:
                 return _SecondaryOutcome(checked=True, latch_off=False, exact_failure=None)
             case _SecondaryResult.SKIP_NONFINITE:
-                # A non-finite lane (ZKF saturation) was not compared; a stateful reference may now have drifted.
                 return _SecondaryOutcome(checked=False, latch_off=self._is_stateful, exact_failure=None)
             case _SecondaryResult.STRUCTURAL_FAIL:
-                # Arity / lane-type / bool-lane disagreement is a STRUCTURAL miscompile, never precision drift, so it is
-                # ALWAYS a reported divergence -- including in CONTINUOUS mode, where a finite float miss is suppressed.
                 return _SecondaryOutcome(checked=False, latch_off=False, exact_failure=detail)
             case _SecondaryResult.FAIL:
-                # A finite EXACT-mode float mismatch is a real bug; a CONTINUOUS finite float miss is expected precision
-                # drift that only latches the secondary off for a stateful kernel (never a reported divergence).
                 if self._mode is Mode.EXACT:
                     return _SecondaryOutcome(checked=False, latch_off=False, exact_failure=detail)
                 return _SecondaryOutcome(

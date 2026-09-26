@@ -1,15 +1,15 @@
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import assert_never
 
-from .._mir import Mir, MirBlock, MirBoolView, MirBranch, MirWideView, reverse_postorder
+from .._mir import Mir, MirBlock, MirBranch, MirRet, predecessors, reverse_postorder, successors
 from .._operators import HardwareOperator, PooledHardwareOperator
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule, resolve_pool, schedule_ops
 from ._build_base import BlockOffsets, BlockSchedules
-from ._mir_facts import mir_operation, pred_count, succ_map
+from ._mir_facts import mir_operation, succ_map
 
 _logger = logging.getLogger(__name__)
 
@@ -27,20 +27,6 @@ def _control_word(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) -> tuple[i
     if isinstance(operator, PooledHardwareOperator):
         return pooled_write_word(commit), operator
     return inline_fire_cycle(commit, fetch_lag), operator
-
-
-@dataclass(frozen=True, slots=True)
-class _SpillCarry:
-    """
-    The cross-block-overlap residue a block hands each single-predecessor successor: per-instance busy windows still
-    in flight at the shrunk terminator (`entry_busy`) and the values whose write spills past it (`livein_landing`,
-    the value's landing cycle in the successor-local frame). Both are successor-local cycles in the
-    `absolute_pc = block_base + cycle` frame the scheduler uses (via `successor_local_cycle`), so a spill can land
-    as early as cycle 0 -- the successor's base PC, available before its first compute cycle.
-    """
-
-    entry_busy: dict[tuple[PooledHardwareOperator, int], int]
-    livein_landing: dict[ValueId, int]
 
 
 def _terminator_floor(mir: Mir, bid: int) -> int:
@@ -95,43 +81,39 @@ def _spill_local_cycle(bid: int, block_local_cycle: int, term_offset: int) -> in
     return local
 
 
-def schedule_blocks(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, fetch_lag: int) -> BlockSchedules:
+def schedule_blocks(mir: Mir, fetch_lag: int) -> BlockSchedules:
     """
-    Schedule every block in reverse-postorder, threading cross-block overlap forward, once per build. A block whose
+    Schedule every block in reverse-postorder, threading cross-block overlap forward, once per graph. A block whose
     every successor is single-predecessor (so a spill cannot reach a wrong path) OVERLAPS: its terminator offset is
     fixed here at the issue-side envelope -- the latest cycle it still drives a control word, plus the branch
     condition's read floor -- and its in-flight results land past the terminator, in the uniquely-reached successor
-    frame, which inherits `entry_busy` (the predecessor's per-instance busy residue) and `livein_landing` (the cycle
-    each spilled value lands), so its schedule neither reads a still-in-flight operand nor double-drives a busy
-    instance. Every other block drains, and its offset is derived per install-fixpoint round by `layout_offsets`. A
-    block originating a phi arm never overlaps (its phi successor is multi-predecessor, which `_prepare` asserts -- the
-    one fact the install set's independence from the schedules rests on), so the install set decides no schedule.
-    Back-edge targets and merge blocks are multi-predecessor, so no overlap crosses them: the forward-DAG carry
-    converges in this single pass with no fixpoint.
+    frame, which inherits `livein_landing` (the cycle each spilled value lands, successor-local in the
+    `absolute_pc = block_base + cycle` frame, so as early as the successor's base PC), so its schedule reads no
+    still-in-flight operand. Every other block drains, and its offset is derived per install-fixpoint round by
+    `layout_offsets`. A block originating a phi arm never overlaps (its phi successor is multi-predecessor, which
+    `_prepare` asserts -- the one fact the install set's independence from the schedules rests on), so the install
+    set decides no schedule. Back-edge targets and merge blocks are multi-predecessor, so no overlap crosses them:
+    the forward-DAG carry converges in this single pass with no fixpoint.
     """
     pool = resolve_pool(mir.nodes)
     succ = succ_map(mir)
-    preds = pred_count(mir)
+    preds = {bid: len(sources) for bid, sources in predecessors(mir).items()}
     blocks_by_id = {block.id: block for block in mir.blocks}
     block_sched: dict[int, Schedule] = {}
     block_inflight: dict[int, dict[ValueId, int]] = {}
-    block_entry_busy: dict[int, dict[tuple[PooledHardwareOperator, int], int]] = {}
     overlap_term_offset: dict[int, int] = {}
-    # successor block -> the spill carry its single overlapping predecessor hands it (set at most once: a carried-into
-    # block is single-predecessor, so only that one predecessor overlaps into it).
-    carry: dict[int, _SpillCarry] = {}
+    # successor block -> the landings its single overlapping predecessor spills into it (set at most once: a
+    # carried-into block is single-predecessor, so only that one predecessor overlaps into it).
+    carry: dict[int, dict[ValueId, int]] = {}
     for bid in reverse_postorder(mir):
         block = blocks_by_id[bid]
-        inherited = carry.get(bid, _SpillCarry({}, {}))
-        livein_landing = inherited.livein_landing
+        livein_landing = carry.get(bid, {})
         block_inflight[bid] = livein_landing
-        block_entry_busy[bid] = inherited.entry_busy
         sched = schedule_ops(
             mir.nodes,
             pool,
-            schedulable=set(wide_mir.block_operations(block)) | set(bool_mir.block_operations(block)),
+            schedulable=set(block.operations),
             fetch_lag=fetch_lag,
-            entry_busy=inherited.entry_busy,
             livein_landing=livein_landing,
         )
         block_sched[bid] = sched
@@ -140,15 +122,8 @@ def schedule_blocks(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, fetc
             continue
         term_offset = _issue_side_envelope(mir, sched, block, livein_landing, fetch_lag)
         overlap_term_offset[bid] = term_offset
-        # Both the per-instance busy residue and the value landings cross the shrunk terminator into the successor
-        # frame, so both translate through the SAME coordinate map (`successor_local_cycle`) that _trace_landing /
-        # Lir.write_landing_pcs and the model's redirect re-keying use -- the scheduler reserves and read-gates each
-        # register/instance at the cycle the pipeline truly frees/writes it, on one coordinate contract.
-        busy = {
-            inst: successor_local_cycle(free, term_offset)
-            for inst, free in sched.busy_until.items()
-            if successor_local_cycle(free, term_offset) > 0
-        }
+        # The landings cross the shrunk terminator into the successor frame through the SAME coordinate map
+        # (`successor_local_cycle`) that Lir.frame_pcs / Lir.write_landing_pcs and the model's redirect re-keying use.
         landing: dict[ValueId, int] = {}
         for vid in sched.issue_cycle:
             land = landing_cycle(sched.commit_cycle(vid), fetch_lag)
@@ -157,9 +132,8 @@ def schedule_blocks(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, fetc
         for vid, land in livein_landing.items():  # a received spill that re-spills past this shrunk terminator
             if land > term_offset:
                 landing[vid] = max(landing.get(vid, 0), _spill_local_cycle(bid, land, term_offset))
-        spill = _SpillCarry(busy, landing)
         for target in targets:
-            carry[target] = spill
+            carry[target] = landing
     instances: dict[PooledHardwareOperator, int] = {}
     for sched in block_sched.values():
         for inst in sched.inst_of.values():
@@ -175,7 +149,7 @@ def schedule_blocks(mir: Mir, wide_mir: MirWideView, bool_mir: MirBoolView, fetc
         len(overlap_term_offset),
         len(carry),
     )
-    return BlockSchedules(block_sched, block_inflight, block_entry_busy, overlap_term_offset, instances)
+    return BlockSchedules(block_sched, block_inflight, overlap_term_offset, instances)
 
 
 def layout_offsets(
@@ -212,29 +186,34 @@ def layout_offsets(
     return BlockOffsets(block_makespan, block_term_offset)
 
 
-def _pc_less(mir: Mir, schedules: BlockSchedules, blocks: list[LirBlock]) -> dict[int, Arm]:
+def pc_less(mir: Mir, schedules: BlockSchedules, working: set[int]) -> dict[int, Arm]:
     """
-    The blocks that take no PC, each mapped to the arm its predecessors take instead: a non-entry block that does no
-    work, receives nothing across an overlapped seam (no spilled value, no busy instance), and jumps. Nothing lands in
-    its frame, so what an exit reads there is already resident at its predecessor's terminator. A cycle of such blocks
-    is a reachable nontermination and keeps its PCs, so a chain running into one resolves to where it enters the cycle.
+    The blocks that take no PC, each mapped to the arm its predecessors take instead: a non-entry block outside
+    `working` (the blocks that schedule an operation or carry a copy) that receives no spill and whose arms all resolve,
+    through other such blocks, to one target other than itself. Nothing lands in its frame, so what an exit reads there
+    is already resident at its predecessor's terminator.
     """
-    jumps: dict[int, Arm] = {}
-    for block in blocks:
-        idle = not (block.ops or block.inline_ops or block.copies)
-        received = schedules.block_inflight[block.index] or schedules.block_entry_busy[block.index]
-        if block.index != mir.entry and idle and not received and isinstance(block.terminator, Jump):
-            jumps[block.index] = block.terminator.target
+    idle = {
+        block.id: [Exit()] if isinstance(block.terminator, MirRet) else successors(block)
+        for block in mir.blocks
+        if block.id != mir.entry and block.id not in working and not schedules.block_inflight[block.id]
+    }
     resolved: dict[int, Arm] = {}
-    for start in jumps:
-        path: list[int] = []
-        arm: Arm = start
-        while isinstance(arm, int) and arm in jumps and arm not in path:
-            path.append(arm)
-            arm = jumps[arm]
-        cycle_entry = path.index(arm) if isinstance(arm, int) and arm in path else len(path)
-        resolved.update(dict.fromkeys(path[:cycle_entry], arm))
-    return resolved
+
+    def resolve(arm: Arm) -> Arm:
+        while isinstance(arm, int) and arm in resolved:
+            arm = resolved[arm]
+        return arm
+
+    changed = True
+    while changed:
+        changed = False
+        for index in sorted(idle.keys() - resolved.keys()):
+            targets = {resolve(arm) for arm in idle[index]}
+            if len(targets) == 1 and (target := targets.pop()) != index:
+                resolved[index] = target
+                changed = True
+    return {index: resolve(index) for index in resolved}
 
 
 def _retarget(terminator: Terminator, pc_less: Mapping[int, Arm]) -> Terminator:
@@ -251,15 +230,15 @@ def _retarget(terminator: Terminator, pc_less: Mapping[int, Arm]) -> Terminator:
             assert_never(terminator)
 
 
-def layout_blocks(mir: Mir, schedules: BlockSchedules, blocks: list[LirBlock]) -> list[LirBlock]:
+def layout_blocks(mir: Mir, blocks: list[LirBlock], resolved: Mapping[int, Arm]) -> list[LirBlock]:
     """
     The blocks that take PCs, laid out linearly in reverse-postorder; each spans `term_offset + 1` fetch steps, the
     successor frame beginning at `term_pc + 1`. A back-edge targets an earlier, lower-addressed block, which the
     next-PC sequencer redirects like any other jump; the frontend emits reducible loops, so a back-edge target dominates
-    it. Arms into a block that takes no PC are resolved through it, until a branch folded into a jump leaves none.
+    it. Arms into a block that takes no PC (`resolved`, see `pc_less`) are resolved through it.
     """
-    while pc_less := _pc_less(mir, schedules, blocks):
-        _logger.info("Layout: blocks %s take no PC", sorted(pc_less))
-        blocks = [replace(b, terminator=_retarget(b.terminator, pc_less)) for b in blocks if b.index not in pc_less]
+    if resolved:
+        _logger.info("Layout: blocks %s take no PC", sorted(resolved))
+    blocks = [replace(b, terminator=_retarget(b.terminator, resolved)) for b in blocks if b.index not in resolved]
     by_index = {block.index: block for block in blocks}
     return [by_index[index] for index in reverse_postorder(mir) if index in by_index]

@@ -89,6 +89,14 @@ def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
 def _metrics(lir: Lir) -> str:
     fmt = lir.float_format
     arms = steering(lir)
+    read_ports = sum(inst.operator.signature.arity for inst in lir.instances)
+    write_lanes = {
+        (op.inst, write.port)
+        for block in lir.blocks
+        for op in block.ops
+        for write in op.writes
+        if isinstance(write.dst, RegRef)
+    }
     op_counts: dict[str, int] = {}
     for inst in lir.instances:
         op_counts[inst.operator.mnemonic] = op_counts.get(inst.operator.mnemonic, 0) + 1
@@ -97,7 +105,7 @@ def _metrics(lir: Lir) -> str:
         ("integer format", str(lir.int_format)),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
         ("wide registers", f"{lir.regfile.nreg} × {lir.wide_register_width}-bit"),
-        ("wide regfile R/W ports", f"{lir.regfile.nrd} / {lir.regfile.nwr}"),
+        ("wide regfile R/W ports", f"{read_ports} / {len(write_lanes)}"),
         ("steering mux arms", f"{arms.read} read + {arms.wide_write} write = {arms.read + arms.wide_write}"),
         ("bool write select arms", arms.bool_write),
         ("II min [cycles]", lir.min_initiation_interval),

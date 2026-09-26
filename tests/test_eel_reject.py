@@ -463,3 +463,28 @@ def test_lambda_rejection_points_at_the_lambda_token() -> None:
 @pytest.mark.parametrize("fn", _CASES, ids=[getattr(fn, "__name__", "?") for fn in _CASES])
 def test_rejection(fn: object) -> None:
     _reject(fn)
+
+
+def _returns_when_positive(x: float) -> float:
+    if x > 0.0:
+        return x
+    raise ValueError("negative")
+
+
+def _k_raise_behind_a_helper_return(x: float) -> float:
+    return _returns_when_positive(x)
+
+
+def _k_raise_behind_a_break(x: float) -> float:
+    for i in range(3):
+        if x > float(i):
+            break
+        raise ValueError("unreached when x > 0")
+    return x
+
+
+@pytest.mark.parametrize("fn", [_k_raise_behind_a_helper_return, _k_raise_behind_a_break])
+def test_a_raise_behind_a_pending_exit_is_data_dependent(fn: Callable[..., object]) -> None:
+    """It runs only where an earlier return or break did not fire, so it is no compile-time diagnostic."""
+    with pytest.raises(UnsupportedConstruct, match="data-dependent path"):
+        lower(fn, DEFAULT_UNROLL_MAX_TRIPS)

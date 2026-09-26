@@ -17,7 +17,6 @@ from ..._errors import SourceLocation, SourceUnavailable, UnsupportedConstruct
 
 @dataclass(frozen=True, slots=True)
 class SourceUnit:
-    fn: types.FunctionType
     fndef: ast.FunctionDef
     lines: list[str]
     start: int
@@ -60,7 +59,7 @@ def load(fn: types.FunctionType) -> SourceUnit:
         line_offset = 0
     for node in body:
         if isinstance(node, ast.FunctionDef) and node.name == fn.__name__:
-            return SourceUnit(fn, node, lines, start, filename, line_offset)
+            return SourceUnit(node, lines, start, filename, line_offset)
         if isinstance(node, ast.AsyncFunctionDef) and node.name == fn.__name__:
             lineno = node.lineno - line_offset
             snippet = lines[lineno - 1]

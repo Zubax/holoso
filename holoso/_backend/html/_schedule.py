@@ -34,11 +34,12 @@ def render_schedule(lir: Lir) -> str:
     columns = _columns_of(lir)
     col_ord = {col: ordinal for ordinal, col in enumerate(columns)}
     operator_colors = _operator_colors(lir)
-    # The microcode PC timeline, cycles 1..span (cycle 0 is the accept/input-load bookend row): the grid reflects what
-    # the register array holds at each PC, including the microcode-fetch staging.
+    # The microcode PC timeline, cycles 1..last PC (cycle 0 is the accept/input-load bookend row): the grid reflects
+    # what the register array holds at each PC, including the microcode-fetch staging.
     # For a control-flow kernel this lays out every block's PC range; one transaction follows a single path through it,
     # so the grid is the static program, not one transaction's cycle-accurate trace.
     compute_cycles = list(range(1, lir.last_pc + 1))
+    steps = _executing_steps(lir)
     # Block boundaries: the grid row axis is the model fetch PC, and blocks tile it contiguously in layout order, so a
     # block ends at its terminator PC and the next block begins on the following row. A thick horizontal seam below each
     # such row but the last makes the block structure visible. A straight-line kernel has one block and no seams.
@@ -52,10 +53,6 @@ def render_schedule(lir: Lir) -> str:
         stage_base.setdefault(inst, sidx)
     group_ends = {stage_base[inst] + inst.operator.latency - 1 for inst in lir.instances}
 
-    # Column seams: a 2px black seam marks every register-bank boundary (wide|bool, bool|constants) and the two block
-    # boundaries (the last data column | pipeline, and pipeline | OPERATIONS); a 1px seam marks the legacy wide|const
-    # seam of a kernel without a boolean bank, the wide|bool divide within the constants block, and the seams between
-    # operator groups.
     data_thin, data_thick = _data_seams(nreg, nbreg, nconst, nbbool)
     if columns:
         data_thick.add(len(columns) - 1)  # the data block | operator-pipeline boundary
@@ -66,9 +63,7 @@ def render_schedule(lir: Lir) -> str:
         stage_thick={n_stage - 1} if n_stage else set(),
     )
 
-    # Residence tint for both register banks, from the LIR's complete liveness (each accounts for the combinational
-    # ops -- comparisons, boolean logic, and the float<->bool casts -- as well as arithmetic, state, and branches),
-    # merged into one column-keyed map.
+    # Residence tint for both register banks.
     live: dict[ColKey, set[int]] = {reg: rows for reg, rows in lir.liveness.items()}
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance `inst` is in stage `k` on cycle `issue + k + fetch_lag`. Keyed to the
@@ -93,14 +88,12 @@ def render_schedule(lir: Lir) -> str:
         base_pc = lir.block_base[block.index]
         for op in block.ops:
             color = operator_colors[type(op.inst.operator)]
-            # Physical clock cycles (cycle-accurate), from the single Lir definitions shared with the liveness. One
-            # firing renders one cell per tapped output port (all in one hover group) on EACH arm its writeback reaches,
-            # edges from its shared operands, and one pipeline trail. Block-local cycles are rebased to absolute here.
+            # Cycles come from the Lir definitions shared with the liveness.
             issue_pc = base_pc + op.issue_cycle
             read_cyc = operand_read_cycle(op.inst.operator, issue_pc, lir.fetch_lag)
             operand_labels = [_operand_label(operand) for operand in op.operands]
             firing_tip = _esc(_op_text(op))
-            landing_pcs = lir.write_landing_pcs(block, op)  # op-wide (not per-write); hoisted out of the lane loop
+            landing_pcs = lir.write_landing_pcs(block, op)
             for write in op.writes:
                 tip = _esc(
                     f"{_col_label(write.dst)} 🠄 "
@@ -110,10 +103,7 @@ def render_schedule(lir: Lir) -> str:
                 )
                 dcol: ColKey = write.dst
                 dord = col_ord[dcol]
-                # One commit cell PER successor arm the writeback reaches, each with its OWN dataflow edges and
-                # ops chip on its landing row -- the report is path-exact, so a spilled result reads the same on every
-                # arm it lands in, not just the first. A single-landing (drained) write draws exactly one cell, edge
-                # set, and chip, identical to a non-overlapping schedule.
+                # The report is path-exact: a spilled result gets its own cell, edges and chip on every arm it lands in.
                 for write_cyc in landing_pcs:
                     writes_at[(write_cyc, dcol)] = writes_at.get((write_cyc, dcol), "") + _write_label(
                         op.inst.index, tip
@@ -122,7 +112,7 @@ def render_schedule(lir: Lir) -> str:
                     endpoints.add((dord, write_cyc))
                     cell_group[(dord, write_cyc)] = group
                     for operand in op.operands:
-                        oord = col_ord[operand.source]  # the operand's source column; read combinationally at read_cyc
+                        oord = col_ord[operand.source]
                         endpoints.add((oord, read_cyc))
                         edges.append((f"g{dord}_{write_cyc}", f"g{oord}_{read_cyc}", color, group))
                     chips_at.setdefault(write_cyc, []).append(
@@ -131,11 +121,13 @@ def render_schedule(lir: Lir) -> str:
             base = stage_base[op.inst]
             # A throughput-1 pipeline advances one stage per cycle: stage k is busy only on row issue + k + lag (a
             # diagonal). A non-pipelined FSM core (initiation_interval > 1) holds one transaction and keeps every stage
-            # busy across the whole in-flight window (a rectangle over the same rows).
+            # busy until it accepts the next, a rectangle over its initiation interval's rows. Past an overlap-shrunk
+            # terminator the stages advance in every successor arm's frame, as the landings do.
             pipelined = op.inst.operator.initiation_interval == 1
-            rows = [issue_pc + i + lir.fetch_lag for i in range(op.latency)]
+            window = op.latency if pipelined else op.inst.operator.initiation_interval
+            rows = [lir.frame_pcs(block, op.issue_cycle + i + lir.fetch_lag) for i in range(window)]
             for k in range(op.latency):
-                for cyc in ([rows[k]] if pipelined else rows):
+                for cyc in rows[k] if pipelined else [pc for pcs in rows for pc in pcs]:
                     key = (base + k, cyc)
                     if key in stage_fill and stage_fill[key][1] != group:
                         conflicts.add(key)
@@ -143,10 +135,7 @@ def render_schedule(lir: Lir) -> str:
                     stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {firing_tip}"
             group += 1
 
-    # Inline firings (boolean logic and the float<->bool casts): single PC-gated statements with no pooled instance,
-    # so no pipeline-stage trail. Each renders a colored result cell on its bank's landing cycle, a write marker,
-    # dataflow edges from its operands (all read on the op's single fire step per operand_read_cycle; a constant operand
-    # -- wide or boolean -- anchors its const-pool column), and an ops chip, all in one hover group.
+    # Inline firings (boolean logic and the float<->bool casts) have no pooled instance, hence no pipeline-stage trail.
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for bop in block.inline_ops:
@@ -156,8 +145,6 @@ def render_schedule(lir: Lir) -> str:
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
             dord = col_ord[dcol]
-            # One result cell per successor arm the writeback reaches (overlap spill), each with its own edges and chip
-            # on its landing row -- path-exact, exactly as for pooled firings; a single-landing write is byte-identical.
             for write_cyc in landing_pcs:
                 writes_at[(write_cyc, dcol)] = (
                     writes_at.get((write_cyc, dcol), "") + f"<span class='wl' title='{tip}'>&#9656;</span>"
@@ -175,12 +162,10 @@ def render_schedule(lir: Lir) -> str:
             group += 1
 
     # Installs -- wide phi-arm copies, boolean phi/state writes, and non-coalesced state writebacks -- are first-class
-    # write events the schedule must show, not invisible side effects. Each samples its source on its FIRE step and
-    # latches its destination on its LANDING row; the caller passes both, computed per kind exactly as the numerical
-    # model's decode does, so the marker row matches the residence tint and the model commit. Render each like a state
-    # commit -- a filled cell, a write marker, and a chip at the landing row, plus a dataflow edge from the landing to
-    # the source's const-pool/register cell on the fire row, so the one-cycle-early write span is visible (a boolean
-    # constant source now anchors a `T`/`F` column, exactly as a wide constant does).
+    # write events the schedule must show. Each samples its source on its fire step and latches its destination on its
+    # landing row, both computed per kind exactly as the numerical model's decode does, so the marker row matches the
+    # residence tint and the model commit. The edge from the landing back to the source cell on the fire row makes the
+    # one-cycle-early write span visible; a boolean constant source anchors a `T`/`F` column as a wide constant does.
     def install_event(dst: ColKey, label: str, source: WideOperand | BoolOperand, fire_step: int, landing: int) -> None:
         nonlocal group
         dord = col_ord[dst]
@@ -295,15 +280,13 @@ def render_schedule(lir: Lir) -> str:
         out.append(f"<th class='{cls}'><span>s{k}</span></th>")
     out.append("</tr>")
 
-    # One displayed row per clock cycle, cycle-accurate to the hardware: the accept/input-load cycle (0), then the
-    # compute, latch, and fetch-staging cycles 1..last PC. The row axis is the fetch PC, so out_valid rises on an exit
-    # row.
+    # The row axis is the fetch PC, so out_valid rises on an exit row.
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.wide_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
         in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
-    for bslot in lir.bool_state_slots:  # boolean persistent slots likewise show their reset snapshot in their bX column
+    for bslot in lir.bool_state_slots:
         in_cells[bslot.reg] = _state_chip(f"{bslot.name} = {bslot.reset_value!r}")
-    out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv, lir.fetch_lag))
+    out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
         out.append("<tr class='bbk'>" if cyc in boundary_rows else "<tr>")  # thick seam below a block's last row
@@ -318,7 +301,7 @@ def render_schedule(lir: Lir) -> str:
         for sidx in range(n_stage):
             out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip, conflicts))
         out.append(f"<td class='opcell'>{''.join(chips_at.get(cyc, []))}</td>")
-        out.append(_pc_cell(cyc, lir.fetch_lag))
+        out.append(_pc_cell(cyc, steps.get(cyc, [])))
         out.append("</tr>")
     out.append("</table><svg class='edges'></svg></div>")
     out.append(_sched_script(lir, edges, live, arrows, col_ord))
@@ -351,7 +334,6 @@ def _op_text(op: PooledScheduledOp) -> str:
 
 
 def _is_live(col: ColKey, row_id: int, live: dict[ColKey, set[int]]) -> bool:
-    """Whether register column `col` holds a live value on grid row `row_id` (constants are never tinted)."""
     return isinstance(col, (RegRef, BoolRegRef)) and col in live and row_id in live[col]
 
 
@@ -369,7 +351,7 @@ class _Dividers:
     Right-border seams between grid columns, kept on the *left* cell's right edge (under `border-collapse` the left
     cell wins an equal-width conflict, so a left border on the right column would not show). A `thick` 2px seam marks
     every register-bank boundary (wide|bool, bool|constants) and the two block boundaries (the data block |
-    operator-pipeline and operator-pipeline | OPERATIONS); a `thin` 1px seam marks the legacy wide|constants seam of a
+    operator-pipeline and operator-pipeline | OPERATIONS); a `thin` 1px seam marks the plain wide|constants seam of a
     boolean-free kernel, the wide|bool divide within the constants block, and the seams between operator groups. Data
     and stage columns index separately.
     """
@@ -382,13 +364,9 @@ class _Dividers:
 
 def _data_seams(nreg: int, nbreg: int, nconst: int, nbbool: int) -> tuple[set[int], set[int]]:
     """
-    Right-border seams within the register/constant block, as `(thin, thick)` left-cell column-index sets. The
-    constant block is the wide constants followed by the boolean constants.
-
-    A thick 2px black seam marks each register-bank boundary: wide|bool and bool|constants. With no boolean bank the
-    wide bank abuts the constants directly; that legacy seam stays the lighter 1px so a wide-only kernel renders
-    exactly as before. A thin 1px seam separates the wide constants from the boolean constants within the constant
-    block. Empty banks contribute no seam. The constants|pipeline block boundary is added by the caller.
+    Right-border seams within the register/constant block, as `(thin, thick)` left-cell column-index sets (see
+    `_Dividers`). The constant block is the wide constants followed by the boolean constants. Empty banks contribute no
+    seam; the caller adds the constants|pipeline seam.
     """
     thin: set[int] = set()
     thick: set[int] = set()
@@ -398,7 +376,7 @@ def _data_seams(nreg: int, nbreg: int, nconst: int, nbbool: int) -> tuple[set[in
         if nconst or nbbool:
             thick.add(nreg + nbreg - 1)  # bool | constants
     elif nreg and (nconst or nbbool):
-        thin.add(nreg - 1)  # legacy wide | constants (no boolean bank)
+        thin.add(nreg - 1)  # plain wide | constants (no boolean bank)
     if nconst and nbbool:
         thin.add(nreg + nbreg + nconst - 1)  # wide constants | boolean constants
     return thin, thick
@@ -436,28 +414,43 @@ def _inline_op_text(op: InlineScheduledOp) -> str:
 
 
 def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
-    """
-    The operator-stage columns, in instance order: `(instance, stage)` for each pipeline stage of each operator.
-
-    One column per stage, so an L-cycle operator contributes L columns labeled `s0..s(L-1)`. As an operation flows
-    through its operator, stage `k` is occupied on cycle `issue + k`; the result commits to its register on cycle
-    `issue + L`. This makes the pipeline's advance directly visible and exposes any structural hazard once several
-    operations are in flight at once.
-    """
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
         cols.extend((inst, k) for k in range(inst.operator.latency))
     return cols
 
 
-def _pc_cell(cyc: int, fetch_lag: int) -> str:
+def _executing_steps(lir: Lir) -> dict[int, list[int]]:
     """
-    The executing microcode step for grid row `cyc` (`clk - fetch_lag`): the ROM address whose control word drives
-    this cycle's datapath, and exactly what `err_pc` latches. Blank during the fetch warmup, where it is negative. The
-    `pc_<cyc>` id lets the overlay measure this row's y-centre to route the control-transfer arrows in the margin.
+    Per grid row, the executing microcode steps: the ROM addresses whose control words drive that cycle's datapath,
+    exactly what `err_pc` latches -- the word fetched `fetch_lag` cycles earlier, which near a block's start was fetched
+    by the blocks that redirected into it, one step per path where paths join. The entry's first rows are the fetch
+    warmup and stay blank.
     """
-    step = cyc - fetch_lag
-    return f"<td class='pc' id='pc_{cyc}'>{step if step >= 0 else ''}</td>"
+    preds: dict[int, list[LirBlock]] = {block.index: [] for block in lir.blocks}
+    for block in lir.blocks:
+        for arm in successor_blocks(block.terminator):
+            preds[arm].append(block)
+
+    def fetched(block: LirBlock, cycle: int, back: int) -> set[int]:
+        """The steps fetched `back` cycles before `block`'s block-local `cycle`, walking back across redirects."""
+        if cycle >= back:
+            return {lir.block_base[block.index] + cycle - back}
+        return {step for pred in preds[block.index] for step in fetched(pred, pred.term_offset, back - cycle - 1)}
+
+    return {
+        lir.block_base[block.index] + cycle: sorted(fetched(block, cycle, lir.fetch_lag))
+        for block in lir.blocks
+        for cycle in range(block.term_offset + 1)
+    }
+
+
+def _pc_cell(cyc: int, steps: list[int]) -> str:
+    """
+    A grid row's executing microcode steps (see `_executing_steps`). The `pc_<cyc>` id lets the overlay measure this
+    row's y-centre to route the control-transfer arrows in the margin.
+    """
+    return f"<td class='pc' id='pc_{cyc}'>{'|'.join(str(step) for step in steps)}</td>"
 
 
 def _bookend_row(
@@ -468,7 +461,6 @@ def _bookend_row(
     row_id: int,
     n_stage: int,
     dv: _Dividers,
-    fetch_lag: int,
 ) -> str:
     """Cycle 0: no operator is in flight yet, so the operator-stage cells and ops cell are empty."""
     out = [f"<tr><td class='clk'>{label}</td>"]
@@ -478,7 +470,7 @@ def _bookend_row(
     for sidx in range(n_stage):
         out.append(f"<td class='{_oc_class(sidx, dv)}'></td>")
     out.append("<td class='opcell'></td>")
-    out.append(_pc_cell(row_id, fetch_lag))
+    out.append(_pc_cell(row_id, []))
     out.append("</tr>")
     return "".join(out)
 
@@ -503,13 +495,9 @@ def _live_intervals(rows: set[int]) -> list[list[int]]:
 @dataclass(frozen=True, slots=True)
 class _Arrow:
     """
-    One control-transfer arrow in the right margin: a non-fall-through jump from grid row `src_cyc` into row
-    `dst_cyc`. `lane` is the packed right-margin channel. `tip` is its hover label -- the branch arm's condition
-    (the boolean register the branch evaluates), or `jump` if unconditional -- as raw text (rendered via the SVG
-    `<title>`'s textContent, not HTML-escaped; json.dumps makes it JS-safe). `cond` is the boolean register the
-    branch reads, or `None` for an unconditional jump; the overlay draws a dotted feed from that register's cell at
-    the source row to the arrow's root, so the register's residence visibly ends at the branch rather than in
-    nothingness.
+    One control-transfer arrow in the right margin, from grid row `src_cyc` into row `dst_cyc`; `lane` is its packed
+    margin channel. `tip` is raw text, not HTML-escaped: the overlay renders it through the SVG `<title>`'s textContent,
+    and json.dumps makes it JavaScript-safe. `cond` is the boolean register the branch reads.
     """
 
     src_cyc: int
@@ -521,13 +509,9 @@ class _Arrow:
 
 def _control_arrows(lir: Lir) -> list[_Arrow]:
     """
-    The control transfers that are not the fall-through to the physically next ROM step, one arrow each: a `Jump` to a
-    non-adjacent block, and each `Branch` arm whose target is not the fall-through (usually one arm falls through and
-    the other jumps). The grid row axis is the fetch PC, so the source row is the terminator PC (where the redirect
-    mux reads the condition register and the residence of that register ends) and the target row is the destination
-    block's base PC (where the model lands after the redirect) -- no offset. An arrow is skipped if either row falls
-    outside the grid. A branch arm carries the condition register it reads (for the tooltip and the dotted feed); a jump
-    carries `None`.
+    One arrow per control transfer other than the fall-through to the physically next ROM step. The grid row axis is the
+    fetch PC, so the source row is the terminator PC (where the redirect mux reads the condition register and that
+    register's residence ends) and the target row is the destination block's base PC, with no offset.
     """
     arrows: list[_Arrow] = []
 
@@ -572,10 +556,7 @@ def _pack_arrow_lanes(arrows: list[_Arrow]) -> list[_Arrow]:
 
 
 def _branch_arm_text(cond: BoolRegRef, taken: bool) -> str:
-    """
-    The condition label for a branch arm, naming the boolean register the branch evaluates (not the comparison that
-    populated it): `if b<i>` for the taken arm, `if not b<i>` for the not-taken arm.
-    """
+    """Names the boolean register the branch evaluates, not the comparison that populated it."""
     label = _col_label(cond)
     return f"if {label}" if taken else f"if not {label}"
 
@@ -612,10 +593,6 @@ def _stage_cell(
     stage_tip: dict[tuple[int, int], str],
     conflicts: set[tuple[int, int]],
 ) -> str:
-    """
-    One operator-stage cell: empty unless an operation occupies this stage on this cycle, in which case it is filled
-    with the operator color and tagged with the operation group (so a hover lights the whole pipeline trail).
-    """
     cls = _oc_class(sidx, dv)
     occ = stage_fill.get((sidx, cyc))
     if occ is None:
@@ -634,14 +611,8 @@ def _sched_script(
     col_ord: dict[ColKey, int],
 ) -> str:
     """
-    Build the interactive layer: substitute the per-module data into the readable script template (_SCHED_JS).
-
-    The data is the edge list, the column labels, the constant values, the per-register live-row intervals (keyed by the
-    full column label so the wide and boolean banks never collide on a shared index), and the control-transfer arrows.
-    Each arrow carries its packed right-margin `lane` and `cond`: the cell id of the boolean register it reads (so
-    the overlay draws a dotted feed from that register to the arrow's root), or `None` for an unconditional jump. This
-    is enough for the script to draw the dataflow and arrow overlays and synthesize hover tooltips on demand; without JS
-    the grid still renders fully.
+    Substitute the per-module data into the script template. The live intervals are keyed by the full column label so
+    the wide and boolean banks never collide on a shared index. Without JavaScript the grid still renders fully.
     """
     cols = [_col_label(col) for col in _columns_of(lir)]
     data = {
@@ -666,9 +637,7 @@ def _sched_script(
 
 def _columns_of(lir: Lir) -> list[ColKey]:
     """
-    The grid columns in bank order: wide registers (`rX`), then boolean registers (`bX`), then wide constants
-    (`cX`), then the boolean constants used (`T`/`F`). This is exactly the order the table renders, so a column
-    ordinal indexes straight into this list.
+    The grid columns in exactly the order the table renders them, so a column ordinal indexes straight into this list.
     """
     cols: list[ColKey] = [RegRef(i) for i in range(lir.regfile.nreg)]
     cols += [BoolRegRef(i) for i in range(lir.bool_regfile.nreg)]
@@ -713,11 +682,8 @@ def _state_chip(tip: str) -> str:
 
 def _register_names(lir: Lir) -> dict[tuple[str, int], tuple[str, str]]:
     """
-    Map each register that has a stable role to `(label, kind)`, keyed by `(bank, index)` where bank is `"r"` for
-    a wide register or `"b"` for a boolean one: the wide input lanes to the port they latch at accept, the wide
-    state slots to the attribute they retain, and the boolean state slots to the boolean attribute they retain. Other
-    registers are anonymous scratch; both kinds may still be reused later, but their cycle-0 role is what the label
-    names.
+    Label each register that has a cycle-0 role (an input lane or a state slot, of either bank) with `(name, kind)`. The
+    register may be reused later; the label names only its cycle-0 role.
     """
     names: dict[tuple[str, int], tuple[str, str]] = {}
     for load in lir.wide_inputs:
@@ -786,7 +752,10 @@ def _schedule_key(
         )
     if has_blocks:
         items.append(_key_item("<span class='sw bbkey'></span>", "basic-block boundary (terminator row)"))
-    items.append(f"<span>pc = microcode step executing this cycle (clk&minus;{fetch_lag} fetch lag)</span>")
+    items.append(
+        f"<span>pc = microcode step executing this cycle, fetched {fetch_lag} cycles earlier (one per path after a "
+        "redirect)</span>"
+    )
     return "<h2>Schedule</h2><div class='gridkey'>" + " ".join(items) + "</div>"
 
 
@@ -795,8 +764,6 @@ def _key_item(marker: str, text: str) -> str:
 
 
 def _operator_colors(lir: Lir) -> dict[type[HardwareOperator], str]:
-    # Pooled operators (one color per concrete class) plus the inline operators -- boolean logic and the float<->bool
-    # casts -- so every operator the schedule renders has a color.
     kinds: set[type[HardwareOperator]] = {type(inst.operator) for inst in lir.instances}
     for block in lir.blocks:
         for bop in block.inline_ops:
@@ -806,12 +773,7 @@ def _operator_colors(lir: Lir) -> dict[type[HardwareOperator], str]:
 
 
 def _html_palette(n: int, lightness: float = 0.2, saturation: float = 1.0, hue_start: float = 0.0) -> list[str]:
-    """
-    n: number of colors equidistant on the hue wheel, starting at hue_start
-    lightness: 0..1, target WCAG relative luminance
-    saturation: 0..1, color intensity
-    hue_start: 0..1, rotates the palette around the hue wheel
-    """
+    """`lightness` is the target WCAG relative luminance (0..1), not the HLS lightness."""
     colors = []
     for i in range(n):
         hue = (hue_start + i / n) % 1.0

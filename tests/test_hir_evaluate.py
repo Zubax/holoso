@@ -1,5 +1,5 @@
 """
-Acceptance gate + independence guard for the HIR evaluator (`holoso._hir.HirEvaluator`) and the front-end
+Acceptance gate + independence guard for the HIR evaluator (`holoso._hir._evaluate.HirEvaluator`) and the front-end
 differential-oracle harness (`tests/_eeloracle.py`).
 
 Hand-built builder graphs pin the semantics no lowered kernel reaches: the poison family, the integer vocabulary,
@@ -18,24 +18,22 @@ import holoso
 from holoso import FAddOptions, FloatFormat, OperatorOptions, Options
 from holoso._eel import lower
 from holoso._hir import (
+    FloatRounding,
+    Rounding,
+    Relation,
+    FloatComparison,
     BoolAnd,
     BoolOr,
     FloatAdd,
-    FloatCeil,
     FloatConst,
     FloatDiv,
     FloatExp2,
-    FloatFloor,
     FloatLog2,
     FloatMul,
     FloatNeg,
-    FloatGreater,
-    FloatRound,
-    FloatTrunc,
     FloatType,
     Hir,
     HirBuilder,
-    HirEvaluator,
     IntAdd,
     IntConst,
     IntDivFloor,
@@ -44,6 +42,7 @@ from holoso._hir import (
     IntType,
     NoNumber,
 )
+from holoso._hir._evaluate import HirEvaluator
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
@@ -81,11 +80,16 @@ def test_operator_reference_poles() -> None:
     assert FloatLog2().evaluate([FloatConst(0.0)]) == FloatConst(-inf)
     with pytest.raises(NoNumber):
         FloatLog2().evaluate([FloatConst(-1.0)])
-    for operator in (FloatFloor(), FloatCeil(), FloatTrunc(), FloatRound()):
+    for operator in (
+        FloatRounding(Rounding.FLOOR),
+        FloatRounding(Rounding.CEIL),
+        FloatRounding(Rounding.TRUNC),
+        FloatRounding(Rounding.NEAREST_EVEN),
+    ):
         assert operator.evaluate([FloatConst(inf)]) == FloatConst(inf)
         assert operator.evaluate([FloatConst(-inf)]) == FloatConst(-inf)
-    assert FloatRound().evaluate([FloatConst(2.5)]) == FloatConst(2.0)
-    assert FloatRound().evaluate([FloatConst(3.5)]) == FloatConst(4.0)
+    assert FloatRounding(Rounding.NEAREST_EVEN).evaluate([FloatConst(2.5)]) == FloatConst(2.0)
+    assert FloatRounding(Rounding.NEAREST_EVEN).evaluate([FloatConst(3.5)]) == FloatConst(4.0)
 
 
 def test_folds_are_immune_to_the_ambient_numpy_error_state() -> None:
@@ -113,7 +117,7 @@ def test_swap_loop_phis_resolve_in_parallel() -> None:
     i = builder.open_phi(FloatType(), (entry, n))
     a = builder.open_phi(FloatType(), (entry, first))
     b = builder.open_phi(FloatType(), (entry, second))
-    builder.branch(builder.operation(FloatGreater(), [i, builder.float_const(0.0)]), body, exit_)
+    builder.branch(builder.operation(FloatComparison(Relation.GT), [i, builder.float_const(0.0)]), body, exit_)
     builder.position_at(body)
     dec = builder.operation(FloatAdd(), [i, builder.float_const(-1.0)])
     builder.jump(header)
@@ -191,7 +195,7 @@ def _gated_poison(gate_value: bool) -> Hir:
     builder.block()
     x = builder.input("x", FloatType())
     quotient = builder.operation(FloatDiv(), [builder.float_const(1.0), x])
-    positive = builder.operation(FloatGreater(), [quotient, builder.float_const(0.0)])
+    positive = builder.operation(FloatComparison(Relation.GT), [quotient, builder.float_const(0.0)])
     builder.output("out_0", builder.operation(BoolAnd(), [builder.bool_const(gate_value), positive]))
     builder.ret()
     return builder.finish()
@@ -203,7 +207,7 @@ def test_poison_absorbed_by_declared_absorbing_elements() -> None:
     builder.block()
     x = builder.input("x", FloatType())
     quotient = builder.operation(FloatDiv(), [builder.float_const(1.0), x])
-    positive = builder.operation(FloatGreater(), [quotient, builder.float_const(0.0)])
+    positive = builder.operation(FloatComparison(Relation.GT), [quotient, builder.float_const(0.0)])
     builder.output("out_0", builder.operation(BoolOr(), [builder.bool_const(True), positive]))
     builder.output("out_1", builder.operation(FloatMul(), [builder.float_const(0.0), quotient]))
     builder.ret()
@@ -237,7 +241,7 @@ def test_poison_at_branch_condition() -> None:
     merge = builder.block()
     x = builder.input("x", FloatType())
     quotient = builder.operation(FloatDiv(), [builder.float_const(1.0), x])
-    positive = builder.operation(FloatGreater(), [quotient, builder.float_const(0.0)])
+    positive = builder.operation(FloatComparison(Relation.GT), [quotient, builder.float_const(0.0)])
     builder.position_at(entry)
     builder.branch(positive, then, other)
     builder.position_at(then)

@@ -29,12 +29,6 @@ function holoso_fisneginf;
     holoso_fisneginf = ~holoso_fisfinite(x) & x[WFLT-1];
 endfunction
 
-// Combinational saturator: replaces infinity with the largest finite value of the same sign; finite pass through.
-function [WFLT-1:0] holoso_fsaturate;
-    input [WFLT-1:0] x;
-    holoso_fsaturate = (&x[WFLT-2:WMAN-1]) ? {x[WFLT-1], {(WEXP - 1) {1'b1}}, 1'b0, {(WMAN - 1) {1'b1}}} : x;
-endfunction
-
 // Combinational floating-point sign conditioner (absolute first, then optional negate): op[0]=negate, op[1]=absolute.
 //      op=0: +x        op=1: -x        op=2: +|x|      op=3: -|x|
 function [WFLT-1:0] holoso_fsgnop;

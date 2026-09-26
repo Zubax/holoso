@@ -6,10 +6,9 @@ Three structural guards (no simulator) keep a later refactor from silently dropp
 Two cosims (Icarus, which exposes the internal `transacting` wire and the `regs` array; Verilator may optimize
 them away) drive a swept idle dwell:
 `test_transacting_edge_pins_at_accept_plus_fetch_lag` certifies the qualifier rises on exactly the genuine step-0 (a
-late rise drops step-0; an early rise fires a spurious fill-window issue, inert for today's feed-forward operators and
-thus cosim-invisible -- the hazard the gate exists to stop once iterative operators land), and
-`test_state_slot_inert_during_dwell` certifies a cycle-0 constant install does not commit to its persistent-state
-register while the PC dwells idle at pc 0 (the held `ucode[0]` commits nothing).
+late rise drops step-0; an early rise fires a spurious fill-window issue, cosim-invisible -- the hazard the gate exists
+to stop), and `test_state_slot_inert_during_dwell` certifies a cycle-0 inline write does not commit to its
+persistent-state register while the PC dwells idle at pc 0 (the held `ucode[0]` commits nothing).
 """
 
 import shutil
@@ -38,9 +37,10 @@ def _cycle0_kernel(a: float, b: float) -> float:
     return (a - b) * 0.25 + a * b
 
 
-class _ConstInstallState:
-    # A persistent-state slot reset to 5.0 that an entry-block constant install overwrites with 0.0 on cycle 0 -- the
-    # install lands on ucode[0], so it must be transacting-gated to stay inert while the PC dwells idle.
+class _ConstInstallLoop:
+    # The attribute's old value is never read, so it keeps no register: the loop counter's preheader arm is an
+    # entry-block constant install writing 0.0 on cycle 0 -- it lands on ucode[0], so it must be transacting-gated to
+    # stay inert while the PC dwells idle.
     def __init__(self) -> None:
         self._s = 5.0
 
@@ -49,6 +49,18 @@ class _ConstInstallState:
         while self._s < n:
             self._s = self._s + 1.0
         return self._s
+
+
+class _CycleZeroStateWrite:
+    # A persistent-state slot reset to 5.0 whose live-out is a select over its own live-in, committed in place by an
+    # inline write on cycle 0 -- it lands on ucode[0], so it must be transacting-gated to leave the slot alone while the
+    # PC dwells idle.
+    def __init__(self) -> None:
+        self._s = 5.0
+
+    def __call__(self, n: float, keep: bool) -> float:
+        self._s = self._s if keep else n
+        return self._s * 2.0
 
 
 def _verilog(fn: Callable[..., object], name: str) -> str:
@@ -75,8 +87,8 @@ def test_every_operator_iv_is_gated_by_transacting() -> None:
 
 def test_const_install_is_gated_by_transacting() -> None:
     # A cycle-0 const-install sits on ucode[0]; its per-register write opcode must AND transacting so the held dwell
-    # decodes to the NOP code (0) and installs nothing. This float-slot kernel covers the mechanism.
-    _assert_effect_trigger_gated(_ConstInstallState().__call__, "gate_cwe", "uc_op_")
+    # decodes to the NOP code (0) and installs nothing.
+    _assert_effect_trigger_gated(_ConstInstallLoop().__call__, "gate_cwe", "uc_op_")
 
 
 def test_pooled_write_enable_is_gated_by_transacting() -> None:
@@ -135,12 +147,13 @@ def test_transacting_edge_pins_at_accept_plus_fetch_lag(k: int, monkeypatch: pyt
 def test_state_slot_inert_during_dwell(k: int, monkeypatch: pytest.MonkeyPatch) -> None:
     name = f"gate_state_k{k}"
     lir = build_lir(
-        lower_to_mir(lower(_ConstInstallState().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
+        lower_to_mir(lower(_CycleZeroStateWrite().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
-    slots = lir.wide_state_slots
-    assert slots, "kernel must have a wide state slot with a cycle-0 const install"
-    slot = slots[0]
+    (slot,) = lir.wide_state_slots
+    assert any(
+        op.issue_cycle == 0 and slot.reg in (write.dst for write in op.writes) for op in lir.blocks[0].inline_ops
+    ), "kernel must write its state slot on cycle 0"
     env = {
         "HOLOSO_DWELL_K": k,
         "HOLOSO_SLOT_IDX": slot.reg.index,

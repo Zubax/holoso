@@ -159,7 +159,7 @@ module holoso_filog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = 
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a),
         .out_valid(out_valid), .y(y),
-        .zero(), .infinity(), .negative()  // sidebands not used at the moment; this may change if needed
+        .zero(), .infinity(), .negative()
     );
 endmodule
 

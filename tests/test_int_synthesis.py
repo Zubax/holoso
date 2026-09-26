@@ -849,6 +849,17 @@ def truncated_and_floored(x: float) -> tuple[int, int]:
     return int(x), int(math.floor(x))
 
 
+def integer_round_trip(i: int) -> int:
+    return int(float(i))
+
+
+def test_the_integer_float_round_trip_needs_neither_conversion() -> None:
+    """`int(float(i))` is `i` under the fastmath charter, so a machine configured with no conversion builds it."""
+    sim = holoso.synthesize(integer_round_trip, _OPTIONS, name="RoundTrip").numerical_model.elaborate()
+    for value in (0, 1, -1, 12345, -12345):
+        assert _run(sim, value) == [value]
+
+
 _ROUNDINGS = [0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.25, -100.25]
 
 

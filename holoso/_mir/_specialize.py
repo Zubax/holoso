@@ -42,22 +42,18 @@ def specialize(hir: Hir, int_format: IntFormat) -> Hir | None:
     """
     width = int_format.width
     assert width >= 2
-    substitutions = 0
-
-    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
-        # Counts are read off the ORIGINAL graph: this pass folds nothing, so a constant there is a constant here.
-        nonlocal substitutions
+    settled: set[ValueId] = set()
+    for vid, node in hir.nodes.items():
         match node:
             case Operation(operator=IntShiftLeft(), operands=(_, count)) if (
                 shamt := constant_shift_count(hir, count)
             ) is not None and shamt >= width:
-                substitutions += 1
-                return builder.const_node(IntConst(0))
-            case _:
-                return copy_node(builder, node, remap)
-
-    specialized = rebuild(hir, build_value)
-    if not substitutions:
+                settled.add(vid)
+    if not settled:
         return None
-    _logger.info("Shift specialization: %d constant count(s) settled by the %d-bit word", substitutions, width)
-    return specialized
+
+    def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
+        return builder.const_node(IntConst(0)) if vid in settled else copy_node(builder, node, remap)
+
+    _logger.info("Shift specialization: %d constant count(s) settled by the %d-bit word", len(settled), width)
+    return rebuild(hir, build_value)

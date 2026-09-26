@@ -5,10 +5,9 @@ runs means a transform changed. Locations off by default, on for logs and for th
 
 import dataclasses
 import math
-import os
 
-from .._errors import SourceLocation
 from ._ir import *
+from ._names import access_path
 
 _INDENT = " " * 4
 
@@ -18,7 +17,7 @@ def print_eel(fn: EelFunction, *, locations: bool = False) -> str:
     for decl in fn.slots:
         lines.append(f"{_INDENT}state {_slot(decl.slot)}: {decl.stype.value} reset {_const(decl.reset)}")
     for out in fn.outputs:
-        lines.append(f"{_INDENT}output {_out_path(out)}: {out.stype.value}")
+        lines.append(f"{_INDENT}output {access_path(out.path)}: {out.stype.value}")
     _block(fn.body, 1, lines, locations)
     return "\n".join(lines) + "\n"
 
@@ -39,14 +38,7 @@ def _header(fn: EelFunction) -> str:
 
 def _slot(slot: SlotPath) -> str:
     assert slot and isinstance(slot[0], str)
-    text = slot[0]
-    for key in slot[1:]:
-        text += f"[{key}]" if isinstance(key, int) else f".{key}"
-    return text
-
-
-def _out_path(out: OutputDecl) -> str:
-    return "".join(f"[{key}]" if isinstance(key, int) else f".{key}" for key in out.path)
+    return access_path(slot)[1:]
 
 
 def _block(body: Block, depth: int, lines: list[str], locations: bool) -> None:
@@ -90,16 +82,10 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
             if orelse:
                 lines.append(pad + "else:")
                 _block(orelse, depth + 1, lines, locations)
-        case While(origin=origin, header=header, cond=cond, body=body):
-            if header:
-                put("while:", origin)
-                _block(header, depth + 1, lines, locations)
-                lines.append(pad + f"do {_atom(cond)}:")
-            else:
-                put(f"while {_atom(cond)}:", origin)
-            _block(body, depth + 1, lines, locations)
-        case ResidualWhile(origin=origin, phis=phis, header=header, cond=cond, body=body):
-            for phi in phis:
+        case While(origin=origin, header=header, cond=cond, body=body) | ResidualWhile(
+            origin=origin, header=header, cond=cond, body=body
+        ):
+            for phi in stmt.phis if isinstance(stmt, ResidualWhile) else ():
                 put(f"phi %{phi.index}: {phi.stype.value} = {_atom(phi.entry)} -> {_atom(phi.back)}", phi.origin)
             if header:
                 put("while:", origin)
@@ -109,7 +95,7 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
                 put(f"while {_atom(cond)}:", origin)
             _block(body, depth + 1, lines, locations)
         case For(origin=origin, target=target, iterable=iterable, body=body):
-            put(f"for {target.name} in {_atom(iterable)}:", origin)
+            put(f"for {_binding(target)} in {_atom(iterable)}:", origin)
             _block(body, depth + 1, lines, locations)
         case Return(origin=origin, value=value):
             put("return" if value is None else f"return {_atom(value)}", origin)
@@ -148,9 +134,7 @@ def _expr(expr: Expr) -> str:
             if rendered.startswith("-"):  # a folded negative literal: `--2.5` would read as a typo
                 rendered = f"({rendered})"
             return f"{op.value}{rendered}"
-        case Binary(op=op, left=left, right=right):
-            return f"{_atom(left)} {op.value} {_atom(right)}"
-        case Compare(op=op, left=left, right=right):
+        case Binary(op=op, left=left, right=right) | Compare(op=op, left=left, right=right):
             return f"{_atom(left)} {op.value} {_atom(right)}"
         case IsNone(operand=operand, negated=negated):
             return f"{_atom(operand)} {'is not' if negated else 'is'} None"
@@ -159,9 +143,7 @@ def _expr(expr: Expr) -> str:
         case AttrRead(base=base, attr=attr):
             return f"{_atom(base)}.{attr}"
         case IndexRead(base=base, index=index):
-            return f"{_atom(base)}[{_atom(index)}]"
-        case SliceRead(base=base, lo=lo, hi=hi):
-            return f"{_atom(base)}[{'' if lo is None else _atom(lo)}:{'' if hi is None else _atom(hi)}]"
+            return f"{_atom(base)}[{_axis(index)}]"
         case MultiIndexRead(base=base, axes=axes):
             return f"{_atom(base)}[{', '.join(_axis(a) for a in axes)}]"
         case TupleExpr(items=items):
@@ -187,11 +169,8 @@ def _operator(operator: object) -> str:
     The mnemonic plus any operator parameters (`fmul_pow2<3>`), duck-typed so the printer stays HIR-free;
     stable across operator-class internals, unlike the dataclass repr.
     """
-    mnemonic = getattr(operator, "mnemonic", None)
-    if not isinstance(mnemonic, str):
-        return repr(operator)
-    if not dataclasses.is_dataclass(operator) or isinstance(operator, type):
-        return mnemonic
+    mnemonic = getattr(operator, "mnemonic")
+    assert isinstance(mnemonic, str) and dataclasses.is_dataclass(operator) and not isinstance(operator, type)
     parts = [repr(getattr(operator, field.name)) for field in dataclasses.fields(operator)]
     return mnemonic + (f"<{','.join(parts)}>" if parts else "")
 
@@ -208,14 +187,10 @@ def _axis(axis: Atom | SliceSel) -> str:
     return _atom(axis)
 
 
-def _argument(arg: PosArg | StarArg | KwArg) -> str:
-    match arg:
-        case PosArg(value=value):
-            return _atom(value)
-        case StarArg(value=value):
-            return f"*{_atom(value)}"
-        case KwArg(name=name, value=value):
-            return f"{name}={_atom(value)}"
+def _argument(arg: Argument) -> str:
+    if isinstance(arg, KwArg):
+        return f"{arg.name}={_atom(arg.value)}"
+    return _item(arg)
 
 
 def _atom(atom: Atom) -> str:
@@ -238,7 +213,7 @@ def _const(value: bool | int | float) -> str:
     return repr(value)
 
 
-def _binding(binding: TempBind | LocalBind) -> str:
+def _binding(binding: Binding) -> str:
     match binding:
         case TempBind(index=index):
             return f"%{index}"
@@ -247,7 +222,7 @@ def _binding(binding: TempBind | LocalBind) -> str:
 
 
 def _store_path(root: LocalRef | EnvRead, path: tuple[Selector, ...]) -> str:
-    text = _expr(root) if isinstance(root, EnvRead) else root.name
+    text = _expr(root)
     for selector in path:
         match selector:
             case AttrSel(name=name):
@@ -259,9 +234,5 @@ def _store_path(root: LocalRef | EnvRead, path: tuple[Selector, ...]) -> str:
 
 def _loc_suffix(origin: Origin) -> str:
     """Every call site the expansion passed through, outermost first, then the line itself."""
-
-    def spelled(location: SourceLocation) -> str:
-        return f"{os.path.basename(location.filename)}:{location.lineno}"
-
-    hops = [f"{spelled(frame.site)} via {frame.callee}" for frame in origin.frames]
-    return "  # " + ", ".join([*hops, spelled(origin.location)])
+    hops = [f"{frame.site.brief} via {frame.callee}" for frame in origin.frames]
+    return "  # " + ", ".join([*hops, origin.location.brief])

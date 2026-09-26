@@ -1,5 +1,6 @@
 """Exception hierarchy for Holoso synthesis, with optional source locations."""
 
+import os
 from dataclasses import dataclass
 
 
@@ -11,6 +12,10 @@ class SourceLocation:
     lineno: int
     col: int
     line: str | None = None
+
+    @property
+    def brief(self) -> str:
+        return f"{os.path.basename(self.filename)}:{self.lineno}"
 
     def __str__(self) -> str:
         where = f"{self.filename}:{self.lineno}:{self.col + 1}"

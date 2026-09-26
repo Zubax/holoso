@@ -2,8 +2,7 @@
 Wrappers the compiler reads through to the function inside.
 
 A JIT dispatcher is read through to the function it merely accelerates, as a target and as a callee, and is never
-state; one that declares types of its own converts rather than accelerates, so it is refused, as is any decorator
-that advertises itself -- a silent unwrap would drop behavior that IS part of the program.
+state; one that declares types of its own converts rather than accelerates, so it is refused.
 """
 
 import sys

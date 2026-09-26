@@ -84,7 +84,7 @@ def test_integer_ports_condition_with_the_identity_and_nothing_else(width: int) 
     assert IntIdentity().decorate("r3") == "r3"
 
     operation = MirOperation(
-        SelectOperator(ty), [0, 1, 2], [BoolInversion(), IntIdentity(), IntIdentity()], 0, IntIdentity(), ()
+        SelectOperator(ty), (0, 1, 2), (BoolInversion(), IntIdentity(), IntIdentity()), 0, IntIdentity(), ()
     )
     assert operation.scalar_type == ty
 
@@ -137,6 +137,24 @@ def test_a_kernel_carrying_no_float_answers_to_the_floor_alone(wint_min: int) ->
         options = dataclasses.replace(default_options(ffmt), wint_min=wint_min)
         assert _word_of(_increment, options, "WintInt")[0] == IntFormat(wint_min), ffmt
         assert _word_of(_flags, options, "WintBool")[0] == IntFormat(wint_min), ffmt
+
+
+class _UnreadFloatState:
+    def __init__(self) -> None:
+        self._f = 0.0
+
+    def step(self, n: int) -> int:
+        self._f = float(n)
+        return n * 2
+
+
+def test_a_float_only_an_unread_slot_holds_sizes_nothing() -> None:
+    """An unread slot is dead code, so its float family is as absent as any other dead float's."""
+    options = dataclasses.replace(default_options(FloatFormat(8, 36)), wint_min=16)
+    result = holoso.synthesize(_UnreadFloatState().step, options, name="UnreadFloatSlot")
+    assert result.int_format == IntFormat(16)
+    (out,) = result.numerical_model.elaborate().run(20000)
+    assert isinstance(out, IntValue) and int(out) == 32767
 
 
 def test_the_machine_word_sizes_the_wide_register_bank_in_the_rtl() -> None:
@@ -230,6 +248,19 @@ def test_a_narrowing_that_leaves_nothing_buildable_keeps_the_widest_word() -> No
     assert isinstance(out, IntValue) and int(out) == 0
 
 
+def _division_by_a_shift_past_the_narrow_word(x: int) -> int:
+    return 5 // (x << 20)  # a real division at the wide word; at the narrow one the divisor is zero
+
+
+def test_a_narrowing_the_refusal_gate_convicts_keeps_the_widest_word() -> None:
+    """The gate's verdict on the narrow graph is part of whether the narrow word can build it at all."""
+    options = dataclasses.replace(default_options(FMT), wint_min=16)
+    result = holoso.synthesize(_division_by_a_shift_past_the_narrow_word, options, name="DivBehindShift")
+    assert result.int_format == IntFormat(24)
+    (out,) = result.numerical_model.elaborate().run(1)
+    assert isinstance(out, IntValue) and int(out) == 0
+
+
 def test_an_absorbed_shift_count_fits_the_word_that_carries_it() -> None:
     """Only a two-bit word cannot represent its own width, and every count from width-1 up rails identically."""
     options = dataclasses.replace(default_options(FMT), wint_min=2)
@@ -260,7 +291,7 @@ def test_a_state_reset_past_the_floor_is_refused_by_its_own_gate() -> None:
 
 
 def test_a_literal_past_the_floor_is_refused_where_a_wide_float_used_to_carry_it() -> None:
-    """The float format no longer lends its width to an integer kernel, so the kernel must ask for what it needs."""
+    """The float format lends no width to a kernel carrying no float, so the kernel must ask for what it needs."""
 
     def big(n: int) -> int:
         return n + 100_000

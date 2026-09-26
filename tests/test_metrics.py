@@ -13,8 +13,8 @@ Value numbering is seed-independent (`tests/test_determinism.py` proves byte-ide
 values), so these figures hold in any process without pinning the hash seed.
 
 The contract: no figure may regress; a deliberate register-for-arm trade re-freezes `nreg` (or `bnreg`) and
-`steering` together. The control-flow rows encode the convergence win (cross-block reuse and
-coalescing keep registers from growing per value), so any backslide toward it fails the same gate.
+`steering` together. The control-flow rows pin cross-block reuse and coalescing, which keep registers from growing per
+value.
 """
 
 import sys
@@ -29,16 +29,16 @@ from holoso import FloatFormat, FMulOptions, FSortOptions, OperatorOptions
 from holoso._eel import lower
 from holoso._lir import (
     BoolRegRef,
-    Early,
     Lir,
     MoveWriteSource,
     RegRef,
-    read_arms,
     read_sources_per_port,
     steering,
     write_arms,
     write_events,
 )
+from holoso._lir._ir import Early
+from holoso._lir._sources import read_arms
 from holoso._mir import MirOptions
 from holoso._mir import lower as lower_to_mir
 from ._modelref import (
@@ -193,15 +193,11 @@ def _measure(name: str) -> Metrics:
 #   slots, per-(instance, port) lane accounting of both banks' write selects, the comparator's read ports steered like
 #   any other operand muxes, and commutative orientation (the comparator swaps with its gt/lt tap exchange), all
 #   decided by one annealer minimizing `steering + 2 * registers`. steering is the emitted mux arm count: a constant
-#   operand is a read arm (cordic's 23 constant arms are its angle table), and a write source repeated on several
-#   steps is one arm. Rows where nreg and steering moved in opposite directions are the annealer's trades at that
-#   price: the large kernels spent registers to remove arms (ekf1_stateless 41 -> 44 registers for 100 -> 91 arms,
-#   ekf1_stateful 39 -> 42 for 99 -> 79), the phi-dense and small kernels spent arms to remove registers (imu_fusion
-#   51 -> 41 registers for 151 -> 160 arms, remainder 9 -> 5 for 13 -> 17, pid 9 -> 6 for 15 -> 17). max_write_select
-#   records how wide those merges made the widest wide-bank write select, the localized view the total hides (foc
-#   reaches 9). Write keys are the emitted opcodes (an inline result over the same registers is one arm, two arms
-#   moving one operand are one), so the widest port and select of foc and imu_fusion are those of the allocations that
-#   exact count chose.
+#   operand is a read arm (cordic's 23 constant arms are its angle table), and a write source repeated on several steps
+#   is one arm. At that price the large kernels spend registers to remove arms, and the phi-dense and small kernels
+#   spend arms to remove registers. max_write_select is the widest wide-bank write select, the localized view the total
+#   hides. Write keys are the emitted opcodes (an inline result over the same registers is one arm, two arms moving one
+#   operand are one).
 # - copies and the phi-dense figures reflect phi-arm coalescing: a phi whose register-backed, identity-conditioner arms
 #   do not interfere with it shares their register (the install-free oracle decides), so the install copy vanishes.
 #   recip_newton keeps its one loop-carried copy (its phi overlaps the back-edge arm), proving the oracle refuses
@@ -226,10 +222,9 @@ def _measure(name: str) -> Metrics:
 #   select or a bool->float cast) or pooled -- lands at the same uniform per-op landing, and an install with a
 #   SETTLED source (`install_source_commit`) fires at the work makespan and drops its +1 install drain. last_pc tiles
 #   every block's span (a per-block drain regression anywhere inflates it); max_block_span localizes it to one
-#   block. These timing rules move the schedule-length guards but not nreg/bnreg/steering/copies; signal_window
-#   carries a deliberately-loosened steering arm (one freed boolean register traded for one write-select mux) --
-#   refrozen rather than chased, since the rules are global and correctness-neutral. Settling a commutative operator's
-#   constant operand on one side re-colors what it interns, at an unchanged schedule, and is refrozen the same way.
+#   block. These timing rules move the schedule-length guards but not nreg/bnreg/steering/copies; signal_window's
+#   steering carries one write-select arm traded for one freed boolean register, not worth chasing since the timing
+#   rules are global and correctness-neutral.
 # - pid uses a variable sample interval: the derivative path contains a real divide, and the first-sample and saturation
 #   guards keep the kernel multi-block with one residual copy. The larger PID row is therefore a property of the example
 #   itself, not a scheduler regression to chase.
@@ -256,7 +251,7 @@ _BASELINE: dict[str, Metrics] = {
         copies=0, min_ii=15, last_pc=15, max_block_span=15,
     ),
     "pid": Metrics(
-        False, nreg=6, bnreg=2, steering=17, max_read_port=4, max_write_select=5,
+        False, nreg=6, bnreg=2, steering=17, max_read_port=3, max_write_select=5,
         copies=1, min_ii=36, last_pc=68, max_block_span=31,
     ),
     "schmitt_trigger": Metrics(
@@ -288,11 +283,11 @@ _BASELINE: dict[str, Metrics] = {
     ),
     "remainder": Metrics(
         False, nreg=5, bnreg=4, steering=16, max_read_port=3, max_write_select=3,
-        copies=2, min_ii=37, last_pc=51, max_block_span=17,
+        copies=2, min_ii=33, last_pc=47, max_block_span=17,
     ),
     "octave_index": Metrics(
         False, nreg=3, bnreg=1, steering=5, max_read_port=2, max_write_select=3,
-        copies=3, min_ii=13, last_pc=44, max_block_span=24,
+        copies=3, min_ii=9, last_pc=40, max_block_span=24,
     ),
     "cordic_sincos": Metrics(
         False, nreg=5, bnreg=1, steering=29, max_read_port=14, max_write_select=4,
@@ -303,33 +298,34 @@ _BASELINE: dict[str, Metrics] = {
         copies=0, min_ii=16, last_pc=16, max_block_span=16,
     ),
     # The capability-probe controller: records, reductions, reshape, dtype conversions, and a branchy scan in one
-    # kernel, so it gates the whole new-frontend surface against fabric regressions. The pairwise extrema over the
-    # six active drives hold two partial maxima live where a fold held one, at no cost in latency: the dot products
-    # bound that block, not the max.
+    # kernel, so it gates the whole front-end surface against fabric regressions. The pairwise extrema over the six
+    # active drives hold two partial maxima live where a sequential fold would hold one, at no cost in latency: the dot
+    # products bound that block, not the max.
     "finite_set_current_controller": Metrics(
         False, nreg=16, bnreg=4, steering=69, max_read_port=8, max_write_select=7,
-        copies=12, min_ii=160, last_pc=204, max_block_span=108,
+        copies=12, min_ii=156, last_pc=188, max_block_span=108,
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
     # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced. Its
     # three Euclidean norms carry an exponent extraction per leg and the scalings around it, which this row prices.
+    # Its two copy-only arms are threaded into the blocks that branch to them; the arm this adds to one read port is the
+    # price of the cycles threading saves, which the threading rule does not weigh.
     "imu_fusion": Metrics(
-        False, nreg=42, bnreg=5, steering=158, max_read_port=26, max_write_select=8,
-        copies=14, min_ii=270, last_pc=464, max_block_span=139,
+        False, nreg=42, bnreg=5, steering=155, max_read_port=27, max_write_select=5,
+        copies=14, min_ii=266, last_pc=456, max_block_span=139,
     ),
-    # The two graduated filter examples: both straight-line, so every figure is one block's.
+    # The two graduated filter examples: both straight-line, so every figure is one block's. fir's shifted-out tap is
+    # never read, so it keeps no register.
     "fir": Metrics(
-        True, nreg=8, bnreg=0, steering=8, max_read_port=4, max_write_select=1,
+        True, nreg=7, bnreg=0, steering=8, max_read_port=4, max_write_select=1,
         copies=0, min_ii=20, last_pc=20, max_block_span=20,
     ),
     "biquad": Metrics(
         True, nreg=5, bnreg=0, steering=6, max_read_port=3, max_write_select=2,
         copies=0, min_ii=21, last_pc=21, max_block_span=21,
     ),
-    # The two largest kernels carry the highest register pressure: the uniform landing keeps min_ii/last_pc tight,
-    # so a result resides a cycle longer, and the allocator spends a few more registers still to cut their read
-    # muxes. The baselines are non-regression ceilings (`<=`) pinned tight to the converged build, so a later
-    # improvement may sit below its bound until the next re-freeze.
+    # The two largest kernels carry the highest register pressure: the uniform landing keeps min_ii/last_pc tight, so a
+    # result resides a cycle longer, and the allocator spends a few more registers still to cut their read muxes.
     "ekf1_stateless": Metrics(
         True, nreg=44, bnreg=0, steering=91, max_read_port=26, max_write_select=3,
         copies=0, min_ii=125, last_pc=125, max_block_span=125,
@@ -348,10 +344,12 @@ _BASELINE: dict[str, Metrics] = {
     ),
     # A deep composition: a nested component instance (the flux observer) whose state joins the controller's own,
     # every transcendental the library offers, and two data-dependent branches -- so it gates cross-component slot
-    # allocation against the register and steering blowup that inlining a component can cause.
+    # allocation against the register and steering blowup that inlining a component can cause. Its copy-only arm is
+    # threaded into the block that branches to it, where the merge phi's register must avoid what that block leaves live
+    # toward its other arm; the steering arms this costs are the price of the four cycles threading saves.
     "foc": Metrics(
-        False, nreg=28, bnreg=3, steering=89, max_read_port=14, max_write_select=9,
-        copies=4, min_ii=298, last_pc=349, max_block_span=231,
+        False, nreg=28, bnreg=3, steering=94, max_read_port=14, max_write_select=6,
+        copies=4, min_ii=294, last_pc=345, max_block_span=231,
     ),
 }
 # fmt: on
@@ -379,7 +377,10 @@ def test_metrics_do_not_regress(name: str) -> None:
 
 
 def test_build_is_deterministic() -> None:
-    """The allocator's annealing is `seed=0`; two builds of the same kernel must agree, so the baseline is stable."""
+    """
+    The allocator's annealing draws from a fixed-seed random number generator; two builds of the same kernel must agree,
+    so the baseline is stable.
+    """
     first = _measure("ekf1_stateless")
     second = _measure("ekf1_stateless")
     assert first == second

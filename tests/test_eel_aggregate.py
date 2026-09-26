@@ -118,6 +118,23 @@ def test_subscript_rejections() -> None:
         _rejects(fn)
 
 
+_NAN_GRID = np.array([[1.0, 2.0], [3.0, math.nan]])
+
+
+def _reads_a_nan_element(x: float) -> float:
+    return float(_NAN_GRID[1, 1]) * x
+
+
+def test_a_captured_element_is_named_by_its_row_major_index() -> None:
+    with pytest.raises(UnsupportedConstruct, match=r"'_NAN_GRID\[1, 1\]' is NaN"):
+        lower(_reads_a_nan_element, DEFAULT_UNROLL_MAX_TRIPS)
+
+
+def test_an_empty_slice_does_not_mask_a_bounds_fault_on_another_axis() -> None:
+    with pytest.raises(UnsupportedConstruct, match="out of bounds"):
+        lower(_axis_bound_behind_empty_slice, DEFAULT_UNROLL_MAX_TRIPS)
+
+
 # ---------------------------------------------------------------------- unpacking and splats
 
 

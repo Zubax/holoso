@@ -1,6 +1,6 @@
 """
-Shared HIR rewrite helpers: a CFG-aware rebuild driver for passes that keep the block structure; if-conversion,
-which dissolves blocks, rebuilds by hand.
+Shared HIR rewrite helpers: a CFG-aware rebuild driver for passes that keep the block structure; the passes that
+delete blocks (pruning, fusion, if-conversion, merge threading) edit by hand.
 """
 
 from collections.abc import Callable, Set
@@ -31,12 +31,6 @@ def copy_node(builder: HirBuilder, node: Node, remap: dict[ValueId, ValueId]) ->
             return builder.phi(type, [(pred, remap[value]) for pred, value in arms])
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def copy_state_slots(builder: HirBuilder, hir: Hir, remap: dict[ValueId, ValueId]) -> None:
-    """Re-emit every persistent state slot with its live-out value remapped (slots survive every rewrite pass)."""
-    for slot in hir.state_slots:
-        builder.state_slot(slot.name, slot.reset_value, remap[slot.live_out])
 
 
 def _remap_terminator(terminator: Terminator, remap: dict[ValueId, ValueId]) -> Terminator:
@@ -116,5 +110,6 @@ def rebuild(hir: Hir, build_value: BuildValue | None = None, keep: Set[ValueId] 
         builder.set_phi_arms(remap[vid], [(pred, remap[arm]) for pred, arm in node.arms])
     for out in hir.outputs:
         builder.output(out.name, remap[out.value])
-    copy_state_slots(builder, hir, remap)
+    for slot in hir.state_slots:
+        builder.state_slot(slot.name, slot.reset_value, remap[slot.live_out])
     return builder.finish()

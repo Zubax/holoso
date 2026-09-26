@@ -217,7 +217,7 @@ class _WideRenderer:
 
 
 def generate(lir: Lir) -> VerilogOutput:
-    assert lir.fetch_lag == 2, "only the 2-lag (3-stage) fetch RTL is implemented; 1-lag awaits the latch-removal mode"
+    assert lir.fetch_lag == 2, "only the 3-stage control fetch is implemented"
     w = _Writer()
     cycw = lir.cyc_width
     pcw = max(1, lir.last_pc.bit_length())
@@ -313,7 +313,7 @@ def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> No
     fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.wide_register_width
     nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
     fetch_lag = lir.fetch_lag
-    fetch_stages = fetch_lag + 1  # the control-fetch pipeline depth, shown in the localparam comment
+    fetch_stages = fetch_lag + 1
     w(f"""
 localparam           WEXP      ={fmt.wexp:4};  // float exponent bits fixed by the static schedule
 localparam           WMAN      ={fmt.wman:4};  // float mantissa bits fixed by the static schedule
@@ -472,10 +472,10 @@ always @(posedge clk)
 def _emit_field_wires(w: _Writer, fields: dict[str, Field]) -> None:
     w("""
 // Decoded control fields. A field constant across the whole program is driven by a constant net (so synthesis prunes
-// the logic it feeds); a varying field is a slice of the instruction word. The effect-trigger fields -- the ``gated``
-// ones (operator issue strobes and per-register write opcodes) -- are ANDed with `transacting` HERE, so a held
-// ucode[0] dwell, a fill bubble, or a stale pre-reset word decodes to 0 (NOP): no issue and every register holds.
-// The AND wraps the constant branch too, so the gate stays unconditional even if a trigger ever folds to a constant.
+// the logic it feeds); a varying field is a slice of the instruction word. The effect-trigger fields (operator issue
+// strobes and per-register write opcodes) are ANDed with `transacting` HERE, so a held ucode[0] dwell, a fill bubble,
+// or a stale pre-reset word decodes to 0 (NOP): no issue and every register holds. The AND wraps the constant branch
+// too, so the gate stays unconditional even if a trigger ever folds to a constant.
 """)
     for f in fields.values():
         rhs = _lit(f.width, f.const_value) if f.offset < 0 else f"ucode_word[{f.offset} +: {f.width}]"

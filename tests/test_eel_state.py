@@ -54,7 +54,7 @@ def _residual(target: Callable[..., object], options: holoso.Options = _SYNTH_OP
     return strip_locations(_synthesized(target, options).frontend_ir[-1])
 
 
-# ---------------------------------------------------------------------- A5: install rejections
+# ---------------------------------------------------------------------- install rejections
 
 _SHARED_TABLE = [1.0, 2.0]
 _ESCAPED_ARRAY = np.array([1.0, 2.0])
@@ -296,7 +296,7 @@ class _AggregateReplacesScalar:
         return x
 
 
-def test_the_a5_install_matrix_rejections() -> None:
+def test_the_install_matrix_rejections() -> None:
     for target in [
         _CrossTransactionAlias().step,
         _InternalRawAliasing().step,
@@ -325,7 +325,7 @@ def test_the_a5_install_matrix_rejections() -> None:
         _rejects(target)
 
 
-# ---------------------------------------------------------------------- A5: admissions
+# ---------------------------------------------------------------------- admissions
 
 
 class _PlainLocalSharing:
@@ -423,7 +423,7 @@ class _PropertyFreshTensorStaysMutable:
         return self.y
 
 
-def test_the_a5_install_matrix_admissions() -> None:
+def test_the_install_matrix_admissions() -> None:
     _oracle(_PlainLocalSharing().step, [{"x": 0.5}, {"x": -1.0}])
     _oracle(_InstallsExplicitCopies().step, [{"x": 1.5}, {"x": -2.0}, {"x": 0.0}])
     _oracle(_UnaliasedElementStores().step, [{"i_gain": 2.0, "x": 1.0}, {"i_gain": 0.5, "x": 3.0}])

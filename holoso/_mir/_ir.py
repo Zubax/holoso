@@ -1,16 +1,12 @@
 """Selected mid-level IR (MIR): concrete hardware operators with typed scalar sidebands, arranged into a CFG."""
 
-from collections.abc import Mapping
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import assert_never
 
 from .._operators import (
-    BoolInversion,
-    FloatSignControl,
     HardwareOperator,
     InlineHardwareOperator,
-    IntIdentity,
     PooledHardwareOperator,
     PortConditioner,
     has_sign_control,
@@ -35,11 +31,6 @@ class MirStateRead:
     scalar_type: ScalarType
 
 
-@dataclass(frozen=True, slots=True)
-class MirConst:
-    scalar_type: ScalarType
-
-
 def degrades(value: float, fmt: FloatFormat) -> bool:
     """
     Whether a literal encodes to zero or infinity and so is not the number written. Asked of the encoded bits: a coarse
@@ -55,6 +46,35 @@ def refuse_degrading(value: float, fmt: FloatFormat, what: str, remedy: str = "w
     """`remedy` is the way out the caller knows of beyond the format itself."""
     if degrades(value, fmt):
         raise UnsupportedConstruct(f"{what} {value!r} degrades to {fmt.decode(fmt.encode(value))!r} in {fmt}; {remedy}")
+
+
+def _refuse_unholdable(value: float | int | bool, scalar_type: ScalarType, what: str) -> None:
+    """
+    A value the machine must hold is refused where its encoding is not the number written; saturation is what the
+    arithmetic does, never what a literal does.
+    """
+    match scalar_type:
+        case FloatType(fmt=fmt):
+            assert type(value) is float
+            refuse_degrading(value, fmt, what)
+        case IntType(fmt=fmt):
+            assert type(value) is int
+            if not fmt.fits(value):
+                raise UnsupportedConstruct(f"{what} {value} does not fit {fmt}; raise wint_min")
+        case BoolType():
+            assert type(value) is bool
+
+
+@dataclass(frozen=True, slots=True)
+class MirConst:
+    scalar_type: ScalarType
+    value: float | int | bool
+
+    def __post_init__(self) -> None:
+        _refuse_unholdable(self.value, self.scalar_type, "constant")
+        # ZKF has no negative zero, and neither does HIR; normalizing here keeps the pool from ever holding one.
+        if isinstance(self.scalar_type, FloatType):
+            object.__setattr__(self, "value", self.value + 0.0)
 
 
 def _check_unconditioned_operands(operator: HardwareOperator) -> None:
@@ -87,13 +107,12 @@ class MirOperation:
     A selected hardware-operator use producing ONE value: the `output_port`-th result, conditioned by
     `output_conditioner`. Operations sharing one block, operator, operands, and operand conditioners while tapping
     DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all its results at
-    once. The operation belongs to the resource family of its tapped port's type; operands may reference either family
-    (a comparison reads float operands and produces booleans; the bool->float cast the reverse).
+    once.
     """
 
     operator: HardwareOperator
-    operands: list[ValueId]
-    operand_conditioners: list[PortConditioner]
+    operands: tuple[ValueId, ...]
+    operand_conditioners: tuple[PortConditioner, ...]
     output_port: int
     output_conditioner: PortConditioner
     immediates: tuple[int, ...]  # per-firing immediate values, aligned with operator.immediate_ports
@@ -139,90 +158,6 @@ class MirStateSlot:
 
 
 @dataclass(frozen=True, slots=True)
-class MirFloatInput(MirInput):
-    scalar_type: FloatType
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, FloatType)
-
-
-@dataclass(frozen=True, slots=True)
-class MirBoolInput(MirInput):
-    scalar_type: BoolType
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, BoolType)
-
-
-@dataclass(frozen=True, slots=True)
-class MirFloatStateRead(MirStateRead):
-    scalar_type: FloatType
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, FloatType)
-
-
-@dataclass(frozen=True, slots=True)
-class MirFloatConst(MirConst):
-    scalar_type: FloatType
-    value: float
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, FloatType)
-        assert isinstance(self.value, float)
-        refuse_degrading(self.value, self.scalar_type.fmt, "constant")
-        # ZKF has no negative zero, and neither does HIR; normalizing here keeps the pool from ever holding one.
-        object.__setattr__(self, "value", self.value + 0.0)
-
-
-@dataclass(frozen=True, slots=True)
-class MirBoolStateRead(MirStateRead):
-    scalar_type: BoolType
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, BoolType)
-
-
-@dataclass(frozen=True, slots=True)
-class MirBoolConst(MirConst):
-    scalar_type: BoolType
-    value: bool
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, BoolType)
-        assert isinstance(self.value, bool)
-
-
-@dataclass(frozen=True, slots=True)
-class MirIntInput(MirInput):
-    scalar_type: IntType
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, IntType)
-
-
-@dataclass(frozen=True, slots=True)
-class MirIntStateRead(MirStateRead):
-    scalar_type: IntType
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, IntType)
-
-
-@dataclass(frozen=True, slots=True)
-class MirIntConst(MirConst):
-    scalar_type: IntType
-    value: int
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.scalar_type, IntType)
-        assert isinstance(self.value, int) and not isinstance(self.value, bool)
-        # Saturation is what the arithmetic does, never what a literal does, so this is a refusal, not an invariant.
-        if not self.scalar_type.fmt.fits(self.value):
-            raise UnsupportedConstruct(f"{self.value} does not fit {self.scalar_type.fmt}; raise wint_min")
-
-
-@dataclass(frozen=True, slots=True)
 class MirPhi:
     """
     An SSA merge at a block's entry: one `(predecessor_block, value, conditioner)` arm per incoming edge, of one
@@ -240,71 +175,6 @@ class MirPhi:
 
 
 type MirNode = MirInput | MirStateRead | MirConst | MirOperation | MirPhi
-type MirBoolNode = MirBoolInput | MirBoolStateRead | MirBoolConst | MirPhi | MirOperation
-
-# The wide bank is shared, so each of its leaf kinds is a union; operations and phis join it on scalar width.
-type MirWideInput = MirFloatInput | MirIntInput
-type MirWideStateRead = MirFloatStateRead | MirIntStateRead
-type MirWideConst = MirFloatConst | MirIntConst
-type MirWideNode = MirWideInput | MirWideStateRead | MirWideConst | MirOperation | MirPhi
-
-
-@dataclass(frozen=True, slots=True)
-class MirFloatOutput(MirOutput):
-    conditioner: FloatSignControl = FloatSignControl()
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.conditioner, FloatSignControl)
-
-
-@dataclass(frozen=True, slots=True)
-class MirIntOutput(MirOutput):
-    conditioner: IntIdentity = IntIdentity()
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.conditioner, IntIdentity)
-
-
-@dataclass(frozen=True, slots=True)
-class MirBoolOutput(MirOutput):
-    conditioner: BoolInversion = BoolInversion()
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.conditioner, BoolInversion)
-
-
-@dataclass(frozen=True, slots=True)
-class MirFloatStateSlot(MirStateSlot):
-    reset_value: float
-    conditioner: FloatSignControl = FloatSignControl()
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.reset_value, float)
-        assert isinstance(self.conditioner, FloatSignControl)
-
-
-@dataclass(frozen=True, slots=True)
-class MirIntStateSlot(MirStateSlot):
-    reset_value: int
-    conditioner: IntIdentity = IntIdentity()
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.reset_value, int) and not isinstance(self.reset_value, bool)
-        assert isinstance(self.conditioner, IntIdentity)
-
-
-@dataclass(frozen=True, slots=True)
-class MirBoolStateSlot(MirStateSlot):
-    reset_value: bool
-    conditioner: BoolInversion = BoolInversion()
-
-    def __post_init__(self) -> None:
-        assert isinstance(self.reset_value, bool)
-        assert isinstance(self.conditioner, BoolInversion)
-
-
-type MirWideOutput = MirFloatOutput | MirIntOutput
-type MirWideStateSlot = MirFloatStateSlot | MirIntStateSlot
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +219,15 @@ class Mir:
     outputs: list[MirOutput]
     state_slots: list[MirStateSlot]
 
+    def __post_init__(self) -> None:
+        # One phi arm per predecessor edge, whoever built or rewrote the graph.
+        preds = predecessors(self)
+        for block in self.blocks:
+            for vid in block.phis:
+                phi = self.nodes[vid]
+                assert isinstance(phi, MirPhi)
+                assert sorted(pred for pred, _, _ in phi.arms) == sorted(preds[block.id]), f"phi {vid} arms"
+
     @property
     def entry(self) -> BlockId:
         return self.blocks[0].id
@@ -371,174 +250,71 @@ def successors(block: MirBlock) -> list[BlockId]:
             assert_never(block.terminator)
 
 
+def predecessors(mir: Mir) -> dict[BlockId, list[BlockId]]:
+    """Per block, the source of every edge into it: a branch with both arms on one block counts twice."""
+    preds: dict[BlockId, list[BlockId]] = {block.id: [] for block in mir.blocks}
+    for block in mir.blocks:
+        for succ in successors(block):
+            preds[succ].append(block.id)
+    return preds
+
+
 def reverse_postorder(mir: Mir) -> list[BlockId]:
     return reverse_postorder_of(mir.entry, {block.id: successors(block) for block in mir.blocks})
 
 
-class _MirBankView:
+def threadable_arms(mir: Mir) -> list[BlockId]:
     """
-    The phi-arm subset and the per-block operation listing of one bank; `operation_nodes` is filled once since the
-    scheduler reads it per operation.
+    The blocks `thread_arm` may take out, in reverse postorder: each does nothing but jump FORWARD into a merge with
+    phis, from a sole predecessor that is not already the merge's. Its predecessor then installs the merge phis' arms
+    on every edge out of it, which is sound because the merge does not dominate the predecessor: every use of a merge
+    phi is dominated by the merge, so none is reachable from the predecessor except through the merge, which redefines
+    it.
     """
-
-    __slots__ = ()
-
-    # Each concrete view narrows this to its bank's node element type (e.g. `dict[ValueId, MirWideNode]`).
-    nodes: Mapping[ValueId, MirNode]
-    operation_nodes: dict[ValueId, MirOperation]
-
-    def __post_init__(self) -> None:
-        operations = {vid: node for vid, node in self.nodes.items() if isinstance(node, MirOperation)}
-        object.__setattr__(self, "operation_nodes", operations)
-
-    @property
-    def phi_nodes(self) -> dict[ValueId, MirPhi]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirPhi)}
-
-    def block_operations(self, block: MirBlock) -> list[ValueId]:
-        """The bank's operation ids defined in `block`, in evaluation order."""
-        return [vid for vid in block.operations if vid in self.operation_nodes]
+    preds = predecessors(mir)
+    order = reverse_postorder(mir)
+    position = {bid: i for i, bid in enumerate(order)}
+    by_id = {block.id: block for block in mir.blocks}
+    arms: list[BlockId] = []
+    for bid in order:
+        block = by_id[bid]
+        if block.operations or not isinstance(block.terminator, MirJump) or len(preds[bid]) != 1:
+            continue
+        merge = block.terminator.target
+        if by_id[merge].phis and position[merge] > position[bid] and preds[bid][0] not in preds[merge]:
+            arms.append(bid)
+    return arms
 
 
-@dataclass(frozen=True, slots=True)
-class MirWideView(_MirBankView):
+def thread_arm(mir: Mir, arm: BlockId) -> Mir:
     """
-    The wide data-bank resource family narrowed out of a MIR graph, carrying the shared CFG so scheduling runs per
-    block. The bank is physical, not a scalar family -- it holds floats and integers alike: from_mir admits
-    operations and phis structurally, on `scalar_type.is_wide`, and only the leaves nominally.
+    Thread out one of the `threadable_arms`: its sole predecessor goes straight to the merge, whose phis take the
+    block's arms from the predecessor instead.
     """
+    assert arm in threadable_arms(mir)
+    by_id = {block.id: block for block in mir.blocks}
+    block = by_id[arm]
+    assert isinstance(block.terminator, MirJump)
+    merge = block.terminator.target
+    (pred,) = predecessors(mir)[arm]
 
-    nodes: dict[ValueId, MirWideNode]
-    blocks: list[MirBlock]
-    entry: BlockId
-    input_ids: list[ValueId]
-    outputs: list[MirWideOutput]
-    state_slots: list[MirWideStateSlot]
-    float_format: FloatFormat
-    int_format: IntFormat
-    operation_nodes: dict[ValueId, MirOperation] = field(init=False, compare=False)
+    def retarget(target: BlockId) -> BlockId:
+        return merge if target == arm else target
 
-    @property
-    def input_nodes(self) -> dict[ValueId, MirWideInput]:
-        return {
-            vid: node for vid in self.input_ids if isinstance(node := self.nodes[vid], (MirFloatInput, MirIntInput))
-        }
-
-    @property
-    def state_read_nodes(self) -> dict[ValueId, MirWideStateRead]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, (MirFloatStateRead, MirIntStateRead))}
-
-    @property
-    def const_nodes(self) -> dict[ValueId, MirWideConst]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, (MirFloatConst, MirIntConst))}
-
-    def scalar_type_of(self, vid: ValueId) -> FloatType | IntType:
-        """Which family a wide value belongs to: the bank is physical, so only the value itself names its type."""
-        scalar_type = self.nodes[vid].scalar_type
-        assert isinstance(scalar_type, (FloatType, IntType))
-        return scalar_type
-
-    @classmethod
-    def from_mir(cls, mir: Mir) -> MirWideView:
-        nodes: dict[ValueId, MirWideNode] = {}
-        float_formats: set[FloatFormat] = set()
-        int_formats: set[IntFormat] = set()
-        for vid, node in mir.nodes.items():
-            match node:
-                case (
-                    MirFloatInput(scalar_type=float_type)
-                    | MirFloatConst(scalar_type=float_type)
-                    | MirFloatStateRead(scalar_type=float_type)
-                ):
-                    nodes[vid] = node
-                    float_formats.add(float_type.fmt)
-                case (
-                    MirIntInput(scalar_type=int_type)
-                    | MirIntConst(scalar_type=int_type)
-                    | MirIntStateRead(scalar_type=int_type)
-                ):
-                    nodes[vid] = node
-                    int_formats.add(int_type.fmt)
-                case MirOperation(scalar_type=scalar_type) | MirPhi(scalar_type=scalar_type) if scalar_type.is_wide:
-                    nodes[vid] = node
-                    if isinstance(scalar_type, FloatType):
-                        float_formats.add(scalar_type.fmt)
-                    elif isinstance(scalar_type, IntType):
-                        int_formats.add(scalar_type.fmt)
-                case MirBoolInput() | MirBoolStateRead() | MirBoolConst() | MirPhi() | MirOperation():
-                    pass  # the bool resource family (bool state/const/phi and bool-result ops), handled by MirBoolView
-        outputs = [out for out in mir.outputs if isinstance(out, (MirFloatOutput, MirIntOutput))]
-        state_slots = [slot for slot in mir.state_slots if isinstance(slot, (MirFloatStateSlot, MirIntStateSlot))]
-        for vid in mir.input_ids:
-            if not isinstance(mir.nodes.get(vid), (MirFloatInput, MirIntInput, MirBoolInput)):
-                raise ValueError(f"MIR input ID {vid} must reference a float, integer, or boolean input")
-        input_ids = [vid for vid in mir.input_ids if isinstance(nodes.get(vid), (MirFloatInput, MirIntInput))]
-        if stray_floats := float_formats - {mir.float_format}:
-            stray = ", ".join(str(fmt) for fmt in stray_floats)
-            raise ValueError(f"LIR requires MIR float values to use configured format {mir.float_format}; got {stray}")
-        if stray_ints := int_formats - {mir.int_format}:
-            stray = ", ".join(str(fmt) for fmt in stray_ints)
-            raise ValueError(f"LIR requires MIR integer values to use configured format {mir.int_format}; got {stray}")
-        return cls(
-            nodes=nodes,
-            blocks=mir.blocks,
-            entry=mir.entry,
-            input_ids=input_ids,
-            outputs=outputs,
-            state_slots=state_slots,
-            float_format=mir.float_format,
-            int_format=mir.int_format,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class MirBoolView(_MirBankView):
-    """
-    The boolean resource family narrowed out of a MIR graph: bool state reads, constants, phis, and bool-result
-    operations (comparator taps, boolean logic, and float->bool casts), plus the bool state slots and the shared CFG.
-    """
-
-    nodes: dict[ValueId, MirBoolNode]
-    blocks: list[MirBlock]
-    entry: BlockId
-    input_ids: list[ValueId]
-    outputs: list[MirBoolOutput]
-    state_slots: list[MirBoolStateSlot]
-    operation_nodes: dict[ValueId, MirOperation] = field(init=False, compare=False)
-
-    @property
-    def input_nodes(self) -> dict[ValueId, MirBoolInput]:
-        return {vid: node for vid in self.input_ids if isinstance(node := self.nodes[vid], MirBoolInput)}
-
-    @property
-    def state_read_nodes(self) -> dict[ValueId, MirBoolStateRead]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolStateRead)}
-
-    @property
-    def const_nodes(self) -> dict[ValueId, MirBoolConst]:
-        return {vid: node for vid, node in self.nodes.items() if isinstance(node, MirBoolConst)}
-
-    @classmethod
-    def from_mir(cls, mir: Mir) -> MirBoolView:
-        nodes: dict[ValueId, MirBoolNode] = {}
-        for vid, node in mir.nodes.items():
-            if isinstance(node, (MirBoolInput, MirBoolStateRead, MirBoolConst)):
-                nodes[vid] = node
-            elif isinstance(node, MirOperation) and isinstance(node.scalar_type, BoolType):
-                nodes[vid] = node
-            elif isinstance(node, MirPhi) and isinstance(node.scalar_type, BoolType):
-                nodes[vid] = node
-        outputs = [out for out in mir.outputs if isinstance(out, MirBoolOutput)]
-        state_slots = [slot for slot in mir.state_slots if isinstance(slot, MirBoolStateSlot)]
-        input_ids = [vid for vid in mir.input_ids if isinstance(nodes.get(vid), MirBoolInput)]
-        return cls(
-            nodes=nodes,
-            blocks=mir.blocks,
-            entry=mir.entry,
-            input_ids=input_ids,
-            outputs=outputs,
-            state_slots=state_slots,
-        )
+    match by_id[pred].terminator:
+        case MirJump(target=target):
+            terminator: MirTerminator = MirJump(retarget(target))
+        case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
+            terminator = MirBranch(cond, retarget(if_true), retarget(if_false))
+        case unexpected:
+            raise AssertionError(unexpected)
+    nodes = dict(mir.nodes)
+    for vid in by_id[merge].phis:
+        phi = nodes[vid]
+        assert isinstance(phi, MirPhi)
+        nodes[vid] = replace(phi, arms=tuple((pred if p == arm else p, v, c) for p, v, c in phi.arms))
+    blocks = [replace(other, terminator=terminator) if other.id == pred else other for other in mir.blocks]
+    return replace(mir, nodes=nodes, blocks=[other for other in blocks if other.id != arm])
 
 
 @dataclass
@@ -559,8 +335,8 @@ class MirBuilder:
         self._float_format = float_format
         self._int_format = int_format
         self._nodes: dict[ValueId, MirNode] = {}
-        self._global_intern: dict[object, ValueId] = {}
-        self._block_intern: dict[object, ValueId] = {}
+        self._global_intern: dict[MirStateRead | MirConst, ValueId] = {}
+        self._block_intern: dict[tuple[BlockId, MirOperation], ValueId] = {}
         self._blocks: list[_MirBlockUC] = []
         self._cur: BlockId | None = None
         self._input_ids: list[ValueId] = []
@@ -579,8 +355,7 @@ class MirBuilder:
 
     @property
     def current_block(self) -> BlockId:
-        if self._cur is None:
-            raise RuntimeError("no current block; call block() first")
+        assert self._cur is not None
         return self._cur
 
     def set_terminator(self, block: BlockId, terminator: MirTerminator) -> None:
@@ -601,52 +376,26 @@ class MirBuilder:
         self._nodes[vid] = node
         return vid
 
-    def _global(self, key: object, node: MirNode) -> ValueId:
-        vid = self._global_intern.get(key)
+    def _global(self, node: MirStateRead | MirConst) -> ValueId:
+        vid = self._global_intern.get(node)
         if vid is None:
             vid = self._fresh(node)
-            self._global_intern[key] = vid
+            self._global_intern[node] = vid
         return vid
 
     def _type_of(self, vid: ValueId) -> ScalarType:
         return self._nodes[vid].scalar_type
 
-    def float_input(self, name: str, scalar_type: FloatType) -> ValueId:
-        vid = self._fresh(MirFloatInput(name, scalar_type))
+    def input(self, name: str, scalar_type: ScalarType) -> ValueId:
+        vid = self._fresh(MirInput(name, scalar_type))
         self._input_ids.append(vid)
         return vid
 
-    def int_input(self, name: str, scalar_type: IntType) -> ValueId:
-        vid = self._fresh(MirIntInput(name, scalar_type))
-        self._input_ids.append(vid)
-        return vid
+    def state_read(self, name: str, scalar_type: ScalarType) -> ValueId:
+        return self._global(MirStateRead(name, scalar_type))
 
-    def bool_input(self, name: str, scalar_type: BoolType) -> ValueId:
-        vid = self._fresh(MirBoolInput(name, scalar_type))
-        self._input_ids.append(vid)
-        return vid
-
-    def float_state_read(self, name: str, scalar_type: FloatType) -> ValueId:
-        return self._global(("float_state_read", name), MirFloatStateRead(name, scalar_type))
-
-    def int_state_read(self, name: str, scalar_type: IntType) -> ValueId:
-        return self._global(("int_state_read", name), MirIntStateRead(name, scalar_type))
-
-    def bool_state_read(self, name: str, scalar_type: BoolType) -> ValueId:
-        return self._global(("bool_state_read", name), MirBoolStateRead(name, scalar_type))
-
-    def float_const(self, value: float, scalar_type: FloatType) -> ValueId:
-        return self._global(
-            ("float_const", float(value), scalar_type), MirFloatConst(scalar_type=scalar_type, value=float(value))
-        )
-
-    def int_const(self, value: int, scalar_type: IntType) -> ValueId:
-        return self._global(("int_const", value, scalar_type), MirIntConst(scalar_type=scalar_type, value=value))
-
-    def bool_const(self, value: bool, scalar_type: BoolType) -> ValueId:
-        return self._global(
-            ("bool_const", bool(value), scalar_type), MirBoolConst(scalar_type=scalar_type, value=bool(value))
-        )
+    def const(self, value: float | int | bool, scalar_type: ScalarType) -> ValueId:
+        return self._global(MirConst(scalar_type, value))
 
     def operation(
         self,
@@ -658,12 +407,9 @@ class MirBuilder:
         immediates: tuple[int, ...] = (),
     ) -> ValueId:
         """
-        Append a hardware-operator use producing the `output_port`-th result, interned within the current block.
-        The value's resource family follows the tapped port's type; operands are type-checked against the operator
-        signature and may reference either resource family. `output_conditioner` defaults to the tapped port's
-        identity conditioner. `immediates` carries the per-firing immediate values (e.g. a rounding mode). The intern
-        key includes the tapped port, both conditioner sides, and the immediates, so two relations over one comparator
-        firing -- or two rounding modes over one operand -- stay distinct values while identical taps collapse.
+        Append a hardware-operator use producing the `output_port`-th result, interned by the whole node within the
+        current block, so two relations over one comparator firing -- or two rounding modes over one operand -- stay
+        distinct values while identical taps collapse.
         """
         signature = operator.signature
         assert len(operands) == signature.arity
@@ -672,7 +418,7 @@ class MirBuilder:
             self._type_of(operand) == expected
             for operand, expected in zip(operands, signature.operand_types, strict=True)
         )
-        # Normalized BEFORE the key below, so every conditioned view of one unconditioned operand interns to a
+        # Normalized BEFORE interning, so every conditioned view of one unconditioned operand interns to a
         # single value. Discarding the transform is what the declaration licenses: it cannot be observed.
         operand_conditioners = [
             identity_conditioner(operand_type) if position in operator.unconditioned_operands else conditioner
@@ -682,27 +428,13 @@ class MirBuilder:
         ]
         if output_conditioner is None:
             output_conditioner = identity_conditioner(signature.result_types[output_port])
-        key = (
-            self.current_block,
-            operator,
-            tuple(operands),
-            tuple(operand_conditioners),
-            output_port,
-            output_conditioner,
-            immediates,
+        node = MirOperation(
+            operator, tuple(operands), tuple(operand_conditioners), output_port, output_conditioner, immediates
         )
+        key = (self.current_block, node)
         vid = self._block_intern.get(key)
         if vid is None:
-            vid = self._fresh(
-                MirOperation(
-                    operator=operator,
-                    operands=list(operands),
-                    operand_conditioners=list(operand_conditioners),
-                    output_port=output_port,
-                    output_conditioner=output_conditioner,
-                    immediates=immediates,
-                )
-            )
+            vid = self._fresh(node)
             self._block_intern[key] = vid
             self._blocks[self.current_block].operations.append(vid)
         return vid
@@ -731,50 +463,26 @@ class MirBuilder:
         self._check_phi_arms(node.scalar_type, arms)
         self._nodes[phi] = MirPhi(scalar_type=node.scalar_type, arms=tuple(arms))
 
-    def float_output(self, name: str, value: ValueId, conditioner: FloatSignControl = FloatSignControl()) -> None:
-        assert isinstance(self._type_of(value), FloatType)
-        self._outputs.append(MirFloatOutput(name, value, conditioner))
+    def output(self, name: str, value: ValueId, conditioner: PortConditioner | None = None) -> None:
+        scalar_type = self._type_of(value)
+        conditioner = identity_conditioner(scalar_type) if conditioner is None else conditioner
+        _check_conditioner(conditioner, scalar_type)
+        self._outputs.append(MirOutput(name, value, conditioner))
 
-    def int_output(self, name: str, value: ValueId, conditioner: IntIdentity = IntIdentity()) -> None:
-        assert isinstance(self._type_of(value), IntType)
-        self._outputs.append(MirIntOutput(name, value, conditioner))
-
-    def bool_output(self, name: str, value: ValueId, conditioner: BoolInversion = BoolInversion()) -> None:
-        assert isinstance(self._type_of(value), BoolType)
-        self._outputs.append(MirBoolOutput(name, value, conditioner))
-
-    def float_state_slot(
-        self,
-        name: str,
-        reset_value: float,
-        live_out: ValueId,
-        conditioner: FloatSignControl = FloatSignControl(),
+    def state_slot(
+        self, name: str, reset_value: float | int | bool, live_out: ValueId, conditioner: PortConditioner | None = None
     ) -> None:
-        assert isinstance(self._type_of(live_out), FloatType)
-        refuse_degrading(float(reset_value), self._float_format, f"state slot {name!r} reset")
-        self._state_slots.append(MirFloatStateSlot(name, float(reset_value), live_out, conditioner))
-
-    def int_state_slot(
-        self, name: str, reset_value: int, live_out: ValueId, conditioner: IntIdentity = IntIdentity()
-    ) -> None:
-        assert isinstance(self._type_of(live_out), IntType)
-        if not self._int_format.fits(reset_value):  # the slot has no type of its own, so the machine format rules
-            raise UnsupportedConstruct(f"slot {name!r} reset {reset_value} does not fit {self._int_format}")
-        self._state_slots.append(MirIntStateSlot(name, reset_value, live_out, conditioner))
-
-    def bool_state_slot(
-        self, name: str, reset_value: bool, live_out: ValueId, conditioner: BoolInversion = BoolInversion()
-    ) -> None:
-        assert isinstance(self._type_of(live_out), BoolType)
-        self._state_slots.append(MirBoolStateSlot(name, bool(reset_value), live_out, conditioner))
+        scalar_type = self._type_of(live_out)
+        conditioner = identity_conditioner(scalar_type) if conditioner is None else conditioner
+        _check_conditioner(conditioner, scalar_type)
+        _refuse_unholdable(reset_value, scalar_type, f"state slot {name!r} reset")
+        self._state_slots.append(MirStateSlot(name, reset_value, live_out, conditioner))
 
     def finish(self) -> Mir:
-        if not self._blocks:
-            raise RuntimeError("cannot finish a MIR with no blocks")
+        assert self._blocks
         blocks: list[MirBlock] = []
         for bid, ub in enumerate(self._blocks):
-            if ub.terminator is None:
-                raise RuntimeError(f"MIR block {bid} was not sealed with a terminator")
+            assert ub.terminator is not None, f"block {bid} is not sealed"
             blocks.append(MirBlock(bid, tuple(ub.phis), tuple(ub.operations), ub.terminator))
         return Mir(
             float_format=self._float_format,

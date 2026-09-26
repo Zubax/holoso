@@ -1,9 +1,9 @@
 """Thin API for the hardware-agnostic high-level IR."""
 
-from ._const import BoolConst as BoolConst, Const as Const, FloatConst as FloatConst, IntConst as IntConst
+from ._const import Const as Const, FloatConst as FloatConst, IntConst as IntConst
+from ._const import const_value as const_value, make_const as make_const
 from ._copy import copy_node as copy_node, rebuild as rebuild, reverse_postorder as reverse_postorder
 from ._dce import eliminate_dead_code as eliminate_dead_code
-from ._evaluate import HirEvaluator as HirEvaluator
 from ._ir import (
     Branch as Branch,
     Hir as Hir,
@@ -12,14 +12,11 @@ from ._ir import (
     Jump as Jump,
     Node as Node,
     Operation as Operation,
-    OutputPort as OutputPort,
     Phi as Phi,
     Ret as Ret,
     StateRead as StateRead,
-    StateSlot as StateSlot,
     Terminator as Terminator,
     references as references,
-    successors as successors,
 )
 from ._scaling import Scaling as Scaling, scaling_of as scaling_of
 from ._operators import (
@@ -34,25 +31,18 @@ from ._operators import (
     FloatAdd as FloatAdd,
     FloatAtan2 as FloatAtan2,
     FloatAtan2Turns as FloatAtan2Turns,
-    FloatCeil as FloatCeil,
     FloatComparison as FloatComparison,
     FloatCos as FloatCos,
     FloatCosTurns as FloatCosTurns,
     FloatDiv as FloatDiv,
-    FloatEqual as FloatEqual,
     FloatExp2 as FloatExp2,
-    FloatFloor as FloatFloor,
     FloatFma as FloatFma,
-    FloatGreater as FloatGreater,
-    FloatGreaterOrEqual as FloatGreaterOrEqual,
     FloatHypot as FloatHypot,
     FloatILog2 as FloatILog2,
     FloatIsFinite as FloatIsFinite,
     FloatIsInf as FloatIsInf,
     FloatIsNegInf as FloatIsNegInf,
     FloatIsPosInf as FloatIsPosInf,
-    FloatLess as FloatLess,
-    FloatLessOrEqual as FloatLessOrEqual,
     FloatLog2 as FloatLog2,
     FloatMax as FloatMax,
     FloatMin as FloatMin,
@@ -60,15 +50,13 @@ from ._operators import (
     FloatMulPow2 as FloatMulPow2,
     FloatMulPow2Dynamic as FloatMulPow2Dynamic,
     FloatNeg as FloatNeg,
-    FloatNotEqual as FloatNotEqual,
-    FloatRound as FloatRound,
+    FloatRounding as FloatRounding,
     FloatSelect as FloatSelect,
     FloatSin as FloatSin,
     FloatSinTurns as FloatSinTurns,
     FloatSqrt as FloatSqrt,
     FloatToBool as FloatToBool,
     FloatToInt as FloatToInt,
-    FloatTrunc as FloatTrunc,
     IntAbs as IntAbs,
     IntAdd as IntAdd,
     IntBwAnd as IntBwAnd,
@@ -77,16 +65,10 @@ from ._operators import (
     IntBwXor as IntBwXor,
     IntComparison as IntComparison,
     IntDivFloor as IntDivFloor,
-    IntEqual as IntEqual,
-    IntGreater as IntGreater,
-    IntGreaterOrEqual as IntGreaterOrEqual,
-    IntLess as IntLess,
-    IntLessOrEqual as IntLessOrEqual,
     IntMod as IntMod,
     IntMul as IntMul,
     IntMulPow2 as IntMulPow2,
     IntNeg as IntNeg,
-    IntNotEqual as IntNotEqual,
     IntPopcount as IntPopcount,
     IntSelect as IntSelect,
     IntShiftLeft as IntShiftLeft,
@@ -96,12 +78,13 @@ from ._operators import (
     IntToFloat as IntToFloat,
     NoNumber as NoNumber,
     Operator as Operator,
+    Rounding as Rounding,
 )
 from ._optimize import optimize as optimize
+from .._util import Relation as Relation
 from ._types import (
     BoolType as BoolType,
     FloatType as FloatType,
     IntType as IntType,
-    Signature as Signature,
     Type as Type,
 )

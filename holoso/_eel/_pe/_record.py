@@ -1,5 +1,5 @@
 """
-Record classes: admissibility, field annotations, and host-instance admission. Admissibility is the
+Record classes: admissibility and field annotations. Admissibility is the
 structural-construction contract, not input validation: construction never runs host code, so a dataclass
 feature that makes construction RUN code (a user `__init__`, `__post_init__`, an `InitVar`, a
 `default_factory`) must refuse rather than silently diverge from the host. The generated-method detector is

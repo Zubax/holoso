@@ -21,7 +21,6 @@ from ._state import (
     spell_state,
 )
 from ._values import (
-    Allocation,
     AllocationState,
     BoundMethod,
     IteratorValue,
@@ -45,11 +44,9 @@ _CONTAINERS = (SequenceValue, TensorValue)
 @dataclass(frozen=True, slots=True)
 class _StoreSite:
     spelled: str
-    chain: list[Allocation]
     spine: list[tuple[SequenceValue, int]]
     holder: TensorValue
     slot: int
-    slot_value: Value
 
 
 def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: Sink, ctx: Ctx) -> None:
@@ -69,10 +66,7 @@ def store(interp: Interpreter, stmt: Store | AugStore, frame: Frame, sink: Sink,
                 "so the change would be observable there",
             )
         case LocalRef(name=name):
-            bound = frame.env.get(name)
-            if bound is None:
-                reject(origin, f"the local name {name!r} is not bound on every path reaching this read")
-            root_value = interp.readable(bound, origin)
+            root_value = interp.read_local(frame, name, origin)
     if isinstance(root_value, Opaque):
         prefix = interp.state_prefix(root_value.value)
         if prefix is not None:
@@ -101,37 +95,32 @@ def _state_store(
         reject(origin, "a component object does not support item assignment; store into an attribute")
     assert interp.tree is not None
     obj = interp.tree.objects[prefix]
-    selectors = list(stmt.path)
-    key: tuple[str, ...] | None = None
-    while selectors:
-        selector = selectors[0]
-        if not isinstance(selector, AttrSel):
+    steps = list(stmt.path)
+    while len(steps) > 1 and isinstance(steps[1], AttrSel):
+        head = steps[0]
+        assert isinstance(head, AttrSel)
+        shadow = shadowed_edge(obj, head.name)
+        if shadow is not None:
+            reject(origin, shadow)
+        protocol = overridden_protocol(obj, READ_PROTOCOLS)
+        if protocol is not None:
+            # Structural descent past a read override would diverge; refuse, as instance_attr does for reads.
+            reject(
+                origin,
+                f"the class {type(obj).__name__} overrides {protocol}, so reading {head.name!r} on the "
+                "way to this store runs host code; the compiler resolves the chain structurally and would "
+                "answer past it",
+            )
+        child = attribute_dict(obj).get(head.name)
+        child_prefix = interp.tree.prefix_of(child)
+        if child_prefix is None:
             break
-        if len(selectors) > 1 and isinstance(selectors[1], AttrSel):
-            shadow = shadowed_edge(obj, selector.name)
-            if shadow is not None:
-                reject(origin, shadow)
-            protocol = overridden_protocol(obj, READ_PROTOCOLS)
-            if protocol is not None:
-                # Structural descent past a read override would diverge; refuse, as instance_attr does for reads.
-                reject(
-                    origin,
-                    f"the class {type(obj).__name__} overrides {protocol}, so reading {selector.name!r} on the "
-                    "way to this store runs host code; the compiler resolves the chain structurally and would "
-                    "answer past it",
-                )
-            child = attribute_dict(obj).get(selector.name)
-            child_prefix = interp.tree.prefix_of(child) if child is not None else None
-            if child_prefix is not None:
-                obj = child
-                prefix = child_prefix
-                selectors.pop(0)
-                continue
-        key = (*prefix, selector.name)
-        selectors.pop(0)
-        break
-    assert key is not None, "the leading selector is an attribute, so the walk names a leaf"
-    rest = tuple(selectors)
+        obj, prefix = child, child_prefix
+        steps.pop(0)
+    leaf = steps.pop(0)
+    assert isinstance(leaf, AttrSel)
+    key = (*prefix, leaf.name)
+    rest = tuple(steps)
     if rest and isinstance(rest[0], AttrSel):
         reject(origin, f"an attribute store through {spell_state(key)} is not supported: it is not a component")
     if rest and interp.tree.objects.get(key) is not None:
@@ -151,66 +140,63 @@ def _state_store(
     if isinstance(stmt, AugStore):
         interp.check_mark(frame, stmt.mark, origin)
     slot_value = interp.readable(frame.env[key], origin)
+    in_place = True
+    value: Value
     if rest:
         if not isinstance(slot_value, _CONTAINERS):
             reject(origin, f"{spell_state(key)} is a scalar state attribute; it has no elements")
-        frame.env[key] = _element_store(interp, stmt, spell_state(key), slot_value, rest, rhs, frame, sink)
-        interp.note_state_write()
-        interp.bump_root_epoch(key)
-        return
-    spec = interp.specs[key]
-    if isinstance(stmt, AugStore):
-        if isinstance(slot_value, Opaque):
-            reject(origin, _describe_opaque(slot_value))
-        if isinstance(slot_value, _CONTAINERS):
-            frame.env[key] = aug_aggregate(interp, origin, spell_state(key), slot_value, stmt.op, rhs, frame, sink)
-            interp.note_state_write()
-            interp.bump_root_epoch(key)
-            return
-        value = _express.operator_call(interp, origin, stmt.op, [slot_value, rhs], frame, sink)
+        value = _element_store(interp, stmt, spell_state(key), slot_value, rest, rhs, frame, sink)
+    elif isinstance(stmt, AugStore) and isinstance(slot_value, _CONTAINERS):
+        value = aug_aggregate(interp, origin, spell_state(key), slot_value, stmt.op, rhs, frame, sink)
     else:
-        value = rhs
-    match value:
-        case BoundMethod():
-            reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
-        case RecordValue():
-            reject(origin, f"a record cannot be installed into {spell_state(key)}; store its fields separately")
-        case IteratorValue():
-            # Hardware state holds leaves, not exhaustion: a reloaded slot would replay what Python drained.
-            reject(origin, f"an enumerate iterator cannot be installed into {spell_state(key)}")
-        case SequenceValue() | TensorValue():
-            if same(value, slot_value):
-                return  # rebinding the attribute to its own current tree is Python's no-op
-            if ctx.loop:
-                reject(
-                    origin,
-                    f"installing a new aggregate into the state attribute {spell_state(key)} inside a "
-                    "data-dependent loop is not supported yet; store its elements instead",
-                )
-            _install(interp, origin, key, spec, value)
-            frame.env[key] = value
-            interp.note_state_write()
-        case StaticScalar() | ResidualScalar():
-            if not isinstance(spec, ScalarSpec):
-                reject(
-                    origin,
-                    f"{spell_state(key)} is an aggregate state attribute; a scalar cannot replace it -- "
-                    "store its elements instead",
-                )
-            frame.env[key] = value
-            interp.note_state_write()
-        case Opaque():
-            if not isinstance(spec, ScalarSpec):
-                reject(origin, _describe_opaque(value))
-            frame.env[key] = value  # judged at use or at the commit, like any captured scalar
-            interp.note_state_write()
+        in_place = False
+        if isinstance(stmt, AugStore):
+            if isinstance(slot_value, Opaque):
+                reject(origin, _describe_opaque(slot_value))
+            value = _express.operator_call(interp, origin, stmt.op, [slot_value, rhs], frame, sink)
+        else:
+            value = rhs
+        spec = interp.specs[key]
+        match value:
+            case BoundMethod():
+                reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
+            case RecordValue():
+                reject(origin, f"a record cannot be installed into {spell_state(key)}; store its fields separately")
+            case IteratorValue():
+                # Hardware state holds leaves, not exhaustion: a reloaded slot would replay what Python drained.
+                reject(origin, f"an enumerate iterator cannot be installed into {spell_state(key)}")
+            case SequenceValue() | TensorValue():
+                if same(value, slot_value):
+                    return  # rebinding the attribute to its own current tree is Python's no-op
+                if ctx.loop:
+                    reject(
+                        origin,
+                        f"installing a new aggregate into the state attribute {spell_state(key)} inside a "
+                        "data-dependent loop is not supported yet; store its elements instead",
+                    )
+                _install(interp, origin, key, spec, value)
+            case StaticScalar() | ResidualScalar():
+                if not isinstance(spec, ScalarSpec):
+                    reject(
+                        origin,
+                        f"{spell_state(key)} is an aggregate state attribute; a scalar cannot replace it -- "
+                        "store its elements instead",
+                    )
+            case Opaque():  # judged at use or at the commit, like any captured scalar
+                if not isinstance(spec, ScalarSpec):
+                    reject(origin, _describe_opaque(value))
+    frame.env[key] = value
+    interp.note_state_write()
+    if in_place:
+        interp.bump_root_epoch(key)
 
 
 def _install(
     interp: Interpreter, origin: Origin, key: tuple[str, ...], spec: Spec, value: SequenceValue | TensorValue
 ) -> None:
     """The install gate: an aggregate becomes state only if nothing else can still reach its storage."""
-    for allocation in allocations(value):
+    found = allocations(value)
+    for allocation in found:
         if allocation.joined:
             reject(
                 origin,
@@ -236,7 +222,7 @@ def _install(
         )
     _install_conform(origin, key, spec, value)
     escape(value)
-    for allocation in allocations(value):
+    for allocation in found:
         interp.state_owners.setdefault(allocation, key)
 
 
@@ -276,7 +262,7 @@ def _element_store(
 ) -> SequenceValue | TensorValue:
     origin = stmt.origin
     site = _store_site(interp, origin, spelled_root, root_value, path, frame, sink)
-    for allocation in site.chain:
+    for allocation in [container.allocation for container, _ in site.spine] + [site.holder.allocation]:
         if not mutable(allocation):
             owner = interp.state_owners.get(allocation)
             if owner is not None and allocation.state is AllocationState.ESCAPED:
@@ -292,7 +278,7 @@ def _element_store(
                 else ""
             )
             reject(origin, f"cannot store into {site.spelled}: {blame(allocation)}{advice}")
-    old = site.slot_value
+    old = site.holder.leaves[site.slot]
     if isinstance(stmt, AugStore):
         if isinstance(old, Opaque):
             reject(origin, _describe_opaque(old))
@@ -325,77 +311,46 @@ def _store_site(
     sink: Sink,
 ) -> _StoreSite:
     spelled = root_name
-    chain: list[Allocation] = []
     spine: list[tuple[SequenceValue, int]] = []
     current: Value = root_value
     tensor: TensorValue | None = None
     axes: list[int] = []
     assert path, "desugar never emits an empty store path"
     for step, selector in enumerate(path):
-        terminal = step == len(path) - 1
         match selector:
             case AttrSel():
                 reject(origin, "an attribute cannot be stored on a sequence or array")
             case IndexSel(index=atom):
                 index_value = interp.expr(atom, frame, sink)
-        if tensor is not None:
-            added = _store_axes(origin, tensor, len(axes), index_value)
-            axes.extend(added)
-            spelled += _spell_axes(added)
-            continue
-        match current:
-            case SequenceValue(items=items):
-                chain.append(current.allocation)
-                position = _aggregate.static_index(origin, index_value, "a subscript index")
-                resolved = position + len(items) if position < 0 else position
-                if not 0 <= resolved < len(items):
-                    reject(
-                        origin,
-                        f"index {position} is out of bounds for a "
-                        f"{_aggregate.kind_label(current)} of length {len(items)}",
-                    )
-                spelled += f"[{position}]"
-                if terminal:
-                    reject(
-                        origin,
-                        f"cannot store into {spelled}: sequences are immutable; build a numpy array instead",
-                    )
-                spine.append((current, resolved))
-                current = items[resolved]
-            case TensorValue():
-                chain.append(current.allocation)
-                tensor = current
-                added = _store_axes(origin, tensor, 0, index_value)
-                axes.extend(added)
-                spelled += _spell_axes(added)
-            case _:
-                reject(origin, f"{_aggregate.a_kind(current)} is not subscriptable")
-    if tensor is None:
-        raise AssertionError("the loop returns at the terminal sequence slot")
+        if tensor is None:
+            match current:
+                case SequenceValue(items=items):
+                    position = _aggregate.static_index(origin, index_value, "a subscript index")
+                    resolved = _aggregate.resolved_index(origin, position, len(items), _aggregate.a_kind(current))
+                    spelled += f"[{position}]"
+                    if step == len(path) - 1:
+                        reject(
+                            origin,
+                            f"cannot store into {spelled}: sequences are immutable; build a numpy array instead",
+                        )
+                    spine.append((current, resolved))
+                    current = items[resolved]
+                    continue
+                case TensorValue():
+                    tensor = current
+                case _:
+                    reject(origin, f"{_aggregate.a_kind(current)} is not subscriptable")
+        rank = len(tensor.shape)
+        if len(axes) >= rank:
+            reject(origin, f"a {rank}-D array store takes at most {rank} {'index' if rank == 1 else 'indices'}")
+        axes.append(_aggregate.axis_position(origin, index_value, tensor.shape[len(axes)]))
+        spelled += f"[{axes[-1]}]"
+    assert tensor is not None, "a terminal sequence step rejects"
     rank = len(tensor.shape)
     if len(axes) < rank:
         reject(origin, "a store into an array must write one scalar element; rebind the whole array instead")
     flat = axes[0] * tensor.shape[1] + axes[1] if rank == 2 else axes[0]
-    return _StoreSite(spelled, chain, spine, tensor, flat, tensor.leaves[flat])
-
-
-def _store_axes(origin: Origin, tensor: TensorValue, taken: int, index_value: Value) -> list[int]:
-    if isinstance(index_value, SequenceValue):
-        reject(origin, "a sequence index on an array is not supported; spell the axes directly (m[i, j])")
-    rank = len(tensor.shape)
-    if taken >= rank:
-        plural = "index" if rank == 1 else "indices"
-        reject(origin, f"a {rank}-D array store takes at most {rank} {plural}")
-    dim = tensor.shape[taken]
-    position = _aggregate.static_index(origin, index_value, "a subscript index")
-    wrapped = position + dim if position < 0 else position
-    if not 0 <= wrapped < dim:
-        reject(origin, f"index {position} is out of bounds for an axis of length {dim}")
-    return [wrapped]
-
-
-def _spell_axes(axes: list[int]) -> str:
-    return "".join(f"[{axis}]" for axis in axes)
+    return _StoreSite(spelled, spine, tensor, flat)
 
 
 def aug_aggregate(

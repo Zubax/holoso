@@ -2,7 +2,7 @@
 
 import logging
 
-from . import _dce, _if_convert, _linear, _prune, _reciprocal, _strength_reduce, _thread_merges
+from . import _dce, _fuse, _if_convert, _linear, _prune, _reciprocal, _strength_reduce, _thread_merges
 from ._ir import Hir
 
 _logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ def optimize(hir: Hir, ifconv_max_ops: int) -> Hir:
         previous = hir
         hir = _strength_reduce.run(hir)
         hir = _prune.run(hir) or hir
+        hir = _fuse.run(hir) or hir
         hir = _if_convert.run(hir, ifconv_max_ops) or hir
         hir = _thread_merges.run(hir) or hir
         hir = _dce.eliminate_dead_code(hir)

@@ -1,4 +1,4 @@
-"""Port naming shared by HIR emission and the test harnesses."""
+"""Hardware names and source spellings of ports, state slots and elements, shared across the lowering."""
 
 import itertools
 import re
@@ -65,6 +65,11 @@ def port_name(path: tuple[int | str, ...]) -> str:
     return "out" + "".join(f"_{_component(key)}" for key in path)
 
 
+def access_path(path: tuple[str | int, ...]) -> str:
+    """A leaf path as Python spells the access, e.g. `("x", 0)` -> `.x[0]`."""
+    return "".join(f"[{key}]" if isinstance(key, int) else f".{key}" for key in path)
+
+
 def slot_name(path: tuple[str | int, ...]) -> str:
     """The flattened slot-register name of a state leaf path, e.g. `("x", 0, 1)` -> `x_0_1`."""
     assert path and isinstance(path[0], str)
@@ -83,12 +88,14 @@ def public_slot(path: tuple[str | int, ...]) -> bool:
 
 
 def indexed_names(base: str, shape: tuple[int, ...]) -> list[str]:
-    """
-    The row-major per-element names of a shaped base name: `()` -> `[base]`, `(2,)` -> `[base_0, base_1]`,
-    `(2, 2)` -> `[base_0_0, base_0_1, base_1_0, base_1_1]`. The one naming convention shared by decomposed
-    state slots and decomposed array-parameter input ports.
-    """
+    """The row-major per-element port names of an array parameter, e.g. `(2, 2)` -> `[x_0_0, x_0_1, x_1_0, x_1_1]`."""
     return [base + "".join(f"_{i}" for i in index) for index in itertools.product(*(range(dim) for dim in shape))]
+
+
+def element_index(shape: tuple[int, ...], position: int) -> tuple[int, ...]:
+    """The row-major index of a flat element position, e.g. position 3 of `(2, 2)` -> `(1, 1)`."""
+    assert len(shape) in (1, 2)
+    return (position,) if len(shape) == 1 else divmod(position, shape[1])
 
 
 def _component(key: str | int) -> str:

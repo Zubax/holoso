@@ -32,15 +32,6 @@ module holoso_fisneginf_tb #(parameter WEXP = 6, parameter WMAN = 18) (
     assign y = holoso_fisneginf(x);
 endmodule
 
-module holoso_fsaturate_tb #(parameter WEXP = 6, parameter WMAN = 18) (
-    input  wire [WEXP+WMAN-1:0] x,
-    output wire [WEXP+WMAN-1:0] y
-);
-    localparam WFLT = WEXP + WMAN;
-    `include "holoso_support_inline.vh"
-    assign y = holoso_fsaturate(x);
-endmodule
-
 module holoso_fsgnop_tb #(parameter WEXP = 6, parameter WMAN = 18) (
     input  wire [WEXP+WMAN-1:0] x,
     input  wire           [1:0] op,

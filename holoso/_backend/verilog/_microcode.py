@@ -11,8 +11,8 @@ dense per-endpoint opcodes parsed by `case` statements -- the two endpoints are 
 Everything a register can take on a cycle is thus one tiny opcode, carrying its write-enable, destination select,
 const-pool select, and boolean inversion together; PC is left to control flow alone. This module is pure data -- the
 emitter owns the Verilog text and renders each source key. The source lists themselves are the Lir's
-(`read_sources_per_port`, `write_sources_per_register`), so the steering the codebooks encode is what the metric
-freezes.
+(`read_sources_per_port`, `write_sources_per_register`), so the codebooks encode exactly the steering that the
+`steering` metric counts.
 """
 
 from dataclasses import dataclass
@@ -143,16 +143,10 @@ def tapped_lanes(lir: Lir) -> set[tuple[OperatorInstance, int]]:
 
 
 def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
-    """
-    Per operand port `(instance, position)`, the ordered distinct read sources (`read_sources_per_port`). The read
-    opcode carries the position over `_code_width` bits; a single-source port keeps its lone source and needs no
-    opcode field.
-    """
     return {port: ReadCodebook(tuple(sources)) for port, sources in read_sources_per_port(lir).items()}
 
 
 def write_codebook(events: list[WriteEvent]) -> dict[RegRef | BoolRegRef, WriteCodebook]:
-    """Per register, the ordered distinct write sources (`write_sources_per_register`, first-appearance dedup)."""
     return {dst: WriteCodebook(tuple(sources)) for dst, sources in write_sources_per_register(events).items()}
 
 
@@ -168,9 +162,8 @@ def build_microcode(
 
     Control is placed on the step each operation requires: the issue strobe, the operand signs, the read opcodes, and a
     wide result's sign ride the ISSUE step (the read is latch-free, so the datapath samples an operand a fetch lag
-    later); each register's WRITE opcode rides the source's executing step (see write_events). A write opcode
-    carries `_code_width(N+1)` bits over its `N` sources with code 0 reserved for the NOP hold; the read opcode
-    carries `_code_width(K)` over its `K` sources with no NOP (a don't-care idle read is harmless).
+    later); each register's WRITE opcode rides the source's executing step (see write_events). A read opcode has no NOP
+    code because a don't-care idle read is harmless.
     """
     depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
@@ -267,7 +260,6 @@ def pack(fields: dict[str, Field], step: int) -> int:
     return word
 
 
-# ---- ROM-step annotations (human-readable summary shared with the HTML report's schedule view) ----
 def _op_expr(op: PooledScheduledOp) -> str:
     dsts = "/".join(write.conditioner.decorate(write.dst.stable_label) for write in op.writes)
     operands = [operand.stable_label for operand in op.operands]

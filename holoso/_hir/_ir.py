@@ -121,8 +121,8 @@ class Block:
 def renumber(hir: Hir) -> Hir:
     """
     Compact block ids to a dense 0..n-1 range, rewriting terminator targets and phi-arm predecessors. The CFG passes
-    (if-conversion, merge threading) delete blocks and leave gaps; the downstream rebuild machinery relies on dense ids.
-    Shared by every block-deleting pass so the recompaction rule lives in one place.
+    (pruning, fusion, if-conversion, merge threading) delete blocks and leave gaps; the downstream rebuild machinery
+    relies on dense ids. Shared by every block-deleting pass so the recompaction rule lives in one place.
     """
     new_id = {block.id: index for index, block in enumerate(hir.blocks)}
     if all(old == new for old, new in new_id.items()):
@@ -152,9 +152,9 @@ def renumber(hir: Hir) -> Hir:
 
 def validate_phi_predecessors(hir: Hir) -> None:
     """
-    Every phi must carry exactly one arm per CFG predecessor of its block. Shared by the builder (a never-closed
-    loop-header phi, a stale arm) and the block-deleting CFG passes (if-conversion, merge threading), so a malformed
-    merge crashes loudly at its source rather than miscompiling downstream.
+    Every phi must carry exactly one arm per CFG predecessor of its block. Checked by the builder and by the passes that
+    edit blocks by hand, so a never-closed loop-header phi or a stale arm crashes at its source rather than
+    miscompiling downstream.
     """
     preds = predecessors(hir.blocks)
     for block in hir.blocks:
@@ -162,11 +162,7 @@ def validate_phi_predecessors(hir: Hir) -> None:
             phi = hir.nodes[phi_id]
             assert isinstance(phi, Phi)
             arm_preds = sorted(pred for pred, _ in phi.arms)
-            if arm_preds != sorted(preds[block.id]):
-                raise RuntimeError(
-                    f"phi {phi_id} in block {block.id} has arms for predecessors {arm_preds}, "
-                    f"expected {sorted(preds[block.id])}"
-                )
+            assert arm_preds == sorted(preds[block.id]), f"phi {phi_id} in block {block.id} has arms from {arm_preds}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,8 +205,8 @@ class Hir:
 
     def external_value_references(self) -> list[ValueId]:
         """
-        Every value referenced from outside the value DAG: outputs, state live-outs, branch conditions. The live roots
-        for DCE, and (with the in-DAG operand and phi-arm references) the complete use-site set for a use-count.
+        Every value referenced from outside the value DAG: outputs, state live-outs, branch conditions. With the in-DAG
+        operand and phi-arm references, the complete use-site set for a use-count.
         """
         refs = [out.value for out in self.outputs] + [slot.live_out for slot in self.state_slots]
         for block in self.blocks:
@@ -227,23 +223,6 @@ class Hir:
         for vid in self.external_value_references():
             counts[vid] += 1
         return counts
-
-    def value_types(self) -> frozenset[Type]:
-        """
-        What sizes the machine word: a family absent from the graph needs no room in the wide register, however the
-        machine is configured. Node types alone are complete -- every operand is itself a node, so a comparison's
-        boolean result cannot hide its integer operands, and a slot's reset shares its live-out's type by the
-        selection gate's own rule.
-        """
-        return frozenset(node.type for node in self.nodes.values())
-
-    def input_names(self) -> list[str]:
-        names: list[str] = []
-        for vid in self.input_ids:
-            node = self.nodes[vid]
-            assert isinstance(node, InPort)
-            names.append(node.name)
-        return names
 
 
 @dataclass
@@ -284,8 +263,7 @@ class HirBuilder:
 
     @property
     def current_block(self) -> BlockId:
-        if self._cur is None:
-            raise RuntimeError("no current block; call block() first")
+        assert self._cur is not None
         return self._cur
 
     def set_terminator(self, block: BlockId, terminator: Terminator) -> None:
@@ -295,8 +273,7 @@ class HirBuilder:
         self.set_terminator(self.current_block, Jump(target))
 
     def branch(self, cond: ValueId, if_true: BlockId, if_false: BlockId) -> None:
-        if not isinstance(self.type_of(cond), BoolType):
-            raise ValueError("a branch condition must be a boolean value")
+        assert isinstance(self.type_of(cond), BoolType)
         self.set_terminator(self.current_block, Branch(cond, if_true, if_false))
 
     def ret(self) -> None:
@@ -330,10 +307,8 @@ class HirBuilder:
     def float_state_read(self, slot: str) -> ValueId:
         return self.state_read(slot, FloatType())
 
-    def bool_state_read(self, slot: str) -> ValueId:
-        return self.state_read(slot, BoolType())
-
     def state_slot(self, name: str, reset_value: Const, live_out: ValueId) -> None:
+        assert reset_value.type == self.type_of(live_out)
         self._state_slots.append(StateSlot(name, reset_value, live_out))
 
     def const_node(self, const: Const) -> ValueId:
@@ -350,11 +325,8 @@ class HirBuilder:
 
     def operation(self, operator: Operator, operands: list[ValueId]) -> ValueId:
         signature = operator.signature
-        if len(operands) != signature.arity:
-            raise ValueError(f"{operator.mnemonic} expects {signature.arity} operand(s), got {len(operands)}")
         operand_types = tuple(self.type_of(operand) for operand in operands)
-        if operand_types != signature.operand_types:
-            raise ValueError(f"{operator.mnemonic} expects operands of {signature.operand_types}, got {operand_types}")
+        assert operand_types == signature.operand_types, f"{operator.mnemonic} over {operand_types}"
         node = Operation(operator, tuple(operands))
         key = (self.current_block, node)
         vid = self._block_intern.get(key)
@@ -365,9 +337,7 @@ class HirBuilder:
         return vid
 
     def phi(self, type: Type, arms: list[tuple[BlockId, ValueId]]) -> ValueId:
-        for _, arm in arms:
-            if arm in self._nodes and self.type_of(arm) != type:
-                raise ValueError(f"phi arm {arm} has type {self.type_of(arm)}, expected {type}")
+        assert all(self.type_of(arm) == type for _, arm in arms)
         vid = self._fresh(Phi(type, tuple(arms)))
         self._blocks[self.current_block].phis.append(vid)
         return vid
@@ -383,23 +353,18 @@ class HirBuilder:
     def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId]]) -> None:
         """Closes a loop-header phi opened by open_phi, once the latch (back-edge) arm is known."""
         node = self._nodes[phi]
-        if not isinstance(node, Phi):
-            raise ValueError(f"value {phi} is not a phi")
-        for _, arm in arms:
-            if arm in self._nodes and self.type_of(arm) != node.type:
-                raise ValueError(f"phi arm {arm} has type {self.type_of(arm)}, expected {node.type}")
+        assert isinstance(node, Phi)
+        assert all(self.type_of(arm) == node.type for _, arm in arms)
         self._nodes[phi] = Phi(node.type, tuple(arms))
 
     def output(self, name: str, value: ValueId) -> None:
         self._outputs.append(OutputPort(name, value))
 
     def finish(self) -> Hir:
-        if not self._blocks:
-            raise RuntimeError("cannot finish an HIR with no blocks")
+        assert self._blocks
         blocks: list[Block] = []
         for bid, ub in enumerate(self._blocks):
-            if ub.terminator is None:
-                raise RuntimeError(f"block {bid} was not sealed with a terminator")
+            assert ub.terminator is not None, f"block {bid} is not sealed"
             blocks.append(Block(bid, tuple(ub.phis), tuple(ub.operations), ub.terminator))
         hir = Hir(
             nodes=dict(self._nodes),

@@ -402,7 +402,7 @@ def test_extraction_of_a_record_from_a_sequence_shares_it() -> None:
     # White-box: field-read sharing masks the extraction share from every observable store, so the allocation
     # states are asserted directly.
     from holoso._eel._pe._values import AllocationState, RecordValue, SequenceValue
-    from holoso._eel._pe._aggregate import index_read, slice_read, splice_items
+    from holoso._eel._pe._aggregate import index_read, splice_items
     from holoso._eel._pe._values import Allocation, StaticScalar
     from holoso._eel._pe._ops import make_const
     from holoso._eel._ir import Origin
@@ -419,7 +419,7 @@ def test_extraction_of_a_record_from_a_sequence_shares_it() -> None:
     assert isinstance(extracted, RecordValue) and extracted.allocation.state is AllocationState.SHARED
 
     seq = fresh()
-    sliced = slice_read(origin, seq, None, None)
+    sliced = index_read(origin, seq, (None, None))
     assert isinstance(sliced, SequenceValue)
     assert all(
         item.allocation.state is AllocationState.SHARED for item in sliced.items if isinstance(item, RecordValue)

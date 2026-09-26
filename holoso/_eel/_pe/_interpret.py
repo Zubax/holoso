@@ -10,19 +10,19 @@ names and desugars no callees; captures are judged at use, never at capture.
 A name bound on only one side of a residual branch drops (CPython would raise UnboundLocalError); divergent
 unmergeable values stay bound to a marker so the read, in any spelling, rejects truthfully. `raise` is
 judged within its own function: unconditional there is a compile-time diagnostic even under a caller's
-residual arm. Library stubs bind positionally only. An operator whose lowering the registry holds -- `**` and
-`@` -- reaches it exactly as a spelled call does, so the two cannot drift; which lowering serves is the
-registry's per-position domain rule, not a decision taken here, and the host is never consulted for a value.
+residual arm. Library stubs bind positionally only. Every operator reaches the registry exactly as a spelled call
+does, so the two cannot drift; which lowering serves is the registry's per-position domain rule, not a decision
+taken here, and the host is never consulted for a value.
 
-Ownership events ride value flow: a desugared temp is a linear conduit, so the first read of an aggregate
-temp MOVES it and any re-read is the second handle, judged at the read itself regardless of where the value
-lands; local-name reads stay innocent, their events firing where the value gains a persistent place.
-Sequence-to-tensor conversions and sequence slices copy scalar leaves (exact); tensor-to-tensor derivations
-(slices, transposes, reshapes, family-preserving asarray) conservatively share over the SOURCE allocation
-(a storage-equivalence token) -- except np.array of an array (an independent copy on the host and the A5
-explicit-copy spelling) and any family-CHANGING dtype conversion (the host copies), which mint fresh. A scalar
-answers rank zero so library stubs can interrogate rank. An annotation never converts an array family: the
-runtime object would keep its dtype, so a mismatch rejects rather than modeling a fiction.
+Ownership events ride value flow: a desugared temp is a linear conduit, so the first read of an aggregate temp MOVES
+it and any re-read is the second handle, judged at the read itself regardless of where the value lands; local-name
+reads stay innocent, their events firing where the value gains a persistent place. Sequence-to-tensor conversions
+and sequence slices copy scalar leaves (exact); tensor-to-tensor derivations (slices, transposes, reshapes,
+family-preserving asarray) conservatively share over the SOURCE allocation (a storage-equivalence token) -- except
+np.array of an array (an independent copy on the host and the explicit-copy spelling) and any family-CHANGING dtype
+conversion (the host copies), which mint fresh. A scalar answers rank zero so library stubs can interrogate rank. An
+annotation never converts an array family: the runtime object would keep its dtype, so a mismatch rejects rather
+than modeling a fiction.
 
 Persistent state: slots are environment bindings keyed by the attribute path, initialized eagerly from
 SlotRead temps so a write under one residual arm joins the entry value from the other. An aggregate state
@@ -57,7 +57,7 @@ from .._desugar import desugar
 from .._ir import *
 from .._decorator import plain_function
 from .._names import hardware_name, indexed_names, port_name, public_slot
-from . import _aggregate, _express, _mutate, _ops
+from . import _aggregate, _express, _mutate
 from ._ownership import allocations, borrow, escape, release, share
 from ._reject import reattribute, reject
 from ._residual import assigned_names, drop_return_rows, prune, rechained
@@ -107,22 +107,24 @@ _logger = logging.getLogger(__name__)
 
 type _EnvKey = str | int | StateKey
 
-_RETURN_KEY = "<return>"
 
-
-@dataclass(frozen=True, slots=True)
-class Ctx:
+class Ctx(enum.Enum):
     """
-    Where interpretation stands: a residual branch arm rejects raise; a residual loop also rejects aggregate
-    state installs. `inline` starts a fresh context, so the flags describe the frame's own position, never
-    the caller's.
+    Where interpretation stands: a residual branch arm rejects raise; a residual loop, itself a branch, also
+    rejects aggregate state installs. `inline` starts at the top, so this describes the frame's own position,
+    never the caller's.
     """
 
-    branch: bool = False
-    loop: bool = False
+    TOP = "top"
+    BRANCH = "branch"
+    LOOP = "loop"
+
+    @property
+    def loop(self) -> bool:
+        return self is Ctx.LOOP
 
     def arm(self) -> Ctx:
-        return Ctx(branch=True, loop=self.loop)
+        return Ctx.LOOP if self.loop else Ctx.BRANCH
 
 
 type Sink = list[Stmt | _OpenIf | _OpenWhile]
@@ -162,6 +164,24 @@ def _unaliased(annotation: object, origin: Origin, what: str) -> object:
         reject(origin, f"{what}: the type alias cannot be evaluated: {error}")
 
 
+def _scalar_leaves(value: Value, origin: Origin) -> list[Scalar]:
+    scalars: list[Scalar] = []
+    for leaf in tree_leaves(value):
+        if isinstance(leaf, Opaque):
+            reject(origin, _describe_opaque(leaf))
+        scalars.append(leaf)
+    return scalars
+
+
+def _without_temps(env: _Env) -> _Env:
+    return {key: value for key, value in env.items() if not isinstance(key, int)}
+
+
+def _drop_temps(env: _Env) -> None:
+    for key in [key for key in env if isinstance(key, int)]:
+        del env[key]
+
+
 def _frozen(sink: Sink) -> tuple[Stmt, ...]:
     out: list[Stmt] = []
     for item in sink:
@@ -184,7 +204,7 @@ class _ExitKind(enum.Enum):
 @dataclass(slots=True)
 class _Exit:
     """
-    A pending exit lane, joined at the one consumer its kind names. `env` and `state` are SNAPSHOTS: a
+    A pending exit lane, joined at the one consumer its kind names. `env` is a SNAPSHOT: a
     statement-level exit ends a lane whose frame dicts a sibling lane's fold may later revive and keep
     mutating in place, so capturing by reference would hand the consumer the survivor's values. `crossed`
     marks a return lane that left a residual loop: its arms lie inside the published loop and never
@@ -201,8 +221,8 @@ class _Exit:
 
     @classmethod
     def snap(
-        cls, kind: _ExitKind, origin: Origin, frame: "Frame", sinks: list[Sink], result: "Value | None" = None
-    ) -> "_Exit":
+        cls, kind: _ExitKind, origin: Origin, frame: Frame, sinks: list[Sink], result: Value | None = None
+    ) -> _Exit:
         return cls(kind, origin, dict(frame.env), sinks, result)
 
 
@@ -288,7 +308,7 @@ class Frame:
     root: bool
     marks: dict[int, int] = dataclasses.field(default_factory=dict)
 
-    def fork(self) -> "Frame":
+    def fork(self) -> Frame:
         """Marks are shared, not copied: an AugMark/AugStore pair is suite-local to one function."""
         return Frame(self.fn, self.annotations, dict(self.env), self.root, marks=self.marks)
 
@@ -326,7 +346,7 @@ def partial_evaluate(
     eel: EelFunction, fn: types.FunctionType, instance: object | None, unroll_max_trips: int
 ) -> EelFunction:
     """
-    The A2 trim driver: run with the seeded assumed-state set (the syntactic may-write scan over the whole
+    The state trim driver: run with the seeded assumed-state set (the syntactic may-write scan over the whole
     component tree), shrink it to the paths whose write was actually reached, and re-run on every other
     repair a run signals, until stable -- each run a fresh interpreter over the same immutable tree. A
     rejection under the conservative assumption is final, annotated with the pinning writes.
@@ -337,7 +357,8 @@ def partial_evaluate(
     tree = build_component_tree(instance)
     model = StateModel(tree, seed_state(tree, eel), environment_aggregates(fn))
     extra_carries: dict[LoopPass, frozenset[StateKey]] = {}
-    while True:  # terminates: each pass finishes, strictly shrinks S, promotes a leaf, or grows a carry set
+    # Terminates: each pass finishes, strictly shrinks the assumed set, promotes a leaf, or grows a carry set.
+    while True:
         interpreter = Interpreter(fn, model, unroll_max_trips, extra_carries)
         try:
             residual = interpreter.run(eel)
@@ -376,7 +397,6 @@ class Interpreter:
     ) -> None:
         self._fn = fn
         self.tree = state.tree if state is not None else None
-        self.instance = self.tree.objects[()] if self.tree is not None else None
         self.state = state
         self.unroll_max_trips = unroll_max_trips
         self.extra_carries = extra_carries or {}
@@ -385,7 +405,6 @@ class Interpreter:
         self._outputs: tuple[OutputDecl, ...] | None = None
         self._elide: list[SlotPath | None] = []
         self.specs: dict[StateKey, Spec] = {}
-        self._decls: tuple[SlotDecl, ...] = ()
         self.state_owners: dict[Allocation, StateKey] = {}
         self.written_attrs: set[StateKey] = set()
         self.state_writes = 0
@@ -430,12 +449,12 @@ class Interpreter:
         env: _Env = {}
         frame = Frame(fn=self._fn, annotations=self._annotations_of(eel.origin, self._fn), env=env, root=True)
         remaining = eel.params
-        if self.instance is not None:
+        if self.tree is not None:
             # The bound receiver is a snapshot root: frozen-attribute reads fold, state attributes read and
             # write their slot bindings, and calling its methods inlines them over the same receiver.
             assert remaining, "a bound method always has a receiver parameter"
             receiver = remaining[0]
-            frame.env[receiver.name] = self.snapshot.admit(receiver.name, self.instance, eel.origin)
+            frame.env[receiver.name] = self.snapshot.admit(receiver.name, self.tree.objects[()], eel.origin)
             remaining = remaining[1:]
         params: list[Param] = []
         for param in remaining:
@@ -445,31 +464,31 @@ class Interpreter:
             collision = next(name for name in names if names.count(name) > 1)
             reject(eel.origin, f"the decomposed parameter names collide on {collision!r}; rename the parameters")
         sink: Sink = []
+        decls: tuple[SlotDecl, ...] = ()
         if self.state is not None:
             self.specs = self.state.prepare()
-            self._decls = self.state.decls()
+            decls = self.state.decls()
             for key in sorted(self.specs):
                 frame.env[key] = self._init_slot(key, self.specs[key], eel.origin, sink)
-        flow = self._block(eel.body, frame, [sink], Ctx())
+        flow = self._block(eel.body, frame, [sink], Ctx.TOP)
         assert not flow.exits, "no exit lane escapes the root frame"
         if flow.fall is not None:
             piece = self._piece(flow.fall)
-            self._bare_site(eel.origin, frame, piece)
+            self._void_site(eel.origin, frame, piece, "can complete without returning a value")
             self._spread(flow.fall, piece)
         assert self._outputs is not None, "every path commits a return site"
         keep = [candidate is None for candidate in self._elide]
         outputs = tuple(row for row, kept in zip(self._outputs, keep, strict=True) if kept)
         frozen = _frozen(sink)
-        statements = frozen if all(keep) else drop_return_rows(frozen, keep)
-        body, live = prune(statements)
+        body, live = prune(drop_return_rows(frozen, keep))
         assert not live, "a residual temp is read before any assignment"
-        residual = EelFunction(eel.origin, eel.name, tuple(params), tuple(body), slots=self._decls, outputs=outputs)
+        residual = EelFunction(eel.origin, eel.name, tuple(params), tuple(body), slots=decls, outputs=outputs)
         _logger.info(
             "%s: partial evaluation: %d residual statement(s), %d output(s), %d slot(s), %d budget unit(s) spent",
             eel.name,
             len(body),
             len(outputs),
-            len(self._decls),
+            len(decls),
             self.budget.spent,
         )
         return residual
@@ -530,7 +549,7 @@ class Interpreter:
     def _decompose(
         self, param: Param, name: str, annotation: object, stack: list[type], what: str
     ) -> tuple[list[Param], Value]:
-        """One classification order shared with _conform_value: scalar, tuple, record, then array."""
+        """One classification order shared with conform_value: scalar, tuple, record, then array."""
         annotation = _unaliased(annotation, param.origin, what)
         stype = annotation_stype(annotation)
         if stype is not None:
@@ -587,9 +606,6 @@ class Interpreter:
         except Exception as error:
             reject(origin, f"the field annotations of {cls.__name__} cannot be evaluated: {error}")
 
-    def conform_annotation(self, value: Value, annotation: object, origin: Origin, sink: Sink, what: str) -> Value:
-        return self._conform_value(value, annotation, origin, sink, what, root=True)
-
     def fresh(self) -> int:
         index = self._next_temp
         self._next_temp += 1
@@ -604,14 +620,12 @@ class Interpreter:
             if current is None:
                 break  # CPython-unreachable suffix: every lane already exited
             piece = self._piece(current)
+            here = ctx.arm() if exits else ctx  # a statement behind a pending exit runs on a data-dependent path
             match stmt:
                 case Assign(target=target, value=value):
                     self._assign(target, value, frame, piece)
                 case AugAssign(origin=origin, target=target, op=op, value=value):
-                    bound = frame.env.get(target.name)
-                    if bound is None:
-                        reject(origin, f"the local name {target.name!r} is not bound on every path reaching this read")
-                    current_value = self.readable(bound, origin)
+                    current_value = self.read_local(frame, target.name, origin)
                     rhs = self.expr(value, frame, piece)
                     if isinstance(current_value, AGGREGATES):
                         updated = _mutate.aug_aggregate(self, origin, target.name, current_value, op, rhs, frame, piece)
@@ -624,7 +638,7 @@ class Interpreter:
                     for target, item in zip(targets, items, strict=True):
                         frame.env[self._binding_key(target)] = item
                 case If():
-                    flow = self._if(stmt, frame, current, ctx)
+                    flow = self._if(stmt, frame, current, here)
                     exits.extend(flow.exits)
                     current = flow.fall
                     continue
@@ -640,7 +654,7 @@ class Interpreter:
                         annotation = frame.annotations.get("return", _MISSING)
                         if annotation is not _MISSING:
                             # At the return itself, so a mismatch points into the callee.
-                            result = self._conform_value(result, annotation, origin, piece, "the returned value")
+                            result = self.conform_value(result, annotation, origin, piece, "the returned value")
                         if isinstance(result, AGGREGATES) and self.alias_conduit(frame, stmt.value):
                             share(result)
                     self._spread(current, piece)
@@ -648,29 +662,26 @@ class Interpreter:
                     current = None
                     continue
                 case Raise():
-                    self._raise(stmt, frame, piece, ctx)
-                case While():
-                    flow = self._while(stmt, frame, current, ctx)
+                    self._raise(stmt, frame, piece, here)
+                case While() | For():
+                    flow = (
+                        self._while(stmt, frame, current, here)
+                        if isinstance(stmt, While)
+                        else self._for(stmt, frame, current, here)
+                    )
+                    _drop_temps(frame.env)
                     exits.extend(flow.exits)
                     current = flow.fall
                     continue
-                case For():
-                    flow = self._for(stmt, frame, current, ctx)
-                    exits.extend(flow.exits)
-                    current = flow.fall
-                    continue
-                case Break(origin=origin):
-                    exits.append(_Exit.snap(_ExitKind.BREAK, origin, frame, current))
-                    current = None
-                    continue
-                case Continue(origin=origin):
-                    exits.append(_Exit.snap(_ExitKind.CONTINUE, origin, frame, current))
+                case Break(origin=origin) | Continue(origin=origin):
+                    kind = _ExitKind.BREAK if isinstance(stmt, Break) else _ExitKind.CONTINUE
+                    exits.append(_Exit.snap(kind, origin, frame, current))
                     current = None
                     continue
                 case AugMark(mark=mark):
                     frame.marks[mark] = self.state_writes
                 case Store() | AugStore():
-                    _mutate.store(self, stmt, frame, piece, ctx)
+                    _mutate.store(self, stmt, frame, piece, here)
                 case _:
                     raise AssertionError(stmt)
             self._spread(current, piece)
@@ -718,6 +729,10 @@ class Interpreter:
     def alias_conduit(self, frame: Frame, atom: Expr) -> bool:
         return isinstance(atom, TempRef) and isinstance(frame.env.get(atom.index), _SlotAlias)
 
+    def named_handle(self, frame: Frame, atom: Expr) -> bool:
+        """Whether the read leaves a handle behind: a local name, or a temp aliasing a state slot."""
+        return isinstance(atom, LocalRef) or self.alias_conduit(frame, atom)
+
     def _binding_key(self, binding: Binding) -> _EnvKey:
         match binding:
             case LocalBind(name=name):
@@ -730,11 +745,9 @@ class Interpreter:
         The branch structure itself is every join; a pending exit holds the If open, and the surviving
         lane's continuation then nests into its arm until the exit's consumer joins and seals.
         """
-        piece = self._piece(sinks)
-        cond = self._condition(stmt.origin, self.expr(stmt.cond, frame, piece))
-        self._spread(sinks, piece)
+        cond = self._condition(stmt.origin, self.expr(stmt.cond, frame, sinks[0]))
         if isinstance(cond, StaticScalar):
-            decided = _ops.const_value(cond.const)
+            decided = cond.value
             assert isinstance(decided, bool)
             taken = stmt.then if decided else stmt.orelse
             return self._block(taken, frame, sinks, ctx)
@@ -749,10 +762,7 @@ class Interpreter:
         if then_flow.fall is not None and else_flow.fall is not None:
             joined = self._join(stmt.origin, then_frame.env, then_flow.fall, else_frame.env, else_flow.fall)
         cond_atom = _express.materialize(cond, stmt.origin)
-        if not pending:
-            node: Stmt | _OpenIf = If(stmt.origin, cond_atom, _frozen(then_sink), _frozen(else_sink))
-        else:
-            node = _OpenIf(stmt.origin, cond_atom, then_sink, else_sink)
+        node = _OpenIf(stmt.origin, cond_atom, then_sink, else_sink)
         for sink in sinks:
             sink.append(node)
         if then_flow.fall is None and else_flow.fall is None:
@@ -806,13 +816,9 @@ class Interpreter:
             if a is not b:
                 reject(origin, "one branch returns a value and the other does not")
             return None
-        merged = self._merge(origin, _RETURN_KEY, a, b, then_sinks, else_sinks, allocations_match(a, b))
-        if merged is None:
+        merged = self._merge_values(origin, "the returned value", a, b, then_sinks, else_sinks)
+        if isinstance(merged, _Unjoinable):
             reject(origin, "the branches return values the compiler cannot merge")
-        if not allocations_match(a, b) and isinstance(merged, AGGREGATES):
-            share(a)
-            share(b)
-            share(merged)
         return merged
 
     def _join(
@@ -826,26 +832,15 @@ class Interpreter:
             b_alias = b_bound if isinstance(b_bound, _SlotAlias) else None
             a = a_bound.value if isinstance(a_bound, (_Moved, _SlotAlias)) else a_bound
             b = b_bound.value if isinstance(b_bound, (_Moved, _SlotAlias)) else b_bound
+            described = self._describe_key(key)
             if isinstance(a, _Unjoinable) or isinstance(b, _Unjoinable):
-                joined[key] = _Unjoinable(self._describe_key(key))
+                joined[key] = _Unjoinable(described)
                 continue
-            if same(a, b):
-                if isinstance(a, AGGREGATES):
-                    joined[key] = _rewrap(a, moved, a_alias, b_alias, (a,))
-                else:
-                    joined[key] = a
-                continue
-            if isinstance(a, (*AGGREGATES, Opaque)) and isinstance(b, (*AGGREGATES, Opaque)):
-                merged = self._join_aggregates(origin, key, a, b, then_sinks, else_sinks)
-                if isinstance(merged, AGGREGATES):
-                    joined[key] = _rewrap(merged, moved, a_alias, b_alias, (a, b, merged))
-                else:
-                    joined[key] = merged
-                continue
-            if isinstance(a, (StaticScalar, ResidualScalar)) and isinstance(b, (StaticScalar, ResidualScalar)):
-                joined[key] = self._join_scalars(origin, self._describe_key(key), a, b, then_sinks, else_sinks)
-                continue
-            joined[key] = _Unjoinable(self._describe_key(key))
+            merged = a if same(a, b) else self._merge_values(origin, described, a, b, then_sinks, else_sinks)
+            if isinstance(merged, AGGREGATES):
+                joined[key] = _rewrap(merged, moved, a_alias, b_alias, (a, b, merged))
+            else:
+                joined[key] = merged
         return joined
 
     def _join_scalars(
@@ -866,13 +861,13 @@ class Interpreter:
             sink.append(Assign(origin, TempBind(origin, index), _express.materialize(b, origin), stype))
         return ResidualScalar(stype, TempRef(origin, index))
 
-    def _join_aggregates(
-        self, origin: Origin, key: _EnvKey, a: Value, b: Value, then_sinks: list[Sink], else_sinks: list[Sink]
+    def _merge_values(
+        self, origin: Origin, described: str, a: Value, b: Value, then_sinks: list[Sink], else_sinks: list[Sink]
     ) -> Value | _Unjoinable:
         keep = allocations_match(a, b)
-        merged = self._merge(origin, key, a, b, then_sinks, else_sinks, keep)
+        merged = self._merge(origin, described, a, b, then_sinks, else_sinks, keep)
         if merged is None:
-            return _Unjoinable(self._describe_key(key))
+            return _Unjoinable(described)
         if not keep:
             # CPython would carry ONE of the two objects; a mutation through the merged name must therefore
             # reject, and so must a mutation through either source, hence all three trees share.
@@ -884,62 +879,50 @@ class Interpreter:
     def _merge(
         self,
         origin: Origin,
-        key: _EnvKey,
+        described: str,
         a: Value,
         b: Value,
         then_sinks: list[Sink],
         else_sinks: list[Sink],
         keep: bool,
     ) -> Value | None:
+        def children(xs: tuple[Value, ...], ys: tuple[Value, ...]) -> tuple[Value, ...] | None:
+            merged: list[Value] = []
+            for x, y in zip(xs, ys, strict=True):
+                child = self._merge(origin, described, x, y, then_sinks, else_sinks, keep)
+                if child is None:  # the first unmergeable child ends the merge, so a later one is never judged
+                    return None
+                merged.append(child)
+            return tuple(merged)
+
         match a, b:
             case SequenceValue(), SequenceValue():
-                if len(a.items) != len(b.items):
-                    return None
-                items: list[Value] = []
-                for x, y in zip(a.items, b.items, strict=True):
-                    item = self._merge(origin, key, x, y, then_sinks, else_sinks, keep)
-                    if item is None:
-                        return None
-                    items.append(item)
-                return SequenceValue(tuple(items), a.allocation if keep else self._minted(a, b))
+                items = children(a.items, b.items) if len(a.items) == len(b.items) else None
+                return None if items is None else SequenceValue(items, a.allocation if keep else self._minted(a, b))
             case TensorValue(), TensorValue():
-                if a.shape != b.shape:
+                merged = children(a.leaves, b.leaves) if a.shape == b.shape else None
+                if merged is None:
                     return None
-                leaves: list[Scalar | Opaque] = []
-                for x, y in zip(a.leaves, b.leaves, strict=True):
-                    leaf = self._merge(origin, key, x, y, then_sinks, else_sinks, keep)
-                    if leaf is None:
-                        return None
-                    assert isinstance(leaf, (StaticScalar, ResidualScalar, Opaque))
-                    leaves.append(leaf)
+                leaves = tuple(leaf for leaf in merged if isinstance(leaf, (StaticScalar, ResidualScalar, Opaque)))
+                assert len(leaves) == len(merged)
                 family = next((leaf.stype for leaf in leaves if not isinstance(leaf, Opaque)), a.family)
-                return TensorValue(a.shape, family, tuple(leaves), a.allocation if keep else self._minted(a, b))
+                return TensorValue(a.shape, family, leaves, a.allocation if keep else self._minted(a, b))
             case RecordValue(), RecordValue():
-                if a.cls is not b.cls:
-                    return None
-                fields: list[Value] = []
-                for x, y in zip(a.fields, b.fields, strict=True):
-                    field = self._merge(origin, key, x, y, then_sinks, else_sinks, keep)
-                    if field is None:
-                        return None
-                    fields.append(field)
-                return RecordValue(a.cls, tuple(fields), a.allocation if keep else self._minted(a, b))
+                fields = children(a.fields, b.fields) if a.cls is b.cls else None
+                return (
+                    None if fields is None else RecordValue(a.cls, fields, a.allocation if keep else self._minted(a, b))
+                )
             case (StaticScalar() | ResidualScalar()), (StaticScalar() | ResidualScalar()):
-                return self._join_scalars(origin, self._describe_key(key), a, b, then_sinks, else_sinks)
-            case Opaque(), Opaque():
-                if a.value is b.value:
-                    return a
-                left = self._admitted_record(type(a.value), a, origin, then_sinks)
-                right = self._admitted_record(type(a.value), b, origin, else_sinks)
+                return self._join_scalars(origin, described, a, b, then_sinks, else_sinks)
+            case Opaque(), Opaque() if a.value is b.value:
+                return a
+            case (Opaque() | RecordValue()), (Opaque() | RecordValue()):
+                cls = a.cls if isinstance(a, RecordValue) else b.cls if isinstance(b, RecordValue) else type(a.value)
+                left = a if isinstance(a, RecordValue) else self._admitted_record(cls, a, origin, then_sinks)
+                right = b if isinstance(b, RecordValue) else self._admitted_record(cls, b, origin, else_sinks)
                 if left is None or right is None:
                     return None
-                return self._merge(origin, key, left, right, then_sinks, else_sinks, keep)
-            case RecordValue(), Opaque():
-                right = self._admitted_record(a.cls, b, origin, else_sinks)
-                return None if right is None else self._merge(origin, key, a, right, then_sinks, else_sinks, keep)
-            case Opaque(), RecordValue():
-                left = self._admitted_record(b.cls, a, origin, then_sinks)
-                return None if left is None else self._merge(origin, key, left, b, then_sinks, else_sinks, keep)
+                return self._merge(origin, described, left, right, then_sinks, else_sinks, keep)
             case RangeValue(), RangeValue():
                 return a if same(a, b) else None
             case _:
@@ -972,11 +955,15 @@ class Interpreter:
         return minted
 
     def _describe_key(self, key: _EnvKey) -> str:
-        if key == _RETURN_KEY:
-            return "the returned value"
         if isinstance(key, tuple):
             return f"the state attribute {spell_state(key)}"
         return f"the local {key!r}" if isinstance(key, str) else "the conditional result"
+
+    def read_local(self, frame: Frame, name: str, origin: Origin) -> Value:
+        found = frame.env.get(name)
+        if found is None:
+            reject(origin, f"the local name {name!r} is not bound on every path reaching this read")
+        return self.readable(found, origin)
 
     def readable(self, binding: Value | _Unjoinable | _Moved | _SlotAlias, origin: Origin) -> Value:
         if isinstance(binding, _Unjoinable):
@@ -1000,7 +987,7 @@ class Interpreter:
         return binding
 
     def _raise(self, stmt: Raise, frame: Frame, sink: Sink, ctx: Ctx) -> None:
-        if ctx.branch or ctx.loop or (frame.root and self._outputs is not None):
+        if ctx is not Ctx.TOP or (frame.root and self._outputs is not None):
             reject(stmt.origin, "a raise on a data-dependent path (a runtime branch arm) cannot be lowered")
         pieces: list[str] = []
         for part in stmt.parts:
@@ -1009,7 +996,7 @@ class Interpreter:
                 continue
             value = self.expr(part, frame, sink)
             if isinstance(value, StaticScalar):
-                pieces.append(format(_ops.const_value(value.const)))
+                pieces.append(format(value.value))
             elif isinstance(value, Opaque) and type(value.value) is str:
                 pieces.append(value.value)
             else:
@@ -1042,15 +1029,11 @@ class Interpreter:
                 if current is None:
                     break
                 self.budget.spend(1, stmt.origin, "the unrolled loop")
-                frame.env[stmt.target.name] = item
+                frame.env[self._binding_key(stmt.target)] = item
                 current = self._trip(stmt.origin, stmt.body, frame, current, ctx, breaks, escaped)
         finally:
             release(held)
         current = self._meet_lanes(stmt.origin, frame, breaks, current, sinks if not escaped else None)
-        if stmt.target.name.startswith("for$"):
-            # A desugared non-name target's hidden binding is dead past the loop (only the body head reads it);
-            # leaving it bound would leak the internal name into an enclosing residual loop's carried set.
-            frame.env.pop(stmt.target.name, None)
         return _Flow(escaped, current)
 
     def _counted(self, stmt: For, iterable: RangeValue, span: range | None, frame: Frame, sink: Sink) -> list[_Exit]:
@@ -1064,11 +1047,10 @@ class Interpreter:
         assert span is None or _aggregate.range_length(span) > self.unroll_max_trips >= 0
         k = self.fresh()
         counter, stop, test = f"for${k}n", f"for${k}s", f"for${k}t"
-        assert stmt.target.name not in (counter, stop, test), "the hidden names are unspellable in source"
         frame.env[counter] = iterable.start
         frame.env[stop] = iterable.stop
         if span is not None:
-            frame.env[stmt.target.name] = iterable.start
+            frame.env[self._binding_key(stmt.target)] = iterable.start
         header = Assign(
             origin,
             LocalBind(origin, test),
@@ -1103,9 +1085,11 @@ class Interpreter:
     ) -> list[Sink] | None:
         """
         Trip-completion lanes fold BEFORE the next trip expands -- expanding each lane separately would
-        nest the remaining trips per lane and go exponential.
+        nest the remaining trips per lane and go exponential. A trip behind an earlier trip's pending break or
+        return runs on a data-dependent path, and a trip ends on a statement boundary, so its temps die with it.
         """
-        flow = self._block(body, frame, entry, ctx)
+        flow = self._block(body, frame, entry, ctx.arm() if breaks or escaped else ctx)
+        _drop_temps(frame.env)
         escaped.extend(exit for exit in flow.exits if exit.kind is _ExitKind.RETURN)
         breaks.extend(exit for exit in flow.exits if exit.kind is _ExitKind.BREAK)
         continues = [exit for exit in flow.exits if exit.kind is _ExitKind.CONTINUE]
@@ -1136,6 +1120,7 @@ class Interpreter:
         already folded in -- a join written only into the newest pair's sinks would leave the earlier lanes
         reading it undefined.
         """
+        parts = [(_without_temps(env), sinks) for env, sinks in parts]
         env, sinks = parts[0]
         for next_env, next_sinks in parts[1:]:
             env = self._join(origin, env, sinks, next_env, next_sinks)
@@ -1166,7 +1151,7 @@ class Interpreter:
                 self._spread(current, piece)
                 break
             self._spread(current, header_piece)
-            decided = _ops.const_value(cond.const)
+            decided = cond.value
             assert isinstance(decided, bool)
             if not decided:
                 break
@@ -1202,21 +1187,19 @@ class Interpreter:
         occurrence = self._loop_occurrences.get(origin, 0)
         self._loop_occurrences[origin] = occurrence + 1
         loop_key: LoopPass = (origin, occurrence)
-        carried: list[tuple[_EnvKey, list[int]]] = []
-        stypes: dict[tuple[_EnvKey, int], ScalarType] = {}
-        rebound, stored, attr_writes = assigned_names((*stmt.header, *stmt.body))
-        for name in sorted(rebound | stored):
+        carried_locals: list[str] = []
+        assigned = assigned_names((*stmt.header, *stmt.body))
+        for name in sorted(assigned.rebound | assigned.stored):
             bound = frame.env.get(name)
             if bound is None:
                 continue
             assert not isinstance(bound, (_Moved, _SlotAlias)), "only temps ride the conduits"
             value = self.readable(bound, origin)
             if isinstance(value, (StaticScalar, ResidualScalar)):
-                if name in rebound:
-                    carried.append((name, [self.fresh()]))
-                    stypes[(name, 0)] = value.stype
+                if name in assigned.rebound:
+                    carried_locals.append(name)
                 continue
-            if name in rebound or isinstance(value, AGGREGATES):
+            if name in assigned.rebound or isinstance(value, AGGREGATES):
                 reject(
                     origin,
                     f"{name!r} is {_aggregate.a_kind(value)}; only bool, int, and float values can be "
@@ -1227,7 +1210,7 @@ class Interpreter:
         # Lean-first is deliberate: carrying an untouched leaf residualizes reads that may be static (a
         # constant written before the loop), and a maximal pass can reject before any repair could run.
         carried_keys: set[StateKey] = set(self.extra_carries.get(loop_key, frozenset())) & set(self.specs)
-        for root, chain in attr_writes:
+        for root, chain in assigned.attrs:
             bound = frame.env.get(root)
             if isinstance(bound, Opaque) and self.tree is not None:
                 prefix = self.state_prefix(bound.value)
@@ -1235,41 +1218,35 @@ class Interpreter:
                     resolved = resolve_chain(self.tree, prefix, chain)
                     if resolved is not None and resolved in self.specs:
                         carried_keys.add(resolved)
-        for slot_key in sorted(carried_keys):
-            entry_tree = self.readable(frame.env[slot_key], origin)
-            leaves = tree_leaves(entry_tree)
+        carried: list[tuple[_EnvKey, list[int]]] = []
+        stypes: dict[tuple[_EnvKey, int], ScalarType] = {}
+        carried_order: list[_EnvKey] = [*carried_locals, *sorted(carried_keys)]
+        for key in carried_order:
+            leaves = _scalar_leaves(self.readable(frame.env[key], origin), origin)
             for position, leaf in enumerate(leaves):
-                if isinstance(leaf, Opaque):
-                    reject(origin, _describe_opaque(leaf))
-                stypes[(slot_key, position)] = leaf.stype
-            carried.append((slot_key, [self.fresh() for _ in leaves]))
+                stypes[(key, position)] = leaf.stype
+            carried.append((key, [self.fresh() for _ in leaves]))
         while True:
             outputs_before = self._outputs
             elide_before = list(self._elide)
-            budget_before = self.budget.mark()
+            budget_before = self.budget.spent
             loop_frame = frame.fork()
             for key, indices in carried:
-                phi_leaves: list[Scalar] = [
+                entry_phis = (
                     ResidualScalar(stypes[(key, position)], TempRef(origin, index))
                     for position, index in enumerate(indices)
-                ]
-                if isinstance(key, tuple):
-                    entry_tree = self.readable(frame.env[key], origin)
-                    loop_frame.env[key] = tree_rebuild(entry_tree, iter(phi_leaves))
-                else:
-                    (only,) = phi_leaves
-                    loop_frame.env[key] = only
+                )
+                loop_frame.env[key] = tree_rebuild(self.readable(frame.env[key], origin), entry_phis)
             header_sink: Sink = []
-            loop_ctx = Ctx(branch=True, loop=True)
             self.active_loops.append((loop_key, frozenset(carried_keys)))
             try:
-                header_flow = self._block(stmt.header, loop_frame, [header_sink], loop_ctx)
+                header_flow = self._block(stmt.header, loop_frame, [header_sink], Ctx.LOOP)
                 assert not header_flow.exits and header_flow.fall is not None, "a test expression cannot exit"
                 cond = self._condition(origin, self.expr(stmt.cond, loop_frame, header_sink))
                 assert isinstance(cond, ResidualScalar), "a residual test cannot re-fold under residual carries"
                 post_header_env = dict(loop_frame.env)
                 body_sink: Sink = []
-                body_flow = self._block(stmt.body, loop_frame, [body_sink], loop_ctx)
+                body_flow = self._block(stmt.body, loop_frame, [body_sink], Ctx.LOOP)
             finally:
                 self.active_loops.pop()
             returns = [exit for exit in body_flow.exits if exit.kind is _ExitKind.RETURN]
@@ -1323,21 +1300,14 @@ class Interpreter:
             self.budget.rewind(budget_before)
         phis: list[LoopPhi] = []
         for key, indices in carried:
-            entry_value = self.readable(frame.env[key], origin)
-            entry_leaves = tree_leaves(entry_value)
-            assert len(entry_leaves) == len(indices)
-            assert not any(isinstance(leaf, Opaque) for leaf in entry_leaves), "the carry setup rejected opaques"
-            for position, index in enumerate(indices):
-                entry_leaf = entry_leaves[position]
-                assert isinstance(entry_leaf, (StaticScalar, ResidualScalar))
-                entry: Scalar = entry_leaf
-                if stypes[(key, position)] is ScalarType.FLOAT and entry.stype is ScalarType.INT:
+            entry_leaves = _scalar_leaves(self.readable(frame.env[key], origin), origin)
+            for position, (index, entry) in enumerate(zip(indices, entry_leaves, strict=True)):
+                stype = stypes[(key, position)]
+                if stype is ScalarType.FLOAT and entry.stype is ScalarType.INT:
                     entry = self.as_float(entry, origin, sink)
-                assert entry.stype is stypes[(key, position)]
+                assert entry.stype is stype
                 back_atom = _express.materialize(backs[(key, position)], origin)
-                phis.append(
-                    LoopPhi(origin, index, stypes[(key, position)], _express.materialize(entry, origin), back_atom)
-                )
+                phis.append(LoopPhi(origin, index, stype, _express.materialize(entry, origin), back_atom))
         _logger.debug(
             "%s: the loop at %s residualizes with %d carried phi(s), %d break(s), %d continue(s): %s",
             frame.fn.__qualname__,
@@ -1359,12 +1329,9 @@ class Interpreter:
             for arm in lane.sinks:
                 arm.append(ResidualContinue(lane.origin))
         cond_atom = _express.materialize(cond, origin)
-        if returns:
-            for lane in returns:
-                lane.crossed = True
-            sink.append(_OpenWhile(origin, tuple(phis), header_sink, cond_atom, body_sink))
-        else:
-            sink.append(ResidualWhile(origin, tuple(phis), _frozen(header_sink), cond_atom, _frozen(body_sink)))
+        for lane in returns:
+            lane.crossed = True
+        sink.append(_OpenWhile(origin, tuple(phis), header_sink, cond_atom, body_sink))
         frame.env.clear()
         frame.env.update(exit_env)
         return returns
@@ -1387,12 +1354,7 @@ class Interpreter:
                 f"installing a new aggregate into {self._describe_key(key)} inside a data-dependent loop "
                 "is not supported yet; store its elements instead",
             )
-        leaves: list[Scalar] = []
-        for leaf in tree_leaves(back_value):
-            if isinstance(leaf, Opaque):
-                reject(origin, _describe_opaque(leaf))
-            leaves.append(leaf)
-        return leaves
+        return _scalar_leaves(back_value, origin)
 
     def _comp(self, node: Comp, frame: Frame, sink: Sink) -> SequenceValue:
         iterable = _aggregate.decay(self.budget, self.expr(node.iterable, frame, sink), node.origin)
@@ -1401,18 +1363,20 @@ class Interpreter:
         items = _aggregate.splice_items(node.origin, iterable, self.loop_passes())
         held = borrow(iterable)
         collected: list[Value] = []
+        outer = set(frame.env)
         try:
             for item in items:
                 self.budget.spend(1, node.origin, "the comprehension")
                 frame.env[node.target] = item
-                body_flow = self._block(node.body, frame, [sink], Ctx(branch=True))
+                body_flow = self._block(node.body, frame, [sink], Ctx.BRANCH)
                 assert not body_flow.exits and body_flow.fall is not None, "a comprehension body holds no exit"
                 value = _aggregate.decay(self.budget, self.expr(node.element, frame, sink), node.origin)
-                if isinstance(value, AGGREGATES) and (
-                    isinstance(node.element, LocalRef) or self.alias_conduit(frame, node.element)
-                ):
+                if isinstance(value, AGGREGATES) and self.named_handle(frame, node.element):
                     share(value)
                 collected.append(value)
+                # The target and the body's temps end with the trip; keys that existed before keep their move marks.
+                for key in frame.env.keys() - outer:
+                    del frame.env[key]
         finally:
             release(held)
         return SequenceValue(tuple(collected), Allocation())
@@ -1420,29 +1384,24 @@ class Interpreter:
     # ------------------------------------------------------------------ the module boundary
 
     def _return_site(self, stmt: Return, frame: Frame, sink: Sink) -> None:
-        annotation = frame.annotations.get("return", _MISSING)
-        if annotation is _MISSING:
-            reject(stmt.origin, "the return type annotation is required")
+        annotation = self._root_annotation(stmt.origin, frame)
         if stmt.value is None:
-            if annotation is not None:
-                reject(stmt.origin, "the kernel returns no value but its annotation declares one")
-            self._commit_site(stmt.origin, frame, sink, [])
+            self._void_site(stmt.origin, frame, sink, "returns no value")
             return
         value = _aggregate.decay(self.budget, self.expr(stmt.value, frame, sink), stmt.origin)
         if isinstance(value, Opaque):
             if value.value is None:
-                if annotation is None:
-                    # `return self.void_helper()` in a `-> None` kernel: None is the bare-return shape.
-                    self._commit_site(stmt.origin, frame, sink, [])
-                    return
-                reject(stmt.origin, "the kernel returns no value (None) but its annotation declares one")
-            declared = _unaliased(annotation, stmt.origin, "the return annotation")
+                # `return self.void_helper()` in a `-> None` kernel: None is the bare-return shape.
+                self._void_site(stmt.origin, frame, sink, "returns no value (None)")
+                return
             record_like = (
-                isinstance(declared, type) and dataclasses.is_dataclass(declared) and isinstance(value.value, declared)
+                isinstance(annotation, type)
+                and dataclasses.is_dataclass(annotation)
+                and isinstance(value.value, annotation)
             )
             if not record_like:
                 reject(stmt.origin, f"the captured object {value.name!r} cannot be returned")
-        conformed = self._conform_value(value, annotation, stmt.origin, sink, "the returned value", root=True)
+        conformed = self.conform_value(value, annotation, stmt.origin, sink, "the returned value", root=True)
         match conformed:
             case StaticScalar() | ResidualScalar():
                 self._commit_site(stmt.origin, frame, sink, [((0,), conformed)])
@@ -1461,12 +1420,15 @@ class Interpreter:
             case _:
                 raise AssertionError(conformed)
 
-    def _bare_site(self, origin: Origin, frame: Frame, sink: Sink) -> None:
+    def _root_annotation(self, origin: Origin, frame: Frame) -> object:
         annotation = frame.annotations.get("return", _MISSING)
         if annotation is _MISSING:
             reject(origin, "the return type annotation is required")
-        if annotation is not None:
-            reject(origin, "the kernel can complete without returning a value but its annotation declares one")
+        return annotation
+
+    def _void_site(self, origin: Origin, frame: Frame, sink: Sink, what: str) -> None:
+        if self._root_annotation(origin, frame) is not None:
+            reject(origin, f"the kernel {what} but its annotation declares one")
         self._commit_site(origin, frame, sink, [])
 
     def _commit_site(
@@ -1491,9 +1453,7 @@ class Interpreter:
         slot_values: dict[SlotPath, Scalar] = {}
         for key in sorted(self.specs):
             tree = self.readable(frame.env[key], origin)
-            for spec_leaf, leaf in zip(spec_leaves(self.specs[key]), tree_leaves(tree), strict=True):
-                if isinstance(leaf, Opaque):
-                    reject(origin, _describe_opaque(leaf))
+            for spec_leaf, leaf in zip(spec_leaves(self.specs[key]), _scalar_leaves(tree, origin), strict=True):
                 committed = self._slot_conform(key, spec_leaf, leaf, origin, sink)
                 slot_values[spec_leaf.path] = committed
                 sink.append(SlotWrite(origin, spec_leaf.path, _express.materialize(committed, origin)))
@@ -1522,7 +1482,7 @@ class Interpreter:
             f"{leaf.stype.value}; bool state joins only with bool",
         )
 
-    def _conform_value(
+    def conform_value(
         self, value: Value, annotation: object, origin: Origin, sink: Sink, what: str, *, root: bool = False
     ) -> Value:
         """
@@ -1540,12 +1500,11 @@ class Interpreter:
             if not isinstance(value, SequenceValue):
                 reject(origin, f"{what} is not a sequence")
             if len(args) == 2 and args[1] is Ellipsis:
-                items = tuple(self._conform_value(item, args[0], origin, sink, what, root=root) for item in value.items)
-                return dataclasses.replace(value, items=items)
+                args = (args[0],) * len(value.items)
             if len(args) != len(value.items):
                 reject(origin, f"{what} has {len(value.items)} element(s) where the annotation declares {len(args)}")
             items = tuple(
-                self._conform_value(item, arg, origin, sink, what, root=root)
+                self.conform_value(item, arg, origin, sink, what, root=root)
                 for item, arg in zip(value.items, args, strict=True)
             )
             return dataclasses.replace(value, items=items)
@@ -1577,7 +1536,7 @@ class Interpreter:
                 return self._admit_record(what, annotation, value.value, origin, sink)
             annotations = self.record_annotations(found, origin)
             fields = tuple(
-                self._conform_value(item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root)
+                self.conform_value(item, field_annotation, origin, sink, f"the field {name!r} of {what}", root=root)
                 for (name, field_annotation), item in zip(annotations.items(), value.fields, strict=True)
             )
             return dataclasses.replace(value, fields=fields)
@@ -1609,7 +1568,7 @@ class Interpreter:
         """Reads via getattr, so slots=True instances admit the same way."""
         annotations = self.record_annotations(cls, origin)
         fields = tuple(
-            self._conform_value(
+            self.conform_value(
                 self.snapshot.admit(f"{what}.{name}", getattr(raw, name), origin),
                 annotation,
                 origin,
@@ -1635,7 +1594,7 @@ class Interpreter:
     def expr(self, expr: Expr, frame: Frame, sink: Sink) -> Value:
         match expr:
             case Const(value=value):
-                return StaticScalar(_ops.make_const(value))
+                return StaticScalar.of(value)
             case TempRef(origin=origin, index=index):
                 bound = frame.env.get(index)
                 assert bound is not None, "desugar binds every temp before its first read"
@@ -1644,10 +1603,7 @@ class Interpreter:
                     frame.env[index] = _Moved(read)
                 return read
             case LocalRef(origin=origin, name=name):
-                found = frame.env.get(name)
-                if found is None:
-                    reject(origin, f"the local name {name!r} is not bound on every path reaching this read")
-                return self.readable(found, origin)
+                return self.read_local(frame, name, origin)
             case EnvRead():
                 return self._env_read(expr, frame)
             case Unary(origin=origin, op=op, operand=operand):
@@ -1661,39 +1617,29 @@ class Interpreter:
             case IsNone(operand=operand, negated=negated):
                 probed = self.expr(operand, frame, sink)
                 answer = isinstance(probed, Opaque) and probed.value is None
-                return StaticScalar(_ops.make_const(answer != negated))
+                return StaticScalar.of(answer != negated)
             case Call():
                 return _express.call(self, expr, frame, sink)
-            case TupleExpr(origin=origin, items=items):
-                return self._display(origin, items, frame, sink)
-            case ListExpr(origin=origin, items=items):
+            case TupleExpr(origin=origin, items=items) | ListExpr(origin=origin, items=items):
                 return self._display(origin, items, frame, sink)
             case AttrRead(origin=origin, base=base, attr=attr):
                 return _express.attr_read(self, origin, self.expr(base, frame, sink), attr, frame, sink)
             case IndexRead(origin=origin, base=base, index=index):
                 base_value = _aggregate.decay(self.budget, self.expr(base, frame, sink), origin)
-                index_value = self.expr(index, frame, sink)
-                return _aggregate.index_read(origin, base_value, index_value)
-            case SliceRead(origin=origin, base=base, lo=lo, hi=hi):
-                base_value = _aggregate.decay(self.budget, self.expr(base, frame, sink), origin)
-                lo_bound = self._slice_bound(lo, frame, sink)
-                hi_bound = self._slice_bound(hi, frame, sink)
-                return _aggregate.slice_read(origin, base_value, lo_bound, hi_bound)
+                return _aggregate.index_read(origin, base_value, self._axis(index, frame, sink))
             case MultiIndexRead(origin=origin, base=base, axes=axes):
                 base_value = _aggregate.decay(self.budget, self.expr(base, frame, sink), origin)
-                resolved: list[_aggregate.ResolvedAxis] = []
-                for axis in axes:
-                    if isinstance(axis, SliceSel):
-                        resolved.append(
-                            (self._slice_bound(axis.lo, frame, sink), self._slice_bound(axis.hi, frame, sink))
-                        )
-                    else:
-                        resolved.append(self.expr(axis, frame, sink))
-                return _aggregate.multi_index_read(origin, base_value, tuple(resolved))
+                resolved = tuple(self._axis(axis, frame, sink) for axis in axes)
+                return _aggregate.multi_index_read(origin, base_value, resolved)
             case Comp():
                 return self._comp(expr, frame, sink)
             case _:
                 raise AssertionError(expr)
+
+    def _axis(self, axis: Atom | SliceSel, frame: Frame, sink: Sink) -> _aggregate.ResolvedAxis:
+        if isinstance(axis, SliceSel):
+            return self._slice_bound(axis.lo, frame, sink), self._slice_bound(axis.hi, frame, sink)
+        return self.expr(axis, frame, sink)
 
     def _slice_bound(self, atom: Atom | None, frame: Frame, sink: Sink) -> int | None:
         if atom is None:
@@ -1704,15 +1650,18 @@ class Interpreter:
         collected: list[Value] = []
         for item in items:
             if isinstance(item, StarArg):
-                source = _aggregate.decay(self.budget, self.expr(item.value, frame, sink), origin)
-                collected.extend(_aggregate.splice_items(origin, source, self.loop_passes()))
+                collected.extend(self.spliced(origin, item.value, frame, sink))
             else:
                 value = _aggregate.decay(self.budget, self.expr(item, frame, sink), origin)
-                if isinstance(value, AGGREGATES) and (isinstance(item, LocalRef) or self.alias_conduit(frame, item)):
+                if isinstance(value, AGGREGATES) and self.named_handle(frame, item):
                     share(value)
                 collected.append(value)
         self.budget.spend(max(len(collected), 1), origin, "the sequence display")
         return SequenceValue(tuple(collected), Allocation())
+
+    def spliced(self, origin: Origin, atom: Atom, frame: Frame, sink: Sink) -> list[Value]:
+        source = _aggregate.decay(self.budget, self.expr(atom, frame, sink), origin)
+        return _aggregate.splice_items(origin, source, self.loop_passes())
 
     def _env_read(self, node: EnvRead, frame: Frame) -> Value:
         if node.free:
@@ -1796,7 +1745,7 @@ class Interpreter:
         if scalar.stype is ScalarType.FLOAT:
             return scalar
         assert scalar.stype is ScalarType.INT
-        return _express.apply(self, _ops.CONVERT[(ScalarType.INT, ScalarType.FLOAT)], [scalar], origin, sink)
+        return _express.convert(self, scalar, ScalarType.FLOAT, origin, sink)
 
     def _float_in(self, scalar: Scalar, origin: Origin, sinks: list[Sink]) -> Scalar:
         piece = self._piece(sinks)
@@ -1836,15 +1785,15 @@ class Interpreter:
             value = bindings[param.name]
             declared = annotations.get(param.name, _MISSING)
             if declared is not _MISSING:
-                value = self._conform_value(value, declared, site, sink, f"the argument {param.name!r}")
+                value = self.conform_value(value, declared, site, sink, f"the argument {param.name!r}")
             env[param.name] = value
-        env.update(_state_view(frame.env))
-        inner = Frame(fn=fn, annotations=annotations, env=env, root=False)
         entry_state = _state_view(frame.env)
+        env.update(entry_state)
+        inner = Frame(fn=fn, annotations=annotations, env=env, root=False)
         start = len(sink)
         self._inlining.add(fn)
         try:
-            flow = self._block(callee.body, inner, [sink], Ctx())
+            flow = self._block(callee.body, inner, [sink], Ctx.TOP)
         finally:
             self._inlining.discard(fn)
         assert all(exit.kind is _ExitKind.RETURN for exit in flow.exits), "loop exits cannot escape a frame"
@@ -1869,9 +1818,6 @@ class Interpreter:
         """A callee that returns no value on any path must not DECLARE one the subset recognizes."""
         declared = annotations.get("return", _MISSING)
         if declared is _MISSING or declared is None:
-            return
-        declared = _unaliased(declared, site, "the return annotation")
-        if declared is None:
             return
         recognized = (
             annotation_stype(declared) is not None

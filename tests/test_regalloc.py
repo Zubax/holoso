@@ -1,8 +1,8 @@
 """
 The register allocator, white-box where the annealer is the one place a wrong cost delta hides from every
 black-box oracle: the incremental objective against a full recomputation, the descent's local optimality, the
-effort-0 contract, the annealer's objective against the emitted mux arms, the busy-residue rule of instance binding,
-and the binding's and orientation's behavior through the model and the emitted machine.
+effort-0 contract, the annealer's objective against the emitted mux arms, and the binding's and orientation's
+behavior through the model and the emitted machine.
 """
 
 import random
@@ -20,19 +20,17 @@ from holoso._eel import lower
 from holoso._lir import (
     BoolOperand,
     BoolRegRef,
-    InPlace,
     InlineWriteSource,
     Lir,
     OpWriteSource,
     RegRef,
     Boundary,
     WideConstRef,
-    read_arms,
-    write_arms,
     write_events,
     write_sources_per_register,
 )
-from holoso._lir._build import _prepare
+from holoso._lir._ir import InPlace
+from holoso._lir._sources import read_arms
 from holoso._lir._sources import WideOperandTemplate
 from holoso._lir._regalloc import (
     ColoringProblem,
@@ -40,7 +38,6 @@ from holoso._lir._regalloc import (
     FixedProducer,
     InlineWriter,
     InputWriter,
-    InstanceSlot,
     MoveWriter,
     RegallocTuning,
     _Snapshot,
@@ -51,14 +48,12 @@ from holoso._lir._regalloc import (
     _seed_incidence,
     color,
 )
-from holoso._mir import MirBuilder
 from holoso._mir import lower as lower_to_mir
 from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, SelectOperator
-from holoso._operators import BoolInversion, FloatSignControl, PortConditioner
+from holoso._operators import BoolInversion, FloatSignControl
 from holoso._type import FloatType
 from holoso._value import coerce_scalar
 from ._modelref import (
-    DEFAULT_FETCH_STAGES,
     DEFAULT_UNROLL_MAX_TRIPS,
     FROZEN_TUNING,
     SharedLiveOut,
@@ -67,7 +62,6 @@ from ._modelref import (
     build_lir,
     build_model,
     build_model_and_interpreter,
-    default_ifmt,
     default_mir,
     default_options,
     mir_options,
@@ -100,7 +94,7 @@ def _select_writer(rng: random.Random, values: list[int]) -> InlineWriter:
 def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
     """
     A random bank: three pinned inputs, movable values under a sparse interference graph, firings of the three
-    operator kinds on two instances (each class realized twice, most firings bindable, none co-issued) reading values
+    operator kinds on two instances (each class realized twice, none co-issued) reading values
     or pool words, each value written by one lane (or by two, as a coalesced class is), inline results on some of
     the values no firing produces (repeating a template on several values, so their keys collide once those values
     share a register), and residual arm moves, some moving a value into itself.
@@ -128,7 +122,6 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
                 block=0,
                 issue=i,
                 seed_instance=rng.randrange(2),
-                bindable=rng.random() < 0.8,
                 reads=reads,
                 writes=[(0, target)],
             )
@@ -151,7 +144,6 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
         fresh_start=len(inputs),
         firings=firings,
         instances={_FADD: 2, _FMUL: 2, _FDIV: 2},
-        entry_busy={},
         tuning=RegallocTuning(effort=effort, register_price=2.0),
     )
 
@@ -166,7 +158,7 @@ def _flippable(problem: ColoringProblem) -> list[int]:
 
 
 def _bindable(problem: ColoringProblem) -> list[int]:
-    return [i for i, firing in enumerate(problem.firings) if firing.bindable]
+    return [i for i, firing in enumerate(problem.firings) if problem.instances[firing.operator] > 1]
 
 
 def test_incremental_objective_matches_a_full_recomputation() -> None:
@@ -268,28 +260,13 @@ def test_two_singly_written_values_share_a_register_at_the_configured_price() ->
         fresh_start=0,
         firings=[
             Firing(
-                100,
-                _FDIV,
-                block=0,
-                issue=0,
-                seed_instance=0,
-                bindable=False,
-                reads=[WideConstRef(0), WideConstRef(1)],
-                writes=[(0, 0)],
+                100, _FDIV, block=0, issue=0, seed_instance=0, reads=[WideConstRef(0), WideConstRef(1)], writes=[(0, 0)]
             ),
             Firing(
-                101,
-                _FDIV,
-                block=0,
-                issue=1,
-                seed_instance=1,
-                bindable=False,
-                reads=[WideConstRef(0), WideConstRef(1)],
-                writes=[(0, 1)],
+                101, _FMUL, block=0, issue=1, seed_instance=0, reads=[WideConstRef(0), WideConstRef(1)], writes=[(0, 1)]
             ),
         ],
-        instances={_FDIV: 2},
-        entry_busy={},
+        instances={_FDIV: 1, _FMUL: 1},
         tuning=RegallocTuning(effort=0, register_price=2.0),
     )
     coloring = color(problem)
@@ -311,13 +288,17 @@ def test_repeated_residual_arms_are_one_writer() -> None:
     # Four constant arms of one phi, two per constant, so the residual installs are two moves each listed twice on the
     # merged register. The emitter keys a move by its operand, so each is one arm, and the phi may then share the
     # input's register once the input is dead; a writer attached twice on one register survived the merge's undo and
-    # hid that improvement from the descent.
+    # hid that improvement from the descent. The comparisons come first, so every branching block is empty and no arm
+    # threads into it, where the input would still be live.
     def kernel(x: float) -> float:
-        if x < 0.0:
+        below0 = x < 0.0
+        below1 = x < 1.0
+        below2 = x < 2.0
+        if below0:
             return 1.0
-        if x < 1.0:
+        if below1:
             return 2.0
-        if x < 2.0:
+        if below2:
             return 1.0
         return 2.0
 
@@ -329,14 +310,14 @@ def test_repeated_residual_arms_are_one_writer() -> None:
 
 
 class _SharedLiveOutResets:
-    """Two slots with different resets ending the transaction holding one value, one of them never read."""
+    """Two slots with different resets ending the transaction holding one value."""
 
     def __init__(self) -> None:
         self.a = 0.0
         self.b = 1.0
 
     def step(self, x: float, y: float) -> float:
-        q = x * y + self.b
+        q = x * y + self.b + self.a
         self.a = q
         self.b = q
         return q * y
@@ -483,85 +464,6 @@ def test_a_swapped_comparator_keeps_every_relation() -> None:
         b = a if rng.random() < 0.25 else rng.uniform(-4.0, 4.0)
         vectors.append([coerce_scalar(port.scalar_type, x, port.name) for port, x in zip(model.inputs, (a, b))])
     assert_model_equals_interpreter(model, interpreter, vectors, "relations")
-
-
-class _ThrottledAdd(FAddOperator):
-    """An adder throttled to the deepest initiation interval the cross-block busy tracking supports (see _ir)."""
-
-    @property
-    def initiation_interval(self) -> int:
-        return 8
-
-
-def _residue_problem(entry_busy: dict[InstanceSlot, int]) -> ColoringProblem:
-    # Block 0's firing (value 2, instance 0) runs past the seam; block 1's firing (value 3) is bindable and the
-    # scheduler put it on instance 1. The two results may share a register (not the inputs', which they are live
-    # against), which costs one write arm on two lanes and none on one, so instance 0 attracts it -- and the inherited
-    # residue on it is the only thing that can say no.
-    slow = _ThrottledAdd(_FMT, FAddOptions())
-    return ColoringProblem(
-        movable=[2, 3],
-        pinned={0: 0, 1: 1},
-        interferes={0: {2, 3}, 1: {2, 3}, 2: {0, 1}, 3: {0, 1}},
-        fixed_producers={
-            0: [InputWriter(0)],
-            1: [InputWriter(1)],
-            2: [],
-            3: [],
-        },
-        reserved=frozenset(),
-        fresh_start=2,
-        firings=[
-            Firing(2, slow, block=0, issue=0, seed_instance=0, bindable=False, reads=[0, 1], writes=[(0, 2)]),
-            Firing(3, slow, block=1, issue=0, seed_instance=1, bindable=True, reads=[0, 1], writes=[(0, 3)]),
-        ],
-        instances={slow: 2},
-        entry_busy=entry_busy,
-        tuning=RegallocTuning(effort=0, register_price=2.0),
-    )
-
-
-def test_a_rebinding_honors_the_residue_a_predecessor_left() -> None:
-    slow = _ThrottledAdd(_FMT, FAddOptions())
-    # The control: without the residue the successor's firing moves onto instance 0 and the two results share one
-    # lane and one register.
-    control = color(_residue_problem({}))
-    assert control.instance[3] == control.instance[2] and control.write_arms == 0
-    # Instance 0 is busy until block 1's cycle 3 with the predecessor's activation: the firing stays on instance 1
-    # and the shared register takes its second writer.
-    residue = {InstanceSlot(1, slow, 0): 3}
-    coloring = color(_residue_problem(residue))
-    assert coloring.instance[3] != coloring.instance[2] and coloring.write_arms == 1
-
-
-def test_the_build_carries_the_residue_into_the_binding() -> None:
-    # The same shape end to end, through the scheduler's carry: the entry block's throttled sum runs past its shrunk
-    # terminator, so the successor inherits its instance busy; the successor's own sum is ready at cycle 0 and
-    # scheduled on the second instance. Its result shares the first sum's register (that sum is consumed before it
-    # lands), so the allocator would merge the two onto one lane were the residue not in its problem.
-    slow = _ThrottledAdd(_FMT, FAddOptions(instances=2))
-    fadd = FAddOperator(_FMT, FAddOptions())
-    builder = MirBuilder(_FMT, default_ifmt(_FMT))
-    entry, tail = builder.block(), builder.block()
-    builder.position_at(entry)
-    a = builder.float_input("a", FloatType(_FMT))
-    b = builder.float_input("b", FloatType(_FMT))
-    c = builder.float_input("c", FloatType(_FMT))
-    signs: list[PortConditioner] = [FloatSignControl(), FloatSignControl()]
-    first = builder.operation(slow, [a, b], signs)
-    builder.jump(tail)
-    builder.position_at(tail)
-    early = builder.operation(fadd, [first, c], signs)
-    second = builder.operation(slow, [a, b], signs)
-    builder.float_output("out_0", builder.operation(fadd, [second, early], signs))
-    builder.ret()
-    mir = builder.finish()
-    residue = _prepare(mir, DEFAULT_FETCH_STAGES - 1).schedules.block_entry_busy[tail]
-    assert residue == {(slow, 0): 3}, residue
-    lir = build_lir(mir, "residue", FROZEN_TUNING)
-    slow_ops = [op for op in (op for block in lir.blocks for op in block.ops) if op.inst.operator is slow]
-    assert len({op.writes[0].dst for op in slow_ops}) == 1, "the premise needs the merged lane to cost less"
-    assert {op.inst.index for op in slow_ops} == {0, 1}
 
 
 def _k_shared(

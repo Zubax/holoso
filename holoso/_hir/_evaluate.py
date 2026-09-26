@@ -12,7 +12,8 @@ the graph computes operands CPython may short-circuit past, and convicting one o
 answers happily (`x > 1.0 and 1.0 / y > 0.0` at `y == 0`). Poison flows through consumers, except that an
 operator's declared absorbing element swallows it -- an AND gate with a constant-0 input outputs 0 whatever garbage
 sits on the other input -- and only a poison reaching an observable sink raises: a branch condition, an output, or
-a state live-out, the last with the whole transaction's state left uncommitted. A poisoned BRANCH CONDITION inside
+a state live-out, the last with the whole transaction's state left uncommitted (conservatively: optimization prunes a
+slot nothing reads, which the unoptimized graph judged here cannot know). A poisoned BRANCH CONDITION inside
 a short-circuited gate operand is the one shape the absorbing rule cannot reach (control cannot carry poison), so
 such a kernel fails here even where CPython and the gate-level hardware would both answer through the gate;
 accepted as a documented limitation rather than speculating both arms into loops and nontermination.
@@ -27,10 +28,10 @@ from dataclasses import dataclass
 from typing import assert_never
 
 from .._util import BlockId, ValueId
-from ._const import BoolConst, Const, FloatConst, IntConst
+from ._const import BoolConst, Const, const_value, make_const
 from ._ir import Block, Branch, Hir, InPort, Jump, Operation, Phi, Ret, StateRead
 from ._operators import NoNumber
-from ._types import BoolType, FloatType, IntType, Type
+from ._types import Type
 
 type Scalar = float | bool | int
 
@@ -44,24 +45,15 @@ type _Value = Const | _Poison
 
 
 def _coerce(value: Scalar, ty: Type, index: int) -> Const:
-    if isinstance(ty, FloatType) and type(value) is float:
-        return FloatConst(value)
-    if isinstance(ty, BoolType) and type(value) is bool:
-        return BoolConst(value)
-    if isinstance(ty, IntType) and type(value) is int:
-        return IntConst(value)
+    if type(value) in (bool, int, float) and (const := make_const(value)).type == ty:
+        return const
     raise TypeError(f"input {index} expects {ty}, got {type(value).__name__} {value!r}")
-
-
-def _scalar(const: Const) -> Scalar:
-    assert isinstance(const, (FloatConst, BoolConst, IntConst)), f"constant {const!r} carries no scalar"
-    return const.value
 
 
 def _evaluate(operation: Operation, operands: list[_Value]) -> _Value:
     consts = [operand for operand in operands if isinstance(operand, Const)]
     if len(consts) != len(operands):
-        absorbing = operation.operator.absorbing()
+        absorbing = operation.operator.absorbing
         if absorbing is not None and absorbing in consts:
             return absorbing
         return next(operand for operand in operands if isinstance(operand, _Poison))
@@ -89,7 +81,7 @@ class HirEvaluator:
 
     @property
     def state(self) -> dict[str, Scalar]:
-        return {name: _scalar(const) for name, const in self._state.items()}
+        return {name: const_value(const) for name, const in self._state.items()}
 
     def run(self, *inputs: Scalar, max_blocks: int = 10_000_000) -> list[Scalar]:
         """
@@ -131,7 +123,7 @@ class HirEvaluator:
             value = env[out.value]
             if isinstance(value, _Poison):
                 raise NoNumber(f"the output {out.name!r}: {value.what}")
-            outputs.append(_scalar(value))
+            outputs.append(const_value(value))
         new_state: dict[str, Const] = {}
         for slot in self._hir.state_slots:
             live_out = env[slot.live_out]

@@ -43,17 +43,31 @@ Parameter and return annotations are checked, so the module boundary is judged w
 
 ## LIR
 
-### Blocks that only install settled phi-arm copies
+### Copy-only arms behind an overlapping predecessor
 
-A branch arm whose block holds nothing but phi-arm copies of values already settled (constants, inputs, state reads,
-landed results) still drains and takes its own PCs, about four cycles on that path: finite_set_current_controller's
-boolean constant arms (160 -> 156 on its shortest path), foc and imu_fusion arm blocks, image_agc_streamed,
-octave_index, remainder. The narrowest sound fix hands the copies to a predecessor that spills nothing, landing them on
-its terminator so the arm block becomes empty and takes no PC; the phi register then interferes with the other arm's
-live values, which can cost a register under pressure. Arms whose predecessor spills (pid, foc's and imu_fusion's
-first arms) or is the empty entry (flux_observer) gain nothing without draining overlaps into merges. Threading the
-empty arm straight into the merge trades latency between the paths instead (a probe moved `x / y if c else 0.0` from
-6/18 to 4/20 cycles), so a general version needs a schedule-aware acceptance test and was sized above medium.
+The LIR build threads an arm block holding nothing but phi-arm installs into its predecessor wherever that shortens
+the arm's path and lengthens none. An arm whose predecessor overlaps keeps its frame, about four cycles on that path:
+pid's first arm, foc's and imu_fusion's first arms, image_agc_streamed's and majority_voter's block 2. Threading them
+makes the predecessor drain into the merge, trading latency between the paths (a probe moved `x / y if c else 0.0`
+from 6/18 to 4/20 cycles); flux_observer's arm sits behind the empty entry, whose frame would grow from 2 to 4 PCs.
+Gaining here needs overlap across a multi-predecessor edge.
+
+### Interference that keeps a copy-only arm
+
+A copy-only arm, such as an empty `continue` path, keeps its frame when its phi-arm copy cannot coalesce, and the
+allocator has no live-range splitting to make it coalesce. In three nested `while` loops whose middle-loop value stays
+live across the innermost loop, each of the middle loop's two `continue` arms pays a frame, 4 cycles per middle-loop
+trip (80, 652 and 1307 cycles at n = 1, 3 and 4). A variant with an unchanged innermost carry (`b = b * 1.0`) folds to
+this kernel and pays the same, although the carry's phi, were it kept, would hold the two ranges apart and save those
+cycles (76, 616 and 1243).
+
+### Arm-threading trial cost
+
+Arm threading judges each candidate by rescheduling and reconverging the whole graph, so build time grows with the
+candidate count times the graph size: negligible on every example, but a generated 4,896-block kernel with 1,693
+threadable arms spends about 13 minutes in it at regalloc effort 0 (0.45 s per candidate). A candidate's effect is
+local to its predecessor's frame and the merge phi's interference, so an incremental judgement is possible; it is
+deferred until a real kernel needs it.
 
 ### List-scheduler priority
 

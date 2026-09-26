@@ -200,7 +200,6 @@ class OpConfig:
 
 
 def require[T: HardwareOperator](operator: T | None, name: str) -> T:
-    """The configured operator with its exact type, or a refusal naming what needs configuring."""
     if operator is None:
         raise UnsupportedConstruct(f"the kernel needs the {name!r} operator, which is not configured")
     return operator

@@ -8,14 +8,15 @@ already dropped (and any later read rejected) by the partial evaluator's definit
 become input ports in declaration order whether read or not: the module interface mirrors the signature.
 
 Every `ResidualReturn` is one return SITE: an arm that returns simply never jumps to its local join. All
-sites meet in a single exit block -- one phi per output row and per slot leaf when there are several -- so
-`Ret` stays the sole function exit and each `StateSlot.live_out` is the value at that exit. The phi types
-agree across sites because the partial evaluator conformed every site against the one annotation-fixed table.
+sites, a lone one included, meet in a single exit block -- one phi per output row and per slot leaf where the sites
+disagree -- so `Ret` stays the sole function exit and each `StateSlot.live_out` is the value at that exit; HIR fusion
+folds a lone site's jump to it. The phi types agree across sites because the partial evaluator conformed every site
+against the one annotation-fixed table.
 """
 
 from dataclasses import dataclass
 
-from ..._hir import BoolConst, BoolType, Const as HirConst, FloatConst, FloatType, Hir, HirBuilder, IntConst, IntType
+from ..._hir import BoolType, Const as HirConst, FloatType, Hir, HirBuilder, IntType, make_const
 from ..._hir import Operator, Type
 from .._ir import *
 from .._names import hardware_name, port_name, public_slot, slot_name, state_port_name
@@ -69,24 +70,17 @@ def emit(fn: EelFunction) -> Hir:
     terminated = _block(_Emit(builder, fn, sites, [], []), fn.body, env)
     assert terminated, "the residual body ends in a return site on every path"
     assert sites
-    if len(sites) == 1:
-        (site,) = sites
+    exit_block = builder.block()
+    for site in sites:
         builder.position_at(site.block)
-        _finish(builder, fn, list(site.outputs), site.slots)
-    else:
-        exit_block = builder.block()
-        for site in sites:
-            builder.position_at(site.block)
-            builder.jump(exit_block)
-        builder.position_at(exit_block)
-        outputs = [
-            _meet(builder, [(site.block, site.outputs[row]) for site in sites], decl.path)
-            for row, decl in enumerate(fn.outputs)
-        ]
-        slots = {
-            name: _meet(builder, [(site.block, site.slots[name]) for site in sites], name) for name in sites[0].slots
-        }
-        _finish(builder, fn, outputs, slots)
+        builder.jump(exit_block)
+    builder.position_at(exit_block)
+    outputs = [
+        _meet(builder, [(site.block, site.outputs[row]) for site in sites], decl.path)
+        for row, decl in enumerate(fn.outputs)
+    ]
+    slots = {name: _meet(builder, [(site.block, site.slots[name]) for site in sites], name) for name in sites[0].slots}
+    _finish(builder, fn, outputs, slots)
     return builder.finish()
 
 
@@ -95,7 +89,7 @@ def _key_order(key: str | int) -> tuple[bool, str]:
 
 
 def _meet(builder: HirBuilder, arms: list[tuple[int, int]], what: object) -> int:
-    """One phi per differing value, none when the arms already agree; the types were fixed by the PE."""
+    """One phi per differing value, none when the arms already agree; the partial evaluator fixed the types."""
     first = arms[0][1]
     if all(vid == first for _, vid in arms):
         return first
@@ -119,16 +113,9 @@ def _finish(builder: HirBuilder, fn: EelFunction, outputs: list[int], slots: dic
 
 
 def _reset(slot: SlotDecl) -> HirConst:
-    match slot.stype:
-        case ScalarType.BOOL:
-            assert isinstance(slot.reset, bool)
-            return BoolConst(slot.reset)
-        case ScalarType.INT:
-            assert isinstance(slot.reset, int) and not isinstance(slot.reset, bool)
-            return IntConst(slot.reset)
-        case ScalarType.FLOAT:
-            assert isinstance(slot.reset, float)
-            return FloatConst(slot.reset)
+    const = make_const(slot.reset)
+    assert const.type == _TYPES[slot.stype]
+    return const
 
 
 def _block(em: _Emit, stmts: tuple[Stmt, ...], env: _Env) -> bool:
@@ -153,16 +140,19 @@ def _block(em: _Emit, stmts: tuple[Stmt, ...], env: _Env) -> bool:
                 return True
             case ResidualBreak():
                 assert em.loops, "a break terminator lies inside a residual loop body"
+                assert not pending_slots
                 em.loops[-1].breaks.append((builder.current_block, dict(env)))
                 return True
             case ResidualContinue():
                 assert em.loops, "a continue terminator lies inside a residual loop body"
+                assert not pending_slots
                 em.loops[-1].continues.append((builder.current_block, dict(env)))
                 return True
             case ResidualFrame():
                 _frame(em, stmt, env)
             case ResidualFrameReturn(values=values):
                 assert em.frames, "a frame return lies inside a residual frame body"
+                assert not pending_slots
                 em.frames[-1].returns.append(
                     (builder.current_block, tuple(_atom(builder, atom, env) for atom in values))
                 )
@@ -320,9 +310,4 @@ def _atom(builder: HirBuilder, atom: Atom, env: _Env) -> int:
         case LocalRef(name=name):
             return env[name]
         case Const(value=value):
-            if type(value) is bool:
-                return builder.bool_const(value)
-            if type(value) is int:
-                return builder.int_const(value)
-            assert type(value) is float
-            return builder.float_const(value)
+            return builder.const_node(make_const(value))

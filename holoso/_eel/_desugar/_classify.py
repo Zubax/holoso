@@ -53,10 +53,6 @@ def build_classifier(fn: types.FunctionType, fndef: ast.FunctionDef) -> Classifi
         scan.visit(stmt)
     args = fndef.args
     params = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
-    if args.vararg is not None:
-        params.add(args.vararg.arg)
-    if args.kwarg is not None:
-        params.add(args.kwarg.arg)
     code = fn.__code__
     code_names = set(code.co_varnames) | set(code.co_cellvars)
     comp_target_only = {
@@ -121,26 +117,16 @@ class _BindingScan:
                 if isinstance(node.target, ast.Name):
                     self.bindings.add(node.target.id)
                 self.visit(node.value)
-            case ast.Assign():
-                for target in node.targets:
-                    self.bindings |= _leaf_names(target)
-                    self.visit(target)
-                self.visit(node.value)
             case ast.AnnAssign():  # the annotation is deliberately not visited
                 self.bindings |= _leaf_names(node.target)
                 self.visit(node.target)
                 if node.value is not None:
                     self.visit(node.value)
-            case ast.AugAssign():
-                self.bindings |= _leaf_names(node.target)
-                self.visit(node.target)
-                self.visit(node.value)
-            case ast.For() | ast.AsyncFor():
-                self.bindings |= _leaf_names(node.target)
-                self.visit(node.target)
-                self.visit(node.iter)
-                for stmt in (*node.body, *node.orelse):
-                    self.visit(stmt)
+            case ast.Assign() | ast.AugAssign() | ast.For():
+                for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                    self.bindings |= _leaf_names(target)
+                for child in ast.iter_child_nodes(node):
+                    self.visit(child)
             case _:
                 for child in ast.iter_child_nodes(node):
                     self.visit(child)

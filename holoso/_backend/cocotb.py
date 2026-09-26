@@ -145,8 +145,6 @@ async def cosim(dut):
             getattr(dut, "in_" + port.name).value = int(bits)
         _SIM.set_inputs(*[_input_value(p, bits) for p, bits in zip(_IN_PORTS, in_bits)])
         await lockstep(True, False)  # accept edge: pc 0 -> 1
-        # Run to out_valid in lockstep. The simulator reaches it on the same cycle as the DUT (the lockstep asserts so
-        # each cycle), which is the cycle-accurate, data-dependent latency check -- no separate prediction needed.
         waited = 0
         while not _SIM.out_valid:
             await lockstep(False, False)

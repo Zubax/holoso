@@ -39,7 +39,7 @@ from .._lir import RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import Arm, BoolConstRef, BoolOperand, Branch, Exit, Jump, Terminator
 from .._lir import install_landing, landing_cycle, operand_read_cycle
-from .._operators import *
+from .._operators import apply_conditioner
 from .._type import FloatFormat, LogicalPort
 
 type _Dst = RegRef | BoolRegRef
@@ -154,7 +154,7 @@ class NumericalSimulator(_Kernel):
             # redirect takes, so re-key the pending writes from the fall-through frame onto the taken successor's
             # frame. For a fall-through arm (and for every fully-drained block) the shift is zero -- a no-op. This
             # dynamic single-arm shift is the per-path instance of the static `successor_local_cycle` map that
-            # `_trace_landing` / `Lir.write_landing_pcs` apply to every arm at once; that the two agree is locked by
+            # `Lir.frame_pcs` / `Lir.write_landing_pcs` apply to every arm at once; that the two agree is locked by
             # `test_spilled_result_landings_match_the_numerical_model`.
             shift = next_pc - (self.pc + 1)
             if shift:

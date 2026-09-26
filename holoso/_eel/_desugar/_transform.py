@@ -1,5 +1,5 @@
 """
-The ANF transformer: whitelisted CPython AST -> Eel, materializing evaluation order.
+The A-normal-form transformer: whitelisted CPython AST -> Eel, materializing evaluation order.
 
 Every non-atomic subexpression is hoisted to a fresh temp in CPython evaluation order; operands are atoms.
 Conditionally-evaluated positions (conditional-expression arms, comparison-chain suffixes) become real guarded
@@ -63,7 +63,7 @@ def desugar(fn: types.FunctionType) -> EelFunction:
         raise UnsupportedConstruct(
             "the target is wrapped by a decorator; pass the undecorated function", unit.location(unit.fndef)
         )
-    if fn.__code__.co_flags & (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
+    if fn.__code__.co_flags & inspect.CO_GENERATOR:
         # A yield can hide inside an ignored assert; the code object is the truth about the function's kind.
         raise UnsupportedConstruct("generators are not supported", unit.location(unit.fndef))
     return _Transformer(unit, build_classifier(fn, unit.fndef)).function()
@@ -93,9 +93,7 @@ class _Transformer:
         return Origin(self._unit.location(node))
 
     def _reject(self, node: ast.AST, message: str) -> NoReturn:
-        location = self._unit.location(node)
-        assert location is not None
-        raise UnsupportedConstruct(message, location)
+        raise UnsupportedConstruct(message, self._unit.location(node))
 
     def _params(self, args: ast.arguments) -> tuple[Param, ...]:
         if args.vararg is not None:
@@ -108,8 +106,7 @@ class _Transformer:
             *((a, ParamKind.POSITIONAL_OR_KEYWORD) for a in args.args),
             *((a, ParamKind.KEYWORD_ONLY) for a in args.kwonlyargs),
         ):
-            if mangles(arg.arg):
-                self._reject(arg, f"the private name {arg.arg!r} is subject to name mangling; rename it")
+            self._demand_unmangled(arg, arg.arg)
             params.append(Param(self._origin(arg), arg.arg, kind))
         return tuple(params)
 
@@ -125,8 +122,6 @@ class _Transformer:
                 pass  # a docstring or stray string constant: a no-op in CPython
             case ast.Expr(value=ast.Constant(value=v)) if v is Ellipsis:
                 self._reject(node, "an `...` statement has no effect (a stub body cannot be synthesized)")
-            case ast.Expr(value=ast.Yield() | ast.YieldFrom()):
-                self._reject(node, "generators are not supported")
             case ast.Expr(value=ast.Call() as call):
                 # A bare call runs for its effects (a void state-writing helper).
                 self._to_temp(call, self._call(call, sink), sink)
@@ -136,7 +131,7 @@ class _Transformer:
             case ast.Assert() | ast.Pass():
                 pass
             case ast.Assign():
-                self._assign(node, sink)
+                self._assign(node, node.targets, node.value, sink)
             case ast.AnnAssign():
                 self._ann_assign(node, sink)
             case ast.AugAssign():
@@ -160,22 +155,22 @@ class _Transformer:
             case _:
                 self._reject(node, f"unsupported statement: {type(node).__name__}")
 
-    def _assign(self, node: ast.Assign, sink: list[Stmt]) -> None:
+    def _assign(self, node: ast.stmt, targets: list[ast.expr], rhs: ast.expr, sink: list[Stmt]) -> None:
         # Region checks run AFTER the structural transform throughout, so a banned construct (the outer shape)
         # rejects before a walrus collision inside it; a raised rejection discards the whole desugar output.
-        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            target = self._local_bind(node.targets[0])
-            sink.append(Assign(self._origin(node), target, self._expr(node.value, sink)))
-            self._check_region([node.value, *node.targets])
+        if len(targets) == 1 and isinstance(targets[0], ast.Name):
+            target = self._local_bind(targets[0])
+            sink.append(Assign(self._origin(node), target, self._expr(rhs, sink)))
+            self._check_region([rhs, *targets])
             return
-        value = self._atom(node.value, sink)
-        if len(node.targets) > 1 and isinstance(value, LocalRef):
+        value = self._atom(rhs, sink)
+        if len(targets) > 1 and isinstance(value, LocalRef):
             # An earlier target may rebind the very name the RHS atom reads (`t, second = out = t`); the temp
             # pins the single evaluation CPython guarantees. A single target cannot race its own value.
-            value = self._to_temp(node.value, value, sink)
-        for tgt in node.targets:  # bound left to right, to the same value, as in CPython
+            value = self._to_temp(rhs, value, sink)
+        for tgt in targets:  # bound left to right, to the same value, as in CPython
             self._bind_target(tgt, value, sink)
-        self._check_region([node.value, *node.targets])
+        self._check_region([rhs, *targets])
 
     def _ann_assign(self, node: ast.AnnAssign, sink: list[Stmt]) -> None:
         if node.value is None:
@@ -183,12 +178,7 @@ class _Transformer:
                 # CPython evaluates a non-name annotated target expression even without a value.
                 self._reject(node, "a bare annotation on a non-name target is not supported")
             return  # a bare name annotation has no runtime effect in a function body
-        if isinstance(node.target, ast.Name):
-            target = self._local_bind(node.target)
-            sink.append(Assign(self._origin(node), target, self._expr(node.value, sink)))
-        else:
-            self._bind_target(node.target, self._atom(node.value, sink), sink)
-        self._check_region([node.value, node.target])
+        self._assign(node, [node.target], node.value, sink)
 
     def _aug_assign(self, node: ast.AugAssign, sink: list[Stmt]) -> None:
         op = _BIN_OPS.get(type(node.op))
@@ -220,14 +210,15 @@ class _Transformer:
         if node.orelse:
             self._reject(node, "`for ... else` is not supported")
         prelude: list[Stmt] = []
+        target: Binding
         if isinstance(node.target, ast.Name):
             target = self._local_bind(node.target)
         else:
-            # Every other target rides a hidden per-item binding rebound at the body head, so the target
-            # vocabulary keeps one owner.
-            hidden = f"for${self._fresh_temp()}u"
-            target = LocalBind(self._origin(node.target), hidden)
-            self._bind_target(node.target, LocalRef(self._origin(node.target), hidden), prelude)
+            # Every other target rides a per-item temp rebound at the body head, so the target vocabulary keeps
+            # one owner.
+            index = self._fresh_temp()
+            target = TempBind(self._origin(node.target), index)
+            self._bind_target(node.target, TempRef(self._origin(node.target), index), prelude)
         iterable = self._atom(node.iter, sink)  # evaluated once, before the loop, as in CPython
         # The target is in the region too: a store path's indexes read names a header walrus could rebind.
         self._check_region([node.iter, node.target])
@@ -248,8 +239,7 @@ class _Transformer:
             self._reject(node, "bare `raise` is not supported")
         if not (isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name)):
             self._reject(exc, "`raise` requires `ExceptionName(...)` with an optional literal message")
-        if mangles(exc.func.id):
-            self._reject(exc.func, f"the private name {exc.func.id!r} is subject to name mangling; rename it")
+        self._demand_unmangled(exc.func, exc.func.id)
         if exc.keywords or len(exc.args) > 1:
             self._reject(exc, "`raise` supports at most one positional message argument")
         parts: list[str | Atom] = []
@@ -306,19 +296,9 @@ class _Transformer:
     def _store_path(self, target: ast.expr, sink: list[Stmt]) -> tuple[LocalRef | EnvRead, tuple[Selector, ...]]:
         match target:
             case ast.Name(id=name):
-                if mangles(name):
-                    self._reject(target, f"the private name {name!r} is subject to name mangling; rename it")
-                origin = self._origin(target)
-                match self._resolve(name):
-                    case NameKind.LOCAL:
-                        return LocalRef(origin, self._renamed(name)), ()
-                    case NameKind.FREE:
-                        return EnvRead(origin, name, free=True), ()
-                    case NameKind.GLOBAL:
-                        return EnvRead(origin, name, free=False), ()
+                return self._name(target, name), ()
             case ast.Attribute(value=base, attr=attr):
-                if mangles(attr):
-                    self._reject(target, f"the private attribute {attr!r} is subject to name mangling; rename it")
+                self._demand_unmangled(target, attr, "attribute")
                 root, path = self._store_path(base, sink)
                 return root, (*path, AttrSel(attr))
             case ast.Subscript(value=base, slice=index):
@@ -333,9 +313,12 @@ class _Transformer:
             case _:
                 self._reject(target, "a store target must be a plain name followed by attributes and indexes")
 
+    def _demand_unmangled(self, node: ast.AST, name: str, kind: str = "name") -> None:
+        if mangles(name):
+            self._reject(node, f"the private {kind} {name!r} is subject to name mangling; rename it")
+
     def _local_bind(self, node: ast.Name) -> LocalBind:
-        if mangles(node.id):
-            self._reject(node, f"the private name {node.id!r} is subject to name mangling; rename it")
+        self._demand_unmangled(node, node.id)
         if self._resolve(node.id) is not NameKind.LOCAL:
             self._reject(node, f"assignment to the non-local name {node.id!r} is not supported")
         return LocalBind(self._origin(node), self._renamed(node.id))
@@ -410,14 +393,10 @@ class _Transformer:
                 value = self._atom(node.value, sink)
                 sink.append(Assign(self._origin(node), target, value))
                 return value  # the walrus expression's value, never a re-read of the target name
-            case ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=int() | float() as v)) if not isinstance(
-                v, bool
-            ):
-                return Const(self._origin(node), -v)
-            case ast.UnaryOp(op=ast.UAdd(), operand=ast.Constant(value=int() | float() as v)) if not isinstance(
-                v, bool
-            ):
-                return Const(self._origin(node), +v)
+            case ast.UnaryOp(
+                op=ast.USub() | ast.UAdd(), operand=ast.Constant(value=int() | float() as v)
+            ) if not isinstance(v, bool):
+                return Const(self._origin(node), -v if isinstance(node.op, ast.USub) else v)
             case ast.UnaryOp():
                 op = _UNARY_OPS.get(type(node.op))
                 assert op is not None, "every ast unary operator is mapped"
@@ -436,8 +415,7 @@ class _Transformer:
             case ast.Call():
                 return self._call(node, sink)
             case ast.Attribute(value=base, attr=attr):
-                if mangles(attr):
-                    self._reject(node, f"the private attribute {attr!r} is subject to name mangling; rename it")
+                self._demand_unmangled(node, attr, "attribute")
                 return AttrRead(self._origin(node), self._atom(base, sink), attr)
             case ast.Subscript():
                 return self._subscript(node, sink)
@@ -459,10 +437,6 @@ class _Transformer:
                 self._reject(node, "lambdas are not supported")
             case ast.JoinedStr():
                 self._reject(node, "f-strings are only supported as raise messages")
-            case ast.Await():
-                self._reject(node, "`await` is not supported")
-            case ast.Yield() | ast.YieldFrom():
-                self._reject(node, "generators are not supported")
             case ast.Starred():
                 self._reject(node, "a starred expression is only supported as a call argument or display element")
             case _:
@@ -481,9 +455,8 @@ class _Transformer:
             )
         self._reject(node, f"unsupported constant: {value!r}")
 
-    def _name(self, node: ast.Name, name: str) -> Expr:
-        if mangles(name):
-            self._reject(node, f"the private name {name!r} is subject to name mangling; rename it")
+    def _name(self, node: ast.Name, name: str) -> LocalRef | EnvRead:
+        self._demand_unmangled(node, name)
         origin = self._origin(node)
         match self._resolve(name):
             case NameKind.LOCAL:
@@ -497,12 +470,9 @@ class _Transformer:
         self._reject_walrus_in(node.values[1:], "an `and`/`or` operand after the first")
         op = BinaryOp.AND if isinstance(node.op, ast.And) else BinaryOp.OR
         result = self._atom(node.values[0], sink)
-        for i, operand in enumerate(node.values[1:]):  # eager gates, nested left-associated
-            gate = Binary(self._origin(node), op, result, self._atom(operand, sink))
-            if i + 2 == len(node.values):
-                return gate
-            result = self._to_temp(node, gate, sink)
-        raise AssertionError("ast guarantees at least two operands")
+        for operand in node.values[1:-1]:  # eager gates, nested left-associated
+            result = self._to_temp(node, Binary(self._origin(node), op, result, self._atom(operand, sink)), sink)
+        return Binary(self._origin(node), op, result, self._atom(node.values[-1], sink))
 
     def _compare(self, node: ast.Compare, sink: list[Stmt]) -> Expr:
         if len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot)):
@@ -563,12 +533,8 @@ class _Transformer:
 
     def _call(self, node: ast.Call, sink: list[Stmt]) -> Expr:
         callee = self._atom(node.func, sink)
-        args: list[PosArg | StarArg | KwArg] = []
-        for arg in node.args:  # positional and starred evaluate first, in source order, as in CPython
-            if isinstance(arg, ast.Starred):
-                args.append(StarArg(self._atom(arg.value, sink)))
-            else:
-                args.append(PosArg(self._atom(arg, sink)))
+        # Positional and starred arguments evaluate first, in source order, as in CPython.
+        args: list[Argument] = list(self._display_items(node.args, sink))
         for keyword in node.keywords:  # keyword values evaluate after, in source order
             if keyword.arg is None:
                 self._reject(keyword.value, "`**` call arguments are not supported")
@@ -577,28 +543,19 @@ class _Transformer:
 
     def _subscript(self, node: ast.Subscript, sink: list[Stmt]) -> Expr:
         base = self._atom(node.value, sink)
-        match node.slice:
+        if isinstance(node.slice, ast.Tuple):  # one selector per axis, bounds hoisted in source order
+            return MultiIndexRead(self._origin(node), base, tuple(self._axis(elt, sink) for elt in node.slice.elts))
+        return IndexRead(self._origin(node), base, self._axis(node.slice, sink))
+
+    def _axis(self, node: ast.expr, sink: list[Stmt]) -> Atom | SliceSel:
+        match node:
             case ast.Slice(step=step) if step is not None:
                 self._reject(step, "slice steps are not supported")
             case ast.Slice(lower=lower, upper=upper):
                 lo = self._atom(lower, sink) if lower is not None else None
                 hi = self._atom(upper, sink) if upper is not None else None
-                return SliceRead(self._origin(node), base, lo, hi)
-            case ast.Tuple(elts=elts):
-                axes: list[Atom | SliceSel] = []
-                for elt in elts:  # one selector per axis, bounds hoisted in source order as CPython evaluates
-                    match elt:
-                        case ast.Slice(step=step) if step is not None:
-                            self._reject(step, "slice steps are not supported")
-                        case ast.Slice(lower=lower, upper=upper):
-                            lo = self._atom(lower, sink) if lower is not None else None
-                            hi = self._atom(upper, sink) if upper is not None else None
-                            axes.append(SliceSel(lo, hi))
-                        case _:
-                            axes.append(self._atom(elt, sink))
-                return MultiIndexRead(self._origin(node), base, tuple(axes))
-            case _:
-                return IndexRead(self._origin(node), base, self._atom(node.slice, sink))
+                return SliceSel(lo, hi)
+        return self._atom(node, sink)
 
     def _display_items(self, elts: list[ast.expr], sink: list[Stmt]) -> tuple[Atom | StarArg, ...]:
         items: list[Atom | StarArg] = []
@@ -616,12 +573,9 @@ class _Transformer:
         gen = node.generators[0]
         if gen.ifs:
             self._reject(gen.ifs[0], "comprehension `if` filters are not supported")
-        if gen.is_async:
-            self._reject(node, "async comprehensions are not supported")
         if not isinstance(gen.target, ast.Name):
             self._reject(gen.target, "a comprehension target must be a plain name")
-        if mangles(gen.target.id):
-            self._reject(gen.target, f"the private name {gen.target.id!r} is subject to name mangling; rename it")
+        self._demand_unmangled(gen.target, gen.target.id)
         iterable = self._atom(gen.iter, sink)  # the enclosing naming context: the target is not yet in scope
         fresh = f"{gen.target.id}${self._comp_count}"
         self._comp_count += 1

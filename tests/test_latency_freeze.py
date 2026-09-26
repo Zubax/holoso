@@ -14,11 +14,10 @@ reported as None (its loop body would otherwise be unguarded). Both are fixed by
 allocation annealing, so they are independent of `HOLOSO_REGALLOC_EFFORT`. A deliberate schedule change is
 expected to update the frozen value in the same commit.
 
-It also folds in the chained-copy kernel shape -- a state assignment `self.a = self.b` where both sides are
-slots, so one slot's live-out reads another slot's live-in (the register allocator's `tapped_by_other` path). No
-committed example exercises it. Two purpose-built kernels (a float delay line and a boolean shift register) pin it in
-both banks, and a behavioral check confirms the chained copy still captures each old value before it is overwritten --
-which the value-blind schedule freeze cannot.
+It also folds in the chained-copy kernel shape -- a state assignment `self.a = self.b` where both sides are slots, so
+one slot's live-out reads another slot's live-in (the register allocator's `tapped_by_other` path). Two purpose-built
+kernels (a float delay line and a boolean shift register) pin it in both banks, and a behavioral check confirms the
+chained copy still captures each old value before it is overwritten -- which the value-blind schedule freeze cannot.
 
 A slot installed at the accepted-output edge from a Ret block that computes nothing is pinned relationally where it can
 be: such a kernel takes exactly as long as its stateless twin returning the live-out instead.
@@ -31,7 +30,8 @@ import pytest
 import holoso
 from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
-from holoso._lir import Boundary, InPlace
+from holoso._lir import Boundary
+from holoso._lir._ir import InPlace
 from holoso._mir import lower as lower_to_mir
 
 from ._examples import ExampleSpec, SPECS
@@ -49,10 +49,8 @@ from ._modelref import (
     PIPELINE_OPTIONS_CASES,
 )
 
-# Kernel label -> frozen (min initiation interval, last microcode PC). last_pc is the last microcode address -- the
-# end of the static schedule across all blocks -- so it pins the full schedule even for data-dependent (branch/loop)
-# kernels. One row per spec per declared format; a spec listing two formats is frozen at both, since the second
-# exists precisely to exercise a different pipeline depth.
+# Kernel label -> frozen (min initiation interval, last microcode PC). A spec listing two formats is frozen at both,
+# since the second exists precisely to exercise a different pipeline depth.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "madd-e8m36": (14, 14),
     "signal_window-e8m36": (9, 9),
@@ -73,7 +71,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
     # the actuator split.
-    "image_agc_streamed-e8m36": (38, 170),
+    "image_agc_streamed-e8m36": (38, 166),
     "pwm-e6m18": (11, 11),
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
@@ -92,11 +90,12 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # transaction that is shorter, not longer (test_cycle_model).
     "recip_newton-e8m36": (28, 45),
     # The all-false early return and the break-terminated candidate scan survive as real branches, so the
-    # frozen last PC covers the full active path with every scan trip taken.
-    "finite_set_current_controller-e8m36": (160, 204),
-    "remainder-e8m36": (37, 51),
-    "octave_index-e6m18": (13, 35),
-    "octave_index-e8m36": (13, 44),
+    # frozen last PC covers the full active path with every scan trip taken. Its constant arms, like the copy-only
+    # arms of remainder and octave_index, are threaded into the blocks that branch to them.
+    "finite_set_current_controller-e8m36": (156, 188),
+    "remainder-e8m36": (33, 47),
+    "octave_index-e6m18": (9, 31),
+    "octave_index-e8m36": (9, 40),
     "equal_temperament-e8m36": (40, 40),
     "cordic_sincos-e8m36": (104, 104),
     "polar_to-e8m36": (63, 63),
@@ -120,11 +119,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The controller that embeds that observer: the same atan2 tail, then a sincos, a norm, and the divides of the
     # limiter and the modulator, with the alignment, the branch-cut correction and the anti-windup freeze all
     # surviving as real branches -- so the last PC covers arms the shortest static path does not.
-    "foc-e8m36": (298, 349),
+    "foc-e8m36": (294, 345),
     # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
     # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
-    "imu_fusion-e8m36": (270, 464),
-    "imu_fusion-e6m18": (243, 401),
+    "imu_fusion-e8m36": (266, 456),
+    "imu_fusion-e6m18": (239, 393),
 }
 
 

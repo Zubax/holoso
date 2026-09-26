@@ -1,7 +1,7 @@
 """
 The integer operators. The pooled ones each carry their own closed-form latency and their own reference arithmetic,
 saturating wherever the operation can leave the format; the inline ones are native Verilog over the whole wide bank,
-sound only under the carrier contract in DESIGN.md.
+sound because an integer fills that register exactly (DESIGN.md, Types).
 """
 
 from abc import ABC
@@ -331,8 +331,6 @@ class ICmpOperator(IntHardwareOperator, ComparatorOperator):
 
 @dataclass(frozen=True, slots=True)
 class IntInlineOperator(InlineHardwareOperator, ABC):
-    """The inline dual of IntHardwareOperator."""
-
     fmt: IntFormat
 
     @property
@@ -415,20 +413,15 @@ class IntShiftConstOperator(IntInlineOperator):
     """
     An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
     drops what leaves the word rather than saturating as the pooled `holoso_ishl` also offers.
-    Shift by 0 or by an amount exceeding the operand width is a compile-time error (must fold/reject before LIR).
     """
 
     mnemonic: ClassVar[str] = "ishiftc"
     shamt: int
 
     def __post_init__(self) -> None:
-        if self.shamt == 0:
-            raise ValueError("ishiftc by 0 is the identity, which HIR or MIR must fold rather than select hardware")
-        if abs(self.shamt) >= self.fmt.width:
-            raise ValueError(
-                f"ishiftc by {self.shamt} is not a shift within {self.fmt}: a count reaching the word answers a "
-                f"constant or a sign fill, and clamping a width-less count to the word is the lowering's job"
-            )
+        # Zero is the identity, which HIR or MIR folds; a count reaching the word answers a constant or a sign fill, and
+        # clamping a width-less count to the word is the lowering's job.
+        assert 0 < abs(self.shamt) < self.fmt.width, self.shamt
 
     @property
     def signature(self) -> ScalarSignature:

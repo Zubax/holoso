@@ -98,21 +98,18 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     """
     The minimum same-block scheduling distance from a producer's commit to a consumer's issue (`issue_consumer >=
     commit_producer + edge`): the producer's result landing minus the consumer's operand-read timing, so the consumer
-    reads no earlier than the producer's result becomes readable. Every producer -- pooled or inline, wide or boolean --
-    lands at the one bank-independent `landing_cycle`. A POOLED consumer reads its operands latch-free at
-    `read_cycle` (both banks alike); an INLINE consumer reads on its combinational fire step (`inline_fire_cycle`).
-    One shared rule for the scheduler, the liveness views, and the model. There is NO floor below this spacing: the
-    model commits every PC's landings before evaluating that PC's reads (`NumericalSimulator._apply`), so a consumer
-    whose read PC equals the producer's landing PC reads the just-committed value -- write-then-read holds at the PC
-    granularity. The zero-offset evaluation below is exact because every cycle helper is affine in its cycle argument
-    with unit slope, so the difference at zero is the frame-independent spacing; a helper that ever loses that affinity
-    breaks this derivation.
+    reads no earlier than the producer's result becomes readable. One shared rule for the scheduler, the liveness views,
+    and the model. There is NO floor below this spacing: the model commits every PC's landings before evaluating that
+    PC's reads (`NumericalSimulator._apply`), so a consumer whose read PC equals the producer's landing PC reads the
+    just-committed value -- write-then-read holds at the PC granularity. The zero-offset evaluation below is exact
+    because every cycle helper is affine in its cycle argument with unit slope, so the difference at zero is the
+    frame-independent spacing; a helper that ever loses that affinity breaks this derivation.
     """
     landing = landing_cycle(0, fetch_lag)
     if isinstance(consumer, PooledHardwareOperator):
         assert producer.signature.result_types[
             producer_port
-        ].is_wide, f"{consumer.mnemonic}: pooled operators read only wide operands today"
+        ].is_wide, f"{consumer.mnemonic}: pooled operators read only wide operands"
         read = read_cycle(0, fetch_lag)
     else:
         read = inline_fire_cycle(consumer.latency, fetch_lag)
@@ -171,8 +168,8 @@ def successor_local_cycle(block_local_cycle: int, term_offset: int) -> int:
     Map a block-local cycle that crosses an overlap-shrunk terminator into the single-predecessor successor's frame.
     The successor frame begins at `term_pc + 1`, so a cycle at absolute `block_base + block_local_cycle` sits at
     `block_local_cycle - term_offset - 1` past the successor's base -- one continuous PC across the seam. This is the
-    single coordinate map shared by the scheduler's spill carry (both the value landings and the per-instance busy
-    residue), `_trace_landing`, and the numerical model's redirect re-keying, so they cannot drift apart.
+    single coordinate map shared by the scheduler's spill carry, `_trace_cycle`, and the numerical model's redirect
+    re-keying, so they cannot drift apart.
     """
     return block_local_cycle - term_offset - 1
 
@@ -217,6 +214,9 @@ class OperatorInstance:
         # A pooled result commits at issue + latency, so latency >= 1 keeps its write opcode off the held `ucode[0]`
         # (the accept-dwell word) -- a latency-0 pooled operator would re-commit every idle cycle (see `transacting`).
         assert self.operator.latency >= 1, f"{self.operator.mnemonic}: pooled operator latency must be >= 1"
+        # Every block keeps a firing's write word, `issue + latency`, in its own frame, so an instance busy no longer
+        # than the step after it is free when any successor frame begins: no busy window crosses a block boundary.
+        assert self.operator.initiation_interval <= self.operator.latency + 1, self.operator.mnemonic
         # Every pooled operator passes through here, so its hand-synchronized per-port declarations are validated
         # once at the source: HDL port names align with the operands and the result types, and the commutation
         # permutation (when declared) is a type-preserving bijection -- a bad declaration fails here, not in emission.
@@ -405,12 +405,15 @@ class PooledScheduledOp:
     operands: list[WideOperand | BoolOperand]
     writes: list[PortWrite]
     issue_cycle: int
-    latency: int
     immediates: tuple[int, ...]  # per-firing immediate values, aligned with the operator's immediate_ports
 
     @property
     def operator(self) -> PooledHardwareOperator:
         return self.inst.operator
+
+    @property
+    def latency(self) -> int:
+        return self.operator.latency
 
     def __post_init__(self) -> None:
         assert self.writes, "a firing with no tapped output cannot exist (an unused operation has no MIR node)"
@@ -435,7 +438,10 @@ class InlineScheduledOp:
     operands: list[WideOperand | BoolOperand]
     write: PortWrite
     issue_cycle: int
-    latency: int
+
+    @property
+    def latency(self) -> int:
+        return self.operator.latency
 
     @property
     def writes(self) -> list[PortWrite]:
@@ -476,18 +482,12 @@ class _Copy:
     """
     A pc-gated move: `dst` takes `source` on the block-relative `issue_cycle`. It installs a phi arm that cannot
     coalesce onto the merged register at a predecessor's tail (placed by `install_issue_cycle`), or a state slot's
-    live-out early in the Ret block. `settled_source` records whether `install_source_commit` answered None -- which an
-    operand alone cannot reveal -- informational, consumed by tests only.
+    live-out early in the Ret block.
     """
 
     dst: RegRef | BoolRegRef
     source: WideOperand | BoolOperand
     issue_cycle: int
-    settled_source: bool
-
-    @property
-    def is_const(self) -> bool:
-        return isinstance(self.source.source, (WideConstRef, BoolConstRef))
 
     def fire_step(self, fetch_lag: int) -> int:
         return inline_fire_cycle(self.issue_cycle, fetch_lag)
@@ -504,8 +504,6 @@ class WideCopy(_Copy):
 
 @dataclass(frozen=True, slots=True)
 class BoolCopy(_Copy):
-    """The source is a boolean register or constant, with the folded inversion."""
-
     dst: BoolRegRef
     source: BoolOperand
 
@@ -567,8 +565,7 @@ class LirBlock:
     """
     One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). `ops`
     (pooled firings), `inline_ops`, and `copies` are the block's datapath events;
-    `terminator` redirects the fetch PC at the block boundary. `block_makespan` is the last commit cycle inside
-    the block (0 if it has none). `term_offset` is the block-relative fetch cycle at which the terminator redirects
+    `terminator` redirects the fetch PC at the block boundary. `term_offset` is the block-relative fetch cycle at which the terminator redirects
     the PC -- the block's boundary step -- and is the single source of truth for the terminator PC (the successor
     frame begins one step later, at `term_pc + 1`). For a block that drains (a multi-predecessor successor or a
     tail install) it is the latest cycle a value LANDS in the block's frame -- taken per landing event (every
@@ -582,7 +579,6 @@ class LirBlock:
     inline_ops: list[InlineScheduledOp]
     copies: list[WideCopy | BoolCopy]
     terminator: Terminator
-    block_makespan: int
     term_offset: int
 
 
@@ -596,26 +592,24 @@ def block_bases(blocks: list[LirBlock]) -> dict[int, int]:
     return bases
 
 
-def _trace_landing(
-    by_index: dict[int, LirBlock], block_base: dict[int, int], block: LirBlock, landing_cycle: int
-) -> list[int]:
+def _trace_cycle(by_index: dict[int, LirBlock], block_base: dict[int, int], block: LirBlock, cycle: int) -> list[int]:
     """
-    Resolve a block-local `landing_cycle` to its absolute landing PC(s), following overlap spills across terminators
-    exactly as the numerical model re-keys its in-flight writes at a redirect (see Lir.write_landing_pcs).
+    Resolve a block-local `cycle` to its absolute PC(s), following overlap spills across terminators exactly as the
+    numerical model re-keys its in-flight writes at a redirect (see Lir.frame_pcs).
     """
-    if landing_cycle <= block.term_offset:
-        return [block_base[block.index] + landing_cycle]
-    assert not exits(block.terminator), f"block {block.index}: a result spills past an exit"
-    spilled = successor_local_cycle(landing_cycle, block.term_offset)
+    if cycle <= block.term_offset:
+        return [block_base[block.index] + cycle]
+    assert not exits(block.terminator), f"block {block.index}: cycle {cycle} spills past an exit"
+    spilled = successor_local_cycle(cycle, block.term_offset)
     arms = successor_blocks(block.terminator)
-    return [pc for arm in arms for pc in _trace_landing(by_index, block_base, by_index[arm], spilled)]
+    return [pc for arm in arms for pc in _trace_cycle(by_index, block_base, by_index[arm], spilled)]
 
 
 @dataclass(frozen=True, slots=True)
 class BoolStateSlot:
     """
     A persistent boolean state register: reset to `reset_value`, holding the slot's live-in throughout the
-    transaction until `install` replaces it with `live_out`. The boolean bank has no early install.
+    transaction until `install` replaces it with `live_out`.
     """
 
     name: str
@@ -627,16 +621,6 @@ class BoolStateSlot:
 
 @dataclass(frozen=True, slots=True)
 class RegFileLayout:
-    nreg: int
-    nrd: int
-    nwr: int
-    nload: int
-
-
-@dataclass(frozen=True, slots=True)
-class BoolRegFileLayout:
-    """The boolean register bank: `nreg` 1-bit registers (branch conditions and boolean state)."""
-
     nreg: int
 
 
@@ -658,7 +642,7 @@ class Lir:
     # Control-flow overlay: the blocks that take PCs, tiling the ROM in layout order from the entry; a block that does
     # no work takes no PC and its arms are resolved through it.
     blocks: list[LirBlock]
-    bool_regfile: BoolRegFileLayout
+    bool_regfile: RegFileLayout
     bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered by attribute path
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
     block_base: dict[int, int] = field(init=False)  # block index -> the absolute PC its frame starts at
@@ -694,23 +678,6 @@ class Lir:
         assert len({inst.operator for inst in self.instances}) == len(
             {type(inst.operator) for inst in self.instances}
         ), "instance names index within the mnemonic, so one operator configuration per pooled class"
-        # Cross-block instance reuse on a DRAINED edge -- onto a multi-predecessor successor (a merge, a loop
-        # header), which carries no per-instance busy residue -- needs the instance provably idle by the
-        # time that successor first issues on it: the worst case is a firing committing at its block's makespan
-        # (issue = makespan - latency), and the redirect-plus-fetch gap to the successor's first issue is at least
-        # `latency + drain + 1` (the `drain` below). The drain is bank-independent -- every result lands at the
-        # one landing -- so the worst-case gap is the same for every operator regardless of result bank. (A
-        # single-predecessor successor inherits the residue explicitly via `entry_busy` and is sound for any
-        # initiation interval.) The gap beyond the drain is the one-step terminator redirect into the successor
-        # frame; every block's first pooled issue is block-local cycle 0, so it adds nothing past the redirect.
-        # This bound guards those drained edges. Checked here, where the fetch lag is known, over every pooled instance.
-        drain = boundary_step(0, self.fetch_lag)
-        for inst in self.instances:
-            bound = inst.operator.latency + drain + 1
-            assert inst.operator.initiation_interval <= bound, (
-                f"{inst.operator.mnemonic}: initiation_interval {inst.operator.initiation_interval} needs cross-block "
-                f"busy tracking (max supported is latency + {drain + 1})"
-            )
         base = block_bases(self.blocks)
         object.__setattr__(self, "block_base", base)
         assert all(arm in base for block in self.blocks for arm in successor_blocks(block.terminator))
@@ -728,8 +695,7 @@ class Lir:
                     if copy.dst == slot.reg and copy.source == slot.live_out
                 ]
                 assert len(early) == 1, f"state slot {slot.name!r} has no early copy landing by its exit"
-        # The numerical model evaluates firings in isolation and cannot witness a double issue; the residue across an
-        # overlapped seam is asserted in the allocator, where it is known.
+        # The numerical model evaluates firings in isolation and cannot witness a double issue.
         for block in self.blocks:
             windows: dict[OperatorInstance, list[range]] = {}
             for op in block.ops:
@@ -744,10 +710,6 @@ class Lir:
 
     def _check_block(self, block: LirBlock) -> None:
         ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
-        # A branch condition gets exactly one cycle of slack: a boolean result committing at the makespan lands one
-        # step before the terminator's boundary read.
-        bool_commits = [op.commit_cycle for op in ops if any(isinstance(w.dst, BoolRegRef) for w in op.writes)]
-        assert all(commit <= block.block_makespan for commit in bool_commits), f"block {block.index}: past its makespan"
         # A copy landing past the terminator is enqueued for a PC the block never reaches: a redirect re-keys it onto
         # the taken arm, but an exit drops it -- a silently dead install that no value comparison can see.
         assert all(copy.landing(self.fetch_lag) <= block.term_offset for copy in block.copies), block.index
@@ -799,10 +761,6 @@ class Lir:
     @property
     def bool_inputs(self) -> list[BoolInputLoad]:
         return [load for load in self.inputs if isinstance(load, BoolInputLoad)]
-
-    @property
-    def wide_outputs(self) -> list[WideOutputWire]:
-        return [wire for wire in self.outputs if isinstance(wire, WideOutputWire)]
 
     @property
     def bool_outputs(self) -> list[BoolOutputWire]:
@@ -877,25 +835,23 @@ class Lir:
 
     def write_landing_pcs(self, block: LirBlock, op: ScheduledOp) -> list[int]:
         """
-        Every absolute fetch PC at which `op`'s result committed in `block` lands -- one per execution path that can
-        reach it. The landing is op-wide (every tapped write of one firing commits together), so it takes no `write`.
-        Every result -- pooled or inline, on either bank -- lands at the one bank-independent `landing_cycle`.
-        A landing at or before the block's terminator offset lands once, inside the block.
-        A landing past an overlap-shrunk terminator spills into EACH successor arm's frame, at
-        `block_base[arm] + (landing - term_offset - 1)`. This is exactly the numerical model's redirect re-keying of
-        its in-flight writes, so the report places a spilled result where the hardware actually writes it on every
-        path -- not in the linear fall-through frame. A drained block never spills, so a drained
-        kernel returns one PC per write.
-
-        The recursion re-keys at every terminator the landing crosses, mirroring the model exactly. A spilled result can
-        therefore re-spill across a second shrunk terminator -- which needs a near-empty overlapping intermediate block,
-        a shape current frontends do not emit, so in practice this resolves in one hop. The recursion is general-case
-        insurance, and terminates because spills only cross single-predecessor forward edges (a finite DAG; a back-edge
-        target is multi-predecessor and never overlaps).
+        Every absolute fetch PC at which `op`'s result committed in `block` lands, one per execution path that can
+        reach it (see `frame_pcs`). The landing is op-wide (every tapped write of one firing commits together), so it
+        takes no `write`.
         """
-        local_landing = landing_cycle(op.commit_cycle, self.fetch_lag)
+        return self.frame_pcs(block, landing_cycle(op.commit_cycle, self.fetch_lag))
+
+    def frame_pcs(self, block: LirBlock, cycle: int) -> list[int]:
+        """
+        Every absolute fetch PC at which `block`'s block-local `cycle` falls, one per path: in the block's own frame up
+        to its terminator, and past an overlap-shrunk terminator in each successor arm's frame, where the result
+        landings and the operator stages still in flight continue, exactly as the numerical model re-keys its in-flight
+        writes at a redirect. A cycle can re-spill across a second shrunk terminator -- an empty branch on a resident
+        condition is one step long -- and the recursion terminates because spills only cross single-predecessor forward
+        edges (a finite DAG; a back-edge target is multi-predecessor and never overlaps).
+        """
         by_index = {b.index: b for b in self.blocks}
-        return _trace_landing(by_index, self.block_base, block, local_landing)
+        return _trace_cycle(by_index, self.block_base, block, cycle)
 
     @property
     def group_by_cycle(self) -> tuple[dict[int, list[PooledScheduledOp]], dict[int, list[PooledScheduledOp]]]:

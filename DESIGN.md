@@ -83,10 +83,10 @@ time, while `0.0/0.0` written out is refused at compile time.
 The error sidebands report INPUT-DEPENDENT failures; an expression that denotes no number is a program defect and is
 refused -- but only the kernel's own expressions are. Unrolling and inlining SUBSTITUTE values, so the compiler
 manufactures such expressions itself (`for w in [1.0, 0.0]: if w > 0.0: x / w` becomes `x / 0.0`), and convicting one
-of those would be the compiler answering for its own transformation. Refusal is therefore SURVIVOR-BASED: `NoNumber`
-is an internal signal rather than an error, every speculative fold catches it and leaves the operation as written,
-and a single sweep at the HIR-to-MIR boundary refuses whatever is still there -- an expression no identity
-erased, no guard excluded, and nothing left dead is the program's own. An operation naming no number is one the
+of those would be the compiler answering for its own transformation. Refusal is therefore SURVIVOR-BASED: an operation
+naming no number raises an internal signal rather than an error, every speculative fold catches it and leaves the
+operation as written, and a single sweep at the HIR-to-MIR boundary refuses whatever is still there -- an expression no
+identity erased, no guard excluded, and nothing left dead is the program's own. An operation naming no number is one the
 compiler cannot NAME, so every identity treats it as any unknown: `x/x` is 1 even when `x` is `inf - inf`.
 
 This is a LICENSE, not a PROMISE: an expression known to fail on every run MAY be refused, but the compiler does not
@@ -161,8 +161,6 @@ the slow HDL-emission/simulation iteration begins.
 - Seed -- the allocation the register allocator's annealing starts from.
 - Orientation -- which of a commutative firing's read ports each operand takes; swapping them costs no hardware and
   moves each operand between the two ports' multiplexers.
-- Busy residue -- the cycles for which an instance stays busy in a successor block's frame because a firing of an
-  overlapping predecessor is still in flight there.
 - ZISC -- zero-instruction-set computer: the VLIW microcode-driven sequential FSM that Holoso synthesizes.
 
 ## Python API
@@ -174,10 +172,10 @@ runtime environment the binding-time front-end needs -- `__globals__`, closure c
 compile root; the boundary ("what to ignore") falls out of reachability + binding-time analysis, not manual
 enumeration.
 
-Beside the generated RTL, testbench, numerical model, and report, the result carries the front-end's own
-intermediate representation after each of its passes, written as indexed `.fir` documents. Neither Eel program
-survives into HIR, so keeping their canonical text is what makes a front-end decision reviewable after the fact --
-the compiler explaining itself, next to what it produced.
+Beside the generated RTL, testbench, numerical model, and report, the result carries the front-end's own intermediate
+representation after each of its passes, written as indexed `.fir` documents. The front end's own representation (the
+Eel, see Front-end) never survives into HIR, so keeping its canonical text is what makes a front-end decision
+reviewable after the fact -- the compiler explaining itself, next to what it produced.
 
 A plain function synthesizes to a stateless module. A stateful module is requested by passing a bound method of a
 constructed instance, e.g. `synthesize(filt.update, options)`: the instance's attribute snapshot seeds the reset state,
@@ -227,7 +225,15 @@ float ones delegate their timing and reference arithmetic to the external ZKF li
 closed-form latency and their own saturating reference arithmetic. Every hardware operator owns its signature, and a
 pooled one also the port names of the module it stands for, so the fully specified operator instance is itself the
 resource-sharing key; a machine holds one configuration per pooled class. An operator may declare per-firing
-microcode-driven immediate inputs, and declares a per-instance initiation interval (most are II=1, fully pipelined).
+microcode-driven immediate inputs, and declares a per-instance initiation interval: most are II=1, fully pipelined,
+and none exceeds its latency by more than one, which is what keeps an instance's busy window from outliving the block
+that issued it (see Control flow).
+
+Hardware operators split structurally into POOLED -- physical streaming modules the scheduler contends for -- and
+INLINE -- pure expressions folded into a register write; the split is load-bearing for scheduling and emission.
+Hardware is never materialized where a shared firing or a sideband suffices: relations over one operand pair share a
+comparator firing, min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer
+sidebands.
 
 Every pooled operator, float or integer, is named by exactly one field of the public options and carries its own knobs
 there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
@@ -364,19 +370,24 @@ integers, phis at merges, and jump/branch/ret terminators. It is target-independ
 at the level of basic math principles under the fastmath charter. The node vocabulary is explicitly typed per scalar
 kind rather than overloading one spelling, which is what let the integer kind arrive alongside the float and boolean
 ones without disturbing them. Value sharing respects control flow: an expression is interned only where one value
-can legally serve every consumer, so identical expressions in mutually exclusive arms stay distinct.
-
-Operators split structurally into POOLED -- physical streaming modules the scheduler contends for -- and INLINE --
-pure expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is
-never materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparator
-firing, min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer sidebands.
+can legally serve every consumer, so identical expressions in mutually exclusive arms stay distinct. A state slot is
+observable only through its read, a public attribute's port being an ordinary output of the live-out, so dead-code
+elimination reaches a live-out only through the slot's read: an attribute nothing reads costs no register, and the
+computation feeding it goes with it.
 
 A branch the graph itself decides is neither: it is pruned, along with everything only its untaken edge reached, so a
 guard the optimizer can settle costs no hardware. The front end decides a condition by evaluating it, never by
 algebra over a residual operand, so a condition constant only under a value identity the graph owns (`x*0 == 0`)
 survives partial evaluation and is settled here, the branch folding to a single arm and the other never lowered.
-Where that leaves the sole exit unreachable the kernel provably never returns, and is refused rather than built into
-a module that can never raise `out_valid`.
+Where that leaves the sole exit unreachable the kernel provably never returns, and is refused rather than built into a
+module that can never raise `out_valid`. A merge left with one value to merge is that value -- the arm a pruned branch
+leaves, or a loop header whose latch only carries the value around, so `acc *= 1.0` in a loop leaves `acc` its initial
+value -- and folding it can settle another branch, so the folding shares pruning's loop. What a settled branch leaves
+behind is a chain of blocks joined by jumps; a block reached only by a jump from one predecessor is fused into it. Every
+block boundary costs the machine a drain, and a block also bounds if-conversion and the sharing of identical
+expressions, so an unfused chain costs cycles and operators alike. Fusion takes a block with one predecessor; an empty
+merge of several is merge threading's. The front end sends every return site, a lone one included, through a jump to one
+exit block and leaves that jump to fusion.
 
 Branch vs. select is the core control-flow decision for the branches that remain. Real branches are the default: only
 the taken side executes, the merge is resolved at register allocation with no runtime mux, and an untaken arm can
@@ -408,19 +419,22 @@ erase an expression before it is judged, exactly as the survivor-based charter r
 through an inlined library composite may name an expression the kernel never spelled; an accepted limitation of the
 composites, not of the rule.
 
-Strength reduction speaks all three scalar families with one grammar. Each binary operator also declares its MIRROR,
-the operator that means the same with its operands exchanged, so a constant operand settles on the right and every
-spelling of one product or relation names one node; it is declared rather than inferred because the answer is about
-bits, `fmin` and `fmax` breaking ties toward the second operand. Beyond that and the identity and absorbing elements
-the operators declare, it states the rules the shared algebra cannot: the one-sided constant rules of the
-non-commutative operators, the value-equality and complement folds (under the same license as `x/x`), negation and
-complement tracked as involutions so every spelling of a negation names one node and `-(-x)` costs nothing, and the
-constant power-of-two rewrites -- the product into the saturating semantic `imul_pow2`, the quotient into the right
-shift (exactly the floor division, negative dividends included), the remainder into the two's-complement mask. No
-rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR) is bounded by the count of left shifts
-in the graph. An absorbed scale never becomes a word -- only its exponent materializes -- and constant scalings
-compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width and composing
-two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of their sum.
+Strength reduction speaks all three scalar families with one grammar. Each binary operator also declares its MIRROR, the
+operator that means the same with its operands exchanged, so a constant operand settles on the right and a product or
+relation by a constant names one node whichever side it was written on; it is declared rather than inferred because the
+answer is about bits, `fmin` and `fmax` breaking ties toward the second operand. Beyond that and the identity and
+absorbing elements and the idempotence the operators declare, it states the rules the shared algebra cannot: the
+one-sided constant rules of the non-commutative operators, the value-equality and complement folds (under the same
+license as `x/x`), negation and complement tracked as involutions so every spelling of a negation names one node and
+`-(-x)` costs nothing, and the constant power-of-two rewrites -- the product into a saturating power-of-two scaling, the
+quotient into the right shift (exactly the floor division, negative dividends included), the remainder into the
+two's-complement mask. No rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR) is bounded by the
+count of left shifts in the graph. An absorbed scale never becomes a word -- only its exponent materializes -- and
+constant scalings compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width
+and composing two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of
+their sum. A conversion to an integer converts in the mode of a rounding it reads, and converting back is that rounding.
+An infinity test conjoined with a sign test of the same value is the directional classifier it amounts to (`isinf(x) and
+x > 0` is `x == inf`), taken where it retires a test nothing else reads.
 
 A constant scaling over a value has one HIR shape, decided in one place and read back by one reader: the value itself,
 an exponent scaling, or a multiplication by a positive constant with the sign peeled into a negation over it, so
@@ -467,33 +481,31 @@ round can reveal one as a constant no word holds -- a left shift past the word i
 right shift's sign fill holds only for a value the word already holds, so that clamp stays at lowering.
 
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
-RESULT is its own. The float lowerer maps each semantic float operator to its configured hardware operator and
-collapses semantic negation/absolute-value chains into MIR sign-control sidebands on operands, results, or output
-wires -- except onto an operand its operator declares UNCONDITIONED, where the builder drops the chain outright
-rather than folding it, for EVERY producer of MIR operations and not this lowerer alone, since a transform no
-result can observe would otherwise buy a second firing for one answer;
-multiply-by-power-of-two selects the `fmul_ilog2` scaler, its exponent an ordinary integer operand,
-unless an adjacent addition absorbs it into an fma instead; and the four rounding operators map to one shared `fround`
-distinguished by an immediate mode, which a float-to-integer conversion reading one of them absorbs as its own.
+RESULT is its own. Every operand, output wire and phi arm folds its own family's sideband chain into its conditioner
+-- a negation/absolute-value chain into a float's sign control, a NOT chain into a boolean's inversion, nothing for an
+integer -- except onto an operand its operator declares UNCONDITIONED, where the builder drops the chain outright
+rather than folding it, for EVERY producer of MIR operations and not the lowering alone, since a transform no
+result can observe would otherwise buy a second firing for one answer. Multiply-by-power-of-two selects the
+`fmul_ilog2` scaler, its exponent an ordinary integer operand, unless an adjacent addition absorbs it into an fma
+instead; and every rounding, the float-to-integer conversion's included, is one immediate mode of a shared module.
 Which operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel
 can be refused for want of an operator it never wrote.
-The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill,
-a negative count is refused, and a count no other use reads is never lowered; `imul_pow2` rides the same shifter
-through its saturating product tap.
+The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill
+(a negative count being the refusal gate's), and a count no other use reads is never lowered; a saturating power-of-two
+scaling rides the same shifter through its saturating product tap.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
 sin/cos computed simultaneously by the sincos operator, FMA contraction of `a*b+c` wherever the additions that read
 the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
-left alone), a directional infinity classifier for an infinity predicate adjacent to a sign test -- matched at MIR
-because this is the first layer aware of hardware semantics. Some semantic operators lower into combinations of
-hardware operators depending on availability and context (e.g. a two-legged magnitude via fatan2).
+left alone) -- matched at MIR because this is the first layer aware of hardware semantics. Some semantic operators
+lower into combinations of hardware operators depending on availability and context (e.g. a two-legged magnitude via
+fatan2).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
-configured float and integer formats explicitly. The CFG is carried through as per-bank views sharing the block
-skeleton -- the wide data bank and the boolean bank -- then scheduled per block and register-allocated over the
-whole CFG. The wide view selects operations and phis structurally, on scalar width, so it is neutral storage rather
-than a float family; its leaves are still selected nominally, so a float and an integer share the bank with neither
-privileged.
+configured float and integer formats explicitly. The CFG is scheduled per block and register-allocated over the
+whole CFG, the allocator splitting the nodes between the wide data bank and the boolean bank structurally, on scalar
+width, so the wide bank is neutral storage rather than a float family, and a float and an integer share it with
+neither privileged.
 
 ## LIR
 
@@ -542,9 +554,9 @@ option, a cap rather than a count -- only the copies the schedule binds are emit
 serialize. The scheduler's first-free binding of a firing to an instance is only a seed: the register allocator
 rebinds firings among the realized instances without changing an issue cycle or the instance count.
 
-Read-first plus the +1 edge, not write-through forwarding, is a deliberate trade: forwarding would erase the +1 but
-its muxes cost `O(NRD*NWR)` across many read and write ports -- unsustainable -- while the +1 hides under pipelined
-overlap.
+Read-first plus the +1 edge, not write-through forwarding, is a deliberate trade: forwarding would erase the +1 but its
+muxes grow with the product of the read-port and write-port counts -- unsustainable -- while the +1 hides under
+pipelined overlap.
 
 ### Register allocation
 
@@ -557,9 +569,9 @@ not the flip-flop count, and there is no spilling to memory. Three decisions sha
 value's register, a commutative firing's orientation (after Chen & Cong), and a firing's instance where its operator
 has several. The search is simulated annealing from the seed, deterministic and with incremental cost updates,
 finished by a local-improvement descent, so the result is never worse than the seed. The boolean bank is allocated
-first, since a wide inline result names the boolean register it reads. Every block is scheduled once; the install
-fixpoint iterates only the draining blocks' terminator offsets and the coalescing, and the coloring runs once on the
-converged layout.
+first, since a wide inline result names the boolean register it reads. Every block is scheduled once per graph (arm
+threading tries several; see Control flow); the install fixpoint iterates only the draining blocks' terminator offsets
+and the coalescing, and the coloring runs once on the converged layout.
 
 Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed, identity-arm
 predecessors merge by union-find whenever the two sides do not interfere, so the arm value flows straight into the
@@ -571,12 +583,12 @@ Persistent state slots. Both banks commit state in place: a live-out is written 
 read-first, so a same-frame self-update (an accumulator) reads the old value and writes the new one with no copy; an
 update whose "unchanged" arm is the slot live-in coalesces onto the slot through the same union-find. When it cannot
 commit in place (a genuine overlap, a folded sign, a chained copy `self.a = self.b`), the live-out keeps its own
-register and is installed by a copy -- an ordinary PC-gated copy in the Ret block as early as the old live-in is read,
-otherwise a handshake-gated write at the output boundary, sampled at the exit like an output; two slots that always hold
-the same value may collapse onto one register. The early copy is taken only from a result the Ret block schedules or an
-input: a source's availability alone does not make the copy cheaper than the boundary write, so the domain stays
-conservative. Which of the three a slot gets is one explicit decision of the allocator, and the handshake-gated writes
-are enumerated once.
+register and is installed by a copy -- an ordinary PC-gated copy in the return block as early as the old live-in is
+read, otherwise a handshake-gated write at the output boundary, sampled at the exit like an output; of two slots ending
+on one value, one holds it and the other copies from its register at the boundary. The early copy is taken only from a
+result the return block schedules or an input: a source's availability alone does not make the copy cheaper than the
+boundary write, so the domain stays conservative. Which of the three a slot gets is one explicit decision of the
+allocator, and the handshake-gated writes are enumerated once.
 
 ### Control flow
 
@@ -584,24 +596,33 @@ are enumerated once.
 costs. Blocks lay out in reverse-postorder, so a back-edge is a jump to a lower address; each block's terminator
 redirects the fetch PC via a small `case(pc)` that, for a branch, reads the condition's 1-bit register. A jumping
 block that does no work and receives nothing takes no PC, its predecessors taking its arm directly; the transaction
-ends on whichever terminator arm reaches the canonical `Ret`, out_valid asserting at that terminator, conditionally
-on a branch.
+ends on whichever terminator arm reaches the canonical return block, out_valid asserting at that terminator,
+conditionally on a branch.
 
 A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the
 block does not forward to a successor, tail installs included. An install's source is classified exactly: a source
-scheduled in the block commits locally, and only the block's own last-committing work pushes the install (and the
-drain) one step past the work makespan; a source arriving as an in-flight spill read-gates the install at its
-landing without a push; and everything else -- constants, inputs, state reads, phis, and foreign results that have
-already landed -- is settled at entry, so the install fires at the makespan, read-first at the boundary. A source
-register that a sibling install writes is always settled, hence read strictly before any sibling's write lands --
-the invariant that keeps cross-referencing loop-carried phis (a swap) correct. Cross-block software
-pipelining then shrinks the terminator offset down to the issue-side envelope -- the latest PC at which the block
-still drives a control word -- whenever the block carries no installs and every successor is single-predecessor, so
-a spill cannot reach a wrong path:
-in-flight results land past the terminator in the uniquely-reached successor frame, which inherits the predecessor's
-per-instance busy residue and each spilled value's landing cycle. A multi-predecessor successor (merge, loop header)
-never receives a spill, so the carry converges in one reverse-postorder pass and no overlap crosses a
-back-edge.
+scheduled in the block commits locally, and only the block's own last-committing work pushes the install (and the drain)
+one step past the work makespan; a source arriving as an in-flight spill read-gates the install at its landing without a
+push; and everything else -- constants, inputs, state reads, phis, and foreign results that have already landed -- is
+settled at entry, so the install fires at the makespan, read-first at the boundary. A source register that a sibling
+install writes is always settled, hence read strictly before any sibling's write lands -- the invariant that keeps
+cross-referencing loop-carried phis (a swap) correct. Cross-block software pipelining then shrinks the terminator offset
+down to the issue-side envelope -- the latest PC at which the block still drives a control word -- whenever the block
+carries no installs and every successor is single-predecessor, so a spill cannot reach a wrong path: in-flight results
+land past the terminator in the uniquely-reached successor frame, which inherits each spilled value's landing cycle;
+since no operator stays busy more than one step past the control word that writes its result, no instance is still busy
+when the successor frame begins. A multi-predecessor successor (merge, loop header) never receives a spill, so the carry
+converges in one reverse-postorder pass and no overlap crosses a back-edge.
+
+An arm block holding nothing but phi-arm installs costs its path a whole frame, so the build threads it out where that
+costs nothing: its sole predecessor branches straight into the merge and installs the arms at its own tail, on every
+edge out of it. That is sound only on a forward edge -- the merge then does not dominate the predecessor, so no use of
+a merge phi is reachable from it except through the merge -- and a latch arm keeps its block. Whether it pays is judged
+on the converged install fixpoint, cheap next to the coloring: a threading stays only while no block's PC span grows,
+a path being the sum of its blocks' spans, which also catches what it costs elsewhere -- a predecessor that must now
+drain where it overlapped, or a merge phi whose register must now avoid what the predecessor leaves live toward its
+other arms and so no longer takes another arm's value in place. The registers and mux arms it may cost are not weighed
+against the cycles.
 
 ### DEFERRED
 
@@ -610,9 +631,11 @@ remaining per-block tail, but needs the commit-side control fields replicated in
 the single-writer microcode validator already in place); overlap also stays off across any multi-predecessor edge.
 
 The HIR merge-threading pass, which folds an empty pass-through merge block into its predecessors' jumps, leaves two
-cases a real branch: an empty `else`-arm block (threading would create a forbidden branch-block phi arm), which costs
-cycles only while it carries phi-arm copies, and a merge phi read outside a successor phi arm (which would need
-rematerialization as a self-referential loop-header phi -- unproven against the emitter, not worth the niche benefit).
+cases a real branch: an empty `else`-arm block, whose phi-arm copies the LIR build threads out where that costs no
+path a cycle (see Control flow), and a merge phi read outside a successor phi arm (which would need rematerialization
+as a self-referential loop-header phi -- unproven against the emitter, not worth the niche benefit). An arm behind a
+predecessor that overlaps keeps its frame: threading it would make the predecessor drain into the merge, trading
+latency between the paths.
 
 ## Backend (VLIW/ZISC)
 
@@ -696,13 +719,13 @@ asserting each cycle that `out_valid` agrees (the data-dependent latency check) 
 valid, back-pressure included; end-to-end verification of the original Python against the model is left to the user.
 The cosimulation is structurally blind to one miscompile class: a scheduling, binding, regalloc, or overlap fault in
 the LIR is shared by both sides, so a wrong-but-consistent LIR passes. A schedule-independent oracle closes the gap:
-a MIR interpreter evaluates the unscheduled MIR dataflow directly through the operators' own bit-exact `evaluate`,
-deliberately importing nothing from the LIR, so the differential `interpreter == model` isolates exactly the LIR
-layer. The front-end is bracketed the same way from above: a differential oracle runs the original kernel under
-CPython against a host-precision evaluator of the unoptimized HIR, before optimization so fastmath rewrites cannot
-muddy the verdict; because the eager gates evaluate operands CPython may skip, a value that names no number is
-carried as poison and convicts only when it reaches an observable sink -- an output, a state live-out, a branch
-condition.
+a MIR interpreter evaluates the unscheduled MIR dataflow directly through the operators' own bit-exact reference
+arithmetic, deliberately importing nothing from the LIR, so the differential `interpreter == model` isolates exactly the
+LIR layer. The front-end is bracketed the same way from above: a differential oracle runs the original kernel under
+CPython against a host-precision evaluator of the unoptimized HIR, before optimization so fastmath rewrites cannot muddy
+the verdict; because the eager gates evaluate operands CPython may skip, a value that names no number is carried as
+poison and convicts only when it reaches an observable sink -- an output, a branch condition, a state live-out
+(conservatively: the evaluated graph is unoptimized, and a slot nothing reads is pruned only later).
 
 The generated bench asserts `err_pc == 0` on every vector, so a transaction whose defined answer includes an
 asserted error sideband -- an input-fed `x // 0`, a float division by zero -- cannot be cosimulated end to end;
@@ -757,8 +780,8 @@ Explored and rejected for register-pressure-bound kernels:
 
 - LUTRAM register file: a multi-write workload needs a live-value table costing as many LUTs as the FF+mux it
   replaces; banking helps only when access sets partition cleanly.
-- Register-file size cap via pressure-limited scheduling: `nreg` floors at peak liveness, so it trades large latency
-  and f_max for a couple percent.
+- Register-file size cap via pressure-limited scheduling: the register count floors at peak liveness, so it trades large
+  latency and f_max for a couple percent.
 - FMA fusion as an area reduction: it raises read-operand traffic (a wider read port), enlarging total mux area
   despite fewer ops. This is why the FMA contraction is opt-in (only when `ffma` is configured): it is a numerical
   feature (single- vs double-rounding), so a pressure-bound kernel should leave `ffma` unconfigured.

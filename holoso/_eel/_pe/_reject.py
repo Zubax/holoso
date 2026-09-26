@@ -5,7 +5,6 @@ as a short tail — kept for stubs too, since user helpers need it — omitted w
 reported location.
 """
 
-import os
 from typing import NoReturn
 
 from ..._errors import SourceLocation, SynthesisError, UnsupportedConstruct
@@ -41,4 +40,4 @@ def _chained(origin: Origin, message: str) -> str:
 
 
 def _tail(location: SourceLocation) -> str:
-    return f" (at {os.path.basename(location.filename)}:{location.lineno})"
+    return f" (at {location.brief})"

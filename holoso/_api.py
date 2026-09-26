@@ -24,8 +24,9 @@ type Target = Callable[..., Any]
 """
 Currently supported targets are:
 - A plain stateless function. It must be importable, so a lambda is refused: its source cannot be recovered.
-- A bound method of a class instance -- stateful. An attribute any reachable method writes becomes a state register,
-  and a public one additionally gets a `state_...` output port; an attribute that is only read folds to its value.
+- A bound method of a class instance -- stateful. An attribute any reachable method writes is persistent state, held
+  in a register while something reads it; a public one also gets a `state_...` output port, and an attribute that is
+  only read folds to its value.
 - Later on we may potentially add support for multiple methods per class, where the generated module will provide
   a selector port to choose which method to execute, all sharing the same state. In this case we would accept
   a tuple containing the class type and a list of its unbound methods. This remains to be seen.
@@ -199,8 +200,6 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     model = generate_model(lir)
     cocotb_output = generate_testbench(model)
 
-    # Only a branch makes the path data-dependent. Counting blocks instead would call a pruned kernel inexact for
-    # the jump chain pruning leaves behind, which every transaction walks identically.
     latency_is_exact = not any(isinstance(block.terminator, Branch) for block in lir.blocks)
     ii = (lir.min_initiation_interval, lir.min_initiation_interval if latency_is_exact else None)
     _logger.info("Generated Verilog: %s; II [min,max]: %s cycles", verilog_output, ii)

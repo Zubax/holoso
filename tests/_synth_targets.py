@@ -719,18 +719,22 @@ TARGETS: list[SynthTarget] = [
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
     ),
+    # Closed lean (84.4 MHz), one stage per critical path in this order: the fma's sticky through its pack rounding
+    # into the register file, the multiplier's pack rounding, the fma's normalize shift, the register file into the
+    # adder's exponent difference, the register file into the scaler's exponent adder (101.3 MHz). The microcode into
+    # the fma's product operand is next, but an fma input stage there costs 6 MHz: the design is congestion-bound.
     _for_example(
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
         _op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
-            fmul=FMulOptions(stage_input=1, stage_pack=1),
+            fadd=FAddOptions(stage_input=1),
+            fmul=FMulOptions(stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
-            ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+            ffma=FFmaOptions(stage_normalize=1, stage_pack=1),
         ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",

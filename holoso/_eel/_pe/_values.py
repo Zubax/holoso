@@ -20,7 +20,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .._ir import LocalRef, Origin, ScalarType, TempRef
-from ._ops import Const, scalar_type
+from .._lib import Array, Reshape, Spelling
+from ._ops import Const, const_value, make_const, stype_of
 from ._reject import reject
 
 
@@ -28,9 +29,17 @@ from ._reject import reject
 class StaticScalar:
     const: Const
 
+    @classmethod
+    def of(cls, value: bool | int | float) -> StaticScalar:
+        return cls(make_const(value))
+
+    @property
+    def value(self) -> bool | int | float:
+        return const_value(self.const)
+
     @property
     def stype(self) -> ScalarType:
-        return scalar_type(self.const)
+        return stype_of(self.const.type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +109,7 @@ class RecordValue:
     """
 
     cls: type
-    fields: tuple["Value", ...]
+    fields: tuple[Value, ...]
     allocation: Allocation
 
 
@@ -110,6 +119,7 @@ class BoundMethod:
 
     receiver: Scalar | TensorValue
     name: str
+    found: Spelling | Array | Reshape
 
 
 type LoopPass = tuple[Origin, int]
@@ -126,7 +136,7 @@ class IteratorValue:
     rebuilds one, so identity is the only equality that matters.
     """
 
-    items: tuple["Value", ...]
+    items: tuple[Value, ...]
     made_in: tuple[LoopPass, ...]
     spent: bool = False
 
@@ -235,25 +245,20 @@ class ExpansionBudget:
     than structure the program asked for. Exact constant arithmetic never spends: folding is not expansion.
     """
 
-    def __init__(self, limit: int = 100_000) -> None:
-        assert limit > 0
-        self._remaining = limit
+    _LIMIT = 100_000
+
+    def __init__(self) -> None:
         self.spent = 0
 
     def spend(self, units: int, origin: Origin, construct: str) -> None:
         assert units > 0
         self.spent += units
-        self._remaining -= units
-        if self._remaining < 0:
+        if self.spent > self._LIMIT:
             reject(origin, f"the graph expansion budget is exhausted while expanding {construct}")
-
-    def mark(self) -> int:
-        return self.spent
 
     def rewind(self, mark: int) -> None:
         """The budget bounds the graph that gets BUILT, so a pass whose result is discarded gives its spend back."""
         assert 0 <= mark <= self.spent
-        self._remaining += self.spent - mark
         self.spent = mark
 
 

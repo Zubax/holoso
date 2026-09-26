@@ -150,6 +150,86 @@ def _subscripted_enumerate(x: float) -> float:
     return enumerate((x, 2.0))[0][1]  # type: ignore[index,no-any-return]
 
 
+def _stale_tuple_target(flag: bool) -> int:
+    acc = 0
+    for step in range(2):
+        items = ((True, 1),) if step == 0 else ((2, 2),)
+        take = True if step == 0 else flag
+        if take:
+            for ignored, value in items:
+                acc = acc + value
+            ignored = 0
+    return acc
+
+
+def test_a_tuple_target_s_hidden_binding_ends_with_its_loop() -> None:
+    """A later join must not meet the item the hidden binding last held, whose leaves need not agree in type."""
+    _oracle(_stale_tuple_target, [{"flag": False}, {"flag": True}])
+
+
+def _heterogeneous_items_behind_a_break(x: float, flag: bool) -> float:
+    acc = 0.0
+    for item in ((True, 1), (2, 2)):
+        item = 0  # type: ignore[assignment]
+        if flag:
+            break
+        acc = acc + x
+    return acc
+
+
+def _heterogeneous_tuple_targets_behind_a_break(x: float, flag: bool) -> float:
+    acc = 0.0
+    for a, b in ((True, 1), (2, 2)):
+        a = 0
+        b = 0
+        if flag:
+            break
+        acc = acc + x
+    return acc
+
+
+def test_a_loop_s_lanes_meet_without_the_temps_of_earlier_trips() -> None:
+    rows: list[_Row] = [{"x": 1.5, "flag": False}, {"x": 1.5, "flag": True}]
+    _oracle(_heterogeneous_items_behind_a_break, rows)
+    _oracle(_heterogeneous_tuple_targets_behind_a_break, rows)
+
+
+def _stale_trip_temp(flag: bool) -> int:
+    acc = 0
+    for step in range(2):
+        take = True if step == 0 else flag
+        if take:
+            pair = (True, 1) if step == 0 else (2, 2)
+            acc = acc + pair[1]
+            pair = (0, 0)
+    return acc
+
+
+def test_a_later_trip_s_join_meets_no_temp_of_an_earlier_trip() -> None:
+    _oracle(_stale_trip_temp, [{"flag": False}, {"flag": True}])
+
+
+def _comprehension_trip_temp(flag: bool) -> int:
+    values = [(pair[1][0] if pair[0] else 0) for pair in ((True, (True,)), (flag, (2,)))]
+    return values[1]
+
+
+def _comprehension_target_past_its_scope(flag: bool) -> int:
+    acc = 0
+    for step in range(2):
+        items = (True,) if step == 0 else (2,)
+        take = True if step == 0 else flag
+        if take:
+            acc = acc + len([item for item in items])
+    return acc
+
+
+def test_a_comprehension_s_bindings_end_with_each_trip() -> None:
+    rows: list[_Row] = [{"flag": False}, {"flag": True}]
+    _oracle(_comprehension_trip_temp, rows)
+    _oracle(_comprehension_target_past_its_scope, rows)
+
+
 def _measured_enumerate(x: float) -> float:
     return x + float(len(enumerate((x, 2.0))))  # type: ignore[arg-type]
 

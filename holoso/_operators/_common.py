@@ -5,11 +5,11 @@ two operators that belong to no one family.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
 from typing import ClassVar, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
 from .._type import BoolType, FloatType, IntType, ScalarType
+from .._util import Relation
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,34 +92,18 @@ type PortConditioner = WideConditioner | BoolInversion
 
 
 def apply_conditioner(conditioner: PortConditioner, value: ScalarValue) -> ScalarValue:
-    """Apply a port's folded sideband: a sign control on a float value, an inversion on a boolean one."""
     match conditioner:
         case FloatSignControl():
-            assert isinstance(value, FloatValue), "a float sign control applies only to a FloatValue"
+            assert isinstance(value, FloatValue)
             return conditioner.apply_value(value)
         case IntIdentity():
-            assert isinstance(value, IntValue), "an integer identity applies only to an IntValue"
+            assert isinstance(value, IntValue)
             return value
         case BoolInversion():
-            assert isinstance(value, bool), "a boolean inversion applies only to a bool"
+            assert isinstance(value, bool)
             return conditioner.apply(value)
         case _:
             assert_never(conditioner)
-
-
-class Relation(Enum):
-    """
-    The relations a comparator serves, shared by every comparator family. Naming them here rather than in the
-    semantic IR keeps this layer below the HIR, whose operators carry the relation in their own identity; MIR maps
-    the two. The value is the symbol used when rendering a tapped flag back as the relation it implements.
-    """
-
-    LT = "<"
-    LE = "≤"
-    GT = ">"
-    GE = "≥"
-    EQ = "="
-    NE = "≠"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,8 +113,8 @@ class ImmediateField:
     dual of the sign sidebands. Lets one shared instance serve several per-firing modes, not one instance per mode.
     """
 
-    name: str  # wrapper port name
-    width: int  # bit width
+    name: str
+    width: int
 
 
 def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
@@ -166,13 +150,9 @@ class ScalarSignature:
 @dataclass(frozen=True)
 class HardwareOperator(ABC):
     """
-    A fully specified hardware operator configuration.
-    Frozen-dataclass equality makes an instance the resource-sharing key: equal operators time-share one physical
-    module. Each concrete operator owns its timing, reference semantics, notation, and port types -- possibly several
-    typed output ports (a comparator's three one-hot order flags, a sorter's min and max).
-    Commutative operators allow port assignment orient each use's operands to shrink the per-port read muxes.
-    The two structural families are PooledHardwareOperator (a physical streaming module) and
-    InlineHardwareOperator (a pure expression folded into a register write).
+    A fully specified hardware operator configuration. Frozen-dataclass equality makes an instance the resource-sharing
+    key: equal operators time-share one physical module. Commutative operators let port assignment orient each use's
+    operands to shrink the per-port read muxes.
     """
 
     mnemonic: ClassVar[str]
@@ -237,27 +217,17 @@ class HardwareOperator(ABC):
 
     def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[ScalarValue, ...]:
         """Driven by the signature's per-port type, so a cross-family operator needs no check of its own."""
-        signature = self.signature
-        if len(operands) != signature.arity:
-            raise ValueError(f"{self.mnemonic} expected {signature.arity} operands, got {len(operands)}")
-        for index, (operand, ty) in enumerate(zip(operands, signature.operand_types, strict=True)):
-            match ty, operand:
-                case FloatType(), FloatValue() if operand.fmt == ty.fmt:
-                    pass
-                case IntType(), IntValue() if operand.fmt == ty.fmt:
-                    pass
-                case BoolType(), bool():
-                    pass
-                case _:
-                    raise TypeError(f"{self.mnemonic} operand {index} must be {ty}, got {operand!r}")
+        for index, (operand, ty) in enumerate(zip(operands, self.signature.operand_types, strict=True)):
+            assert (
+                (isinstance(ty, FloatType) and isinstance(operand, FloatValue) and operand.fmt == ty.fmt)
+                or (isinstance(ty, IntType) and isinstance(operand, IntValue) and operand.fmt == ty.fmt)
+                or (isinstance(ty, BoolType) and isinstance(operand, bool))
+            ), f"{self.mnemonic} operand {index} must be {ty}, got {operand!r}"
         return operands
 
     @abstractmethod
     def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[ScalarValue, ...]:
-        """
-        Bit-exact reference semantics: one value per output port, aligned with `signature.result_types`.
-        `immediates` carries the per-firing immediate values (empty for most operators).
-        """
+        """Bit-exact reference semantics: one value per output port, aligned with `signature.result_types`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +240,8 @@ class PooledOperatorOptions:
     """How many physical copies of this operator the machine may emit. A cap: only the copies the schedule uses."""
 
     def __post_init__(self) -> None:
-        assert self.instances >= 1
+        if self.instances < 1:
+            raise ValueError(f"instances must be >= 1, got {self.instances}")
 
 
 @dataclass(frozen=True)
@@ -281,7 +252,7 @@ class PooledHardwareOperator(HardwareOperator, ABC):
     generated RTL (a per-operand read opcode selects each operand, a per-register write opcode installs each result).
     """
 
-    Options: ClassVar[type[PooledOperatorOptions]]  # the type of the `opt` field below
+    Options: ClassVar[type[PooledOperatorOptions]]
 
     @property
     @abstractmethod
@@ -351,8 +322,7 @@ class ComparatorOperator(PooledHardwareOperator, ABC):
 
     @property
     @abstractmethod
-    def scalar_type(self) -> ScalarType:
-        """The family being compared -- the one pooled place where operands and results belong to different ones."""
+    def scalar_type(self) -> ScalarType: ...
 
     @property
     def signature(self) -> ScalarSignature:
@@ -380,9 +350,8 @@ class SelectOperator(InlineHardwareOperator):
     """
     A data mux `cond ? a : b` over same-typed values, folded into the destination register write as a ternary over
     the operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings.
-    Each operand is a dedicated direct (unlatched) register read -- an area/timing characteristic of inline operators;
-    the cost is one mux per merged value, the same order as the per-arm phi-copy installs the branch would otherwise
-    need.
+    Each operand is a dedicated direct (unlatched) register read; the cost is one mux per merged value, the same order
+    as the per-arm phi-copy installs the branch would otherwise need.
     """
 
     mnemonic: ClassVar[str] = "select"

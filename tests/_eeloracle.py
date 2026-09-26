@@ -47,7 +47,8 @@ import numpy as np
 
 from holoso._eel._annotations import unaliased
 from holoso._eel._names import indexed_names, spelled
-from holoso._hir import Hir, HirEvaluator, NoNumber
+from holoso._hir import Hir, InPort, NoNumber
+from holoso._hir._evaluate import HirEvaluator
 
 from ._modelref import flatten_value, port_name
 
@@ -281,7 +282,7 @@ def assert_hir_matches_reference(
 ) -> int:
     """Drive the ordered `vectors` through both sides; returns the number of compared transactions."""
     evaluator = HirEvaluator(hir)
-    input_names = hir.input_names()
+    input_names = [node.name for vid in hir.input_ids if isinstance(node := hir.nodes[vid], InPort)]
     parameter_names = expected_input_names(reference)
     assert input_names == parameter_names, f"{label}: input ports {input_names} != parameters {parameter_names}"
     out_ports = [out.name for out in hir.outputs]

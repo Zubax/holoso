@@ -16,8 +16,8 @@ from holoso._operators import (
     IShlOperator,
     IShrOperator,
     ISubOperator,
-    IntHardwareOperator,
 )
+from holoso._operators._int import IntHardwareOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,

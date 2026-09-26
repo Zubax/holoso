@@ -10,22 +10,22 @@ from ..._hir import *
 from ._registry import intrinsic, variadic
 
 
-@intrinsic(FloatFloor())
+@intrinsic(FloatRounding(Rounding.FLOOR))
 def floor(x: float) -> float:
     return float(np.floor(x))
 
 
-@intrinsic(FloatCeil())
+@intrinsic(FloatRounding(Rounding.CEIL))
 def ceil(x: float) -> float:
     return float(np.ceil(x))
 
 
-@intrinsic(FloatTrunc())
+@intrinsic(FloatRounding(Rounding.TRUNC))
 def trunc(x: float) -> float:
     return float(np.trunc(x))
 
 
-@intrinsic(FloatRound())
+@intrinsic(FloatRounding(Rounding.NEAREST_EVEN))
 def round_(x: float) -> float:
     return float(np.round(x))
 
@@ -159,62 +159,62 @@ def invert(x: int) -> int:
     return ~x
 
 
-@intrinsic(IntLess())
+@intrinsic(IntComparison(Relation.LT))
 def less_int(a: int, b: int) -> bool:
     return a < b
 
 
-@intrinsic(FloatLess())
+@intrinsic(FloatComparison(Relation.LT))
 def less_float(a: float, b: float) -> bool:
     return a < b
 
 
-@intrinsic(IntLessOrEqual())
+@intrinsic(IntComparison(Relation.LE))
 def less_equal_int(a: int, b: int) -> bool:
     return a <= b
 
 
-@intrinsic(FloatLessOrEqual())
+@intrinsic(FloatComparison(Relation.LE))
 def less_equal_float(a: float, b: float) -> bool:
     return a <= b
 
 
-@intrinsic(IntGreater())
+@intrinsic(IntComparison(Relation.GT))
 def greater_int(a: int, b: int) -> bool:
     return a > b
 
 
-@intrinsic(FloatGreater())
+@intrinsic(FloatComparison(Relation.GT))
 def greater_float(a: float, b: float) -> bool:
     return a > b
 
 
-@intrinsic(IntGreaterOrEqual())
+@intrinsic(IntComparison(Relation.GE))
 def greater_equal_int(a: int, b: int) -> bool:
     return a >= b
 
 
-@intrinsic(FloatGreaterOrEqual())
+@intrinsic(FloatComparison(Relation.GE))
 def greater_equal_float(a: float, b: float) -> bool:
     return a >= b
 
 
-@intrinsic(IntEqual())
+@intrinsic(IntComparison(Relation.EQ))
 def equal_int(a: int, b: int) -> bool:
     return a == b
 
 
-@intrinsic(FloatEqual())
+@intrinsic(FloatComparison(Relation.EQ))
 def equal_float(a: float, b: float) -> bool:
     return a == b
 
 
-@intrinsic(IntNotEqual())
+@intrinsic(IntComparison(Relation.NE))
 def not_equal_int(a: int, b: int) -> bool:
     return a != b
 
 
-@intrinsic(FloatNotEqual())
+@intrinsic(FloatComparison(Relation.NE))
 def not_equal_float(a: float, b: float) -> bool:
     return a != b
 

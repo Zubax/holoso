@@ -7,9 +7,8 @@ from .._type import FloatFormat
 @dataclass(frozen=True, slots=True)
 class MirOptions:
     """
-    The integer width is not specified but decided by the MIR based on the wint_min, the float format,
-    and the actually used operators.
-    The idea is that a kernel that needs no floats does not need to size its register file for them, and vice versa.
+    The integer width is not given but decided at lowering from `wint_min`, the float format, and whether any float
+    survives optimization, so a kernel without floats need not size its wide register for them.
     """
 
     operator: OperatorOptions

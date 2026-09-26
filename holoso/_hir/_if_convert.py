@@ -1,5 +1,5 @@
 """
-Diamond if-conversion: a small, pure branch diamond collapses into `fselect` data muxes.
+Diamond if-conversion: a small, pure branch diamond collapses into data muxes.
 
 A diamond is `P: Branch(c, T, F)` where both arms are single-predecessor, phi-free, operation-only blocks jumping
 to one merge block `M` whose only predecessors they are. When every arm operation is speculatable and each arm is
@@ -23,10 +23,12 @@ import logging
 from ._const import BoolConst
 from .._util import BlockId
 from ._ir import Block, Branch, Hir, Jump, Operation, Phi, predecessors, renumber
-from ._operators import BoolSelect, FloatSelect, IntSelect
-from ._types import BoolType, FloatType, IntType
+from ._operators import BoolSelect, FloatSelect, IntSelect, Operator
+from ._types import BoolType, FloatType, IntType, Type
 
 _logger = logging.getLogger(__name__)
+
+_SELECT: dict[Type, Operator] = {FloatType(): FloatSelect(), IntType(): IntSelect(), BoolType(): BoolSelect()}
 
 
 def _arm_convertible(hir: Hir, preds: dict[BlockId, set[BlockId]], arm: Block, pred: BlockId, max_ops: int) -> bool:
@@ -65,8 +67,6 @@ def _find_diamond(
         merge = blocks_by_id[arm_t.terminator.target]
         if merge.id == block.id or preds[merge.id] != {arm_t.id, arm_f.id}:
             continue
-        if not all(isinstance(hir.nodes[vid].type, (FloatType, IntType, BoolType)) for vid in merge.phis):
-            continue
         assert not isinstance(hir.nodes[block.terminator.cond], BoolConst), "pruning owns a decided diamond"
         return block, arm_t, arm_f, merge
     return None
@@ -82,16 +82,7 @@ def _splice(hir: Hir, diamond: tuple[Block, Block, Block, Block]) -> Hir:
         phi = nodes[vid]
         assert isinstance(phi, Phi)
         arm_value = dict(phi.arms)
-        match phi.type:
-            case FloatType():
-                op: FloatSelect | IntSelect | BoolSelect = FloatSelect()
-            case IntType():
-                op = IntSelect()
-            case BoolType():
-                op = BoolSelect()
-            case _:
-                raise AssertionError(f"if-conversion reached an unsupported phi type: {phi.type}")
-        nodes[vid] = Operation(op, (terminator.cond, arm_value[arm_t.id], arm_value[arm_f.id]))
+        nodes[vid] = Operation(_SELECT[phi.type], (terminator.cond, arm_value[arm_t.id], arm_value[arm_f.id]))
     spliced = Block(
         id=pred.id,
         phis=pred.phis,

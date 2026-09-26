@@ -4,7 +4,8 @@ The Eel tree: the one representation shared by all three front-end stages (desug
 Eel is compact-atom A-normal form: every operand of every operation is an atom (a temp reference, a local-name
 reference, or a constant); every non-atomic subexpression is hoisted by the desugarer to a fresh temp in CPython
 evaluation order. Temps are anonymous locals, not SSA values: a guarded construct (a desugared conditional
-expression or comparison chain) assigns its result temp in both arms.
+expression or comparison chain) assigns its result temp in both arms. A temp lives within one source statement,
+so none is live where a loop's or a comprehension's trips and lanes meet.
 
 The tree is pure syntax: no numpy, no function objects, and no HIR beyond one opacity -- a residual
 `IntrinsicCall` carries the operator the partial evaluator selected, typed `object` here and downcast only by
@@ -19,7 +20,7 @@ rather than a hoisted aggregate read. A store rooted in an environment name is r
 evaluator can reject it with the escaped-root diagnostic instead of a syntax error.
 
 Residual-only forms (never produced by the desugarer, introduced by the partial evaluator, consumed by emit):
-IntrinsicCall (a resolved HIR operator riding opaquely — also the spelling of every PE-inserted conversion),
+IntrinsicCall (a resolved HIR operator riding opaquely — also the spelling of every inserted conversion),
 SlotRead/SlotWrite over flattened state-slot paths, ResidualWhile with its explicit loop-carried phis and the
 ResidualBreak/ResidualContinue terminators of its body, ResidualFrame with its result rows and the
 ResidualFrameReturn terminators of its sites, ResidualReturn against the OutputDecl table, and the mandatory
@@ -133,11 +134,6 @@ type Binding = TempBind | LocalBind
 
 
 @dataclass(frozen=True, slots=True)
-class PosArg:
-    value: Atom
-
-
-@dataclass(frozen=True, slots=True)
 class StarArg:
     value: Atom
 
@@ -148,7 +144,7 @@ class KwArg:
     value: Atom
 
 
-type Argument = PosArg | StarArg | KwArg
+type Argument = Atom | StarArg | KwArg
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +201,7 @@ class IsNone:
 class Call:
     """
     Arguments keep the syntactic form (positional/starred/keyword) for signature binding at the partial
-    evaluator; the wrapper list is canonical order — positional and starred in source order, then keywords in
+    evaluator; the argument tuple is in canonical order — positional and starred in source order, then keywords in
     source order — which is also CPython's evaluation order, pinned by the hoisted temps preceding the call.
     """
 
@@ -222,26 +218,18 @@ class AttrRead:
 
 
 @dataclass(frozen=True, slots=True)
+class SliceSel:
+    """One sliced axis of a subscript; bounds are hoisted atoms or open."""
+
+    lo: Atom | None
+    hi: Atom | None
+
+
+@dataclass(frozen=True, slots=True)
 class IndexRead:
     origin: Origin
     base: Atom
-    index: Atom
-
-
-@dataclass(frozen=True, slots=True)
-class SliceRead:
-    origin: Origin
-    base: Atom
-    lo: Atom | None
-    hi: Atom | None
-
-
-@dataclass(frozen=True, slots=True)
-class SliceSel:
-    """One sliced axis of a multi-dimensional subscript; bounds are hoisted atoms or open."""
-
-    lo: Atom | None
-    hi: Atom | None
+    index: Atom | SliceSel
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,7 +237,7 @@ class MultiIndexRead:
     """
     A tuple subscript `m[i, j]` / `m[:, k]`: one selector per axis, in source order. Tensor-only — the
     partial evaluator rejects it on sequences. Stores never use this form: slice assignment is banned, and a
-    pure-index tuple store rides an ordinary IndexSel with a tuple-valued atom.
+    pure-index tuple store rides one IndexSel per axis.
     """
 
     origin: Origin
@@ -301,7 +289,7 @@ class Comp:
 class IntrinsicCall:
     """
     Residual-only: a call resolved to a single HIR operator, riding opaquely (the tree stays HIR-free; only emit
-    downcasts). PE-inserted conversions (int-to-float promotion arms, casts) use this same spelling.
+    downcasts). Conversions the partial evaluator inserts (int-to-float promotion arms, casts) use this same spelling.
     """
 
     origin: Origin
@@ -324,7 +312,6 @@ type Expr = (
     | Call
     | AttrRead
     | IndexRead
-    | SliceRead
     | MultiIndexRead
     | TupleExpr
     | ListExpr
@@ -423,7 +410,7 @@ class While:
 @dataclass(frozen=True, slots=True)
 class For:
     origin: Origin
-    target: LocalBind
+    target: Binding
     iterable: Atom
     body: tuple[Stmt, ...]
 

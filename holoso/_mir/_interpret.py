@@ -19,29 +19,8 @@ from typing import assert_never
 from .._operators import apply_conditioner
 from .._util import ValueId
 from .._type import LogicalPort
-from .._value import FloatValue, IntValue, ScalarLike, ScalarValue, coerce_scalar
-from ._ir import (
-    Mir,
-    MirBlock,
-    MirBoolConst,
-    MirBoolInput,
-    MirBoolStateRead,
-    MirBoolStateSlot,
-    MirBranch,
-    MirFloatConst,
-    MirFloatInput,
-    MirFloatStateRead,
-    MirFloatStateSlot,
-    MirIntConst,
-    MirIntInput,
-    MirIntStateRead,
-    MirIntStateSlot,
-    MirJump,
-    MirOperation,
-    MirPhi,
-    MirRet,
-    MirWideInput,
-)
+from .._value import ScalarLike, ScalarValue, coerce_scalar
+from ._ir import Mir, MirBlock, MirBranch, MirConst, MirInput, MirJump, MirOperation, MirPhi, MirRet, MirStateRead
 
 
 class MirInterpreter:
@@ -67,18 +46,12 @@ class MirInterpreter:
 
     def reset(self) -> None:
         """Reload every slot with its reset snapshot: the live-in of the next transaction."""
-        state: dict[str, ScalarValue] = {}
-        for slot in self._mir.state_slots:
-            match slot:
-                case MirFloatStateSlot():
-                    state[slot.name] = FloatValue.from_float(self._mir.float_format, slot.reset_value)
-                case MirIntStateSlot():
-                    state[slot.name] = IntValue.from_int(self._mir.int_format, slot.reset_value)
-                case MirBoolStateSlot():
-                    state[slot.name] = slot.reset_value
-                case _:
-                    assert False, f"unhandled state slot {type(slot).__name__}"
-        self._state = state
+        self._state = {
+            slot.name: coerce_scalar(
+                self._mir.nodes[slot.live_out].scalar_type, slot.reset_value, f"state slot {slot.name!r} reset"
+            )
+            for slot in self._mir.state_slots
+        }
 
     def run(self, *inputs: ScalarLike, max_blocks: int = 10_000_000) -> list[ScalarValue]:
         """
@@ -94,7 +67,7 @@ class MirInterpreter:
             self._resolve_phis(block, previous, env)
             for op_id in block.operations:
                 operation = self._mir.nodes[op_id]
-                assert isinstance(operation, MirOperation), f"node {op_id} in block.operations is not a MirOperation"
+                assert isinstance(operation, MirOperation)
                 operands = [
                     apply_conditioner(conditioner, env[operand])
                     for operand, conditioner in zip(operation.operands, operation.operand_conditioners, strict=True)
@@ -109,7 +82,7 @@ class MirInterpreter:
                     previous, current = current, target
                 case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
                     condition = env[cond]
-                    assert isinstance(condition, bool), "a branch condition must evaluate to a bool"
+                    assert isinstance(condition, bool)
                     previous, current = current, (if_true if condition else if_false)
                 case _:
                     assert_never(terminator)
@@ -121,11 +94,11 @@ class MirInterpreter:
         self._writeback_state(env)
         return outputs
 
-    def _input_nodes(self) -> list[MirWideInput | MirBoolInput]:
-        nodes: list[MirWideInput | MirBoolInput] = []
+    def _input_nodes(self) -> list[MirInput]:
+        nodes: list[MirInput] = []
         for vid in self._mir.input_ids:
             node = self._mir.nodes[vid]
-            assert isinstance(node, (MirFloatInput, MirIntInput, MirBoolInput)), f"input {vid} is not an input node"
+            assert isinstance(node, MirInput)
             nodes.append(node)
         return nodes
 
@@ -138,9 +111,9 @@ class MirInterpreter:
             env[vid] = coerce_scalar(input_node.scalar_type, raw, f"input {index}")
         for vid, node in self._mir.nodes.items():
             match node:
-                case MirFloatConst() | MirIntConst() | MirBoolConst():
+                case MirConst():
                     env[vid] = coerce_scalar(node.scalar_type, node.value, f"constant {vid}")
-                case MirFloatStateRead(name=name) | MirIntStateRead(name=name) | MirBoolStateRead(name=name):
+                case MirStateRead(name=name):
                     env[vid] = self._state[name]
                 case _:
                     pass  # inputs (bound above), operations and phis (bound during the walk)
@@ -156,7 +129,7 @@ class MirInterpreter:
         snapshot: dict[ValueId, ScalarValue] = {}
         for phi_id in block.phis:
             phi = self._mir.nodes[phi_id]
-            assert isinstance(phi, MirPhi), f"node {phi_id} in phis is not a phi"
+            assert isinstance(phi, MirPhi)
             arm = next((entry for entry in phi.arms if entry[0] == previous), None)
             assert arm is not None, f"phi {phi_id} has no arm for predecessor {previous}"
             _pred, value, conditioner = arm

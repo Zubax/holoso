@@ -14,7 +14,8 @@ from .._hir import (
     FloatSqrt,
     Hir,
     HirBuilder,
-    IntGreater,
+    IntComparison,
+    Relation,
     IntNeg,
     IntSelect,
     IntSub,
@@ -104,7 +105,7 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
     Rewrite each magnitude no adjacent atan2 will carry into `2^-k * sqrt(sum((x_i*2^k)^2))`. Being exact, the
     scaling cannot overflow the dominant square; a smaller leg's square still underflows once the significand
     outruns the exponent range, a loss the written form shares and exceeds. Sign chains are dropped rather than
-    folded, so two spellings of one magnitude expand alike and can cancel -- which the orphan case turns on.
+    folded, so two spellings of one magnitude expand alike and can cancel.
 
     Fusion is planned here rather than by the caller because it must be re-planned on every round: an expansion can
     let an expression cancel, and the cancellation can delete the atan2 another magnitude was to fuse with.
@@ -136,11 +137,11 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
         assert isinstance(node, Operation)
         assert len(node.operands) >= 2  # strength reduction answers a lone leg with the absolute value
         scale = scales[len(node.operands)]
-        legs = [remap[collapse_signs(hir.nodes, operand)[0]] for operand in node.operands]  # signs dropped
+        legs = [remap[collapse_signs(hir.nodes, operand)[0]] for operand in node.operands]
         exponents = [builder.operation(FloatILog2(bias), [leg]) for leg in legs]
         largest = _tree(
             exponents,
-            lambda a, b: builder.operation(IntSelect(), [builder.operation(IntGreater(), [a, b]), a, b]),
+            lambda a, b: builder.operation(IntSelect(), [builder.operation(IntComparison(Relation.GT), [a, b]), a, b]),
         )
         k = builder.operation(IntSub(), [builder.int_const(scale), largest])
         squares = [

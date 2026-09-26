@@ -29,7 +29,7 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower
-from holoso._mir import MirFloatConst, MirOperation
+from holoso._mir import MirConst, MirOperation
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import (
@@ -107,7 +107,7 @@ def _standing_multiply_reads_a_constant(fn: Callable[..., object]) -> bool:
     (multiply,) = [
         node for node in mir.nodes.values() if isinstance(node, MirOperation) and node.operator.mnemonic == "fmul"
     ]
-    return any(isinstance(mir.nodes[operand], MirFloatConst) for operand in multiply.operands)
+    return any(isinstance(mir.nodes[operand], MirConst) for operand in multiply.operands)
 
 
 def test_an_add_offered_two_products_contracts_the_one_computed_first() -> None:
@@ -338,7 +338,7 @@ def test_factoring_leaves_an_addend_the_fold_already_answered() -> None:
 
 def test_a_deeply_nested_product_divisor_builds_its_reciprocal() -> None:
     # Expanding a nested divisor's reciprocal by recursion exceeds the interpreter's limit well inside the
-    # unrolling budget, on a kernel shape that is entirely ordinary.
+    # unrolling budget, on a kernel shape that is entirely ordinary. The allocation's quality is beside the point.
     def kernel(x: float, y: float) -> float:
         product = x
         total = 1.0 / x + 1.0 / y
@@ -347,7 +347,8 @@ def test_a_deeply_nested_product_divisor_builds_its_reciprocal() -> None:
             total = total + 1.0 / product
         return total
 
-    model = holoso.synthesize(kernel, _options(fma=False), name="deep_divisor").numerical_model.elaborate()
+    options = dataclasses.replace(_options(fma=False), regalloc_effort=0)
+    model = holoso.synthesize(kernel, options, name="deep_divisor").numerical_model.elaborate()
     assert float(model.run(1.0, 1.0)[0]) == 992.0
 
 
