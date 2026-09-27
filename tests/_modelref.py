@@ -233,10 +233,10 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
 
 
 def _if_supported[O](operator: Callable[..., object], fmt: FloatFormat, opt: O) -> O | None:
-    """A transcendental without zkf tables for the format is left unconfigured."""
+    """A transcendental that zkf refuses at the format (no tables, or an exponent too narrow) is left unconfigured."""
     try:
         operator(fmt, opt, 0)
-    except KeyError:
+    except (KeyError, ValueError):
         return None
     return opt
 

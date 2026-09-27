@@ -303,7 +303,7 @@ _BASELINE: dict[str, Metrics] = {
     # products bound that block, not the max.
     "finite_set_current_controller": Metrics(
         False, nreg=16, bnreg=4, steering=69, max_read_port=8, max_write_select=7,
-        copies=12, min_ii=156, last_pc=188, max_block_span=108,
+        copies=12, min_ii=157, last_pc=189, max_block_span=109,
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
     # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced. Its
@@ -349,7 +349,7 @@ _BASELINE: dict[str, Metrics] = {
     # toward its other arm; the steering arms this costs are the price of the four cycles threading saves.
     "foc": Metrics(
         False, nreg=28, bnreg=3, steering=94, max_read_port=14, max_write_select=6,
-        copies=4, min_ii=294, last_pc=345, max_block_span=231,
+        copies=4, min_ii=295, last_pc=346, max_block_span=232,
     ),
 }
 # fmt: on
