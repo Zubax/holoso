@@ -162,10 +162,12 @@ def _from_polar_kernel() -> Callable[..., object]:
     return polar.from_polar
 
 
-# One measured CORDIC config per polar kernel closes all three flows, so the three per-flow rows share it (unlike the
-# per-flow stage knobs elsewhere in the matrix).
+# One measured CORDIC config per polar kernel is shared by its per-flow rows, except from_polar on diamond: there the
+# fixed-to-float tail takes stage_pack and stage_normalize, and the residual correction multiply, whose operand
+# exceeds the DSP slice width, takes stage_product.
 _TO_POLAR_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
 _FROM_POLAR_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
+_FROM_POLAR_DIAMOND_FSINCOS = FSincosOptions(stage_pack=1, stage_normalize=1, stage_product=1)
 _FLUX_OBSERVER_DIAMOND_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=2)
 # kepler's fsincos (coalesced sin+cos per Newton iteration) dominates timing, so its measured closure coincides with
 # from_polar's -- the same operator.
@@ -325,9 +327,10 @@ TARGETS: list[SynthTarget] = [
         "ekf1_stateful",
         FlowId.DIAMOND_ECP5,
         100,
-        # The register file through the adder's b-port read mux into its exponent difference (81.5 MHz with no stage)
-        # takes the adder's input stage, and its normalizing shift the normalize stage.
-        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_normalize=1)),
+        # Lean, the microcode word through the adder's b-port read mux into its exponent difference is critical
+        # (92.1 MHz) and takes the adder's input stage; the fmul post-product cone (DSP product register through
+        # pack rounding into the register file, 19 logic levels) then limits it to 93.9 MHz and takes the pack stage.
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_pack=1)),
         kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
@@ -472,9 +475,9 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(
             _F_e8m36,
-            fadd=FAddOptions(stage_input=1, stage_decode=1, stage_normalize=2, stage_pack=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_product=2, stage_output=1),
-            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
+            fmul_ilog2=FMulILog2Options(stage_decode=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -536,7 +539,7 @@ TARGETS: list[SynthTarget] = [
         kernel=_from_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=_op_config(_F_e6m18, fmul=FMulOptions(stage_pack=1), fsincos=_FROM_POLAR_FSINCOS),
+        ops=_op_config(_F_e6m18, fsincos=_FROM_POLAR_DIAMOND_FSINCOS),
         name="from_polar_e6m18",
     ),
     SynthTarget(
@@ -767,11 +770,17 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(_F_e6m18, fadd=FAddOptions(stage_pack=1), fsincos=_KEPLER_FSINCOS),
     ),
+    # Diamond: the fsincos multiplier's operand-capture register, then the fixed-to-float normalize and pack splits,
+    # then the fmul pack split, each added against the critical path in turn.
     _for_example(
         "kepler",
         FlowId.DIAMOND_ECP5,
         100,
-        _op_config(_F_e6m18, fsincos=FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=1)),
+        _op_config(
+            _F_e6m18,
+            fmul=FMulOptions(stage_pack=1),
+            fsincos=FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1),
+        ),
     ),
     # At lean the adder's normalize shifter is one combinational barrel shift between the s2 and s3 boundaries,
     # and on artix7 it is what this row's critical path runs through (s2_raw_result -> s3_sub_aligned, ~77% route)
