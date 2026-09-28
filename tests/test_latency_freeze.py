@@ -65,7 +65,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "majority_voter-e6m18": (14, 19),
     # The turn-native trigonometric ABI lets the phase scaling meet the cores' own conversion and cancel, so the I/Q
     # oscillator's two general multiplies collapse to one exponent add.
-    "iq_oscillator-e8m36": (55, 55),
+    "iq_oscillator-e8m36": (56, 56),
     "nco-e6m18": (12, 12),
     # The sixteen pixel lanes scale, clamp and round independently on the pooled float operators while the
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
@@ -92,18 +92,18 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The all-false early return and the break-terminated candidate scan survive as real branches, so the
     # frozen last PC covers the full active path with every scan trip taken. Its constant arms, like the copy-only
     # arms of remainder and octave_index, are threaded into the blocks that branch to them.
-    "finite_set_current_controller-e8m36": (156, 188),
+    "finite_set_current_controller-e8m36": (157, 189),
     "remainder-e8m36": (33, 47),
     "octave_index-e6m18": (9, 31),
     "octave_index-e8m36": (9, 40),
     "equal_temperament-e8m36": (40, 40),
     "cordic_sincos-e8m36": (104, 104),
     "polar_to-e8m36": (63, 63),
-    "polar_from-e8m36": (38, 38),
+    "polar_from-e8m36": (39, 39),
     # The three pivot-swap diamonds of the 3x3 Gauss-Jordan inversion if-convert into selects, so the whole
     # kernel is one straight-line block serialized on the pooled divider.
     "rigid_body_scalar-e8m36": (126, 126),
-    "kepler-e8m36": (74, 149),
+    "kepler-e8m36": (75, 151),
     "integrator-e8m36": (16, 16),
     "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
@@ -119,7 +119,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The controller that embeds that observer: the same atan2 tail, then a sincos, a norm, and the divides of the
     # limiter and the modulator, with the alignment, the branch-cut correction and the anti-windup freeze all
     # surviving as real branches -- so the last PC covers arms the shortest static path does not.
-    "foc-e8m36": (294, 345),
+    "foc-e8m36": (295, 346),
     # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
     # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
     "imu_fusion-e8m36": (266, 456),

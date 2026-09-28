@@ -42,7 +42,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy~=2.4",
-    "zkf~=0.6",
+    "zkf~=0.7",
 ]
 
 [project.optional-dependencies]

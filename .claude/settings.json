@@ -7,6 +7,10 @@
       "Workflow", "AskUserQuestion", "EnterPlanMode", "EnterWorktree", "ExitWorktree", "CronCreate", "CronDelete",
       "CronList", "ListMcpResourcesTool", "ReadMcpResourceTool", "ToolSearch", "PushNotification", "Artifact",
       "RemoteTrigger", "ShareOnboardingGuide"
+    ],
+    "deny": [
+      "Bash(git push -f *)",
+      "Bash(git push --force *)"
     ]
   }
 }
