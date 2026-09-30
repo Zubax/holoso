@@ -319,7 +319,8 @@ TARGETS: list[SynthTarget] = [
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_decode=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_output=1),
-            fmul_ilog2=FMulILog2Options(stage_input=1),
+            # The scaler's exponent add and overflow compare into its output register's reset (96.7 MHz).
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -329,8 +330,9 @@ TARGETS: list[SynthTarget] = [
         100,
         # Lean, the microcode word through the adder's b-port read mux into its exponent difference is critical
         # (92.1 MHz) and takes the adder's input stage; the fmul post-product cone (DSP product register through
-        # pack rounding into the register file, 19 logic levels) then limits it to 93.9 MHz and takes the pack stage.
-        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_pack=1)),
+        # pack rounding into the register file, 19 logic levels) then limits it to 93.9 MHz and takes the pack stage;
+        # the adder's close-cancellation normalize shift (s2 to s3, 92.4 MHz) then takes the normalize stage.
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_normalize=1), fmul=FMulOptions(stage_pack=1)),
         kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
@@ -646,19 +648,16 @@ TARGETS: list[SynthTarget] = [
             fsincos=_FROM_POLAR_FSINCOS,
         ),
     ),
-    # The Euclidean norms expand by exact exponent scaling, a `filog2` per leg and its scalings. Two rows fell just
-    # under their fence on that (99.19 and 148.22) and each took one stage on the hop its critical path named: the
-    # extractor's input on diamond, the scaler's input on the ffma Vivado row.
+    # The Euclidean norms expand by exact exponent scaling, a `filog2` per leg and its scalings. The ffma Vivado row
+    # fell just under its fence on that (148.22) and took one stage on the hop its critical path named: the scaler's
+    # input.
     # imu_fusion: the fusion capstone -- three norm/rsqrt chains (fsqrt/fdiv, one feeding the coarse alignment), the
     # sorter-backed clamp, and real gate branches over the heaviest register pressure in the matrix, in the plain and
     # the ffma-contracted datapaths. The native root retired the wall these rows used to close against (the flog2
     # Horner pmul); the two ffma ECP5 rows each needed one more stage once that wall left. On yosys the deepest path
-    # is the sorter's compare cone entered straight off the register file, which fsort stage_input splits; on diamond
-    # it is the fadd normalize/pack tail into the register file, which fadd stage_pack splits -- and the plain
-    # diamond row's fadd stage_output stays, since removing it only exposes the same tail one stage earlier. The
-    # exact install scheduling shifted the plain diamond and ffma Vivado rows a hair under their fences (12 and
-    # 19 ps): the diamond miss was a lone controller clock-enable route, re-closed by splitting the fadd pack tail;
-    # the Vivado miss was the fadd subtract-normalize cone, which fadd stage_normalize splits.
+    # is the sorter's compare cone entered straight off the register file, which fsort stage_input splits. The exact
+    # install scheduling shifted the ffma Vivado row a hair under its fence (19 ps) on the fadd subtract-normalize
+    # cone, which fadd stage_normalize splits.
     _for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
@@ -678,12 +677,15 @@ TARGETS: list[SynthTarget] = [
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
+        # Congestion-bound: staged more heavily, the critical path is the controller's accept decode into the input
+        # registers' clock enables (86 percent route), which no operator stage splits. Closed lean (88.2 MHz), one
+        # stage per critical path in this order: the microcode word through the adder's read mux into its exponent
+        # difference, the multiplier's DSP product through pack rounding into the register file (78.2 MHz), the
+        # adder's normalize and pack tail into the register file (94.2 MHz, then 102.4).
         _op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
-            fmul=FMulOptions(stage_input=1, stage_pack=1),
-            fmul_ilog2=FMulILog2Options(stage_input=1),
-            filog2=FILog2Options(stage_input=1),
+            fadd=FAddOptions(stage_input=1, stage_pack=1),
+            fmul=FMulOptions(stage_pack=1),
             fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
         ),
@@ -770,17 +772,15 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(_F_e6m18, fadd=FAddOptions(stage_pack=1), fsincos=_KEPLER_FSINCOS),
     ),
-    # Diamond: the fsincos multiplier's operand-capture register, then the fixed-to-float normalize and pack splits,
-    # then the fmul pack split, each added against the critical path in turn.
+    # Diamond, closed lean (47.2 MHz), one stage per critical path in this order: the fixed-to-float normalize into
+    # the register file, the CORDIC's done flag into the multiplier's operand (88.1 MHz), the normalize's second half
+    # through pack into the register file (95.0 MHz); the CORDIC iteration is then critical (103.9 MHz). A multiplier
+    # pack stage or a second normalize barrier each cost f_max here: the design is congestion-bound.
     _for_example(
         "kepler",
         FlowId.DIAMOND_ECP5,
         100,
-        _op_config(
-            _F_e6m18,
-            fmul=FMulOptions(stage_pack=1),
-            fsincos=FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1),
-        ),
+        _op_config(_F_e6m18, fsincos=FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1)),
     ),
     # At lean the adder's normalize shifter is one combinational barrel shift between the s2 and s3 boundaries,
     # and on artix7 it is what this row's critical path runs through (s2_raw_result -> s3_sub_aligned, ~77% route)
