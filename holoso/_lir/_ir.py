@@ -682,6 +682,7 @@ class Lir:
         object.__setattr__(self, "block_base", base)
         assert all(arm in base for block in self.blocks for arm in successor_blocks(block.terminator))
         assert self.exit_pcs and min(self.exit_pcs) >= 1, "PC 0 is the accept dwell"
+        assert all(base[arm] >= 1 for block in self.blocks for arm in successor_blocks(block.terminator))
         for block in self.blocks:
             self._check_block(block)
         for slot in self.state_slots:

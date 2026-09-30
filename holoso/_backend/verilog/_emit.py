@@ -336,6 +336,8 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
     reg  [PCW-1:0]  ucode_addr_q;  // PC latch: splits pc -> next_pc -> ROM address for the case read
     reg  [CYCW-1:0] err_pc_q;
     wire            err;           // an operator error is detected on the current step
+    reg             next_in_ready; // the input loads' high-fanout write enables start at a flop, not a circuit
+    reg             in_ready_q;
 
     reg                 transacting_in;                           // per-branch tag: this pc's word is a live step
     reg [FETCH_LAG-1:0] transacting_q;                            // delays the tag FETCH_LAG onto executing word
@@ -493,27 +495,32 @@ def _emit_datapath_comb(w: _Writer, lir: Lir, write_books: dict[RegRef | BoolReg
 // Next-PC sequencer (combinational). The PC holds at the accept (pc==0) and exit (out_valid) boundaries; bubble
 // steps carry a NOP word and the PC keeps advancing. The executing step lags the fetch PC by FETCH_LAG. A block's
 // terminator redirects the fetch PC at the block's boundary step (a branch reads its boolean register). Each branch
-// also sets transacting_in -- 1 for a live accept/body word, 0 at the boundaries -- so each branch tags its own word.
+// also sets transacting_in -- 1 for a live accept/body word, 0 at the boundaries -- so each branch tags its own word,
+// and next_in_ready, whether the next PC is the accept dwell; no redirect targets PC 0.
 always @* begin
 """)
     w.push()
     w("if (rst) begin")
     w.push()
     w("next_pc        = 0;")
+    w("next_in_ready  = 1'b1;")
     w("transacting_in = 1'b0;")
     w.pop()
     w("end else if (out_valid) begin  // present: hold until the result is taken")
     w.push()
     w("next_pc        = out_ready ? 0 : pc;")
+    w("next_in_ready  = out_ready;")
     w("transacting_in = 1'b0;")
     w.pop()
     w("end else if (in_ready) begin   // accept: hold until a transaction arrives")
     w.push()
     w("next_pc        = in_valid ? 1 : 0;")
+    w("next_in_ready  = !in_valid;")
     w("transacting_in = in_valid;")
     w.pop()
     w("end else begin                 // advance the fetch: the body of a live transaction")
     w.push()
+    w("next_in_ready  = 1'b0;")
     w("transacting_in = 1'b1;")
     if not redirects:
         w("next_pc        = pc + 1'b1;")
@@ -656,8 +663,9 @@ def _emit_clocked(
     arms = handshake_arms(lir)
 
     w("""
-// All sequential logic in one clocked process. Reset gates only the control state (pc, err_pc_q, transacting_q) and the
-// persistent state registers; every other register is reset-unconditional. Each is driven by exactly one statement.
+// All sequential logic in one clocked process. Reset gates only the control state (pc, in_ready_q, err_pc_q,
+// transacting_q) and the persistent state registers; every other register is reset-unconditional. Each is driven by
+// exactly one statement.
 always @(posedge clk) begin
 """)
     w.push()
@@ -692,6 +700,7 @@ always @(posedge clk) begin
     w("if (rst) begin")
     w.push()
     w("pc            <= 0;")
+    w("in_ready_q    <= 1'b1;")
     w("err_pc_q      <= 0;")
     w("transacting_q <= 0;")
     for slot in lir.wide_state_slots:
@@ -702,6 +711,7 @@ always @(posedge clk) begin
     w("end else begin")
     w.push()
     w("pc <= next_pc;")
+    w("in_ready_q <= next_in_ready;")
     w("transacting_q <= (transacting_q << 1) | transacting_in;")
     w("if (err) err_pc_q <= pc - FETCH_LAG;  // err wins; execution lags the fetch PC by FETCH_LAG, so step is pc-lag")
     w("else if (in_ready && in_valid) err_pc_q <= 0;  // clear the diagnostic when a new transaction is accepted")
@@ -724,7 +734,7 @@ always @(posedge clk) begin
 
 def _emit_outputs(w: _Writer, lir: Lir, renderer: _WideRenderer) -> None:
     w(f"""
-assign in_ready  = (pc == 0);
+assign in_ready  = in_ready_q;
 assign out_valid = {_out_valid(lir)};
 assign err_pc    = err_pc_q;
 """)

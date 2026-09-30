@@ -162,12 +162,12 @@ def _from_polar_kernel() -> Callable[..., object]:
     return polar.from_polar
 
 
-# One measured CORDIC config per polar kernel is shared by its per-flow rows, except from_polar on diamond: there the
-# fixed-to-float tail takes stage_pack and stage_normalize, and the residual correction multiply, whose operand
-# exceeds the DSP slice width, takes stage_product.
+# One measured CORDIC config per polar kernel is shared by its per-flow rows, except from_polar on diamond, closed lean
+# (49.6 MHz): the fixed-to-float normalize takes a barrier, the residual correction multiply's operand into its DSP
+# (88.3 MHz) takes stage_product, and the normalize's first half (96.9 MHz) the second barrier (102.4 MHz).
 _TO_POLAR_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=3)
 _FROM_POLAR_FSINCOS = FSincosOptions(stage_pack=1, stage_product=2, stage_normalize=2)
-_FROM_POLAR_DIAMOND_FSINCOS = FSincosOptions(stage_pack=1, stage_normalize=1, stage_product=1)
+_FROM_POLAR_DIAMOND_FSINCOS = FSincosOptions(stage_normalize=2, stage_product=1)
 _FLUX_OBSERVER_DIAMOND_FATAN2 = FAtan2Options(unroll100=50, stage_pack=1, stage_normalize=2, stage_product=2)
 # kepler's fsincos (coalesced sin+cos per Newton iteration) dominates timing, so its measured closure coincides with
 # from_polar's -- the same operator.
@@ -487,11 +487,14 @@ TARGETS: list[SynthTarget] = [
         "ekf1_stateful",
         FlowId.DIAMOND_ECP5,
         100,
+        # Closed lean from the product stage alone (81.0 MHz), one stage per critical path in this order: the register
+        # file into the adder's exponent difference, the multiplier's pack rounding into the register file (84.9 MHz),
+        # the adder's normalize shift, the adder's pack tail into the register file (91.4 MHz), the multiplier's DSP
+        # cascade, which takes the split product (96.5 MHz, then 106.5).
         _op_config(
             _F_e8m36,
-            fadd=FAddOptions(stage_input=2, stage_decode=1, stage_align=1, stage_normalize=2, stage_pack=1),
-            fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
-            fdiv=FDivOptions(stage_input=3, stage_pack=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
+            fmul=FMulOptions(stage_product=2, stage_pack=1),
         ),
         kernel=_ekf1_stateful_kernel,
     ),
@@ -654,10 +657,9 @@ TARGETS: list[SynthTarget] = [
     # imu_fusion: the fusion capstone -- three norm/rsqrt chains (fsqrt/fdiv, one feeding the coarse alignment), the
     # sorter-backed clamp, and real gate branches over the heaviest register pressure in the matrix, in the plain and
     # the ffma-contracted datapaths. The native root retired the wall these rows used to close against (the flog2
-    # Horner pmul); the two ffma ECP5 rows each needed one more stage once that wall left. On yosys the deepest path
-    # is the sorter's compare cone entered straight off the register file, which fsort stage_input splits. The exact
-    # install scheduling shifted the ffma Vivado row a hair under its fence (19 ps) on the fadd subtract-normalize
-    # cone, which fadd stage_normalize splits.
+    # Horner pmul). On the plain yosys row the deepest path is the sorter's compare cone entered straight off the
+    # register file, which fsort stage_input splits. The exact install scheduling shifted the ffma Vivado row a hair
+    # under its fence (19 ps) on the fadd subtract-normalize cone, which fadd stage_normalize splits.
     _for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
@@ -677,15 +679,15 @@ TARGETS: list[SynthTarget] = [
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
-        # Congestion-bound: staged more heavily, the critical path is the controller's accept decode into the input
-        # registers' clock enables (86 percent route), which no operator stage splits. Closed lean (88.2 MHz), one
-        # stage per critical path in this order: the microcode word through the adder's read mux into its exponent
-        # difference, the multiplier's DSP product through pack rounding into the register file (78.2 MHz), the
-        # adder's normalize and pack tail into the register file (94.2 MHz, then 102.4).
+        # Closed lean (88.9 MHz), one stage per critical path in this order: the microcode word through the adder's
+        # read mux into its exponent difference, the multiplier's DSP product through pack rounding into the register
+        # file (78.5 MHz), the register file through the scaler's read mux into its exponent adder (97.4 MHz), the
+        # adder's pack tail into the register file (99.7 MHz, then 101.3).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_pack=1),
             fmul=FMulOptions(stage_pack=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
             fsort=FSortOptions(),
         ),
@@ -710,31 +712,33 @@ TARGETS: list[SynthTarget] = [
         "imu_fusion",
         FlowId.YOSYS_ECP5,
         100,
+        # Closed lean (66.1 MHz), one stage per critical path in this order: the microcode into the fma's DSP operand,
+        # the microcode through the scaler's read mux into its overflow compare, the microcode into the multiplier's
+        # DSP operand, the fma's normalize shift, the fma's pack rounding into the register file, the microcode into
+        # the adder's exponent difference, the fma's product into its exponent decode, the adder's pack rounding into
+        # the register file (at its output), the multiplier's pack rounding (101.7 MHz).
         _op_config(
             _F_e6m18,
-            # The rounding carry chain plus register-file writeback exceeds the period; separate them at the output.
-            fadd=FAddOptions(stage_input=1, stage_pack=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
-            fsort=FSortOptions(stage_input=1),
-            ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
+            fsort=FSortOptions(),
+            ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_normalize=1, stage_pack=1),
             wmultiplier=18,
         ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
     ),
-    # Closed lean (84.4 MHz), one stage per critical path in this order: the fma's sticky through its pack rounding
-    # into the register file, the multiplier's pack rounding, the fma's normalize shift, the register file into the
-    # adder's exponent difference, the register file into the scaler's exponent adder (101.3 MHz). The microcode into
-    # the fma's product operand is next, but an fma input stage there costs 6 MHz: the design is congestion-bound.
+    # Closed lean (76.3 MHz), one stage per critical path in this order: the fma's sticky through its pack rounding
+    # into the register file, the multiplier's pack rounding (83.3 MHz), the microcode through the scaler's read mux
+    # into its exponent adder (89.0 MHz), the fma's normalize shift (90.7 MHz, then 101.0).
     _for_example(
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
         _op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1),
             fmul=FMulOptions(stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fsqrt=FSqrtOptions(),
@@ -772,15 +776,14 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(_F_e6m18, fadd=FAddOptions(stage_pack=1), fsincos=_KEPLER_FSINCOS),
     ),
-    # Diamond, closed lean (47.2 MHz), one stage per critical path in this order: the fixed-to-float normalize into
-    # the register file, the CORDIC's done flag into the multiplier's operand (88.1 MHz), the normalize's second half
-    # through pack into the register file (95.0 MHz); the CORDIC iteration is then critical (103.9 MHz). A multiplier
-    # pack stage or a second normalize barrier each cost f_max here: the design is congestion-bound.
+    # Diamond, closed lean (46.3 MHz), one stage per critical path in this order: the fixed-to-float normalize into
+    # the register file, the CORDIC's done flag into the multiplier's operand (87.9 MHz), the normalize's second half
+    # through pack into the register file (96.4 MHz), the normalize's first half (95.5 MHz, then 100.3).
     _for_example(
         "kepler",
         FlowId.DIAMOND_ECP5,
         100,
-        _op_config(_F_e6m18, fsincos=FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1)),
+        _op_config(_F_e6m18, fsincos=FSincosOptions(stage_product=1, stage_normalize=2, stage_pack=1)),
     ),
     # At lean the adder's normalize shifter is one combinational barrel shift between the s2 and s3 boundaries,
     # and on artix7 it is what this row's critical path runs through (s2_raw_result -> s3_sub_aligned, ~77% route)

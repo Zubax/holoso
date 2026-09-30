@@ -204,8 +204,7 @@ A robust closure procedure that accounts for this starts lean and adds back one 
   incidental cone that a stage added elsewhere will relieve.
 - Add exactly one stage, at the boundary that splits the true bottleneck, and re-measure. Adding stages one at a time
   this way logic-balances a routing-dominated design without over-populating it with flip-flops.
-- Repeat until f_max clears the target. If a newly added stage lowers f_max it was relieving congestion, not logic
-  depth: back it out and split a different boundary.
+- Repeat until f_max clears the target.
 
 ## Verification
 

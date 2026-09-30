@@ -663,7 +663,9 @@ that dedicated form is what triggers the inference. The RTL stays tool-neutral: 
 `HOLOSO_ATTRIBUTE_ROM` macro where a flow defines it, through which the flow attaches its synthesizer's mapping
 attribute. The ROM is read through a short multi-stage fetch (PC latch, ROM read register, routing register) so the
 controller is short register-to-register paths rather than a wide combinational cone; the fetch leads the executing
-step, which under static scheduling only adds to the makespan/II.
+step, which under static scheduling only adds to the makespan/II. For the same reason `in_ready` is a register the
+sequencer sets beside the next PC, so the input loads' wide write-enable fanout starts at a flip-flop rather than
+behind a PC decode.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
 `in_valid`); the PC advances every clock; at an exit it asserts `out_valid` while outputs drive combinationally
