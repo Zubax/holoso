@@ -34,9 +34,8 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
-from holoso._operators import FAtan2Operator, FSincosOperator
 from holoso._value import ScalarValue
-from ._modelref import _if_supported, instantiated_modules as _modules, random_legal_bits
+from ._modelref import instantiated_modules as _modules, random_legal_bits
 
 # Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -79,8 +78,8 @@ def _ops(
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
             fsqrt=FSqrtOptions() if with_sqrt else None,
-            fsincos=_if_supported(FSincosOperator, fmt, FSincosOptions()) if with_sincos else None,
-            fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options()) if with_atan2 else None,
+            fsincos=FSincosOptions() if with_sincos else None,
+            fatan2=FAtan2Options() if with_atan2 else None,
         ),
         ffmt=fmt,
     )
@@ -438,7 +437,7 @@ def test_min_max_match_reference() -> None:
 
 def test_min_max_sign_folds_into_operands() -> None:
     # Each operand's sign chain folds onto its sorter operand and is applied BEFORE the sort: min(-a, |b|) is the
-    # sorter fed (-a, |b|). This drives the operand conditioners on a commutative multi-output operator.
+    # sorter fed (-a, |b|). This drives the operand conditioners on a multi-output primitive.
     def kernel(a: float, b: float) -> tuple[float, float]:
         return (min(-a, abs(b)), max(abs(a), -b))
 
@@ -484,7 +483,7 @@ def test_min_max_unconfigured_is_rejected() -> None:
 def test_min_max_is_not_bit_commutative() -> None:
     # min/max preserve the selected operand's exact bits and break ties toward the second operand, so they are NOT
     # bit-commutative: swapping operands can flip the sign of a zero. Two mirrored mins over the same pair must each
-    # keep their source operand order (the operator must not be marked commutative), or out_0's zero sign diverges
+    # keep their source operand order (the primitive must not be marked commutative), or out_0's zero sign diverges
     # from the reference. At x=0, sign conditioning makes -0, exposing the tie.
     def kernel(x: float, y: float) -> tuple[float, float]:
         return (min(-x, y), min(y, -x))

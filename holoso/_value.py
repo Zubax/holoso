@@ -228,7 +228,7 @@ class IntValue:
         _check_int_format(fmt)
         if not isinstance(value, FloatValue):
             raise TypeError(f"value must be FloatValue, got {type(value).__name__}")
-        return cls._wrap(fmt, _TO_INT[RoundMode(mode)](_zkf_format(value.fmt).wrap(value.bits), fmt.width))
+        return cls._wrap(fmt, _TO_INT[mode](_zkf_format(value.fmt).wrap(value.bits), fmt.width))
 
     def to_float(self, fmt: FloatFormat) -> FloatValue:
         """Matches `holoso_ffromint`: nearest, ties to even; a magnitude past the finite range becomes an infinity."""

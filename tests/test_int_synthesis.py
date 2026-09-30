@@ -3,7 +3,7 @@ Black-box integer synthesis through the public API: every kernel drives `synthes
 against CPython or independent literals. Selection facts are asserted through the one public spelling they have --
 `holoso_<mnemonic> #(` instantiations present or absent in `verilog_output.verilog` -- and refusal diagnostics
 verbatim. `wint_min` alone pins the machine word of a float-free kernel, so the vectors that depend on it say so; the
-inline operators (`ishiftc`, `ibwand`, ...) have no public name, so their selection lives in
+inline primitives (`ishiftc`, `ibwand`, ...) have no public name, so their selection lives in
 `test_int_selection`.
 """
 
@@ -707,7 +707,7 @@ def _scale_by(k: int) -> Callable[[int], int]:
 @pytest.mark.parametrize("k", [1, 2, 14, 15, 16, 40])
 def test_a_power_of_two_scaling_reads_the_shifter_where_it_saturates(k: int) -> None:
     """
-    The one thing separating this operator from `x << k`: a multiplication rails where the raw shift drops what
+    The one thing separating this primitive from `x << k`: a multiplication rails where the raw shift drops what
     leaves the word. The count is unbounded where the word is not, so every one past the width rails the same way.
     """
     result = holoso.synthesize(_scale_by(k), _INT16, name=f"ScaleBy{k}")

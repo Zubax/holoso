@@ -7,9 +7,9 @@ from .._mir import Mir, MirBranch, MirConst, MirInput, MirJump, MirOperation, Mi
 from .._operators import (
     BoolInversion,
     FloatSignControl,
-    InlineHardwareOperator,
+    InlinePrimitive,
     IntIdentity,
-    PooledHardwareOperator,
+    PooledPrimitive,
     PortConditioner,
     WideConditioner,
 )
@@ -49,7 +49,7 @@ def operand_templates(node: MirOperation, mir: Mir, pool: Mapping[ValueId, Poole
     The one normalization of an operation's operands, shared by the LIR build and the allocator's objective so the
     two cannot disagree on a write source's identity. The constant pool stores a float as its magnitude and folds
     the sign onto whoever reads it -- BELOW the MIR normalization that cleared an unconditioned operand, so the sign
-    would reappear on a port with nothing to bind it to. This is the last place that still knows the operator, hence
+    would reappear on a port with nothing to bind it to. This is the last place that still knows the primitive, hence
     the last that can erase it.
     """
     templates: list[OperandTemplate] = []
@@ -59,7 +59,7 @@ def operand_templates(node: MirOperation, mir: Mir, pool: Mapping[ValueId, Poole
             template = wide_operand_template(mir, vid, conditioner, pool)
         else:
             template = bool_operand_template(mir, vid, conditioner)
-        if position in node.operator.unconditioned_operands:
+        if position in node.primitive.unconditioned_operands:
             assert isinstance(template, WideOperandTemplate)  # the declaration admits float ports alone
             template = replace(template, conditioner=FloatSignControl())
         templates.append(template)
@@ -79,22 +79,23 @@ def _operands_of(
     ]
 
 
-def _value_dst(mir: Mir, alloc: Allocation, vid: ValueId) -> RegRef | BoolRegRef:
-    if mir.nodes[vid].scalar_type.is_wide:
-        return RegRef(alloc.wide.assign[vid])
-    return BoolRegRef(alloc.bool.assign[vid])
+def _port_write(mir: Mir, alloc: Allocation, vid: ValueId, result: int) -> PortWrite:
+    inversion = mir_operation(mir, vid).output_inversion
+    if inversion is None:
+        return PortWrite(result, RegRef(alloc.wide.assign[vid]), None)
+    return PortWrite(result, BoolRegRef(alloc.bool.assign[vid]), inversion)
 
 
 def build_inline_op(
     mir: Mir, vid: ValueId, issue_cycle: int, alloc: Allocation, pool: dict[ValueId, PooledConst]
 ) -> InlineScheduledOp:
     node = mir_operation(mir, vid)
-    assert isinstance(node.operator, InlineHardwareOperator)
+    assert isinstance(node.primitive, InlinePrimitive)
     operands = _operands_of(node, mir, alloc, pool)
     return InlineScheduledOp(
-        operator=node.operator,
+        primitive=node.primitive,
         operands=operands,
-        write=PortWrite(port=node.output_port, dst=_value_dst(mir, alloc, vid), conditioner=node.output_conditioner),
+        write=_port_write(mir, alloc, vid, node.result),
         issue_cycle=issue_cycle,
     )
 
@@ -107,43 +108,36 @@ def build_pooled_op(
     pool: dict[ValueId, PooledConst],
 ) -> PooledScheduledOp:
     """
-    Build one pooled firing: the members share the operator, operands, and operand conditioners (the fusion key), so
+    Build one pooled firing: the members share the primitive, operands, and operand conditioners (the fusion key), so
     the operands are resolved once from the leader; each member contributes one PortWrite tapping its output port
     into its own bank's register.
     """
     leader = min(members)
     node = mir_operation(mir, leader)
-    assert isinstance(node.operator, PooledHardwareOperator)
+    assert isinstance(node.primitive, PooledPrimitive)
     operands = _operands_of(node, mir, alloc, pool)
     swapped = alloc.wide.swap[leader]
-    if swapped:  # commutative operator: exchange operands (with their conditioners) to shrink read muxes
+    if swapped:  # commutative primitive: exchange operands (with their conditioners) to shrink read muxes
         operands.reverse()
-    # A swapped firing's taps move with the operands: each member's output port maps through the operator's
-    # commutation permutation (the comparator's gt and lt exchange while eq is fixed), so cmp(b,a) tapped at the
-    # permuted port yields bit-exactly the member's original value.
-    permutation = node.operator.swap_output_permutation
+    # A swapped firing's taps move with the operands: each member's result maps through the primitive's commutation
+    # permutation (the comparator's gt and lt exchange while eq is fixed), so cmp(b,a) tapped at the permuted result
+    # yields bit-exactly the member's original value.
+    permutation = node.primitive.swap_output_permutation
 
-    def tap_port(member: ValueId) -> int:
-        port = mir_operation(mir, member).output_port
+    def tap(member: ValueId) -> int:
+        result = mir_operation(mir, member).result
         if not swapped:
-            return port
+            return result
         assert permutation is not None
-        return permutation[port]
+        return permutation[result]
 
-    writes = [
-        PortWrite(
-            port=tap_port(member),
-            dst=_value_dst(mir, alloc, member),
-            conditioner=mir_operation(mir, member).output_conditioner,
-        )
-        for member in sorted(members, key=tap_port)
-    ]
+    writes = [_port_write(mir, alloc, member, tap(member)) for member in sorted(members, key=tap)]
     return PooledScheduledOp(
-        inst=OperatorInstance(node.operator, alloc.wide.instance[leader]),
+        primitive=node.primitive,
+        instance=alloc.wide.instance[leader],
         operands=operands,
         writes=writes,
         issue_cycle=sched.issue_cycle[leader],
-        immediates=node.immediates,
     )
 
 

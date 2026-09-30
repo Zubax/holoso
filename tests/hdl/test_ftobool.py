@@ -1,7 +1,7 @@
 """
 Tests for holoso_ftobool (combinational; y=1 iff the exponent field is nonzero).
 
-The sign sweep is the point: `FloatToBoolOperator` declares its operand sign-invariant, and the compiler ERASES
+The sign sweep is the point: `FloatToBoolPrimitive` declares its operand sign-invariant, and the compiler ERASES
 sign conditioning on the strength of that. This is the RTL-side evidence for the claim.
 """
 

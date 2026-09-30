@@ -11,8 +11,8 @@ from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 from zkf import ZkfFormat
 
-from holoso import FloatFormat, FloatValue, IntFormat
-from holoso._operators import FILog2Operator
+from holoso import FILog2Options, FloatFormat, FloatValue, IntFormat
+from holoso._operators import FILog2Operator, FILog2Primitive, HardwareOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
@@ -36,12 +36,12 @@ class _Config:
     stage_input: int = 0
 
     @property
-    def operator(self) -> FILog2Operator:
+    def operator(self) -> HardwareOperator:
         """The module name, its RTL parameters and its latency all come from the operator, so a drift fails here."""
-        return FILog2Operator(
+        return FILog2Operator.build(
             FloatFormat(self.wexp, self.wman),
             IntFormat(self.wint),
-            FILog2Operator.Options(stage_input=self.stage_input),
+            FILog2Options(stage_input=self.stage_input),
         )
 
     @property
@@ -71,10 +71,10 @@ async def holoso_filog2_cocotb(dut: Any) -> None:
     wfull = wexp + wman
     fmt = ZkfFormat(wexp, wman)
     ffmt = FloatFormat(wexp, wman)
-    operator = FILog2Operator(
-        ffmt, IntFormat(wint), FILog2Operator.Options(stage_input=int(os.environ["HOLOSO_STAGE_INPUT"]))
+    primitive = FILog2Primitive(
+        FILog2Operator.build(ffmt, IntFormat(wint), FILog2Options(stage_input=int(os.environ["HOLOSO_STAGE_INPUT"])))
     )
-    assert operator.latency == latency, "the oracle must be the configuration the DUT was built from"
+    assert primitive.latency == latency, "the oracle must be the configuration the DUT was built from"
     assert len(dut.y) == wint
     await start_clock(dut)
     await drive_reset(dut)
@@ -83,8 +83,8 @@ async def holoso_filog2_cocotb(dut: Any) -> None:
     rng = np.random.default_rng(get_seed())
 
     def oracle(a: int) -> int:
-        """Taken through the operator's own reference, so the RTL and the model cannot drift apart."""
-        (value,) = operator.evaluate(FloatValue.from_bits(ffmt, a))
+        """Taken through the primitive's own reference, so the RTL and the model cannot drift apart."""
+        (value,) = primitive.evaluate(FloatValue.from_bits(ffmt, a))
         return int(value) & ((1 << wint) - 1)
 
     async def step_idle() -> None:
@@ -150,7 +150,7 @@ def test_holoso_filog2(sim: str, config: _Config) -> None:
             "HOLOSO_WMAN": str(config.wman),
             "HOLOSO_WINT": str(config.wint),
             "HOLOSO_STAGE_INPUT": str(config.stage_input),
-            "HOLOSO_EXPECTED_LATENCY": str(operator.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0]),
         },
         results_xml=str(build_dir / "results.xml"),
     )

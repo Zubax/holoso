@@ -44,10 +44,10 @@ STAGE_COMBOS: tuple[dict[str, int], ...] = (
 )
 
 
-async def _atan2(dut: Any, latency: int, y: int, x: int, ops: tuple[int, int, int, int]) -> tuple[int, int]:
+async def _atan2(dut: Any, latency: int, y: int, x: int, ops: tuple[int, int]) -> tuple[int, int]:
     dut.a.value = y
     dut.b.value = x
-    dut.a_sgnop.value, dut.b_sgnop.value, dut.theta_sgnop.value, dut.mag_sgnop.value = ops
+    dut.a_sgnop.value, dut.b_sgnop.value = ops
     dut.in_valid.value = 1
     await RisingEdge(dut.clk)
     dut.in_valid.value = 0
@@ -69,10 +69,9 @@ async def holoso_fatan2_cocotb(dut: Any) -> None:
     await drive_reset(dut)
     rng = np.random.default_rng(get_seed())
 
-    async def check(y: int, x: int, ops: tuple[int, int, int, int] = (0, 0, 0, 0)) -> None:
-        y_op, x_op, theta_op, mag_op = ops
-        theta_pre, mag_pre = atan2_oracle(apply_sgnop(y, y_op), apply_sgnop(x, x_op))
-        exp_theta, exp_mag = apply_sgnop(theta_pre, theta_op), apply_sgnop(mag_pre, mag_op)
+    async def check(y: int, x: int, ops: tuple[int, int] = (0, 0)) -> None:
+        y_op, x_op = ops
+        exp_theta, exp_mag = atan2_oracle(apply_sgnop(y, y_op), apply_sgnop(x, x_op))
         got_theta, got_mag = await _atan2(dut, latency, y, x, ops)
         assert (
             got_theta == exp_theta
@@ -89,9 +88,9 @@ async def holoso_fatan2_cocotb(dut: Any) -> None:
     for y_op in SGNOP_OPS:
         for x_op in SGNOP_OPS:
             for y, x in sample:
-                await check(y, x, (y_op, x_op, 0, 0))
+                await check(y, x, (y_op, x_op))
     for _ in range(get_random_count()):
-        ops = (int(rng.integers(0, 4)), int(rng.integers(0, 4)), int(rng.integers(0, 4)), int(rng.integers(0, 4)))
+        ops = (int(rng.integers(0, 4)), int(rng.integers(0, 4)))
         await check(random_zkf_f32(rng), random_zkf_f32(rng), ops)
 
     await drive_reset(dut)
@@ -105,7 +104,7 @@ async def holoso_fatan2_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fatan2(sim: str, stages: dict[str, int]) -> None:
-    operator = FAtan2Operator(FloatFormat(8, 24), FAtan2Options(**stages), 0)
+    operator = FAtan2Operator.build(FloatFormat(8, 24), FAtan2Options(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fatan2_{stage_tag(stages)}"
     runner.build(
@@ -124,6 +123,6 @@ def test_holoso_fatan2(sim: str, stages: dict[str, int]) -> None:
         test_module="tests.hdl.test_fatan2",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )

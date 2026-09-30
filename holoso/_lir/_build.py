@@ -12,7 +12,7 @@ from .._mir import (
     thread_arm,
     threadable_arms,
 )
-from .._operators import InlineHardwareOperator
+from .._operators import InlinePrimitive
 from .._type import BoolType, FloatType, IntType
 from .._util import BlockId
 from .._value import FloatValue, IntValue, WideValue, coerce_scalar
@@ -140,7 +140,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     blocks: list[LirBlock] = []
     for block in mir.blocks:
         sched = block_sched[block.id]
-        # Operations split by operator class, not by result bank; each issues as soon as its own operands have landed,
+        # Operations split by primitive class, not by result bank; each issues as soon as its own operands have landed,
         # with no barrier.
         ops = [
             build_pooled_op(mir, members, sched, alloc, const_pool)
@@ -149,7 +149,7 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
         inline_ops = [
             build_inline_op(mir, vid, sched.issue_cycle[vid], alloc, const_pool)
             for vid in sorted(
-                (v for v in sched.issue_cycle if isinstance(mir_operation(mir, v).operator, InlineHardwareOperator)),
+                (v for v in sched.issue_cycle if isinstance(mir_operation(mir, v).primitive, InlinePrimitive)),
                 key=lambda v: (sched.issue_cycle[v], v),
             )
         ]

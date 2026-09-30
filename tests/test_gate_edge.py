@@ -1,7 +1,7 @@
 """
 Gate verification for the `transacting` issue/install qualifier.
 
-Three structural guards (no simulator) keep a later refactor from silently dropping the gate: every pooled operator
+Three structural guards (no simulator) keep a later refactor from silently dropping the gate: every operator
 `iv`, every ucode-driven constant install, and every pooled commit write-enable must be ANDed with `transacting`.
 Two cosims (Icarus, which exposes the internal `transacting` wire and the `regs` array; Verilator may optimize
 them away) drive a swept idle dwell:

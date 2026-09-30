@@ -7,7 +7,6 @@ from dataclasses import dataclass, replace
 from importlib import resources
 
 from ..._lir import *
-from ..._operators import HardwareOperator
 
 # Interactive layer; `__DATA__` is replaced by the per-module payload in `_sched_script`.
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
@@ -51,7 +50,7 @@ def render_schedule(lir: Lir) -> str:
     stage_base: dict[OperatorInstance, int] = {}
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
-    group_ends = {stage_base[inst] + inst.operator.latency - 1 for inst in lir.instances}
+    group_ends = {stage_base[inst] + _stage_count(inst) - 1 for inst in lir.instances}
 
     data_thin, data_thick = _data_seams(nreg, nbreg, nconst, nbbool)
     if columns:
@@ -68,11 +67,8 @@ def render_schedule(lir: Lir) -> str:
     edges: list[tuple[str, str, str, int]] = []  # (commit id, operand id, color, operation group) for the overlay
     # Operator pipeline occupancy: instance `inst` is in stage `k` on cycle `issue + k + fetch_lag`. Keyed to the
     # operation group so a hover lights the whole pipeline trail together with the result cell, its chip and its edges.
-    # `conflicts` flags any cell two operations claim at once -- the alarm for a scheduling bug (a structural hazard
-    # the pipelined scheduler should never emit).
     stage_fill: dict[tuple[int, int], tuple[str, int]] = {}  # (stage column, cycle) -> (operator color, group)
     stage_tip: dict[tuple[int, int], str] = {}
-    conflicts: set[tuple[int, int]] = set()
     # Result-commit cells, keyed by absolute (cycle, column). A result lands on its commit's landing cycle; under
     # cross-block overlap a result spilling past the shrunk terminator lands in EACH successor arm's frame, so one
     # firing may stamp a commit cell on more than one row (`lir.write_landing_pcs`, exactly the model's landing PCs).
@@ -87,19 +83,17 @@ def render_schedule(lir: Lir) -> str:
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for op in block.ops:
-            color = operator_colors[type(op.inst.operator)]
+            color = operator_colors[op.inst.operator.name]
             # Cycles come from the Lir definitions shared with the liveness.
             issue_pc = base_pc + op.issue_cycle
-            read_cyc = operand_read_cycle(op.inst.operator, issue_pc, lir.fetch_lag)
+            read_cyc = operand_read_cycle(op.primitive, issue_pc, lir.fetch_lag)
             operand_labels = [_operand_label(operand) for operand in op.operands]
             firing_tip = _esc(_op_text(op))
             landing_pcs = lir.write_landing_pcs(block, op)
             for write in op.writes:
                 tip = _esc(
                     f"{_col_label(write.dst)} 🠄 "
-                    + op.inst.operator.render_output(
-                        write.port, write.conditioner, *operand_labels, immediates=op.immediates
-                    )
+                    + op.primitive.render_output(write.result, write.inversion, *operand_labels)
                 )
                 dcol: ColKey = write.dst
                 dord = col_ord[dcol]
@@ -119,28 +113,24 @@ def render_schedule(lir: Lir) -> str:
                         f"<span class='opf' data-op='{group}' style='background:{color}'>{tip}</span>"
                     )
             base = stage_base[op.inst]
-            # A throughput-1 pipeline advances one stage per cycle: stage k is busy only on row issue + k + lag (a
-            # diagonal). A non-pipelined FSM core (initiation_interval > 1) holds one transaction and keeps every stage
-            # busy until it accepts the next, a rectangle over its initiation interval's rows. Past an overlap-shrunk
-            # terminator the stages advance in every successor arm's frame, as the landings do.
-            pipelined = op.inst.operator.initiation_interval == 1
-            window = op.latency if pipelined else op.inst.operator.initiation_interval
-            rows = [lir.frame_pcs(block, op.issue_cycle + i + lir.fetch_lag) for i in range(window)]
-            for k in range(op.latency):
-                for cyc in rows[k] if pipelined else [pc for pcs in rows for pc in pcs]:
+            # Stage k holds the firing on row issue + k + lag, and the input stage stays held for the rest of the busy
+            # window. Firings on one instance never share an issue row and their busy windows never overlap, so no two
+            # claim one cell. Past an overlap-shrunk terminator the stages advance in every successor arm's frame, as
+            # the landings do.
+            held = [(0, i) for i in range(1, op.primitive.initiation_interval)]
+            for k, i in [(k, k) for k in range(op.latency)] + held:
+                for cyc in lir.frame_pcs(block, op.issue_cycle + i + lir.fetch_lag):
                     key = (base + k, cyc)
-                    if key in stage_fill and stage_fill[key][1] != group:
-                        conflicts.add(key)
                     stage_fill[key] = (color, group)
-                    stage_tip[key] = f"{op.inst.operator.mnemonic}_{op.inst.index} s{k}: {firing_tip}"
+                    stage_tip[key] = f"{op.inst.name} s{k}: {firing_tip}"
             group += 1
 
     # Inline firings (boolean logic and the float<->bool casts) have no pooled instance, hence no pipeline-stage trail.
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for bop in block.inline_ops:
-            color = operator_colors[type(bop.operator)]
-            read_cyc = operand_read_cycle(bop.operator, base_pc + bop.issue_cycle, lir.fetch_lag)
+            color = operator_colors[bop.primitive.mnemonic]
+            read_cyc = operand_read_cycle(bop.primitive, base_pc + bop.issue_cycle, lir.fetch_lag)
             landing_pcs = lir.write_landing_pcs(block, bop)
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
@@ -264,12 +254,12 @@ def render_schedule(lir: Lir) -> str:
         cls = "gh k" + _border_suffix(nreg + nbreg + nconst + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>{'T' if value else 'F'}</span></th>")
     for inst in lir.instances:
-        lat = inst.operator.latency
+        lat = _stage_count(inst)
         # full name, set vertically so a 1-stage operator does not widen
         name = inst.name
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
         out.append(
-            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{operator_colors[type(inst.operator)]}'>"
+            f"<th class='ohgrp{seam}' colspan='{lat}' style='color:{operator_colors[inst.operator.name]}'>"
             f"<span>{_esc(name)}</span></th>"
         )
     out.append("</tr>")
@@ -299,7 +289,7 @@ def render_schedule(lir: Lir) -> str:
                 attrs += f" data-op='{cell_group[(ordinal, cyc)]}'"
             out.append(f"<td class='{_gc_class(ordinal, dv)}{extra}'{attrs}{style}>{content}</td>")
         for sidx in range(n_stage):
-            out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip, conflicts))
+            out.append(_stage_cell(sidx, cyc, dv, stage_fill, stage_tip))
         out.append(f"<td class='opcell'>{''.join(chips_at.get(cyc, []))}</td>")
         out.append(_pc_cell(cyc, steps.get(cyc, [])))
         out.append("</tr>")
@@ -328,9 +318,8 @@ def _col_label(col: ColKey) -> str:
 
 
 def _op_text(op: PooledScheduledOp) -> str:
-    body = op.inst.operator.render(*[_operand_label(o) for o in op.operands], immediates=op.immediates)
-    dsts = "/".join(write.conditioner.decorate(_col_label(write.dst)) for write in op.writes)
-    return f"{dsts}={body}"
+    body = op.primitive.render(*[_operand_label(o) for o in op.operands])
+    return f"{'/'.join(write.stable_label for write in op.writes)}={body}"
 
 
 def _is_live(col: ColKey, row_id: int, live: dict[ColKey, set[int]]) -> bool:
@@ -409,14 +398,19 @@ def _operand_label(operand: WideOperand | BoolOperand) -> str:
 
 def _inline_op_text(op: InlineScheduledOp) -> str:
     operands = [_operand_label(o) for o in op.operands]
-    body = op.operator.render_output(op.write.port, op.write.conditioner, *operands, immediates=op.immediates)
+    body = op.primitive.render_output(op.write.result, op.write.inversion, *operands)
     return f"{_col_label(op.write.dst)} 🠄 {body}"
+
+
+def _stage_count(inst: OperatorInstance) -> int:
+    """One column per pipeline stage of the operator's deepest mode, which every firing on it fits."""
+    return max(inst.operator.latencies)
 
 
 def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
-        cols.extend((inst, k) for k in range(inst.operator.latency))
+        cols.extend((inst, k) for k in range(_stage_count(inst)))
     return cols
 
 
@@ -591,15 +585,12 @@ def _stage_cell(
     dv: _Dividers,
     stage_fill: dict[tuple[int, int], tuple[str, int]],
     stage_tip: dict[tuple[int, int], str],
-    conflicts: set[tuple[int, int]],
 ) -> str:
     cls = _oc_class(sidx, dv)
     occ = stage_fill.get((sidx, cyc))
     if occ is None:
         return f"<td class='{cls}'></td>"
     color, group = occ
-    if (sidx, cyc) in conflicts:
-        cls += " conflict"
     return f"<td class='{cls}' data-op='{group}' title='{stage_tip[(sidx, cyc)]}' style='background:{color}'></td>"
 
 
@@ -705,15 +696,15 @@ def _named_label(bank: str, index: int, named: tuple[str, str] | None) -> str:
 
 
 def _schedule_key(
-    operator_colors: dict[type[HardwareOperator], str],
+    operator_colors: dict[str, str],
     has_state: bool,
     has_arrows: bool,
     has_blocks: bool,
     fetch_lag: int,
 ) -> str:
     items = [
-        f"<span class='wr' style='background:{color}'>{_esc(cls.mnemonic)}</span>"
-        for cls, color in operator_colors.items()
+        f"<span class='wr' style='background:{color}'>{_esc(mnemonic)}</span>"
+        for mnemonic, color in operator_colors.items()
     ]
     items.extend(
         [
@@ -763,12 +754,11 @@ def _key_item(marker: str, text: str) -> str:
     return f"<span>{marker} {text}</span>"
 
 
-def _operator_colors(lir: Lir) -> dict[type[HardwareOperator], str]:
-    kinds: set[type[HardwareOperator]] = {type(inst.operator) for inst in lir.instances}
-    for block in lir.blocks:
-        for bop in block.inline_ops:
-            kinds.add(type(bop.operator))
-    ordered = sorted(kinds, key=lambda kind: (kind.mnemonic, kind.__module__, kind.__qualname__))
+def _operator_colors(lir: Lir) -> dict[str, str]:
+    """One color per operator, keyed by its name, and per inline primitive, keyed by its mnemonic."""
+    kinds = {inst.operator.name for inst in lir.instances}
+    kinds |= {bop.primitive.mnemonic for block in lir.blocks for bop in block.inline_ops}
+    ordered = sorted(kinds)
     return dict(zip(ordered, _html_palette(len(ordered)), strict=True))
 
 

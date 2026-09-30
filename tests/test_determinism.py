@@ -13,6 +13,7 @@ The subprocess entry points are the plain functions below (imported from this mo
 and operator configs are ordinary, type-checked Python rather than templated source strings.
 """
 
+import math
 import os
 import subprocess
 import sys
@@ -110,6 +111,20 @@ def _emit_coalesce_conflict_two_instances() -> None:
     _dump(synthesize(_coalesce_conflict, with_instances(default_options(FloatFormat(6, 18)), 2)))
 
 
+def _roundings(x: float, y: float) -> tuple[float, float, int, int]:
+    return float(math.floor(x)), float(math.ceil(y)), round(x * y), int(y)
+
+
+def _emit_roundings_two_instances() -> None:
+    from holoso import FloatFormat, FRoundOptions, FToIntOptions, synthesize
+
+    from ._modelref import default_options, with_instances
+
+    options = default_options(FloatFormat(6, 18))
+    options = replace(options, operator=replace(options.operator, fround=FRoundOptions(), ftoint=FToIntOptions()))
+    _dump(synthesize(_roundings, with_instances(options, 2)))
+
+
 def _dump(result: SynthesisResult) -> None:
     # The frontend IR rides along because it is a shipped artifact whose canonical text is a determinism claim in
     # its own right, and it sits closest to the merge points this suite exists to pin.
@@ -187,10 +202,13 @@ def test_counted_loop_lowering_is_byte_identical_across_hash_seeds(other_seed: s
     assert _entry_output_under_seed("_emit_counted", "0") == _entry_output_under_seed("_emit_counted", other_seed)
 
 
-@pytest.mark.parametrize("entry", ["_emit_ekf_two_multipliers", "_emit_coalesce_conflict_two_instances"])
+@pytest.mark.parametrize(
+    "entry", ["_emit_ekf_two_multipliers", "_emit_coalesce_conflict_two_instances", "_emit_roundings_two_instances"]
+)
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
 def test_instance_binding_is_byte_identical_across_hash_seeds(entry: str, other_seed: str) -> None:
     # The allocator's binding and orientation are decided by an annealer whose random number generator is seeded
-    # and whose candidate lists are built from dicts and sorted sets; a two-multiplier straight-line kernel and a
-    # multi-instance CFG kernel pin that no hash-ordered structure leaks into the emitted machine.
+    # and whose candidate lists are built from dicts and sorted sets, its keys hashing operators by name; a
+    # two-multiplier straight-line kernel, a multi-instance CFG kernel, and several modes of one operator over two
+    # instances pin that no hash-ordered structure leaks into the emitted machine.
     assert _entry_output_under_seed(entry, "0") == _entry_output_under_seed(entry, other_seed)

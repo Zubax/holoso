@@ -5,7 +5,7 @@ The campaign generates small kernels as Python *source text* -- rendered to line
 the frontend's `inspect.getsourcelines` retrieval succeeds -- and drives each through the public-ish compiler pipeline
 twice: once into the numerical model (downstream of LIR scheduling/binding/regalloc/overlap) and once into the MIR
 interpreter (the schedule-independent oracle, upstream of the LIR layer). The two share the front/mid-end and
-`operator.evaluate` but NOT the LIR, so the primary check `interpreter == model` (bit-exact, exception-free on both
+`primitive.evaluate` but NOT the LIR, so the primary check `interpreter == model` (bit-exact, exception-free on both
 ZKF sides) isolates exactly the LIR layer -- the miscompile class the RTL-versus-model cosimulation is blind to.
 
 The generator emits the *danger shapes by construction* -- real un-if-convertible diamonds (kept branchy by either an
@@ -1099,7 +1099,7 @@ def _overlap_spill_depth(lir: Lir) -> int | None:
             [*block.ops, *block.inline_ops], key=lambda op: (op.issue_cycle, op.commit_cycle)
         )
         for op in block_ops:
-            read_cycle = operand_read_cycle(op.operator, op.issue_cycle, lir.fetch_lag)
+            read_cycle = operand_read_cycle(op.primitive, op.issue_cycle, lir.fetch_lag)
             operands = [
                 _depth_at(reg_depth.get(operand.source, []), read_cycle)
                 for operand in op.operands
@@ -1124,7 +1124,7 @@ def _has_fused_relation_pair(lir: Lir) -> bool:
     """
     for block in lir.blocks:
         for op in block.ops:
-            if op.operator.mnemonic == "fcmp" and len(op.writes) > 1:
+            if op.inst.operator.name == "fcmp" and len(op.writes) > 1:
                 return True
     return False
 

@@ -44,11 +44,9 @@ STAGE_COMBOS: tuple[dict[str, int], ...] = (
 )
 
 
-async def _sincos(dut: Any, latency: int, a: int, a_op: int, sin_op: int, cos_op: int) -> tuple[int, int]:
+async def _sincos(dut: Any, latency: int, a: int, a_op: int) -> tuple[int, int]:
     dut.a.value = a
     dut.a_sgnop.value = a_op
-    dut.sin_sgnop.value = sin_op
-    dut.cos_sgnop.value = cos_op
     dut.in_valid.value = 1
     await RisingEdge(dut.clk)
     dut.in_valid.value = 0
@@ -70,23 +68,21 @@ async def holoso_fsincos_cocotb(dut: Any) -> None:
     await drive_reset(dut)
     rng = np.random.default_rng(get_seed())
 
-    async def check(a: int, a_op: int, sin_op: int, cos_op: int) -> None:
-        sin_pre, cos_pre = sincos_oracle(apply_sgnop(a, a_op))
-        exp_sin, exp_cos = apply_sgnop(sin_pre, sin_op), apply_sgnop(cos_pre, cos_op)
-        got_sin, got_cos = await _sincos(dut, latency, a, a_op, sin_op, cos_op)
-        assert got_sin == exp_sin, f"sin a=0x{a:08x} ops={a_op}{sin_op}: got 0x{got_sin:08x} exp 0x{exp_sin:08x}"
-        assert got_cos == exp_cos, f"cos a=0x{a:08x} ops={a_op}{cos_op}: got 0x{got_cos:08x} exp 0x{exp_cos:08x}"
+    async def check(a: int, a_op: int) -> None:
+        exp_sin, exp_cos = sincos_oracle(apply_sgnop(a, a_op))
+        got_sin, got_cos = await _sincos(dut, latency, a, a_op)
+        assert got_sin == exp_sin, f"sin a=0x{a:08x} ops={a_op}: got 0x{got_sin:08x} exp 0x{exp_sin:08x}"
+        assert got_cos == exp_cos, f"cos a=0x{a:08x} ops={a_op}: got 0x{got_cos:08x} exp 0x{exp_cos:08x}"
         await RisingEdge(dut.clk)  # let in_ready reassert before the next transaction
 
     for a in DIRECTED_F32:
-        await check(a, 0, 0, 0)
+        await check(a, 0)
     sample = [DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))] for _ in range(4)]
     for a_op in SGNOP_OPS:
-        for sin_op in SGNOP_OPS:
-            for a in sample:
-                await check(a, a_op, sin_op, 0)
+        for a in sample:
+            await check(a, a_op)
     for _ in range(get_random_count()):
-        await check(random_zkf_f32(rng), *(int(rng.integers(0, 4)) for _ in range(3)))
+        await check(random_zkf_f32(rng), int(rng.integers(0, 4)))
 
     await drive_reset(dut)
     for _ in range(8):
@@ -99,7 +95,7 @@ async def holoso_fsincos_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fsincos(sim: str, stages: dict[str, int]) -> None:
-    operator = FSincosOperator(FloatFormat(8, 24), FSincosOptions(**stages), 0)
+    operator = FSincosOperator.build(FloatFormat(8, 24), FSincosOptions(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsincos_{stage_tag(stages)}"
     runner.build(
@@ -118,6 +114,6 @@ def test_holoso_fsincos(sim: str, stages: dict[str, int]) -> None:
         test_module="tests.hdl.test_fsincos",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )

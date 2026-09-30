@@ -489,7 +489,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OptionsCase) -> None:
         name,
     )
     entry = lir.blocks[0]
-    (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
+    (fdiv,) = [op for op in entry.ops if op.primitive.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)
     bench = (
         _ERR_BENCH3.replace("@@WEXP@@", str(fmt.wexp))
@@ -520,7 +520,7 @@ def test_cosim_threaded_arm_div0_errpc(sim: str, config: OptionsCase) -> None:
     )
     assert len(lir.blocks) == 3, "the constant arm must be threaded out"
     (merge,) = [block for block in lir.blocks if exits(block.terminator)]
-    (fdiv,) = [op for op in merge.ops if op.inst.operator.error_ports]
+    (fdiv,) = [op for op in merge.ops if op.primitive.operator.error_ports]
     err_pc = lir.block_base[merge.index] + pooled_write_word(fdiv.commit_cycle)
     bench = (
         _ERR_BENCH3.replace("@@WEXP@@", str(fmt.wexp))
@@ -562,7 +562,7 @@ def test_cosim_two_multiplier_instances_co_issue(sim: str) -> None:
     operators = dataclasses.replace(options.operator, fmul=FMulOptions(instances=2))
     options = dataclasses.replace(options, operator=operators)
     lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "fmul_pair")
-    products = [op for block in lir.blocks for op in block.ops if op.inst.operator.mnemonic == "fmul"]
+    products = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fmul"]
     assert {op.inst.name for op in products} == {"fmul_0", "fmul_1"}
     assert len({op.issue_cycle for op in products}) == 1, "the products must co-issue for the pool to bind both"
     run_cosim(sim, holoso.synthesize(kernel, options, name="fmul_pair"))
@@ -599,14 +599,14 @@ def test_cosim_a_core_reissues_across_a_seam_one_interval_later(sim: str, kernel
     lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name)
     entry = lir.blocks[0]
     by_index = {block.index: block for block in lir.blocks}
-    (first,) = [op for op in entry.ops if op.inst.operator.initiation_interval > 1]
+    (first,) = [op for op in entry.ops if op.primitive.initiation_interval > 1]
     reissues = [
         entry.term_offset + 1 + op.issue_cycle - first.issue_cycle
         for arm in successor_blocks(entry.terminator)
         for op in by_index[arm].ops
         if op.inst == first.inst
     ]
-    assert reissues == [first.inst.operator.initiation_interval], "the premise needs the reissue right at the seam"
+    assert reissues == [first.primitive.initiation_interval], "the premise needs the reissue right at the seam"
     run_cosim(sim, holoso.synthesize(kernel, options, name=name))
 
 

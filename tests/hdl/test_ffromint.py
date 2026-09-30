@@ -12,15 +12,13 @@ from cocotb_tools.runner import get_runner
 from zkf import ZkfFormat
 
 from holoso import FFromIntOptions, FloatFormat, IntFormat
-from holoso._operators import FFromIntOperator
+from holoso._operators import FFromIntOperator, HardwareOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
-    PipelineScoreboard,
     REPO_ROOT,
-    SGNOP_OPS,
     SIMULATORS,
-    apply_sgnop,
+    PipelineScoreboard,
     build_args,
     drive_reset,
     get_random_count,
@@ -42,9 +40,9 @@ class _Config:
     default_latency: bool = False
 
     @property
-    def operator(self) -> FFromIntOperator:
+    def operator(self) -> HardwareOperator:
         """The module name, its RTL parameters and its latency all come from the operator, so a drift fails here."""
-        return FFromIntOperator(
+        return FFromIntOperator.build(
             FloatFormat(self.wexp, self.wman),
             IntFormat(self.wint),
             FFromIntOptions(
@@ -112,36 +110,27 @@ async def holoso_ffromint_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, y_sgnop: int) -> None:
-        expected = apply_sgnop(fmt.from_int(wint, a).bits, y_sgnop, wfull)
+    async def step(a: int) -> None:
         dut.a.value = a & int_mask
-        dut.y_sgnop.value = y_sgnop
         dut.in_valid.value = 1
-        sb.push({"y": expected, "_desc": f"a={a} y_sgnop={y_sgnop}"})
+        sb.push({"y": fmt.from_int(wint, a).bits, "_desc": f"a={a}"})
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         sb.sample()
 
-    values = _signed_values(wman, wint)
-    for a in values:
-        await step(a, 0)
-    await sb.drain()
-
-    for y_sgnop in SGNOP_OPS:
-        for a in values:
-            await step(a, y_sgnop)
+    for a in _signed_values(wman, wint):
+        await step(a)
     await sb.drain()
 
     for _ in range(get_random_count()):
         if rng.random() < 0.2:
             await step_idle()
         else:
-            await step(int(rng.integers(-(1 << (wint - 1)), 1 << (wint - 1))), int(rng.integers(0, 4)))
+            await step(int(rng.integers(-(1 << (wint - 1)), 1 << (wint - 1))))
     await sb.drain()
 
     if latency > 1:
         dut.a.value = 1
-        dut.y_sgnop.value = 0
         dut.in_valid.value = 1
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
@@ -184,7 +173,7 @@ def test_holoso_ffromint(sim: str, config: _Config) -> None:
             "HOLOSO_WEXP": str(config.wexp),
             "HOLOSO_WMAN": str(config.wman),
             "HOLOSO_WINT": str(config.wint),
-            "HOLOSO_EXPECTED_LATENCY": str(operator.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0]),
         },
         results_xml=str(build_dir / "results.xml"),
     )

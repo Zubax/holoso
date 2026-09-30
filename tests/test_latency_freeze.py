@@ -67,7 +67,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # oscillator's two general multiplies collapse to one exponent add.
     "iq_oscillator-e8m36": (56, 56),
     "nco-e6m18": (12, 12),
-    # The sixteen pixel lanes scale, clamp and round independently on the pooled float operators while the
+    # The sixteen pixel lanes scale, clamp and round independently on the float operators while the
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
     # the actuator split.

@@ -12,7 +12,7 @@
 
 `timescale 1ns/1ps
 
-// Combinational floating-point sign conditioner operator; to be used at the inputs/outputs of arithmetic operators.
+// Combinational floating-point sign conditioner; to be used at the inputs of arithmetic operators.
 // Sign conditioning is a trivial and/xor single-bit gate enabling free computation of abs/neg.
 // Conditional inputs can be tied off to constants, in which case the corresponding circuits are optimized away.
 // Function:
@@ -28,8 +28,8 @@ module holoso_fsgnop#(parameter WFULL = 24) (input wire [WFULL-1:0] x, input wir
     assign y      = { s_out, x[WFULL-2:0] };
 endmodule
 
-// Floating point adder/subtractor with sign conditioning:  y = sgnop(sgnop(a) + sgnop(b))
-// E.g., subtraction: y=a+(-b); negative absolute difference: y=-abs(a-b), magnitude difference: y=abs(a)-abs(b), ...
+// Floating point adder/subtractor with sign conditioning:  y = sgnop(a) + sgnop(b)
+// E.g., subtraction: y=a+(-b); magnitude difference: y=abs(a)-abs(b), ...
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
 module holoso_fadd#(parameter WEXP = 6, parameter WMAN = 18,
                     parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0, parameter STAGE_ALIGN = 0,
@@ -40,7 +40,6 @@ module holoso_fadd#(parameter WEXP = 6, parameter WMAN = 18,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
     input  wire           [1:0] b_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     input  wire [WEXP+WMAN-1:0] b,
     output wire                 out_valid,
@@ -49,23 +48,18 @@ module holoso_fadd#(parameter WEXP = 6, parameter WMAN = 18,
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
     zkf_add#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT),
              .STAGE_DECODE(STAGE_DECODE), .STAGE_ALIGN(STAGE_ALIGN), .STAGE_NORMALIZE(STAGE_NORMALIZE),
              .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_add (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .b(b1),
-        .out_valid(out_valid), .y(y1)
+        .out_valid(out_valid), .y(y)
     );
 endmodule
 
-// Floating point multiplier with sign conditioning: y = sgnop(sgnop(a) * sgnop(b))
+// Floating point multiplier with sign conditioning: y = sgnop(a) * sgnop(b)
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
 // Caution: STAGE_PRODUCT is almost never a good idea unless WMAN is wider than DSP multiplier input widths.
 module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
@@ -77,7 +71,6 @@ module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLI
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
     input  wire           [1:0] b_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     input  wire [WEXP+WMAN-1:0] b,
     output wire                 out_valid,
@@ -86,23 +79,18 @@ module holoso_fmul#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLI
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
     zkf_mul#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .STAGE_INPUT(STAGE_INPUT),
              .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
              .LATENCY(LATENCY)) u_mul (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .b(b1),
-        .out_valid(out_valid), .y(y1)
+        .out_valid(out_valid), .y(y)
     );
 endmodule
 
-// Floating point fused multiply-add with sign conditioning:  y = sgnop(sgnop(a)*sgnop(b) + sgnop(c))
+// Floating point fused multiply-add with sign conditioning:  y = sgnop(a)*sgnop(b) + sgnop(c)
 // The product is kept full-width and rounded once together with c (a single rounding, unlike a multiply then add).
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
 module holoso_ffma#(parameter WEXP = 6, parameter WMAN = 18,
@@ -115,7 +103,6 @@ module holoso_ffma#(parameter WEXP = 6, parameter WMAN = 18,
     input  wire           [1:0] a_sgnop,
     input  wire           [1:0] b_sgnop,
     input  wire           [1:0] c_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     input  wire [WEXP+WMAN-1:0] b,
     input  wire [WEXP+WMAN-1:0] c,
@@ -126,21 +113,16 @@ module holoso_ffma#(parameter WEXP = 6, parameter WMAN = 18,
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
     wire [WFULL-1:0] c1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_c (.x(c), .op(c_sgnop), .y(c1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
     zkf_fma#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .STAGE_INPUT(STAGE_INPUT),
              .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_DECODE(STAGE_DECODE), .STAGE_ALIGN(STAGE_ALIGN),
              .STAGE_NORMALIZE(STAGE_NORMALIZE), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
              .LATENCY(LATENCY)) u_fma (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .b(b1), .c(c1),
-        .out_valid(out_valid), .y(y1)
+        .out_valid(out_valid), .y(y)
     );
 endmodule
 
@@ -163,10 +145,10 @@ module holoso_filog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = 
     );
 endmodule
 
-// Power-of-two scaler with sign conditioning: y = sgnop(sgnop(a) * 2^k).
+// Power-of-two scaler with sign conditioning: y = sgnop(a) * 2^k.
 // Every representable k is legal; large values collapse to infinities or zero.
 // Scaling is exact while the result remains normal and finite.
-// Zero and infinity retain their class regardless of k before output sign conditioning.
+// Zero and infinity retain their class regardless of k.
 module holoso_fmul_ilog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = WEXP + WMAN,
                           parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0,
                           parameter integer LATENCY = 0) (
@@ -174,30 +156,23 @@ module holoso_fmul_ilog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WIN
     input  wire rst,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     input  wire signed [WINT-1:0] k,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
     localparam WFULL = WEXP + WMAN;
-    localparam Y_SGNOP_LATENCY = (LATENCY == 0) ? 1 + STAGE_INPUT + STAGE_DECODE : LATENCY;
     wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
-    zkf_pipe#(.W(2), .N(Y_SGNOP_LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
     zkf_mul_ilog2#(.WEXP(WEXP), .WMAN(WMAN), .WK(WINT), .STAGE_INPUT(STAGE_INPUT),
                    .STAGE_DECODE(STAGE_DECODE), .LATENCY(LATENCY)) u_mul_ilog2 (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .k(k),
-        .out_valid(out_valid), .y(y1)
+        .out_valid(out_valid), .y(y)
     );
 endmodule
 
-// Floating point divider with sign conditioning: y = sgnop(sgnop(a) / sgnop(b))
+// Floating point divider with sign conditioning: y = sgnop(a) / sgnop(b)
 // div0 is asserted alongside out_valid when the divisor is (positive) zero; the value of y is then unspecified.
 // The quotient is rounded.
 // The inputs are sampled once at in_valid and are not required to remain stable during operation.
@@ -209,7 +184,6 @@ module holoso_fdiv#(parameter WEXP = 6, parameter WMAN = 18,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
     input  wire           [1:0] b_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     input  wire [WEXP+WMAN-1:0] b,
     output wire                 out_valid,
@@ -219,26 +193,21 @@ module holoso_fdiv#(parameter WEXP = 6, parameter WMAN = 18,
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a),  .op(a_sgnop), .y(a1));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b),  .op(b_sgnop), .y(b1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
     zkf_div#(.WEXP(WEXP), .WMAN(WMAN),
              .STAGE_INPUT(STAGE_INPUT), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
              .LATENCY(LATENCY)) u_div (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .b(b1),
-        .out_valid(out_valid), .q(y1), .div0(div0)
+        .out_valid(out_valid), .q(y), .div0(div0)
     );
 endmodule
 
-// Floating point min/max sorter with sign conditioning on inputs and outputs:
-//      min = sgnop(min(sgnop(a), sgnop(b)))
-//      max = sgnop(max(sgnop(a), sgnop(b)))
-// Useful for e.g. sort-by-absolute-value or producing sign-flipped extrema.
+// Floating point min/max sorter with sign conditioning:
+//      min = min(sgnop(a), sgnop(b))
+//      max = max(sgnop(a), sgnop(b))
+// Useful for e.g. sort-by-absolute-value.
 module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer STAGE_INPUT = 0,
                      parameter integer LATENCY = 0) (
     input  wire clk,
@@ -246,8 +215,6 @@ module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer 
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
     input  wire           [1:0] b_sgnop,
-    input  wire           [1:0] min_sgnop,
-    input  wire           [1:0] max_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     input  wire [WEXP+WMAN-1:0] b,
     output wire                 out_valid,
@@ -257,21 +224,12 @@ module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer 
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
-    wire [WFULL-1:0] min1;
-    wire [WFULL-1:0] max1;
-    wire       [3:0] out_sgnop_q;
-    wire       [1:0] min_sgnop_q = out_sgnop_q[1:0];
-    wire       [1:0] max_sgnop_q = out_sgnop_q[3:2];
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a   (.x(a),    .op(a_sgnop),   .y(a1));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b   (.x(b),    .op(b_sgnop),   .y(b1));
-    zkf_pipe#(.W(4), .N(LATENCY)) u_out_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid),
-                                                    .in({max_sgnop, min_sgnop}), .out_valid(), .out(out_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_min (.x(min1), .op(min_sgnop_q), .y(min));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_max (.x(max1), .op(max_sgnop_q), .y(max));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
     zkf_sort#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .LATENCY(LATENCY)) u_sort (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .b(b1),
-        .out_valid(out_valid), .min(min1), .max(max1)
+        .out_valid(out_valid), .min(min), .max(max)
     );
 endmodule
 
@@ -287,8 +245,6 @@ module holoso_fsincos#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTI
     input  wire rst,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] sin_sgnop,
-    input  wire           [1:0] cos_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] sin,
@@ -296,21 +252,14 @@ module holoso_fsincos#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTI
 );
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] sin1;
-    wire [WFULL-1:0] cos1;
-    wire       [3:0] out_sgnop_q;
     wire             core_in_ready;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a   (.x(a),    .op(a_sgnop),           .y(a1));
-    zkf_pipe#(.W(4), .N(LATENCY)) u_out_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid),
-                                                    .in({cos_sgnop, sin_sgnop}), .out_valid(), .out(out_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_sin (.x(sin1), .op(out_sgnop_q[1:0]), .y(sin));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_cos (.x(cos1), .op(out_sgnop_q[3:2]), .y(cos));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     zkf_sincos#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .UNROLL100(UNROLL100),
                 .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_NORMALIZE(STAGE_NORMALIZE),
                 .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_sincos (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in_ready(core_in_ready), .x(a1),
-        .out_valid(out_valid), .out_ready(1'b1), .sin(sin1), .cos(cos1), .quadrant()
+        .out_valid(out_valid), .out_ready(1'b1), .sin(sin), .cos(cos), .quadrant()
     );
 `ifdef SIMULATION
     always @(posedge clk) begin
@@ -332,8 +281,6 @@ module holoso_fatan2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIP
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
     input  wire           [1:0] b_sgnop,
-    input  wire           [1:0] theta_sgnop,
-    input  wire           [1:0] mag_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     input  wire [WEXP+WMAN-1:0] b,
     output wire                 out_valid,
@@ -343,22 +290,15 @@ module holoso_fatan2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIP
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
     wire [WFULL-1:0] b1;
-    wire [WFULL-1:0] theta1;
-    wire [WFULL-1:0] mag1;
-    wire       [3:0] out_sgnop_q;
     wire             core_in_ready;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a     (.x(a), .op(a_sgnop), .y(a1));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b     (.x(b), .op(b_sgnop), .y(b1));
-    zkf_pipe#(.W(4), .N(LATENCY)) u_out_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid),
-                                                    .in({mag_sgnop, theta_sgnop}), .out_valid(), .out(out_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_theta (.x(theta1), .op(out_sgnop_q[1:0]), .y(theta));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_mag   (.x(mag1),   .op(out_sgnop_q[3:2]), .y(mag));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
     zkf_atan2#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .UNROLL100(UNROLL100),
                .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_NORMALIZE(STAGE_NORMALIZE),
                .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_atan2 (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in_ready(core_in_ready), .y(a1), .x(b1),
-        .out_valid(out_valid), .out_ready(1'b1), .theta(theta1), .mag(mag1)
+        .out_valid(out_valid), .out_ready(1'b1), .theta(theta), .mag(mag)
     );
 `ifdef SIMULATION
     always @(posedge clk) begin
@@ -368,7 +308,7 @@ module holoso_fatan2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIP
 `endif
 endmodule
 
-// Floating point comparator with sign conditioning on inputs only:
+// Floating point comparator with sign conditioning:
 //      (a_gt_b, a_eq_b, a_lt_b) = compare(sgnop(a), sgnop(b))
 // Outputs are mutually-exclusive one-hot flags.
 module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer STAGE_INPUT = 0,
@@ -395,7 +335,7 @@ module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer S
         .out_valid(out_valid), .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b));
 endmodule
 
-// Base-two exponential with sign conditioning:  y = sgnop(2 ** sgnop(a))
+// Base-two exponential with sign conditioning:  y = 2 ** sgnop(a)
 // The input is sampled once at in_valid and is not required to remain stable during operation.
 module holoso_fexp2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
                      parameter STAGE_INPUT = 0, parameter STAGE_REDUCE = 0, parameter STAGE_PRODUCT = 0,
@@ -405,29 +345,23 @@ module holoso_fexp2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPL
     input  wire rst,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a),  .op(a_sgnop), .y(a1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     zkf_exp2#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER),
               .STAGE_INPUT(STAGE_INPUT), .STAGE_REDUCE(STAGE_REDUCE), .STAGE_PRODUCT(STAGE_PRODUCT),
               .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_exp2 (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .x(a1),
-        .out_valid(out_valid), .y(y1)
+        .out_valid(out_valid), .y(y)
     );
 endmodule
 
-// Base-two logarithm with sign conditioning:  y = sgnop(log2(sgnop(a)))
+// Base-two logarithm with sign conditioning:  y = log2(sgnop(a))
 // domain_error is asserted alongside out_valid when the conditioned operand is negative; pole when it is zero. y is
 // -inf in both cases. The input is sampled once at in_valid and is not required to remain stable during operation.
 module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
@@ -439,7 +373,6 @@ module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPL
     input  wire rst,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y,
@@ -448,12 +381,7 @@ module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPL
 );
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a),  .op(a_sgnop), .y(a1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     zkf_log2#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER),
               .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE), .STAGE_PRODUCT(STAGE_PRODUCT),
               .STAGE_PRODUCT_FINAL(STAGE_PRODUCT_FINAL), .STAGE_NORMALIZE(STAGE_NORMALIZE),
@@ -461,13 +389,13 @@ module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPL
               .LATENCY(LATENCY)) u_log2 (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .x(a1),
-        .out_valid(out_valid), .y(y1), .domain_error(domain_error), .pole(pole)
+        .out_valid(out_valid), .y(y), .domain_error(domain_error), .pole(pole)
     );
 endmodule
 
-// Square root with sign conditioning:  y = sgnop(sqrt(sgnop(a)))
+// Square root with sign conditioning:  y = sqrt(sgnop(a))
 // domain_error is asserted alongside out_valid when the conditioned operand is negative (a negative zero is not);
-// y is then -inf before output conditioning. The root is correctly rounded (nearest, ties to even).
+// y is then -inf. The root is correctly rounded (nearest, ties to even).
 // The input is sampled once at in_valid and is not required to remain stable during operation.
 module holoso_fsqrt#(parameter WEXP = 6, parameter WMAN = 18,
                      parameter STAGE_INPUT = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
@@ -476,7 +404,6 @@ module holoso_fsqrt#(parameter WEXP = 6, parameter WMAN = 18,
     input  wire rst,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y,
@@ -484,22 +411,17 @@ module holoso_fsqrt#(parameter WEXP = 6, parameter WMAN = 18,
 );
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a),  .op(a_sgnop), .y(a1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     zkf_sqrt#(.WEXP(WEXP), .WMAN(WMAN),
               .STAGE_INPUT(STAGE_INPUT), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
               .LATENCY(LATENCY)) u_sqrt (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .x(a1),
-        .out_valid(out_valid), .y(y1), .domain_error(domain_error)
+        .out_valid(out_valid), .y(y), .domain_error(domain_error)
     );
 endmodule
 
-// Floating point round-to-integer with sign conditioning:  y = sgnop(round(sgnop(a), round_mode))
+// Floating point round-to-integer with sign conditioning:  y = round(sgnop(a), round_mode)
 // round_mode selects the mode per transaction: 0 nearest-even, 1 floor, 2 ceil, 3 trunc (the zkf_round encoding).
 // The input is sampled once at in_valid and is not required to remain stable during operation.
 module holoso_fround#(parameter WEXP = 6, parameter WMAN = 18,
@@ -511,28 +433,22 @@ module holoso_fround#(parameter WEXP = 6, parameter WMAN = 18,
     input  wire                 in_valid,
     input  wire           [1:0] a_sgnop,
     input  wire           [1:0] round_mode,
-    input  wire           [1:0] y_sgnop,
     input  wire [WEXP+WMAN-1:0] a,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
-    zkf_pipe#(.W(2), .N(LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
     zkf_round#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE),
                .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_round (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a1), .round_mode(round_mode),
-        .out_valid(out_valid), .y(y1)
+        .out_valid(out_valid), .y(y)
     );
 endmodule
 
-// Signed-integer-to-float conversion with output sign conditioning.
+// Signed-integer-to-float conversion.
 // Conversion is round-to-nearest, ties-to-even; values outside the finite float range become signed infinity.
 module holoso_ffromint#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT = WEXP + WMAN,
                         parameter STAGE_INPUT = 0, parameter STAGE_NORMALIZE = 0,
@@ -542,24 +458,15 @@ module holoso_ffromint#(parameter WEXP = 6, parameter WMAN = 18, parameter WINT 
     input  wire rst,
     input  wire                 in_valid,
     input  wire signed [WINT-1:0] a,
-    input  wire           [1:0] y_sgnop,
     output wire                 out_valid,
     output wire [WEXP+WMAN-1:0] y
 );
-    localparam WFULL = WEXP + WMAN;
-    localparam Y_SGNOP_LATENCY =
-        (LATENCY == 0) ? 1 + STAGE_INPUT + STAGE_NORMALIZE + STAGE_PACK + STAGE_OUTPUT : LATENCY;
-    wire [WFULL-1:0] y1;
-    wire       [1:0] y_sgnop_q;
-    zkf_pipe#(.W(2), .N(Y_SGNOP_LATENCY)) u_y_sgnop_pipe (.clk(clk), .rst(rst), .in_valid(in_valid), .in(y_sgnop),
-                                                  .out_valid(), .out(y_sgnop_q));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_y (.x(y1), .op(y_sgnop_q), .y(y));
     zkf_from_int#(.WEXP(WEXP), .WMAN(WMAN), .WINT(WINT), .STAGE_INPUT(STAGE_INPUT),
                   .STAGE_NORMALIZE(STAGE_NORMALIZE), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
                   .LATENCY(LATENCY)) u_from_int (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .a(a),
-        .out_valid(out_valid), .y(y1)
+        .out_valid(out_valid), .y(y)
     );
 endmodule
 

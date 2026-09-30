@@ -24,7 +24,7 @@ from .._hir import (
     copy_node,
     rebuild,
 )
-from .._operators import OpConfig
+from .._operators import FAtan2Primitive, OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
 from ._signs import collapse_signs
@@ -50,10 +50,10 @@ def _pair(hir: Hir, vid: ValueId) -> Operation | None:
 def plan_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     """
     Map each two-legged FloatHypot to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's
-    magnitude port (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR
-    firing fusion it feeds; a pair is the only arity that port carries.
+    magnitude port (the two fuse into one CORDIC) rather than expand into elementary operations. Block-local, like the
+    LIR firing fusion it feeds; a pair is the only arity that port carries.
     """
-    if ops.options.fatan2 is None:
+    if not ops.serves(FAtan2Primitive):
         return {}
     plans: dict[ValueId, ValueId] = {}
     for block in hir.blocks:

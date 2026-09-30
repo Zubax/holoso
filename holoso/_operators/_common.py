@@ -1,11 +1,12 @@
 """
-The vocabulary every hardware operator family shares: the port conditioners, the abstract operator hierarchy, and the
-two operators that belong to no one family.
+The vocabulary every family shares: the port conditioners, hardware operators and their modes, the abstract primitive
+hierarchy, and the two primitives that belong to no one family.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import ClassVar, assert_never
+from typing import ClassVar, Self, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
 from .._type import BoolType, FloatType, IntType, ScalarType
@@ -107,11 +108,8 @@ def apply_conditioner(conditioner: PortConditioner, value: ScalarValue) -> Scala
 
 
 @dataclass(frozen=True, slots=True)
-class ImmediateField:
-    """
-    A per-firing immediate input port: a small microcode-driven constant on a named wrapper port, the data-carrying
-    dual of the sign sidebands. Lets one shared instance serve several per-firing modes, not one instance per mode.
-    """
+class ModePort:
+    """The wrapper input that selects each firing's mode, driven from the microcode like a sign sideband."""
 
     name: str
     width: int
@@ -128,14 +126,14 @@ def identity_conditioner(scalar_type: ScalarType) -> PortConditioner:
 
 
 def has_sign_control(scalar_type: ScalarType) -> bool:
-    """Whether a port carries a sign sideband, which only a float does; read off the conditioner so the two agree."""
+    """Whether a port of this type can carry a sign sideband; read off the conditioner so the two agree."""
     return isinstance(identity_conditioner(scalar_type), FloatSignControl)
 
 
 @dataclass(frozen=True, slots=True)
 class ScalarSignature:
     """
-    Operand- and result-port types for a concrete hardware operator. An operator may produce several results (e.g. a
+    Operand- and result-port types for a concrete primitive. A primitive may produce several results (e.g. a
     comparator's three one-hot order flags, a sorter's min and max), one per output port, each independently typed.
     """
 
@@ -147,93 +145,225 @@ class ScalarSignature:
         return len(self.operand_types)
 
 
+@dataclass(frozen=True, slots=True)
+class OperatorPort:
+    """
+    One port of an operator's RTL wrapper, by HDL name, typed as the register file sees it: a wrapper may present a
+    narrower physical port, which the connection zero-extends.
+    """
+
+    name: str
+    scalar_type: ScalarType
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorMode:
+    """
+    One mode of an operator, bound to what it decides: the code it drives on the operator's mode port (none on an
+    operator without one), the RTL parameter carrying its latency, its initiation interval, how many leading operand
+    ports it reads, and which output ports carry its results, in result order. Every observable output of the mode,
+    error ports included, is independent of the operand ports past that count, so their read and sign fields may be
+    left don't-care.
+    """
+
+    code: int | None
+    latency_param: str
+    initiation_interval: int
+    operand_count: int
+    outputs: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareOperator:
+    """
+    One kind of physical streaming module as configured, and the resource-sharing key: equal operators time-share one
+    module. It is the single home of every physical fact; the primitives that run on it hold only semantics. A float
+    operand port carries a sign sideband unless listed in `operands_without_sideband`.
+
+    A firing's busy window is its own mode's initiation interval. Requiring `L_a - L_b < II_a` for every ordered pair
+    of modes that share an output port makes the earliest next firing on that port commit strictly after its
+    predecessor, so the busy window stays the only per-instance constraint; modes on disjoint ports interleave freely.
+    The error ports are one sideband every mode drives, so they tie all modes together.
+
+    Each kind is a subclass that adds no fields, only the facts shared by every configuration of the kind and a typed
+    `build` from the machine's formats and the kind's options; it stays undecorated, since a regenerated field-based
+    hash would fail on `params`.
+    """
+
+    name: ClassVar[str]
+    mode_port: ClassVar[ModePort | None] = None
+    error_ports: ClassVar[tuple[str, ...]] = ()
+    operands_without_sideband: ClassVar[frozenset[int]] = frozenset()
+
+    params: Mapping[str, int]  # in instantiation order
+    instances: int
+    operand_ports: tuple[OperatorPort, ...]
+    output_ports: tuple[OperatorPort, ...]
+    modes: tuple[OperatorMode, ...]
+
+    def __hash__(self) -> int:
+        # Consistent with equality, since equal operators are of one kind, and cheap in the allocator's hot loops.
+        return hash(self.name)
+
+    @classmethod
+    def of_one_mode(
+        cls,
+        params: Mapping[str, int],
+        instances: int,
+        operand_ports: tuple[OperatorPort, ...],
+        output_ports: tuple[OperatorPort, ...],
+        initiation_interval: int,
+    ) -> Self:
+        """An operator with no mode port, whose one mode reads every operand port at the `LATENCY` parameter."""
+        mode = OperatorMode(None, "LATENCY", initiation_interval, len(operand_ports), tuple(range(len(output_ports))))
+        return cls(params, instances, operand_ports, output_ports, (mode,))
+
+    def __post_init__(self) -> None:
+        assert self.name and self.instances >= 1, self.name
+        assert self.output_ports and (self.mode_port is None or self.mode_port.width >= 1), self.name
+        ports = [port.name for port in (*self.operand_ports, *self.output_ports)]
+        names = [*ports, *([] if self.mode_port is None else [self.mode_port.name]), *self.error_ports]
+        assert len(set(names)) == len(names), self.name
+        assert all(port.scalar_type.is_wide for port in self.operand_ports), "an operator reads only wide operands"
+        assert all(
+            0 <= position < len(self.operand_ports) and has_sign_control(self.operand_ports[position].scalar_type)
+            for position in self.operands_without_sideband
+        ), self.name
+        assert self.modes and len({mode.code for mode in self.modes}) == len(self.modes), self.name
+        named = {mode.latency_param for mode in self.modes}
+        assert named == {name for name in self.params if name.startswith("LATENCY")}, (self.name, named)
+        for mode in self.modes:
+            if self.mode_port is None:
+                assert mode.code is None, self.name
+            else:
+                assert mode.code is not None and 0 <= mode.code < 1 << self.mode_port.width, self.name
+            assert 1 <= mode.operand_count <= len(self.operand_ports), self.name
+            assert mode.outputs and len(set(mode.outputs)) == len(mode.outputs), self.name
+            assert all(0 <= port < len(self.output_ports) for port in mode.outputs), self.name
+            # A result commits at issue + latency; latency >= 1 keeps its write opcode off the held accept-dwell word,
+            # and a busy window ending no later than the step after it cannot outlive the block that issued it.
+            assert self.latency(mode) >= 1 and 1 <= mode.initiation_interval <= self.latency(mode) + 1, self.name
+        for a in self.modes:
+            shared = [b for b in self.modes if self.error_ports or set(a.outputs) & set(b.outputs)]
+            assert all(self.latency(a) - self.latency(b) < a.initiation_interval for b in shared), self.name
+
+    @property
+    def module_name(self) -> str:
+        return f"holoso_{self.name}"
+
+    def conditions_operand(self, position: int) -> bool:
+        """Whether operand port `position` has a sign sideband."""
+        port = self.operand_ports[position]
+        return has_sign_control(port.scalar_type) and position not in self.operands_without_sideband
+
+    def mode_of(self, code: int) -> OperatorMode:
+        modes = [mode for mode in self.modes if mode.code == code]
+        assert len(modes) == 1, (self.name, code)
+        return modes[0]
+
+    @property
+    def sole_mode(self) -> OperatorMode:
+        (mode,) = self.modes
+        return mode
+
+    def latency(self, mode: OperatorMode) -> int:
+        assert mode in self.modes, (self.name, mode)
+        return self.params[mode.latency_param]
+
+    @property
+    def latencies(self) -> list[int]:
+        return [self.latency(mode) for mode in self.modes]
+
+
 @dataclass(frozen=True)
-class HardwareOperator(ABC):
+class Primitive(ABC):
     """
-    A fully specified hardware operator configuration. Frozen-dataclass equality makes an instance the resource-sharing
-    key: equal operators time-share one physical module. Commutative operators let port assignment orient each use's
-    operands to shrink the per-port read muxes.
+    What a firing computes: a signature, bit-exact reference semantics, and a rendering. Commutative primitives let
+    port assignment orient each use's operands to shrink the per-port read muxes.
     """
-
-    mnemonic: ClassVar[str]
-
-    # Per-firing immediate input ports (empty for most operators; `fround` declares its 2-bit `round_mode`). The
-    # value rides the MIR operation, not the operator identity, so one shared instance serves every mode.
-    immediate_ports: ClassVar[list[ImmediateField]] = []
 
     # Commutation symmetry: swapping the two operands permutes the output ports through this map (`new_port =
-    # swap_output_permutation[old_port]`); `None` means non-commutative. Single-output commutative operators use
+    # swap_output_permutation[old_port]`); `None` means non-commutative. Single-output commutative primitives use
     # the identity `(0,)`; the comparator's order flags transpose (`gt` and `lt` exchange, `eq` is fixed).
     # The permutation must preserve each port's type, so a swapped firing's taps stay in their banks.
     swap_output_permutation: ClassVar[tuple[int, ...] | None] = None
 
-    # Operand positions that bind NO conditioner sideband, their port being fixed to the identity: the operator
-    # cannot observe the transform, so offering one would buy a second firing for one answer.
+    # Float operand positions whose sign the primitive cannot observe: their conditioner is fixed to the identity, since
+    # offering one would buy a second firing for one answer.
     unconditioned_operands: ClassVar[frozenset[int]] = frozenset()
 
-    def conditions_operand(self, position: int) -> bool:
+    # One label per result port of a multi-output primitive whose taps render as `label(operands)`.
+    output_labels: ClassVar[tuple[str, ...]] = ()
+
+    def __post_init__(self) -> None:
         """
-        Whether this operand port binds a conditioner sideband. A RESULT port's is decided by its type alone -- a
-        conditioned result is always observable -- so only the operand side admits a per-operator answer.
+        The declarations assert what the primitive reads, which nothing can derive, so these rules close the ways they
+        can be wrong.
         """
-        if position in self.unconditioned_operands:
-            return False
-        return has_sign_control(self.signature.operand_types[position])
+        signature, name = self.signature, type(self).__name__
+        declined = self.unconditioned_operands
+        # Declining a sideband the port never had would say nothing; only a float port carries one to decline.
+        assert all(0 <= position < signature.arity for position in declined), name
+        assert all(has_sign_control(signature.operand_types[position]) for position in declined), name
+        permutation = self.swap_output_permutation
+        if permutation is not None:
+            # A flip exchanges the two operands together with their conditioners, so the two ports must be
+            # interchangeable, and a declaration covering one of them would migrate onto the other.
+            assert signature.arity == 2 and signature.operand_types[0] == signature.operand_types[1], name
+            assert declined in (frozenset(), frozenset({0, 1})), name
+            result_types = signature.result_types
+            assert sorted(permutation) == list(range(len(result_types))), name
+            assert all(result_types[permutation[p]] == result_types[p] for p in range(len(permutation))), name
 
     @property
     @abstractmethod
     def latency(self) -> int: ...
 
-    @property
-    def initiation_interval(self) -> int:
-        """
-        Minimum cycles between successive issues on one physical instance (1 = fully pipelined) -- the per-operator
-        sense of II. Distinct from the module-level `Lir.min_initiation_interval`, the whole-transaction cost, which is
-        this project's deliberate usage (see DESIGN.md, Direction).
-        """
-        return 1
-
     @abstractmethod
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str: ...
+    def render(self, *operands: str) -> str: ...
 
     @property
     def is_commutative(self) -> bool:
         return self.swap_output_permutation is not None
 
-    def render_output(
-        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
-    ) -> str:
+    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
         """
-        Human-friendly form of one tapped output port. The default covers single-output operators only; a
-        multi-output operator must override it (silently rendering every tap as the whole-operator expression would
-        mislabel the report). `immediates` is forwarded so a mode-bearing operator renders the firing's actual mode.
+        Human-friendly form of one tapped result, `inversion` present exactly for a boolean one. A multi-output
+        primitive declares its `output_labels` or overrides this (silently rendering every tap as the whole-primitive
+        expression would mislabel the report).
         """
-        assert len(self.signature.result_types) == 1 and port == 0, f"{self.mnemonic} must override render_output"
-        return conditioner.decorate(self.render(*operands, immediates=immediates))
+        if self.output_labels:
+            text = f"{self.output_labels[result]}({', '.join(operands)})"
+        else:
+            assert (
+                len(self.signature.result_types) == 1 and result == 0
+            ), f"{type(self).__name__} must label its outputs"
+            text = self.render(*operands)
+        return text if inversion is None else inversion.decorate(text)
 
     @property
     @abstractmethod
     def signature(self) -> ScalarSignature: ...
 
     def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[ScalarValue, ...]:
-        """Driven by the signature's per-port type, so a cross-family operator needs no check of its own."""
+        """Driven by the signature's per-port type, so a cross-family primitive needs no check of its own."""
         for index, (operand, ty) in enumerate(zip(operands, self.signature.operand_types, strict=True)):
             assert (
                 (isinstance(ty, FloatType) and isinstance(operand, FloatValue) and operand.fmt == ty.fmt)
                 or (isinstance(ty, IntType) and isinstance(operand, IntValue) and operand.fmt == ty.fmt)
                 or (isinstance(ty, BoolType) and isinstance(operand, bool))
-            ), f"{self.mnemonic} operand {index} must be {ty}, got {operand!r}"
+            ), f"{type(self).__name__} operand {index} must be {ty}, got {operand!r}"
         return operands
 
     @abstractmethod
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[ScalarValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[ScalarValue, ...]:
         """Bit-exact reference semantics: one value per output port, aligned with `signature.result_types`."""
 
 
 @dataclass(frozen=True, slots=True)
-class PooledOperatorOptions:
+class BaseOperatorOptions:
     """
-    The knobs of one pooled operator. Every pooled operator subclasses this.
+    The knobs of one kind of operator. Every kind's options subclass this.
     """
 
     instances: int = 1
@@ -244,41 +374,69 @@ class PooledOperatorOptions:
             raise ValueError(f"instances must be >= 1, got {self.instances}")
 
 
+@dataclass(frozen=True, slots=True)
+class PooledPrimitive(Primitive, ABC):
+    """
+    A primitive that runs on an operator, in the one mode it selects there: the primitive is the semantics, the
+    operator the hardware, and everything physical -- ports, parameters, timing -- is read off the operator, never
+    redeclared. Operand position i is the operator's operand port i, a mode reading a prefix of them; result q leaves on
+    the q-th output port its mode drives. The scheduler pools and contends firings over the operator's instances.
+    """
+
+    operator: HardwareOperator
+
+    def __post_init__(self) -> None:
+        # An error sideband is an observable output that "unchanged across every result port" does not cover, so a
+        # primitive raising one may decline no operand's sign.
+        name = type(self).__name__
+        assert not (self.operator.error_ports and self.unconditioned_operands), name
+        # A port without a sideband can only be driven by the identity, which lowering guarantees for declined operands.
+        assert all(
+            self.operator.conditions_operand(position) or position in self.unconditioned_operands
+            for position in range(self.mode.operand_count)
+            if has_sign_control(self.operator.operand_ports[position].scalar_type)
+        ), name
+        super().__post_init__()
+
+    @property
+    def mode(self) -> OperatorMode:
+        """A primitive on an operator of several modes selects its own through that operator's typed accessor."""
+        return self.operator.sole_mode
+
+    @property
+    def latency(self) -> int:
+        return self.operator.latency(self.mode)
+
+    @property
+    def initiation_interval(self) -> int:
+        """
+        Minimum cycles until the instance accepts its next firing, of any mode (1 = fully pipelined) -- the per-firing
+        sense of II. Distinct from the module-level `Lir.min_initiation_interval`, the whole-transaction cost, which is
+        this project's deliberate usage (see DESIGN.md, Direction).
+        """
+        return self.mode.initiation_interval
+
+    @property
+    def signature(self) -> ScalarSignature:
+        operands = self.operator.operand_ports[: self.mode.operand_count]
+        outputs = [self.operator.output_ports[port] for port in self.mode.outputs]
+        return ScalarSignature(
+            tuple(port.scalar_type for port in operands), tuple(port.scalar_type for port in outputs)
+        )
+
+    def physical_port(self, result: int) -> int:
+        """The operator output port carrying the `result`-th result, which a mode need not start at port 0."""
+        return self.mode.outputs[result]
+
+
 @dataclass(frozen=True)
-class PooledHardwareOperator(HardwareOperator, ABC):
+class InlinePrimitive(Primitive, ABC):
     """
-    An operator backed by a physical streaming module instance (in_valid/out_valid, per-float-port sign conditioners).
-    The scheduler pools and contends equal operators over shared instances; every port is microcode-driven in the
-    generated RTL (a per-operand read opcode selects each operand, a per-register write opcode installs each result).
-    """
-
-    Options: ClassVar[type[PooledOperatorOptions]]
-
-    @property
-    @abstractmethod
-    def opt(self) -> PooledOperatorOptions:
-        """This operator's knobs. Each subclass satisfies it with a field declared `opt: Options = field()`."""
-
-    error_ports: ClassVar[list[str]] = []
-    operand_hdl_ports: ClassVar[list[str]]  # module port name per operand, aligned with the arity
-    output_hdl_ports: ClassVar[list[str]]  # module port name per output, aligned with result_types
-
-    @property
-    def module_name(self) -> str:
-        return f"holoso_{self.mnemonic}"
-
-    @property
-    @abstractmethod
-    def params(self) -> dict[str, int]:
-        """The complete RTL `#(.NAME(value))` parameter set (WEXP/WMAN, LATENCY, and every operator knob)."""
-
-
-@dataclass(frozen=True)
-class InlineHardwareOperator(HardwareOperator, ABC):
-    """
-    A pure combinational operator folded into a register write: each firing is one PC-gated statement that reads its
+    A pure combinational primitive folded into a register write: each firing is one PC-gated statement that reads its
     operands and writes its single result on one step. No module, no pooling, no contention.
     """
+
+    mnemonic: ClassVar[str]
 
     @property
     def latency(self) -> int:
@@ -286,7 +444,7 @@ class InlineHardwareOperator(HardwareOperator, ABC):
         # landing helper, not a pipeline stage.
         return 0
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         return self.verilog_expr(*operands).replace(" ", "")
 
     @abstractmethod
@@ -294,15 +452,12 @@ class InlineHardwareOperator(HardwareOperator, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class ComparatorOperator(PooledHardwareOperator, ABC):
+class ComparatorPrimitive(PooledPrimitive, ABC):
     """
     A pooled comparator over one scalar family, producing the three mutually-exclusive one-hot order flags. Every
     family Holoso compares is totally ordered, so each relation is one flag or its complement; one instance therefore
     serves them all, and several relations over the same operands fuse into one firing.
     """
-
-    operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
-    output_hdl_ports: ClassVar[list[str]] = ["a_gt_b", "a_eq_b", "a_lt_b"]
 
     # The single place the relation/flag mapping is defined; consumers go through `tap_of`.
     _TAP_OF_RELATION: ClassVar[dict[Relation, tuple[int, BoolInversion]]] = {
@@ -320,33 +475,31 @@ class ComparatorOperator(PooledHardwareOperator, ABC):
     # which lets port assignment orient the operands freely.
     swap_output_permutation: ClassVar[tuple[int, ...]] = (2, 1, 0)
 
-    @property
-    @abstractmethod
-    def scalar_type(self) -> ScalarType: ...
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 2, (BoolType(), BoolType(), BoolType()))
-
     @classmethod
     def tap_of(cls, relation: Relation) -> tuple[int, BoolInversion]:
         return cls._TAP_OF_RELATION[relation]
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}⇔{b}"
 
-    def render_output(
-        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
-    ) -> str:
+    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
         """Recovers the tapped flag as the relation it implements, e.g. `a≥b`."""
-        assert isinstance(conditioner, BoolInversion)
+        assert inversion is not None
         a, b = operands
-        return f"{a}{self._RELATION_OF_TAP[(port, conditioner)].value}{b}"
+        return f"{a}{self._RELATION_OF_TAP[(result, inversion)].value}{b}"
+
+
+def comparator_ports(scalar_type: ScalarType) -> tuple[tuple[OperatorPort, ...], tuple[OperatorPort, ...]]:
+    """The operand and output ports every comparator wrapper shares: the order flags of `a` against `b`."""
+    return (
+        (OperatorPort("a", scalar_type), OperatorPort("b", scalar_type)),
+        tuple(OperatorPort(name, BoolType()) for name in ("a_gt_b", "a_eq_b", "a_lt_b")),
+    )
 
 
 @dataclass(frozen=True, slots=True)
-class SelectOperator(InlineHardwareOperator):
+class SelectPrimitive(InlinePrimitive):
     """
     A data mux `cond ? a : b` over same-typed values, folded into the destination register write as a ternary over
     the operand nets. Produced by HIR if-conversion and by selected MIR composite lowerings.
@@ -362,7 +515,7 @@ class SelectOperator(InlineHardwareOperator):
         ty = self.scalar_type
         return ScalarSignature((BoolType(), ty, ty), (ty,))
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         cond, a, b = operands
         return f"{cond}?{a}:{b}"
 
@@ -370,7 +523,7 @@ class SelectOperator(InlineHardwareOperator):
         cond, a, b = operand_nets
         return f"(({cond}) ? ({a}) : ({b}))"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[ScalarValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[ScalarValue, ...]:
         cond, a, b = self._validated_operands(operands)
         assert isinstance(cond, bool)
         return (a if cond else b,)

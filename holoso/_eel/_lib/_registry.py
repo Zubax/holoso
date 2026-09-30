@@ -259,7 +259,7 @@ def _lowering_of(stub: object) -> ScalarLowering:
 
 
 def _stub(lowering: ScalarLowering) -> None:
-    """A stub spells its own lowering alone: a composite calls the primitive it needs, not a meaning it lowers."""
+    """A stub spells its own lowering alone: a composite calls the intrinsic it needs, not a meaning it lowers."""
     _register(Spelling(ScalarMeaning((lowering,))), (lowering.stub,))
 
 

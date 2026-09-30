@@ -26,6 +26,7 @@ from ..._lir import (
     OpWriteSource,
     RegRef,
     WideOperand,
+    WideStateSlot,
     handshake_arms,
     read_sources_per_port,
     steering,
@@ -33,7 +34,7 @@ from ..._lir import (
     write_events,
     write_sources_per_register,
 )
-from ..._operators import PooledHardwareOperator
+from ..._operators import HardwareOperator, SelectPrimitive
 from ..._legal import output_header
 from ..verilog import VerilogOutput
 from ._schedule import render_schedule
@@ -89,17 +90,15 @@ def generate(lir: Lir, verilog_output: VerilogOutput) -> HtmlOutput:
 def _metrics(lir: Lir) -> str:
     fmt = lir.float_format
     arms = steering(lir)
-    read_ports = sum(inst.operator.signature.arity for inst in lir.instances)
+    read_ports = sum(1 for sources in read_sources_per_port(lir).values() if sources)
     write_lanes = {
-        (op.inst, write.port)
-        for block in lir.blocks
-        for op in block.ops
-        for write in op.writes
-        if isinstance(write.dst, RegRef)
+        (event.source.inst, event.source.port)
+        for event in write_events(lir)
+        if isinstance(event.source, OpWriteSource) and isinstance(event.dst, RegRef)
     }
     op_counts: dict[str, int] = {}
     for inst in lir.instances:
-        op_counts[inst.operator.mnemonic] = op_counts.get(inst.operator.mnemonic, 0) + 1
+        op_counts[inst.operator.name] = op_counts.get(inst.operator.name, 0) + 1
     rows: list[tuple[str, object]] = [
         ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
         ("integer format", str(lir.int_format)),
@@ -108,6 +107,7 @@ def _metrics(lir: Lir) -> str:
         ("wide regfile R/W ports", f"{read_ports} / {len(write_lanes)}"),
         ("steering mux arms", f"{arms.read} read + {arms.wide_write} write = {arms.read + arms.wide_write}"),
         ("bool write select arms", arms.bool_write),
+        ("inline select muxes", sum(_select_muxes(lir).values())),
         ("II min [cycles]", lir.min_initiation_interval),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
@@ -116,16 +116,16 @@ def _metrics(lir: Lir) -> str:
 
 def _operator_params(lir: Lir) -> str:
     """Most parameters (the float format above all) are shared, so the matrix is far shorter than one row per pair."""
-    operators: dict[PooledHardwareOperator, None] = {}  # distinct operators present, in instance order
+    operators: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
     for inst in lir.instances:
         operators.setdefault(inst.operator, None)
-    names = sorted({name for op in operators for name in op.params})
+    names = sorted({name for operator in operators for name in operator.params})
     if not names:
         return "<h2>Operator Params</h2><table class='metrics cfg'><tr><td>(defaults)</td></tr></table>"
-    head = "".join(f"<th class='v'>{_esc(op.mnemonic)}</th>" for op in operators)
+    head = "".join(f"<th class='v'>{_esc(operator.name)}</th>" for operator in operators)
     rows = "".join(
         f"<tr><th>{_esc(name)}</th>"
-        + "".join(f"<td class='v'>{op.params.get(name, '')}</td>" for op in operators)
+        + "".join(f"<td class='v'>{operator.params.get(name, '')}</td>" for operator in operators)
         + "</tr>"
         for name in names
     )
@@ -203,13 +203,11 @@ def _constants(lir: Lir) -> str:
 @dataclass(frozen=True, slots=True)
 class _MuxTable:
     title: str
-    read_label: str
     labels: list[str]
-    reads: list[int]
-    writes: list[int]
+    rows: list[tuple[str, list[int]]]
 
     def __post_init__(self) -> None:
-        assert len(self.labels) == len(self.reads) == len(self.writes)
+        assert all(len(values) == len(self.labels) for _, values in self.rows)
 
     @property
     def nreg(self) -> int:
@@ -222,10 +220,7 @@ class _MuxTable:
             for index, label in enumerate(self.labels)
         )
         head += "<td class='rl'>total</td><td class='rl'>mean</td><td class='rl'>max</td>"
-        rows = "".join(
-            _mux_row(label, values, self.nreg)
-            for label, values in ((self.read_label, self.reads), ("write mux", self.writes))
-        )
+        rows = "".join(_mux_row(label, values, self.nreg) for label, values in self.rows)
         return (
             f"<h3>{_esc(self.title)}</h3><div class='hscroll'><table class='muxtab'>"
             f"<tr><th>register</th>{head}</tr>{rows}</table></div>"
@@ -254,17 +249,17 @@ def _read_muxes_per_register(lir: Lir) -> dict[RegRef, int]:
     return muxes
 
 
-def _bool_read_fanin(lir: Lir) -> dict[BoolRegRef, int]:
+def _direct_reads(lir: Lir) -> dict[RegRef | BoolRegRef, int]:
     """
-    No read mux selects a boolean register -- the inline expressions, the moves, the branch conditions, the boundary
-    state installs and the output taps all read the bank directly -- so what that bank costs is fan-in: the loads on
-    each register's net, one per deduplicated write-select arm reading it plus one per direct reader.
+    The loads on each register's net besides the operand read muxes, which no boolean register has: one per
+    deduplicated write-select arm reading it (an inline expression's operand or a move) plus one per boundary state
+    install, branch condition and output wire.
     """
-    fanin: dict[BoolRegRef, int] = {}
+    reads: dict[RegRef | BoolRegRef, int] = {}
 
     def tally(operand: WideOperand | BoolOperand) -> None:
-        if isinstance(operand.source, BoolRegRef):
-            fanin[operand.source] = fanin.get(operand.source, 0) + 1
+        if isinstance(operand.source, RegRef | BoolRegRef):
+            reads[operand.source] = reads.get(operand.source, 0) + 1
 
     for sources in write_sources_per_register(write_events(lir)).values():
         for source in sources:
@@ -279,36 +274,52 @@ def _bool_read_fanin(lir: Lir) -> dict[BoolRegRef, int]:
                 case _:
                     assert_never(source)
     for arm in handshake_arms(lir).values():
-        if isinstance(arm, BoolStateSlot):
+        if isinstance(arm, WideStateSlot | BoolStateSlot):
             tally(arm.live_out)
     for block in lir.blocks:
         if isinstance(block.terminator, Branch):
-            fanin[block.terminator.cond] = fanin.get(block.terminator.cond, 0) + 1
-    for wire in lir.bool_outputs:
+            reads[block.terminator.cond] = reads.get(block.terminator.cond, 0) + 1
+    for wire in lir.outputs:
         tally(wire.tap)
-    return fanin
+    return reads
+
+
+def _select_muxes(lir: Lir) -> dict[RegRef | BoolRegRef, int]:
+    """Per register, the inline selects among its write-select arms, each a 2:1 multiplexer in front of that select."""
+    muxes: dict[RegRef | BoolRegRef, int] = {}
+    for dst, sources in write_sources_per_register(write_events(lir)).items():
+        for source in sources:
+            if isinstance(source, InlineWriteSource) and isinstance(source.primitive, SelectPrimitive):
+                muxes[dst] = muxes.get(dst, 0) + 1
+    return muxes
 
 
 def _register_muxes(lir: Lir) -> str:
     read_muxes = _read_muxes_per_register(lir)
-    fanin = _bool_read_fanin(lir)
+    direct = _direct_reads(lir)
+    selects = _select_muxes(lir)
     writes = write_arms(lir)
     wide = [RegRef(index) for index in range(lir.regfile.nreg)]
     boolean = [BoolRegRef(index) for index in range(lir.bool_regfile.nreg)]
     tables = [
         _MuxTable(
             title="Wide bank reach",
-            read_label="read mux",
             labels=[reg.stable_label for reg in wide],
-            reads=[read_muxes.get(reg, 0) for reg in wide],
-            writes=[writes.get(reg, 0) for reg in wide],
+            rows=[
+                ("read mux", [read_muxes.get(reg, 0) for reg in wide]),
+                ("direct reads", [direct.get(reg, 0) for reg in wide]),
+                ("select mux", [selects.get(reg, 0) for reg in wide]),
+                ("write mux", [writes.get(reg, 0) for reg in wide]),
+            ],
         ),
         _MuxTable(
             title="Boolean bank reach",
-            read_label="read fan-in",
             labels=[reg.stable_label for reg in boolean],
-            reads=[fanin.get(reg, 0) for reg in boolean],
-            writes=[writes.get(reg, 0) for reg in boolean],
+            rows=[
+                ("direct reads", [direct.get(reg, 0) for reg in boolean]),
+                ("select mux", [selects.get(reg, 0) for reg in boolean]),
+                ("write mux", [writes.get(reg, 0) for reg in boolean]),
+            ],
         ),
     ]
     rendered = "".join(table.render() for table in tables if table.nreg)

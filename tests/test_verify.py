@@ -1330,7 +1330,7 @@ def test_inplace_slot_gap_tenant_is_dwell_safe() -> None:
 
 def test_inplace_float_conditional_accumulator() -> None:
     class FloatCondAccum:
-        # A conditional float accumulator: the live-out is the if-converted SelectOperator (an inline op) whose "false"
+        # A conditional float accumulator: the live-out is the if-converted SelectPrimitive (an inline op) whose "false"
         # arm is the live-in, so it commits in place into the slot register -- no scratch register, no boundary copy.
         def __init__(self) -> None:
             self._acc = 0.0

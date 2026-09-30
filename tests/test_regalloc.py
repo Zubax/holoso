@@ -49,7 +49,8 @@ from holoso._lir._regalloc import (
     color,
 )
 from holoso._mir import lower as lower_to_mir
-from holoso._operators import FAddOperator, FCmpOperator, FDivOperator, FMulOperator, SelectOperator
+from holoso._operators import FAddPrimitive, FCmpPrimitive, FDivPrimitive, FMulPrimitive, SelectPrimitive
+from holoso._operators import FAddOperator, FDivOperator, FMulOperator
 from holoso._operators import BoolInversion, FloatSignControl
 from holoso._type import FloatType
 from holoso._value import coerce_scalar
@@ -72,10 +73,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from cordic_sincos import CordicSinCos  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
-_FADD = FAddOperator(_FMT, FAddOptions())
-_FMUL = FMulOperator(_FMT, FMulOptions(), 0)
-_FDIV = FDivOperator(_FMT, FDivOptions())
-_SELECT = SelectOperator(FloatType(_FMT))
+_FADD = FAddPrimitive(FAddOperator.build(_FMT, FAddOptions()))
+_FMUL = FMulPrimitive(FMulOperator.build(_FMT, FMulOptions(), 0))
+_FDIV = FDivPrimitive(FDivOperator.build(_FMT, FDivOptions()))
+_SELECT = SelectPrimitive(FloatType(_FMT))
 _SIGN = FloatSignControl()
 
 
@@ -88,16 +89,16 @@ def _select_writer(rng: random.Random, values: list[int]) -> InlineWriter:
         return WideOperandTemplate(rng.choice(values), _SIGN)
 
     condition = BoolOperand(BoolRegRef(rng.randrange(2)), BoolInversion(rng.random() < 0.5))
-    return InlineWriter(_SELECT, (condition, arm(), arm()), _SIGN)
+    return InlineWriter(_SELECT, (condition, arm(), arm()))
 
 
 def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
     """
-    A random bank: three pinned inputs, movable values under a sparse interference graph, firings of the three
-    operator kinds on two instances (each class realized twice, none co-issued) reading values
-    or pool words, each value written by one lane (or by two, as a coalesced class is), inline results on some of
-    the values no firing produces (repeating a template on several values, so their keys collide once those values
-    share a register), and residual arm moves, some moving a value into itself.
+    A random bank: three pinned inputs, movable values under a sparse interference graph, firings of three primitives,
+    each on its own operator realized twice (none co-issued), reading values or pool words, each value written by one
+    lane (or by two, as a coalesced class is), inline results on some of the values no firing produces (repeating a
+    template on several values, so their keys collide once those values share a register), and residual arm moves, some
+    moving a value into itself.
     """
     values = list(range(24))
     inputs, movable = values[:3], values[3:]
@@ -110,7 +111,7 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
     firings: list[Firing] = []
     written: set[int] = set()
     for i in range(18):
-        operator = rng.choice([_FADD, _FMUL, _FDIV])
+        primitive = rng.choice([_FADD, _FMUL, _FDIV])
         reads = [rng.choice(values) if rng.random() < 0.8 else WideConstRef(rng.randrange(3)) for _ in range(2)]
         unwritten = [v for v in movable if v not in written]
         target = rng.choice(unwritten) if unwritten and rng.random() < 0.85 else rng.choice(movable)
@@ -118,7 +119,7 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
         firings.append(
             Firing(
                 leader=1000 + i,
-                operator=operator,
+                primitive=primitive,
                 block=0,
                 issue=i,
                 seed_instance=rng.randrange(2),
@@ -143,7 +144,7 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
         reserved=frozenset(),
         fresh_start=len(inputs),
         firings=firings,
-        instances={_FADD: 2, _FMUL: 2, _FDIV: 2},
+        instances={_FADD.operator: 2, _FMUL.operator: 2, _FDIV.operator: 2},
         tuning=RegallocTuning(effort=effort, register_price=2.0),
     )
 
@@ -154,11 +155,11 @@ def _seed_state(problem: ColoringProblem) -> _State:
 
 
 def _flippable(problem: ColoringProblem) -> list[int]:
-    return [i for i, firing in enumerate(problem.firings) if firing.operator.is_commutative]
+    return [i for i, firing in enumerate(problem.firings) if firing.primitive.is_commutative]
 
 
 def _bindable(problem: ColoringProblem) -> list[int]:
-    return [i for i, firing in enumerate(problem.firings) if problem.instances[firing.operator] > 1]
+    return [i for i, firing in enumerate(problem.firings) if problem.instances[firing.primitive.operator] > 1]
 
 
 def test_incremental_objective_matches_a_full_recomputation() -> None:
@@ -187,8 +188,8 @@ def test_incremental_objective_matches_a_full_recomputation() -> None:
             state.move_instance(i, target)
         elif draw < 0.4:
             i, j = rng.sample(bindable, 2)
-            same_class = problem.firings[i].operator == problem.firings[j].operator
-            if not same_class or state.instance[i] == state.instance[j] or not state.swap_instances(i, j):
+            same_operator = problem.firings[i].primitive.operator == problem.firings[j].primitive.operator
+            if not same_operator or state.instance[i] == state.instance[j] or not state.swap_instances(i, j):
                 continue
             assert state.swap_instances(i, j) and state.cost == before
             assert state.swap_instances(i, j)
@@ -238,7 +239,7 @@ def test_the_descent_leaves_no_improving_move(effort: int) -> None:
         for j in bindable:
             if (
                 i < j
-                and problem.firings[i].operator == problem.firings[j].operator
+                and problem.firings[i].primitive.operator == problem.firings[j].primitive.operator
                 and state.instance[i] != state.instance[j]
             ):
                 if state.swap_instances(i, j):
@@ -266,7 +267,7 @@ def test_two_singly_written_values_share_a_register_at_the_configured_price() ->
                 101, _FMUL, block=0, issue=1, seed_instance=0, reads=[WideConstRef(0), WideConstRef(1)], writes=[(0, 1)]
             ),
         ],
-        instances={_FDIV: 1, _FMUL: 1},
+        instances={_FDIV.operator: 1, _FMUL.operator: 1},
         tuning=RegallocTuning(effort=0, register_price=2.0),
     )
     coloring = color(problem)
@@ -453,7 +454,7 @@ def test_a_swapped_comparator_keeps_every_relation() -> None:
     lir = build_lir(
         lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(fmt)), "relations", FROZEN_TUNING
     )
-    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.inst.operator, FCmpOperator)]
+    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive)]
     assert len(firings) == 3, "the premise needs the mirrored comparison as its own firing"
     assert len({tuple(operand.source for operand in op.operands) for op in firings}) == 1, "one firing must be swapped"
     model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "relations", fmt, FROZEN_TUNING)
@@ -490,8 +491,8 @@ def _k_saturated(
     return p + c * g, q + e * h, r + a * i
 
 
-def _class_read_arms(lir: Lir, mnemonic: str) -> int:
-    return sum(max(0, n - 1) for (inst, _), n in read_arms(lir).items() if inst.operator.mnemonic == mnemonic)
+def _class_read_arms(lir: Lir, name: str) -> int:
+    return sum(max(0, n - 1) for (inst, _), n in read_arms(lir).items() if inst.operator.name == name)
 
 
 # Kernels where the scheduler's first-free binding is provably wrong, with the multiplier read arms the frozen tuning
@@ -509,7 +510,7 @@ def test_rebinding_beats_the_first_free_seed(
     lir = build_lir(
         lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name, FROZEN_TUNING
     )
-    assert {inst.name for inst in lir.instances if inst.operator.mnemonic == "fmul"} == {
+    assert {inst.name for inst in lir.instances if inst.operator.name == "fmul"} == {
         f"fmul_{i}" for i in range(instances)
     }
     assert _class_read_arms(lir, "fmul") == expected

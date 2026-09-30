@@ -4,17 +4,17 @@ from dataclasses import replace
 from typing import assert_never
 
 from .._mir import Mir, MirBlock, MirBranch, MirRet, predecessors, reverse_postorder, successors
-from .._operators import HardwareOperator, PooledHardwareOperator
+from .._operators import HardwareOperator, PooledPrimitive, Primitive
 from .._util import ValueId
 from ._ir import *
-from ._schedule import Schedule, resolve_pool, schedule_ops
+from ._schedule import Schedule, schedule_ops
 from ._build_base import BlockOffsets, BlockSchedules
 from ._mir_facts import mir_operation, succ_map
 
 _logger = logging.getLogger(__name__)
 
 
-def _control_word(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) -> tuple[int, HardwareOperator]:
+def _control_word(mir: Mir, sched: Schedule, vid: ValueId, fetch_lag: int) -> tuple[int, Primitive]:
     """
     For a scheduled value, the last in-block control WORD in its block-local frame: the latest fetch step the op
     still drives -- a pooled lane's write opcode on its commit step, or an inline op's combinational fire step one
@@ -22,11 +22,11 @@ def _control_word(mir: Mir, vid: ValueId, issue: int, fetch_lag: int) -> tuple[i
     overlap may place the terminator between the two, the word staying in the block and the landing spilling into
     the single-predecessor successor frame.
     """
-    operator = mir_operation(mir, vid).operator
-    commit = issue + operator.latency
-    if isinstance(operator, PooledHardwareOperator):
-        return pooled_write_word(commit), operator
-    return inline_fire_cycle(commit, fetch_lag), operator
+    primitive = mir_operation(mir, vid).primitive
+    commit = sched.commit_cycle(vid)
+    if isinstance(primitive, PooledPrimitive):
+        return pooled_write_word(commit), primitive
+    return inline_fire_cycle(commit, fetch_lag), primitive
 
 
 def _terminator_floor(mir: Mir, bid: int) -> int:
@@ -53,10 +53,10 @@ def _issue_side_envelope(
     """
     floor = _terminator_floor(mir, block.id)
     for vid, issue in sched.issue_cycle.items():
-        word, operator = _control_word(mir, vid, issue, fetch_lag)
+        word, primitive = _control_word(mir, sched, vid, fetch_lag)
         # Without the operand-read floor the op would fire past the shrunk terminator and never execute.
-        floor = max(floor, word, operand_read_cycle(operator, issue, fetch_lag))
-        if isinstance(operator, PooledHardwareOperator) and operator.error_ports:
+        floor = max(floor, word, operand_read_cycle(primitive, issue, fetch_lag))
+        if isinstance(primitive, PooledPrimitive) and primitive.operator.error_ports:
             # The err_pc diagnostic latches `pc - fetch_lag` when this op's write-enable executes, which is
             # fetch_lag fetch steps after its write word. If the terminator redirected by then, err_pc would
             # capture the successor frame's PC instead of this op's step. Keep the latch inside the block: the
@@ -95,7 +95,6 @@ def schedule_blocks(mir: Mir, fetch_lag: int) -> BlockSchedules:
     set decides no schedule. Back-edge targets and merge blocks are multi-predecessor, so no overlap crosses them:
     the forward-DAG carry converges in this single pass with no fixpoint.
     """
-    pool = resolve_pool(mir.nodes)
     succ = succ_map(mir)
     preds = {bid: len(sources) for bid, sources in predecessors(mir).items()}
     blocks_by_id = {block.id: block for block in mir.blocks}
@@ -111,7 +110,6 @@ def schedule_blocks(mir: Mir, fetch_lag: int) -> BlockSchedules:
         block_inflight[bid] = livein_landing
         sched = schedule_ops(
             mir.nodes,
-            pool,
             schedulable=set(block.operations),
             fetch_lag=fetch_lag,
             livein_landing=livein_landing,
@@ -134,14 +132,13 @@ def schedule_blocks(mir: Mir, fetch_lag: int) -> BlockSchedules:
                 landing[vid] = max(landing.get(vid, 0), _spill_local_cycle(bid, land, term_offset))
         for target in targets:
             carry[target] = landing
-    instances: dict[PooledHardwareOperator, int] = {}
+    instances: dict[HardwareOperator, int] = {}
     for sched in block_sched.values():
         for inst in sched.inst_of.values():
             instances[inst.operator] = max(instances.get(inst.operator, 0), inst.index + 1)
     _logger.info(
         "Operator instances used: %s",
-        ", ".join(f"{operator.mnemonic} {count}/{pool[type(operator)]}" for operator, count in instances.items())
-        or "none",
+        ", ".join(f"{operator.name} {count}/{operator.instances}" for operator, count in instances.items()) or "none",
     )
     _logger.info(
         "Schedules: %d blocks, %d overlapping, %d receiving spills",

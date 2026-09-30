@@ -6,7 +6,7 @@ import shutil
 import pytest
 from holoso import FFromIntOptions, FToIntOptions, FloatFormat, IPopcntOptions, IntFormat
 from holoso._backend.verilog._support import support_files
-from holoso._operators import FFromIntOperator, FToIntOperator, IPopcntOperator
+from holoso._operators import FFromIntOperator, FToIntOperator, HardwareOperator, IPopcntOperator
 from synth import OocDesign, SourceFile
 
 from synth._ooc import KEEP_ATTR
@@ -147,8 +147,8 @@ class _FromIntTarget(_MixedTarget):
         self._validate()
 
     @property
-    def _model(self) -> FFromIntOperator:
-        return FFromIntOperator(
+    def _hardware_operator(self) -> HardwareOperator:
+        return FFromIntOperator.build(
             FloatFormat(self.wexp, self.wman),
             IntFormat(self.wint),
             FFromIntOptions(
@@ -161,11 +161,11 @@ class _FromIntTarget(_MixedTarget):
 
     @property
     def operator(self) -> str:
-        return self._model.module_name
+        return self._hardware_operator.module_name
 
     @property
     def latency(self) -> int:
-        return self._model.latency
+        return self._hardware_operator.latencies[0]
 
     @property
     def stage_label(self) -> str:
@@ -180,18 +180,18 @@ class _ToIntTarget(_MixedTarget):
         self._validate()
 
     @property
-    def _model(self) -> FToIntOperator:
-        return FToIntOperator(
+    def _hardware_operator(self) -> HardwareOperator:
+        return FToIntOperator.build(
             FloatFormat(self.wexp, self.wman), IntFormat(self.wint), FToIntOptions(stage_input=self.stage_input)
         )
 
     @property
     def operator(self) -> str:
-        return self._model.module_name
+        return self._hardware_operator.module_name
 
     @property
     def latency(self) -> int:
-        return self._model.latency
+        return self._hardware_operator.latencies[0]
 
     @property
     def stage_label(self) -> str:
@@ -314,14 +314,12 @@ module {top} (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-    input  wire in_sel,
     input  wire [{wio - 1}:0] io_in,
     output wire out_valid,
     output wire [{wio - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
     {KEEP_ATTR} reg signed [{target.wint - 1}:0] r_a;
-    {KEEP_ATTR} reg [1:0] r_y_sgnop;
     wire dut_out_valid;
     wire [{wfull - 1}:0] dut_y;
     {KEEP_ATTR} reg r_out_valid;
@@ -335,18 +333,16 @@ module {top} (
         .STAGE_INPUT({target.stage_input}), .STAGE_NORMALIZE({target.stage_normalize}),
         .STAGE_PACK({target.stage_pack}), .STAGE_OUTPUT({target.stage_output}), .LATENCY({target.latency})
     ) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a), .y_sgnop(r_y_sgnop),
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a),
         .out_valid(dut_out_valid), .y(dut_y)
     );
 
     always @(posedge clk) begin
-        if (in_sel) r_y_sgnop <= io_in[1:0];
-        else        r_a <= io_in[{target.wint - 1}:0];
+        r_a <= io_in[{target.wint - 1}:0];
         r_y <= dut_y;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
-            r_y_sgnop <= 2'b00;
         end else begin
             r_in_valid <= in_valid;
             r_out_valid <= dut_out_valid;
@@ -436,7 +432,6 @@ module {top} (
     {KEEP_ATTR} reg [{wfull - 1}:0] r_a;
     {KEEP_ATTR} reg signed [{target.wint - 1}:0] r_k;
     {KEEP_ATTR} reg [1:0] r_a_sgnop;
-    {KEEP_ATTR} reg [1:0] r_y_sgnop;
     wire dut_out_valid;
     wire [{wfull - 1}:0] dut_y;
     {KEEP_ATTR} reg r_out_valid;
@@ -449,7 +444,7 @@ module {top} (
         .WEXP({target.wexp}), .WMAN({target.wman}), .WINT({target.wint}),
         .STAGE_INPUT({target.stage_input}), .STAGE_DECODE({target.stage_decode}), .LATENCY({target.latency})
     ) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .a_sgnop(r_a_sgnop), .y_sgnop(r_y_sgnop), .a(r_a), .k(r_k),
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .a_sgnop(r_a_sgnop), .a(r_a), .k(r_k),
         .out_valid(dut_out_valid), .y(dut_y)
     );
 
@@ -458,14 +453,13 @@ module {top} (
             2'd0: r_a <= io_in[{wfull - 1}:0];
             2'd1: r_k <= io_in[{target.wint - 1}:0];
             2'd2: r_a_sgnop <= io_in[1:0];
-            default: r_y_sgnop <= io_in[1:0];
+            default: ;
         endcase
         r_y <= dut_y;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
             r_a_sgnop <= 2'b00;
-            r_y_sgnop <= 2'b00;
         end else begin
             r_in_valid <= in_valid;
             r_out_valid <= dut_out_valid;
@@ -779,8 +773,8 @@ def _render_popcnt_wrapper(top: str, width: int) -> str:
     the count port and the zero fill happens on the way out: a full-width boundary register would hold the constant
     high bits under the keep attribute and charge them to the measurement.
     """
-    operator = IPopcntOperator(IntFormat(width), IPopcntOptions())
-    count_width = operator.count_width
+    operator = IPopcntOperator.build(IntFormat(width), IPopcntOptions())
+    count_width = operator.params["WY"]
     parameters = ", ".join(f".{name}({value})" for name, value in operator.params.items())
     return f"""`default_nettype none
 

@@ -1,5 +1,5 @@
 """
-Tests for holoso_fexp2 (pipelined; y = sgnop(2 ** sgnop(a))).
+Tests for holoso_fexp2 (pipelined; y = 2 ** sgnop(a)).
 
 The oracle is the exact ZKF model (FloatValue.exp2); the packaged zkf_exp2 RTL is the independent hardware anchor, so
 this bench proves the two agree bit-for-bit across the directed corner cases, the sign-conditioning sweep, and a random
@@ -59,15 +59,14 @@ async def holoso_fexp2_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, a_op: int, y_op: int) -> None:
+    async def step(a: int, a_op: int) -> None:
         a_eff = apply_sgnop(a, a_op)
         expected = {
-            "_desc": f"a=0x{a:08x} ops={a_op}{y_op}",
-            "y": apply_sgnop(exp2_oracle_bits(a_eff), y_op),
+            "_desc": f"a=0x{a:08x} ops={a_op}",
+            "y": exp2_oracle_bits(a_eff),
         }
         dut.a.value = a
         dut.a_sgnop.value = a_op
-        dut.y_sgnop.value = y_op
         dut.in_valid.value = 1
         sb.push(expected)
         await RisingEdge(dut.clk)
@@ -75,21 +74,20 @@ async def holoso_fexp2_cocotb(dut: Any) -> None:
         sb.sample()
 
     for a in DIRECTED_F32:
-        await step(a, 0, 0)
+        await step(a, 0)
     await sb.drain()
 
     sample = [DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))] for _ in range(6)]
     for a_op in SGNOP_OPS:
-        for y_op in SGNOP_OPS:
-            for a in sample:
-                await step(a, a_op, y_op)
+        for a in sample:
+            await step(a, a_op)
     await sb.drain()
 
     for _ in range(get_random_count()):
         if rng.random() < 0.2:
             await step_idle()
             continue
-        await step(random_zkf_f32(rng), int(rng.integers(0, 4)), int(rng.integers(0, 4)))
+        await step(random_zkf_f32(rng), int(rng.integers(0, 4)))
     await sb.drain()
 
     await drive_reset(dut)
@@ -103,7 +101,7 @@ async def holoso_fexp2_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fexp2(sim: str, stages: dict[str, int]) -> None:
-    operator = FExp2Operator(FloatFormat(8, 24), FExp2Options(**stages), 0)
+    operator = FExp2Operator.build(FloatFormat(8, 24), FExp2Options(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fexp2_{stage_tag(stages)}"
     runner.build(
@@ -121,6 +119,6 @@ def test_holoso_fexp2(sim: str, stages: dict[str, int]) -> None:
         test_module="tests.hdl.test_fexp2",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )

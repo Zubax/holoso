@@ -16,23 +16,25 @@ from holoso import (
     FCmpOptions,
     FDivOptions,
     FFromIntOptions,
+    FILog2Options,
+    FloatFormat,
+    FloatValue,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
+    FSqrtOptions,
     FToIntOptions,
-    FloatFormat,
-    FloatValue,
     IAbsOptions,
     IAddOptions,
     ICmpOptions,
     IDivOptions,
     IMulOptions,
+    IntFormat,
+    IntValue,
     IPopcntOptions,
     IShlOptions,
     IShrOptions,
     ISubOptions,
-    IntFormat,
-    IntValue,
     OperatorOptions,
     Options,
     UnsupportedConstruct,
@@ -40,10 +42,13 @@ from holoso import (
 )
 from holoso._operators import (
     FFromIntOperator,
+    FILog2Operator,
     FMulILog2Operator,
     FSortOperator,
+    FSortPrimitive,
     FSqrtOperator,
     FToIntOperator,
+    HardwareOperator,
     IAbsOperator,
     IAddOperator,
     ICmpOperator,
@@ -53,7 +58,6 @@ from holoso._operators import (
     IShlOperator,
     IShrOperator,
     ISubOperator,
-    PooledHardwareOperator,
 )
 from holoso import SynthesisResult
 from holoso._type import FloatType, IntType, ScalarType
@@ -172,28 +176,31 @@ endmodule
     assert "_zkf_invalid_latency_mismatch" in result.stderr
 
 
-def _integer_operators(ifmt: IntFormat) -> list[PooledHardwareOperator]:
+def _integer_operators(ifmt: IntFormat) -> list[HardwareOperator]:
     return [
-        IAddOperator(ifmt, IAddOptions()),
-        ISubOperator(ifmt, ISubOptions()),
-        IDivOperator(ifmt, IDivOptions()),
-        IAbsOperator(ifmt, IAbsOptions()),
-        IShlOperator(ifmt, IShlOptions()),
-        IShrOperator(ifmt, IShrOptions()),
-        ICmpOperator(ifmt, ICmpOptions()),
-        IPopcntOperator(ifmt, IPopcntOptions()),
-        *(IMulOperator(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
+        IAddOperator.build(ifmt, IAddOptions()),
+        ISubOperator.build(ifmt, ISubOptions()),
+        IDivOperator.build(ifmt, IDivOptions()),
+        IAbsOperator.build(ifmt, IAbsOptions()),
+        IShlOperator.build(ifmt, IShlOptions()),
+        IShrOperator.build(ifmt, IShrOptions()),
+        ICmpOperator.build(ifmt, ICmpOptions()),
+        IPopcntOperator.build(ifmt, IPopcntOptions()),
+        *(IMulOperator.build(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
     ]
 
 
-def _mixed_format_operators(ffmt: FloatFormat, ifmt: IntFormat) -> list[PooledHardwareOperator]:
+def _mixed_format_operators(ffmt: FloatFormat, ifmt: IntFormat) -> list[HardwareOperator]:
     return [
-        FFromIntOperator(ffmt, ifmt, FFromIntOptions()),
-        FFromIntOperator(ffmt, ifmt, FFromIntOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1)),
-        FToIntOperator(ffmt, ifmt, FToIntOptions()),
-        FToIntOperator(ffmt, ifmt, FToIntOptions(stage_input=2)),
-        FMulILog2Operator(ffmt, ifmt, FMulILog2Options()),
-        FMulILog2Operator(ffmt, ifmt, FMulILog2Options(stage_input=1, stage_decode=1)),
+        FFromIntOperator.build(ffmt, ifmt, FFromIntOptions()),
+        FFromIntOperator.build(
+            ffmt, ifmt, FFromIntOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1)
+        ),
+        FToIntOperator.build(ffmt, ifmt, FToIntOptions()),
+        FToIntOperator.build(ffmt, ifmt, FToIntOptions(stage_input=2)),
+        FMulILog2Operator.build(ffmt, ifmt, FMulILog2Options()),
+        FMulILog2Operator.build(ffmt, ifmt, FMulILog2Options(stage_input=1, stage_decode=1)),
+        FILog2Operator.build(ffmt, ifmt, FILog2Options()),
     ]
 
 
@@ -203,28 +210,26 @@ def _net(scalar_type: ScalarType) -> str:
     return f"[{scalar_type.width - 1}:0] " if scalar_type.is_wide else ""
 
 
-def _pooled_probe(name: str, operators: list[PooledHardwareOperator]) -> str:
+def _pooled_probe(name: str, operators: list[HardwareOperator]) -> str:
     """
-    A module instantiating each operator through the ports, widths, parameters and immediates it declares for itself,
-    all read off its signature -- so a declaration that drifted from the RTL fails right here. A sign-conditioning
-    sideband exists on a float port and on no other, which is what makes the two conversion wrappers asymmetric.
+    A module instantiating each operator through the ports, widths, parameters, mode and error ports it declares
+    for itself -- so a port, sign sideband or parameter it declares and the RTL lacks fails right here.
     """
     lines = [f"module {name};", "    wire clk = 1'b0;", "    wire rst = 1'b0;", "    wire in_valid = 1'b0;"]
     for index, operator in enumerate(operators):
-        signature = operator.signature
         connections = []
-        for port, ty in zip(operator.operand_hdl_ports, signature.operand_types, strict=True):
+        for position, operand in enumerate(operator.operand_ports):
+            port, ty = operand.name, operand.scalar_type
             lines.append(f"    wire {_net(ty)}u{index}_{port} = {ty.width}'d0;")
             connections.append(f".{port}(u{index}_{port})")
-            if isinstance(ty, FloatType):
+            if operator.conditions_operand(position):
                 connections.append(f".{port}_sgnop(2'd0)")
-        for port, ty in zip(operator.output_hdl_ports, signature.result_types, strict=True):
+        for output in operator.output_ports:
+            port, ty = output.name, output.scalar_type
             lines.append(f"    wire {_net(ty)}u{index}_{port};")
             connections.append(f".{port}(u{index}_{port})")
-            if isinstance(ty, FloatType):
-                connections.append(f".{port}_sgnop(2'd0)")
-        for immediate in operator.immediate_ports:
-            connections.append(f".{immediate.name}({immediate.width}'d0)")
+        if (mode_port := operator.mode_port) is not None:
+            connections.append(f".{mode_port.name}({mode_port.width}'d0)")
         for port in operator.error_ports:
             lines.append(f"    wire u{index}_{port};")
             connections.append(f".{port}(u{index}_{port})")
@@ -264,9 +269,9 @@ def test_fsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tm
     # rounding-guard rule and its stage count both depend on WMAN's parity.
     name = f"fsqrt_probe_e{wexp}m{wman}"
     fmt = FloatFormat(wexp, wman)
-    operators: list[PooledHardwareOperator] = [
-        FSqrtOperator(fmt, FSqrtOperator.Options()),
-        FSqrtOperator(fmt, FSqrtOperator.Options(stage_input=2, stage_pack=1, stage_output=1)),
+    operators: list[HardwareOperator] = [
+        FSqrtOperator.build(fmt, FSqrtOptions()),
+        FSqrtOperator.build(fmt, FSqrtOptions(stage_input=2, stage_pack=1, stage_output=1)),
     ]
     _elaborate(name, _pooled_probe(name, operators), tmp_path)
 
@@ -274,10 +279,9 @@ def test_fsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tm
 @_requires_iverilog
 def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     # The negative twin of the probe above, so its silence means something.
-    operator = IDivOperator(IntFormat(33), IDivOptions())
-    verilog = _pooled_probe("wrong_int_latency", [operator]).replace(
-        f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
-    )
+    operator = IDivOperator.build(IntFormat(33), IDivOptions())
+    latency = operator.latencies[0]
+    verilog = _pooled_probe("wrong_int_latency", [operator]).replace(f".LATENCY({latency})", f".LATENCY({latency + 1})")
     result = _compile("wrong_int_latency", verilog, tmp_path)
     assert result.returncode != 0
     assert "_holoso_invalid_integer_latency" in result.stderr
@@ -288,8 +292,8 @@ def test_popcount_wrapper_rejects_wrong_result_width(tmp_path: Path) -> None:
     # The count port is narrower than the word it counts, and Verilog would accept a wrapper that disagreed about
     # how much narrower -- silently padding or truncating. The guard is what makes the width a checked claim, so it
     # needs its own negative twin.
-    operator = IPopcntOperator(IntFormat(33), IPopcntOptions())
-    width = operator.count_width
+    operator = IPopcntOperator.build(IntFormat(33), IPopcntOptions())
+    width = operator.params["WY"]
     verilog = _pooled_probe("wrong_popcnt_width", [operator]).replace(f".WY({width})", f".WY({width + 1})")
     result = _compile("wrong_popcnt_width", verilog, tmp_path)
     assert result.returncode != 0
@@ -300,18 +304,17 @@ def test_popcount_wrapper_rejects_wrong_result_width(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "operator",
     (
-        FFromIntOperator(FloatFormat(6, 18), IntFormat(44), FFromIntOptions()),
-        FToIntOperator(FloatFormat(6, 18), IntFormat(44), FToIntOptions()),
-        FMulILog2Operator(FloatFormat(6, 18), IntFormat(44), FMulILog2Options()),
+        FFromIntOperator.build(FloatFormat(6, 18), IntFormat(44), FFromIntOptions()),
+        FToIntOperator.build(FloatFormat(6, 18), IntFormat(44), FToIntOptions()),
+        FMulILog2Operator.build(FloatFormat(6, 18), IntFormat(44), FMulILog2Options()),
     ),
-    ids=lambda operator: operator.mnemonic,
+    ids=lambda operator: operator.name,
 )
-def test_mixed_format_wrapper_rejects_wrong_latency(operator: PooledHardwareOperator, tmp_path: Path) -> None:
+def test_mixed_format_wrapper_rejects_wrong_latency(operator: HardwareOperator, tmp_path: Path) -> None:
     # The negative twin on the conversion side, so the probe's silence means something.
-    name = f"wrong_mixed_latency_{operator.mnemonic}"
-    verilog = _pooled_probe(name, [operator]).replace(
-        f".LATENCY({operator.latency})", f".LATENCY({operator.latency + 1})"
-    )
+    name = f"wrong_mixed_latency_{operator.name}"
+    latency = operator.latencies[0]
+    verilog = _pooled_probe(name, [operator]).replace(f".LATENCY({latency})", f".LATENCY({latency + 1})")
     result = _compile(name, verilog, tmp_path)
     assert result.returncode != 0
     assert "_zkf_invalid_latency_mismatch" in result.stderr
@@ -499,7 +502,6 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
     from holoso._lir import (
         Lir,
         LirBlock,
-        OperatorInstance,
         PooledScheduledOp,
         Exit,
         Jump,
@@ -512,20 +514,16 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
     _FETCH_LAG = 2  # datapath lag matching the 3-stage control fetch: one less than fetch_stages
 
     fmt = FloatFormat(6, 18)
-    inst = OperatorInstance(FSortOperator(fmt, FSortOptions()), 0)
     op = PooledScheduledOp(
-        inst=inst,
+        primitive=FSortPrimitive(FSortOperator.build(fmt, FSortOptions())),
+        instance=0,
         operands=[WideOperand(RegRef(0), FloatSignControl()), WideOperand(RegRef(1), FloatSignControl())],
-        writes=[
-            PortWrite(0, RegRef(2), FloatSignControl()),
-            PortWrite(1, RegRef(3), FloatSignControl(negate=True)),
-        ],
+        writes=[PortWrite(0, RegRef(2), None), PortWrite(1, RegRef(3), None)],
         issue_cycle=1,
-        immediates=(),
     )
     lir = Lir(
         module_name="fsort_probe",
-        instances=[inst],
+        instances=[op.inst],
         wide_consts=[],
         float_format=fmt,
         int_format=default_ifmt(fmt),
@@ -548,8 +546,7 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         assert re.search(
             rf"regs\[\d+\] <= s_fsort_0_y{q}\b", verilog
         ), "the wide write must read the combinational output wire directly"
-        assert re.search(rf"uc_fsort_0_y{q}sgn\b", verilog)
-    assert ".min(" in verilog and ".max(" in verilog and ".min_sgnop(" in verilog and ".max_sgnop(" in verilog
+    assert ".min(" in verilog and ".max(" in verilog
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")
     _elaborate("fsort_probe", verilog, tmp_path)
@@ -698,13 +695,13 @@ def test_an_integer_kernel_model_matches_python_beyond_the_float_width(_integer_
 
 def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width(_integer_result: SynthesisResult) -> None:
     """
-    The sideband exists only on a float port, and the read mux feeding an integer one must be as wide as the
+    The sideband exists only on a float operand port, and the read mux feeding an integer one must be as wide as the
     register rather than as the float -- the silent half, which elaborates either way and drops the top bits.
     """
     verilog = _integer_result.verilog_output.verilog
     ffromint, ftoint, iadds = (_instantiation(verilog, name) for name in ("ffromint", "ftoint", "iadds"))
-    assert ".a_sgnop(" not in ffromint and ".y_sgnop(" in ffromint  # integer operand, float result
-    assert ".a_sgnop(" in ftoint and ".y_sgnop(" not in ftoint  # float operand, integer result
+    assert "_sgnop(" not in ffromint  # integer operand, float result
+    assert ftoint.count("_sgnop(") == 1 and ".a_sgnop(" in ftoint  # float operand, integer result
     assert "_sgnop(" not in iadds
     assert re.search(r"reg  \[WINT-1:0\] s_iadds_\w+_a;", verilog)
     assert re.search(r"wire \[WINT-1:0\] s_ftoint_\w+_y0;", verilog)
@@ -713,17 +710,14 @@ def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width(_inte
 
 def test_only_a_float_port_is_allocated_a_microcode_sign_field(_integer_result: SynthesisResult) -> None:
     """
-    The literal field set for this known kernel: float operand/result ports only -- no integer port and, the unique
-    pruning claim, no field for the untapped `fsort.max` result lane.
+    The literal field set for this known kernel: float operand ports only -- no integer port and no result, a result
+    never being conditioned at its producer.
     """
     assert set(re.findall(r"\buc_\w+?sgn\b", _integer_result.verilog_output.verilog)) == {
         "uc_fadd_0_asgn",
         "uc_fadd_0_bsgn",
-        "uc_fadd_0_y0sgn",
-        "uc_ffromint_0_y0sgn",
         "uc_fsort_0_asgn",
         "uc_fsort_0_bsgn",
-        "uc_fsort_0_y0sgn",
         "uc_ftoint_0_asgn",
     }
 

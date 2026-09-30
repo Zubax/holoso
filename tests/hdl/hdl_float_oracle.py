@@ -285,7 +285,7 @@ def cmp_oracle(a_bits: int, b_bits: int) -> tuple[int, int, int]:
     return int(a > b), int(a == b), int(a < b)
 
 
-# Round-mode opcodes -- must match zkf_round's round_mode encoding and FRoundOperator's immediate values.
+# Round-mode opcodes -- must match zkf_round's round_mode encoding and the rounding operators' mode codes.
 ROUND_NEAREST_EVEN = 0
 ROUND_FLOOR = 1
 ROUND_CEIL = 2

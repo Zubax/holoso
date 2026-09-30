@@ -1,7 +1,7 @@
 """
 The low-level IR (LIR): the scheduled, bound, register-allocated microprogram for the synthesized ZISC machine.
 
-A Lir is controller-agnostic -- it describes which hardware operators issue on which cycle, reading/writing
+A Lir is controller-agnostic -- it describes which primitives fire on which cycle, reading/writing
 which typed storage resources, with which folded port conditioners.
 """
 
@@ -13,10 +13,11 @@ from typing import assert_never
 from .._operators import (
     BoolInversion,
     HardwareOperator,
-    InlineHardwareOperator,
-    PooledHardwareOperator,
-    PortConditioner,
+    InlinePrimitive,
+    PooledPrimitive,
+    Primitive,
     WideConditioner,
+    identity_conditioner,
 )
 from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType, ScalarType
 from .._value import WideValue
@@ -25,17 +26,17 @@ from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputP
 # The cycle-accurate timing model: one consistent physical story shared by the LIR cycle helpers below, the numerical
 # model, the scheduler's dependency edges, the register allocator, and the HTML report, so a value's
 # landing/read/copy/boundary cycle is computed in exactly one place and the consumers cannot drift.
-# It is built from primitives:
+# It is built from two named quantities:
 #   - fetch_lag -- the microcode fetch leads the datapath by this many steps (a global frame offset), threaded from
 #     the build entry and recorded on the Lir, so the schedule and every consumer share one value;
 #   - READ_FIRST_EDGE -- a register read sees the value written one step earlier (write-then-read), so a result becomes
 #     readable one step after it is written.
-# Both register banks read combinationally and alike: an instance-backed operator's read-address word rides its
+# Both register banks read combinationally and alike: a pooled firing's read-address word rides its
 # issue step and the datapath samples the operand fetch_lag later, so every operand read lands at issue + fetch_lag
 # independent of bank -- the read-side mirror of the uniform landing below. Every result -- pooled or inline, wide
 # or boolean -- drives its register write combinationally from its producer's output at its commit step, so a
 # result committed at C becomes readable at C + fetch_lag + READ_FIRST_EDGE, bank- and class-independent.
-# The operator's own LATENCY is the orthogonal pipeline depth (a pooled instance has L stages, an inline op has none).
+# A firing's own LATENCY is the orthogonal pipeline depth (its mode's L stages when pooled, none when inline).
 READ_FIRST_EDGE = 1
 
 
@@ -50,7 +51,7 @@ def landing_cycle(commit_cycle: int, fetch_lag: int) -> int:
 
 def read_cycle(issue_cycle: int, fetch_lag: int) -> int:
     """
-    The cycle an instance-backed operator samples its register operands: latch-free on both banks, fetch_lag after the
+    The cycle a pooled firing samples its register operands: latch-free on both banks, fetch_lag after the
     read-address word rides the issue step.
     """
     return issue_cycle + fetch_lag
@@ -81,20 +82,20 @@ def pooled_write_word(commit_cycle: int) -> int:
     return commit_cycle
 
 
-def operand_read_cycle(operator: HardwareOperator, issue_cycle: int, fetch_lag: int) -> int:
+def operand_read_cycle(primitive: Primitive, issue_cycle: int, fetch_lag: int) -> int:
     """
     The hardware-frame cycle on which an operation samples its register operands (an operation reads all its operands
     on one cycle), the single definition shared by the register allocator's interference, the liveness views, and the
     numerical model so none can drift. A pooled instance reads its operands latch-free at `read_cycle` (both banks
     alike); an inline op fires -- and reads -- on its combinational fire step (`inline_fire_cycle`).
     """
-    if isinstance(operator, PooledHardwareOperator):
-        assert all(ty.is_wide for ty in operator.signature.operand_types), operator.mnemonic
+    if isinstance(primitive, PooledPrimitive):
+        assert all(ty.is_wide for ty in primitive.signature.operand_types), primitive.operator.name
         return read_cycle(issue_cycle, fetch_lag)
-    return inline_fire_cycle(issue_cycle + operator.latency, fetch_lag)
+    return inline_fire_cycle(issue_cycle + primitive.latency, fetch_lag)
 
 
-def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: HardwareOperator, fetch_lag: int) -> int:
+def dependency_edge(producer: Primitive, producer_result: int, consumer: Primitive, fetch_lag: int) -> int:
     """
     The minimum same-block scheduling distance from a producer's commit to a consumer's issue (`issue_consumer >=
     commit_producer + edge`): the producer's result landing minus the consumer's operand-read timing, so the consumer
@@ -106,10 +107,10 @@ def dependency_edge(producer: HardwareOperator, producer_port: int, consumer: Ha
     frame-independent spacing; a helper that ever loses that affinity breaks this derivation.
     """
     landing = landing_cycle(0, fetch_lag)
-    if isinstance(consumer, PooledHardwareOperator):
+    if isinstance(consumer, PooledPrimitive):
         assert producer.signature.result_types[
-            producer_port
-        ].is_wide, f"{consumer.mnemonic}: pooled operators read only wide operands"
+            producer_result
+        ].is_wide, f"{consumer.operator.name}: an operator reads only wide operands"
         read = read_cycle(0, fetch_lag)
     else:
         read = inline_fire_cycle(consumer.latency, fetch_lag)
@@ -196,37 +197,16 @@ def _residence_rows(defs: list[int], uses: list[int], boundary: int) -> set[int]
 @dataclass(frozen=True, slots=True)
 class OperatorInstance:
     """
-    One physical operator module, e.g. `u_fadd_0` or `u_fcmp_0`.
-
-    `operator` is the fully specified pooled hardware operator it elaborates; `index` numbers the copies of that
-    operator value. The scheduler pools firings by the hardware-operator instance: equal operators may time-share one
-    module, each instance accepting a new firing every `initiation_interval` cycles.
+    One physical copy of an operator, e.g. `u_fadd_0` or `u_fcmp_0`: `index` numbers the copies of that operator.
+    Every primitive running on the operator shares its instances.
     """
 
-    operator: PooledHardwareOperator
-    index: int  # 0-based within this concrete operator value
+    operator: HardwareOperator
+    index: int  # 0-based within this operator
 
     @property
     def name(self) -> str:
-        return f"{self.operator.mnemonic}_{self.index}"
-
-    def __post_init__(self) -> None:
-        # A pooled result commits at issue + latency, so latency >= 1 keeps its write opcode off the held `ucode[0]`
-        # (the accept-dwell word) -- a latency-0 pooled operator would re-commit every idle cycle (see `transacting`).
-        assert self.operator.latency >= 1, f"{self.operator.mnemonic}: pooled operator latency must be >= 1"
-        # Every block keeps a firing's write word, `issue + latency`, in its own frame, so an instance busy no longer
-        # than the step after it is free when any successor frame begins: no busy window crosses a block boundary.
-        assert self.operator.initiation_interval <= self.operator.latency + 1, self.operator.mnemonic
-        # Every pooled operator passes through here, so its hand-synchronized per-port declarations are validated
-        # once at the source: HDL port names align with the operands and the result types, and the commutation
-        # permutation (when declared) is a type-preserving bijection -- a bad declaration fails here, not in emission.
-        result_types = self.operator.signature.result_types
-        assert len(self.operator.operand_hdl_ports) == self.operator.signature.arity, self.operator.mnemonic
-        assert len(self.operator.output_hdl_ports) == len(result_types), self.operator.mnemonic
-        permutation = self.operator.swap_output_permutation
-        if permutation is not None:
-            assert sorted(permutation) == list(range(len(result_types))), self.operator.mnemonic
-            assert all(result_types[permutation[p]] == result_types[p] for p in range(len(permutation)))
+        return f"{self.operator.name}_{self.index}"
 
 
 # `(instance, operand position)`; the write side's `(instance, output port)` lanes are a different key.
@@ -381,44 +361,64 @@ class BoolOperand:
 @dataclass(frozen=True, slots=True)
 class PortWrite:
     """
-    One tapped output port of a firing: the `port`-th result lands in `dst` through the conditioner its scalar
-    type admits -- a folded sign control for a float, an inversion for a boolean, nothing at all for an integer.
-    Untapped ports of the firing simply have no PortWrite -- the module output is left unconnected.
+    One tapped output port of a firing: its `result`-th result lands in `dst`, a boolean one through `inversion`, the
+    fabric inversion folded at the write. Untapped ports of the firing simply have no write -- the module output is
+    left unconnected.
     """
 
-    port: int
+    result: int
     dst: RegRef | BoolRegRef
-    conditioner: PortConditioner
+    inversion: BoolInversion | None
+
+    def __post_init__(self) -> None:
+        assert (self.inversion is None) == isinstance(self.dst, RegRef)
+
+    @property
+    def stable_label(self) -> str:
+        return self.dst.stable_label if self.inversion is None else self.inversion.decorate(self.dst.stable_label)
+
+
+def _check_ports(primitive: Primitive, operands: list[WideOperand | BoolOperand], writes: list[PortWrite]) -> None:
+    """
+    Each operand carries its port's own conditioner (a sign control for a float, an inversion for a boolean, nothing
+    for an integer), and each write's carrier is its result's bank: a wide result lands as produced, a boolean
+    one through its inversion.
+    """
+    signature = primitive.signature
+    for operand, operand_type in zip(operands, signature.operand_types, strict=True):
+        conditioner = operand.conditioner if isinstance(operand, WideOperand) else operand.inversion
+        assert isinstance(conditioner, type(identity_conditioner(operand_type))), type(primitive).__name__
+    assert all(isinstance(write.dst, RegRef) == signature.result_types[write.result].is_wide for write in writes)
 
 
 @dataclass(frozen=True, slots=True)
 class PooledScheduledOp:
     """
-    One pooled-instance firing in the software-pipelined schedule: `inst` asserts `in_valid` on `issue_cycle`,
-    and on `commit_cycle == issue_cycle + latency` every
-    tapped output port lands in its destination register. The writes are sorted by port and pairwise distinct in
-    both port and destination -- members of one firing land simultaneously, so the allocator always gives them
-    distinct registers.
+    One firing in the software-pipelined schedule: `primitive` runs on the `instance`-th copy of its operator, which
+    asserts `in_valid` on `issue_cycle`, and on `commit_cycle == issue_cycle + latency` every tapped output port lands
+    in its destination register. The writes are sorted by result and pairwise distinct in both result and destination --
+    members of one firing land simultaneously, so the allocator always gives them distinct registers.
     """
 
-    inst: OperatorInstance
+    primitive: PooledPrimitive
+    instance: int
     operands: list[WideOperand | BoolOperand]
     writes: list[PortWrite]
     issue_cycle: int
-    immediates: tuple[int, ...]  # per-firing immediate values, aligned with the operator's immediate_ports
 
     @property
-    def operator(self) -> PooledHardwareOperator:
-        return self.inst.operator
+    def inst(self) -> OperatorInstance:
+        return OperatorInstance(self.primitive.operator, self.instance)
 
     @property
     def latency(self) -> int:
-        return self.operator.latency
+        return self.primitive.latency
 
     def __post_init__(self) -> None:
         assert self.writes, "a firing with no tapped output cannot exist (an unused operation has no MIR node)"
-        ports = [write.port for write in self.writes]
-        assert ports == sorted(set(ports)), f"write ports must be sorted and distinct: {ports}"
+        _check_ports(self.primitive, self.operands, self.writes)
+        results = [write.result for write in self.writes]
+        assert results == sorted(set(results)), f"write results must be sorted and distinct: {results}"
         assert len({write.dst for write in self.writes}) == len(self.writes), "write destinations must be distinct"
 
     @property
@@ -429,27 +429,26 @@ class PooledScheduledOp:
 @dataclass(frozen=True, slots=True)
 class InlineScheduledOp:
     """
-    One inline-operator firing: a single PC-gated statement that reads its operands and drives its one result's write
+    One inline-primitive firing: a single PC-gated statement that reads its operands and drives its one result's write
     data combinationally on its fire step. Its result lands one read-first edge after the fire, at the bank- and
     class-independent `landing_cycle` -- the same landing as a pooled result.
     """
 
-    operator: InlineHardwareOperator
+    primitive: InlinePrimitive
     operands: list[WideOperand | BoolOperand]
     write: PortWrite
     issue_cycle: int
 
+    def __post_init__(self) -> None:
+        _check_ports(self.primitive, self.operands, [self.write])
+
     @property
     def latency(self) -> int:
-        return self.operator.latency
+        return self.primitive.latency
 
     @property
     def writes(self) -> list[PortWrite]:
         return [self.write]
-
-    @property
-    def immediates(self) -> tuple[int, ...]:
-        return ()  # an inline operator is a pure combinational expression; it declares no immediate ports
 
     @property
     def commit_cycle(self) -> int:
@@ -564,8 +563,8 @@ def exits(terminator: Terminator) -> bool:
 class LirBlock:
     """
     One basic block of the scheduled microprogram, with block-relative cycles (block start is cycle 0). `ops`
-    (pooled firings), `inline_ops`, and `copies` are the block's datapath events;
-    `terminator` redirects the fetch PC at the block boundary. `term_offset` is the block-relative fetch cycle at which the terminator redirects
+    (pooled firings), `inline_ops`, and `copies` are the block's datapath events; `terminator` redirects the fetch PC
+    at the block boundary. `term_offset` is the block-relative fetch cycle at which the terminator redirects
     the PC -- the block's boundary step -- and is the single source of truth for the terminator PC (the successor
     frame begins one step later, at `term_pc + 1`). For a block that drains (a multi-predecessor successor or a
     tail install) it is the latest cycle a value LANDS in the block's frame -- taken per landing event (every
@@ -624,7 +623,7 @@ class RegFileLayout:
     nreg: int
 
 
-# The common surface of the two firing classes (operator/operands/writes/issue/commit), as the model consumes it.
+# The common surface of the two firing classes (primitive/operands/writes/issue/commit), as the model consumes it.
 type ScheduledOp = PooledScheduledOp | InlineScheduledOp
 
 
@@ -663,10 +662,10 @@ class Lir:
                 yield carrier.scalar_type.width
         for value in [*self.wide_consts, *(slot.reset_value for slot in self.wide_state_slots)]:
             yield value.fmt.width
-        firings: list[HardwareOperator] = [inst.operator for inst in self.instances]
-        firings += [op.operator for block in self.blocks for op in block.inline_ops]
-        for operator in firings:
-            signature = operator.signature
+        for inst in self.instances:
+            yield from (port.scalar_type.width for port in (*inst.operator.operand_ports, *inst.operator.output_ports))
+        for op in (op for block in self.blocks for op in block.inline_ops):
+            signature = op.primitive.signature
             yield from (ty.width for ty in signature.operand_types + signature.result_types if ty.is_wide)
 
     def __post_init__(self) -> None:
@@ -675,9 +674,10 @@ class Lir:
         # operator port is the evidence instead.
         assert all(width <= self.wide_register_width for width in self._wide_widths())
         assert self.fetch_lag in (1, 2), self.fetch_lag
+        assert all(0 <= inst.index < inst.operator.instances for inst in self.instances), "an instance past the budget"
         assert len({inst.operator for inst in self.instances}) == len(
-            {type(inst.operator) for inst in self.instances}
-        ), "instance names index within the mnemonic, so one operator configuration per pooled class"
+            {inst.operator.name for inst in self.instances}
+        ), "instance names index within the operator's name, so one operator per name"
         base = block_bases(self.blocks)
         object.__setattr__(self, "block_base", base)
         assert all(arm in base for block in self.blocks for arm in successor_blocks(block.terminator))
@@ -695,21 +695,37 @@ class Lir:
                     if copy.dst == slot.reg and copy.source == slot.live_out
                 ]
                 assert len(early) == 1, f"state slot {slot.name!r} has no early copy landing by its exit"
-        # The numerical model evaluates firings in isolation and cannot witness a double issue.
-        for block in self.blocks:
-            windows: dict[OperatorInstance, list[range]] = {}
-            for op in block.ops:
-                windows.setdefault(op.inst, []).append(
-                    range(op.issue_cycle, op.issue_cycle + op.operator.initiation_interval)
-                )
-            for inst, spans in windows.items():
-                spans.sort(key=lambda span: span.start)
-                assert all(
-                    earlier.stop <= later.start for earlier, later in zip(spans, spans[1:])
-                ), f"block {block.index}: two firings busy on {inst.name} at once"
 
     def _check_block(self, block: LirBlock) -> None:
         ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
+        # A pooled write opcode must be driven inside its own block's frame: the model re-keys a spilled LANDING onto
+        # the taken arm, but the opcode that commits it is a control word the successor frame never carries. An
+        # error-raising firing also needs the err_pc latch, which records the executing step a fetch lag later.
+        for op in block.ops:
+            slack = self.fetch_lag if op.primitive.operator.error_ports else 0
+            assert pooled_write_word(op.commit_cycle) + slack <= block.term_offset, block.index
+        # The numerical model evaluates firings in isolation and cannot witness a double issue, nor two results leaving
+        # one output port on one cycle (or out of issue order); the busy windows exclude both only through the
+        # operator's mode rule, so this cross-checks its conclusion.
+        firings: dict[OperatorInstance, list[PooledScheduledOp]] = {}
+        for op in block.ops:
+            firings.setdefault(op.inst, []).append(op)
+        for inst, same in firings.items():
+            same.sort(key=lambda op: op.issue_cycle)
+            assert all(
+                earlier.issue_cycle + earlier.primitive.initiation_interval <= later.issue_cycle
+                for earlier, later in zip(same, same[1:])
+            ), f"block {block.index}: two firings busy on {inst.name} at once"
+            ports = [
+                [op for op in same if port in op.primitive.mode.outputs]
+                for port in range(len(inst.operator.output_ports))
+            ]
+            if inst.operator.error_ports:
+                ports.append(same)  # the error sideband, driven by every mode
+            for driving in ports:
+                assert all(
+                    earlier.commit_cycle < later.commit_cycle for earlier, later in zip(driving, driving[1:])
+                ), f"block {block.index}: results leave a port of {inst.name} together or out of issue order"
         # A copy landing past the terminator is enqueued for a PC the block never reaches: a redirect re-keys it onto
         # the taken arm, but an exit drops it -- a silently dead install that no value comparison can see.
         assert all(copy.landing(self.fetch_lag) <= block.term_offset for copy in block.copies), block.index
@@ -865,7 +881,7 @@ class Lir:
                 commits.setdefault(base + op.commit_cycle, []).append(op)
         for group in (issues, commits):
             for ops in group.values():
-                ops.sort(key=lambda op: (op.inst.operator.mnemonic, op.inst.index, op.writes[0].dst.index))
+                ops.sort(key=lambda op: (op.inst.operator.name, op.inst.index, op.writes[0].dst.index))
         return issues, commits
 
     def _cfg_residence(
@@ -991,7 +1007,7 @@ class Lir:
                 for write in op.writes:
                     defs.setdefault(write.dst, []).extend(self.write_landing_pcs(block, op))
                 for operand in op.operands:
-                    read(operand, [operand_read_cycle(op.operator, base_pc + op.issue_cycle, self.fetch_lag)])
+                    read(operand, [operand_read_cycle(op.primitive, base_pc + op.issue_cycle, self.fetch_lag)])
             if isinstance(block.terminator, Branch):
                 uses.setdefault(block.terminator.cond, []).append(self.term_pc(block))
         rows = self._cfg_residence(defs, uses, carried)

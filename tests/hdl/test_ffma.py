@@ -1,10 +1,9 @@
 """
-Tests for holoso_ffma (pipelined; sgnop on a, b, c, y; y = sgnop(sgnop(a)*sgnop(b) + sgnop(c)), single rounding).
+Tests for holoso_ffma (pipelined; sgnop on a, b, c; y = sgnop(a)*sgnop(b) + sgnop(c), single rounding).
 
-The wrapper delays y_sgnop through the same number of stages as zkf_fma, so all sgnop controls are allowed to vary
-every input cycle. The oracle is the exact FloatValue.fma; the packaged zkf_fma RTL is the independent anchor, so a
-bit-exact match proves the single-rounding fused result against hardware (including cases where a separate
-multiply-then-add would double-round differently).
+All sgnop controls are allowed to vary every input cycle. The oracle is the exact FloatValue.fma; the packaged zkf_fma
+RTL is the independent anchor, so a bit-exact match proves the single-rounding fused result against hardware (including
+cases where a separate multiply-then-add would double-round differently).
 """
 
 import os
@@ -85,13 +84,13 @@ async def holoso_ffma_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, b: int, c: int, a_op: int, b_op: int, c_op: int, y_op: int) -> None:
+    async def step(a: int, b: int, c: int, a_op: int, b_op: int, c_op: int) -> None:
         a_eff, b_eff, c_eff = apply_sgnop(a, a_op), apply_sgnop(b, b_op), apply_sgnop(c, c_op)
-        expected = apply_sgnop(fma_oracle_bits(a_eff, b_eff, c_eff), y_op)
+        expected = fma_oracle_bits(a_eff, b_eff, c_eff)
         dut.a.value, dut.b.value, dut.c.value = a, b, c
-        dut.a_sgnop.value, dut.b_sgnop.value, dut.c_sgnop.value, dut.y_sgnop.value = a_op, b_op, c_op, y_op
+        dut.a_sgnop.value, dut.b_sgnop.value, dut.c_sgnop.value = a_op, b_op, c_op
         dut.in_valid.value = 1
-        sb.push({"y": expected, "_desc": f"a=0x{a:08x} b=0x{b:08x} c=0x{c:08x} ops={a_op}{b_op}{c_op}{y_op}"})
+        sb.push({"y": expected, "_desc": f"a=0x{a:08x} b=0x{b:08x} c=0x{c:08x} ops={a_op}{b_op}{c_op}"})
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         sb.sample()
@@ -99,16 +98,16 @@ async def holoso_ffma_cocotb(dut: Any) -> None:
     for a in _SMALL:
         for b in _SMALL:
             for c in _SMALL:
-                await step(a, b, c, 0, 0, 0, 0)
+                await step(a, b, c, 0, 0, 0)
     for a, b, c in _CANCELLATION:
-        await step(a, b, c, 0, 0, 0, 0)
+        await step(a, b, c, 0, 0, 0)
     await sb.drain()
 
     triples = [tuple(int(rng.integers(0, len(_SMALL))) for _ in range(3)) for _ in range(6)]
     for a_op in SGNOP_OPS:
-        for y_op in SGNOP_OPS:
+        for c_op in SGNOP_OPS:
             for ia, ib, ic in triples:
-                await step(_SMALL[ia], _SMALL[ib], _SMALL[ic], a_op, 0, 0, y_op)
+                await step(_SMALL[ia], _SMALL[ib], _SMALL[ic], a_op, 0, c_op)
     await sb.drain()
 
     for _ in range(get_random_count()):
@@ -116,8 +115,8 @@ async def holoso_ffma_cocotb(dut: Any) -> None:
             await step_idle()
             continue
         a, b, c = random_zkf_f32(rng), random_zkf_f32(rng), random_zkf_f32(rng)
-        ops = [int(rng.integers(0, 4)) for _ in range(4)]
-        await step(a, b, c, ops[0], ops[1], ops[2], ops[3])
+        ops = [int(rng.integers(0, 4)) for _ in range(3)]
+        await step(a, b, c, ops[0], ops[1], ops[2])
     await sb.drain()
 
     await drive_reset(dut)
@@ -131,7 +130,7 @@ async def holoso_ffma_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_ffma(sim: str, stages: dict[str, int]) -> None:
-    operator = FFmaOperator(FloatFormat(8, 24), FFmaOptions(**stages), 0)
+    operator = FFmaOperator.build(FloatFormat(8, 24), FFmaOptions(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"ffma_{stage_tag(stages)}"
     runner.build(
@@ -149,6 +148,6 @@ def test_holoso_ffma(sim: str, stages: dict[str, int]) -> None:
         test_module="tests.hdl.test_ffma",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )

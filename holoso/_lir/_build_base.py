@@ -6,7 +6,7 @@ Carrier types shared by more than one LIR builder stage. They sit at the base of
 from dataclasses import dataclass
 
 from .._mir import Mir
-from .._operators import PooledHardwareOperator, WideConditioner
+from .._operators import HardwareOperator, WideConditioner
 from .._util import ValueId
 from .._value import WideValue
 from ._ir import BoolCopy, Boundary, Early, InPlace, OperatorInstance, WideCopy
@@ -61,7 +61,7 @@ class BlockSchedules:
     block_sched: dict[int, Schedule]
     block_inflight: dict[int, dict[ValueId, int]]
     overlap_term_offset: dict[int, int]
-    instances: dict[PooledHardwareOperator, int]
+    instances: dict[HardwareOperator, int]
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,10 +1,9 @@
 """
-Tests for holoso_fsort (pipelined; min/max with input + output sgnops).
+Tests for holoso_fsort (pipelined; min/max with input sgnops).
 
-The wrapper delays min_sgnop and max_sgnop through the same number of stages as zkf_sort, so output sign controls are
-allowed to vary every input cycle. The test also skips any case where applying sgnop to an input would produce a
-non-canonical -0, since sort preserves the input bit pattern through to its outputs and -0 is outside the ZKF input
-contract.
+Sign controls are allowed to vary every input cycle. The test skips any case where applying sgnop to an input would
+produce a non-canonical -0, since sort preserves the input bit pattern through to its outputs and -0 is outside the ZKF
+input contract.
 """
 
 import os
@@ -53,7 +52,7 @@ async def holoso_fsort_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, b: int, a_op: int, b_op: int, mn_op: int, mx_op: int) -> None:
+    async def step(a: int, b: int, a_op: int, b_op: int) -> None:
         a_eff = apply_sgnop(a, a_op)
         b_eff = apply_sgnop(b, b_op)
         # Skip sgnop-induced non-canonical -0; ZKF doesn't define it as an input, and sort preserves the bit pattern
@@ -62,33 +61,22 @@ async def holoso_fsort_cocotb(dut: Any) -> None:
         if is_neg_zero_f32(a_eff) or is_neg_zero_f32(b_eff):
             await step_idle()
             return
-        mn_pre, mx_pre = sort_oracle_bits(a_eff, b_eff)
-        mn_exp = apply_sgnop(mn_pre, mn_op)
-        mx_exp = apply_sgnop(mx_pre, mx_op)
+        mn_exp, mx_exp = sort_oracle_bits(a_eff, b_eff)
         dut.a.value = a
         dut.b.value = b
         dut.a_sgnop.value = a_op
         dut.b_sgnop.value = b_op
-        dut.min_sgnop.value = mn_op
-        dut.max_sgnop.value = mx_op
         dut.in_valid.value = 1
-        sb.push(
-            {
-                "min": mn_exp,
-                "max": mx_exp,
-                "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}{mn_op}{mx_op}",
-            }
-        )
+        sb.push({"min": mn_exp, "max": mx_exp, "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}"})
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         sb.sample()
 
     for a in DIRECTED_F32:
         for b in DIRECTED_F32:
-            await step(a, b, 0, 0, 0, 0)
+            await step(a, b, 0, 0)
     await sb.drain()
 
-    # Full sgnop sweep: output sign controls change every cycle to verify sideband pipelining.
     sample_pairs = [
         (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(4)
@@ -96,9 +84,7 @@ async def holoso_fsort_cocotb(dut: Any) -> None:
     for a_op in SGNOP_OPS:
         for b_op in SGNOP_OPS:
             for a, b in sample_pairs:
-                for mn_op in SGNOP_OPS:
-                    for mx_op in SGNOP_OPS:
-                        await step(a, b, a_op, b_op, mn_op, mx_op)
+                await step(a, b, a_op, b_op)
     await sb.drain()
 
     for _ in range(get_random_count()):
@@ -109,9 +95,7 @@ async def holoso_fsort_cocotb(dut: Any) -> None:
         b = random_zkf_f32(rng)
         a_op = int(rng.integers(0, 4))
         b_op = int(rng.integers(0, 4))
-        mn_op = int(rng.integers(0, 4))
-        mx_op = int(rng.integers(0, 4))
-        await step(a, b, a_op, b_op, mn_op, mx_op)
+        await step(a, b, a_op, b_op)
     await sb.drain()
 
     await drive_reset(dut)
@@ -125,7 +109,7 @@ async def holoso_fsort_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stage_input", (0, 1, 2), ids=lambda s: f"i{s}")
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fsort(sim: str, stage_input: int) -> None:
-    operator = FSortOperator(FloatFormat(8, 24), FSortOptions(stage_input=stage_input))
+    operator = FSortOperator.build(FloatFormat(8, 24), FSortOptions(stage_input=stage_input))
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fsort_i{stage_input}"
     runner.build(
@@ -143,6 +127,6 @@ def test_holoso_fsort(sim: str, stage_input: int) -> None:
         test_module="tests.hdl.test_fsort",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )
