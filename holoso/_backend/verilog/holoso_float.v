@@ -308,6 +308,50 @@ module holoso_fatan2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIP
 `endif
 endmodule
 
+// Fixed-latency facade over the handshaked zkf_cordic (see holoso_fsincos), its mode chosen per transaction:
+//      vectoring=0:  r0 = sin(2*pi*sgnop(a)), r1 = cos(2*pi*sgnop(a)); b is ignored
+//      vectoring=1:  r0 = atan2(sgnop(a), sgnop(b)) in turns, r1 = hypot(sgnop(a), sgnop(b))
+// Each mode's initiation interval is its own LATENCY+1.
+module holoso_fcordic#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
+                       parameter integer UNROLL100 = 100,
+                       parameter integer STAGE_INPUT = 0, parameter integer STAGE_PRODUCT = 0,
+                       parameter integer STAGE_NORMALIZE = 0, parameter integer STAGE_PACK = 0,
+                       parameter integer STAGE_OUTPUT = 0,
+                       parameter integer LATENCY_ROTATION = 0, parameter integer LATENCY_VECTORING = 0) (
+    input  wire clk,
+    input  wire rst,
+    input  wire                 in_valid,
+    input  wire                 vectoring,
+    input  wire           [1:0] a_sgnop,
+    input  wire           [1:0] b_sgnop,
+    input  wire [WEXP+WMAN-1:0] a,
+    input  wire [WEXP+WMAN-1:0] b,
+    output wire                 out_valid,
+    output wire [WEXP+WMAN-1:0] r0,
+    output wire [WEXP+WMAN-1:0] r1
+);
+    localparam WFULL = WEXP + WMAN;
+    wire [WFULL-1:0] a1;
+    wire [WFULL-1:0] b1;
+    wire             core_in_ready;
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
+    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
+    zkf_cordic#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .UNROLL100(UNROLL100),
+                .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_NORMALIZE(STAGE_NORMALIZE),
+                .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
+                .LATENCY_ROTATION(LATENCY_ROTATION), .LATENCY_VECTORING(LATENCY_VECTORING)) u_cordic (
+        .clk(clk), .rst(rst),
+        .in_valid(in_valid), .in_ready(core_in_ready), .vectoring(vectoring), .a(a1), .b(b1),
+        .out_valid(out_valid), .out_ready(1'b1), .r0(r0), .r1(r1), .quadrant()
+    );
+`ifdef SIMULATION
+    always @(posedge clk) begin
+        if (!rst && in_valid && !core_in_ready)
+            $fatal(1, "holoso_fcordic over-issued: in_valid while busy (initiation_interval too small)");
+    end
+`endif
+endmodule
+
 // Floating point comparator with sign conditioning:
 //      (a_gt_b, a_eq_b, a_lt_b) = compare(sgnop(a), sgnop(b))
 // Outputs are mutually-exclusive one-hot flags.
