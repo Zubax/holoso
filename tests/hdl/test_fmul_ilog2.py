@@ -120,15 +120,14 @@ async def holoso_fmul_ilog2_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, k: int, a_sgnop: int, y_sgnop: int) -> None:
+    async def step(a: int, k: int, a_sgnop: int) -> None:
         a_eff = apply_sgnop(a, a_sgnop, wfull)
-        expected = apply_sgnop(fmt.wrap(a_eff).mul_ilog2(k).bits, y_sgnop, wfull)
+        expected = fmt.wrap(a_eff).mul_ilog2(k).bits
         dut.a.value = a
         dut.k.value = k & k_mask
         dut.a_sgnop.value = a_sgnop
-        dut.y_sgnop.value = y_sgnop
         dut.in_valid.value = 1
-        sb.push({"y": expected, "_desc": f"a=0x{a:x} k={k} ops=a{a_sgnop}y{y_sgnop}"})
+        sb.push({"y": expected, "_desc": f"a=0x{a:x} k={k} a_sgnop={a_sgnop}"})
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         sb.sample()
@@ -137,13 +136,13 @@ async def holoso_fmul_ilog2_cocotb(dut: Any) -> None:
     shifts = _shift_values(fmt, wint)
     for a in values:
         for k in shifts:
-            await step(a, k, 0, 0)
+            await step(a, k, 0)
     await sb.drain()
 
-    for index, a_sgnop in enumerate(SGNOP_OPS):
-        for y_sgnop in SGNOP_OPS:
-            for offset, a in enumerate(values):
-                await step(a, shifts[(index + offset + y_sgnop) % len(shifts)], a_sgnop, y_sgnop)
+    for a_sgnop in SGNOP_OPS:
+        for a in values:
+            for k in shifts:
+                await step(a, k, a_sgnop)
     await sb.drain()
 
     int_min = -(1 << (wint - 1))
@@ -153,19 +152,13 @@ async def holoso_fmul_ilog2_cocotb(dut: Any) -> None:
             await step_idle()
         else:
             a = fmt.wrap(int(rng.integers(0, 1 << wfull, dtype=np.uint64))).canonicalize().bits
-            await step(
-                a,
-                int(rng.integers(int_min, int_max + 1)),
-                int(rng.integers(0, 4)),
-                int(rng.integers(0, 4)),
-            )
+            await step(a, int(rng.integers(int_min, int_max + 1)), int(rng.integers(0, 4)))
     await sb.drain()
 
     if latency > 1:
         dut.a.value = fmt.encode(1).bits
         dut.k.value = 0
         dut.a_sgnop.value = 0
-        dut.y_sgnop.value = 0
         dut.in_valid.value = 1
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
@@ -219,7 +212,7 @@ def _run(sim: str, config: _Config, model: MulIlog2Model, parameters: dict[str, 
             "HOLOSO_WEXP": str(config.wexp),
             "HOLOSO_WMAN": str(config.wman),
             "HOLOSO_WINT": str(config.wint),
-            "HOLOSO_EXPECTED_LATENCY": str(model.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(model.timing.latency),
         },
         results_xml=str(build_dir / "results.xml"),
     )

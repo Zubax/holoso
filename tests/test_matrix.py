@@ -4,7 +4,7 @@ subscripts, jaxtyping-annotated parameters/returns, matrix state, and ndarray mo
 structure are checked through the public synthesis artifacts (ports, initiation interval, emitted Verilog, residual
 `frontend_ir`); numerical behavior is checked black-box through the public API against numpy executing the very
 same kernel. The binding-time tests pinning what folds statically stay on the lowered HIR, and the FMA-chain test
-keeps a compact MIR population sentinel for the exact operator count that module pooling erases from the Verilog.
+keeps a compact MIR population sentinel for the exact operation count that module pooling erases from the Verilog.
 """
 
 import dataclasses
@@ -29,10 +29,10 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower
-from holoso._mir import MirOptions, lower as lower_to_mir
+from holoso._mir import MirOperation, MirOptions, lower as lower_to_mir
 
 from ._examples import _FUSION_ACCEL_CAL, _FUSION_GYRO_CAL, ImuFusion
-from ._modelref import default_mir, default_options, mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import default_mir, default_options, mir_options, hardware_name, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude, strip_locations
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
@@ -122,9 +122,8 @@ def _mnemonic_counts(fn: Callable[..., object], ops: MirOptions) -> dict[str, in
     mir = lower_to_mir(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, ops)
     counts: dict[str, int] = {}
     for node in mir.nodes.values():
-        operator = getattr(node, "operator", None)
-        if operator is not None:
-            stem = operator.mnemonic.split("_")[0]
+        if isinstance(node, MirOperation):
+            stem = hardware_name(node.primitive).split("_")[0]
             counts[stem] = counts.get(stem, 0) + 1
     return counts
 
@@ -335,7 +334,7 @@ def test_transpose_structure() -> None:
 
     result = _synth(t)
     assert [p.name for p in result.output_ports] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1", "out_2_0", "out_2_1"]
-    # A pure reindexing: no hardware at all -- no pooled operator instantiations and no inline call sites remain after
+    # A pure reindexing: no hardware at all -- no operator instantiations and no inline call sites remain after
     # stripping the unconditional support prelude -- at the combinational II.
     assert result.initiation_interval == (1, 1)
     assert "holoso_" not in strip_inline_prelude(result.verilog_output.verilog)

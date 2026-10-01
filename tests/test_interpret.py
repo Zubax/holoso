@@ -2,7 +2,7 @@
 Acceptance gate + independence guard for the MIR interpreter (`holoso._mir._interpret.MirInterpreter`).
 
 The interpreter is the schedule-independent bit-exact oracle: it evaluates the MIR dataflow graph directly, sharing the
-front/mid-end and `operator.evaluate` with the numerical model but NONE of the LIR scheduling/binding/regalloc/overlap
+front/mid-end and `primitive.evaluate` with the numerical model but NONE of the LIR scheduling/binding/regalloc/overlap
 machinery. Before it can be trusted as an oracle it must agree bit-for-bit with the numerical model on kernels that are
 already known correct -- every bundled example (validated against Python in `test_example_reference`) and every
 scheduling corner kernel (validated against RTL in the cosim suite). A disagreement here means the interpreter is wrong,
@@ -61,7 +61,7 @@ def _spec_vector(model: NumericalSimulator, row: dict[str, float | bool]) -> Vec
     return [coerce_scalar(port.scalar_type, row[port.name], port.name) for port in model.inputs]
 
 
-# Every example with every pooled class at one instance and then at two, so the allocator's binding (and the
+# Every example with every operator at one instance and then at two, so the allocator's binding (and the
 # scheduler's co-issue) is checked against the interpreter on every CFG shape the examples have.
 _EXAMPLE_CASES = [
     pytest.param(spec, fmt, instances, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}-x{instances}")

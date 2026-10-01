@@ -12,15 +12,14 @@ import numpy as np
 import holoso
 from holoso import (
     FAddOptions,
-    FAtan2Options,
     FCmpOptions,
+    FCordicOptions,
     FDivOptions,
     FExp2Options,
     FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
-    FSincosOptions,
     FSqrtOptions,
     OperatorOptions,
     Options,
@@ -29,8 +28,7 @@ from holoso._api import _mir_options
 from holoso._mir import MirOptions
 from holoso._lir import Lir, LirBlock, RegallocTuning, WideStateSlot, build
 from holoso._lir._ir import Early, WideCopy
-from holoso._operators import FAtan2Operator, FExp2Operator, FLog2Operator, FSincosOperator, OpConfig
-from holoso._operators._common import PooledOperatorOptions
+from holoso._operators import BaseOperatorOptions, InlinePrimitive, OpConfig, PooledPrimitive, Primitive
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
 from holoso._mir import Mir, lower as lower_to_mir
@@ -232,18 +230,17 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
     return edges
 
 
-def _if_supported[O](operator: Callable[..., object], fmt: FloatFormat, opt: O) -> O | None:
-    """A transcendental that zkf refuses at the format (no tables, or an exponent too narrow) is left unconfigured."""
-    try:
-        operator(fmt, opt, 0)
-    except (KeyError, ValueError):
-        return None
-    return opt
-
-
 def build_ops(options: Options, width: int) -> OpConfig:
     """For the few tests that inspect a built machine with no kernel to settle its word, so they name the width."""
     return OpConfig(options.operator, options.ffmt, IntFormat(width), options.wmultiplier or 0)
+
+
+def hardware_name(primitive: Primitive) -> str:
+    """The hardware a primitive runs as: its operator for a pooled one, its own mnemonic for an inline one."""
+    if isinstance(primitive, PooledPrimitive):
+        return primitive.operator.name
+    assert isinstance(primitive, InlinePrimitive)
+    return primitive.mnemonic
 
 
 DEFAULT_FETCH_STAGES = 3
@@ -268,12 +265,12 @@ def build_lir(mir: Mir, name: str, tuning: RegallocTuning = _DEFAULT_TUNING) -> 
 
 
 def with_instances(options: Options, instances: int) -> Options:
-    """The same options with every pooled operator the configuration enables allowed `instances` copies."""
+    """The same options with every operator the configuration enables allowed `instances` copies."""
     operator = options.operator
     widened: dict[str, Any] = {
         field.name: dataclasses.replace(value, instances=instances)
         for field in dataclasses.fields(operator)
-        if isinstance(value := getattr(operator, field.name), PooledOperatorOptions)
+        if isinstance(value := getattr(operator, field.name), BaseOperatorOptions)
     }
     return dataclasses.replace(options, operator=dataclasses.replace(operator, **widened))
 
@@ -287,11 +284,11 @@ def default_options(fmt: FloatFormat) -> Options:
             fmul_ilog2=FMulILog2Options(),
             filog2=FILog2Options(),
             fcmp=FCmpOptions(),
-            fexp2=_if_supported(FExp2Operator, fmt, FExp2Options()),
-            flog2=_if_supported(FLog2Operator, fmt, FLog2Options()),
+            # Configured at every format: ZKF alone knows which it supports, and refuses as the operator is built.
+            fexp2=FExp2Options(),
+            flog2=FLog2Options(),
             fsqrt=FSqrtOptions(),  # no tables, hence no format that leaves it unsupported
-            fsincos=_if_supported(FSincosOperator, fmt, FSincosOptions()),
-            fatan2=_if_supported(FAtan2Operator, fmt, FAtan2Options()),
+            fcordic=FCordicOptions(),
         ),
         ffmt=fmt,
     )
@@ -430,9 +427,6 @@ def staged_options(fmt: FloatFormat) -> Options:
     and handshake at a longer latency. Deliberately hardcoded -- it is a test fixture chosen for coverage, not a
     derived enumeration of operator knobs, so it stays valid as new (not necessarily stage-shaped) knobs are added.
     """
-    # Bench-verified stage combos (tests/hdl/test_f{sincos,atan2}.py), so the latency formula is known-good.
-    sincos = FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1)
-    atan2 = FAtan2Options(stage_product=1, stage_normalize=1, stage_pack=1)
     return Options(
         OperatorOptions(
             fadd=FAddOptions(
@@ -443,28 +437,20 @@ def staged_options(fmt: FloatFormat) -> Options:
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
             filog2=FILog2Options(stage_input=1),
             fcmp=FCmpOptions(stage_input=1),
-            fexp2=_if_supported(
-                FExp2Operator,
-                fmt,
-                FExp2Options(stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1),
-            ),
-            flog2=_if_supported(
-                FLog2Operator,
-                fmt,
-                FLog2Options(
-                    stage_input=1,
-                    stage_decode=1,
-                    stage_product=1,
-                    stage_product_final=1,
-                    stage_normalize=1,
-                    stage_normalize_output=1,
-                    stage_pack=1,
-                    stage_output=1,
-                ),
+            fexp2=FExp2Options(stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1),
+            flog2=FLog2Options(
+                stage_input=1,
+                stage_decode=1,
+                stage_product=1,
+                stage_product_final=1,
+                stage_normalize=1,
+                stage_normalize_output=1,
+                stage_pack=1,
+                stage_output=1,
             ),
             fsqrt=FSqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
-            fsincos=_if_supported(FSincosOperator, fmt, sincos),
-            fatan2=_if_supported(FAtan2Operator, fmt, atan2),
+            # A stage combination tests/hdl/test_fcordic.py verifies both switching modes and fixed to either.
+            fcordic=FCordicOptions(stage_product=1, stage_normalize=1, stage_pack=1),
         ),
         ffmt=fmt,
     )

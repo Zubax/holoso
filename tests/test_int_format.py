@@ -14,7 +14,7 @@ import pytest
 import holoso
 from holoso import FloatFormat, IntFormat, Options
 from holoso._mir import MirOperation, MirPhi
-from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, SelectOperator, identity_conditioner
+from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, SelectPrimitive, identity_conditioner
 from holoso._type import BoolType, IntType
 from holoso._value import IntValue
 
@@ -65,13 +65,13 @@ def test_select_carries_an_integer_scalar_type_through_its_signature(width: int)
     # The mux is type-polymorphic across the scalar families, at every integer width rather than the machine's own.
     ty = IntType(IntFormat(width))
     fmt = ty.fmt
-    signature = SelectOperator(ty).signature
+    signature = SelectPrimitive(ty).signature
     assert signature.operand_types == (BoolType(), ty, ty)
     assert signature.result_types == (ty,)
 
     arms = (IntValue.from_int(fmt, fmt.max), IntValue.from_int(fmt, fmt.min))
-    assert SelectOperator(ty).evaluate(True, *arms) == (arms[0],)
-    assert SelectOperator(ty).evaluate(False, *arms) == (arms[1],)
+    assert SelectPrimitive(ty).evaluate(True, *arms) == (arms[0],)
+    assert SelectPrimitive(ty).evaluate(False, *arms) == (arms[1],)
 
 
 @pytest.mark.parametrize("width", (2, 17, 33))
@@ -83,9 +83,7 @@ def test_integer_ports_condition_with_the_identity_and_nothing_else(width: int) 
     assert IntIdentity().is_identity
     assert IntIdentity().decorate("r3") == "r3"
 
-    operation = MirOperation(
-        SelectOperator(ty), (0, 1, 2), (BoolInversion(), IntIdentity(), IntIdentity()), 0, IntIdentity(), ()
-    )
+    operation = MirOperation(SelectPrimitive(ty), (0, 1, 2), (BoolInversion(), IntIdentity(), IntIdentity()), 0, None)
     assert operation.scalar_type == ty
 
     # The phi path matters separately: it is what the wide-bank allocator narrows when lowering a merge into

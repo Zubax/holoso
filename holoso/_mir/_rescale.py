@@ -20,7 +20,7 @@ from .._hir import (
     rebuild,
     scaling_of,
 )
-from .._operators import OpConfig
+from .._operators import FMulILog2Primitive, OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
 from ._ir import degrades, refuse_degrading
@@ -68,7 +68,7 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
                     scaling = scaling_of(constant.value)
                     assert scaling is not None
                     reaches = _reaches(fmt, scaling.k)
-                    if ops.options.fmul_ilog2 is None:
+                    if not ops.serves(FMulILog2Primitive):
                         # Past the format's reach the scaler does not help either, so it is not the remedy to name.
                         remedy = _NO_SCALER if reaches else "widen wexp or rescale"
                         refuse_degrading(constant.value, fmt, "constant", remedy)

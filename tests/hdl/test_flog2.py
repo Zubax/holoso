@@ -1,5 +1,5 @@
 """
-Tests for holoso_flog2 (pipelined; y = sgnop(log2(sgnop(a))); domain_error and pole alongside out_valid).
+Tests for holoso_flog2 (pipelined; y = log2(sgnop(a)); domain_error and pole alongside out_valid).
 
 Unlike fdiv (whose y is unspecified on div0), zkf_log2 defines y = -inf for both error cases, so this bench checks y in
 every case and additionally checks the two flags: pole when the conditioned operand is +0, domain_error when it is
@@ -66,18 +66,17 @@ async def holoso_flog2_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, a_op: int, y_op: int) -> None:
+    async def step(a: int, a_op: int) -> None:
         a_eff = apply_sgnop(a, a_op)
-        y_pre, domain_error, pole = log2_oracle(a_eff)
+        y, domain_error, pole = log2_oracle(a_eff)
         expected = {
-            "_desc": f"a=0x{a:08x} ops={a_op}{y_op}",
-            "y": apply_sgnop(y_pre, y_op),
+            "_desc": f"a=0x{a:08x} ops={a_op}",
+            "y": y,
             "domain_error": domain_error,
             "pole": pole,
         }
         dut.a.value = a
         dut.a_sgnop.value = a_op
-        dut.y_sgnop.value = y_op
         dut.in_valid.value = 1
         sb.push(expected)
         await RisingEdge(dut.clk)
@@ -85,23 +84,22 @@ async def holoso_flog2_cocotb(dut: Any) -> None:
         sb.sample()
 
     for a in DIRECTED_F32:
-        await step(a, 0, 0)
+        await step(a, 0)
     await sb.drain()
 
-    # Sgnop sweep, seeded with a zero and a negative operand so the pole/domain flags fire under output sign changes.
+    # Sgnop sweep, seeded with a zero and a negative operand so the pole/domain flags fire under operand sign changes.
     sample = [DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))] for _ in range(6)]
     sample += [0, f32_to_bits(-3.0)]
     for a_op in SGNOP_OPS:
-        for y_op in SGNOP_OPS:
-            for a in sample:
-                await step(a, a_op, y_op)
+        for a in sample:
+            await step(a, a_op)
     await sb.drain()
 
     for _ in range(get_random_count()):
         if rng.random() < 0.2:
             await step_idle()
             continue
-        await step(random_zkf_f32(rng), int(rng.integers(0, 4)), int(rng.integers(0, 4)))
+        await step(random_zkf_f32(rng), int(rng.integers(0, 4)))
     await sb.drain()
 
     await drive_reset(dut)
@@ -115,7 +113,7 @@ async def holoso_flog2_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_flog2(sim: str, stages: dict[str, int]) -> None:
-    operator = FLog2Operator(FloatFormat(8, 24), FLog2Options(**stages), 0)
+    operator = FLog2Operator.build(FloatFormat(8, 24), FLog2Options(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"flog2_{stage_tag(stages)}"
     runner.build(
@@ -133,6 +131,6 @@ def test_holoso_flog2(sim: str, stages: dict[str, int]) -> None:
         test_module="tests.hdl.test_flog2",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )

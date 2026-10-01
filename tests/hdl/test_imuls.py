@@ -111,30 +111,30 @@ _CONFIGURATIONS = tuple((width, stage) for width in (*range(2, 7), 24, 44) for s
 )
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_imuls(sim: str, width: int, stage_product: int) -> None:
-    # The Python operator model supplies the RTL parameters and the expected latency, so a drifted closed form fails.
-    hardware = IMulOperator(IntFormat(width), IMulOptions(stage_product=stage_product))
+    # The operator supplies the RTL parameters and the expected latency, so a drifted closed form fails.
+    operator = IMulOperator.build(IntFormat(width), IMulOptions(stage_product=stage_product))
     runner = get_runner(sim)
     tag = f"holoso_imuls_w{width}_s{stage_product}"
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / tag
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
-        hdl_toplevel=hardware.module_name,
-        parameters=hardware.params,
+        hdl_toplevel=operator.module_name,
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel=hardware.module_name,
+        hdl_toplevel=operator.module_name,
         test_module="tests.hdl.test_imuls",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={
             "HOLOSO_IMULS_WIDTH": str(width),
             "HOLOSO_IMULS_STAGE_PRODUCT": str(stage_product),
-            "HOLOSO_EXPECTED_LATENCY": str(hardware.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0]),
         },
         results_xml=str(build_dir / "results.xml"),
     )

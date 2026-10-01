@@ -34,8 +34,7 @@ def main() -> None:
                 fdiv=holoso.FDivOptions(),
                 fmul_ilog2=holoso.FMulILog2Options(),
                 fcmp=holoso.FCmpOptions(),
-                fsincos=holoso.FSincosOptions(),
-                fatan2=holoso.FAtan2Options(),
+                fcordic=holoso.FCordicOptions(),
             ),
             ffmt=fmt,
         )

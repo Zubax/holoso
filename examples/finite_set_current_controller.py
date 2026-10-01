@@ -127,7 +127,7 @@ def main() -> None:
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
             fsort=holoso.FSortOptions(),
-            fsincos=holoso.FSincosOptions(),
+            fcordic=holoso.FCordicOptions(),
         ),
         ffmt=float_format,
     )

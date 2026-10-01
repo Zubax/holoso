@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 from typing import Any
 
 import cocotb
@@ -7,8 +8,18 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import IntFormat
+from holoso import (
+    IAbsOptions,
+    IAddOptions,
+    ICmpOptions,
+    IntFormat,
+    IPopcntOptions,
+    IShlOptions,
+    IShrOptions,
+    ISubOptions,
+)
 from holoso._operators import (
+    HardwareOperator,
     IAbsOperator,
     IAddOperator,
     ICmpOperator,
@@ -17,7 +28,6 @@ from holoso._operators import (
     IShrOperator,
     ISubOperator,
 )
-from holoso._operators._int import IntHardwareOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
@@ -31,9 +41,17 @@ from .hdl_float_oracle import (
 )
 from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, expected_simple
 
-# The operator model is the source of the module name, its RTL parameters, its port names and its latency, so a
-# declaration that drifted from the hardware fails right here, across every width the sweep covers.
-_OPERATORS = (IAddOperator, ISubOperator, IAbsOperator, ICmpOperator, IShlOperator, IShrOperator, IPopcntOperator)
+# The operator is the source of the module name, its RTL parameters, its port names and its latency, so a declaration
+# that drifted from the hardware fails right here, across every width the sweep covers.
+_OPERATORS: list[Callable[[IntFormat], HardwareOperator]] = [
+    lambda fmt: IAddOperator.build(fmt, IAddOptions()),
+    lambda fmt: ISubOperator.build(fmt, ISubOptions()),
+    lambda fmt: IAbsOperator.build(fmt, IAbsOptions()),
+    lambda fmt: ICmpOperator.build(fmt, ICmpOptions()),
+    lambda fmt: IShlOperator.build(fmt, IShlOptions()),
+    lambda fmt: IShrOperator.build(fmt, IShrOptions()),
+    lambda fmt: IPopcntOperator.build(fmt, IPopcntOptions()),
+]
 
 
 @cocotb.test()
@@ -43,7 +61,7 @@ async def integer_operator_cocotb(dut: Any) -> None:
     operands = os.environ["HOLOSO_INTEGER_OPERANDS"].split(",")
     results = os.environ["HOLOSO_INTEGER_RESULTS"].split(",")
     unary = len(operands) == 1
-    # Value ports from the model, so a name it declares and the RTL lacks fails here; sidebands from the oracle,
+    # Value ports from the operator, so a name it declares and the RTL lacks fails here; sidebands from the oracle,
     # which is what knows whether this module raises one.
     sidebands = sorted(set(expected_simple(operator, 0, 0, width)) - set(results))
     outputs = [(port, port) for port in results + sidebands]
@@ -129,35 +147,34 @@ async def integer_operator_cocotb(dut: Any) -> None:
 
 
 @pytest.mark.parametrize("width", TEST_WIDTHS, ids=lambda width: f"w{width}")
-@pytest.mark.parametrize("operator_class", _OPERATORS, ids=lambda cls: cls.mnemonic)
+@pytest.mark.parametrize("operator_of", _OPERATORS, ids=lambda operator_of: operator_of(IntFormat(2)).name)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_integer_operator(sim: str, operator_class: type[IntHardwareOperator], width: int) -> None:
-    # Every pooled integer operator is (format, options), which the abstract base does not spell out.
-    hardware = operator_class(IntFormat(width), operator_class.Options())  # type: ignore[call-arg]
-    operator = hardware.module_name
+def test_integer_operator(sim: str, operator_of: Callable[[IntFormat], HardwareOperator], width: int) -> None:
+    operator = operator_of(IntFormat(width))
+    module = operator.module_name
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"{operator}_w{width}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"{module}_w{width}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
-        hdl_toplevel=operator,
-        parameters=hardware.params,
+        hdl_toplevel=module,
+        parameters=operator.params,
         build_args=build_args(sim),
         build_dir=build_dir,
         clean=True,
         timescale=("1ns", "1ps"),
     )
     runner.test(
-        hdl_toplevel=operator,
+        hdl_toplevel=module,
         test_module="tests.hdl.test_integer",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
         extra_env={
-            "HOLOSO_INTEGER_OPERATOR": operator,
+            "HOLOSO_INTEGER_OPERATOR": module,
             "HOLOSO_INTEGER_WIDTH": str(width),
-            "HOLOSO_INTEGER_OPERANDS": ",".join(hardware.operand_hdl_ports),
-            "HOLOSO_INTEGER_RESULTS": ",".join(hardware.output_hdl_ports),
-            "HOLOSO_EXPECTED_LATENCY": str(hardware.latency),
+            "HOLOSO_INTEGER_OPERANDS": ",".join(port.name for port in operator.operand_ports),
+            "HOLOSO_INTEGER_RESULTS": ",".join(port.name for port in operator.output_ports),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0]),
         },
         results_xml=str(build_dir / "results.xml"),
     )

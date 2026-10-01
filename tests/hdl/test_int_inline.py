@@ -1,10 +1,10 @@
 """
-The inline integer operators in fabric: each one's own `verilog_expr` spliced into a combinational harness, scored
-against an independent Python bit formula per operator family.
+The inline integer primitives in fabric: each one's own `verilog_expr` spliced into a combinational harness, scored
+against an independent Python bit formula per primitive family.
 
 The generated transport -- the emitter's operand nets, conditioners and register writes -- is owned elsewhere:
-test_cosim_int drives inline operators end-to-end through generated machines (the inline xor in `sat_mix`, the
-inline shift/mask in `pow2_strength`) and test_int_selection pins which operators MIR selects.
+test_cosim_int drives inline primitives end-to-end through generated machines (the inline xor in `sat_mix`, the
+inline shift/mask in `pow2_strength`) and test_int_selection pins which primitives MIR selects.
 """
 
 import os
@@ -19,21 +19,21 @@ from cocotb.triggers import Timer
 from cocotb_tools.runner import get_runner
 
 from holoso._operators import (
-    BoolToIntOperator,
-    InlineHardwareOperator,
-    IntBwAndOperator,
-    IntBwNotOperator,
-    IntBwOrOperator,
-    IntBwXorOperator,
-    IntShiftConstOperator,
-    IntToBoolOperator,
+    BoolToIntPrimitive,
+    InlinePrimitive,
+    IntBwAndPrimitive,
+    IntBwNotPrimitive,
+    IntBwOrPrimitive,
+    IntBwXorPrimitive,
+    IntShiftConstPrimitive,
+    IntToBoolPrimitive,
 )
 from holoso._type import BoolType, IntFormat, IntType
 
 from .hdl_float_oracle import REPO_ROOT, SIMULATORS, build_args, get_seed
 
 EXHAUSTIVE_WIDTH_LIMIT = 6
-"""At and below this width every operand pair is driven, so the sweep proves the operators there, not samples them."""
+"""At and below this width every operand pair is driven, so the sweep proves the primitives there, not samples them."""
 
 TOPLEVEL = "holoso_int_inline_tb"
 
@@ -44,7 +44,7 @@ _WIDTHS = (*range(2, EXHAUSTIVE_WIDTH_LIMIT + 1), 9, 24, 33, 44)
 
 
 def _shift_counts(fmt: IntFormat) -> list[int]:
-    """Every count the operator accepts, which at the production widths is too many to instantiate one output each."""
+    """Every count the primitive accepts, which at the production widths is too many to instantiate one output each."""
     legal = [count for count in range(1 - fmt.width, fmt.width) if count != 0]
     if fmt.width <= EXHAUSTIVE_WIDTH_LIMIT:
         return legal
@@ -55,13 +55,13 @@ def _shift_counts(fmt: IntFormat) -> list[int]:
 @dataclass(frozen=True, slots=True)
 class _Case:
     """
-    One operator over one folded-conditioner assignment of its operands, owning its literal operand nets and result
+    One primitive over one folded-conditioner assignment of its operands, owning its literal operand nets and result
     family: the boolean port takes the harness net `c`, the integer ones `a` then `b`. An integer port folds
-    nothing, but a boolean port folds an inversion that the emitter splices as `~net`, so an operator taking one
+    nothing, but a boolean port folds an inversion that the emitter splices as `~net`, so a primitive taking one
     must serve both spellings.
     """
 
-    operator: InlineHardwareOperator
+    primitive: InlinePrimitive
     invert: bool
     operands: tuple[str, ...]
     wide_result: bool
@@ -72,34 +72,34 @@ class _Case:
 
 
 def _cases(fmt: IntFormat) -> list[_Case]:
-    table: list[tuple[InlineHardwareOperator, tuple[str, ...], bool]] = [
-        (IntBwAndOperator(fmt), ("a", "b"), True),
-        (IntBwOrOperator(fmt), ("a", "b"), True),
-        (IntBwXorOperator(fmt), ("a", "b"), True),
-        (IntBwNotOperator(fmt), ("a",), True),
-        (IntToBoolOperator(fmt), ("a",), False),
-        (BoolToIntOperator(fmt), ("c",), True),
-        *((IntShiftConstOperator(fmt, count), ("a",), True) for count in _shift_counts(fmt)),
+    table: list[tuple[InlinePrimitive, tuple[str, ...], bool]] = [
+        (IntBwAndPrimitive(fmt), ("a", "b"), True),
+        (IntBwOrPrimitive(fmt), ("a", "b"), True),
+        (IntBwXorPrimitive(fmt), ("a", "b"), True),
+        (IntBwNotPrimitive(fmt), ("a",), True),
+        (IntToBoolPrimitive(fmt), ("a",), False),
+        (BoolToIntPrimitive(fmt), ("c",), True),
+        *((IntShiftConstPrimitive(fmt, count), ("a",), True) for count in _shift_counts(fmt)),
     ]
     cases: list[_Case] = []
-    for operator, operands, wide_result in table:
+    for primitive, operands, wide_result in table:
         # The production signature is checked against the case's own literal shape, never consulted for it: a
         # signature defect must fail here, not be coerced through the numeric compare downstream.
         expected_operands = tuple(BoolType() if net == "c" else IntType(fmt) for net in operands)
-        assert operator.signature.operand_types == expected_operands, operator.mnemonic
+        assert primitive.signature.operand_types == expected_operands, primitive.mnemonic
         expected_result = (IntType(fmt),) if wide_result else (BoolType(),)
-        assert operator.signature.result_types == expected_result, operator.mnemonic
+        assert primitive.signature.result_types == expected_result, primitive.mnemonic
         polarities = (False, True) if "c" in operands else (False,)
-        cases.extend(_Case(operator, invert, operands, wide_result) for invert in polarities)
+        cases.extend(_Case(primitive, invert, operands, wide_result) for invert in polarities)
     return cases
 
 
 def _port(index: int, case: _Case) -> str:
-    return f"y{index}_{case.operator.mnemonic}"  # the index disambiguates the several shift counts and both polarities
+    return f"y{index}_{case.primitive.mnemonic}"  # the index disambiguates the several shift counts and both polarities
 
 
 def _nested_port(index: int, case: _Case) -> str:
-    return f"n{index}_{case.operator.mnemonic}"
+    return f"n{index}_{case.primitive.mnemonic}"
 
 
 def _harness(width: int, cases: Sequence[_Case]) -> str:
@@ -112,7 +112,7 @@ def _harness(width: int, cases: Sequence[_Case]) -> str:
     assigns = []
     for index, case in enumerate(cases):
         declaration = f"[{width - 1}:0] " if case.wide_result else " "
-        expression = case.operator.verilog_expr(*case.nets)
+        expression = case.primitive.verilog_expr(*case.nets)
         ports.append(f"    output wire {declaration}{_port(index, case)},")
         ports.append(f"    output wire {declaration}{_nested_port(index, case)},")
         assigns.append(f"    assign {_port(index, case)} = {expression};")
@@ -137,26 +137,26 @@ def _harness(width: int, cases: Sequence[_Case]) -> str:
     )
 
 
-def _expected_bits(operator: InlineHardwareOperator, width: int, a: int, b: int, c: bool) -> int:
+def _expected_bits(primitive: InlinePrimitive, width: int, a: int, b: int, c: bool) -> int:
     """
-    The independent oracle: a plain Python bit formula per operator family over the signed operands `a`/`b` and
-    the boolean `c`, never the operator's own `evaluate`.
+    The independent oracle: a plain Python bit formula per primitive family over the signed operands `a`/`b` and
+    the boolean `c`, never the primitive's own `evaluate`.
     """
     mask = (1 << width) - 1
-    if isinstance(operator, IntBwAndOperator):
+    if isinstance(primitive, IntBwAndPrimitive):
         return (a & b) & mask
-    if isinstance(operator, IntBwOrOperator):
+    if isinstance(primitive, IntBwOrPrimitive):
         return (a | b) & mask
-    if isinstance(operator, IntBwXorOperator):
+    if isinstance(primitive, IntBwXorPrimitive):
         return (a ^ b) & mask
-    if isinstance(operator, IntBwNotOperator):
+    if isinstance(primitive, IntBwNotPrimitive):
         return ~a & mask
-    if isinstance(operator, IntToBoolOperator):
+    if isinstance(primitive, IntToBoolPrimitive):
         return int(a != 0)
-    if isinstance(operator, BoolToIntOperator):
+    if isinstance(primitive, BoolToIntPrimitive):
         return int(c)
-    assert isinstance(operator, IntShiftConstOperator)
-    return ((a << operator.shamt) if operator.shamt > 0 else (a >> -operator.shamt)) & mask
+    assert isinstance(primitive, IntShiftConstPrimitive)
+    return ((a << primitive.shamt) if primitive.shamt > 0 else (a >> -primitive.shamt)) & mask
 
 
 def _operand_values(fmt: IntFormat, rng: np.random.Generator) -> list[int]:
@@ -185,7 +185,7 @@ async def holoso_int_inline_cocotb(dut: Any) -> None:
                 dut.sel.value = 1
                 await Timer(1, unit="ns")
                 for index, case in enumerate(cases):
-                    want = _expected_bits(case.operator, fmt.width, a, b, c ^ case.invert)
+                    want = _expected_bits(case.primitive, fmt.width, a, b, c ^ case.invert)
                     for port in (_port(index, case), _nested_port(index, case)):
                         actual = int(getattr(dut, port).value)
                         assert actual == want, f"{port} {fmt} a={a} b={b} c={c}: got {actual:#x}, want {want:#x}"

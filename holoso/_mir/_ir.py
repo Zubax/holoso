@@ -1,15 +1,14 @@
-"""Selected mid-level IR (MIR): concrete hardware operators with typed scalar sidebands, arranged into a CFG."""
+"""Selected mid-level IR (MIR): hardware primitives with typed scalar sidebands, arranged into a CFG."""
 
 import math
 from dataclasses import dataclass, field, replace
 from typing import assert_never
 
 from .._operators import (
-    HardwareOperator,
-    InlineHardwareOperator,
-    PooledHardwareOperator,
+    BoolInversion,
+    InlinePrimitive,
     PortConditioner,
-    has_sign_control,
+    Primitive,
     identity_conditioner,
 )
 from .._errors import UnsupportedConstruct
@@ -77,25 +76,6 @@ class MirConst:
             object.__setattr__(self, "value", self.value + 0.0)
 
 
-def _check_unconditioned_operands(operator: HardwareOperator) -> None:
-    """
-    The declaration asserts what the operator READS, which nothing can derive, so these three rules close the ways
-    it can be wrong. They run per operation because an operator has no constructor of its own to hang them on.
-    """
-    declined = operator.unconditioned_operands
-    if not declined:
-        return
-    signature = operator.signature
-    # Declining a sideband the port never had would say nothing; only a float port carries one to decline.
-    assert all(has_sign_control(signature.operand_types[position]) for position in declined)
-    # An ERROR sideband is an observable output that "unchanged across every RESULT port" does not cover, so the
-    # claim would be unsound rather than merely unverified; an operator raising one may decline nothing.
-    assert not (isinstance(operator, PooledHardwareOperator) and operator.error_ports)
-    # A firing may exchange a commutative operator's operands together with their conditioners, so a claim covering
-    # one of them would migrate onto the other. `swap_output_permutation` maps RESULT ports and cannot say this.
-    assert not operator.is_commutative or declined == frozenset(range(signature.arity))
-
-
 def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType) -> None:
     """Port conditioner must be the type's own: sign control for floats, inversion for bools, identity for ints."""
     assert isinstance(conditioner, type(identity_conditioner(port_type)))
@@ -104,40 +84,36 @@ def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType) -> N
 @dataclass(frozen=True, slots=True)
 class MirOperation:
     """
-    A selected hardware-operator use producing ONE value: the `output_port`-th result, conditioned by
-    `output_conditioner`. Operations sharing one block, operator, operands, and operand conditioners while tapping
-    DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all its results at
-    once.
+    One use of a selected primitive, producing ONE value: its `result`-th result, a boolean one through its
+    `output_inversion`. A wide result is never conditioned at its producer -- its sign folds into whatever reads it --
+    so the inversion is present exactly for a boolean result. Operations sharing one block, primitive, operands, and
+    operand conditioners while tapping DISTINCT output ports fuse into a single firing at LIR build -- a multi-output
+    module computes all its results at once.
     """
 
-    operator: HardwareOperator
+    primitive: Primitive
     operands: tuple[ValueId, ...]
     operand_conditioners: tuple[PortConditioner, ...]
-    output_port: int
-    output_conditioner: PortConditioner
-    immediates: tuple[int, ...]  # per-firing immediate values, aligned with operator.immediate_ports
+    result: int
+    output_inversion: BoolInversion | None
     scalar_type: ScalarType = field(init=False, compare=False)
 
     def __post_init__(self) -> None:
-        signature = self.operator.signature
-        ports = self.operator.immediate_ports
-        assert not isinstance(self.operator, InlineHardwareOperator) or len(signature.result_types) == 1
-        assert len(self.immediates) == len(ports)
-        assert all(0 <= value < (1 << port.width) for value, port in zip(self.immediates, ports, strict=True))
+        signature = self.primitive.signature
+        assert not isinstance(self.primitive, InlinePrimitive) or len(signature.result_types) == 1
         assert len(self.operands) == signature.arity
         assert len(self.operand_conditioners) == signature.arity
-        _check_unconditioned_operands(self.operator)
         for position, (conditioner, operand_type) in enumerate(
             zip(self.operand_conditioners, signature.operand_types, strict=True)
         ):
             _check_conditioner(conditioner, operand_type)
-            # The invariant the whole design rests on: a declined sideband leaves nothing to bind. Stated over the
-            # declaration rather than over `conditions_operand`, which also answers no for the boolean and integer
-            # ports -- and a boolean port carries a real inversion.
-            assert position not in self.operator.unconditioned_operands or conditioner.is_identity
-        assert 0 <= self.output_port < len(signature.result_types)
-        _check_conditioner(self.output_conditioner, signature.result_types[self.output_port])
-        object.__setattr__(self, "scalar_type", signature.result_types[self.output_port])
+            # What the declaration licenses: an operand whose sign the primitive cannot observe carries the identity,
+            # so every conditioned view of one value names one node.
+            assert position not in self.primitive.unconditioned_operands or conditioner.is_identity
+        assert 0 <= self.result < len(signature.result_types)
+        result_type = signature.result_types[self.result]
+        assert (self.output_inversion is None) == result_type.is_wide
+        object.__setattr__(self, "scalar_type", result_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,19 +375,18 @@ class MirBuilder:
 
     def operation(
         self,
-        operator: HardwareOperator,
+        primitive: Primitive,
         operands: list[ValueId],
         operand_conditioners: list[PortConditioner],
-        output_port: int = 0,
-        output_conditioner: PortConditioner | None = None,
-        immediates: tuple[int, ...] = (),
+        result: int = 0,
+        output_inversion: BoolInversion = BoolInversion(),
     ) -> ValueId:
         """
-        Append a hardware-operator use producing the `output_port`-th result, interned by the whole node within the
-        current block, so two relations over one comparator firing -- or two rounding modes over one operand -- stay
-        distinct values while identical taps collapse.
+        Append a use of a primitive producing its `result`-th result, a boolean one through `output_inversion`,
+        interned by the whole node within the current block, so two relations over one comparator firing -- or two
+        rounding modes over one operand -- stay distinct values while identical taps collapse.
         """
-        signature = operator.signature
+        signature = primitive.signature
         assert len(operands) == signature.arity
         assert len(operand_conditioners) == signature.arity
         assert all(
@@ -421,16 +396,15 @@ class MirBuilder:
         # Normalized BEFORE interning, so every conditioned view of one unconditioned operand interns to a
         # single value. Discarding the transform is what the declaration licenses: it cannot be observed.
         operand_conditioners = [
-            identity_conditioner(operand_type) if position in operator.unconditioned_operands else conditioner
+            identity_conditioner(operand_type) if position in primitive.unconditioned_operands else conditioner
             for position, (conditioner, operand_type) in enumerate(
                 zip(operand_conditioners, signature.operand_types, strict=True)
             )
         ]
-        if output_conditioner is None:
-            output_conditioner = identity_conditioner(signature.result_types[output_port])
-        node = MirOperation(
-            operator, tuple(operands), tuple(operand_conditioners), output_port, output_conditioner, immediates
-        )
+        wide = signature.result_types[result].is_wide
+        assert not (wide and output_inversion.invert), "a wide result is never conditioned at its producer"
+        inversion = None if wide else output_inversion
+        node = MirOperation(primitive, tuple(operands), tuple(operand_conditioners), result, inversion)
         key = (self.current_block, node)
         vid = self._block_intern.get(key)
         if vid is None:

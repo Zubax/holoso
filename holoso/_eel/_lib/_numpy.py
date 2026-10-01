@@ -9,9 +9,9 @@ prove statically is refused at build time instead -- a liberty it takes where a 
 Composites compute through the intrinsic stubs (exp2, atan2, ...) instead of the library functions directly even
 though the library spellings would lower identically (they select the same lowerings). `clip` is the
 exception: its bounds are arrays as readily as scalars, so it composes `np.maximum`/`np.minimum`, which map over one.
-The intrinsic stub pins each primitive to the numpy/math variant matching the hardware behavior -- e.g. exp2 saturates
+The intrinsic stub pins each intrinsic to the numpy/math variant matching the hardware behavior -- e.g. exp2 saturates
 to inf like the hardware where math.exp2 would raise -- so a composite built on the stubs inherits that
-hardware-faithful behavior, and its plain-Python run uses exactly the primitives (and fast-math choices) it lowers to.
+hardware-faithful behavior, and its plain-Python run uses exactly the intrinsics (and fast-math choices) it lowers to.
 """
 
 import math

@@ -3,7 +3,7 @@ The MIR interpreter: a bit-exact, schedule-independent reference model of a kern
 
 Where the numerical backend (`holoso._backend.numerical`) replays the scheduled, register-allocated LIR cycle by
 cycle, this interpreter evaluates the unscheduled MIR dataflow graph directly: it walks the CFG, evaluates each
-operation once through the operator's own bit-exact `evaluate`, and resolves phis by the edge actually taken. It owns
+operation once through the primitive's own bit-exact `evaluate`, and resolves phis by the edge actually taken. It owns
 no registers, no operator instances, and no cycle counter, so it is independent of scheduling, instance binding,
 register allocation, and the cross-block overlap machinery. Comparing it against the numerical model therefore isolates
 exactly that LIR layer, bit-for-bit and with no tolerance: a divergence is a scheduling/binding/regalloc/overlap
@@ -72,8 +72,13 @@ class MirInterpreter:
                     apply_conditioner(conditioner, env[operand])
                     for operand, conditioner in zip(operation.operands, operation.operand_conditioners, strict=True)
                 ]
-                results = operation.operator.evaluate(*operands, immediates=operation.immediates)
-                env[op_id] = apply_conditioner(operation.output_conditioner, results[operation.output_port])
+                results = operation.primitive.evaluate(*operands)
+                result = results[operation.result]
+                env[op_id] = (
+                    result
+                    if operation.output_inversion is None
+                    else apply_conditioner(operation.output_inversion, result)
+                )
             terminator = block.terminator
             match terminator:
                 case MirRet():

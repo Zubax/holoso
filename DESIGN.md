@@ -111,7 +111,7 @@ flowchart LR
 HIR -- "what to compute": SSA dataflow inside a control-flow graph with real branches. Target-independent and semantic;
 it does not know how an operation is implemented.
 
-MIR -- "which hardware to use": selected hardware operators over typed nodes, still unscheduled. This is the first stage
+MIR -- "which hardware to use": selected primitives over typed nodes, still unscheduled. This is the first stage
 allowed to inspect hardware operator configs or operand numerical limits.
 
 LIR -- "the microprogram": the scheduled, bound, register-allocated op stream for the synthesized machine, over typed
@@ -127,8 +127,16 @@ the slow HDL-emission/simulation iteration begins.
 - Issue / commit / landing -- the three cycles of a result: an op issues when the schedule dispatches it (operands
   are sampled a fetch lag later), commits its result at `issue + latency`, and that result lands (first becomes
   readable) a further fixed latency later; a consumer reads at the landing, not the commit.
-- Pooled operator -- a latency-bearing arithmetic operator (fadd, fdiv, ...) time-multiplexed across all its uses.
-- Inline operator -- a combinational zero-latency op (boolean logic, select, cast) emitted as a single HDL expression.
+- Operator -- one kind of physical streaming module as configured (its RTL wrapper, parameters, ports and instance
+  budget): the resource-sharing key and the home of every physical fact. The public options configure operators by kind.
+- Mode -- one way to drive an operator, selected by a code on its mode port where it has one, deciding the latency,
+  initiation interval, operand prefix and output ports of a firing issued in it.
+- Primitive -- what a firing computes: a signature, bit-exact reference semantics and a rendering. A MIR operation is
+  one use of a primitive.
+- Pooled primitive -- a latency-bearing primitive (fadd, floor, ...): one mode on one operator, time-multiplexed with
+  every other primitive on that operator across all their uses.
+- Inline primitive -- a combinational zero-latency primitive (boolean logic, select, cast) emitted as a single HDL
+  expression.
 - Spill -- NOT a register spill to memory: a value whose landing extends past its block's terminator into a
   single-predecessor successor; the cross-block software-pipelining overlap.
 - Install -- a copy that writes a value into a persistent-state slot or a merged-phi register at a block boundary,
@@ -150,10 +158,10 @@ the slow HDL-emission/simulation iteration begins.
   alongside the opcode-selected arms. A register carries at most one.
 - Makespan / II -- a block's schedule length in cycles; the initiation interval (II) is the whole executed path's
   exact cycle count.
-- Firing -- one activation of a pooled operator: the operation, or the fused group of operations, that a single
-  issue of the module computes; its members share the issue cycle and the instance.
-- Instance -- one physical copy of a pooled operator. The scheduler binds each firing to an instance; the register
-  allocator may rebind it.
+- Firing -- one activation of a primitive: the operation, or the fused group of operations, that a single issue
+  computes; a pooled firing's members share the issue cycle, the mode and the operator instance.
+- Instance -- one physical copy of an operator. The scheduler binds each firing to an instance; the register allocator
+  may rebind it. An instance whose firings all run one mode is elaborated for that mode alone where its operator can be.
 - Mux arm -- one input of a register-file multiplexer: a source an operand port's read multiplexer selects among, or
   a writer a register's write select takes. The arm count over all ports and registers is the steering, the
   multiplexer fabric the register allocator minimizes.
@@ -220,29 +228,43 @@ the integer constants MIR holds are the machine's own -- a shift count, a scaler
 ## Operators
 
 HIR carries pure semantic operations from a HIR-local operator hierarchy; an operation is one operator applied to
-operand value IDs. Concrete hardware operators are frozen dataclasses whose fields are Holoso-exposed parameters;
-float ones delegate their timing and reference arithmetic to the external ZKF library, while integer ones carry a
-closed-form latency and their own saturating reference arithmetic. Every hardware operator owns its signature, and a
-pooled one also the port names of the module it stands for, so the fully specified operator instance is itself the
-resource-sharing key; a machine holds one configuration per pooled class. An operator may declare per-firing
-microcode-driven immediate inputs, and declares a per-instance initiation interval: most are II=1, fully pipelined,
-and none exceeds its latency by more than one, which is what keeps an instance's busy window from outliving the block
-that issued it (see Control flow).
+operand value IDs. Selected hardware separates what a firing computes from what it runs on. An OPERATOR is one kind of
+physical streaming module as configured -- RTL wrapper, parameters, ports, instance budget -- and is the
+resource-sharing key and the single home of every physical fact: float operators take their timing and parameters from
+the external ZKF library, integer ones carry a closed-form latency. A PRIMITIVE is what a firing computes -- a
+signature, bit-exact reference arithmetic, a rendering -- and a MIR operation is one use of a primitive. A pooled
+primitive names the operator it runs on, reads its signature off that operator's ports, and runs in one MODE of it,
+selected through the operator. A mode is one code on the operator's per-firing mode port, or its only mode when it has
+none, bound to the RTL parameter carrying its latency, its initiation interval, the leading operand ports it reads, and
+the output ports it drives; this is how one operator serves several primitives, and why latency is per firing yet
+statically known. A mode's initiation interval exceeds its latency by at most one, which keeps an instance's busy window
+from outliving the block that issued it (see Control flow). A firing's busy window is its own mode's, and modes that
+share an output port must satisfy `L_a - L_b < II_a` for every ordered pair, so results on any one port leave in issue
+order and the busy window stays the only per-instance constraint; modes on disjoint ports interleave freely whatever
+their latencies, the error sideband counting as a port every mode drives. An operator whose acceptance depends on the
+next firing's mode is outside the model. The CORDIC is the operator whose modes differ in timing: it rotates (a sine
+and cosine from one operand) and vectors (an angle and magnitude from two) at different latencies, each re-accepting one
+step after it retires, so one instance serves sin, cos, atan2 and a fused magnitude alike.
 
-Hardware operators split structurally into POOLED -- physical streaming modules the scheduler contends for -- and
-INLINE -- pure expressions folded into a register write; the split is load-bearing for scheduling and emission.
-Hardware is never materialized where a shared firing or a sideband suffices: relations over one operand pair share a
-comparator firing, min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer
-sidebands.
+An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
+schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
+is made per instance at emission: an instance whose firings all run one mode is elaborated for it alone (a CORDIC that
+only rotates sheds the vectoring datapath), and any other keeps the elaboration serving every mode. The operator is
+still built from the latter, so its format limits are those of every mode.
 
-Every pooled operator, float or integer, is named by exactly one field of the public options and carries its own knobs
+Primitives split structurally into POOLED -- running on operators the scheduler contends for -- and INLINE -- pure
+expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is never
+materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparator firing,
+min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer sidebands.
+
+Every kind of operator, float or integer, is named by exactly one field of the public options and carries its own knobs
 there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
-reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every
-float operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA contraction,
-`fsort` enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean
-norms included); what a kernel cannot reach through the operators it was given is refused at MIR lowering. An integer
-operator is never optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially
-all of it.
+reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every float
+operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA contraction, `fsort`
+enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean norms included);
+what a kernel cannot reach through the operators it was given is refused at MIR lowering. Planning asks the catalogue
+whether the machine is configured to run a primitive, never which options it was given. An integer operator is never
+optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
 
 ## Front-end
 
@@ -480,26 +502,25 @@ unboundedness that motivates it: a rule qualifies only if its answer is independ
 round can reveal one as a constant no word holds -- a left shift past the word is zero whatever it shifts, while the
 right shift's sign fill holds only for a value the word already holds, so that clamp stays at lowering.
 
-HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose
-RESULT is its own. Every operand, output wire and phi arm folds its own family's sideband chain into its conditioner
--- a negation/absolute-value chain into a float's sign control, a NOT chain into a boolean's inversion, nothing for an
-integer -- except onto an operand its operator declares UNCONDITIONED, where the builder drops the chain outright
-rather than folding it, for EVERY producer of MIR operations and not the lowering alone, since a transform no
-result can observe would otherwise buy a second firing for one answer. Multiply-by-power-of-two selects the
-`fmul_ilog2` scaler, its exponent an ordinary integer operand, unless an adjacent addition absorbs it into an fma
-instead; and every rounding, the float-to-integer conversion's included, is one immediate mode of a shared module.
-Which operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel
-can be refused for want of an operator it never wrote.
-The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill
-(a negative count being the refusal gate's), and a count no other use reads is never lowered; a saturating power-of-two
-scaling rides the same shifter through its saturating product tap.
+HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose RESULT is
+its own. Every operand, output wire and phi arm folds its own family's sideband chain into its conditioner -- a
+negation/absolute-value chain into a float's sign control, a NOT chain into a boolean's inversion, nothing for an
+integer -- except onto an operand its primitive declares UNCONDITIONED, where the builder drops the chain outright
+rather than folding it, for EVERY producer of MIR operations and not the lowering alone, since a transform no result can
+observe would otherwise buy a second firing for one answer. Multiply-by-power-of-two selects the `fmul_ilog2` scaler,
+its exponent an ordinary integer operand, unless an adjacent addition absorbs it into an fma instead; and every
+rounding, the float-to-integer conversion's included, is one mode of a shared operator. Which operators a build demands
+therefore follows the optimized graph rather than the source's spelling, so a kernel can be refused for want of an
+operator it never wrote. The integer lowerer answers a constant shift count from the count itself: a right shift past
+the word is the sign fill (a negative count being the refusal gate's), and a count no other use reads is never lowered;
+a saturating power-of-two scaling rides the same shifter through its saturating product tap.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
-sin/cos computed simultaneously by the sincos operator, FMA contraction of `a*b+c` wherever the additions that read
+sin and cos of one angle computed by one CORDIC rotation, FMA contraction of `a*b+c` wherever the additions that read
 the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
 left alone) -- matched at MIR because this is the first layer aware of hardware semantics. Some semantic operators
-lower into combinations of hardware operators depending on availability and context (e.g. a two-legged magnitude via
-fatan2).
+lower into combinations of primitives depending on availability and context (e.g. a two-legged magnitude via
+the CORDIC's vectoring).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is scheduled per block and register-allocated over the
@@ -509,24 +530,23 @@ neither privileged.
 
 ## LIR
 
-LIR is the scheduled, bound, register-allocated microprogram. Its resources are the bound operator instances, the
-float format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a wide constant pool
-shared by both families, and the typed input loads and output wires. The pool interns constants by their typed encoded
-machine value -- a float by its encoded magnitude, the sign riding the consumer's free sideband (erased again where
-that consumer's operand declines its conditioner, the pool folding below the layer that normalized it), an integer by
-its whole word -- so encoding-equal float literals share one word and the two families cannot collide. Each wide
-carrier names its own scalar family (a state slot's reset snapshot is an encoded value of the slot's family), so the
-port metadata the RTL and the numerical model share never assumes one. LIR names its carriers after the bank that
-holds them, being the physical binding layer, and types a carrier's folded conditioner by what the bank may hold: a
-float port folds a sign into the free `fsgnop` sideband and a boolean port an inversion, but an integer port folds
-nothing, since two's-complement negation is not free in fabric. Whether a float OPERAND port has that sideband at all
-is the operator's to declare, not the port type's to imply: one that reads no sign bit on any output -- the exponent
+LIR is the scheduled, bound, register-allocated microprogram. Its resources are the bound operator instances, the float
+format, the storage banks (a wide data register file and a separate 1-bit boolean bank), a wide constant pool shared by
+both families, and the typed input loads and output wires. The pool interns constants by their typed encoded machine
+value -- a float by its encoded magnitude, the sign riding the consumer's free sideband (erased again where that
+consumer's operand declines its conditioner, the pool folding below the layer that normalized it), an integer by its
+whole word -- so encoding-equal float literals share one word and the two families cannot collide. Each wide carrier
+names its own scalar family (a state slot's reset snapshot is an encoded value of the slot's family), so the port
+metadata the RTL and the numerical model share never assumes one. LIR names its carriers after the bank that holds them,
+being the physical binding layer, and types a carrier's folded conditioner by what the bank may hold: a float port folds
+a sign into the free `fsgnop` sideband and a boolean port an inversion, but an integer port folds nothing, since
+two's-complement negation is not free in fabric. A primitive that reads no sign bit on any output -- the exponent
 extractor, the finiteness and zero tests -- declares the operand UNCONDITIONED and then admits only the identity
-conditioner: a pooled one binds no sign field and allocates no microcode bits, while an inline one, having neither to
-begin with, sheds the `holoso_fsgnop` that would have wrapped its operand in the write expression. A result port keeps
-the type rule, negating a result being always observable. Each scheduled firing carries its operands and conditioners,
-its register writes, and an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API plus shared
-analysis helpers (per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
+conditioner; an operator whose operand port serves only such primitives has no sideband there, which is the operator's
+to declare. A result is never conditioned at its producer: its sign folds into whatever reads it, so only a boolean
+result carries an inversion, folded into its register write. Each scheduled firing carries its operands and
+conditioners, its register writes, and an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API
+plus shared analysis helpers (per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach
@@ -535,24 +555,26 @@ crossbar was tried first and abandoned -- its read/write port multiplexors impos
 ### Scheduling
 
 The LIR scheduler runs software-pipelined list scheduling over each block. Operator latencies are fully static and
-data-independent, so the whole schedule is computed at compile time and the backend just replays it with a cycle
-counter -- no scoreboard. The latency model is load-bearing, not advisory: the backend commits each result at
-`issue + latency` without watching `out_valid`, the RTL passes that latency into each operator wrapper's `LATENCY`
-parameter, and any Python/RTL drift fails at elaboration. An inaccurate latency is a correctness bug.
+data-independent -- a latency may depend on the firing's mode, but the mode is microcode, not data -- so the whole
+schedule is computed at compile time and the backend just replays it with a cycle counter -- no scoreboard. The latency
+model is load-bearing, not advisory: the backend commits each result at `issue + latency` without watching `out_valid`,
+and a mode's latency is read from the very operator parameter the RTL checks against its own computation, so any
+Python/RTL drift fails at elaboration. An inaccurate latency is a correctness bug.
 
 Each op issues on the earliest cycle its operands are ready and a free instance exists, with no barrier. The
-commit-to-issue spacing a dependence requires is derived pairwise from a single cycle-accurate timing model built
-from a few named primitives (a global fetch lag and a read-first edge), never per-case constants: every result --
-pooled or inline, on either bank -- writes the register array combinationally and becomes readable a fixed
+commit-to-issue spacing a dependence requires is derived pairwise from a single cycle-accurate timing model built from a
+few named quantities (a global fetch lag and a read-first edge), never per-case constants: every result -- pooled or
+inline, on either bank -- writes the register array combinationally and becomes readable a fixed
 fetch-lag-plus-read-first edge after its commit, and both banks sample operands alike (per-result writeback and
-read-address latches were tried and dropped: inconsistent across result classes and needlessly delaying short
-installs). Because the banks and the pooled/inline classes are uniform instances of one model rather than hand-coded
-cases, boolean-logic and cast chains schedule back-to-back. Block-resident operands (inputs, state reads, phis) are
-available from the block's first control word. Ready ops issue in critical-path order onto free instances, pooled by
-the fully specified hardware operator itself (equal-by-value); the per-class budget is that operator's own `instances`
-option, a cap rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it
-serialize. The scheduler's first-free binding of a firing to an instance is only a seed: the register allocator
-rebinds firings among the realized instances without changing an issue cycle or the instance count.
+read-address latches were tried and dropped: inconsistent across result classes and needlessly delaying short installs).
+Because the banks and the pooled/inline classes are uniform instances of one model rather than hand-coded cases,
+boolean-logic and cast chains schedule back-to-back. Block-resident operands (inputs, state reads, phis) are available
+from the block's first control word. Ready ops issue in critical-path order onto free instances, pooled by operator
+(equal-by-value), whichever of its primitives they run; the budget is the operator's own `instances` option, a cap
+rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it serialize. A firing
+keeps its instance busy for its own mode's initiation interval. The scheduler's first-free binding of a firing to an
+instance is only a seed: the register allocator rebinds firings among the realized instances without changing an issue
+cycle or the instance count.
 
 Read-first plus the +1 edge, not write-through forwarding, is a deliberate trade: forwarding would erase the +1 but its
 muxes grow with the product of the read-port and write-port counts -- unsustainable -- while the +1 hides under
@@ -563,15 +585,15 @@ pipelined overlap.
 Register allocation is reach-aware over the whole CFG: whether two values may share a register is decided on a
 hardware-frame interference graph from per-block liveness, two values interfering when their residences overlap under
 the read-first rule. Path-awareness is free: the two arms of an `if` are live in no common block, so their temporaries
-reuse the same registers, keeping a heavily-branched kernel to a handful of wide registers. The objective is the
-emitted mux arm count plus the register price times the register count: the steering is the FPGA cost that matters,
-not the flip-flop count, and there is no spilling to memory. Three decisions share that objective and one search: a
-value's register, a commutative firing's orientation (after Chen & Cong), and a firing's instance where its operator
-has several. The search is simulated annealing from the seed, deterministic and with incremental cost updates,
-finished by a local-improvement descent, so the result is never worse than the seed. The boolean bank is allocated
-first, since a wide inline result names the boolean register it reads. Every block is scheduled once per graph (arm
-threading tries several; see Control flow); the install fixpoint iterates only the draining blocks' terminator offsets
-and the coalescing, and the coloring runs once on the converged layout.
+reuse the same registers, keeping a heavily-branched kernel to a handful of wide registers. The objective is the emitted
+mux arm count plus the register price times the register count: the steering is the FPGA cost that matters, not the
+flip-flop count, and there is no spilling to memory. Three decisions share that objective and one search: a value's
+register, a commutative firing's orientation (after Chen & Cong), and a firing's instance where its operator has
+several. The search is simulated annealing from the seed, deterministic and with incremental cost updates, finished by a
+local-improvement descent, so the result is never worse than the seed. The boolean bank is allocated first, since a wide
+inline result names the boolean register it reads. Every block is scheduled once per graph (arm threading tries several;
+see Control flow); the install fixpoint iterates only the draining blocks' terminator offsets and the coalescing, and
+the coloring runs once on the converged layout.
 
 Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed, identity-arm
 predecessors merge by union-find whenever the two sides do not interfere, so the arm value flows straight into the
@@ -640,16 +662,18 @@ latency between the paths.
 ## Backend (VLIW/ZISC)
 
 The Verilog backend is mechanical from LIR: an inline flop bank plus the 1-bit boolean bank (either emitted only when
-used), one module per pooled operator instance, one continuous assignment per pooled constant, and a microcode-ROM
-controller -- one pre-decoded VLIW control word per step, written as a synchronous `case` over the fetch PC. That
-`case`-over-address is the inferable-ROM form every synthesis tool recognizes and maps to an appropriate ROM (LUT
-logic or block RAM), unlike the array-plus-`initial` form, which some tools flatten to logic and others force into a
-slow block RAM even when tiny; it occupies its own clocked block, the sole sanctioned second `always @(posedge clk)`,
-since that dedicated form is what triggers the inference. The RTL stays tool-neutral: the ROM read register carries
-the `HOLOSO_ATTRIBUTE_ROM` macro where a flow defines it, through which the flow attaches its synthesizer's mapping
+used), one module per operator instance, one continuous assignment per pooled constant, and a microcode-ROM controller
+-- one pre-decoded VLIW control word per step, written as a synchronous `case` over the fetch PC. That
+`case`-over-address is the inferable-ROM form every synthesis tool recognizes and maps to an appropriate ROM (LUT logic
+or block RAM), unlike the array-plus-`initial` form, which some tools flatten to logic and others force into a slow
+block RAM even when tiny; it occupies its own clocked block, the sole sanctioned second `always @(posedge clk)`, since
+that dedicated form is what triggers the inference. The RTL stays tool-neutral: the ROM read register carries the
+`HOLOSO_ATTRIBUTE_ROM` macro where a flow defines it, through which the flow attaches its synthesizer's mapping
 attribute. The ROM is read through a short multi-stage fetch (PC latch, ROM read register, routing register) so the
 controller is short register-to-register paths rather than a wide combinational cone; the fetch leads the executing
-step, which under static scheduling only adds to the makespan/II.
+step, which under static scheduling only adds to the makespan/II. For the same reason `in_ready` is a register the
+sequencer sets beside the next PC, so the input loads' wide write-enable fanout starts at a flip-flop rather than
+behind a PC decode.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
 `in_valid`); the PC advances every clock; at an exit it asserts `out_valid` while outputs drive combinationally
@@ -662,9 +686,10 @@ Value routing is uniform across two dual endpoints: a per-operand READ opcode se
 per-register WRITE opcode selects that register's next value (code 0 == NOP hold). An operator output, an inline
 expression, and a phi-arm/constant/state move are all just sources one write opcode picks, so outside the two I/O
 boundaries the PC gates no datapath read or write -- that is left to control flow alone. A control field constant
-across the whole program is driven by a
-constant net and lifted out of the ROM so synthesis prunes what it feeds; the Python ROM packer and the module's
-bit-slice offsets are produced together so they cannot drift.
+across the whole program is driven by a constant net and lifted out of the ROM so synthesis prunes what it feeds; the
+Python ROM packer and the module's bit-slice offsets are produced together so they cannot drift. An instance is
+likewise emitted for what its firings use: an operand port none of them reads is tied off, and one running a single mode
+is instantiated with its operator's narrower elaboration for it where there is one (see Operators).
 
 Sparse storage. Each operand's read mux is a `case` over its read codebook (the registers it reads plus each distinct
 constant it reads) and each register's write a `case` over its write codebook, both indexed by the endpoint's dense
@@ -684,23 +709,21 @@ its snapshot, the non-reset arm applies its opcode-selected update and boundary 
 fetch registers are reset-unconditional, so they pack into the BRAM output register and settle to the first word
 under reset; the rest of the datapath likewise stays out of the reset cone.
 
-Each operator instance carries its own options and formats, fixed at construction from the user's `Options`;
-every instantiation lists every hardware parameter explicitly, turning a param-name mismatch into a loud
-elaboration error. The auxiliary HDL ships as one self-contained `holoso_support.v`, assembled in memory from
-hand-written operator catalogues plus included external RTL, so the end application adds a single file to the
-synthesis input. The control word and datapath skeleton are the only ZISC-specific part -- LIR itself is
-controller-agnostic.
+Each operator is built from its own options and the machine's formats; every instantiation lists the hardware
+parameters of its instance's elaboration explicitly, turning a param-name mismatch into a loud elaboration error. The
+auxiliary HDL ships as one self-contained `holoso_support.v`, assembled in memory from hand-written operator
+catalogues plus included external RTL, so the end application adds a single file to the synthesis input. The control
+word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 
 ### Numerical model
 
-The numerical model gives bit-exact, cycle-exact emulation of the emitted HDL without HDL emission or simulation, so
-the synthesis logic can be verified through LIR during heavy refactors: bit-exact because it replaces native float
-operators with bit-exact software implementations (the ZKF package for floats, the integer operators' own saturating
-arithmetic), cycle-exact because it mirrors the RTL's fetch
-PC, register files, and sequencer. It splits into a serializable handle carrying only the LIR (kept private, so the
-LIR never enters the public API) -- the artifact a generated testbench embeds -- and a runtime machine elaborated
-from it. Both expose the kernel's logical signature as read-only metadata (each port a logical name paired with a
-scalar type), so a driver decides a port's encoding by matching its type.
+The numerical model gives bit-exact, cycle-exact emulation of the emitted HDL without HDL emission or simulation, so the
+synthesis logic can be verified through LIR during heavy refactors: bit-exact because it replaces native float operators
+with bit-exact software implementations (the ZKF package for floats, the integer primitives' own saturating arithmetic),
+cycle-exact because it mirrors the RTL's fetch PC, register files, and sequencer. It splits into a serializable handle
+carrying only the LIR (kept private, so the LIR never enters the public API) -- the artifact a generated testbench
+embeds -- and a runtime machine elaborated from it. Both expose the kernel's logical signature as read-only metadata
+(each port a logical name paired with a scalar type), so a driver decides a port's encoding by matching its type.
 
 A tick advances exactly one `posedge clk` with the same sequencer the Verilog emits (out_valid, in_ready, terminator
 redirect, back-pressure); the error sidebands are outside its scope. The only mutable state beyond the register files
@@ -719,7 +742,7 @@ asserting each cycle that `out_valid` agrees (the data-dependent latency check) 
 valid, back-pressure included; end-to-end verification of the original Python against the model is left to the user.
 The cosimulation is structurally blind to one miscompile class: a scheduling, binding, regalloc, or overlap fault in
 the LIR is shared by both sides, so a wrong-but-consistent LIR passes. A schedule-independent oracle closes the gap:
-a MIR interpreter evaluates the unscheduled MIR dataflow directly through the operators' own bit-exact reference
+a MIR interpreter evaluates the unscheduled MIR dataflow directly through the primitives' own bit-exact reference
 arithmetic, deliberately importing nothing from the LIR, so the differential `interpreter == model` isolates exactly the
 LIR layer. The front-end is bracketed the same way from above: a differential oracle runs the original kernel under
 CPython against a host-precision evaluator of the unoptimized HIR, before optimization so fastmath rewrites cannot muddy

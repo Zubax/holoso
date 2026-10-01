@@ -1,9 +1,9 @@
 """
 The rewrites that share work rather than rewriting one expression in place.
 
-Op counts are asserted on MIR rather than on the emitted Verilog because a pooled operator instantiates one module
-per class however many times it fires, so the RTL cannot tell six divisions from four. Values are asserted against
-exact references wherever a rule changes the rounding, and against the un-rewritten spelling wherever it must not.
+Op counts are asserted on MIR rather than on the emitted Verilog because an operator is one module however many times it
+fires, so the RTL cannot tell six divisions from four. Values are asserted against exact references wherever a rule
+changes the rounding, and against the un-rewritten spelling wherever it must not.
 """
 
 import collections
@@ -29,10 +29,12 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower
+from holoso._operators import FMulPrimitive
 from holoso._mir import MirConst, MirOperation
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import (
+    hardware_name,
     DEFAULT_UNROLL_MAX_TRIPS,
     build_lir,
     default_tolerance,
@@ -65,7 +67,7 @@ def _mnemonics(fn: Callable[..., object], options: Options) -> collections.Count
         for vid in block.operations:
             node = mir.nodes[vid]
             assert isinstance(node, MirOperation)
-            counts[node.operator.mnemonic] += 1
+            counts[hardware_name(node.primitive)] += 1
     return counts
 
 
@@ -105,7 +107,9 @@ def _standing_multiply_reads_a_constant(fn: Callable[..., object]) -> bool:
     hir = lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir
     mir = lower_to_mir(hir, mir_options(_options(fma=True)))
     (multiply,) = [
-        node for node in mir.nodes.values() if isinstance(node, MirOperation) and node.operator.mnemonic == "fmul"
+        node
+        for node in mir.nodes.values()
+        if isinstance(node, MirOperation) and isinstance(node.primitive, FMulPrimitive)
     ]
     return any(isinstance(mir.nodes[operand], MirConst) for operand in multiply.operands)
 

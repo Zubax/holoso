@@ -116,10 +116,10 @@ async def idivs_cocotb(dut: Any) -> None:
 def test_idivs(sim: str, width: int, quotient_floor: int) -> None:
     # The floor rows take the operator's own parameters, so a wrong QUOTIENT_FLOOR would compute the other division;
     # the truncating rows no operator can ask for keep their own, pinned against the same closed form.
-    hardware = IDivOperator(IntFormat(width), IDivOptions())
+    operator = IDivOperator.build(IntFormat(width), IDivOptions())
     latency = 3 + (width + 1) // 2
-    assert latency == hardware.latency
-    parameters = hardware.params if quotient_floor else {"W": width, "QUOTIENT_FLOOR": 0, "LATENCY": latency}
+    assert latency == operator.latencies[0]
+    parameters = operator.params if quotient_floor else {"W": width, "QUOTIENT_FLOOR": 0, "LATENCY": latency}
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"holoso_idivs_w{width}_f{quotient_floor}"
     runner = get_runner(sim)
     runner.build(
@@ -140,7 +140,7 @@ def test_idivs(sim: str, width: int, quotient_floor: int) -> None:
         extra_env={
             "HOLOSO_IDIVS_WIDTH": str(width),
             "HOLOSO_IDIVS_QUOTIENT_FLOOR": str(quotient_floor),
-            "HOLOSO_IDIVS_OPERANDS": ",".join(hardware.operand_hdl_ports),
+            "HOLOSO_IDIVS_OPERANDS": ",".join(port.name for port in operator.operand_ports),
         },
         results_xml=str(build_dir / "results.xml"),
     )

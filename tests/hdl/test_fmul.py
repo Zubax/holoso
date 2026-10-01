@@ -1,8 +1,7 @@
 """
-Tests for holoso_fmul (pipelined; sgnop on a, b, y; y = sgnop(sgnop(a)*sgnop(b))).
+Tests for holoso_fmul (pipelined; sgnop on a, b; y = sgnop(a)*sgnop(b)).
 
-The wrapper delays y_sgnop through the same number of stages as zkf_mul, so all sgnop controls are allowed to vary
-every input cycle.
+All sgnop controls are allowed to vary every input cycle.
 """
 
 import os
@@ -65,28 +64,26 @@ async def holoso_fmul_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, b: int, a_op: int, b_op: int, y_op: int) -> None:
+    async def step(a: int, b: int, a_op: int, b_op: int) -> None:
         a_eff = apply_sgnop(a, a_op)
         b_eff = apply_sgnop(b, b_op)
-        y_pre = mul_oracle_bits(a_eff, b_eff)
-        if y_pre is None:
+        expected = mul_oracle_bits(a_eff, b_eff)
+        if expected is None:
             await step_idle()
             return
-        expected = apply_sgnop(y_pre, y_op)
         dut.a.value = a
         dut.b.value = b
         dut.a_sgnop.value = a_op
         dut.b_sgnop.value = b_op
-        dut.y_sgnop.value = y_op
         dut.in_valid.value = 1
-        sb.push({"y": expected, "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}{y_op}"})
+        sb.push({"y": expected, "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}"})
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         sb.sample()
 
     for a in DIRECTED_F32:
         for b in DIRECTED_F32:
-            await step(a, b, 0, 0, 0)
+            await step(a, b, 0, 0)
     await sb.drain()
 
     sample_pairs = [
@@ -96,8 +93,7 @@ async def holoso_fmul_cocotb(dut: Any) -> None:
     for a_op in SGNOP_OPS:
         for b_op in SGNOP_OPS:
             for a, b in sample_pairs:
-                for y_op in SGNOP_OPS:
-                    await step(a, b, a_op, b_op, y_op)
+                await step(a, b, a_op, b_op)
     await sb.drain()
 
     for _ in range(get_random_count()):
@@ -108,8 +104,7 @@ async def holoso_fmul_cocotb(dut: Any) -> None:
         b = random_zkf_f32(rng)
         a_op = int(rng.integers(0, 4))
         b_op = int(rng.integers(0, 4))
-        y_op = int(rng.integers(0, 4))
-        await step(a, b, a_op, b_op, y_op)
+        await step(a, b, a_op, b_op)
     await sb.drain()
 
     await drive_reset(dut)
@@ -123,7 +118,7 @@ async def holoso_fmul_cocotb(dut: Any) -> None:
 @pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_holoso_fmul(sim: str, stages: dict[str, int]) -> None:
-    operator = FMulOperator(FloatFormat(8, 24), FMulOptions(**stages), 0)
+    operator = FMulOperator.build(FloatFormat(8, 24), FMulOptions(**stages), 0)
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fmul_{stage_tag(stages)}"
     runner.build(
@@ -141,6 +136,6 @@ def test_holoso_fmul(sim: str, stages: dict[str, int]) -> None:
         test_module="tests.hdl.test_fmul",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )

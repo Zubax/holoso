@@ -24,7 +24,7 @@ from .._hir import (
     copy_node,
     rebuild,
 )
-from .._operators import OpConfig
+from .._operators import FAtan2Primitive, OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
 from ._signs import collapse_signs
@@ -34,7 +34,7 @@ _logger = logging.getLogger(__name__)
 
 def _operand_base_set(hir: Hir, node: Operation) -> tuple[ValueId, ...]:
     """
-    Order-independent: a magnitude is commutative and sign-invariant, as is the fatan2 magnitude it taps, so a
+    Order-independent: a magnitude is commutative and sign-invariant, as is the CORDIC vectoring magnitude it taps, so a
     two-legged one fuses with any same-block atan2 over the same value pair.
     """
     return tuple(sorted(collapse_signs(hir.nodes, operand)[0] for operand in node.operands))
@@ -50,10 +50,10 @@ def _pair(hir: Hir, vid: ValueId) -> Operation | None:
 def plan_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     """
     Map each two-legged FloatHypot to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's
-    magnitude port (the two fuse into one CORDIC) rather than decompose into primitives. Block-local, like the LIR
-    firing fusion it feeds; a pair is the only arity that port carries.
+    magnitude port (the two fuse into one CORDIC) rather than expand into elementary operations. Block-local, like the
+    LIR firing fusion it feeds; a pair is the only arity that port carries.
     """
-    if ops.options.fatan2 is None:
+    if not ops.serves(FAtan2Primitive):
         return {}
     plans: dict[ValueId, ValueId] = {}
     for block in hir.blocks:

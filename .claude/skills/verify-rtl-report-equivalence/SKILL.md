@@ -38,7 +38,7 @@ exist, the verification agents touch nothing but the files.
 For each design, the two artifacts must describe the same set of operations. Match operations across the
 two by their CONTENT, not their position:
 
-- operator kind (select, bor, bxor, fadd, fmul, fcmp, …);
+- primitive kind (select, bor, bxor, fadd, fmul, fcmp, …);
 - destination register;
 - source operands — including any sign/negation/inversion decoration and any constants.
 

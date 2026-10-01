@@ -11,7 +11,7 @@ builds.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .._operators import BoolInversion, InlineHardwareOperator, PortConditioner, WideConditioner
+from .._operators import BoolInversion, InlinePrimitive, WideConditioner
 from .._util import ValueId
 from ._ir import (
     BoolConstRef,
@@ -76,24 +76,23 @@ type OperandTemplate = WideOperandTemplate | BoolOperandTemplate
 
 @dataclass(frozen=True, slots=True)
 class OpWriteSource:
-    """
-    A pooled operator output lane. A boolean lane folds its fabric inversion into `invert`; a wide lane conditions on
-    the wrapper instead (a float's sign on the `y*sgn` field, nothing at all for any other family), so its `invert`
-    is always False and equal conditioners never split the opcode.
-    """
+    """An operator output lane, a boolean one through its `inversion`."""
 
     inst: OperatorInstance
     port: int
-    invert: bool
+    inversion: BoolInversion | None
 
 
 @dataclass(frozen=True, slots=True)
 class InlineWriteSource:
-    """An inline-operator combinational result; structurally identical results dedup to one opcode (loop bodies)."""
+    """
+    An inline-primitive combinational result, a boolean one through its `inversion`; structurally identical results
+    dedup to one opcode (loop bodies).
+    """
 
-    operator: InlineHardwareOperator
+    primitive: InlinePrimitive
     operands: tuple[WideOperand | BoolOperand, ...]
-    conditioner: PortConditioner
+    inversion: BoolInversion | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +114,8 @@ class WriteEvent:
     step: int
 
     def __post_init__(self) -> None:
-        if isinstance(self.source, OpWriteSource) and self.source.invert:
-            assert isinstance(self.dst, BoolRegRef), "a wide lane conditions on the wrapper, so it never inverts"
+        if isinstance(self.source, OpWriteSource | InlineWriteSource):
+            assert (self.source.inversion is None) == isinstance(self.dst, RegRef)
 
 
 def read_sources_per_port(lir: Lir) -> dict[ReadPort, list[ReadSource]]:
@@ -136,7 +135,7 @@ def read_sources_per_port(lir: Lir) -> dict[ReadPort, list[ReadSource]]:
                 book = consts.setdefault((op.inst, pos), [])
                 if source not in book:
                     book.append(source)
-    ports = [(inst, pos) for inst in lir.instances for pos in range(inst.operator.signature.arity)]
+    ports = [(inst, pos) for inst in lir.instances for pos in range(len(inst.operator.operand_ports))]
     assert set(regs) | set(consts) <= set(ports)
     return {port: [*(RegRef(index) for index in sorted(regs.get(port, ()))), *consts.get(port, [])] for port in ports}
 
@@ -154,17 +153,12 @@ def write_events(lir: Lir) -> list[WriteEvent]:
         base = lir.block_base[block.index]
         for op in block.ops:
             for write in op.writes:
-                if isinstance(write.dst, RegRef):
-                    invert = False  # a wide lane conditions on the wrapper, not on the opcode
-                else:
-                    assert isinstance(write.conditioner, BoolInversion)
-                    invert = write.conditioner.invert
-                lane = OpWriteSource(op.inst, write.port, invert)
+                lane = OpWriteSource(op.inst, op.primitive.physical_port(write.result), write.inversion)
                 events.append(WriteEvent(write.dst, lane, pooled_write_word(base + op.commit_cycle)))
     for block in lir.blocks:
         base = lir.block_base[block.index]
         for inline_op in block.inline_ops:
-            source = InlineWriteSource(inline_op.operator, tuple(inline_op.operands), inline_op.write.conditioner)
+            source = InlineWriteSource(inline_op.primitive, tuple(inline_op.operands), inline_op.write.inversion)
             events.append(WriteEvent(inline_op.write.dst, source, base + inline_op.commit_cycle))
         for copy in block.copies:
             events.append(WriteEvent(copy.dst, MoveWriteSource(copy.source), base + copy.issue_cycle))

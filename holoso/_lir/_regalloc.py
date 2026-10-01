@@ -1,7 +1,7 @@
 """
 Register allocation of one bank, jointly with the orientation of every commutative firing (which read port each
-operand takes) and, for a pooled class realized on several instances, with the instance each firing (one activation
-of a pooled operator) binds, by one deterministic incremental annealer over an explicit interference graph.
+operand takes) and, for an operator realized on several instances, with the instance each firing (one activation of
+an operator) binds, by one deterministic incremental annealer over an explicit interference graph.
 
 Register sharing is decided entirely by the interference graph the caller supplies (built in `._liveness` from
 per-block hardware-frame residence), so one `color` routine colors a straight-line block or a whole control-flow graph,
@@ -15,7 +15,7 @@ price per register:
 A read port is one `(operator, instance, operand position)`; its sources, the arms of its read mux, are the registers
 and the constant-pool words it reads (a constant is an arm like a register, an immovable pseudo-register). A register's
 writers are the output lanes `(operator, instance, output port)` landing in it and the fixed producers the emitter
-places beside them, keyed exactly as the emitter's write codebook keys them: an inline result by its operator and
+places beside them, keyed exactly as the emitter's write codebook keys them: an inline result by its primitive and
 resolved operands (two results of one expression over the same registers are one arm), a residual phi arm by the operand
 it moves, and the handshake-gated input load and slot install each by itself. Those keys depend on the assignment, so a
 value move re-keys every producer reading it. An open register is one above the pinned registers that holds at least one
@@ -23,11 +23,11 @@ value.
 
 Orientation belongs to the same objective because a commutative firing may read its operands either way round:
 swapping moves each operand from one port's mux to the other's and permutes the firing's output taps through the
-operator's `swap_output_permutation`, a pure relabeling at zero latency (Chen & Cong, ASP-DAC 2004). Binding
+primitive's `swap_output_permutation`, a pure relabeling at zero latency (Chen & Cong, ASP-DAC 2004). Binding
 belongs to it for the same reason: the instance a firing runs on decides which ports read its operands and which
 lanes write its results, and the scheduler's first-free choice is only the seed. A firing may move to any instance of
-its class where the other firings of its block leave its busy window free, so neither the instance count nor the
-latency changes.
+its operator where the other firings of its block leave its busy window free, so neither the instance count nor the
+latency changes; firings of different primitives on one operator share its instances like any others.
 
 The search starts from the seed, a greedy allocation guided by port affinity, refined by simulated annealing over value
 moves, instance moves, pair swaps and orientation flips with incremental cost deltas, then a first-improvement descent
@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import NamedTuple
 
-from .._operators import InlineHardwareOperator, PooledHardwareOperator, PortConditioner
+from .._operators import HardwareOperator, InlinePrimitive, PooledPrimitive
 from .._util import ValueId
 from ._ir import BoolOperand, WideConstRef
 from ._sources import InlineWriteSource, MoveWriteSource, OperandTemplate, WideOperandTemplate
@@ -140,11 +140,12 @@ class SlotWriter(_StaticWriter):
 
 @dataclass(frozen=True, slots=True)
 class InlineWriter(FixedProducer):
-    """An inline operator's combinational result; its boolean operands are resolved, that bank being colored first."""
+    """
+    An inline primitive's combinational wide result; its boolean operands are resolved, that bank being colored first.
+    """
 
-    operator: InlineHardwareOperator
+    primitive: InlinePrimitive
     operands: tuple[WideOperandTemplate | BoolOperand, ...]
-    conditioner: PortConditioner
 
     @property
     def holes(self) -> list[ValueId]:
@@ -152,11 +153,11 @@ class InlineWriter(FixedProducer):
 
     def substitute(self, fn: Callable[[ValueId], ValueId]) -> "InlineWriter":
         operands = tuple(t.substitute(fn) if isinstance(t, WideOperandTemplate) else t for t in self.operands)
-        return InlineWriter(self.operator, operands, self.conditioner)
+        return InlineWriter(self.primitive, operands)
 
     def resolve(self, register_of: Callable[[ValueId], int]) -> InlineWriteSource:
         operands = tuple(t.resolve(register_of) if isinstance(t, WideOperandTemplate) else t for t in self.operands)
-        return InlineWriteSource(self.operator, operands, self.conditioner)
+        return InlineWriteSource(self.primitive, operands, inversion=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,14 +184,14 @@ type _WriterKey = _StaticWriter | InlineWriteSource | MoveWriteSource
 class Firing:
     """
     One pooled firing as the bank's objective sees it: the leader the build keys the orientation and the binding by,
-    the operator, the block and block-local issue cycle, the instance the scheduler bound, its operand sources in source
-    order (a value of this bank or a constant-pool word), and the tapped output ports landing in this bank with the
-    value each writes. A firing tapping nothing into this
-    bank (a comparator's boolean taps) still reads its wide operands.
+    the primitive, the block and block-local issue cycle, the instance the scheduler bound, its operand sources in
+    source order (a value of this bank or a constant-pool word), and the tapped results landing in this bank with the
+    value each writes. A firing tapping nothing into this bank (a comparator's boolean taps) still reads its wide
+    operands.
     """
 
     leader: ValueId
-    operator: PooledHardwareOperator
+    primitive: PooledPrimitive
     block: int
     issue: int
     seed_instance: int
@@ -199,7 +200,7 @@ class Firing:
 
     @property
     def window(self) -> range:
-        return range(self.issue, self.issue + self.operator.initiation_interval)
+        return range(self.issue, self.issue + self.primitive.initiation_interval)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +223,7 @@ class ColoringProblem:
     reserved: frozenset[int]
     fresh_start: int
     firings: list[Firing]
-    instances: dict[PooledHardwareOperator, int]
+    instances: dict[HardwareOperator, int]
     tuning: RegallocTuning
 
 
@@ -245,22 +246,22 @@ class Coloring:
 
 # Named tuples, not dataclasses: these are the counter keys of the annealer's hot loop.
 class _Port(NamedTuple):
-    operator: PooledHardwareOperator
+    operator: HardwareOperator
     instance: int
     position: int
 
 
 class _Lane(NamedTuple):
-    operator: PooledHardwareOperator
+    operator: HardwareOperator
     instance: int
     port: int
 
 
 class _InstanceSlot(NamedTuple):
-    """One instance of a pooled class within one block: what a firing occupies for its busy window."""
+    """One instance of an operator within one block: what a firing occupies for its busy window."""
 
     block: int
-    operator: PooledHardwareOperator
+    operator: HardwareOperator
     instance: int
 
 
@@ -300,14 +301,14 @@ class _State:
         self.write_arms = 0
         self.open = 0
         self.readers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, operand position)
-        self.producers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, output port)
+        self.producers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, result)
         self.dependents: dict[ValueId, list[tuple[ValueId, FixedProducer]]] = {}  # hole -> (written value, producer)
         for i, firing in enumerate(problem.firings):
             for pos, source in enumerate(firing.reads):
                 if not isinstance(source, WideConstRef):
                     self.readers.setdefault(source, []).append((i, pos))
-            for port, value in firing.writes:
-                self.producers.setdefault(value, []).append((i, port))
+            for result, value in firing.writes:
+                self.producers.setdefault(value, []).append((i, result))
         for vid in sorted(problem.fixed_producers):
             producers = problem.fixed_producers[vid]
             assert len(set(producers)) == len(producers), f"value {vid} lists a producer twice"
@@ -360,19 +361,19 @@ class _State:
         firing = self.problem.firings[i]
         if self.flip[i]:
             pos = 1 - pos  # commutative firings have arity 2 (checked by `color`)
-        return _Port(firing.operator, self.instance[i], pos)
+        return _Port(firing.primitive.operator, self.instance[i], pos)
 
-    def _lane(self, i: int, port: int) -> _Lane:
+    def _lane(self, i: int, result: int) -> _Lane:
         firing = self.problem.firings[i]
         if self.flip[i]:
-            permutation = firing.operator.swap_output_permutation
+            permutation = firing.primitive.swap_output_permutation
             assert permutation is not None
-            port = permutation[port]
-        return _Lane(firing.operator, self.instance[i], port)
+            result = permutation[result]
+        return _Lane(firing.primitive.operator, self.instance[i], firing.primitive.physical_port(result))
 
     def _slot(self, i: int, instance: int) -> _InstanceSlot:
         firing = self.problem.firings[i]
-        return _InstanceSlot(firing.block, firing.operator, instance)
+        return _InstanceSlot(firing.block, firing.primitive.operator, instance)
 
     def _read_source(self, source: _Source) -> _ReadSource:
         return source if isinstance(source, WideConstRef) else self.assign[source]
@@ -381,12 +382,12 @@ class _State:
         firing = self.problem.firings[i]
         for pos, source in enumerate(firing.reads):
             self._read(self._port(i, pos), self._read_source(source), delta)
-        for port, value in firing.writes:
-            self._write(self.assign[value], self._lane(i, port), delta)
+        for result, value in firing.writes:
+            self._write(self.assign[value], self._lane(i, result), delta)
         slot = self._slot(i, self.instance[i])
         for cycle in firing.window:
             if delta > 0:
-                assert (slot, cycle) not in self.occupancy, "two firings of one class busy on one instance"
+                assert (slot, cycle) not in self.occupancy, "two firings busy on one instance of an operator"
                 self.occupancy[(slot, cycle)] = i
             else:
                 del self.occupancy[(slot, cycle)]
@@ -418,7 +419,7 @@ class _State:
         return list(dict.fromkeys([*own, *self.dependents.get(vid, ())]))
 
     def _writers_of(self, vid: ValueId) -> list[_Writer]:
-        lanes: list[_Writer] = [self._lane(i, port) for i, port in self.producers.get(vid, ())]
+        lanes: list[_Writer] = [self._lane(i, result) for i, result in self.producers.get(vid, ())]
         return [*(self._resolve(p) for p in self.problem.fixed_producers.get(vid, ())), *lanes]
 
     def _touch(self, vid: ValueId, delta: int) -> None:
@@ -426,8 +427,8 @@ class _State:
         reg = self.assign[vid]
         for i, pos in self.readers.get(vid, ()):
             self._read(self._port(i, pos), reg, delta)
-        for i, port in self.producers.get(vid, ()):
-            self._write(reg, self._lane(i, port), delta)
+        for i, result in self.producers.get(vid, ()):
+            self._write(reg, self._lane(i, result), delta)
         for dst, producer in self._rekeyed(vid):
             self._write(self.assign[dst], self._resolve(producer), delta)
 
@@ -453,8 +454,8 @@ class _State:
         self._attach(i, 1)
 
     def swap_instances(self, i: int, j: int) -> bool:
-        """Exchange two same-class firings' instances if both windows are free after the exchange; else no change."""
-        assert self.problem.firings[i].operator == self.problem.firings[j].operator
+        """Exchange two same-operator firings' instances if both windows are free after the exchange; else no change."""
+        assert self.problem.firings[i].primitive.operator == self.problem.firings[j].primitive.operator
         self._attach(i, -1)
         self._attach(j, -1)
         legal = self.instance_free(i, self.instance[j]) and self.instance_free(j, self.instance[i])
@@ -509,13 +510,6 @@ class _State:
         return reg if self.fits(vid, reg) else None
 
 
-def _check_swappable(operator: PooledHardwareOperator) -> None:
-    """A flip exchanges the two operands with their conditioners, which only a symmetric pair of ports can carry."""
-    assert operator.signature.arity == 2, operator.mnemonic
-    assert operator.conditions_operand(0) == operator.conditions_operand(1), operator.mnemonic
-    assert (0 in operator.unconditioned_operands) == (1 in operator.unconditioned_operands), operator.mnemonic
-
-
 type _SeedWriter = _Lane | FixedProducer  # a producer stands for itself before any register is assigned
 
 
@@ -530,9 +524,11 @@ def _seed_incidence(
     for firing in problem.firings:
         for pos, source in enumerate(firing.reads):
             if not isinstance(source, WideConstRef):
-                ports[source].add(_Port(firing.operator, firing.seed_instance, pos))
-        for port, value in firing.writes:
-            writers[value].add(_Lane(firing.operator, firing.seed_instance, port))
+                ports[source].add(_Port(firing.primitive.operator, firing.seed_instance, pos))
+        for result, value in firing.writes:
+            writers[value].add(
+                _Lane(firing.primitive.operator, firing.seed_instance, firing.primitive.physical_port(result))
+            )
     return ports, {vid: frozenset(w) for vid, w in writers.items()}
 
 
@@ -596,16 +592,18 @@ class _Decisions:
     movable: list[ValueId]
     flippable: list[int]
     bindable: list[int]
-    swappable: list[list[int]]  # the classes with at least two bindable firings
+    swappable: list[list[int]]  # the operators with at least two bindable firings
 
     @classmethod
     def of(cls, problem: ColoringProblem) -> "_Decisions":
-        flippable = [i for i, firing in enumerate(problem.firings) if firing.operator.is_commutative]
-        bindable = [i for i, firing in enumerate(problem.firings) if problem.instances[firing.operator] > 1]
-        by_class: dict[PooledHardwareOperator, list[int]] = {}
+        flippable = [i for i, firing in enumerate(problem.firings) if firing.primitive.is_commutative]
+        bindable = [i for i, firing in enumerate(problem.firings) if problem.instances[firing.primitive.operator] > 1]
+        by_operator: dict[HardwareOperator, list[int]] = {}
         for i in bindable:
-            by_class.setdefault(problem.firings[i].operator, []).append(i)
-        return cls(problem.movable, flippable, bindable, [members for members in by_class.values() if len(members) > 1])
+            by_operator.setdefault(problem.firings[i].primitive.operator, []).append(i)
+        return cls(
+            problem.movable, flippable, bindable, [members for members in by_operator.values() if len(members) > 1]
+        )
 
     @property
     def count(self) -> int:
@@ -636,7 +634,7 @@ def _anneal(state: _State, rng: random.Random, proposals: int, decisions: _Decis
         draw = rng.random()
         if draw < bind_share:
             i = decisions.bindable[rng.randrange(len(decisions.bindable))]
-            target = rng.randrange(problem.instances[problem.firings[i].operator])
+            target = rng.randrange(problem.instances[problem.firings[i].primitive.operator])
             if target == state.instance[i] or not state.instance_free(i, target):
                 continue
             undo = partial(state.move_instance, i, state.instance[i])
@@ -699,7 +697,7 @@ def _descend(state: _State, decisions: _Decisions) -> int:
         for i in decisions.bindable:
             old = state.instance[i]
             best_instance, best_cost = None, state.cost
-            for instance in range(problem.instances[problem.firings[i].operator]):
+            for instance in range(problem.instances[problem.firings[i].primitive.operator]):
                 if instance == old or not state.instance_free(i, instance):
                     continue
                 state.move_instance(i, instance)
@@ -750,25 +748,23 @@ def _compact(problem: ColoringProblem, assign: dict[ValueId, int]) -> tuple[dict
 
 def _canonical_instances(problem: ColoringProblem, instance: list[int]) -> dict[ValueId, int]:
     """
-    Per firing leader, its instance relabeled per class by first use in block, cycle, leader order, so the labels
+    Per firing leader, its instance relabeled per operator by first use in block, cycle, leader order, so the labels
     are dense and every labeled instance is used.
     """
-    labels: dict[tuple[PooledHardwareOperator, int], int] = {}
-    used: Counter[PooledHardwareOperator] = Counter()
+    labels: dict[tuple[HardwareOperator, int], int] = {}
+    used: Counter[HardwareOperator] = Counter()
     order = sorted(range(len(problem.firings)), key=lambda i: (problem.firings[i].block, problem.firings[i].issue, i))
     for i in order:
-        key = (problem.firings[i].operator, instance[i])
+        key = (problem.firings[i].primitive.operator, instance[i])
         if key not in labels:
             labels[key] = used[key[0]]
             used[key[0]] += 1
     assert all(used[operator] <= count for operator, count in problem.instances.items())
-    return {problem.firings[i].leader: labels[(problem.firings[i].operator, instance[i])] for i in order}
+    return {problem.firings[i].leader: labels[(problem.firings[i].primitive.operator, instance[i])] for i in order}
 
 
 def color(problem: ColoringProblem) -> Coloring:
     """Allocate one bank."""
-    for operator in {firing.operator for firing in problem.firings if firing.operator.is_commutative}:
-        _check_swappable(operator)
     ports_of, writers_of = _seed_incidence(problem)
     seed = _Snapshot(
         _greedy(problem, ports_of, writers_of),

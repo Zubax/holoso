@@ -35,12 +35,6 @@ class FloatFormat:
     wexp: int
     wman: int
 
-    def __post_init__(self) -> None:
-        if self.wexp < 2:
-            raise ValueError(f"wexp must be >= 2, got {self.wexp}")
-        if self.wman < 4:
-            raise ValueError(f"wman must be >= 4, got {self.wman}")
-
     @property
     def _zfmt(self) -> zkf.ZkfFormat:
         return zkf.ZkfFormat(self.wexp, self.wman)

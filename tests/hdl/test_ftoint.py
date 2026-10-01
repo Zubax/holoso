@@ -13,7 +13,7 @@ from cocotb_tools.runner import get_runner
 from zkf import ZkfFormat
 
 from holoso import FToIntOptions, FloatFormat, IntFormat
-from holoso._operators import FToIntOperator
+from holoso._operators import FToIntOperator, HardwareOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
@@ -40,9 +40,9 @@ class _Config:
     stage_input: int = 0
 
     @property
-    def operator(self) -> FToIntOperator:
+    def operator(self) -> HardwareOperator:
         """The module name, its RTL parameters and its latency all come from the operator, so a drift fails here."""
-        return FToIntOperator(
+        return FToIntOperator.build(
             FloatFormat(self.wexp, self.wman), IntFormat(self.wint), FToIntOptions(stage_input=self.stage_input)
         )
 
@@ -109,8 +109,9 @@ async def holoso_ftoint_cocotb(dut: Any) -> None:
     wfull = wexp + wman
     fmt = ZkfFormat(wexp, wman)
     assert len(dut.y) == wint
-    (immediate,) = FToIntOperator.immediate_ports
-    assert len(getattr(dut, immediate.name)) == immediate.width
+    mode_port = FToIntOperator.mode_port
+    assert mode_port is not None
+    assert len(getattr(dut, mode_port.name)) == mode_port.width
     await start_clock(dut)
     await drive_reset(dut)
 
@@ -196,7 +197,7 @@ def test_holoso_ftoint(sim: str, config: _Config) -> None:
             "HOLOSO_WEXP": str(config.wexp),
             "HOLOSO_WMAN": str(config.wman),
             "HOLOSO_WINT": str(config.wint),
-            "HOLOSO_EXPECTED_LATENCY": str(operator.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0]),
         },
         results_xml=str(build_dir / "results.xml"),
     )

@@ -22,7 +22,6 @@ from ._type import (
     IntFormat as IntFormat,
     IntType as IntType,
 )
-from ._operators import OperatorOptions as OperatorOptions
 from ._value import FloatValue as FloatValue, IntValue as IntValue
 from ._errors import (
     HolosoError as HolosoError,
@@ -36,34 +35,33 @@ from ._backend.html import HtmlOutput as HtmlOutput
 from ._backend.numerical import NumericalModel as NumericalModel, NumericalSimulator as NumericalSimulator
 from ._backend.verilog import VerilogOutput as VerilogOutput
 
-from . import _operators
+from ._operators import (
+    FAddOptions as FAddOptions,
+    FCmpOptions as FCmpOptions,
+    FCordicOptions as FCordicOptions,
+    FDivOptions as FDivOptions,
+    FExp2Options as FExp2Options,
+    FFmaOptions as FFmaOptions,
+    FFromIntOptions as FFromIntOptions,
+    FILog2Options as FILog2Options,
+    FLog2Options as FLog2Options,
+    FMulILog2Options as FMulILog2Options,
+    FMulOptions as FMulOptions,
+    FRoundOptions as FRoundOptions,
+    FSortOptions as FSortOptions,
+    FSqrtOptions as FSqrtOptions,
+    FToIntOptions as FToIntOptions,
+    IAbsOptions as IAbsOptions,
+    IAddOptions as IAddOptions,
+    ICmpOptions as ICmpOptions,
+    IDivOptions as IDivOptions,
+    IMulOptions as IMulOptions,
+    IPopcntOptions as IPopcntOptions,
+    IShlOptions as IShlOptions,
+    IShrOptions as IShrOptions,
+    ISubOptions as ISubOptions,
+    OperatorOptions as OperatorOptions,
+)
 
-# The user names an operator's knobs without naming the operator type, which is not part of the public API.
-FAddOptions = _operators.FAddOperator.Options
-FAtan2Options = _operators.FAtan2Operator.Options
-FCmpOptions = _operators.FCmpOperator.Options
-FDivOptions = _operators.FDivOperator.Options
-FExp2Options = _operators.FExp2Operator.Options
-FFmaOptions = _operators.FFmaOperator.Options
-FFromIntOptions = _operators.FFromIntOperator.Options
-FILog2Options = _operators.FILog2Operator.Options
-FLog2Options = _operators.FLog2Operator.Options
-FMulILog2Options = _operators.FMulILog2Operator.Options
-FMulOptions = _operators.FMulOperator.Options
-FRoundOptions = _operators.FRoundOperator.Options
-FSincosOptions = _operators.FSincosOperator.Options
-FSortOptions = _operators.FSortOperator.Options
-FSqrtOptions = _operators.FSqrtOperator.Options
-FToIntOptions = _operators.FToIntOperator.Options
-IAbsOptions = _operators.IAbsOperator.Options
-IAddOptions = _operators.IAddOperator.Options
-ICmpOptions = _operators.ICmpOperator.Options
-IDivOptions = _operators.IDivOperator.Options
-IMulOptions = _operators.IMulOperator.Options
-IPopcntOptions = _operators.IPopcntOperator.Options
-IShlOptions = _operators.IShlOperator.Options
-IShrOptions = _operators.IShrOperator.Options
-ISubOptions = _operators.ISubOperator.Options
-
-__version__ = "0.6.2"
+__version__ = "0.7.0"
 __url__ = "https://holoso.digital"

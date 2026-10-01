@@ -346,9 +346,10 @@ _BASELINE: dict[str, Metrics] = {
     # every transcendental the library offers, and two data-dependent branches -- so it gates cross-component slot
     # allocation against the register and steering blowup that inlining a component can cause. Its copy-only arm is
     # threaded into the block that branches to it, where the merge phi's register must avoid what that block leaves live
-    # toward its other arm; the steering arms this costs are the price of the four cycles threading saves.
+    # toward its other arm; the steering arms this costs are the price of the four cycles threading saves. One CORDIC
+    # serves both the observer's atan2 and the Park rotation, so their results share its two output lanes.
     "foc": Metrics(
-        False, nreg=28, bnreg=3, steering=94, max_read_port=14, max_write_select=6,
+        False, nreg=29, bnreg=3, steering=93, max_read_port=14, max_write_select=7,
         copies=4, min_ii=295, last_pc=346, max_block_span=232,
     ),
 }

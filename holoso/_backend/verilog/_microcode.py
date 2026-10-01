@@ -34,7 +34,7 @@ from ..._lir import (
     read_sources_per_port,
     write_sources_per_register,
 )
-from ..._operators import FloatSignControl, IntIdentity, has_sign_control
+from ..._operators import FloatSignControl
 
 PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
 
@@ -117,16 +117,12 @@ def f_issue(base: str) -> str:
     return f"uc_issue_{base}"
 
 
-def f_imm(base: str, name: str) -> str:
-    return f"uc_{base}_imm_{name}"
+def f_mode(base: str) -> str:
+    return f"uc_{base}_mode"
 
 
 def f_osgn(base: str, letter: str) -> str:
     return f"uc_{base}_{letter}sgn"
-
-
-def f_ysgn(base: str, port: int) -> str:
-    return f"uc_{base}_y{port}sgn"
 
 
 def f_rd(base: str, letter: str) -> str:
@@ -137,9 +133,9 @@ def f_op(dst: RegRef | BoolRegRef) -> str:
     return f"uc_op_{dst.stable_label}"
 
 
-def tapped_lanes(lir: Lir) -> set[tuple[OperatorInstance, int]]:
+def tapped_lanes(events: list[WriteEvent]) -> set[tuple[OperatorInstance, int]]:
     """The operator output ports some firing writes -- an untapped port gets no nets and is left unconnected."""
-    return {(op.inst, write.port) for block in lir.blocks for op in block.ops for write in op.writes}
+    return {(event.source.inst, event.source.port) for event in events if isinstance(event.source, OpWriteSource)}
 
 
 def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
@@ -155,15 +151,14 @@ def build_microcode(
     read_books: dict[tuple[OperatorInstance, int], ReadCodebook],
     write_books: dict[RegRef | BoolRegRef, WriteCodebook],
     events: list[WriteEvent],
-    tapped: set[tuple[OperatorInstance, int]],
 ) -> dict[str, Field]:
     """
     Build the per-step value table of every control field from the static schedule.
 
-    Control is placed on the step each operation requires: the issue strobe, the operand signs, the read opcodes, and a
-    wide result's sign ride the ISSUE step (the read is latch-free, so the datapath samples an operand a fetch lag
-    later); each register's WRITE opcode rides the source's executing step (see write_events). A read opcode has no NOP
-    code because a don't-care idle read is harmless.
+    Control is placed on the step each operation requires: the issue strobe, the operand signs, and the read opcodes
+    ride the ISSUE step (the read is latch-free, so the datapath samples an operand a fetch lag later); each register's
+    WRITE opcode rides the source's executing step (see write_events). A read opcode has no NOP code because a
+    don't-care idle read is harmless.
     """
     depth = lir.last_pc + 1  # one control word per fetch PC: blocks are laid out across 0..last_pc with NOP gaps
     fields: dict[str, Field] = {}
@@ -185,18 +180,14 @@ def build_microcode(
     for inst in lir.instances:
         base = inst.name
         add(f_issue(base), 1, gated=True)
-        for imm in inst.operator.immediate_ports:
-            add(f_imm(base, imm.name), imm.width)
-        # A sign field exists for a FLOAT port alone, on either side: it drives a sideband only a float module has.
-        for pos in range(inst.operator.signature.arity):
+        if (port := inst.operator.mode_port) is not None:
+            add(f_mode(base), port.width)
+        for pos in range(len(inst.operator.operand_ports)):
             if inst.operator.conditions_operand(pos):
                 add(f_osgn(base, PORT_LETTERS[pos]), 2)
             read_book = read_books[(inst, pos)]
             if len(read_book.sources) > 1:
                 add(f_rd(base, PORT_LETTERS[pos]), read_book.opcode_width)
-        for q, result_type in enumerate(inst.operator.signature.result_types):
-            if has_sign_control(result_type) and (inst, q) in tapped:
-                add(f_ysgn(base, q), 2)
     for dst, book in write_books.items():
         add(f_op(dst), book.opcode_width, gated=True)
 
@@ -205,29 +196,21 @@ def build_microcode(
         base = op.inst.name
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
         put(f_issue(base), ci, 1)
-        for value, imm in zip(op.immediates, op.operator.immediate_ports, strict=True):
-            put(f_imm(base, imm.name), ci, value)
-        signature = op.operator.signature
+        if (port := op.inst.operator.mode_port) is not None:
+            code = op.primitive.mode.code
+            assert code is not None
+            put(f_mode(base), ci, code)
         for pos, operand in enumerate(op.operands):
-            assert isinstance(operand, WideOperand), "pooled operators read only wide operands today (no read lane)"
-            if op.operator.conditions_operand(pos):
+            assert isinstance(operand, WideOperand), "operators read only wide operands (no read lane)"
+            if op.inst.operator.conditions_operand(pos):
                 assert isinstance(operand.conditioner, FloatSignControl)
                 put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
             else:
-                # No sideband to drive: an integer port, or a float one whose sign this operator cannot observe.
-                # Type agreement is `_check_conditioner`'s at MIR; what is left to hold here is emptiness.
+                # No sideband to drive: an integer port, or a float one its operator leaves without one.
                 assert operand.conditioner.is_identity
             field = f_rd(base, PORT_LETTERS[pos])
             if field in fields:
                 put(field, ci, read_books[(op.inst, pos)].code(operand.source))
-        for write in op.writes:
-            if not isinstance(write.dst, RegRef):
-                continue
-            if has_sign_control(signature.result_types[write.port]):
-                assert isinstance(write.conditioner, FloatSignControl)
-                put(f_ysgn(base, write.port), ci, write.conditioner.encoded)
-            else:
-                assert isinstance(write.conditioner, IntIdentity)
 
     for event in events:
         assert 0 <= event.step < depth, f"microcode write step out of range: {event.step}, depth={depth}"
@@ -261,17 +244,18 @@ def pack(fields: dict[str, Field], step: int) -> int:
 
 
 def _op_expr(op: PooledScheduledOp) -> str:
-    dsts = "/".join(write.conditioner.decorate(write.dst.stable_label) for write in op.writes)
+    dsts = "/".join(write.stable_label for write in op.writes)
     operands = [operand.stable_label for operand in op.operands]
-    return f"{dsts}={op.inst.operator.render(*operands, immediates=op.immediates)}"
+    return f"{dsts}={op.primitive.render(*operands)}"
 
 
 def _landing_label(dst: RegRef | BoolRegRef, source: WriteSource) -> str:
     """A non-pooled write rendered `dst=source` for the ROM-step comment -- the dual of the emitter's write RHS."""
     match source:
-        case InlineWriteSource(operator=operator, operands=operands, conditioner=conditioner):
-            rendered = operator.render(*[operand.stable_label for operand in operands])
-            return f"{conditioner.decorate(dst.stable_label)}={rendered}"
+        case InlineWriteSource(primitive=primitive, operands=operands, inversion=inversion):
+            rendered = primitive.render(*[operand.stable_label for operand in operands])
+            label = dst.stable_label if inversion is None else inversion.decorate(dst.stable_label)
+            return f"{label}={rendered}"
         case MoveWriteSource(operand=operand):
             return f"{dst.stable_label}={operand.stable_label}"
         case OpWriteSource():

@@ -1,9 +1,9 @@
 """
-Tests for holoso_fdiv (pipelined; y = sgnop(sgnop(a)/sgnop(b)); div0 alongside out_valid).
+Tests for holoso_fdiv (pipelined; y = sgnop(a)/sgnop(b); div0 alongside out_valid).
 
 div0 is asserted when the post-sgnop divisor has exp=0 (i.e., the divisor is zero in either sign form). When div0=1
 the y output is unspecified by the wrapper contract, so the test skips the y comparison for those cases but still
-checks that div0 itself is correct. The wrapper delays y_sgnop through the same number of stages as zkf_div.
+checks that div0 itself is correct.
 """
 
 import os
@@ -67,29 +67,28 @@ async def holoso_fdiv_cocotb(dut: Any) -> None:
         await Timer(1, unit="ns")
         sb.sample()
 
-    async def step(a: int, b: int, a_op: int, b_op: int, y_op: int) -> None:
+    async def step(a: int, b: int, a_op: int, b_op: int) -> None:
         a_eff = apply_sgnop(a, a_op)
         b_eff = apply_sgnop(b, b_op)
         b_eff_is_zero = _exp_is_zero(b_eff)
 
-        expected: dict[str, Any] = {"_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}{y_op}"}
+        expected: dict[str, Any] = {"_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}"}
         if b_eff_is_zero:
             # div0 asserts; y is unspecified -- only check div0.
             expected["div0"] = 1
         else:
             # Filter NaN-producing pairs (oracle returns None for inf/inf, etc.).
-            y_pre = div_oracle_bits(a_eff, b_eff)
-            if y_pre is None:
+            y = div_oracle_bits(a_eff, b_eff)
+            if y is None:
                 await step_idle()
                 return
-            expected["y"] = apply_sgnop(y_pre, y_op)
+            expected["y"] = y
             expected["div0"] = 0
 
         dut.a.value = a
         dut.b.value = b
         dut.a_sgnop.value = a_op
         dut.b_sgnop.value = b_op
-        dut.y_sgnop.value = y_op
         dut.in_valid.value = 1
         sb.push(expected)
         await RisingEdge(dut.clk)
@@ -98,10 +97,10 @@ async def holoso_fdiv_cocotb(dut: Any) -> None:
 
     for a in DIRECTED_F32:
         for b in DIRECTED_F32:
-            await step(a, b, 0, 0, 0)
+            await step(a, b, 0, 0)
     await sb.drain()
 
-    # Sgnop sweep. Include zero-divisor cases in each sample to exercise div0 while output sign control changes.
+    # Sgnop sweep. Include zero-divisor cases in each sample to exercise div0 while operand sign controls change.
     sample_pairs = [
         (DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))], DIRECTED_F32[int(rng.integers(0, len(DIRECTED_F32)))])
         for _ in range(6)
@@ -112,8 +111,7 @@ async def holoso_fdiv_cocotb(dut: Any) -> None:
     for a_op in SGNOP_OPS:
         for b_op in SGNOP_OPS:
             for a, b in sample_pairs:
-                for y_op in SGNOP_OPS:
-                    await step(a, b, a_op, b_op, y_op)
+                await step(a, b, a_op, b_op)
     await sb.drain()
 
     for _ in range(get_random_count()):
@@ -124,8 +122,7 @@ async def holoso_fdiv_cocotb(dut: Any) -> None:
         b = random_zkf_f32(rng)
         a_op = int(rng.integers(0, 4))
         b_op = int(rng.integers(0, 4))
-        y_op = int(rng.integers(0, 4))
-        await step(a, b, a_op, b_op, y_op)
+        await step(a, b, a_op, b_op)
     await sb.drain()
 
     await drive_reset(dut)
@@ -141,7 +138,7 @@ async def holoso_fdiv_cocotb(dut: Any) -> None:
 def test_holoso_fdiv(sim: str, stages: dict[str, int]) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fdiv_{stage_tag(stages)}"
-    operator = FDivOperator(FloatFormat(8, 24), FDivOptions(**stages))
+    operator = FDivOperator.build(FloatFormat(8, 24), FDivOptions(**stages))
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],
@@ -157,6 +154,6 @@ def test_holoso_fdiv(sim: str, stages: dict[str, int]) -> None:
         test_module="tests.hdl.test_fdiv",
         test_dir=REPO_ROOT,
         build_dir=build_dir,
-        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latency)},
+        extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
     )

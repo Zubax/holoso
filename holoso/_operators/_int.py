@@ -1,49 +1,54 @@
 """
-The integer operators. The pooled ones each carry their own closed-form latency and their own reference arithmetic,
-saturating wherever the operation can leave the format; the inline ones are native Verilog over the whole wide bank,
-sound because an integer fills that register exactly (DESIGN.md, Types).
+The integer operators and primitives. The operators each carry their own closed-form latency, and the pooled
+primitives their own reference arithmetic, saturating wherever the operation can leave the format; the inline ones are
+native Verilog over the whole wide bank, sound because an integer fills that register exactly (DESIGN.md, Types).
 """
 
 from abc import ABC
-from dataclasses import dataclass, field
-from typing import ClassVar
+from dataclasses import dataclass
+from typing import ClassVar, Self
 
 from .._value import IntValue, ScalarValue
 from .._type import BoolType, IntFormat, IntType
 from ._common import (
-    ComparatorOperator,
-    InlineHardwareOperator,
-    IntIdentity,
-    PooledHardwareOperator,
-    PooledOperatorOptions,
-    PortConditioner,
+    BaseOperatorOptions,
+    BoolInversion,
+    ComparatorPrimitive,
+    HardwareOperator,
+    InlinePrimitive,
+    OperatorPort,
+    PooledPrimitive,
     ScalarSignature,
+    comparator_ports,
 )
 
 
+def _int_operator[O: HardwareOperator](
+    cls: type[O],
+    fmt: IntFormat,
+    options: BaseOperatorOptions,
+    operands: tuple[str, ...],
+    outputs: tuple[str, ...],
+    latency: int = 2,
+    knobs: dict[str, int] | None = None,
+) -> O:
+    ints = IntType(fmt)
+    return cls.of_one_mode(
+        {"W": fmt.width, **(knobs or {}), "LATENCY": latency},
+        options.instances,
+        tuple(OperatorPort(name, ints) for name in operands),
+        tuple(OperatorPort(name, ints) for name in outputs),
+        initiation_interval=1,
+    )
+
+
 @dataclass(frozen=True, slots=True)
-class IntHardwareOperator(PooledHardwareOperator, ABC):
+class IntPrimitive(PooledPrimitive, ABC):
     """
-    The dual of FloatHardwareOperator, each operator carries its own closed-form latency and RTL parameters.
-    Saturation is what the integer type does at its extremes rather than a failure, and HIR marks the saturating
-    operations speculatable, so the `saturated` sideband every module raises stays unconnected and unmodeled -- an
-    if-converted arm that saturates must not raise the machine's error flag.
+    The dual of FloatPrimitive. Saturation is what the integer type does at its extremes rather than a failure,
+    and HIR marks the saturating operations speculatable, so the `saturated` sideband every module raises stays
+    unconnected and unmodeled -- an if-converted arm that saturates must not raise the machine's error flag.
     """
-
-    fmt: IntFormat
-
-    @property
-    def latency(self) -> int:
-        """Every integer core latches its inputs and its outputs; one with internal stages adds them to this."""
-        return 2
-
-    @property
-    def scalar_type(self) -> IntType:
-        return IntType(self.fmt)
-
-    @property
-    def params(self) -> dict[str, int]:
-        return {"W": self.fmt.width, "LATENCY": self.latency}
 
     def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[IntValue, ...]:
         validated: list[IntValue] = []
@@ -54,283 +59,290 @@ class IntHardwareOperator(PooledHardwareOperator, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class IAddOperator(IntHardwareOperator):
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
+class IAddOptions(BaseOperatorOptions): ...
 
-    mnemonic: ClassVar[str] = "iadds"
-    operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
-    output_hdl_ports: ClassVar[list[str]] = ["y"]
+
+class IAddOperator(HardwareOperator):
+    __slots__ = ()
+    name = "iadds"
+
+    @classmethod
+    def build(cls, fmt: IntFormat, options: IAddOptions) -> Self:
+        return _int_operator(cls, fmt, options, ("a", "b"), ("y",))
+
+
+@dataclass(frozen=True, slots=True)
+class IAddPrimitive(IntPrimitive):
+    operator: IAddOperator
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
-    opt: Options = field()
 
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
         return (a + b,)
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}+{b}"
 
 
 @dataclass(frozen=True, slots=True)
-class ISubOperator(IntHardwareOperator):
+class ISubOptions(BaseOperatorOptions): ...
+
+
+class ISubOperator(HardwareOperator):
+    __slots__ = ()
+    name = "isubs"
+
+    @classmethod
+    def build(cls, fmt: IntFormat, options: ISubOptions) -> Self:
+        return _int_operator(cls, fmt, options, ("a", "b"), ("y",))
+
+
+@dataclass(frozen=True, slots=True)
+class ISubPrimitive(IntPrimitive):
     """Also serves negation as `0-x`: there is no negation module, and this one saturates `-MIN` correctly."""
 
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
+    operator: ISubOperator
 
-    mnemonic: ClassVar[str] = "isubs"
-    operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
-    output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options = field()
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
         return (a - b,)
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}-{b}"
 
 
 @dataclass(frozen=True, slots=True)
-class IMulOperator(IntHardwareOperator):
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions):
-        stage_product: int = 0
-        """Splitting the product is useful when the width exceeds the DSP slice input. See Verilog holoso_imuls."""
+class IMulOptions(BaseOperatorOptions):
+    stage_product: int = 0
+    """Splitting the product is useful when the width exceeds the DSP slice input. See Verilog holoso_imuls."""
 
-    mnemonic: ClassVar[str] = "imuls"
-    operand_hdl_ports: ClassVar[list[str]] = ["a", "b"]
-    output_hdl_ports: ClassVar[list[str]] = ["y"]
+
+class IMulOperator(HardwareOperator):
+    __slots__ = ()
+    name = "imuls"
+
+    @classmethod
+    def build(cls, fmt: IntFormat, options: IMulOptions) -> Self:
+        if not 0 <= options.stage_product <= 4:
+            raise ValueError(f"imuls stage_product must be in 0..4, got {options.stage_product}")
+        knobs = {"STAGE_PRODUCT": options.stage_product}
+        return _int_operator(cls, fmt, options, ("a", "b"), ("y",), 2 + options.stage_product, knobs)
+
+
+@dataclass(frozen=True, slots=True)
+class IMulPrimitive(IntPrimitive):
+    operator: IMulOperator
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
-    opt: Options = field()
 
-    def __post_init__(self) -> None:
-        if not 0 <= self.opt.stage_product <= 4:
-            raise ValueError(f"imuls stage_product must be in 0..4, got {self.opt.stage_product}")
-
-    @property
-    def latency(self) -> int:
-        return 2 + self.opt.stage_product
-
-    @property
-    def params(self) -> dict[str, int]:
-        return {"W": self.fmt.width, "STAGE_PRODUCT": self.opt.stage_product, "LATENCY": self.latency}
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
         return (a * b,)
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}×{b}"
 
 
 @dataclass(frozen=True, slots=True)
-class IDivOperator(IntHardwareOperator):
-    """Floor division and its remainder together: one firing answers both."""
+class IDivOptions(BaseOperatorOptions): ...
 
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
 
-    mnemonic: ClassVar[str] = "idivs"
-    operand_hdl_ports: ClassVar[list[str]] = ["num", "den"]
-    output_hdl_ports: ClassVar[list[str]] = ["quo", "rem"]
-    error_ports: ClassVar[list[str]] = ["div0"]
-    opt: Options = field()
+class IDivOperator(HardwareOperator):
+    __slots__ = ()
+    name = "idivs"
+    error_ports = ("div0",)
 
-    @property
-    def latency(self) -> int:
-        return 3 + (self.fmt.width + 1) // 2  # one radix-4 step per two quotient bits
-
-    @property
-    def params(self) -> dict[str, int]:
-        # Floor, because that is what Python's `//` and `%` mean and HIR has no other division; the core's
-        # truncating mode is unreachable from a kernel.
-        return {"W": self.fmt.width, "QUOTIENT_FLOOR": 1, "LATENCY": self.latency}
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,) * 2)
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        a, b = self._validated_operands(operands)
-        return a.divmod_floor(b)
-
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
-        a, b = operands
-        return f"{a}//{b}"
-
-    def render_output(
-        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
-    ) -> str:
-        assert isinstance(conditioner, IntIdentity)
-        a, b = operands
-        return f"{a}//{b}" if port == 0 else f"{a}%{b}"
+    @classmethod
+    def build(cls, fmt: IntFormat, options: IDivOptions) -> Self:
+        latency = 3 + (fmt.width + 1) // 2  # one radix-4 step per two quotient bits
+        # Floor, because that is what Python's `//` and `%` mean and HIR has no other division; the core's truncating
+        # mode is unreachable from a kernel.
+        knobs = {"QUOTIENT_FLOOR": 1}
+        return _int_operator(cls, fmt, options, ("num", "den"), ("quo", "rem"), latency, knobs)
 
 
 @dataclass(frozen=True, slots=True)
-class IAbsOperator(IntHardwareOperator):
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
+class IDivPrimitive(IntPrimitive):
+    """Floor division and its remainder together: one firing answers both."""
 
-    mnemonic: ClassVar[str] = "iabss"
-    operand_hdl_ports: ClassVar[list[str]] = ["x"]
-    output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options = field()
+    operator: IDivOperator
 
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 1, (self.scalar_type,))
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
+        a, b = self._validated_operands(operands)
+        return a.divmod_floor(b)
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}//{b}"
+
+    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
+        assert inversion is None
+        a, b = operands
+        return f"{a}//{b}" if result == 0 else f"{a}%{b}"
+
+
+@dataclass(frozen=True, slots=True)
+class IAbsOptions(BaseOperatorOptions): ...
+
+
+class IAbsOperator(HardwareOperator):
+    __slots__ = ()
+    name = "iabss"
+
+    @classmethod
+    def build(cls, fmt: IntFormat, options: IAbsOptions) -> Self:
+        return _int_operator(cls, fmt, options, ("x",), ("y",))
+
+
+@dataclass(frozen=True, slots=True)
+class IAbsPrimitive(IntPrimitive):
+    operator: IAbsOperator
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
         return (abs(a),)
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         (a,) = operands
         return f"|{a}|"
 
 
 @dataclass(frozen=True, slots=True)
-class IShlOperator(IntHardwareOperator):
-    """
-    An arithmetic shift by a signed amount, left when positive. It emits both readings of a left shift at once:
-    `shft` lets the high bits fall off the word, while `prod` is the multiplication by a power of two, saturating
-    instead. Which one a shift wants is a lowering decision, so the operator commits to neither.
-    """
+class IShlOptions(BaseOperatorOptions): ...
 
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
 
-    mnemonic: ClassVar[str] = "ishl"
-    operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
-    output_hdl_ports: ClassVar[list[str]] = ["shft", "prod"]
-    opt: Options = field()
+class IShlOperator(HardwareOperator):
+    __slots__ = ()
+    name = "ishl"
 
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,) * 2)
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
-        a, b = self._validated_operands(operands)
-        return a.shift_left(b)
-
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
-        a, b = operands
-        return f"{a}<<{b}"
-
-    def render_output(
-        self, port: int, conditioner: PortConditioner, *operands: str, immediates: tuple[int, ...] = ()
-    ) -> str:
-        assert isinstance(conditioner, IntIdentity)
-        return f"{self.output_hdl_ports[port]}({', '.join(operands)})"
+    @classmethod
+    def build(cls, fmt: IntFormat, options: IShlOptions) -> Self:
+        return _int_operator(cls, fmt, options, ("x", "shamt"), ("shft", "prod"))
 
 
 @dataclass(frozen=True, slots=True)
-class IShrOperator(IntHardwareOperator):
+class IShlPrimitive(IntPrimitive):
     """
-    The mirror of IShlOperator, right when positive.
+    An arithmetic shift by a signed amount, left when positive. It emits both readings of a left shift at once:
+    `shft` lets the high bits fall off the word, while `prod` is the multiplication by a power of two, saturating
+    instead. Which one a shift wants is a lowering decision, so the primitive commits to neither.
+    """
+
+    operator: IShlOperator
+    output_labels: ClassVar[tuple[str, ...]] = ("shft", "prod")
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
+        a, b = self._validated_operands(operands)
+        return a.shift_left(b)
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"{a}<<{b}"
+
+
+@dataclass(frozen=True, slots=True)
+class IShrOptions(BaseOperatorOptions): ...
+
+
+class IShrOperator(HardwareOperator):
+    __slots__ = ()
+    name = "ishr"
+
+    @classmethod
+    def build(cls, fmt: IntFormat, options: IShrOptions) -> Self:
+        return _int_operator(cls, fmt, options, ("x", "shamt"), ("shft",))
+
+
+@dataclass(frozen=True, slots=True)
+class IShrPrimitive(IntPrimitive):
+    """
+    The mirror of IShlPrimitive, right when positive.
     Neither direction can rail, so it emits one raw reading and no saturation.
     """
 
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
+    operator: IShrOperator
 
-    mnemonic: ClassVar[str] = "ishr"
-    operand_hdl_ports: ClassVar[list[str]] = ["x", "shamt"]
-    output_hdl_ports: ClassVar[list[str]] = ["shft"]
-    opt: Options = field()
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
         return (a.shift_right(b),)
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}>>{b}"
 
 
 @dataclass(frozen=True, slots=True)
-class IPopcntOperator(IntHardwareOperator):
+class IPopcntOptions(BaseOperatorOptions): ...
+
+
+class IPopcntOperator(HardwareOperator):
+    """
+    The module answers on a port only as wide as the count needs -- the narrowest unsigned one holding a count of the
+    magnitude, which the RTL derives again as `$clog2(W)` -- and the connection widens it with a zero fill, a count
+    never being negative.
+    """
+
+    __slots__ = ()
+    name = "ipopcnt"
+
+    @classmethod
+    def build(cls, fmt: IntFormat, options: IPopcntOptions) -> Self:
+        count_width = (fmt.width - 1).bit_length()
+        assert (1 << (count_width - 1)) <= fmt.width - 1 < (1 << count_width)
+        return _int_operator(cls, fmt, options, ("x",), ("y",), knobs={"WY": count_width})
+
+
+@dataclass(frozen=True, slots=True)
+class IPopcntPrimitive(IntPrimitive):
     """
     The population count of the magnitude, as Python's `int.bit_count()`, so a negative operand counts the ones of `-x`.
     The negation that overflows a signed word is exactly the magnitude `2**(W-1)` read unsigned, so unlike
-    IAbsOperator nothing saturates and the count never reaches the width. The module answers on a port only
-    as wide as that count needs, which the reader widens; a count is never negative, so the widening is a zero fill.
+    IAbsPrimitive nothing saturates and the count never reaches the width.
     """
 
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
+    operator: IPopcntOperator
 
-    mnemonic: ClassVar[str] = "ipopcnt"
-    operand_hdl_ports: ClassVar[list[str]] = ["x"]
-    output_hdl_ports: ClassVar[list[str]] = ["y"]
-    opt: Options = field()
-
-    @property
-    def count_width(self) -> int:
-        """The narrowest unsigned port holding a count of the magnitude; the RTL derives it again as `$clog2(W)`."""
-        width = (self.fmt.width - 1).bit_length()
-        assert self.fmt.width - 1 < (1 << width)
-        assert self.fmt.width - 1 >= (1 << (width - 1))
-        return width
-
-    @property
-    def params(self) -> dict[str, int]:
-        return {"W": self.fmt.width, "WY": self.count_width, "LATENCY": self.latency}
-
-    @property
-    def signature(self) -> ScalarSignature:
-        return ScalarSignature((self.scalar_type,), (self.scalar_type,))
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
         count = abs(a.value).bit_count()
-        assert 0 <= count < self.fmt.width
-        return (IntValue.from_int(self.fmt, count),)
+        assert 0 <= count < a.fmt.width
+        return (IntValue.from_int(a.fmt, count),)
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         (a,) = operands
         return f"popcnt({a})"
 
 
 @dataclass(frozen=True, slots=True)
-class ICmpOperator(IntHardwareOperator, ComparatorOperator):
+class ICmpOptions(BaseOperatorOptions): ...
+
+
+class ICmpOperator(HardwareOperator):
+    __slots__ = ()
+    name = "icmp"
+
+    @classmethod
+    def build(cls, fmt: IntFormat, options: ICmpOptions) -> Self:
+        params = {"W": fmt.width, "LATENCY": 2}
+        return cls.of_one_mode(params, options.instances, *comparator_ports(IntType(fmt)), initiation_interval=1)
+
+
+@dataclass(frozen=True, slots=True)
+class ICmpPrimitive(IntPrimitive, ComparatorPrimitive):
     """Two's complement is totally ordered."""
 
-    @dataclass(frozen=True, slots=True)
-    class Options(PooledOperatorOptions): ...
+    operator: ICmpOperator
 
-    mnemonic: ClassVar[str] = "icmp"
-    opt: Options = field()
-
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands)
         ordering = a.compare(b)
         return ordering > 0, ordering == 0, ordering < 0
 
 
 @dataclass(frozen=True, slots=True)
-class IntInlineOperator(InlineHardwareOperator, ABC):
+class IntInlinePrimitive(InlinePrimitive, ABC):
     fmt: IntFormat
 
     @property
@@ -346,53 +358,53 @@ class IntInlineOperator(InlineHardwareOperator, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class IntBitwiseOperator(IntInlineOperator, ABC):
+class IntBitwisePrimitive(IntInlinePrimitive, ABC):
     @property
     def signature(self) -> ScalarSignature:
         return ScalarSignature((self.scalar_type,) * 2, (self.scalar_type,))
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwAndOperator(IntBitwiseOperator):
+class IntBwAndPrimitive(IntBitwisePrimitive):
     mnemonic: ClassVar[str] = "ibwand"
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"({a}) & ({b})"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
         return (a & b,)
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwOrOperator(IntBitwiseOperator):
+class IntBwOrPrimitive(IntBitwisePrimitive):
     mnemonic: ClassVar[str] = "ibwor"
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"({a}) | ({b})"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
         return (a | b,)
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwXorOperator(IntBitwiseOperator):
+class IntBwXorPrimitive(IntBitwisePrimitive):
     mnemonic: ClassVar[str] = "ibwxor"
 
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"({a}) ^ ({b})"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
         return (a ^ b,)
 
 
 @dataclass(frozen=True, slots=True)
-class IntBwNotOperator(IntInlineOperator):
+class IntBwNotPrimitive(IntInlinePrimitive):
     mnemonic: ClassVar[str] = "ibwnot"
 
     @property
@@ -403,13 +415,13 @@ class IntBwNotOperator(IntInlineOperator):
         (a,) = operand_nets
         return f"~({a})"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
         return (~a,)
 
 
 @dataclass(frozen=True, slots=True)
-class IntShiftConstOperator(IntInlineOperator):
+class IntShiftConstPrimitive(IntInlinePrimitive):
     """
     An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
     drops what leaves the word rather than saturating as the pooled `holoso_ishl` also offers.
@@ -419,6 +431,7 @@ class IntShiftConstOperator(IntInlineOperator):
     shamt: int
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         # Zero is the identity, which HIR or MIR folds; a count reaching the word answers a constant or a sign fill, and
         # clamping a width-less count to the word is the lowering's job.
         assert 0 < abs(self.shamt) < self.fmt.width, self.shamt
@@ -433,17 +446,17 @@ class IntShiftConstOperator(IntInlineOperator):
             return f"{{$signed({a}) >>> {-self.shamt}}}"
         return f"({a}) << {self.shamt}"
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         (a,) = operands
         return f"{a}<<{self.shamt}" if self.shamt > 0 else f"{a}>>{-self.shamt}"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
         return (a.shift_left(IntValue.from_int(self.fmt, self.shamt)).shft,)
 
 
 @dataclass(frozen=True, slots=True)
-class IntToBoolOperator(InlineHardwareOperator):
+class IntToBoolPrimitive(InlinePrimitive):
     mnemonic: ClassVar[str] = "itobool"
     fmt: IntFormat
 
@@ -451,7 +464,7 @@ class IntToBoolOperator(InlineHardwareOperator):
     def signature(self) -> ScalarSignature:
         return ScalarSignature((IntType(self.fmt),), (BoolType(),))
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         (a,) = operands
         return f"bool({a})"
 
@@ -459,14 +472,14 @@ class IntToBoolOperator(InlineHardwareOperator):
         (a,) = operand_nets
         return f"|({a})"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, IntValue)
         return (a.value != 0,)
 
 
 @dataclass(frozen=True, slots=True)
-class BoolToIntOperator(InlineHardwareOperator):
+class BoolToIntPrimitive(InlinePrimitive):
     mnemonic: ClassVar[str] = "ifrombool"
     fmt: IntFormat
 
@@ -474,7 +487,7 @@ class BoolToIntOperator(InlineHardwareOperator):
     def signature(self) -> ScalarSignature:
         return ScalarSignature((BoolType(),), (IntType(self.fmt),))
 
-    def render(self, *operands: str, immediates: tuple[int, ...] = ()) -> str:
+    def render(self, *operands: str) -> str:
         (a,) = operands
         return f"int({a})"
 
@@ -484,7 +497,7 @@ class BoolToIntOperator(InlineHardwareOperator):
         # `~net`, and a bare one spliced into a wide register write would complement the carrier, not the single bit.
         return f"{{1'b0, {a}}}"
 
-    def evaluate(self, *operands: ScalarValue, immediates: tuple[int, ...] = ()) -> tuple[IntValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, bool)
         return (IntValue.from_int(self.fmt, int(a)),)

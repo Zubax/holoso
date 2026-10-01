@@ -27,7 +27,7 @@ from holoso import (
     OperatorOptions,
     Options,
 )
-from holoso._operators import FDivOperator
+from holoso._operators import FDivPrimitive
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from holoso._lir._ir import pooled_write_word
@@ -103,7 +103,7 @@ def test_err_pc(sim: str, stage_output: int) -> None:
     # commit step itself (pooled_write_word). An fdiv output stage pushes the commit later, and the err flag and the
     # result still latch/land together: err_step is recomputed from this build's actual fdiv commit.
     (block,) = lir.blocks
-    commit_cycle = next(op.commit_cycle for op in block.ops if isinstance(op.inst.operator, FDivOperator))
+    commit_cycle = next(op.commit_cycle for op in block.ops if isinstance(op.primitive, FDivPrimitive))
     err_step = pooled_write_word(commit_cycle)
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}_s{stage_output}"
     gen_dir.mkdir(parents=True, exist_ok=True)

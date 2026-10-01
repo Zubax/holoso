@@ -13,11 +13,11 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
+    FCordicOptions,
     FDivOptions,
     FILog2Options,
     FMulILog2Options,
     FMulOptions,
-    FSincosOptions,
     FSortOptions,
     FSqrtOptions,
     FloatFormat,
@@ -27,6 +27,7 @@ from holoso import (
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._eel import lower
 from holoso._lir._ir import pooled_write_word
+from holoso._operators import CordicMode
 from holoso._lir._ir import exits, successor_blocks
 from holoso._mir import lower as lower_to_mir
 
@@ -489,7 +490,7 @@ def test_cosim_overlap_div0_errpc(sim: str, config: OptionsCase) -> None:
         name,
     )
     entry = lir.blocks[0]
-    (fdiv,) = [op for op in entry.ops if op.inst.operator.error_ports]
+    (fdiv,) = [op for op in entry.ops if op.primitive.operator.error_ports]
     err_pc = lir.block_base[entry.index] + pooled_write_word(fdiv.commit_cycle)
     bench = (
         _ERR_BENCH3.replace("@@WEXP@@", str(fmt.wexp))
@@ -520,7 +521,7 @@ def test_cosim_threaded_arm_div0_errpc(sim: str, config: OptionsCase) -> None:
     )
     assert len(lir.blocks) == 3, "the constant arm must be threaded out"
     (merge,) = [block for block in lir.blocks if exits(block.terminator)]
-    (fdiv,) = [op for op in merge.ops if op.inst.operator.error_ports]
+    (fdiv,) = [op for op in merge.ops if op.primitive.operator.error_ports]
     err_pc = lir.block_base[merge.index] + pooled_write_word(fdiv.commit_cycle)
     bench = (
         _ERR_BENCH3.replace("@@WEXP@@", str(fmt.wexp))
@@ -562,7 +563,7 @@ def test_cosim_two_multiplier_instances_co_issue(sim: str) -> None:
     operators = dataclasses.replace(options.operator, fmul=FMulOptions(instances=2))
     options = dataclasses.replace(options, operator=operators)
     lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "fmul_pair")
-    products = [op for block in lir.blocks for op in block.ops if op.inst.operator.mnemonic == "fmul"]
+    products = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fmul"]
     assert {op.inst.name for op in products} == {"fmul_0", "fmul_1"}
     assert len({op.issue_cycle for op in products}) == 1, "the products must co-issue for the pool to bind both"
     run_cosim(sim, holoso.synthesize(kernel, options, name="fmul_pair"))
@@ -586,27 +587,58 @@ def _atan2_seam(x: float, y: float, c: bool) -> float:
     return r
 
 
-@pytest.mark.parametrize("kernel", [_sincos_seam, _atan2_seam], ids=lambda kernel: kernel.__name__.strip("_"))
+def _rotation_to_vectoring_seam(x: float, y: float, c: bool) -> float:
+    t = math.sin(2.0 * math.pi * x)
+    if c:
+        r = math.atan2(t, y) / (2.0 * math.pi)
+    else:
+        r = t * 2.0
+    return r
+
+
+def _vectoring_to_rotation_seam(x: float, y: float, c: bool) -> float:
+    t = math.atan2(y, x) / (2.0 * math.pi)
+    if c:
+        r = math.sin(2.0 * math.pi * t)
+    else:
+        r = t * 2.0
+    return r
+
+
+@pytest.mark.parametrize(
+    "kernel, switches_mode",
+    [
+        (_sincos_seam, False),
+        (_atan2_seam, False),
+        (_rotation_to_vectoring_seam, True),
+        (_vectoring_to_rotation_seam, True),
+    ],
+    ids=lambda value: value.__name__.strip("_") if callable(value) else None,
+)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_cosim_a_core_reissues_across_a_seam_one_interval_later(sim: str, kernel: Callable[..., float]) -> None:
+def test_cosim_a_core_reissues_across_a_seam_one_interval_later(
+    sim: str, kernel: Callable[..., float], switches_mode: bool
+) -> None:
     # A CORDIC core stays busy one step past its latency, the most any operator may, and no busy window is carried
     # across a block seam: the entry's terminator sits at the core's write word and the arm reissues on the same
-    # instance at its first step, exactly one initiation interval after the entry's firing. The wrappers' over-issue
-    # `$fatal` is the oracle, which the model cannot see.
+    # instance at its first step, exactly one initiation interval after the entry's firing -- the entry firing's own,
+    # whichever mode the arm's firing runs in. The wrappers' over-issue `$fatal` is the oracle, which the model cannot
+    # see.
     fmt = FloatFormat(6, 18)
     options = dataclasses.replace(default_options(fmt), ifconv_max_ops=0)
     name = f"seam_{kernel.__name__.strip('_')}"
     lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name)
     entry = lir.blocks[0]
     by_index = {block.index: block for block in lir.blocks}
-    (first,) = [op for op in entry.ops if op.inst.operator.initiation_interval > 1]
+    (first,) = [op for op in entry.ops if op.primitive.initiation_interval > 1]
     reissues = [
-        entry.term_offset + 1 + op.issue_cycle - first.issue_cycle
+        (entry.term_offset + 1 + op.issue_cycle - first.issue_cycle, op.primitive.mode != first.primitive.mode)
         for arm in successor_blocks(entry.terminator)
         for op in by_index[arm].ops
         if op.inst == first.inst
     ]
-    assert reissues == [first.inst.operator.initiation_interval], "the premise needs the reissue right at the seam"
+    expected = [(first.primitive.initiation_interval, switches_mode)]
+    assert reissues == expected, "the premise needs the reissue right at the seam"
     run_cosim(sim, holoso.synthesize(kernel, options, name=name))
 
 
@@ -619,14 +651,67 @@ def test_cosim_two_cordic_instances_with_contending_windows(sim: str) -> None:
 
     fmt = FloatFormat(6, 18)
     options = default_options(fmt)
-    assert options.operator.fsincos is not None
+    assert options.operator.fcordic is not None
     operators = dataclasses.replace(
-        options.operator, fsincos=FSincosOptions(instances=2), fmul=FMulOptions(instances=2)
+        options.operator, fcordic=FCordicOptions(instances=2), fmul=FMulOptions(instances=2)
     )
     options = dataclasses.replace(options, operator=operators)
     lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "sincos_pair")
-    assert {inst.name for inst in lir.instances} >= {"fsincos_0", "fsincos_1"}
+    assert {inst.name for inst in lir.instances} >= {"fcordic_0", "fcordic_1"}
     run_cosim(sim, holoso.synthesize(kernel, options, name="sincos_pair"))
+
+
+@pytest.mark.parametrize("config", [None, FCordicOptions(stage_product=1, stage_normalize=1, stage_pack=1)])
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_one_cordic_serves_both_modes(sim: str, config: FCordicOptions | None) -> None:
+    # Rotations and vectorings share one CORDIC instance, a rotation followed by a vectoring and a vectoring by a
+    # rotation at the tightest spacing each allows, the earlier firing's own initiation interval, while each commits at
+    # its own mode's latency; the vectoring's magnitude feeds a fused hypot, and the wrapper's over-issue `$fatal`
+    # guards the spacing.
+    def kernel(a: float, b: float, x: float, y: float, z: float) -> tuple[float, float, float]:
+        s = math.sin(a)
+        theta = math.atan2(s, x)
+        return math.cos(theta) * math.hypot(s, x), math.atan2(y, z), math.sin(b)
+
+    options = default_options(FloatFormat(6, 18))
+    if config is not None:
+        options = dataclasses.replace(options, operator=dataclasses.replace(options.operator, fcordic=config))
+    name = "cordic_modes" if config is None else "cordic_modes_staged"
+    lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name)
+    assert {inst.name for inst in lir.instances if inst.operator.name == "fcordic"} == {"fcordic_0"}
+    (block,) = lir.blocks
+    firings = sorted(
+        ((op.issue_cycle, op.primitive) for op in block.ops if op.inst.name == "fcordic_0"), key=lambda f: f[0]
+    )
+    tight = {
+        (earlier.mode.code, later.mode.code)
+        for (issue, earlier), (next_issue, later) in zip(firings, firings[1:])
+        if next_issue - issue == earlier.initiation_interval
+    }
+    switches = {(CordicMode.ROTATION, CordicMode.VECTORING), (CordicMode.VECTORING, CordicMode.ROTATION)}
+    assert tight >= switches, firings
+    run_cosim(sim, holoso.synthesize(kernel, options, name=name))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_two_cordic_instances_each_elaborated_for_its_own_mode(sim: str) -> None:
+    # A rotation and a vectoring issued together take an instance each, so each instance is elaborated for its own mode
+    # alone, the other mode's datapath dropped; the vectoring's magnitude also feeds a fused hypot.
+    def kernel(a: float, y: float, x: float) -> tuple[float, float, float]:
+        return math.sin(a), math.atan2(y, x), math.hypot(y, x)
+
+    options = default_options(FloatFormat(6, 18))
+    options = dataclasses.replace(
+        options, operator=dataclasses.replace(options.operator, fcordic=FCordicOptions(instances=2))
+    )
+    lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "cordic_pair")
+    modes = sorted(
+        tuple(sorted(mode.code for mode in modes if mode.code is not None))
+        for inst, modes in lir.instance_modes.items()
+        if inst.operator.name == "fcordic"
+    )
+    assert modes == [(CordicMode.ROTATION,), (CordicMode.VECTORING,)], "the premise of this test"
+    run_cosim(sim, holoso.synthesize(kernel, options, name="cordic_pair"))
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -785,8 +870,8 @@ def test_cosim_two_sincos_share_ii_instance(sim: str) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_two_atan2_share_ii_instance(sim: str) -> None:
-    # The fatan2 twin of test_cosim_two_sincos_share_ii_instance: deeper latency than fsincos, so a distinct re-accept
-    # boundary the schedule must space by the initiation interval.
+    # The vectoring twin of test_cosim_two_sincos_share_ii_instance: deeper latency than rotation, so a distinct
+    # re-accept boundary the schedule must space by the initiation interval.
     def kernel(a: float, b: float, c: float, d: float) -> tuple[float, float]:
         return math.atan2(a, b), math.atan2(c, d)
 

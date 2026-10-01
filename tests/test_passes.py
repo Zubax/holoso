@@ -965,7 +965,7 @@ def test_speculatable_hir_operators_map_to_error_free_hardware() -> None:
     # The speculation flag and the hardware error sideband are two declarations of one fact: an error-bearing operator
     # such as division must keep the default speculatable=False on its HIR side, or if-conversion would assert the
     # module error flag for a never-taken path.
-    assert FDivOperator(FMT, FDivOptions()).error_ports and not HirFloatDiv.speculatable
+    assert FDivOperator.build(FMT, FDivOptions()).error_ports and not HirFloatDiv.speculatable
 
 
 def test_dead_diamond_frees_its_condition_cone() -> None:
@@ -991,8 +991,8 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
 
 def test_operator_layer_does_not_import_hir() -> None:
     """
-    The hardware operator models are a base vocabulary layer below the IR pipeline; they must never reach back into the
-    semantic HIR, even transitively.
+    The hardware operators and primitives are a base vocabulary layer below the IR pipeline; they must never reach back
+    into the semantic HIR, even transitively.
     """
     offenders = forbidden_imports("holoso._operators", "holoso._hir")
     assert not offenders, f"the operator layer transitively imports HIR: {offenders}"

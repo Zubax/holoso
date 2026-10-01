@@ -10,7 +10,7 @@ pure data and lets the simulator be an ordinary (non-pickled) object.
 NumericalSimulator mirrors the generated ZISC RTL: it holds the same fetch PC and register files
 (`regs`/`bregs`) and advances exactly one `posedge clk` per NumericalSimulator.tick, driving `next_pc`
 with the same sequencer the Verilog emits (reset / out_valid / in_ready / terminator redirect, back-pressure included).
-Every operator evaluates the exact bits the hardware computes (ZKF floats, saturating two's-complement integers), so it
+Every primitive evaluates the exact bits the hardware computes (ZKF floats, saturating two's-complement integers), so it
 reproduces a transaction bit-for-bit AND cycle-for-cycle: the same inputs reach `out_valid` on the same cycle and
 present the same output bits. The persistent slot registers simply live in `regs`/`bregs` and carry across
 transactions; NumericalSimulator.reset reloads the reset snapshot.
@@ -51,7 +51,7 @@ def _signature(ports: list[LogicalPort]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _OpEvent:
-    """An operator firing scheduled at a read PC: the LIR op and the absolute PC it commits on (for its landings)."""
+    """A firing scheduled at a read PC: the LIR op and the absolute PC it commits on (for its landings)."""
 
     op: ScheduledOp
     commit_pc: int
@@ -216,7 +216,7 @@ class NumericalSimulator(_Kernel):
             base = lir.block_base[block.index]
             block_ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
             for op in block_ops:
-                read_pc = operand_read_cycle(op.operator, base + op.issue_cycle, lir.fetch_lag)
+                read_pc = operand_read_cycle(op.primitive, base + op.issue_cycle, lir.fetch_lag)
                 self._op_events.setdefault(read_pc, []).append(_OpEvent(op, base + op.commit_cycle))
             for copy in block.copies:
                 fire = base + copy.fire_step(lir.fetch_lag)
@@ -253,13 +253,13 @@ class NumericalSimulator(_Kernel):
         for dst, value in landings:
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):
-            results = event.op.operator.evaluate(
-                *[self._read(operand) for operand in event.op.operands], immediates=event.op.immediates
-            )
+            results = event.op.primitive.evaluate(*[self._read(operand) for operand in event.op.operands])
             # every result of this firing lands at the one bank-independent cycle
             landing = landing_cycle(event.commit_pc, self._lir.fetch_lag)
             for write in event.op.writes:
-                value = apply_conditioner(write.conditioner, results[write.port])
+                value = results[write.result]
+                if write.inversion is not None:
+                    value = apply_conditioner(write.inversion, value)
                 self._pending.setdefault(landing, []).append((write.dst, value))
         # Installs are a parallel bundle (read every source before enqueueing any destination, so an in-place
         # self-conditioned install `b <= ~b` and a swap are read-then-write correct) and land one PC later -- the

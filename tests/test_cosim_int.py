@@ -80,7 +80,7 @@ def _crossing_options() -> Options:
 @pytest.mark.cosim
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_float_crossing_cosim(sim: str) -> None:
-    """Pooled ftoint (rounding carried as its immediate) and ffromint inside one scheduled kernel, random sweep."""
+    """Pooled ftoint (rounding carried on its mode port) and ffromint inside one scheduled kernel, random sweep."""
     run_cosim(sim, holoso.synthesize(int_float_crossing, _crossing_options(), name="int_float_crossing"))
 
 

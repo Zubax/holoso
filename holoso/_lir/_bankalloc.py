@@ -11,8 +11,8 @@ from typing import ClassVar, assert_never
 
 from .._mir import Mir, MirBranch, MirOperation, MirPhi, MirStateRead, MirStateSlot, reverse_postorder
 from .._operators import (
-    InlineHardwareOperator,
-    PooledHardwareOperator,
+    InlinePrimitive,
+    PooledPrimitive,
     PortConditioner,
 )
 from .._util import ValueId
@@ -222,14 +222,14 @@ class _WideBank(_Bank[_Placement | Boundary]):
         producers: dict[ValueId, list[FixedProducer]] = {vid: [] for vid in facts.values}
         producers.update({vid: [InputWriter(vid)] for vid in facts.input_ids})
         for vid, node in facts.op_nodes.items():
-            if isinstance(node.operator, PooledHardwareOperator):
+            if isinstance(node.primitive, PooledPrimitive):
                 continue
-            assert isinstance(node.operator, InlineHardwareOperator)
+            assert isinstance(node.primitive, InlinePrimitive)
             operands = tuple(
                 t.resolve(bool_reg.__getitem__) if isinstance(t, BoolOperandTemplate) else t
                 for t in operand_templates(node, ctx.mir, ctx.const_pool.entries)
             )
-            producers[vid] = [InlineWriter(node.operator, operands, node.output_conditioner)]
+            producers[vid] = [InlineWriter(node.primitive, operands)]
         for _pred, vid, value, conditioner in coalesced.residual_arms():
             template = wide_operand_template(ctx.mir, value, conditioner, ctx.const_pool.entries)
             producers[vid].append(MoveWriter(template))
@@ -246,17 +246,17 @@ class _WideBank(_Bank[_Placement | Boundary]):
             sched = block_sched[bid]
             for leader in sorted(sched.firings, key=lambda vid: (sched.issue_cycle[vid], vid)):
                 node = mir_operation(ctx.mir, leader)
-                operator = node.operator
-                assert isinstance(operator, PooledHardwareOperator)
+                primitive = node.primitive
+                assert isinstance(primitive, PooledPrimitive)
                 reads: list[ValueId | WideConstRef] = []
                 for template in operand_templates(node, ctx.mir, ctx.const_pool.entries):
                     assert isinstance(template, WideOperandTemplate) and (
                         template.hole is None or template.hole in values
                     )
                     reads.append(template.source)
-                writes = [(op_nodes[m].output_port, m) for m in sched.firings[leader] if m in values]
+                writes = [(op_nodes[m].result, m) for m in sched.firings[leader] if m in values]
                 seed = sched.inst_of[leader].index
-                firings.append(Firing(leader, operator, bid, sched.issue_cycle[leader], seed, reads, writes))
+                firings.append(Firing(leader, primitive, bid, sched.issue_cycle[leader], seed, reads, writes))
         return firings
 
     def install_policy(
@@ -389,7 +389,7 @@ def prepare_bank[D: _Placement | Boundary](bank: _Bank[D], ctx: BuildContext) ->
     for block in mir.blocks:
         for vid, issue in block_sched[block.id].issue_cycle.items():
             operation = mir_operation(mir, vid)
-            rc = operand_read_cycle(operation.operator, issue, fetch_lag)
+            rc = operand_read_cycle(operation.primitive, issue, fetch_lag)
             reads[block.id].extend((operand, rc) for operand in operation.operands if operand in values)
     # The spills this bank receives, reserving a spilled value's register across every successor frame it lands in
     # even where the value is dataflow-dead.
