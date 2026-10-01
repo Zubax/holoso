@@ -63,5 +63,5 @@ from ._operators import (
     OperatorOptions as OperatorOptions,
 )
 
-__version__ = "0.6.2"
+__version__ = "0.7.0"
 __url__ = "https://holoso.digital"

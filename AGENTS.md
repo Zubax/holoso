@@ -211,6 +211,8 @@ A robust closure procedure that accounts for this starts lean and adds back one 
 Entirely driven by `nox`; read the `noxfile.py` for details and follow its recommendations.
 Tests may take a long time to run; if there is no output, assume they are still running, not stuck,
 
+A pushed commit whose message contains `#yolo` skips CI on every branch but main; reserve it for trivial commits.
+
 Treat all code as suspect and likely defective until proven otherwise through testing. A passing build, a clean type
 check, a green-looking review, or code that merely reads as correct is not evidence of correctness -- only a test that
 exercises the behavior and could have failed is. When in doubt, assume the path is untested and the behavior is wrong
