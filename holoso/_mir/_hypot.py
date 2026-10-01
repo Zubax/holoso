@@ -34,7 +34,7 @@ _logger = logging.getLogger(__name__)
 
 def _operand_base_set(hir: Hir, node: Operation) -> tuple[ValueId, ...]:
     """
-    Order-independent: a magnitude is commutative and sign-invariant, as is the fatan2 magnitude it taps, so a
+    Order-independent: a magnitude is commutative and sign-invariant, as is the CORDIC vectoring magnitude it taps, so a
     two-legged one fuses with any same-block atan2 over the same value pair.
     """
     return tuple(sorted(collapse_signs(hir.nodes, operand)[0] for operand in node.operands))

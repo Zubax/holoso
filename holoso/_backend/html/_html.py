@@ -10,6 +10,7 @@ Do not define any styles or colors here, do that in CSS.
 
 import html
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
@@ -34,7 +35,7 @@ from ..._lir import (
     write_events,
     write_sources_per_register,
 )
-from ..._operators import HardwareOperator, SelectPrimitive
+from ..._operators import SelectPrimitive
 from ..._legal import output_header
 from ..verilog import VerilogOutput
 from ._schedule import render_schedule
@@ -115,17 +116,26 @@ def _metrics(lir: Lir) -> str:
 
 
 def _operator_params(lir: Lir) -> str:
-    """Most parameters (the float format above all) are shared, so the matrix is far shorter than one row per pair."""
-    operators: dict[HardwareOperator, None] = {}  # distinct operators present, in instance order
+    """
+    Most parameters (the float format above all) are shared, so the matrix is far shorter than one row per pair: one
+    column per distinct elaboration, headed by its operator, or by its instances where the operator's instances are
+    elaborated differently.
+    """
+    columns: dict[tuple[str, tuple[tuple[str, int], ...]], list[str]] = {}  # in instance order
     for inst in lir.instances:
-        operators.setdefault(inst.operator, None)
-    names = sorted({name for operator in operators for name in operator.params})
+        elaboration = tuple(lir.elaboration(inst).items())
+        columns.setdefault((inst.operator.name, elaboration), []).append(inst.name)
+    names = sorted({name for _, elaboration in columns for name, _ in elaboration})
     if not names:
         return "<h2>Operator Params</h2><table class='metrics cfg'><tr><td>(defaults)</td></tr></table>"
-    head = "".join(f"<th class='v'>{_esc(operator.name)}</th>" for operator in operators)
+    elaborations_of = Counter(operator_name for operator_name, _ in columns)
+    head = "".join(
+        f"<th class='v'>{_esc(operator_name if elaborations_of[operator_name] == 1 else ' '.join(insts))}</th>"
+        for (operator_name, _), insts in columns.items()
+    )
     rows = "".join(
         f"<tr><th>{_esc(name)}</th>"
-        + "".join(f"<td class='v'>{operator.params.get(name, '')}</td>" for operator in operators)
+        + "".join(f"<td class='v'>{dict(elaboration).get(name, '')}</td>" for _, elaboration in columns)
         + "</tr>"
         for name in names
     )

@@ -7,6 +7,7 @@ whatever else it touches, so the casts across the type boundary live here too.
 from abc import ABC
 from collections.abc import Callable
 from dataclasses import dataclass, fields
+from enum import IntEnum
 from typing import ClassVar, Self
 
 import zkf
@@ -44,6 +45,14 @@ def _floats(fmt: FloatFormat, *names: str) -> tuple[OperatorPort, ...]:
     return tuple(OperatorPort(name, FloatType(fmt)) for name in names)
 
 
+def _timing(model: zkf.OperatorModel) -> zkf.Timing:
+    """The model's single timing, which a mode port selecting only the arithmetic leaves undivided."""
+    timing = model.timing
+    assert isinstance(timing, zkf.Timing), model.module
+    assert timing.latency == model.params["LATENCY"], model.module
+    return timing
+
+
 def _zkf_operator[O: HardwareOperator](
     cls: type[O],
     model: zkf.OperatorModel,
@@ -52,7 +61,7 @@ def _zkf_operator[O: HardwareOperator](
     outputs: tuple[OperatorPort, ...],
 ) -> O:
     """An operator with a single timing, taken from its model; reading the parameters loads a format's tables."""
-    return cls.of_one_mode(model.params, options.instances, operands, outputs, model.initiation_interval)
+    return cls.of_one_mode(model.params, options.instances, operands, outputs, _timing(model).initiation_interval)
 
 
 def _format(fmt: FloatFormat) -> zkf.ZkfFormat:
@@ -229,7 +238,7 @@ class FMulILog2Operator(HardwareOperator):
         params = {("WINT" if name == "WK" else name): value for name, value in model.params.items()}
         operands = (OperatorPort("a", FloatType(fmt)), OperatorPort("k", IntType(ifmt)))
         outputs = _floats(fmt, "y")
-        return cls.of_one_mode(params, options.instances, operands, outputs, model.initiation_interval)
+        return cls.of_one_mode(params, options.instances, operands, outputs, _timing(model).initiation_interval)
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,7 +299,8 @@ _ROUND_MODE = ModePort("round_mode", 2)
 
 def _rounding_modes(model: zkf.OperatorModel) -> tuple[OperatorMode, ...]:
     """Every rounding runs at one timing: the mode selects the arithmetic, not the pipeline."""
-    return tuple(OperatorMode(int(mode), "LATENCY", model.initiation_interval, 1, (0,)) for mode in RoundMode)
+    interval = _timing(model).initiation_interval
+    return tuple(OperatorMode(int(mode), "LATENCY", interval, 1, (0,)) for mode in RoundMode)
 
 
 class RoundingOperator(HardwareOperator):
@@ -310,7 +320,7 @@ class FRoundOperator(RoundingOperator):
     @classmethod
     def build(cls, fmt: FloatFormat, options: FRoundOptions) -> Self:
         model = zkf.RoundModel(_format(fmt), **_knobs(options))
-        if model.latency < 1:
+        if _timing(model).latency < 1:
             raise ValueError("fround needs at least one register stage (an operator must have latency >= 1)")
         ports = _floats(fmt, "a"), _floats(fmt, "y")
         return cls(model.params, options.instances, *ports, _rounding_modes(model))
@@ -525,7 +535,9 @@ class FSqrtPrimitive(FloatPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class FSincosOptions(BaseOperatorOptions):
+class FCordicOptions(BaseOperatorOptions):
+    """A nearby hypot over the operands of an atan2 folds into the vectoring magnitude for free."""
+
     unroll100: int = 100
     stage_input: int = 0
     stage_product: int = 0
@@ -534,22 +546,63 @@ class FSincosOptions(BaseOperatorOptions):
     stage_output: int = 0
 
 
-class FSincosOperator(HardwareOperator):
-    """NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring."""
+class CordicMode(IntEnum):
+    """
+    The value driven on `vectoring`, which is also how ZKF keys each mode's timing; the member name spells the mode's
+    latency parameter.
+    """
+
+    ROTATION = 0
+    VECTORING = 1
+
+    @property
+    def operand_count(self) -> int:
+        """Rotation reads the phase alone, vectoring `(y, x)`."""
+        return 1 if self is CordicMode.ROTATION else 2
+
+
+class FCordicOperator(HardwareOperator):
+    """
+    The CORDIC core, its mode chosen per firing on `vectoring`: rotation reads a phase in turns and yields its sine and
+    cosine, vectoring reads `(y, x)` and yields their angle in turns and their magnitude. NOT throughput-1: the core
+    holds one transaction in flight and re-accepts one cycle after retiring, as each mode's ZKF timing states.
+    """
 
     __slots__ = ()
-    name = "fsincos"
+    name = "fcordic"
+    mode_port = ModePort("vectoring", 1)
 
     @classmethod
-    def build(cls, fmt: FloatFormat, options: FSincosOptions, wmultiplier: int) -> Self:
-        model = zkf.SincosModel(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a"), _floats(fmt, "sin", "cos"))
+    def build(cls, fmt: FloatFormat, options: FCordicOptions, wmultiplier: int) -> Self:
+        model = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
+        timing = model.timing
+        assert not isinstance(timing, zkf.Timing) and set(timing) == set(CordicMode)
+        modes: list[OperatorMode] = []
+        single_mode_params: dict[OperatorMode, dict[str, int]] = {}
+        for mode in CordicMode:
+            latency_param = f"LATENCY_{mode.name}"
+            assert timing[mode].latency == model.params[latency_param]
+            interval = timing[mode].initiation_interval
+            operator_mode = OperatorMode(int(mode), latency_param, interval, mode.operand_count, (0, 1))
+            modes.append(operator_mode)
+            fixed = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, mode=int(mode), **_knobs(options))
+            assert fixed.timing == timing[mode], "a fixed mode must keep its timing, which the schedule was built on"
+            single_mode_params[operator_mode] = fixed.params
+        ports = _floats(fmt, "a", "b"), _floats(fmt, "r0", "r1")
+        return cls(model.params, options.instances, *ports, tuple(modes), single_mode_params)
+
+    def mode_of_cordic(self, mode: CordicMode) -> OperatorMode:
+        return self.mode_of(int(mode))
 
 
 @dataclass(frozen=True, slots=True)
 class FSincosPrimitive(FloatPrimitive):
-    operator: FSincosOperator
+    operator: FCordicOperator
     output_labels: ClassVar[tuple[str, ...]] = ("sin", "cos")
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_cordic(CordicMode.ROTATION)
 
     def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
         (a,) = self._validated_operands(operands)
@@ -561,33 +614,13 @@ class FSincosPrimitive(FloatPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class FAtan2Options(BaseOperatorOptions):
-    """A nearby hypot over the same operands folds into the magnitude port for free."""
-
-    unroll100: int = 100
-    stage_input: int = 0
-    stage_product: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
-
-
-class FAtan2Operator(HardwareOperator):
-    """NOT throughput-1: the core holds one transaction in flight and re-accepts one cycle after retiring."""
-
-    __slots__ = ()
-    name = "fatan2"
-
-    @classmethod
-    def build(cls, fmt: FloatFormat, options: FAtan2Options, wmultiplier: int) -> Self:
-        model = zkf.Atan2Model(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b"), _floats(fmt, "theta", "mag"))
-
-
-@dataclass(frozen=True, slots=True)
 class FAtan2Primitive(FloatPrimitive):
-    operator: FAtan2Operator
+    operator: FCordicOperator
     output_labels: ClassVar[tuple[str, ...]] = ("theta", "mag")
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_cordic(CordicMode.VECTORING)
 
     def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
         y, x = self._validated_operands(operands)

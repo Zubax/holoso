@@ -5,7 +5,7 @@ hierarchy, and the two primitives that belong to no one family.
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Self, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
@@ -180,6 +180,11 @@ class HardwareOperator:
     module. It is the single home of every physical fact; the primitives that run on it hold only semantics. A float
     operand port carries a sign sideband unless listed in `operands_without_sideband`.
 
+    `single_mode_params` holds, for each mode the module can also be elaborated for alone, the parameters doing so: the
+    module's parameter names less the other modes' latency parameters, the mode's own latency unchanged. An operator
+    offering them asserts that the mode keeps its whole timing alone, so an instance whose firings all run that mode
+    can shed the rest without the schedule noticing.
+
     A firing's busy window is its own mode's initiation interval. Requiring `L_a - L_b < II_a` for every ordered pair
     of modes that share an output port makes the earliest next firing on that port commit strictly after its
     predecessor, so the busy window stays the only per-instance constraint; modes on disjoint ports interleave freely.
@@ -200,6 +205,7 @@ class HardwareOperator:
     operand_ports: tuple[OperatorPort, ...]
     output_ports: tuple[OperatorPort, ...]
     modes: tuple[OperatorMode, ...]
+    single_mode_params: Mapping[OperatorMode, Mapping[str, int]] = field(default_factory=dict)
 
     def __hash__(self) -> int:
         # Consistent with equality, since equal operators are of one kind, and cheap in the allocator's hot loops.
@@ -246,6 +252,12 @@ class HardwareOperator:
         for a in self.modes:
             shared = [b for b in self.modes if self.error_ports or set(a.outputs) & set(b.outputs)]
             assert all(self.latency(a) - self.latency(b) < a.initiation_interval for b in shared), self.name
+        assert not self.single_mode_params or self.mode_port is not None, self.name
+        for mode, narrowed in self.single_mode_params.items():
+            assert mode in self.modes, self.name
+            others = {other.latency_param for other in self.modes} - {mode.latency_param}
+            assert set(narrowed) == set(self.params) - others, self.name
+            assert narrowed[mode.latency_param] == self.params[mode.latency_param], self.name
 
     @property
     def module_name(self) -> str:
@@ -269,6 +281,14 @@ class HardwareOperator:
     def latency(self, mode: OperatorMode) -> int:
         assert mode in self.modes, (self.name, mode)
         return self.params[mode.latency_param]
+
+    def params_for(self, modes: frozenset[OperatorMode]) -> Mapping[str, int]:
+        """The parameters elaborating an instance whose firings run `modes`."""
+        assert modes and modes <= set(self.modes), self.name
+        if len(modes) == 1:
+            (mode,) = modes
+            return self.single_mode_params.get(mode, self.params)
+        return self.params
 
     @property
     def latencies(self) -> list[int]:

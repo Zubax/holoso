@@ -15,6 +15,7 @@ constants it reads), and each register's write is a `case` over that register's 
 per-register opcode (code 0 == NOP hold). PC drives only the sequencer; it never gates a datapath read or write.
 """
 
+import logging
 from dataclasses import dataclass
 from textwrap import dedent
 from typing import assert_never
@@ -26,6 +27,8 @@ from ..._value import FloatValue
 from ..._legal import output_header
 from ._microcode import *
 from ._support import inline_support, support_files
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,7 +386,11 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
         operator = inst.operator
         # The operator names its own ports; the nets and microcode fields they connect to stay positional.
         operands = list(zip(operator.operand_ports, PORT_LETTERS))
-        params = ", ".join(f".{name}({value})" for name, value in operator.params.items())
+        elaboration = lir.elaboration(inst)
+        if elaboration != operator.params:
+            codes = sorted(str(mode.code) for mode in lir.instance_modes[inst])
+            _logger.info("Instance %s is elaborated for the modes its firings run alone: %s", base, ", ".join(codes))
+        params = ", ".join(f".{name}({value})" for name, value in elaboration.items())
         w(f"{operator.module_name} #(", f"    {params}", f") u_{base} (")
         w.push()
         w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")

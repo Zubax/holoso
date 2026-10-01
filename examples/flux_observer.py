@@ -78,7 +78,7 @@ def main() -> None:
             fadd=holoso.FAddOptions(),
             fmul=holoso.FMulOptions(),
             fsort=holoso.FSortOptions(),
-            fatan2=holoso.FAtan2Options(),
+            fcordic=holoso.FCordicOptions(),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=24),
     )

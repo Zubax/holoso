@@ -1118,7 +1118,7 @@ SPECS = [
         name="iq_oscillator",
         inputs=("frequency", "dt", "phase_offset"),
         make_kernel=lambda: IqOscillator().tick,
-        # One fsincos firing serves both lanes; the budget is the source's own phase scaling plus the core, and it
+        # One CORDIC rotation serves both lanes; the budget is the source's own phase scaling plus the core, and it
         # does not grow with age because the phase recurrence is integer and exact -- no float state drifts. It is a
         # bound rather than a fit: the scaling now composes with the cores' turn ABI into a single exact exponent, so
         # the realized error sits well inside it.
@@ -1352,7 +1352,7 @@ SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
-        name="polar_to",  # fused hypot+atan2 -> one fatan2
+        name="polar_to",  # fused hypot+atan2 -> one CORDIC vectoring
         inputs=("x", "y"),
         make_kernel=lambda: polar_to,
         # The CORDIC operator is faithful (few-ulp), not exact; both lanes carry the same operator-level budget.
@@ -1371,7 +1371,7 @@ SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
-        name="polar_from",  # coalesced cos+sin -> one fsincos
+        name="polar_from",  # coalesced cos+sin -> one CORDIC rotation
         inputs=("magnitude", "angle"),
         make_kernel=lambda: polar_from,
         # A near-axis angle makes one lane |magnitude*eps|, so the floor is the |magnitude| <= 4 operand scale.
@@ -1432,7 +1432,7 @@ SPECS = [
         },
     ),
     ExampleSpec(
-        name="kepler",  # Newton loop; sin(E)+cos(E) coalesce into one fsincos per iteration
+        name="kepler",  # Newton loop; sin(E)+cos(E) coalesce into one CORDIC rotation per iteration
         inputs=("mean_anomaly", "eccentricity"),
         make_kernel=lambda: kepler.eccentric_anomaly,
         reference={"out_0": OutputTolerance(ulps=64, floor=4.0)},  # same-trip Newton at the |M| + e scale

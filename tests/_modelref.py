@@ -12,15 +12,14 @@ import numpy as np
 import holoso
 from holoso import (
     FAddOptions,
-    FAtan2Options,
     FCmpOptions,
+    FCordicOptions,
     FDivOptions,
     FExp2Options,
     FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
-    FSincosOptions,
     FSqrtOptions,
     OperatorOptions,
     Options,
@@ -289,8 +288,7 @@ def default_options(fmt: FloatFormat) -> Options:
             fexp2=FExp2Options(),
             flog2=FLog2Options(),
             fsqrt=FSqrtOptions(),  # no tables, hence no format that leaves it unsupported
-            fsincos=FSincosOptions(),
-            fatan2=FAtan2Options(),
+            fcordic=FCordicOptions(),
         ),
         ffmt=fmt,
     )
@@ -429,9 +427,6 @@ def staged_options(fmt: FloatFormat) -> Options:
     and handshake at a longer latency. Deliberately hardcoded -- it is a test fixture chosen for coverage, not a
     derived enumeration of operator knobs, so it stays valid as new (not necessarily stage-shaped) knobs are added.
     """
-    # Bench-verified stage combos (tests/hdl/test_f{sincos,atan2}.py), so the latency formula is known-good.
-    sincos = FSincosOptions(stage_product=1, stage_normalize=1, stage_pack=1)
-    atan2 = FAtan2Options(stage_product=1, stage_normalize=1, stage_pack=1)
     return Options(
         OperatorOptions(
             fadd=FAddOptions(
@@ -454,8 +449,8 @@ def staged_options(fmt: FloatFormat) -> Options:
                 stage_output=1,
             ),
             fsqrt=FSqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
-            fsincos=sincos,
-            fatan2=atan2,
+            # A stage combination tests/hdl/test_fcordic.py verifies both switching modes and fixed to either.
+            fcordic=FCordicOptions(stage_product=1, stage_normalize=1, stage_pack=1),
         ),
         ffmt=fmt,
     )

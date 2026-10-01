@@ -29,7 +29,7 @@ def main() -> None:
             fdiv=holoso.FDivOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
-            fsincos=holoso.FSincosOptions(),
+            fcordic=holoso.FCordicOptions(),
         ),
         ffmt=fmt,
     )

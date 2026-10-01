@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ from holoso import (
     BoolType,
     FAddOptions,
     FCmpOptions,
+    FCordicOptions,
     FDivOptions,
     FFromIntOptions,
     FILog2Options,
@@ -41,6 +43,8 @@ from holoso import (
     synthesize,
 )
 from holoso._operators import (
+    CordicMode,
+    FCordicOperator,
     FFromIntOperator,
     FILog2Operator,
     FMulILog2Operator,
@@ -285,6 +289,88 @@ def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     result = _compile("wrong_int_latency", verilog, tmp_path)
     assert result.returncode != 0
     assert "_holoso_invalid_integer_latency" in result.stderr
+
+
+def _rotating(x: float) -> tuple[float, float]:
+    return math.sin(x), math.cos(x)
+
+
+def _vectoring(y: float, x: float) -> tuple[float, float]:
+    return math.atan2(y, x), math.hypot(y, x)
+
+
+def _rotating_a_vectored_angle(y: float, x: float) -> float:
+    return math.cos(math.atan2(y, x))
+
+
+def _rotating_beside_vectoring(a: float, y: float, x: float) -> tuple[float, float]:
+    return math.sin(a), math.atan2(y, x)
+
+
+@pytest.mark.parametrize(
+    "kernel, instances, modes",
+    [
+        (_rotating, 1, [{"MODE": 0, "LATENCY_ROTATION": True, "LATENCY_VECTORING": False}]),
+        (_vectoring, 1, [{"MODE": 1, "LATENCY_ROTATION": False, "LATENCY_VECTORING": True}]),
+        (_rotating_a_vectored_angle, 1, [{"MODE": 2, "LATENCY_ROTATION": True, "LATENCY_VECTORING": True}]),
+        (
+            _rotating_beside_vectoring,
+            2,
+            [
+                {"MODE": 0, "LATENCY_ROTATION": True, "LATENCY_VECTORING": False},
+                {"MODE": 1, "LATENCY_ROTATION": False, "LATENCY_VECTORING": True},
+            ],
+        ),
+    ],
+    ids=lambda value: value.__name__.strip("_") if callable(value) else None,
+)
+def test_a_cordic_instance_is_elaborated_for_the_modes_its_firings_run(
+    kernel: Callable[..., object], instances: int, modes: list[dict[str, int | bool]]
+) -> None:
+    # A rotation and a vectoring issued together take an instance each, so each is elaborated for its own mode alone;
+    # an instance running both keeps the per-transaction core and both latencies.
+    options = Options(
+        OperatorOptions(fmul=FMulOptions(), fmul_ilog2=FMulILog2Options(), fcordic=FCordicOptions(instances=instances)),
+        ffmt=FloatFormat(6, 18),
+    )
+    verilog = synthesize(kernel, options, name=f"cordic_elab_{kernel.__name__.strip('_')}").verilog_output.verilog
+    elaborations = re.findall(r"holoso_fcordic #\(\n\s*(.*?)\n\) u_fcordic_\d+ \(", verilog)
+    found = [
+        {
+            "MODE": int(re.findall(r"\.MODE\((\d)\)", params)[0]),
+            "LATENCY_ROTATION": ".LATENCY_ROTATION(" in params,
+            "LATENCY_VECTORING": ".LATENCY_VECTORING(" in params,
+        }
+        for params in elaborations
+    ]
+    assert sorted(found, key=lambda elaboration: elaboration["MODE"]) == modes
+
+
+def _cordic_probe(name: str, mode: int, wrong: CordicMode) -> str:
+    """The CORDIC wrapper elaborated with MODE `mode` and the latency parameter of mode `wrong` off by one."""
+    operator = FCordicOperator.build(FloatFormat(6, 18), FCordicOptions(), 0)
+    param = f"LATENCY_{wrong.name}"
+    latency = operator.params[param]
+    verilog = _pooled_probe(name, [operator]).replace(f".{param}({latency})", f".{param}({latency + 1})")
+    return verilog.replace(".MODE(2)", f".MODE({mode})")
+
+
+@_requires_iverilog
+@pytest.mark.parametrize("mode", list(CordicMode), ids=lambda mode: mode.name)
+def test_cordic_wrapper_fixed_to_one_mode_ignores_the_other_modes_latency(mode: CordicMode, tmp_path: Path) -> None:
+    # Only a MODE that reaches zkf_cordic makes it ignore the other mode's latency parameter; one the wrapper dropped
+    # would leave the core checking both, and no simulation tells the two apart.
+    name = f"cordic_fixed_{mode.name.lower()}"
+    other = CordicMode.VECTORING if mode is CordicMode.ROTATION else CordicMode.ROTATION
+    _elaborate(name, _cordic_probe(name, int(mode), other), tmp_path)
+
+
+@_requires_iverilog
+def test_cordic_wrapper_running_both_modes_checks_both_latencies(tmp_path: Path) -> None:
+    # The negative twin of the probe above, so its silence means something.
+    result = _compile("cordic_both_wrong", _cordic_probe("cordic_both_wrong", 2, CordicMode.VECTORING), tmp_path)
+    assert result.returncode != 0
+    assert "_zkf_invalid_latency_mismatch" in result.stderr
 
 
 @_requires_iverilog

@@ -2162,8 +2162,8 @@ def test_sincos_coalesces_sin_and_cos_into_one_firing() -> None:
         return math.sin(x), math.cos(x)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "sincos_coalesce")
-    assert _instance_counts(lir).get("fsincos") == 1
-    firings = _firings(lir, "fsincos")
+    assert _instance_counts(lir).get("fcordic") == 1
+    firings = _firings(lir, "fcordic")
     assert len(firings) == 1 and len(firings[0].writes) == 2
 
 
@@ -2172,8 +2172,8 @@ def test_atan2_and_hypot_coalesce_into_one_firing() -> None:
         return math.hypot(y, x), math.atan2(y, x)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "atan2_hypot_coalesce")
-    assert _instance_counts(lir).get("fatan2") == 1
-    firings = _firings(lir, "fatan2")
+    assert _instance_counts(lir).get("fcordic") == 1
+    firings = _firings(lir, "fcordic")
     assert len(firings) == 1 and len(firings[0].writes) == 2
 
 
@@ -2184,8 +2184,8 @@ def test_hypot_fuses_with_atan2_regardless_of_operand_order() -> None:
         return math.hypot(x, y), math.atan2(y, x)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "hypot_swapped_fuse")
-    assert _instance_counts(lir).get("fatan2") == 1 and "fsort" not in _instance_counts(lir)
-    firings = _firings(lir, "fatan2")
+    assert _instance_counts(lir).get("fcordic") == 1 and "fsort" not in _instance_counts(lir)
+    firings = _firings(lir, "fcordic")
     assert len(firings) == 1 and len(firings[0].writes) == 2
 
 
@@ -2194,7 +2194,7 @@ def test_lone_sin_is_one_firing_with_untapped_cos() -> None:
         return math.sin(x)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "lone_sin")
-    firings = _firings(lir, "fsincos")
+    firings = _firings(lir, "fcordic")
     assert len(firings) == 1 and len(firings[0].writes) == 1
 
 
@@ -2204,7 +2204,7 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "lone_hypot")
     counts = _instance_counts(lir)
-    assert "fatan2" not in counts  # no CORDIC is spun up for a hypotenuse that has no angle beside it
+    assert "fcordic" not in counts  # no CORDIC is spun up for a hypotenuse that has no angle beside it
     # The exponent scaling needs no sorter and no divider, and the root sees a sum of two squares taken at a scale
     # that cannot overflow.
     assert counts.get("fsqrt") == 1 and counts.get("filog2") == 1
@@ -2235,7 +2235,7 @@ def test_dropping_a_zero_leg_hands_the_pair_back_to_the_cordic() -> None:
         return math.hypot(y, x, 0.0), math.atan2(y, x)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "zero_leg_fuse")
-    assert len(_firings(lir, "fatan2")) == 1
+    assert len(_firings(lir, "fcordic")) == 1
     counts = _instance_counts(lir)
     assert "filog2" not in counts and "fsqrt" not in counts
 
@@ -2246,7 +2246,7 @@ def test_a_two_legged_magnitude_still_fuses_with_an_adjacent_atan2() -> None:
         return math.hypot(y, x), math.atan2(y, x)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "narity_pair_fuse")
-    assert len(_firings(lir, "fatan2")) == 1
+    assert len(_firings(lir, "fcordic")) == 1
     assert "filog2" not in _instance_counts(lir)
 
 
@@ -2255,7 +2255,7 @@ def test_independent_sincos_share_one_instance_spaced_by_ii() -> None:
         return math.sin(a), math.cos(a), math.sin(b), math.cos(b)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "two_sincos_ii")
-    _assert_two_firings_at_minimal_ii(lir, "fsincos")
+    _assert_two_firings_at_minimal_ii(lir, "fcordic")
 
 
 def test_independent_atan2_share_one_instance_spaced_by_ii() -> None:
@@ -2263,7 +2263,7 @@ def test_independent_atan2_share_one_instance_spaced_by_ii() -> None:
         return math.atan2(a, b), math.atan2(c, d)
 
     lir = build_lir(_run(kernel, _CORDIC_OPS), "two_atan2_ii")
-    _assert_two_firings_at_minimal_ii(lir, "fatan2")
+    _assert_two_firings_at_minimal_ii(lir, "fcordic")
 
 
 def _assert_two_firings_at_minimal_ii(lir: Lir, mnemonic: str) -> None:

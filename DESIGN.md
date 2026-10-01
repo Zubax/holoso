@@ -161,7 +161,7 @@ the slow HDL-emission/simulation iteration begins.
 - Firing -- one activation of a primitive: the operation, or the fused group of operations, that a single issue
   computes; a pooled firing's members share the issue cycle, the mode and the operator instance.
 - Instance -- one physical copy of an operator. The scheduler binds each firing to an instance; the register allocator
-  may rebind it.
+  may rebind it. An instance whose firings all run one mode is elaborated for that mode alone where its operator can be.
 - Mux arm -- one input of a register-file multiplexer: a source an operand port's read multiplexer selects among, or
   a writer a register's write select takes. The arm count over all ports and registers is the steering, the
   multiplexer fabric the register allocator minimizes.
@@ -242,7 +242,15 @@ from outliving the block that issued it (see Control flow). A firing's busy wind
 share an output port must satisfy `L_a - L_b < II_a` for every ordered pair, so results on any one port leave in issue
 order and the busy window stays the only per-instance constraint; modes on disjoint ports interleave freely whatever
 their latencies, the error sideband counting as a port every mode drives. An operator whose acceptance depends on the
-next firing's mode is outside the model.
+next firing's mode is outside the model. The CORDIC is the operator whose modes differ in timing: it rotates (a sine
+and cosine from one operand) and vectors (an angle and magnitude from two) at different latencies, each re-accepting one
+step after it retires, so one instance serves sin, cos, atan2 and a fused magnitude alike.
+
+An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
+schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
+is made per instance at emission: an instance whose firings all run one mode is elaborated for it alone (a CORDIC that
+only rotates sheds the vectoring datapath), and any other keeps the elaboration serving every mode. The operator is
+still built from the latter, so its format limits are those of every mode.
 
 Primitives split structurally into POOLED -- running on operators the scheduler contends for -- and INLINE -- pure
 expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is never
@@ -508,11 +516,11 @@ the word is the sign fill (a negative count being the refusal gate's), and a cou
 a saturating power-of-two scaling rides the same shifter through its saturating product tap.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
-sin/cos computed simultaneously by the sincos operator, FMA contraction of `a*b+c` wherever the additions that read
+sin and cos of one angle computed by one CORDIC rotation, FMA contraction of `a*b+c` wherever the additions that read
 the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
 left alone) -- matched at MIR because this is the first layer aware of hardware semantics. Some semantic operators
 lower into combinations of primitives depending on availability and context (e.g. a two-legged magnitude via
-fatan2).
+the CORDIC's vectoring).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is scheduled per block and register-allocated over the
@@ -678,9 +686,10 @@ Value routing is uniform across two dual endpoints: a per-operand READ opcode se
 per-register WRITE opcode selects that register's next value (code 0 == NOP hold). An operator output, an inline
 expression, and a phi-arm/constant/state move are all just sources one write opcode picks, so outside the two I/O
 boundaries the PC gates no datapath read or write -- that is left to control flow alone. A control field constant
-across the whole program is driven by a
-constant net and lifted out of the ROM so synthesis prunes what it feeds; the Python ROM packer and the module's
-bit-slice offsets are produced together so they cannot drift.
+across the whole program is driven by a constant net and lifted out of the ROM so synthesis prunes what it feeds; the
+Python ROM packer and the module's bit-slice offsets are produced together so they cannot drift. An instance is
+likewise emitted for what its firings use: an operand port none of them reads is tied off, and one running a single mode
+is instantiated with its operator's narrower elaboration for it where there is one (see Operators).
 
 Sparse storage. Each operand's read mux is a `case` over its read codebook (the registers it reads plus each distinct
 constant it reads) and each register's write a `case` over its write codebook, both indexed by the endpoint's dense
@@ -700,9 +709,9 @@ its snapshot, the non-reset arm applies its opcode-selected update and boundary 
 fetch registers are reset-unconditional, so they pack into the BRAM output register and settle to the first word
 under reset; the rest of the datapath likewise stays out of the reset cone.
 
-Each operator is built from its own options and the machine's formats, fixed at construction from the user's `Options`;
-every instantiation lists every hardware parameter explicitly, turning a param-name mismatch into a loud elaboration
-error. The auxiliary HDL ships as one self-contained `holoso_support.v`, assembled in memory from hand-written operator
+Each operator is built from its own options and the machine's formats; every instantiation lists the hardware
+parameters of its instance's elaboration explicitly, turning a param-name mismatch into a loud elaboration error. The
+auxiliary HDL ships as one self-contained `holoso_support.v`, assembled in memory from hand-written operator
 catalogues plus included external RTL, so the end application adds a single file to the synthesis input. The control
 word and datapath skeleton are the only ZISC-specific part -- LIR itself is controller-agnostic.
 

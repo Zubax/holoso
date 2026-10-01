@@ -155,7 +155,7 @@ For example, if the fused multiply-add (FMA) operator is set up, Holoso will fus
 FMA rather than separate `fmul` and `fadd` (fast-math style -- bit-exact results are not guaranteed across transforms),
 hypotenuse is folded into `atan2` when computed nearby, etc.
 Overall, Holoso pattern-matches heavily to reduce execution latency;
-e.g., nearby sin and cos are folded into a single `fsincos`.
+e.g., nearby sin and cos are folded into a single CORDIC rotation.
 If the kernel cannot be lowered using the available operators, Holoso will raise an error.
 
 ### Construct the RTL
@@ -298,8 +298,8 @@ Non-NaN infinity cases (same intent as IEEE 754):
 | ±∞⋅±∞               | ±∞  (sign = signs XOR)         |
 | finite≠0⋅±∞         | ±∞  (sign = signs XOR)         |
 
-WEXP can be chosen freely depending on the required range, while WMAN is sensitive to the chip's DSP capabilities
-and thus requires careful selection to achieve best resource utilization.
+WEXP can be chosen freely within each operator's limits depending on the required range, while WMAN is sensitive to
+the chip's DSP capabilities and thus requires careful selection to achieve best resource utilization.
 
 | WMAN | ≈ε (interval) | Description                                                                         |
 |------|---------------|-------------------------------------------------------------------------------------|

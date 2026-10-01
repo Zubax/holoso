@@ -37,8 +37,8 @@ from ._backend.verilog import VerilogOutput as VerilogOutput
 
 from ._operators import (
     FAddOptions as FAddOptions,
-    FAtan2Options as FAtan2Options,
     FCmpOptions as FCmpOptions,
+    FCordicOptions as FCordicOptions,
     FDivOptions as FDivOptions,
     FExp2Options as FExp2Options,
     FFmaOptions as FFmaOptions,
@@ -48,7 +48,6 @@ from ._operators import (
     FMulILog2Options as FMulILog2Options,
     FMulOptions as FMulOptions,
     FRoundOptions as FRoundOptions,
-    FSincosOptions as FSincosOptions,
     FSortOptions as FSortOptions,
     FSqrtOptions as FSqrtOptions,
     FToIntOptions as FToIntOptions,

@@ -69,6 +69,14 @@ threadable arms spends about 13 minutes in it at regalloc effort 0 (0.45 s per c
 local to its predecessor's frame and the merge phi's interference, so an incremental judgement is possible; it is
 deferred until a real kernel needs it.
 
+### Mode-aware binding
+
+The register allocator binds firings to instances without regard to their modes, but an instance whose firings all run
+in one mode elaborates its operator for that mode alone, as a CORDIC that only rotates sheds the vectoring datapath.
+With two or more instances, steering rotations and vectorings onto separate instances where the schedule allows would
+make more of them single-mode and so smaller. The binding objective counts only registers and steering arms today, so
+this needs an area term for each instance's mode set.
+
 ### List-scheduler priority
 
 `schedule_ops` issues ready firings by latency-weighted height to a sink, which ignores instance contention. A

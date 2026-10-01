@@ -212,7 +212,7 @@ def _run(sim: str, config: _Config, model: MulIlog2Model, parameters: dict[str, 
             "HOLOSO_WEXP": str(config.wexp),
             "HOLOSO_WMAN": str(config.wman),
             "HOLOSO_WINT": str(config.wint),
-            "HOLOSO_EXPECTED_LATENCY": str(model.latency),
+            "HOLOSO_EXPECTED_LATENCY": str(model.timing.latency),
         },
         results_xml=str(build_dir / "results.xml"),
     )

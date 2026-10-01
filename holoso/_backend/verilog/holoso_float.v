@@ -233,90 +233,19 @@ module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer 
     );
 endmodule
 
-// Fixed-latency facade over the handshaked, non-throughput-1 zkf_sincos CORDIC (one transaction in flight): the
-// scheduler spaces issues by initiation_interval = LATENCY+1, so the core is idle at issue, out_ready is tied high,
-// and the result is captured on its out_valid cycle -- the same static-schedule contract as the pipelined wrappers.
-module holoso_fsincos#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
-                       parameter integer UNROLL100 = 100,
-                       parameter integer STAGE_INPUT = 0, parameter integer STAGE_PRODUCT = 0,
-                       parameter integer STAGE_NORMALIZE = 0, parameter integer STAGE_PACK = 0,
-                       parameter integer STAGE_OUTPUT = 0, parameter integer LATENCY = 0) (
-    input  wire clk,
-    input  wire rst,
-    input  wire                 in_valid,
-    input  wire           [1:0] a_sgnop,
-    input  wire [WEXP+WMAN-1:0] a,
-    output wire                 out_valid,
-    output wire [WEXP+WMAN-1:0] sin,
-    output wire [WEXP+WMAN-1:0] cos
-);
-    localparam WFULL = WEXP + WMAN;
-    wire [WFULL-1:0] a1;
-    wire             core_in_ready;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
-    zkf_sincos#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .UNROLL100(UNROLL100),
-                .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_NORMALIZE(STAGE_NORMALIZE),
-                .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_sincos (
-        .clk(clk), .rst(rst),
-        .in_valid(in_valid), .in_ready(core_in_ready), .x(a1),
-        .out_valid(out_valid), .out_ready(1'b1), .sin(sin), .cos(cos), .quadrant()
-    );
-`ifdef SIMULATION
-    always @(posedge clk) begin
-        if (!rst && in_valid && !core_in_ready)
-            $fatal(1, "holoso_fsincos over-issued: in_valid while busy (initiation_interval too small)");
-    end
-`endif
-endmodule
-
-// Fixed-latency facade over the handshaked zkf_atan2 CORDIC (see holoso_fsincos). Operand a is y, b is x; outputs
-// theta in turns and mag = hypot(y, x).
-module holoso_fatan2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
-                      parameter integer UNROLL100 = 100,
-                      parameter integer STAGE_INPUT = 0, parameter integer STAGE_PRODUCT = 0,
-                      parameter integer STAGE_NORMALIZE = 0, parameter integer STAGE_PACK = 0,
-                      parameter integer STAGE_OUTPUT = 0, parameter integer LATENCY = 0) (
-    input  wire clk,
-    input  wire rst,
-    input  wire                 in_valid,
-    input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] b_sgnop,
-    input  wire [WEXP+WMAN-1:0] a,
-    input  wire [WEXP+WMAN-1:0] b,
-    output wire                 out_valid,
-    output wire [WEXP+WMAN-1:0] theta,
-    output wire [WEXP+WMAN-1:0] mag
-);
-    localparam WFULL = WEXP + WMAN;
-    wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] b1;
-    wire             core_in_ready;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    zkf_atan2#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .UNROLL100(UNROLL100),
-               .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_NORMALIZE(STAGE_NORMALIZE),
-               .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_atan2 (
-        .clk(clk), .rst(rst),
-        .in_valid(in_valid), .in_ready(core_in_ready), .y(a1), .x(b1),
-        .out_valid(out_valid), .out_ready(1'b1), .theta(theta), .mag(mag)
-    );
-`ifdef SIMULATION
-    always @(posedge clk) begin
-        if (!rst && in_valid && !core_in_ready)
-            $fatal(1, "holoso_fatan2 over-issued: in_valid while busy (initiation_interval too small)");
-    end
-`endif
-endmodule
-
-// Fixed-latency facade over the handshaked zkf_cordic (see holoso_fsincos), its mode chosen per transaction:
+// Fixed-latency facade over the handshaked, non-throughput-1 zkf_cordic (one transaction in flight), its mode chosen
+// per transaction, or fixed by MODE (0 rotation, 1 vectoring), which drops the other mode's datapath and ignores
+// `vectoring` and the other mode's latency parameter:
 //      vectoring=0:  r0 = sin(2*pi*sgnop(a)), r1 = cos(2*pi*sgnop(a)); b is ignored
 //      vectoring=1:  r0 = atan2(sgnop(a), sgnop(b)) in turns, r1 = hypot(sgnop(a), sgnop(b))
-// Each mode's initiation interval is its own LATENCY+1.
+// The scheduler spaces the issues by each transaction's initiation interval, its mode's LATENCY+1, so the core is
+// idle at issue, out_ready is tied high, and the result is captured on its out_valid cycle -- the same static-schedule
+// contract as the pipelined wrappers.
 module holoso_fcordic#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
                        parameter integer UNROLL100 = 100,
                        parameter integer STAGE_INPUT = 0, parameter integer STAGE_PRODUCT = 0,
                        parameter integer STAGE_NORMALIZE = 0, parameter integer STAGE_PACK = 0,
-                       parameter integer STAGE_OUTPUT = 0,
+                       parameter integer STAGE_OUTPUT = 0, parameter integer MODE = 2,
                        parameter integer LATENCY_ROTATION = 0, parameter integer LATENCY_VECTORING = 0) (
     input  wire clk,
     input  wire rst,
@@ -338,7 +267,7 @@ module holoso_fcordic#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTI
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
     zkf_cordic#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER), .UNROLL100(UNROLL100),
                 .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT), .STAGE_NORMALIZE(STAGE_NORMALIZE),
-                .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
+                .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .MODE(MODE),
                 .LATENCY_ROTATION(LATENCY_ROTATION), .LATENCY_VECTORING(LATENCY_VECTORING)) u_cordic (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in_ready(core_in_ready), .vectoring(vectoring), .a(a1), .b(b1),

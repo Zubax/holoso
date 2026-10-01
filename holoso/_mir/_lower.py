@@ -337,7 +337,7 @@ class _FloatLowerer(_FamilyLowerer):
             # sign-invariant, so the hypot's own operand order and signs are immaterial.
             atan2 = self.hir.nodes[atan2_id]
             assert isinstance(atan2, Operation)
-            return self.emit(FAtan2Primitive(self.ops.fatan2), atan2.operands, result=1)
+            return self.emit(FAtan2Primitive(self.ops.fcordic), atan2.operands, result=1)
         ops, fmt = self.ops, self.ops.float_format
         match node:
             case Operation(operator=FloatAdd(), operands=operands):
@@ -364,17 +364,17 @@ class _FloatLowerer(_FamilyLowerer):
             case Operation(operator=FloatLog2(), operands=operands):
                 return self.emit(FLog2Primitive(ops.flog2), operands)
             case Operation(operator=(FloatSinTurns() | FloatCosTurns()) as semantic, operands=operands):
-                # zkf_sincos already counts in turns, so whatever conversion the kernel's angle wanted was stated in HIR
+                # The CORDIC already counts in turns, so whatever conversion the kernel's angle wanted was stated in HIR
                 # and folded there. The sign rides the core's own operand, so one value serves sin(-x)/cos(-x) and a
                 # sin+cos over one argument fuse into one firing.
                 port = 0 if isinstance(semantic, FloatSinTurns) else 1
-                return self.emit(FSincosPrimitive(ops.fsincos), operands, result=port)
+                return self.emit(FSincosPrimitive(ops.fcordic), operands, result=port)
             case Operation(operator=FloatSqrt(), operands=operands):
                 return self.emit(FSqrtPrimitive(ops.fsqrt), operands)
             case Operation(operator=FloatAtan2Turns(), operands=operands):
-                # zkf_atan2 returns theta in turns, which is what the operator means; its magnitude port is tapped
-                # only by a fused hypot (above).
-                return self.emit(FAtan2Primitive(ops.fatan2), operands)
+                # Vectoring returns theta in turns, which is what the operator means; its magnitude port is tapped only
+                # by a fused hypot (above).
+                return self.emit(FAtan2Primitive(ops.fcordic), operands)
             case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=operands):
                 # min taps the low output port, max the high one; a min and a max over one pair fuse into one firing.
                 return self.emit(FSortPrimitive(ops.fsort), operands, result=int(isinstance(semantic, FloatMax)))

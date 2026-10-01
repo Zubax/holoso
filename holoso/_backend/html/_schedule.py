@@ -50,7 +50,7 @@ def render_schedule(lir: Lir) -> str:
     stage_base: dict[OperatorInstance, int] = {}
     for sidx, (inst, _k) in enumerate(stage_cols):
         stage_base.setdefault(inst, sidx)
-    group_ends = {stage_base[inst] + _stage_count(inst) - 1 for inst in lir.instances}
+    group_ends = {stage_base[inst] + _stage_count(lir, inst) - 1 for inst in lir.instances}
 
     data_thin, data_thick = _data_seams(nreg, nbreg, nconst, nbbool)
     if columns:
@@ -254,7 +254,7 @@ def render_schedule(lir: Lir) -> str:
         cls = "gh k" + _border_suffix(nreg + nbreg + nconst + index, dv.data_thin, dv.data_thick)
         out.append(f"<th class='{cls}' rowspan='2'><span>{'T' if value else 'F'}</span></th>")
     for inst in lir.instances:
-        lat = _stage_count(inst)
+        lat = _stage_count(lir, inst)
         # full name, set vertically so a 1-stage operator does not widen
         name = inst.name
         seam = _border_suffix(stage_base[inst] + lat - 1, dv.stage_thin, dv.stage_thick)
@@ -402,15 +402,15 @@ def _inline_op_text(op: InlineScheduledOp) -> str:
     return f"{_col_label(op.write.dst)} 🠄 {body}"
 
 
-def _stage_count(inst: OperatorInstance) -> int:
-    """One column per pipeline stage of the operator's deepest mode, which every firing on it fits."""
-    return max(inst.operator.latencies)
+def _stage_count(lir: Lir, inst: OperatorInstance) -> int:
+    """One column per pipeline stage of the deepest mode the instance runs, which every firing on it fits."""
+    return max(inst.operator.latency(mode) for mode in lir.instance_modes[inst])
 
 
 def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
     cols: list[tuple[OperatorInstance, int]] = []
     for inst in lir.instances:
-        cols.extend((inst, k) for k in range(_stage_count(inst)))
+        cols.extend((inst, k) for k in range(_stage_count(lir, inst)))
     return cols
 
 

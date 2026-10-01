@@ -39,7 +39,7 @@ def main() -> None:
         holoso.OperatorOptions(
             fmul=holoso.FMulOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),  # scaling a turn fraction by a power of two is an exponent add
-            fsincos=holoso.FSincosOptions(),
+            fcordic=holoso.FCordicOptions(),
             ffromint=holoso.FFromIntOptions(),
             ftoint=holoso.FToIntOptions(),
         ),

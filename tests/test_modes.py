@@ -4,6 +4,7 @@ per firing, a firing holds its instance for its own mode's initiation interval, 
 no mux arm. The test-only operator has no RTL, so the numerical model against the MIR interpreter is the oracle here.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Self
 
@@ -53,12 +54,17 @@ class _ModalOperator(HardwareOperator):
         outputs = (OperatorPort("y", ints), OperatorPort("z", ints)) if split else (OperatorPort("y", ints),)
         slow = OperatorMode(_SLOW, "LATENCY_SLOW", slow_interval, 1, (1,) if split else (0,))
         fast = OperatorMode(_FAST, "LATENCY_FAST", 1, 2, (0,))
+        # MODE 2 serves both modes; an instance running only one is elaborated for it alone.
         return cls(
-            {"W": _IFMT.width, "LATENCY_SLOW": 4, "LATENCY_FAST": 1},
+            {"W": _IFMT.width, "MODE": 2, "LATENCY_SLOW": 4, "LATENCY_FAST": 1},
             instances,
             (OperatorPort("a", ints), OperatorPort("b", ints)),
             outputs,
             (slow, fast),
+            {
+                slow: {"W": _IFMT.width, "MODE": _SLOW, "LATENCY_SLOW": 4},
+                fast: {"W": _IFMT.width, "MODE": _FAST, "LATENCY_FAST": 1},
+            },
         )
 
     @property
@@ -216,3 +222,79 @@ def test_an_operand_port_no_firing_reads_costs_no_mux_and_is_tied_off() -> None:
     model, interpreter = build_model(lir), MirInterpreter(mir)
     for x_value, _ in _MODAL_VECTORS:
         assert model.run(x_value) == interpreter.run(x_value), x_value
+
+
+def _elaborations(verilog: str) -> dict[str, str]:
+    """Each modal instance's parameter list as the emitted Verilog instantiates it, by instance name."""
+    return {name: params for params, name in re.findall(r"holoso_modal #\(\n\s*(.*?)\n\) u_(\w+) \(", verilog)}
+
+
+def _single_instance_kernel(chain: str) -> Mir:
+    operator = _ModalOperator.build(1, 4, False)
+    slow, fast = _Slow(operator), _Fast(operator)
+    builder = MirBuilder(FMT, _IFMT)
+    builder.block()
+    x, y = builder.input("x", IntType(_IFMT)), builder.input("y", IntType(_IFMT))
+    value = x
+    for letter in chain:
+        if letter == "s":
+            value = builder.operation(slow, [value], [IntIdentity()])
+        else:
+            value = builder.operation(fast, [value, y], [IntIdentity()] * 2)
+    builder.output("out", value)
+    builder.ret()
+    return builder.finish()
+
+
+@pytest.mark.parametrize(
+    "chain, expected",
+    [
+        ("s", f".W({_IFMT.width}), .MODE(0), .LATENCY_SLOW(4)"),
+        ("ff", f".W({_IFMT.width}), .MODE(1), .LATENCY_FAST(1)"),
+        ("fs", f".W({_IFMT.width}), .MODE(2), .LATENCY_SLOW(4), .LATENCY_FAST(1)"),
+    ],
+)
+def test_an_instance_running_one_mode_is_elaborated_for_it_alone(chain: str, expected: str) -> None:
+    mir = _single_instance_kernel(chain)
+    lir = build_lir(mir, f"modal_{chain}")
+    assert _elaborations(generate_verilog(lir).verilog) == {"modal_0": expected}
+    model, interpreter = build_model(lir), MirInterpreter(mir)
+    for vector in _MODAL_VECTORS:
+        assert model.run(*vector) == interpreter.run(*vector), vector
+
+
+def test_each_instance_is_elaborated_for_the_modes_its_own_firings_run() -> None:
+    # A SLOW and a FAST issue together and so take both instances; the FAST's instance also runs a SLOW in each arm
+    # of the branch. That instance serves both modes, while the other is elaborated for SLOW alone.
+    operator = _ModalOperator.build(2, 4, False)
+    slow, fast = _Slow(operator), _Fast(operator)
+    ints = IntType(_IFMT)
+    builder = MirBuilder(FMT, _IFMT)
+    entry, left, right, merge = builder.block(), builder.block(), builder.block(), builder.block()
+    builder.position_at(entry)
+    x, y = builder.input("x", ints), builder.input("y", ints)
+    alone = builder.operation(slow, [x], [IntIdentity()])
+    mixed = builder.operation(fast, [x, y], [IntIdentity()] * 2)
+    comparator = ICmpPrimitive(ICmpOperator.build(_IFMT, ICmpOptions()))
+    builder.branch(builder.operation(comparator, [x, y], [IntIdentity()] * 2, result=2), left, right)
+    builder.position_at(left)
+    from_left = builder.operation(slow, [mixed], [IntIdentity()])
+    builder.jump(merge)
+    builder.position_at(right)
+    from_right = builder.operation(slow, [y], [IntIdentity()])
+    builder.jump(merge)
+    builder.position_at(merge)
+    builder.output("alone", alone)
+    builder.output("merged", builder.phi(ints, [(left, from_left, IntIdentity()), (right, from_right, IntIdentity())]))
+    builder.ret()
+    mir = builder.finish()
+    lir = build_lir(mir, "modal_pair", _TUNING)
+    codes = {inst.name: {mode.code for mode in modes} for inst, modes in lir.instance_modes.items()}
+    assert codes == {"modal_0": {_SLOW}, "modal_1": {_SLOW, _FAST}, "icmp_0": {None}}, "the premise of this test"
+    assert _elaborations(generate_verilog(lir).verilog) == {
+        "modal_0": f".W({_IFMT.width}), .MODE(0), .LATENCY_SLOW(4)",
+        "modal_1": f".W({_IFMT.width}), .MODE(2), .LATENCY_SLOW(4), .LATENCY_FAST(1)",
+    }
+    model, interpreter = build_model(lir), MirInterpreter(mir)
+    for vector in _MODAL_VECTORS:
+        assert model.run(*vector) == interpreter.run(*vector), vector

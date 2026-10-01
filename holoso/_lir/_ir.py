@@ -6,7 +6,7 @@ which typed storage resources, with which folded port conditioners.
 """
 
 from bisect import bisect_right
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import assert_never
 
@@ -14,6 +14,7 @@ from .._operators import (
     BoolInversion,
     HardwareOperator,
     InlinePrimitive,
+    OperatorMode,
     PooledPrimitive,
     Primitive,
     WideConditioner,
@@ -198,7 +199,7 @@ def _residence_rows(defs: list[int], uses: list[int], boundary: int) -> set[int]
 class OperatorInstance:
     """
     One physical copy of an operator, e.g. `u_fadd_0` or `u_fcmp_0`: `index` numbers the copies of that operator.
-    Every primitive running on the operator shares its instances.
+    Every primitive running on the operator shares its instances; each is elaborated for the modes its own firings run.
     """
 
     operator: HardwareOperator
@@ -645,6 +646,14 @@ class Lir:
     bool_state_slots: list[BoolStateSlot]  # persistent boolean registers, ordered by attribute path
     fetch_lag: int  # steps the control fetch leads the datapath; threaded from build(), one less than its fetch_stages
     block_base: dict[int, int] = field(init=False)  # block index -> the absolute PC its frame starts at
+    # The modes each instance's firings run across the program, which decide how the instance is elaborated.
+    instance_modes: dict[OperatorInstance, frozenset[OperatorMode]] = field(init=False)
+
+    def elaboration(self, inst: OperatorInstance) -> Mapping[str, int]:
+        """
+        The parameters `inst` is instantiated with, narrowed to the modes its firings run where its operator allows.
+        """
+        return inst.operator.params_for(self.instance_modes[inst])
 
     @property
     def wide_register_width(self) -> int:
@@ -680,6 +689,11 @@ class Lir:
         ), "instance names index within the operator's name, so one operator per name"
         base = block_bases(self.blocks)
         object.__setattr__(self, "block_base", base)
+        modes: dict[OperatorInstance, set[OperatorMode]] = {}
+        for op in (op for block in self.blocks for op in block.ops):
+            modes.setdefault(op.inst, set()).add(op.primitive.mode)
+        assert set(modes) == set(self.instances), "every instance runs some firing, and only instances do"
+        object.__setattr__(self, "instance_modes", {inst: frozenset(modes[inst]) for inst in self.instances})
         assert all(arm in base for block in self.blocks for arm in successor_blocks(block.terminator))
         assert self.exit_pcs and min(self.exit_pcs) >= 1, "PC 0 is the accept dwell"
         assert all(base[arm] >= 1 for block in self.blocks for arm in successor_blocks(block.terminator))

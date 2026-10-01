@@ -161,13 +161,13 @@ class FloatValue:
         return FloatValue.from_bits(self.fmt, self._zval.sqrt().root.bits)
 
     def sincos(self) -> SinCos:
-        """`(sin(2*pi*self), cos(2*pi*self))` -- turn-native, as `zkf_sincos`; the quadrant sideband is dropped."""
+        """`(sin(2*pi*self), cos(2*pi*self))` -- turn-native, as `zkf_cordic` rotates; the quadrant is dropped."""
         r = self._zval.sincos()
         return SinCos(FloatValue.from_bits(self.fmt, r.sin.bits), FloatValue.from_bits(self.fmt, r.cos.bits))
 
     @staticmethod
     def atan2(y: FloatValue, x: FloatValue) -> Atan2Result:
-        """`(theta, magnitude)` of `atan2(y, x)` -- theta in turns, magnitude `hypot(y, x)` (`zkf_atan2`)."""
+        """`(theta, magnitude)` of `atan2(y, x)` -- theta in turns, magnitude `hypot(y, x)`, as `zkf_cordic` vectors."""
         fmt = _matching_format(y, x)
         r = y._zval.atan2(x._zval)
         return Atan2Result(FloatValue.from_bits(fmt, r.theta.bits), FloatValue.from_bits(fmt, r.magnitude.bits))

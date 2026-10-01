@@ -6,6 +6,8 @@ from dataclasses import dataclass, fields
 from functools import cached_property
 from typing import get_type_hints
 
+import zkf
+
 from .._errors import UnsupportedConstruct
 from .._type import FloatFormat, FloatType, IntFormat, IntType
 from ._common import HardwareOperator, PooledPrimitive
@@ -34,8 +36,7 @@ class OperatorOptions:
     fexp2: FExp2Options | None = None
     flog2: FLog2Options | None = None
     fsqrt: FSqrtOptions | None = None
-    fsincos: FSincosOptions | None = None
-    fatan2: FAtan2Options | None = None
+    fcordic: FCordicOptions | None = None
     ffromint: FFromIntOptions | None = None
     ftoint: FToIntOptions | None = None
 
@@ -131,18 +132,12 @@ class OpConfig:
         return self._built(FSqrtOperator.build, self.float_format, self._configured(self.options.fsqrt, "fsqrt"))
 
     @cached_property
-    def fsincos(self) -> FSincosOperator:
+    def fcordic(self) -> FCordicOperator:
         return self._built(
-            FSincosOperator.build,
+            FCordicOperator.build,
             self.float_format,
-            self._configured(self.options.fsincos, "fsincos"),
+            self._configured(self.options.fcordic, "fcordic"),
             self.wmultiplier,
-        )
-
-    @cached_property
-    def fatan2(self) -> FAtan2Operator:
-        return self._built(
-            FAtan2Operator.build, self.float_format, self._configured(self.options.fatan2, "fatan2"), self.wmultiplier
         )
 
     @cached_property
@@ -217,9 +212,8 @@ class OpConfig:
         """
         try:
             operator = build(*args, **kwargs)
-        except KeyError as ex:  # the float library's refusal of a format it holds no precomputed table for
-            (reason,) = ex.args
-            raise UnsupportedConstruct(f"a needed operator cannot be built at {self.float_format}: {reason}") from ex
+        except zkf.UnsupportedFormat as ex:
+            raise UnsupportedConstruct(f"a needed operator cannot be built for this machine's formats: {ex}") from ex
         assert all(
             (port.scalar_type.fmt == self.float_format if isinstance(port.scalar_type, FloatType) else True)
             and (port.scalar_type.fmt == self.int_format if isinstance(port.scalar_type, IntType) else True)

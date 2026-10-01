@@ -14,8 +14,8 @@ from jaxtyping import Float64
 import holoso
 from holoso import (
     FAddOptions,
-    FAtan2Options,
     FCmpOptions,
+    FCordicOptions,
     FDivOptions,
     FExp2Options,
     FFmaOptions,
@@ -24,7 +24,6 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FRoundOptions,
-    FSincosOptions,
     FSortOptions,
     FSqrtOptions,
     FloatFormat,
@@ -58,8 +57,7 @@ def _ops(
     with_exp2: bool = True,
     with_log2: bool = True,
     with_sqrt: bool = True,
-    with_sincos: bool = True,
-    with_atan2: bool = True,
+    with_cordic: bool = True,
     with_ilog2: bool = True,
     with_scaler: bool = True,
     fmt: FloatFormat = FMT,
@@ -78,8 +76,7 @@ def _ops(
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
             fsqrt=FSqrtOptions() if with_sqrt else None,
-            fsincos=FSincosOptions() if with_sincos else None,
-            fatan2=FAtan2Options() if with_atan2 else None,
+            fcordic=FCordicOptions() if with_cordic else None,
         ),
         ffmt=fmt,
     )
@@ -694,7 +691,7 @@ _TRIG_VECTORS = [0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, math.pi / 2,
 
 
 def _sincos_ref(x: float) -> tuple[int, int]:
-    # Bit-exact reference: turn-native model of the format-scaled operand, mirroring the restated fmul + fsincos.
+    # Bit-exact reference: turn-native model of the format-scaled operand, mirroring the restated fmul and rotation.
     s, c = (_v(x) * _INV_TAU).sincos()
     return s.bits, c.bits
 
@@ -741,14 +738,14 @@ def test_a_turn_scaled_angle_sheds_the_conversion() -> None:
 
     # The sign-flipped spelling composes to a NEGATIVE power of two, which must still ride the exponent scaler --
     # a kernel given only that scaler and the core must build, having written no general product anywhere.
-    scaler_only = Options(OperatorOptions(fmul_ilog2=FMulILog2Options(), fsincos=FSincosOptions()), ffmt=FMT)
+    scaler_only = Options(OperatorOptions(fmul_ilog2=FMulILog2Options(), fcordic=FCordicOptions()), ffmt=FMT)
     for label, turned, options in (
         ("full", kernel, _ops()),
         ("lean", kernel, scaler_only),
         ("neg", flipped, scaler_only),
     ):
         result = holoso.synthesize(turned, options, name=f"turn_scaled_{label}")
-        assert _modules(result) == {"holoso_fmul_ilog2", "holoso_fsincos"}, label
+        assert _modules(result) == {"holoso_fmul_ilog2", "holoso_fcordic"}, label
         sim = result.numerical_model.elaborate()
         for x in (0.0, 1.0, -1.0, 64.0, -96.0, 128.0):
             assert abs(float(sim.run(x)[0]) - turned(x)) <= 4 * _ulp32(1.0), f"{label} x={x}"
@@ -763,7 +760,7 @@ def test_a_full_turn_scale_cancels_the_conversion_entirely() -> None:
         return angle, math.sin(angle)
 
     result = holoso.synthesize(shared, _ops(), name="shared_turn")
-    assert _modules(result) == {"holoso_fmul", "holoso_fsincos"}
+    assert _modules(result) == {"holoso_fmul", "holoso_fcordic"}
     sim = result.numerical_model.elaborate()
     # 0.7, 1.3, 5.9 and 0.35 do not survive a multiply by tau followed by one by its reciprocal, so they tell a
     # cancelled conversion from a performed one; the rest are ordinary vectors.
@@ -814,7 +811,7 @@ def test_a_negation_between_two_scalings_is_not_opaque() -> None:
         return math.sin((-x) * math.tau)
 
     result = holoso.synthesize(outside, _ops(), name="neg_outside")
-    assert _modules(result) == {"holoso_fsincos"}
+    assert _modules(result) == {"holoso_fcordic"}
     assert result.initiation_interval == holoso.synthesize(inside, _ops(), name="neg_inside").initiation_interval
     sim = result.numerical_model.elaborate()
     for x in (0.7, 1.3, 0.25, -0.5, 2.0):
@@ -827,7 +824,7 @@ def test_a_turn_scaled_kernel_can_need_the_exponent_scaler() -> None:
     def kernel(x: float) -> float:
         return math.sin(x * (math.tau / 2**8))
 
-    options = Options(OperatorOptions(fmul=FMulOptions(), fsincos=FSincosOptions()), ffmt=FMT)
+    options = Options(OperatorOptions(fmul=FMulOptions(), fcordic=FCordicOptions()), ffmt=FMT)
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(kernel, options, name="turn_scaled_no_ilog2")
 
@@ -861,7 +858,7 @@ def test_sincos_unconfigured_is_rejected() -> None:
         return math.sin(x)
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_sincos=False), name="sincos_unconfigured")
+        holoso.synthesize(kernel, _ops(with_cordic=False), name="sincos_unconfigured")
 
 
 _ATAN2_VECTORS = [(1.0, 1.0), (3.0, 4.0), (-3.0, 4.0), (3.0, -4.0), (-3.0, -4.0), (1.0, 0.0), (0.0, 1.0), (2.5, -0.5)]
@@ -903,7 +900,7 @@ def test_atan2_unconfigured_is_rejected() -> None:
         return math.atan2(y, x)
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_atan2=False), name="atan2_unconfigured")
+        holoso.synthesize(kernel, _ops(with_cordic=False), name="atan2_unconfigured")
 
 
 def test_a_configured_atan2_a_kernel_never_reaches_is_never_built() -> None:
@@ -911,7 +908,7 @@ def test_a_configured_atan2_a_kernel_never_reaches_is_never_built() -> None:
     def kernel(x: int) -> int:
         return x + 1
 
-    options = Options(OperatorOptions(fatan2=FAtan2Options()), ffmt=FloatFormat(6, 8), wint_min=8, regalloc_effort=0)
+    options = Options(OperatorOptions(fcordic=FCordicOptions()), ffmt=FloatFormat(6, 8), wint_min=8, regalloc_effort=0)
     (out,) = holoso.synthesize(kernel, options, name="k").numerical_model.elaborate().run(2)
     assert isinstance(out, holoso.IntValue) and int(out) == 3
 
@@ -1022,11 +1019,11 @@ def test_sqrt_without_its_operator_is_refused() -> None:
 
 def test_trig_of_constants_fold() -> None:
     # Trig of literal operands folds in the format-agnostic HIR, so a kernel of only constant trig needs no CORDIC:
-    # synthesizing with fsincos/fatan2 unconfigured proves the fold.
+    # synthesizing with the CORDIC unconfigured proves the fold.
     def kernel(x: float) -> tuple[float, float, float, float, float]:
         return (math.sin(0.5), math.cos(0.5), math.atan2(1.0, 2.0), math.hypot(3.0, 4.0), math.sqrt(2.0))
 
-    ops = _ops(with_sincos=False, with_atan2=False, with_exp2=False, with_log2=False, with_sort=False, with_sqrt=False)
+    ops = _ops(with_cordic=False, with_exp2=False, with_log2=False, with_sort=False, with_sqrt=False)
     sim = holoso.synthesize(kernel, ops, name="trig_fold").numerical_model.elaborate()
     out = sim.run(0.0)
     for index, ref in enumerate(
@@ -1422,7 +1419,7 @@ def test_a_hypotenuse_orphaned_by_a_cancelled_fusion_is_still_expanded() -> None
         return math.hypot(a, b) + delta * math.atan2(a, b)
 
     modules = _modules(holoso.synthesize(kernel, _ops(), name="hypot_orphan_modules"))
-    assert "holoso_fatan2" not in modules, "the cancellation must have deleted the only atan2"
+    assert "holoso_fcordic" not in modules, "the cancellation must have deleted the only atan2"
     assert {"holoso_filog2", "holoso_fsqrt", "holoso_fmul_ilog2"} <= modules
     assert "holoso_fsort" not in modules and "holoso_fdiv" not in modules
     sim = _sim(kernel, "hypot_orphan")
