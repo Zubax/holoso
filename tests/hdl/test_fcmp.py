@@ -31,6 +31,7 @@ from .hdl_float_oracle import (
     get_seed,
     random_zkf_f32,
     sources,
+    stage_tag,
     start_clock,
 )
 
@@ -129,12 +130,21 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0
 
 
-@pytest.mark.parametrize("stage_input", (0, 1), ids=lambda s: f"s{s}")
+# The public default (the output register alone), the input register alone, and both. The output register is on by
+# default, so the input register alone has to switch it off.
+STAGE_COMBOS: tuple[dict[str, int], ...] = (
+    {},
+    {"stage_input": 1, "stage_output": 0},
+    {"stage_input": 1, "stage_output": 1},
+)
+
+
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fcmp(sim: str, stage_input: int) -> None:
-    operator = FCmpOperator.build(FloatFormat(8, 24), FCmpOptions(stage_input=stage_input))
+def test_holoso_fcmp(sim: str, stages: dict[str, int]) -> None:
+    operator = FCmpOperator.build(FloatFormat(8, 24), FCmpOptions(**stages))
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fcmp_s{stage_input}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fcmp_{stage_tag(stages)}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

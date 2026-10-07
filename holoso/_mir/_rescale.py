@@ -6,6 +6,7 @@ and no accuracy the single constant would have had, since it has none.
 
 import logging
 
+from .._errors import UnsupportedConstruct
 from .._hir import (
     FloatConst,
     FloatMul,
@@ -20,10 +21,10 @@ from .._hir import (
     rebuild,
     scaling_of,
 )
-from .._operators import FMulILog2Primitive, OpConfig
+from .._operators import FMulILog2Operator, OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
-from ._ir import degrades, refuse_degrading
+from ._ir import degrades
 
 _logger = logging.getLogger(__name__)
 
@@ -68,10 +69,13 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
                     scaling = scaling_of(constant.value)
                     assert scaling is not None
                     reaches = _reaches(fmt, scaling.k)
-                    if not ops.serves(FMulILog2Primitive):
+                    if not ops.serves(FMulILog2Operator):
                         # Past the format's reach the scaler does not help either, so it is not the remedy to name.
                         remedy = _NO_SCALER if reaches else "widen wexp or rescale"
-                        refuse_degrading(constant.value, fmt, "constant", remedy)
+                        degraded = fmt.decode(fmt.encode(constant.value))
+                        raise UnsupportedConstruct(
+                            f"constant {constant.value!r} degrades to {degraded!r} in {fmt}; {remedy}"
+                        )
                     if reaches:
                         rewrites += 1
                         return split(builder, remap[base], scaling)

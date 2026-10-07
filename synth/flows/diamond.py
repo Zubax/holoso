@@ -3,14 +3,15 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from .._detect import find_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
-from .._flow_id import FlowId
+from .._flow_id import DeviceClass, FlowId
 from ._flow import Flow
 
 _TCL = "run_diamond.tcl"
+_DEFINES = "holoso_defines.v"
 _LOG = "diamond.log"
 _CLOCK_NET = "clk_c"  # Diamond names the net driven by the `clk` input port `clk_c`.
 
@@ -18,6 +19,10 @@ _CLOCK_NET = "clk_c"  # Diamond names the net driven by the `clk` input port `cl
 @dataclass(frozen=True, slots=True)
 class DiamondEcp5Device:
     device: str = "LFE5U-25F-6BG381C"
+
+    @classmethod
+    def of(cls, device_class: DeviceClass) -> Self:
+        return cls("LFE5U-45F-6BG381C") if device_class is DeviceClass.LARGE else cls()
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +39,11 @@ class DiamondEcp5Flow(Flow):
 
     def prepare(self, design: OocDesign) -> SynthArtifact:
         top = design.top
-        src = design.files
+        # LSE maps a ROM into block RAM only with resource sharing enabled, and sharing folds mutually exclusive
+        # arithmetic onto shared adders. The keep hook pins the nets where that was measured to cost closure, in both
+        # dividers (DESIGN.md's fabric-area exploration).
+        defines = SourceFile(Path(_DEFINES), "`define HOLOSO_ATTRIBUTE_KEEP (* syn_keep = 1 *)\n")
+        src = [defines, *design.files]
         verilog_paths = [source.path for source in src]
 
         lpf = SourceFile(Path(f"{top}.lpf"), _lpf(self.target_frequency_MHz))
@@ -73,7 +82,7 @@ def _strategy(freq_MHz: float) -> str:
         "PROP_LST_IOInsertion": "True",
         "PROP_LST_OptimizeGoal": "Timing",
         "PROP_LST_PropagatConst": "True",
-        "PROP_LST_ResourceShare": "False",
+        "PROP_LST_ResourceShare": "True",
         "PROP_LST_UseLPF": "True",
         "PROP_MAP_RegRetiming": "True",
         "PROP_MAP_TimingDriven": "True",
@@ -171,6 +180,20 @@ def _resource(pattern: str, text: str, name: str) -> ResourceUse | None:
     return ResourceUse(name, int(match.group(1)), int(match.group(2)))
 
 
+def _block_ram_owners(hierarchy_report: str) -> dict[str, int]:
+    """
+    Read off the mapper's hierarchy report, one record per instance, rather than the map report's own listing: that
+    one is paginated, and a page break between an instance's path and its counts loses the instance.
+    """
+    owners: dict[str, int] = {}
+    for record in re.split(r"^-{10,}$", hierarchy_report, flags=re.MULTILINE):
+        path = re.search(r"Instance path:\s+(\S+)", record)
+        count = re.search(r"^\s*EBR\s+([0-9]+)", record, re.MULTILINE)
+        if path is not None and count is not None:
+            owners[path.group(1)] = int(count.group(1))
+    return owners
+
+
 def _parse(flow: DiamondEcp5Flow, directory: Path) -> SynthReport:
     impl = directory / "impl1"
     twrs = sorted(p for p in impl.glob("*.twr") if not p.name.endswith("_lse.twr"))
@@ -192,6 +215,7 @@ def _parse(flow: DiamondEcp5Flow, directory: Path) -> SynthReport:
             _resource(r"SLICE\s+([0-9]+)/([0-9]+)", par, "SLICE"),
             _resource(r"PIO \(prelim\)\s+([0-9]+)/([0-9]+)", par, "PIO"),
             _resource(r"MULT18\s+([0-9]+)/([0-9]+)", par, "MULT18"),
+            _resource(r"Number of block RAMs:\s+([0-9]+) out of ([0-9]+)", mrp, "EBR"),
         )
         if use is not None
     }
@@ -204,4 +228,5 @@ def _parse(flow: DiamondEcp5Flow, directory: Path) -> SynthReport:
         resources=resources,
         artifact_dir=directory,
         logs=[directory / _LOG, *sorted(impl.glob("*.twr"))],
+        block_ram_owners=_block_ram_owners(_read(next(iter(sorted(impl.glob("*_map.hrr"))), None))),
     )

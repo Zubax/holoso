@@ -23,8 +23,7 @@ from holoso import (
     FloatFormat,
     FloatType,
     FloatValue,
-    FRoundOptions,
-    FToIntOptions,
+    FRintOptions,
     IAbsOptions,
     IAddOptions,
     ICmpOptions,
@@ -44,10 +43,8 @@ from holoso._operators import (
     BoolToIntPrimitive,
     FFromIntOperator,
     FFromIntPrimitive,
-    FRoundOperator,
-    FRoundPrimitive,
-    FToIntOperator,
-    FToIntPrimitive,
+    FRintOperator,
+    FRintPrimitive,
     HardwareOperator,
     IAbsOperator,
     IAbsPrimitive,
@@ -325,11 +322,11 @@ def test_multiplier_staging_is_part_of_the_hardware_identity() -> None:
 
 def test_the_multiplier_knob_reaches_the_built_machine() -> None:
     # It must arrive carrying the user's staging AND the machine's integer format, not the float one.
-    imul = build_ops(Options(OperatorOptions(imul=IMulOptions(stage_product=3)), wint_min=44), 44).imul
+    imul = build_ops(Options(OperatorOptions(imuls=IMulOptions(stage_product=3)), wint_min=44), 44).imuls
     assert {port.scalar_type for port in imul.operand_ports + imul.output_ports} == {IntType(IntFormat(44))}
     assert imul.latencies[0] == 5
     assert imul.params == {"W": 44, "STAGE_PRODUCT": 3, "LATENCY": 5}
-    assert build_ops(Options(OperatorOptions()), 16).imul == IMulOperator.build(
+    assert build_ops(Options(OperatorOptions()), 16).imuls == IMulOperator.build(
         IntFormat(16), IMulOptions(stage_product=0)
     )
 
@@ -382,12 +379,11 @@ def test_the_constant_shift_is_the_raw_shift_and_not_the_saturating_one() -> Non
 @pytest.mark.parametrize("wint", (4, 17, 44))
 def test_the_conversions_saturate_at_the_rails_and_round_trip_the_extremes(wint: int) -> None:
     ffmt, ifmt = FloatFormat(8, 24), IntFormat(wint)
-    to_int = FToIntOperator.build(ffmt, ifmt, FToIntOptions())
+    rint = FRintOperator.build(ffmt, ifmt, FRintOptions())
     from_int = FFromIntPrimitive(FFromIntOperator.build(ffmt, ifmt, FFromIntOptions()))
 
     def convert(value: float, mode: RoundMode) -> int:
-        (result,) = FToIntPrimitive(to_int, mode).evaluate(FloatValue.from_float(ffmt, value))
-        assert isinstance(result, IntValue)
+        _, result = FRintPrimitive(rint, mode).evaluate(FloatValue.from_float(ffmt, value))
         return result.value
 
     for mode in RoundMode:
@@ -402,37 +398,32 @@ def test_the_conversions_saturate_at_the_rails_and_round_trip_the_extremes(wint:
     for extreme in (ifmt.min, ifmt.max):
         (image,) = from_int.evaluate(IntValue.from_int(ifmt, extreme))
         assert isinstance(image, FloatValue)
-        (back,) = FToIntPrimitive(to_int, RoundMode.NEAREST_EVEN).evaluate(image)
-        assert isinstance(back, IntValue) and back.value == extreme
+        _, back = FRintPrimitive(rint, RoundMode.NEAREST_EVEN).evaluate(image)
+        assert back.value == extreme
 
 
 def test_rounding_before_converting_is_not_the_same_as_converting_with_that_mode() -> None:
-    # Strength reduction's conversion of a rounding in the rounding's own mode (one ftoint(x, ROUND)) is a rewrite that
-    # can change the answer, and the fastmath charter (DESIGN.md, Direction) licenses it anyway. Here 3.5 rounds to
-    # +inf, which saturates, while a direct nearest-even conversion answers 4.
+    # Strength reduction's conversion of a rounding in the rounding's own mode (the integer result of the one rounding)
+    # is a rewrite that can change the answer, and the fastmath charter (DESIGN.md, Direction) licenses it anyway.
+    # Here 3.5 rounds to +inf, which saturates, while a direct nearest-even conversion answers 4.
     ffmt, ifmt = FloatFormat(2, 4), IntFormat(33)
-    fround = FRoundPrimitive(FRoundOperator.build(ffmt, FRoundOptions()), RoundMode.NEAREST_EVEN)
-    ftoint = FToIntOperator.build(ffmt, ifmt, FToIntOptions())
-    x = FloatValue.from_float(ffmt, 3.5)
-    (rounded,) = fround.evaluate(x)
-    assert isinstance(rounded, FloatValue)
-    (fused,) = FToIntPrimitive(ftoint, RoundMode.NEAREST_EVEN).evaluate(x)
-    (staged,) = FToIntPrimitive(ftoint, RoundMode.TRUNC).evaluate(rounded)
-    assert isinstance(fused, IntValue) and isinstance(staged, IntValue)
+    rint = FRintOperator.build(ffmt, ifmt, FRintOptions())
+    rounded, fused = FRintPrimitive(rint, RoundMode.NEAREST_EVEN).evaluate(FloatValue.from_float(ffmt, 3.5))
+    _, staged = FRintPrimitive(rint, RoundMode.TRUNC).evaluate(rounded)
     assert fused.value == 4 and staged.value == ifmt.max
 
 
 def test_the_conversion_knobs_reach_the_built_machine() -> None:
     ops = build_ops(
         Options(
-            OperatorOptions(ffromint=FFromIntOptions(stage_input=1, stage_pack=1), ftoint=FToIntOptions(stage_input=2)),
+            OperatorOptions(ffromint=FFromIntOptions(stage_input=1, stage_pack=1), frint=FRintOptions(stage_input=2)),
             ffmt=FloatFormat(6, 18),
             wint_min=44,
         ),
         44,
     )
     assert {ops.ffromint.latency(mode) for mode in ops.ffromint.modes} == {3}
-    assert {ops.ftoint.latency(mode) for mode in ops.ftoint.modes} == {6}
+    assert {ops.frint.latency(mode) for mode in ops.frint.modes} == {3}
     assert ops.ffromint.params == {
         "WEXP": 6,
         "WMAN": 18,
@@ -443,11 +434,23 @@ def test_the_conversion_knobs_reach_the_built_machine() -> None:
         "STAGE_OUTPUT": 0,
         "LATENCY": 3,
     }
-    assert ops.ftoint.params == {"WEXP": 6, "WMAN": 18, "WINT": 44, "STAGE_INPUT": 2, "LATENCY": 6}
+    assert ops.frint.params == {
+        "WEXP": 6,
+        "WMAN": 18,
+        "WINT": 44,
+        "STAGE_INPUT": 2,
+        "STAGE_SHIFT": 1,
+        "STAGE_ROUND": 0,
+        "STAGE_OUTPUT": 0,
+        "LATENCY": 3,
+    }
     assert [port.scalar_type for port in ops.ffromint.operand_ports] == [IntType(IntFormat(44))]
     assert [port.scalar_type for port in ops.ffromint.output_ports] == [FloatType(FloatFormat(6, 18))]
-    assert [port.scalar_type for port in ops.ftoint.operand_ports] == [FloatType(FloatFormat(6, 18))]
-    assert [port.scalar_type for port in ops.ftoint.output_ports] == [IntType(IntFormat(44))]
+    assert [port.scalar_type for port in ops.frint.operand_ports] == [FloatType(FloatFormat(6, 18))]
+    assert [port.scalar_type for port in ops.frint.output_ports] == [
+        FloatType(FloatFormat(6, 18)),
+        IntType(IntFormat(44)),
+    ]
 
 
 def _everything_configured() -> Options:
@@ -456,19 +459,17 @@ def _everything_configured() -> Options:
         OperatorOptions(
             fadd=holoso.FAddOptions(),
             fmul=holoso.FMulOptions(),
-            fdiv=holoso.FDivOptions(),
+            fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             filog2=holoso.FILog2Options(),
             fcmp=holoso.FCmpOptions(),
-            fround=holoso.FRoundOptions(),
+            frint=holoso.FRintOptions(),
             ffma=holoso.FFmaOptions(),
             fsort=holoso.FSortOptions(),
-            fsqrt=holoso.FSqrtOptions(),
             fexp2=holoso.FExp2Options(),
             flog2=holoso.FLog2Options(),
             fcordic=holoso.FCordicOptions(),
             ffromint=holoso.FFromIntOptions(),
-            ftoint=holoso.FToIntOptions(),
         ),
         ffmt=FloatFormat(6, 18),
         wint_min=33,
@@ -507,6 +508,8 @@ def test_every_operator_is_publicly_configurable() -> None:
         if isinstance(kind, type) and issubclass(kind, HardwareOperator) and kind is not HardwareOperator
     }
     assert {type(getattr(ops, field.name)) for field in fields(OperatorOptions)} == kinds
+    # Asking whether a machine has an operator reads the options field of that name.
+    assert all(getattr(ops, field.name).name == field.name for field in fields(OperatorOptions))
 
 
 def test_the_instance_cap_reaches_the_operator_but_never_the_rtl() -> None:
@@ -545,10 +548,10 @@ def _add(a: float, b: float) -> float:
 def test_a_float_only_build_configures_an_integer_operator_without_instantiating_it() -> None:
     options = Options(OperatorOptions(fadd=holoso.FAddOptions()), ffmt=FloatFormat(6, 18), wint_min=44)
     ops = build_ops(options, options.wint_min)
-    assert {port.scalar_type for port in ops.imul.operand_ports + ops.imul.output_ports} == {IntType(IntFormat(44))}
-    for conversion in ("ffromint", "ftoint"):  # a conversion is optional, as every float operator is
+    assert {port.scalar_type for port in ops.imuls.operand_ports + ops.imuls.output_ports} == {IntType(IntFormat(44))}
+    for conversion in ("ffromint", "frint"):  # a conversion is optional, as every float operator is
         with pytest.raises(UnsupportedConstruct, match="not configured"):
             getattr(ops, conversion)
     verilog = holoso.synthesize(_add, options, name="ImulUnused").verilog_output.verilog
     assert "holoso_imuls" not in verilog, "an available operator no kernel reaches costs no fabric"
-    assert "holoso_ffromint" not in verilog and "holoso_ftoint" not in verilog
+    assert "holoso_ffromint" not in verilog and "holoso_frint" not in verilog

@@ -21,7 +21,7 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
@@ -38,7 +38,7 @@ def _ops() -> Options:
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             fcmp=FCmpOptions(),
         ),

@@ -238,33 +238,48 @@ selected through the operator. A mode is one code on the operator's per-firing m
 none, bound to the RTL parameter carrying its latency, its initiation interval, the leading operand ports it reads, and
 the output ports it drives; this is how one operator serves several primitives, and why latency is per firing yet
 statically known. A mode's initiation interval exceeds its latency by at most one, which keeps an instance's busy window
-from outliving the block that issued it (see Control flow). A firing's busy window is its own mode's, and modes that
-share an output port must satisfy `L_a - L_b < II_a` for every ordered pair, so results on any one port leave in issue
-order and the busy window stays the only per-instance constraint; modes on disjoint ports interleave freely whatever
-their latencies, the error sideband counting as a port every mode drives. An operator whose acceptance depends on the
-next firing's mode is outside the model. The CORDIC is the operator whose modes differ in timing: it rotates (a sine
-and cosine from one operand) and vectors (an angle and magnitude from two) at different latencies, each re-accepting one
-step after it retires, so one instance serves sin, cos, atan2 and a fused magnitude alike.
+from outliving the block that issued it (see Control flow), and a firing's busy window is its own mode's.
+
+The mode condition. Where latency depends on the mode, two firings of one instance can be in flight at different
+latencies, and one issued later could land before one issued earlier. Results must leave any one output port in issue
+order, so every ordered pair of modes `a`, `b` that share an output port must satisfy `L_a - L_b < II_a`: the earliest
+firing that can follow one in mode `a` then lands strictly after it, and the busy window stays the only per-instance
+constraint. The error ports count as output ports that every mode drives, so on an operator with an error port all modes
+share one. The condition holds by itself between modes of equal latency, and for any latencies where the initiation
+interval is the latency plus one, the instance then holding a single transaction in flight. A pair that fails it must
+land on disjoint output ports, error ports included; such modes interleave freely. It is checked when an operator is
+built. An operator whose acceptance depends on the next firing's mode is outside the model.
+
+The CORDIC is the operator whose modes differ in timing: it rotates (a sine and cosine from one operand) and vectors (an
+angle and magnitude from two) at different latencies, each re-accepting one step after it retires, so one instance
+serves sin, cos, atan2 and a fused magnitude alike. The divider's modes share one latency and differ in the operands
+they read: one digit-recurrence pipeline answers a quotient from two operands or a square root from one. The rounder's
+modes differ in arithmetic only: each reads one operand and answers its rounding on two ports at once, as a float and as
+an integer.
 
 An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
 schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
 is made per instance at emission: an instance whose firings all run one mode is elaborated for it alone (a CORDIC that
-only rotates sheds the vectoring datapath), and any other keeps the elaboration serving every mode. The operator is
-still built from the latter, so its format limits are those of every mode.
+only rotates sheds the vectoring datapath, a divider that only divides the square root's), and any other keeps the
+elaboration serving every mode. The operator is still built from the latter, so its format limits are those of every
+mode.
 
 Primitives split structurally into POOLED -- running on operators the scheduler contends for -- and INLINE -- pure
 expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is never
 materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparator firing,
-min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer sidebands.
+min and max over one pair share a sorter firing, a rounding and the integer conversion of the same rounding share a
+rounder firing, and negation/inversion chains fold into consumer sidebands.
 
 Every kind of operator, float or integer, is named by exactly one field of the public options and carries its own knobs
 there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
 reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every float
 operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA contraction, `fsort`
-enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean norms included);
-what a kernel cannot reach through the operators it was given is refused at MIR lowering. Planning asks the catalogue
-whether the machine is configured to run a primitive, never which options it was given. An integer operator is never
-optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
+enables min/max, `fdivsqrt` with `filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean norms
+included); what a kernel cannot reach through the operators it was given is refused at MIR lowering. An operator serving
+several operations is configured as one, so division and the square root arrive together, as a rounding and the
+float-to-integer conversion do. Planning asks the catalogue whether the machine is configured to run a primitive, never
+which options it was given. An integer operator is never optional, only tuned: the vocabulary is small enough that a
+kernel using integers needs essentially all of it.
 
 ## Front-end
 
@@ -508,19 +523,20 @@ negation/absolute-value chain into a float's sign control, a NOT chain into a bo
 integer -- except onto an operand its primitive declares UNCONDITIONED, where the builder drops the chain outright
 rather than folding it, for EVERY producer of MIR operations and not the lowering alone, since a transform no result can
 observe would otherwise buy a second firing for one answer. Multiply-by-power-of-two selects the `fmul_ilog2` scaler,
-its exponent an ordinary integer operand, unless an adjacent addition absorbs it into an fma instead; and every
-rounding, the float-to-integer conversion's included, is one mode of a shared operator. Which operators a build demands
-therefore follows the optimized graph rather than the source's spelling, so a kernel can be refused for want of an
-operator it never wrote. The integer lowerer answers a constant shift count from the count itself: a right shift past
-the word is the sign fill (a negative count being the refusal gate's), and a count no other use reads is never lowered;
-a saturating power-of-two scaling rides the same shifter through its saturating product tap.
+its exponent an ordinary integer operand, unless an adjacent addition absorbs it into an fma instead; and every rounding
+is one mode of a shared operator, the float-to-integer conversion being the integer result of that same rounding. Which
+operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel can be
+refused for want of an operator it never wrote. The integer lowerer answers a constant shift count from the count
+itself: a right shift past the word is the sign fill (a negative count being the refusal gate's), and a count no other
+use reads is never lowered; a saturating power-of-two scaling rides the same shifter through its saturating product tap.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
-sin and cos of one angle computed by one CORDIC rotation, FMA contraction of `a*b+c` wherever the additions that read
-the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
-left alone) -- matched at MIR because this is the first layer aware of hardware semantics. Some semantic operators
-lower into combinations of primitives depending on availability and context (e.g. a two-legged magnitude via
-the CORDIC's vectoring).
+sin and cos of one angle computed by one CORDIC rotation, a rounding and its integer conversion in one rounder
+transaction, FMA contraction of `a*b+c` wherever the additions that read the product absorb it entirely (each fma
+carrying its own rounding, which is why a product anything else observes is left alone) -- matched at MIR because this
+is the first layer aware of hardware semantics; operations selected onto distinct outputs of one transaction become a
+single firing when the LIR is built. Some semantic operators lower into combinations of primitives depending on
+availability and context (e.g. a two-legged magnitude via the CORDIC's vectoring).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is scheduled per block and register-allocated over the
@@ -669,11 +685,12 @@ or block RAM), unlike the array-plus-`initial` form, which some tools flatten to
 block RAM even when tiny; it occupies its own clocked block, the sole sanctioned second `always @(posedge clk)`, since
 that dedicated form is what triggers the inference. The RTL stays tool-neutral: the ROM read register carries the
 `HOLOSO_ATTRIBUTE_ROM` macro where a flow defines it, through which the flow attaches its synthesizer's mapping
-attribute. The ROM is read through a short multi-stage fetch (PC latch, ROM read register, routing register) so the
-controller is short register-to-register paths rather than a wide combinational cone; the fetch leads the executing
-step, which under static scheduling only adds to the makespan/II. For the same reason `in_ready` is a register the
-sequencer sets beside the next PC, so the input loads' wide write-enable fanout starts at a flip-flop rather than
-behind a PC decode.
+attribute, and a net that a synthesizer must not restructure carries `HOLOSO_ATTRIBUTE_KEEP` the same way (the keep
+hook); the support library passes both on to the float library's own. The ROM is read through a short multi-stage fetch
+(PC latch, ROM read register, routing register) so the controller is short register-to-register paths rather than a wide
+combinational cone; the fetch leads the executing step, which under static scheduling only adds to the makespan/II. For
+the same reason `in_ready` is a register the sequencer sets beside the next PC, so the input loads' wide write-enable
+fanout starts at a flip-flop rather than behind a PC decode.
 
 The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
 `in_valid`); the PC advances every clock; at an exit it asserts `out_valid` while outputs drive combinationally
@@ -789,6 +806,18 @@ Adopted (lossless, f_max-neutral):
   on every gapped row, growing with the gap); Vivado and Yosys sweep the dead bits under either spelling. X-filling
   the constant pool was measured null (a constant's high bits are dead at every use) and skipped.
 
+Resource sharing in Lattice Diamond's LSE synthesizer, which folds mutually exclusive arithmetic onto one adder behind
+operand multiplexers, is adopted at a price that the keep hook (see Backend) contains. LSE maps a ROM into block RAM
+only with sharing enabled, whatever the coding form or attribute, and then needs no ROM-style setting. Without sharing
+the exp2/log2 lookup tables stay in LUT logic, which at a 36-bit significand is three times the whole machine (18.8
+thousand LUTs against 6.0 thousand and twelve block RAMs). The microcode ROM moves to block RAM too, saving its LUTs; a
+path from it into an operator then calls for that operator's input stage. The price is the longer path through each
+shared adder, and the hook pins the nets where that lost closures: the integer divider's floor correction (100 MHz
+without the hook against 115 with it, at 44 bits) and the float divider elaborated for the root alone (81 MHz against
+135 at a 36-bit significand). The hook also pins a net of the float library's power-of-two scaler, costing that operator
+a few percent in isolation and no closure. Where sharing costs f_max and the design still closes -- the popcount of the
+small integer kernels, the rounder -- nothing is pinned.
+
 The register price. The allocator trades registers for mux arms at `regalloc_register_price` (2.0), and across the
 example kernels the trades go both ways: the EKF kernels spend registers to remove arms, foc and imu_fusion spend arms
 to remove registers. Across the synthesis matrix the price acts as a step at one arm per register, where the trade
@@ -797,7 +826,17 @@ for as many flip-flops, with f_max gains confined to small kernels far above tar
 it nothing moves. The price stays 2.0.
 
 Operator replication (`instances`) trades area for latency and pays in mux arms; it is not an area loss: a second
-multiplier shortens the EKF transaction by about a sixth for a similar fraction more LUTs under the annealer's binding.
+multiplier shortens the EKF transaction by about a fifth for a seventh more LUTs under the annealer's binding.
+
+Pinning the microcode ROM under LSE resource sharing was measured null. Over ten kernels, leaving the ROM in block RAM,
+forcing it into logic through its attribute hook (which LSE honors only in part) and marking its routing register to be
+preserved (retiming moves it regardless) came within one percent of each other in geometric-mean f_max. Only the first
+saves the LUTs, so nothing is pinned.
+
+Place-and-route noise bounds such comparisons. A one-LUT netlist difference -- the keep hook on a single net of the
+scaler -- moved an unrelated kernel's f_max by 8 percent, and any perturbation reshuffles a design within a few percent
+of its target that much either way. A single on/off pair therefore attributes nothing smaller than the 15-40 percent the
+real sharing regressions show, and a hook is adopted only where it holds at two widths.
 
 Explored and rejected for register-pressure-bound kernels:
 

@@ -18,7 +18,7 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FFmaOptions,
     FloatFormat,
     FloatValue,
@@ -51,7 +51,7 @@ def _options(*, fma: bool = True, fmt: FloatFormat = FMT) -> Options:
             fcmp=FCmpOptions(),
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             ffma=FFmaOptions() if fma else None,
         ),
@@ -207,7 +207,7 @@ def _two_divides(x: float, y: float) -> tuple[float, float]:
 
 def test_a_division_is_answered_from_a_reciprocal_already_computed() -> None:
     counts = _mnemonics(_two_divides, _options(fma=False))
-    assert counts["fdiv"] == 1 and counts["fmul"] == 1
+    assert counts["fdivsqrt"] == 1 and counts["fmul"] == 1
     for x, y in ((3.0, 4.0), (-1.5, 0.25), (7.0, -2.0)):
         recip, quotient = _run(_two_divides, _options(fma=False), "shared_recip", x, y)
         assert recip == 1.0 / y
@@ -219,7 +219,7 @@ def test_a_reciprocal_of_a_product_uses_the_reciprocals_of_its_factors() -> None
         return 1.0 / m, 1.0 / (m * m), x / (m * m)
 
     counts = _mnemonics(kernel, _options(fma=False))
-    assert counts["fdiv"] == 1 and counts["fmul"] == 2
+    assert counts["fdivsqrt"] == 1 and counts["fmul"] == 2
 
 
 def test_reciprocal_of_a_product_parts_company_at_zero_times_infinity() -> None:
@@ -237,7 +237,7 @@ def test_divisions_without_a_reciprocal_are_left_alone() -> None:
     def kernel(a: float, b: float, y: float) -> tuple[float, float]:
         return a / y, b / y
 
-    assert _mnemonics(kernel, _options(fma=False))["fdiv"] == 2
+    assert _mnemonics(kernel, _options(fma=False))["fdivsqrt"] == 2
 
 
 def test_the_sharing_passes_do_not_strand_a_reciprocal_between_them() -> None:
@@ -248,7 +248,7 @@ def test_the_sharing_passes_do_not_strand_a_reciprocal_between_them() -> None:
         same = (a + reciprocal) - reciprocal
         return same, x / y
 
-    options = Options(OperatorOptions(fadd=FAddOptions(), fdiv=FDivOptions()), ffmt=FMT)
+    options = Options(OperatorOptions(fadd=FAddOptions(), fdivsqrt=FDivsqrtOptions()), ffmt=FMT)
     model = holoso.synthesize(kernel, options, name="sharing_order").numerical_model.elaborate()
     assert tuple(float(v) for v in model.run(2.0, 6.0, 3.0)) == (2.0, 2.0)
 
@@ -262,7 +262,7 @@ def test_a_reciprocal_the_round_would_delete_is_not_adopted() -> None:
         return x / y + z
 
     counts = _mnemonics(kernel, _options(fma=False))
-    assert counts["fdiv"] == 1 and counts["fmul"] == 0
+    assert counts["fdivsqrt"] == 1 and counts["fmul"] == 0
 
 
 def test_an_infinite_constant_leaves_a_sum_opaque() -> None:

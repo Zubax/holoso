@@ -16,16 +16,15 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FCordicOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FExp2Options,
     FFmaOptions,
     FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
-    FRoundOptions,
+    FRintOptions,
     FSortOptions,
-    FSqrtOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
@@ -35,6 +34,7 @@ from holoso import (
 )
 from holoso._value import ScalarValue
 from ._modelref import instantiated_modules as _modules, random_legal_bits
+from ._public import divsqrt_modes
 
 # Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -56,7 +56,7 @@ def _ops(
     with_sort: bool = True,
     with_exp2: bool = True,
     with_log2: bool = True,
-    with_sqrt: bool = True,
+    with_divsqrt: bool = True,
     with_cordic: bool = True,
     with_ilog2: bool = True,
     with_scaler: bool = True,
@@ -66,16 +66,15 @@ def _ops(
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions() if with_divsqrt else None,
             fmul_ilog2=FMulILog2Options() if with_scaler else None,
             filog2=FILog2Options() if with_ilog2 else None,
             fcmp=FCmpOptions(),
-            fround=FRoundOptions() if with_round else None,
+            frint=FRintOptions() if with_round else None,
             ffma=FFmaOptions() if with_fma else None,
             fsort=FSortOptions() if with_sort else None,
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
-            fsqrt=FSqrtOptions() if with_sqrt else None,
             fcordic=FCordicOptions() if with_cordic else None,
         ),
         ffmt=fmt,
@@ -98,7 +97,7 @@ def _round_ref(value: float, mode: int) -> int:
     if math.isinf(v):
         return fv.bits
     if mode == 0:
-        n = round(v)  # banker's rounding (half to even), matching zkf_round mode 0
+        n = round(v)  # banker's rounding (half to even), matching zkf_rint mode 0
     elif mode == 1:
         n = math.floor(v)
     elif mode == 2:
@@ -966,11 +965,11 @@ def test_hypot_lone_decomposition_is_approximate() -> None:
 
 
 def test_hypot_lone_missing_primitive_is_rejected() -> None:
-    # The expansion needs the exponent extractor, the root, and the scaler, but not the sorter.
+    # The expansion needs the exponent extractor, the divider (for the root), and the scaler, but not the sorter.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
-    for ops in (_ops(with_ilog2=False), _ops(with_sqrt=False), _ops(with_scaler=False)):
+    for ops in (_ops(with_ilog2=False), _ops(with_divsqrt=False), _ops(with_scaler=False)):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(kernel, ops, name="hypot_lone_reject")
     holoso.synthesize(kernel, _ops(with_sort=False), name="hypot_lone_no_sorter")
@@ -1000,6 +999,40 @@ def test_sqrt_is_the_correctly_rounded_native_root() -> None:
         assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"sqrt sweep x={x}"
 
 
+def _quotient(a: float, b: float) -> tuple[float, ...]:
+    return (a / b,)
+
+
+def _root(a: float, b: float) -> tuple[float, ...]:
+    return (math.sqrt(a),)
+
+
+def _quotient_and_root(a: float, b: float) -> tuple[float, ...]:
+    return a / b, math.sqrt(a)
+
+
+@pytest.mark.parametrize("kernel,mode", [(_quotient, 0), (_root, 1), (_quotient_and_root, 2)])
+def test_the_divider_is_elaborated_for_the_operations_a_kernel_keeps(
+    kernel: Callable[[float, float], tuple[float, ...]], mode: int
+) -> None:
+    """
+    One instance answers the quotient and the root. A kernel keeping one of them elaborates it for that one alone,
+    which sheds the other's datapath; a kernel keeping both shares the instance and chooses per firing.
+    """
+    verilog = holoso.synthesize(kernel, _ops(), name=f"divsqrt_mode_{mode}").verilog_output.verilog
+    assert divsqrt_modes(verilog) == [mode]
+
+
+def test_a_shared_divider_answers_the_quotient_and_the_root() -> None:
+    """binary32's division and root are correctly rounded, so numpy is an exact reference for either."""
+    sim = holoso.synthesize(_quotient_and_root, _ops(), name="divsqrt_shared").numerical_model.elaborate()
+    rng = np.random.default_rng(0xD15)
+    for _ in range(200):
+        a, b = (float(np.float32(abs(rng.standard_normal()) * 100 + 1e-6)) for _ in range(2))
+        expected = [_v(float(np.float32(a) / np.float32(b))).bits, _sqrt_ref(a)]
+        assert [_bits(value) for value in sim.run(a, b)] == expected, (a, b)
+
+
 def test_sqrt_dispatch_numpy() -> None:
     def kernel(x: float) -> float:
         return np.sqrt(x)  # type: ignore[no-any-return]
@@ -1014,7 +1047,7 @@ def test_sqrt_without_its_operator_is_refused() -> None:
         return math.sqrt(x)
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_sqrt=False), name="sqrt_reject")
+        holoso.synthesize(kernel, _ops(with_divsqrt=False), name="sqrt_reject")
 
 
 def test_trig_of_constants_fold() -> None:
@@ -1023,7 +1056,7 @@ def test_trig_of_constants_fold() -> None:
     def kernel(x: float) -> tuple[float, float, float, float, float]:
         return (math.sin(0.5), math.cos(0.5), math.atan2(1.0, 2.0), math.hypot(3.0, 4.0), math.sqrt(2.0))
 
-    ops = _ops(with_cordic=False, with_exp2=False, with_log2=False, with_sort=False, with_sqrt=False)
+    ops = _ops(with_cordic=False, with_exp2=False, with_log2=False, with_sort=False, with_divsqrt=False)
     sim = holoso.synthesize(kernel, ops, name="trig_fold").numerical_model.elaborate()
     out = sim.run(0.0)
     for index, ref in enumerate(
@@ -1347,7 +1380,7 @@ def test_sqrt_over_the_whole_format_matches_binary32_sqrt() -> None:
     """
     The breadth sweep behind the directed root test: every operand class the format admits, driven as exact bits so
     the extremes stay exact. binary32's root is correctly rounded, so numpy is an exact oracle; a negative operand
-    has no root and answers with the -inf poison value the hardware raises domain_error alongside.
+    has no root and answers with the -inf poison value the hardware raises its error alongside.
     """
 
     def kernel(x: float) -> float:
@@ -1382,13 +1415,14 @@ def test_a_static_one_half_exponent_is_the_native_root() -> None:
         return x**0.5  # type: ignore[no-any-return]
 
     result = holoso.synthesize(kernel, _ops(), name="pow_one_half")
-    assert _modules(result) == {"holoso_fsqrt"}
+    assert _modules(result) == {"holoso_fdivsqrt"}
+    assert divsqrt_modes(result.verilog_output.verilog) == [1]
     sim = result.numerical_model.elaborate()
     for x in (0.0, 0.25, 1.0, 2.0, 9.0, 1e6, _POS_INF):
         assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"x**0.5 x={x}"
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_sqrt=False), name="pow_one_half_reject")
+        holoso.synthesize(kernel, _ops(with_divsqrt=False), name="pow_one_half_reject")
 
 
 def test_other_exponents_keep_the_general_power() -> None:
@@ -1403,8 +1437,9 @@ def test_other_exponents_keep_the_general_power() -> None:
     def cube(x: float) -> float:
         return x**3
 
-    assert "holoso_fsqrt" not in _modules(holoso.synthesize(fourth_root, _ops(), name="pow_quarter"))
-    assert "holoso_fsqrt" not in _modules(holoso.synthesize(runtime_exponent, _ops(), name="pow_runtime_e"))
+    for kernel, name in ((fourth_root, "pow_quarter"), (runtime_exponent, "pow_runtime_e")):
+        verilog = holoso.synthesize(kernel, _ops(), name=name).verilog_output.verilog
+        assert "holoso_fexp2 #(" in verilog and divsqrt_modes(verilog) == []
     assert _modules(holoso.synthesize(cube, _ops(), name="pow_cube")) == {"holoso_fmul"}
 
 
@@ -1418,10 +1453,12 @@ def test_a_hypotenuse_orphaned_by_a_cancelled_fusion_is_still_expanded() -> None
         delta = math.hypot(x, y) - math.hypot(-x, y)
         return math.hypot(a, b) + delta * math.atan2(a, b)
 
-    modules = _modules(holoso.synthesize(kernel, _ops(), name="hypot_orphan_modules"))
+    result = holoso.synthesize(kernel, _ops(), name="hypot_orphan_modules")
+    modules = _modules(result)
     assert "holoso_fcordic" not in modules, "the cancellation must have deleted the only atan2"
-    assert {"holoso_filog2", "holoso_fsqrt", "holoso_fmul_ilog2"} <= modules
-    assert "holoso_fsort" not in modules and "holoso_fdiv" not in modules
+    assert {"holoso_filog2", "holoso_fdivsqrt", "holoso_fmul_ilog2"} <= modules
+    # The root alone: the expansion divides nothing.
+    assert "holoso_fsort" not in modules and divsqrt_modes(result.verilog_output.verilog) == [1]
     sim = _sim(kernel, "hypot_orphan")
     for a, b in ((3.0, 4.0), (0.0, 0.0), (-3.0, 4.0)):
         assert float(sim.run(a, b, 1.0, 2.0)[0]) == float(_v(math.hypot(a, b))), (a, b)
@@ -1434,7 +1471,7 @@ def test_a_hypotenuse_beside_an_unholdable_multiplier_still_builds() -> None:
         return math.hypot(x, y), (x * 2.0**40) * 3.0
 
     modules = _modules(holoso.synthesize(kernel, _ops(fmt=FloatFormat(6, 18)), name="hypot_beside_wide_scale"))
-    assert {"holoso_filog2", "holoso_fsqrt"} <= modules
+    assert {"holoso_filog2", "holoso_fdivsqrt"} <= modules
 
 
 def test_a_magnitude_is_refused_where_no_scaling_keeps_the_square_in_range() -> None:

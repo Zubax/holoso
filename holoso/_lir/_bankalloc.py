@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import ClassVar, assert_never
 
-from .._mir import Mir, MirBranch, MirOperation, MirPhi, MirStateRead, MirStateSlot, reverse_postorder
+from .._mir import Mir, MirBranch, MirOperation, MirPhi, MirStateRead, MirStateSlot, reverse_postorder, successors
 from .._operators import (
     InlinePrimitive,
     PooledPrimitive,
@@ -17,7 +17,7 @@ from .._operators import (
 )
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import mir_operation, phi_arm_out, succ_map
+from ._mir_facts import mir_operation, phi_arm_out
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import (
@@ -409,7 +409,7 @@ def prepare_bank[D: _Placement | Boundary](bank: _Bank[D], ctx: BuildContext) ->
     liveness = BankLiveness(
         blocks=[b.id for b in mir.blocks],
         entry=mir.entry,
-        succ=succ_map(mir),
+        succ={block.id: successors(block) for block in mir.blocks},
         term_offset={},
         resident=frozenset({*input_ids, *state_read_nodes}),
         # Every result -- pooled or inline, wide or boolean -- lands at the one bank-independent landing.

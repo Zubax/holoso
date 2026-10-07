@@ -40,9 +40,11 @@ def optimize(hir: Hir, ifconv_max_ops: int) -> Hir:
         hir = _dce.eliminate_dead_code(hir)
         if hir != previous:
             continue
-        for share in (_linear.run, _reciprocal.run):
-            # Swept between the two: the second would otherwise read a liveness the first has just invalidated.
-            hir = _dce.eliminate_dead_code(share(hir))
+        hir = _linear.run(hir)
+        # Swept between the two: the second would otherwise read a liveness the first has just invalidated.
+        hir = _dce.eliminate_dead_code(hir)
+        hir = _reciprocal.run(hir)
+        hir = _dce.eliminate_dead_code(hir)
         if hir == previous:
             _logger.info(
                 "HIR optimization: settled after %d of at most %d round(s); %d block(s), %d node(s) remain",

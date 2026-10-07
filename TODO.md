@@ -48,8 +48,9 @@ Parameter and return annotations are checked, so the module boundary is judged w
 The LIR build threads an arm block holding nothing but phi-arm installs into its predecessor wherever that shortens
 the arm's path and lengthens none. An arm whose predecessor overlaps keeps its frame, about four cycles on that path:
 pid's first arm, foc's and imu_fusion's first arms, image_agc_streamed's and majority_voter's block 2. Threading them
-makes the predecessor drain into the merge, trading latency between the paths (a probe moved `x / y if c else 0.0`
-from 6/18 to 4/20 cycles); flux_observer's arm sits behind the empty entry, whose frame would grow from 2 to 4 PCs.
+makes the predecessor drain into the merge, trading latency between the paths (a probe took two cycles off the short
+path of `x / y if c else 0.0` and added two to the long one); flux_observer's arm sits behind the empty entry, whose
+frame would grow from 2 to 4 PCs.
 Gaining here needs overlap across a multi-predecessor edge.
 
 ### Interference that keeps a copy-only arm
@@ -72,15 +73,16 @@ deferred until a real kernel needs it.
 ### Mode-aware binding
 
 The register allocator binds firings to instances without regard to their modes, but an instance whose firings all run
-in one mode elaborates its operator for that mode alone, as a CORDIC that only rotates sheds the vectoring datapath.
-With two or more instances, steering rotations and vectorings onto separate instances where the schedule allows would
-make more of them single-mode and so smaller. The binding objective counts only registers and steering arms today, so
-this needs an area term for each instance's mode set.
+in one mode elaborates its operator for that mode alone, as a CORDIC that only rotates sheds the vectoring datapath
+and a divider that only divides sheds the square root. With two or more instances, steering rotations and vectorings,
+or divisions and roots, onto separate instances where the schedule allows would make more of them single-mode and so
+smaller. The binding objective counts only registers and steering arms today, so this needs an area term for each
+instance's mode set.
 
 ### List-scheduler priority
 
 `schedule_ops` issues ready firings by latency-weighted height to a sink, which ignores instance contention. A
 randomized slack-based priority, 300 trials per block under an independent timing model, found shorter blocks the
-height order misses: rigid_body_scalar 126 -> 124 cycles, imu_fusion's entry and one arm block one cycle each. Other
+height order misses: rigid_body_scalar by two cycles, imu_fusion's entry and one arm block by one cycle each. Other
 large kernels (both EKFs, cordic_sincos, foc) showed no gain, so the benefit is uneven; a contention-aware priority, or
 a few perturbed orders per block keeping the shortest, are the candidates.

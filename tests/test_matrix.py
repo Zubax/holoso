@@ -24,8 +24,7 @@ from holoso import (
     FFromIntOptions,
     FloatFormat,
     FSortOptions,
-    FSqrtOptions,
-    FToIntOptions,
+    FRintOptions,
     UnsupportedConstruct,
 )
 from holoso._eel import lower
@@ -771,7 +770,7 @@ def test_operators_and_their_spellings_map_over_arrays() -> None:
         return np.minimum(v, w) - np.maximum(-1.0, w) + np.hypot(v, w) * np.prod(v)  # type: ignore[no-any-return]
 
     _assert_python_matches_holoso(products, v, w)
-    _assert_python_matches_holoso(powers, v, options=_with_operators(default_options(_FMT), fsqrt=FSqrtOptions()))
+    _assert_python_matches_holoso(powers, v)
     _assert_python_matches_holoso(reflected, m)
     _assert_python_matches_holoso(extrema, v, w, options=_with_operators(default_options(_FMT), fsort=FSortOptions()))
 
@@ -1357,7 +1356,7 @@ def test_dtype_int_truncates_like_numpy() -> None:
         v = np.asarray(np.array([x, -x]), int)  # the positional dtype spelling
         return v[0], v[1]
 
-    options = _with_operators(default_options(_FMT), ftoint=FToIntOptions())
+    options = _with_operators(default_options(_FMT), frint=FRintOptions())
     sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
     for x in (1.9, 0.5, 2.0):
         got = [value for value in sim.run(x) if isinstance(value, holoso.IntValue)]
@@ -1670,7 +1669,7 @@ def test_np_linalg_inv_structure() -> None:
         return np.linalg.inv(m)
 
     verilog = _synth(inv3).verilog_output.verilog
-    assert "holoso_fdiv #(" in verilog and "holoso_fcmp #(" in verilog  # pivot compares are not folded away
+    assert "holoso_fdivsqrt #(" in verilog and "holoso_fcmp #(" in verilog  # pivot compares are not folded away
 
 
 def test_np_linalg_inv_rejections() -> None:

@@ -19,8 +19,7 @@ from holoso import (
     FloatFormat,
     FMulILog2Options,
     FMulOptions,
-    FRoundOptions,
-    FToIntOptions,
+    FRintOptions,
     OperatorOptions,
     Options,
 )
@@ -42,8 +41,7 @@ from holoso._operators import (
     FloatToBoolPrimitive,
     FMulILog2Operator,
     FMulILog2Primitive,
-    FRoundPrimitive,
-    FToIntPrimitive,
+    FRintPrimitive,
     IntIdentity,
     Primitive,
     RoundMode,
@@ -74,9 +72,8 @@ OPTIONS = Options(
         fadd=FAddOptions(),
         fmul=FMulOptions(),
         fcmp=FCmpOptions(),
-        fround=FRoundOptions(),
+        frint=FRintOptions(),
         ffromint=FFromIntOptions(),
-        ftoint=FToIntOptions(),
     ),
     ffmt=FloatFormat(5, 11),
 )
@@ -97,7 +94,7 @@ def _operations(mir: Mir, name: str) -> list[MirOperation]:
 
 
 def _rounding(operation: MirOperation) -> RoundMode:
-    assert isinstance(operation.primitive, FRoundPrimitive | FToIntPrimitive)
+    assert isinstance(operation.primitive, FRintPrimitive)
     return operation.primitive.rounding
 
 
@@ -134,7 +131,7 @@ def countdown(n: int) -> int:
         (bitwise_ops, ["ibwand", "ibwnot", "ibwor", "ibwxor"]),
         (mux_and_casts, ["iadds", "ifrombool", "itobool", "select"]),
         (_min_max_of_ints, ["iadds", "icmp", "icmp", "imuls", "select", "select"]),
-        (family_crossings, ["ffromint", "ftoint"]),
+        (family_crossings, ["ffromint", "frint"]),
         (shift_pair, ["ishl", "ishr"]),
         (countdown, ["iadds", "icmp", "isubs"]),
         (times_eight, ["ishl"]),
@@ -269,36 +266,42 @@ def test_exponent_extraction_places_the_limit_cases_outside_the_finite_span() ->
         assert -bias < extracted(magnitude) < bias + 1
 
 
-def test_conversions_share_one_instance_and_read_the_unrounded_value() -> None:
+def test_a_rounding_and_its_conversion_are_two_taps_of_one_firing() -> None:
     """
-    Values cannot distinguish a conversion that reads the already-rounded node in this format, nor one shared
-    configured operator from two instances: the operand identity and the rounding modes are the contract.
+    Values cannot distinguish a conversion that reads the already-rounded node in this format, nor one firing from
+    two: the operand identity, the rounding modes and the firing count are the contract.
     """
     mir = _select(floored_for_two_readers)
-    assert _mnemonics(mir) == ["fadd", "fround", "ftoint"]
-    (conversion,) = _operations(mir, "ftoint")
-    (rounding,) = _operations(mir, "fround")
+    assert _mnemonics(mir) == ["fadd", "frint", "frint"]
+    rounding, conversion = sorted(_operations(mir, "frint"), key=lambda operation: operation.result)
+    assert (rounding.result, conversion.result) == (0, 1)
     assert conversion.operands == rounding.operands, "the conversion reads the value, not the rounding's result"
     assert _rounding(conversion) == _rounding(rounding) == RoundMode.FLOOR
+    lir = build_lir(mir, "floored_for_two_readers")
+    (firing,) = [op for op in _wide_firings(lir) if op.inst.operator.name == "frint"]
+    assert sorted(write.result for write in firing.writes) == [0, 1], "the float and the integer leave one firing"
 
+
+def test_two_roundings_of_one_value_share_the_instance_but_not_a_firing() -> None:
+    """One firing runs one rounding mode, so a truncation and a floor of the same operand are two firings."""
     mir = _select(truncated_and_floored)
-    conversions = _operations(mir, "ftoint")
+    conversions = _operations(mir, "frint")
     assert [_rounding(c) for c in conversions] == [RoundMode.TRUNC, RoundMode.FLOOR]
     assert len({c.operands[0] for c in conversions}) == 1
     lir = build_lir(mir, "truncated_and_floored")
-    assert [instance.operator.name for instance in lir.instances] == ["ftoint"]
+    assert [instance.operator.name for instance in lir.instances] == ["frint"]
     assert len(_wide_firings(lir)) == 2
 
     mir = _select(cross_boundary)  # the folded negation's dual: an integer constant crossing beside both conversions
-    assert _mnemonics(mir) == ["ffromint", "ftoint", "ibwand"]
+    assert _mnemonics(mir) == ["ffromint", "frint", "ibwand"]
 
 
 def test_a_negated_operand_folds_onto_the_conversion() -> None:
     """
-    `int(-x)` conditions the `ftoint` float port rather than emitting a sign primitive of its own; the public
+    `int(-x)` conditions the `frint` float port rather than emitting a sign primitive of its own; the public
     module regex cannot see an inline sign, so the exact mnemonic list is the sentinel.
     """
-    assert _mnemonics(_select(negated_crossing)) == ["ftoint"]
+    assert _mnemonics(_select(negated_crossing)) == ["frint"]
 
 
 def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
@@ -314,7 +317,8 @@ def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [floored])]))
     builder.ret()
     mir = lower_to_mir(builder.finish(), mir_options(OPTIONS))
-    assert _mnemonics(mir) == ["fround", "ftoint"]
+    assert _mnemonics(mir) == ["frint", "frint"]
+    assert len({operation.operands for operation in _operations(mir, "frint")}) == 2, "two firings, not two taps"
     interpreter = MirInterpreter(mir)
     for value in (0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.25, -100.25):
         (converted,) = interpreter.run(value)

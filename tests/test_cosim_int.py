@@ -16,7 +16,7 @@ from ._eeloracle import InputRow
 from ._modelref import default_options
 from .hdl.hdl_float_oracle import SIMULATORS
 from .test_int_selection import countdown
-from .test_int_synthesis import divmod_pair, popcount_of
+from .test_int_synthesis import divmod_pair, every_rounding_both_ways, popcount_of
 
 # NcoPhase sums a 2**30 increment over a 32-bit mask, so exactness needs at least a 34-bit word.
 _OPTIONS = dataclasses.replace(default_options(FloatFormat(wexp=6, wman=18)), wint_min=34)
@@ -70,9 +70,8 @@ def int_float_crossing(x: float, n: int) -> tuple[int, float]:
 def _crossing_options() -> Options:
     operator = dataclasses.replace(
         _OPTIONS.operator,
-        fround=holoso.FRoundOptions(),
+        frint=holoso.FRintOptions(),
         ffromint=holoso.FFromIntOptions(),
-        ftoint=holoso.FToIntOptions(),
     )
     return dataclasses.replace(_OPTIONS, operator=operator)
 
@@ -80,8 +79,22 @@ def _crossing_options() -> Options:
 @pytest.mark.cosim
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_float_crossing_cosim(sim: str) -> None:
-    """Pooled ftoint (rounding carried on its mode port) and ffromint inside one scheduled kernel, random sweep."""
+    """Pooled frint (rounding carried on its mode port) and ffromint inside one scheduled kernel, random sweep."""
     run_cosim(sim, holoso.synthesize(int_float_crossing, _crossing_options(), name="int_float_crossing"))
+
+
+@pytest.mark.cosim
+@pytest.mark.parametrize("wint_min", (16, 34), ids=("word_equals_float", "word_wider_than_float"))
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_a_rounding_answered_as_float_and_integer_cosim(sim: str, wint_min: int) -> None:
+    """
+    Each firing of the rounder writes a float register and an integer one. Where the integer word outgrows the float,
+    the float write fills the register's high bits with don't-cares, which this drives through real RTL.
+    """
+    options = dataclasses.replace(_crossing_options(), wint_min=wint_min)
+    result = holoso.synthesize(every_rounding_both_ways, options, name=f"rounded_both_ways_w{wint_min}")
+    assert (result.int_format.width > options.ffmt.width) == (wint_min == 34)
+    run_cosim(sim, result)
 
 
 @pytest.mark.cosim

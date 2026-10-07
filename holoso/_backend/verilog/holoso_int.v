@@ -450,11 +450,18 @@ module holoso_idivs #(parameter W = 44, parameter integer QUOTIENT_FLOOR = 1, pa
     generate
         if (QUOTIENT_FLOOR == 1) begin : g_floor
             reg [W-1:0] floor_quo;
-            wire [W-1:0] negative_quo = -quotient_magnitude;
-            wire [W-1:0] unequal_rem = den_negative_q[NSTEPS] ?
-                (remainder_magnitude - den_q[NSTEPS]) : (den_q[NSTEPS] - remainder_magnitude);
+            // Unless kept apart, these four mutually exclusive results are folded by a synthesizer sharing arithmetic
+            // onto one adder behind operand multiplexers: smaller, with a much longer path into the output registers.
+`ifdef HOLOSO_ATTRIBUTE_KEEP
+            `HOLOSO_ATTRIBUTE_KEEP
+`endif
+            wire [W-1:0] negative_quo = -quotient_magnitude,
+                         rem_minus_den = remainder_magnitude - den_q[NSTEPS],
+                         den_minus_rem = den_q[NSTEPS] - remainder_magnitude,
+                         negative_rem = -remainder_magnitude;
+            wire [W-1:0] unequal_rem = den_negative_q[NSTEPS] ? rem_minus_den : den_minus_rem;
             wire [W-1:0] unequal_rem_or_zero = remainder_nonzero ? unequal_rem : {W{1'b0}};
-            wire [W-1:0] equal_rem = den_negative_q[NSTEPS] ? -remainder_magnitude : remainder_magnitude;
+            wire [W-1:0] equal_rem = den_negative_q[NSTEPS] ? negative_rem : remainder_magnitude;
             always @* begin
                 case ({signs_differ, remainder_nonzero})
                     2'b10: floor_quo = negative_quo;

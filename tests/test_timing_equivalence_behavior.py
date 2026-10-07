@@ -13,8 +13,8 @@ and the resulting simulator's `run` / `set_inputs` / `tick` / handshake surface)
 BITS and on publicly observable timing (`SynthesisResult.initiation_interval` and handshake cycle counts) -- never on
 any internal schedule, register, or cycle structure. The two configurations are the no-optional-
 stage baseline and a deeply-pipelined fixture (both shared from `_modelref` so they track the operator-knob surface):
-`default_options` has every `stage_*` knob at zero; `staged_options` enables them across fadd / fmul / fdiv /
-fmul_ilog2 / fcmp. The kernels span the four shapes that exercise distinct timing paths:
+`default_options` leaves every operator at its own defaults; `staged_options` enables the `stage_*` knobs across fadd /
+fmul / fdivsqrt / fmul_ilog2 / fcmp. The kernels span the four shapes that exercise distinct timing paths:
 
   - a branchy diamond (a real, division-bearing branch with a long commit chain),
   - a back-edge while loop (a Newton-Raphson reciprocal with a data-dependent trip count, so the back edge is genuine),
@@ -226,7 +226,7 @@ def test_overlap_spill_timing_invariant() -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Shape 5: a straight-line kernel touching every default operator kind -- fadd, fmul, fdiv, and the 2^-2 strength-
+# Shape 5: a straight-line kernel touching every default operator kind -- fadd, fmul, fdivsqrt, and the 2^-2 strength-
 # reduced fmul_ilog2 -- proving that optional stages raise the PUBLIC initiation interval without changing the value.
 # The kernel is branch-free, so the public min II is exact (initiation_interval[1] is not None) and the latency growth
 # is directly observable; the vectors are chosen so every intermediate is exactly representable (power-of-two divisors

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso import FFromIntOptions, FloatFormat, FSortOptions, FToIntOptions, OperatorOptions, Options
+from holoso import FFromIntOptions, FloatFormat, FSortOptions, FRintOptions, OperatorOptions, Options
 from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -1144,7 +1144,7 @@ SPECS = [
         edge_values=_WIDE_EDGES,
         formats=(_FMT,),  # wman >= 32: a shallower format would quantize the grid and measure itself, not the compiler
         wint_min=34,  # a carry bit above the phase, then a sign bit
-        operators=lambda ops: dataclasses.replace(ops, ffromint=FFromIntOptions(), ftoint=FToIntOptions()),
+        operators=lambda ops: dataclasses.replace(ops, ffromint=FFromIntOptions(), frint=FRintOptions()),
     ),
     ExampleSpec(
         name="nco",
@@ -1185,7 +1185,7 @@ SPECS = [
         # accumulator, and the rounding of the gained pixel back to an integer saturates too, on both sides alike.
         edge_values=(0, 1, 128, PIXEL_MAX, -1, 1 << 42),
         operators=lambda ops: dataclasses.replace(
-            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), ftoint=FToIntOptions()
+            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), frint=FRintOptions()
         ),
     ),
     ExampleSpec(
@@ -1389,7 +1389,7 @@ SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
-        name="rigid_body_scalar",  # pivoted Gauss-Jordan inversion: data-dependent swap branches feeding one fdiv
+        name="rigid_body_scalar",  # pivoted Gauss-Jordan inversion: data-dependent swap branches feeding one divider
         inputs=_RIGID_BODY_INPUTS,
         make_kernel=lambda: rigid_body_scalar,
         # omega' lanes: the inversion's forward error over the driven domain (cond <= ~4) enters scaled by dt <= 1e-2

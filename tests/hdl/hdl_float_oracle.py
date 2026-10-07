@@ -187,17 +187,13 @@ def mul_oracle_bits(a_bits: int, b_bits: int) -> int | None:
 
 def div_oracle_bits(a_bits: int, b_bits: int) -> int | None:
     """
-    ZKF-compatible float32 divide; returns None whenever the wrapper's y is unspecified.
-
-    Division by +0 is a separately-signalled condition (the div0 flag); the wrapper contract leaves y unspecified
-    there, so callers should skip the value check when b == +0 and verify div0 instead.
+    ZKF-compatible float32 divide; returns None where float32 names no ZKF value: a zero divisor, which is the
+    separately signaled error whose value the core defines for itself, and the quotients float32 answers with a NaN.
     """
-    if is_zero_f32(b_bits) and is_zero_f32(a_bits):
-        return None  # 0/0 -> NaN in float32, undefined in ZKF
+    if is_zero_f32(b_bits):
+        return None
     if is_inf_f32(a_bits) and is_inf_f32(b_bits):
         return None  # inf/inf -> NaN
-    if is_zero_f32(b_bits):
-        return None  # finite/0 -> inf in float32; div0 flag asserts and the value of y is unspecified
     with np.errstate(divide="ignore", invalid="ignore"):
         y = bits_to_f32(a_bits) / bits_to_f32(b_bits)
     yb = f32_to_bits(y)
@@ -243,7 +239,7 @@ def log2_oracle(a_bits: int) -> tuple[int, int, int]:
 
 def sqrt_oracle(a_bits: int) -> tuple[int, int]:
     """
-    Reference `(y_bits, domain_error)`. The root is correctly rounded, so numpy is a genuinely INDEPENDENT oracle
+    Reference `(y_bits, error)`. The root is correctly rounded, so numpy is a genuinely INDEPENDENT oracle
     here (unlike the faithfully-rounded log2/sincos cores, which have to be checked against the ZKF model itself).
     A negative operand -- a negative zero is not one -- yields the -inf poison value instead of numpy's NaN.
     """
@@ -285,7 +281,7 @@ def cmp_oracle(a_bits: int, b_bits: int) -> tuple[int, int, int]:
     return int(a > b), int(a == b), int(a < b)
 
 
-# Round-mode opcodes -- must match zkf_round's round_mode encoding and the rounding operators' mode codes.
+# Round-mode opcodes -- must match zkf_rint's round_mode encoding and the rounding operator's mode codes.
 ROUND_NEAREST_EVEN = 0
 ROUND_FLOOR = 1
 ROUND_CEIL = 2
@@ -295,7 +291,7 @@ ROUND_MODES: tuple[int, ...] = (ROUND_NEAREST_EVEN, ROUND_FLOOR, ROUND_CEIL, ROU
 
 def round_oracle_bits(a_bits: int, mode: int) -> int | None:
     """
-    Round a ZKF-legal float32 to an integral float per the zkf_round mode, using numpy as an INDEPENDENT reference
+    Round a ZKF-legal float32 to an integral float per the zkf_rint mode, using numpy as an INDEPENDENT reference
     (rint is round-half-to-even). Integral float32 results are exact; `_flush_to_zkf` canonicalizes a -0 result
     (e.g. ceil(-0.3)) to +0. Returns None on NaN (an inf input rounds to itself, never NaN, so None never occurs here).
     """

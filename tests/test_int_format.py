@@ -219,7 +219,7 @@ def test_the_second_derivation_reshapes_the_graph_under_the_word_it_settled_on()
 def test_a_narrowing_that_does_not_settle_keeps_the_widest_word() -> None:
     """No fixpoint need exist, so the loop is bounded and falls back rather than failing on a legal kernel."""
     operator = dataclasses.replace(
-        default_options(FMT).operator, ffromint=holoso.FFromIntOptions(), ftoint=holoso.FToIntOptions()
+        default_options(FMT).operator, ffromint=holoso.FFromIntOptions(), frint=holoso.FRintOptions()
     )
     options = dataclasses.replace(default_options(FMT), operator=operator, wint_min=16)
     result = holoso.synthesize(_float_arm_behind_a_shift, options, name="Oscillates")

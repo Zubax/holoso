@@ -5,7 +5,6 @@ or decline because the datapath would answer differently.
 """
 
 import math
-from collections.abc import Callable
 
 from ._const import BoolConst, Const, FloatConst, IntConst
 from ._copy import copy_node, rebuild
@@ -183,11 +182,6 @@ def run(hir: Hir) -> Hir:
         scaled = base if node is None else reduce_algebra(builder, node.operator, list(node.operands))
         return make_neg(builder, scaled) if rendering.negative else scaled
 
-    def emit_scaling(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId | None:
-        """None where no host float names the coefficient: the operands then stand as written."""
-        rendering = scaling.rendering()
-        return None if rendering is None else emit_rendering(builder, base, rendering)
-
     def scale_or_multiply(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
         """A written product by a constant takes the constant's own shape; by zero or an infinity it is a product."""
         for const_side, other in ((b, a), (a, b)):
@@ -196,18 +190,13 @@ def run(hir: Hir) -> Hir:
                 return emit_rendering(builder, other, rendering)
         return reduce_algebra(builder, FloatMul(), [a, b])
 
-    def constant_of(remap: dict[ValueId, ValueId]) -> Callable[[ValueId], float | None]:
-        """
-        Shape is read off the OLD graph and constant-ness off the REBUILT one: a fold this round may have made an
-        operand a constant.
-        """
-        return lambda old_id: float_of(remap[old_id])
-
     def scaling(remap: dict[ValueId, ValueId], old_id: ValueId) -> tuple[ValueId, Scaling] | None:
         """Composition stops at a layer another consumer still wants, since the caller replaces what it composes."""
         if known.get(remap[old_id]) is not None:
             return None  # a node the rebuild already answered is a constant, and folding owns it
-        reading = read_scaling(hir, old_id, constant_of(remap), lambda layer: uses[layer] == 1)
+        # Shape is read off the OLD graph and constant-ness off the REBUILT one: a fold this round may have made an
+        # operand a constant.
+        reading = read_scaling(hir, old_id, lambda operand: float_of(remap[operand]), lambda layer: uses[layer] == 1)
         return None if reading is None else (reading.base, reading.scaling)
 
     def reduce_scaling(builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId) -> ValueId | None:
@@ -215,12 +204,12 @@ def run(hir: Hir) -> Hir:
         The composed node replaces the outer one; the inner layers survive only while another consumer wants them. None
         where the node scales nothing.
         """
-        reading = read_scaling(hir, vid, constant_of(remap))
+        reading = read_scaling(hir, vid, lambda operand: float_of(remap[operand]))
         if reading is None or len(reading.layers) < 2:
             return None
-        composed = emit_scaling(builder, remap[reading.base], reading.scaling)
-        assert composed is not None
-        return composed
+        rendering = reading.scaling.rendering()
+        assert rendering is not None
+        return emit_rendering(builder, remap[reading.base], rendering)
 
     def reduce_mul(
         builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId, old_a: ValueId, old_b: ValueId
@@ -260,8 +249,8 @@ def run(hir: Hir) -> Hir:
             reciprocal = (
                 Scaling(1.0, -scaling.k, scaling.negative) if scaling.is_power_of_two else scaling_of(1.0 / divisor)
             )
-            if reciprocal is not None and (emitted := emit_scaling(builder, a, reciprocal)) is not None:
-                return emitted
+            if reciprocal is not None and (rendering := reciprocal.rendering()) is not None:
+                return emit_rendering(builder, a, rendering)
         return reduce_algebra(builder, FloatDiv(), [a, b])
 
     def reduce_iadd(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:

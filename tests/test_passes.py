@@ -19,7 +19,7 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
@@ -30,7 +30,7 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
-from holoso._operators import FDivOperator
+from holoso._operators import FDivsqrtOperator
 from holoso._util import ValueId
 from holoso._eel import lower
 from holoso._hir import (
@@ -124,7 +124,7 @@ OPTIONS = Options(
     OperatorOptions(
         fadd=FAddOptions(),
         fmul=FMulOptions(),
-        fdiv=FDivOptions(),
+        fdivsqrt=FDivsqrtOptions(),
         fmul_ilog2=FMulILog2Options(),
         fcmp=FCmpOptions(),
     ),
@@ -261,7 +261,7 @@ def test_a_reciprocal_the_host_cannot_hold_leaves_the_division_standing() -> Non
         return a / 1e-320
 
     result = _synth(f, _WIDE_OPTIONS, name="div_subnormal")
-    assert _instantiated(result) == {"holoso_fdiv"}
+    assert _instantiated(result) == {"holoso_fdivsqrt"}
     got = float(result.numerical_model.elaborate().run(1e-20)[0])
     want = 1e-20 / 1e-320
     assert within(got, want, *default_tolerance(_WIDE_OPTIONS.ffmt, 2, magnitude=want))
@@ -359,7 +359,7 @@ def test_a_scale_past_the_formats_reach_is_refused_rather_than_split() -> None:
 def test_without_the_scaler_the_constant_is_still_what_is_refused() -> None:
     # The split needs the exponent scaler. Without it the kernel must be refused over the constant it cannot hold,
     # which names both the trouble and the way out, rather than over an operator the kernel never asked for.
-    options = Options(OperatorOptions(fmul=FMulOptions(), fdiv=FDivOptions()), ffmt=FMT)
+    options = Options(OperatorOptions(fmul=FMulOptions(), fdivsqrt=FDivsqrtOptions()), ffmt=FMT)
 
     def f(x: float) -> float:
         return x / 3e9
@@ -571,7 +571,7 @@ def test_ekf1_stateless_synthesis() -> None:
     assert len(result.input_ports) == 17
     assert len(result.output_ports) == 9
     verilog = result.verilog_output.verilog
-    assert verilog.count("holoso_fdiv #") == 1  # the source's only division, x22 = 1 / x21, on one pooled divider
+    assert verilog.count("holoso_fdivsqrt #") == 1  # the source's only division, x22 = 1 / x21, on one pooled divider
     assert verilog.count("holoso_fmul_ilog2 #") >= 1  # the "2 * ..." terms
 
 
@@ -655,7 +655,7 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
 
     result = _synth(f, name="unspec_arm")
     assert result.initiation_interval[1] is None  # the diamond survives as a real branch
-    assert "holoso_fdiv" in _instantiated(result)
+    assert "holoso_fdivsqrt" in _instantiated(result)
     sim = result.numerical_model.elaborate()
     for a, b in [(3.0, 1.0), (1.0, 2.0), (1.0, 4.0)]:
         assert float(sim.run(a, b)[0]) == f(a, b)
@@ -673,7 +673,7 @@ def test_if_conversion_speculates_a_hypotenuse() -> None:
 
     options = dataclasses.replace(
         OPTIONS,
-        operator=dataclasses.replace(OPTIONS.operator, filog2=holoso.FILog2Options(), fsqrt=holoso.FSqrtOptions()),
+        operator=dataclasses.replace(OPTIONS.operator, filog2=holoso.FILog2Options()),
     )
     result = _synth(f, options, name="spec_hypot")
     assert result.initiation_interval[1] is not None  # the diamond collapsed rather than surviving as a branch
@@ -965,7 +965,7 @@ def test_speculatable_hir_operators_map_to_error_free_hardware() -> None:
     # The speculation flag and the hardware error sideband are two declarations of one fact: an error-bearing operator
     # such as division must keep the default speculatable=False on its HIR side, or if-conversion would assert the
     # module error flag for a never-taken path.
-    assert FDivOperator.build(FMT, FDivOptions()).error_ports and not HirFloatDiv.speculatable
+    assert FDivsqrtOperator.build(FMT, FDivsqrtOptions()).error_ports and not HirFloatDiv.speculatable
 
 
 def test_dead_diamond_frees_its_condition_cone() -> None:

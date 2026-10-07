@@ -39,7 +39,7 @@ from ._operators import (
     FAddOptions as FAddOptions,
     FCmpOptions as FCmpOptions,
     FCordicOptions as FCordicOptions,
-    FDivOptions as FDivOptions,
+    FDivsqrtOptions as FDivsqrtOptions,
     FExp2Options as FExp2Options,
     FFmaOptions as FFmaOptions,
     FFromIntOptions as FFromIntOptions,
@@ -47,10 +47,8 @@ from ._operators import (
     FLog2Options as FLog2Options,
     FMulILog2Options as FMulILog2Options,
     FMulOptions as FMulOptions,
-    FRoundOptions as FRoundOptions,
+    FRintOptions as FRintOptions,
     FSortOptions as FSortOptions,
-    FSqrtOptions as FSqrtOptions,
-    FToIntOptions as FToIntOptions,
     IAbsOptions as IAbsOptions,
     IAddOptions as IAddOptions,
     ICmpOptions as ICmpOptions,
@@ -63,5 +61,5 @@ from ._operators import (
     OperatorOptions as OperatorOptions,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 __url__ = "https://holoso.digital"

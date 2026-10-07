@@ -16,6 +16,7 @@ from .._value import FloatValue, IntValue, RoundMode, ScalarValue
 from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType
 from ._common import (
     BaseOperatorOptions,
+    BoolInversion,
     ComparatorPrimitive,
     HardwareOperator,
     InlinePrimitive,
@@ -45,11 +46,16 @@ def _floats(fmt: FloatFormat, *names: str) -> tuple[OperatorPort, ...]:
     return tuple(OperatorPort(name, FloatType(fmt)) for name in names)
 
 
-def _timing(model: zkf.OperatorModel) -> zkf.Timing:
-    """The model's single timing, which a mode port selecting only the arithmetic leaves undivided."""
+def _timing(name: str, model: zkf.OperatorModel) -> zkf.Timing:
+    """
+    The model's single timing, which a mode port selecting only the arithmetic leaves undivided. ZKF reads a zero
+    `LATENCY` as "do not check", so a combinational core is refused rather than elaborated with its latency unverified.
+    """
     timing = model.timing
     assert isinstance(timing, zkf.Timing), model.module
     assert timing.latency == model.params["LATENCY"], model.module
+    if timing.latency < 1:
+        raise ValueError(f"{name} needs at least one register stage (an operator must have latency >= 1)")
     return timing
 
 
@@ -61,7 +67,8 @@ def _zkf_operator[O: HardwareOperator](
     outputs: tuple[OperatorPort, ...],
 ) -> O:
     """An operator with a single timing, taken from its model; reading the parameters loads a format's tables."""
-    return cls.of_one_mode(model.params, options.instances, operands, outputs, _timing(model).initiation_interval)
+    interval = _timing(cls.name, model).initiation_interval
+    return cls.of_one_mode(model.params, options.instances, operands, outputs, interval)
 
 
 def _format(fmt: FloatFormat) -> zkf.ZkfFormat:
@@ -78,12 +85,6 @@ class FloatPrimitive(PooledPrimitive, ABC):
             assert isinstance(operand, FloatValue)
             validated.append(operand)
         return tuple(validated)
-
-
-def _result_int_format(primitive: PooledPrimitive) -> IntFormat:
-    (result,) = primitive.signature.result_types
-    assert isinstance(result, IntType)
-    return result.fmt
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,26 +154,61 @@ class FMulPrimitive(FloatPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class FDivOptions(BaseOperatorOptions):
+class FDivsqrtOptions(BaseOperatorOptions):
     stage_input: int = 0
+    stage_decode: int = 0  # takes effect at an even wman only
     stage_pack: int = 0
     stage_output: int = 0
 
 
-class FDivOperator(HardwareOperator):
+class DivsqrtMode(IntEnum):
+    """The value driven on `op_sqrt`, which is also the `MODE` elaborating the core for that operation alone."""
+
+    DIVISION = 0
+    SQRT = 1
+
+    @property
+    def operand_count(self) -> int:
+        return 2 if self is DivsqrtMode.DIVISION else 1
+
+
+class FDivsqrtOperator(HardwareOperator):
+    """
+    One digit-recurrence pipeline serving the quotient `a / b` and the square root of `a`, chosen per firing on
+    `op_sqrt`, at one latency. `error` reports a zero divisor in the first and a negative operand in the second.
+    """
+
     __slots__ = ()
-    name = "fdiv"
-    error_ports = ("div0",)
+    name = "fdivsqrt"
+    mode_port = ModePort("op_sqrt", 1)
+    error_ports = ("error",)
 
     @classmethod
-    def build(cls, fmt: FloatFormat, options: FDivOptions) -> Self:
-        model = zkf.DivModel(_format(fmt), **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b"), _floats(fmt, "y"))
+    def build(cls, fmt: FloatFormat, options: FDivsqrtOptions) -> Self:
+        model = zkf.DivsqrtModel(_format(fmt), **_knobs(options))
+        timing = _timing(cls.name, model)
+        modes: list[OperatorMode] = []
+        single_mode_params: dict[OperatorMode, dict[str, int]] = {}
+        for mode in DivsqrtMode:
+            operator_mode = OperatorMode(int(mode), "LATENCY", timing.initiation_interval, mode.operand_count, (0,))
+            modes.append(operator_mode)
+            fixed = zkf.DivsqrtModel(_format(fmt), mode=int(mode), **_knobs(options))
+            assert fixed.timing == timing, "a fixed mode must keep its timing, which the schedule was built on"
+            single_mode_params[operator_mode] = fixed.params
+        ports = _floats(fmt, "a", "b"), _floats(fmt, "y")
+        return cls(model.params, options.instances, *ports, tuple(modes), single_mode_params)
+
+    def mode_of_divsqrt(self, mode: DivsqrtMode) -> OperatorMode:
+        return self.mode_of(int(mode))
 
 
 @dataclass(frozen=True, slots=True)
 class FDivPrimitive(FloatPrimitive):
-    operator: FDivOperator
+    operator: FDivsqrtOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_divsqrt(DivsqrtMode.DIVISION)
 
     def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
         a, b = self._validated_operands(operands)
@@ -181,6 +217,25 @@ class FDivPrimitive(FloatPrimitive):
     def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}/{b}"
+
+
+@dataclass(frozen=True, slots=True)
+class FSqrtPrimitive(FloatPrimitive):
+    """Correctly-rounded square root; a negative operand yields -inf and raises `error`."""
+
+    operator: FDivsqrtOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_divsqrt(DivsqrtMode.SQRT)
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
+        (a,) = self._validated_operands(operands)
+        return (a.sqrt(),)
+
+    def render(self, *operands: str) -> str:
+        (a,) = operands
+        return f"√{a}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +269,9 @@ class FILog2Primitive(PooledPrimitive):
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
-        return (IntValue.from_int(_result_int_format(self), a.ilog2()),)
+        (result,) = self.signature.result_types
+        assert isinstance(result, IntType)
+        return (IntValue.from_int(result.fmt, a.ilog2()),)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
@@ -238,7 +295,8 @@ class FMulILog2Operator(HardwareOperator):
         params = {("WINT" if name == "WK" else name): value for name, value in model.params.items()}
         operands = (OperatorPort("a", FloatType(fmt)), OperatorPort("k", IntType(ifmt)))
         outputs = _floats(fmt, "y")
-        return cls.of_one_mode(params, options.instances, operands, outputs, _timing(model).initiation_interval)
+        interval = _timing(cls.name, model).initiation_interval
+        return cls.of_one_mode(params, options.instances, operands, outputs, interval)
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,7 +317,10 @@ class FMulILog2Primitive(PooledPrimitive):
 
 @dataclass(frozen=True, slots=True)
 class FCmpOptions(BaseOperatorOptions):
+    """The zkf core is combinational, hence the nonzero default: an operator needs latency >= 1."""
+
     stage_input: int = 0
+    stage_output: int = 1
 
 
 class FCmpOperator(HardwareOperator):
@@ -285,55 +346,47 @@ class FCmpPrimitive(FloatPrimitive, ComparatorPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class FRoundOptions(BaseOperatorOptions):
+class FRintOptions(BaseOperatorOptions):
     """The zkf core is combinational, hence the nonzero default: an operator needs latency >= 1."""
 
-    stage_input: int = 1
-    stage_decode: int = 0
-    stage_pack: int = 0
+    stage_input: int = 0
+    stage_shift: int = 1
+    stage_round: int = 0
     stage_output: int = 0
 
 
-_ROUND_MODE = ModePort("round_mode", 2)
-
-
-def _rounding_modes(model: zkf.OperatorModel) -> tuple[OperatorMode, ...]:
-    """Every rounding runs at one timing: the mode selects the arithmetic, not the pipeline."""
-    interval = _timing(model).initiation_interval
-    return tuple(OperatorMode(int(mode), "LATENCY", interval, 1, (0,)) for mode in RoundMode)
-
-
-class RoundingOperator(HardwareOperator):
-    """Every rounding is one mode, selected on the `round_mode` port by the rounding's own encoding."""
+class FRintOperator(HardwareOperator):
+    """
+    Rounds a float to an integer and answers it twice at once, as a float of the same format and as a signed integer.
+    The rounding is one mode, selected on the `round_mode` port by its own encoding.
+    """
 
     __slots__ = ()
-    mode_port = _ROUND_MODE
+    name = "frint"
+    mode_port = ModePort("round_mode", 2)
+
+    @classmethod
+    def build(cls, fmt: FloatFormat, ifmt: IntFormat, options: FRintOptions) -> Self:
+        model = zkf.RintModel(_format(fmt), wint=ifmt.width, **_knobs(options))
+        # Every rounding runs at one timing: the mode selects the arithmetic, not the pipeline.
+        interval = _timing(cls.name, model).initiation_interval
+        modes = tuple(OperatorMode(int(mode), "LATENCY", interval, 1, (0, 1)) for mode in RoundMode)
+        outputs = (OperatorPort("y_float", FloatType(fmt)), OperatorPort("y_int", IntType(ifmt)))
+        return cls(model.params, options.instances, _floats(fmt, "a"), outputs, modes)
 
     def mode_of_rounding(self, rounding: RoundMode) -> OperatorMode:
         return self.mode_of(int(rounding))
 
 
-class FRoundOperator(RoundingOperator):
-    __slots__ = ()
-    name = "fround"
-
-    @classmethod
-    def build(cls, fmt: FloatFormat, options: FRoundOptions) -> Self:
-        model = zkf.RoundModel(_format(fmt), **_knobs(options))
-        if _timing(model).latency < 1:
-            raise ValueError("fround needs at least one register stage (an operator must have latency >= 1)")
-        ports = _floats(fmt, "a"), _floats(fmt, "y")
-        return cls(model.params, options.instances, *ports, _rounding_modes(model))
-
-
 @dataclass(frozen=True, slots=True)
-class FRoundPrimitive(FloatPrimitive):
+class FRintPrimitive(FloatPrimitive):
     """
-    Round a float to an integral-valued float. One operator serves all four roundings (nearest-even, floor, ceil, trunc)
-    through its 2-bit `round_mode` port, as one comparator serves every relation.
+    One rounding of a float (nearest-even, floor, ceil or trunc), answered as an integral-valued float (result 0) and
+    as a signed integer saturating at the rails, an infinity reaching one of them (result 1). A float use and an
+    integer use of one rounding of one operand therefore fuse into a single firing.
     """
 
-    operator: FRoundOperator
+    operator: FRintOperator
     rounding: RoundMode
 
     @property
@@ -346,14 +399,27 @@ class FRoundPrimitive(FloatPrimitive):
         RoundMode.CEIL: FloatValue.ceil,
         RoundMode.TRUNC: FloatValue.trunc,
     }
+    _EVAL_INT: ClassVar[dict[RoundMode, Callable[[FloatValue, IntFormat], IntValue]]] = {
+        RoundMode.NEAREST_EVEN: FloatValue.round_int,
+        RoundMode.FLOOR: FloatValue.floor_int,
+        RoundMode.CEIL: FloatValue.ceil_int,
+        RoundMode.TRUNC: FloatValue.trunc_int,
+    }
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, IntValue]:
         (a,) = self._validated_operands(operands)
-        return (self._EVAL[self.rounding](a),)
+        integer = self.signature.result_types[1]
+        assert isinstance(integer, IntType)
+        return self._EVAL[self.rounding](a), self._EVAL_INT[self.rounding](a, integer.fmt)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"{_ROUND_LABEL[self.rounding]}({a})"
+
+    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
+        assert inversion is None
+        text = self.render(*operands)
+        return f"i{text}" if result == 1 else text
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,39 +565,6 @@ class FLog2Primitive(FloatPrimitive):
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"log2({a})"
-
-
-@dataclass(frozen=True, slots=True)
-class FSqrtOptions(BaseOperatorOptions):
-    stage_input: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
-
-
-class FSqrtOperator(HardwareOperator):
-    __slots__ = ()
-    name = "fsqrt"
-    error_ports = ("domain_error",)
-
-    @classmethod
-    def build(cls, fmt: FloatFormat, options: FSqrtOptions) -> Self:
-        model = zkf.SqrtModel(_format(fmt), **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a"), _floats(fmt, "y"))
-
-
-@dataclass(frozen=True, slots=True)
-class FSqrtPrimitive(FloatPrimitive):
-    """Correctly-rounded square root; a negative operand yields -inf and raises `domain_error` (as log2's does)."""
-
-    operator: FSqrtOperator
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands)
-        return (a.sqrt(),)
-
-    def render(self, *operands: str) -> str:
-        (a,) = operands
-        return f"√{a}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,43 +811,3 @@ class FFromIntPrimitive(PooledPrimitive):
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"float({a})"
-
-
-@dataclass(frozen=True, slots=True)
-class FToIntOptions(BaseOperatorOptions):
-    stage_input: int = 0
-
-
-class FToIntOperator(RoundingOperator):
-    __slots__ = ()
-    name = "ftoint"
-
-    @classmethod
-    def build(cls, fmt: FloatFormat, ifmt: IntFormat, options: FToIntOptions) -> Self:
-        model = zkf.ToIntModel(_format(fmt), wint=ifmt.width, **_knobs(options))
-        ports = _floats(fmt, "a"), (OperatorPort("y", IntType(ifmt)),)
-        return cls(model.params, options.instances, *ports, _rounding_modes(model))
-
-
-@dataclass(frozen=True, slots=True)
-class FToIntPrimitive(PooledPrimitive):
-    """
-    Float to signed integer, saturating at the rails, an infinity reaching one of them. One operator serves all four
-    roundings through its `round_mode` port, as `fround` does.
-    """
-
-    operator: FToIntOperator
-    rounding: RoundMode
-
-    @property
-    def mode(self) -> OperatorMode:
-        return self.operator.mode_of_rounding(self.rounding)
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
-        (a,) = self._validated_operands(operands)
-        assert isinstance(a, FloatValue)
-        return (IntValue.from_float(_result_int_format(self), a, self.rounding),)
-
-    def render(self, *operands: str) -> str:
-        (a,) = operands
-        return f"i{_ROUND_LABEL[self.rounding]}({a})"

@@ -1,7 +1,6 @@
 """Runtime values and exact arithmetic for Zubax Kulibin float and for the native saturating integer."""
 
 import math
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import NamedTuple, Self
 
@@ -93,7 +92,7 @@ class FloatValue:
         return FloatValue.from_bits(fmt, (self._zval * other._zval).bits)
 
     def __truediv__(self, other: FloatValue) -> FloatValue:
-        """`zkf_div`'s error sidebands are intentionally not modeled."""
+        """`zkf_divsqrt`'s error sideband is intentionally not modeled."""
         fmt = _matching_format(self, other)
         return FloatValue.from_bits(fmt, (self._zval / other._zval).bits)
 
@@ -149,15 +148,32 @@ class FloatValue:
     def trunc(self) -> FloatValue:
         return FloatValue.from_bits(self.fmt, self._zval.trunc().bits)
 
+    # The four below match `holoso_frint`'s integer result: saturating at the rails, an infinity reaching one of them.
+    def round_int(self, fmt: IntFormat) -> IntValue:
+        _check_int_format(fmt)
+        return IntValue.from_int(fmt, self._zval.round_int(fmt.width))
+
+    def floor_int(self, fmt: IntFormat) -> IntValue:
+        _check_int_format(fmt)
+        return IntValue.from_int(fmt, self._zval.floor_int(fmt.width))
+
+    def ceil_int(self, fmt: IntFormat) -> IntValue:
+        _check_int_format(fmt)
+        return IntValue.from_int(fmt, self._zval.ceil_int(fmt.width))
+
+    def trunc_int(self, fmt: IntFormat) -> IntValue:
+        _check_int_format(fmt)
+        return IntValue.from_int(fmt, self._zval.trunc_int(fmt.width))
+
     def exp2(self) -> FloatValue:
         return FloatValue.from_bits(self.fmt, self._zval.exp2().bits)
 
     def log2(self) -> FloatValue:
-        """`zkf_log2`'s domain-error/pole sidebands are intentionally not modeled (as with `zkf_div`'s div0)."""
+        """`zkf_log2`'s domain-error/pole sidebands are intentionally not modeled (as with `zkf_divsqrt`'s error)."""
         return FloatValue.from_bits(self.fmt, self._zval.log2().value.bits)
 
     def sqrt(self) -> FloatValue:
-        """`zkf_sqrt`'s domain-error sideband is intentionally not modeled; a negative operand yields -inf."""
+        """`zkf_divsqrt`'s error sideband is intentionally not modeled; a negative operand yields -inf."""
         return FloatValue.from_bits(self.fmt, self._zval.sqrt().root.bits)
 
     def sincos(self) -> SinCos:
@@ -193,7 +209,7 @@ class IntValue:
     A concrete native integer, signed and saturating. Results match the `holoso_i*` RTL bit-for-bit, edge cases
     included: `abs(MIN)` is `MAX`, `MIN // -1` is `(MAX, 0)`, and a division by zero answers a rail by the
     numerator's sign while keeping the numerator as the remainder. The saturation sidebands those modules also raise
-    are intentionally not modeled, as `zkf_div`'s `div0` is not.
+    are intentionally not modeled, as `zkf_divsqrt`'s `error` is not.
     """
 
     fmt: IntFormat
@@ -221,14 +237,6 @@ class IntValue:
         if not fmt.fits(value):
             raise ValueError(f"{value} is out of range for {fmt}: [{fmt.min}, {fmt.max}]")
         return cls._wrap(fmt, value)
-
-    @classmethod
-    def from_float(cls, fmt: IntFormat, value: FloatValue, mode: RoundMode) -> Self:
-        """Matches `holoso_ftoint`: rounds by `mode`, saturating at the rails, an infinity reaching one of them."""
-        _check_int_format(fmt)
-        if not isinstance(value, FloatValue):
-            raise TypeError(f"value must be FloatValue, got {type(value).__name__}")
-        return cls._wrap(fmt, _TO_INT[mode](_zkf_format(value.fmt).wrap(value.bits), fmt.width))
 
     def to_float(self, fmt: FloatFormat) -> FloatValue:
         """Matches `holoso_ffromint`: nearest, ties to even; a magnitude past the finite range becomes an infinity."""
@@ -367,14 +375,6 @@ def coerce_scalar(scalar_type: ScalarType, value: object, what: str) -> ScalarVa
             raise TypeError(f"{what} must be bool, got {type(value).__name__}")
         case _:
             raise TypeError(f"no scalar family for {scalar_type!r}")
-
-
-_TO_INT: dict[RoundMode, Callable[[zkf.Zkf, int], int]] = {
-    RoundMode.NEAREST_EVEN: zkf.Zkf.round_int,
-    RoundMode.FLOOR: zkf.Zkf.floor_int,
-    RoundMode.CEIL: zkf.Zkf.ceil_int,
-    RoundMode.TRUNC: zkf.Zkf.trunc_int,
-}
 
 
 def _zkf_format(fmt: FloatFormat) -> zkf.ZkfFormat:

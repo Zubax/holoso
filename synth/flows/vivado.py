@@ -2,11 +2,11 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from .._detect import find_tool, require_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
-from .._flow_id import FlowId
+from .._flow_id import DeviceClass, FlowId
 from ._flow import Flow
 
 _TCL = "run_vivado.tcl"
@@ -20,6 +20,10 @@ _TIMING = "worst_path.rpt"
 @dataclass(frozen=True, slots=True)
 class XilinxPart:
     name: str = "xc7a35tcsg324-1"
+
+    @classmethod
+    def of(cls, device_class: DeviceClass) -> Self:
+        return cls("xc7a100tcsg324-1") if device_class is DeviceClass.LARGE else cls()
 
 
 @dataclass(frozen=True, slots=True)

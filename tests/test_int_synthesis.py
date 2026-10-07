@@ -13,6 +13,7 @@ import pickle
 import re
 from collections.abc import Callable
 
+import numpy as np
 import pytest
 
 import holoso
@@ -24,9 +25,8 @@ _INT16 = holoso.Options(
         fadd=holoso.FAddOptions(),
         fmul=holoso.FMulOptions(),
         fcmp=holoso.FCmpOptions(),
-        fround=holoso.FRoundOptions(),
+        frint=holoso.FRintOptions(),
         ffromint=holoso.FFromIntOptions(),
-        ftoint=holoso.FToIntOptions(),
     ),
     ffmt=holoso.FloatFormat(5, 11),
 )
@@ -813,7 +813,7 @@ def test_a_product_with_minus_one_negates_on_the_subtractor() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Float-to-integer conversions: the rounding rides the conversion as a mode, never a second module.
+# Float-to-integer conversions: the rounding is a mode of the one rounder.
 
 
 def rounded_to_int(x: float) -> int:
@@ -868,50 +868,59 @@ _ROUNDINGS = [0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.
     [rounded_to_int, floored_to_int, ceiled_to_int, truncated_to_int, negated_then_floored_to_int, negated_crossing],
     ids=lambda value: getattr(value, "__name__", str(value)),
 )
-def test_a_conversion_carries_its_rounding_as_a_mode_rather_than_a_second_module(
-    target: Callable[..., object],
-) -> None:
-    """
-    Only the conversion is instantiated: no `holoso_fround` (the rounding is a mode field) and no
-    `holoso_isubs` (a sign folds onto the conversion's operand rather than costing a module).
-    """
+def test_a_conversion_takes_the_rounder_alone(target: Callable[..., object]) -> None:
+    """No `holoso_isubs` beside it: a sign folds onto the conversion's operand rather than costing a module."""
     result = holoso.synthesize(target, _INT16, name="Conv")
-    assert _modules(result) == ["ftoint"]
+    assert _modules(result) == ["frint"]
     sim = result.numerical_model.elaborate()
     for x in _ROUNDINGS:
         assert _run(sim, x) == _expected(target, x), x
 
 
-def test_a_rounding_another_reader_observes_is_still_emitted_beside_the_conversion() -> None:
-    """A second reader adds the standalone rounding rather than cancelling the absorption."""
-    result = holoso.synthesize(floored_for_two_readers, _INT16, name="TwoReaders")
-    assert _modules(result) == ["fadd", "fround", "ftoint"]
-    sim = result.numerical_model.elaborate()
-    for x in _ROUNDINGS:
-        assert _run(sim, x) == _expected(floored_for_two_readers, x), x
-
-
 def test_two_conversions_over_one_value_stay_apart_on_their_modes_alone() -> None:
     """One shared instance, two firings: the outputs differ wherever truncation and floor do."""
     result = holoso.synthesize(truncated_and_floored, _INT16, name="TruncAndFloor")
-    assert result.verilog_output.verilog.count("holoso_ftoint #") == 1
-    assert _modules(result) == ["ftoint"]
+    assert _modules(result) == ["frint"]
     sim = result.numerical_model.elaborate()
     for x in _ROUNDINGS:
         assert _run(sim, x) == _expected(truncated_and_floored, x), x
 
 
-def test_a_rounding_that_only_a_conversion_reads_needs_no_rounding_operator_configured() -> None:
-    """Absorbed, the rounding is never selected, so a kernel that only converts one no longer demands `fround`."""
-    without_fround = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(), ffromint=holoso.FFromIntOptions(), ftoint=holoso.FToIntOptions()
-        ),
-        ffmt=holoso.FloatFormat(5, 11),
-    )
-    holoso.synthesize(floored_to_int, without_fround, name="NoFround")
-    with pytest.raises(holoso.UnsupportedConstruct):
-        holoso.synthesize(floored_for_two_readers, without_fround, name="NoFroundTwoReaders")
+def every_rounding_both_ways(x: float) -> tuple[float, int, float, int, float, int, float, int]:
+    return np.rint(x), round(x), np.floor(x), math.floor(x), np.ceil(x), math.ceil(x), np.trunc(x), int(x)
+
+
+def every_rounding_as_integer(x: float) -> tuple[int, int, int, int]:
+    return round(x), math.floor(x), math.ceil(x), int(x)
+
+
+def test_a_rounding_answers_as_float_and_as_integer_in_one_firing() -> None:
+    """
+    The float result of a rounding rides the firing that converts it, in every rounding mode: the kernel wanting both
+    takes no longer than the one wanting the integers alone, which twice the firings on the one rounder would.
+    """
+    both = holoso.synthesize(every_rounding_both_ways, _INT16, name="BothWays")
+    integers = holoso.synthesize(every_rounding_as_integer, _INT16, name="IntegersOnly")
+    assert _modules(both) == _modules(integers) == ["frint"]
+    assert both.initiation_interval == integers.initiation_interval
+    sim = both.numerical_model.elaborate()
+    for x in _ROUNDINGS:
+        assert _run(sim, x) == _expected(every_rounding_both_ways, x), x
+
+
+def truncated_and_converted_back(x: float) -> tuple[int, float]:
+    return int(x), float(int(x))
+
+
+def test_converting_an_integer_back_is_the_float_result_of_the_same_firing() -> None:
+    """`float(int(x))` is the truncation itself, so it costs neither the integer-to-float converter nor a firing."""
+    result = holoso.synthesize(truncated_and_converted_back, _INT16, name="TruncatedBack")
+    alone = holoso.synthesize(truncated_to_int, _INT16, name="TruncatedAlone")
+    assert _modules(result) == ["frint"]
+    assert result.initiation_interval == alone.initiation_interval
+    sim = result.numerical_model.elaborate()
+    for x in _ROUNDINGS:
+        assert _run(sim, x) == _expected(truncated_and_converted_back, x), x
 
 
 def rounded_to_float(x: float) -> float:

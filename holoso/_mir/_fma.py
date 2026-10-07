@@ -22,7 +22,7 @@ from .._hir import (
     rebuild,
     references,
 )
-from .._operators import FFmaPrimitive, FloatSignControl, OpConfig
+from .._operators import FFmaOperator, FloatSignControl, OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
 from ._signs import sign_chain
@@ -135,7 +135,7 @@ def _plan_fma_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, _FmaPlan]:
     A product is carried by every add that names it or by none, since one add would single-round a product observed
     elsewhere.
     """
-    if not ops.serves(FFmaPrimitive):
+    if not ops.serves(FFmaOperator):
         return {}
     fmt = ops.float_format
     readers = _readers(hir)

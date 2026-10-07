@@ -13,12 +13,11 @@ from cocotb_tools.runner import get_runner
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FILog2Options,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
-    FSqrtOptions,
     FloatFormat,
     OperatorOptions,
     Options,
@@ -39,12 +38,11 @@ def _ops() -> MirOptions:
             OperatorOptions(
                 fadd=FAddOptions(),
                 fmul=FMulOptions(),
-                fdiv=FDivOptions(),
+                fdivsqrt=FDivsqrtOptions(),
                 fmul_ilog2=FMulILog2Options(),
                 filog2=FILog2Options(),
                 fcmp=FCmpOptions(),
                 fsort=FSortOptions(),
-                fsqrt=FSqrtOptions(),
             ),
             ffmt=FMT,
         )
@@ -63,6 +61,10 @@ def _speculated_hypot(a: float, b: float) -> float:
 
 def _sqrt(x: float) -> float:
     return math.sqrt(x)
+
+
+def _quotient_and_root(a: float, b: float) -> float:
+    return a / b + math.sqrt(a)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,20 @@ CASES = (
             _Vector((0.0,), False),
             _Vector((-1.0,), True),
             _Vector((0.0,), False),
+        ),
+    ),
+    # One instance runs both operations, so its one error port must report either's fault, and neither's on a clean
+    # run after one.
+    _Case(
+        "quotient_and_root",
+        _quotient_and_root,
+        ("a", "b"),
+        (
+            _Vector((4.0, 2.0), False),
+            _Vector((4.0, 0.0), True),
+            _Vector((4.0, 2.0), False),
+            _Vector((-4.0, 2.0), True),
+            _Vector((0.0, 2.0), False),
         ),
     ),
     # The expansion's only error-bearing primitive is the root, over a sum of squares. The ORDINARY vector is the

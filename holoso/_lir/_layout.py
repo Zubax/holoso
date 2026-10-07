@@ -9,7 +9,7 @@ from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule, schedule_ops
 from ._build_base import BlockOffsets, BlockSchedules
-from ._mir_facts import mir_operation, succ_map
+from ._mir_facts import mir_operation
 
 _logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def schedule_blocks(mir: Mir, fetch_lag: int) -> BlockSchedules:
     set decides no schedule. Back-edge targets and merge blocks are multi-predecessor, so no overlap crosses them:
     the forward-DAG carry converges in this single pass with no fixpoint.
     """
-    succ = succ_map(mir)
+    succ = {block.id: successors(block) for block in mir.blocks}
     preds = {bid: len(sources) for bid, sources in predecessors(mir).items()}
     blocks_by_id = {block.id: block for block in mir.blocks}
     block_sched: dict[int, Schedule] = {}
