@@ -252,6 +252,11 @@ TARGETS: list[SynthTarget] = [
     _for_example("uart_rx", FlowId.YOSYS_ECP5, 100, _op_config(_F_e4m8)),
     _for_example("uart_rx", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e4m8)),
     _for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e4m8)),
+    # tunable_lowpass: the one bundled kernel whose shift counts are run-time operands, hence the one that builds the
+    # barrel shifter; at the 32-bit word its script ships.
+    _for_example("tunable_lowpass", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wint_min=32)),
+    _for_example("tunable_lowpass", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wint_min=32)),
+    _for_example("tunable_lowpass", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wint_min=32)),
     _for_example(
         "ekf1_stateless",
         FlowId.YOSYS_ECP5,

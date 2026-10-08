@@ -86,3 +86,15 @@ randomized slack-based priority, 300 trials per block under an independent timin
 height order misses: rigid_body_scalar by two cycles, imu_fusion's entry and one arm block by one cycle each. Other
 large kernels (both EKFs, cordic_sincos, foc) showed no gain, so the benefit is uneven; a contention-aware priority, or
 a few perturbed orders per block keeping the shortest, are the candidates.
+
+## MIR
+
+### Sign tests against zero and a branchless absolute value
+
+A comparison against a constant zero occupies a comparator firing even where it only reads its operand's sign bit.
+Inline primitives answering "negative" and "nonnegative" for an integer (`iisneg`, `iisnonneg`), and their float
+counterparts, would take those comparisons off the comparator; equality with zero and its negation lower through the
+existing conversion to boolean. "Positive" and "nonpositive" look past the sign bit, so they stay on the comparator.
+
+The integer absolute value then needs no operator of its own: it lowers to the saturating `0 + x` and `0 - x` and an
+inline select between them on the sign test, which removes `holoso_iabss`.

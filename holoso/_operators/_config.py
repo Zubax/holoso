@@ -43,8 +43,7 @@ class OperatorOptions:
     imuls: IMulOptions = IMulOptions()
     idivs: IDivOptions = IDivOptions()
     iabss: IAbsOptions = IAbsOptions()
-    ishl: IShlOptions = IShlOptions()
-    ishr: IShrOptions = IShrOptions()
+    ishft: IShftOptions = IShftOptions()
     ipopcnt: IPopcntOptions = IPopcntOptions()
     icmp: ICmpOptions = ICmpOptions()
 
@@ -168,12 +167,8 @@ class OpConfig:
         return self._built(IAbsOperator.build, self.int_format, self.options.iabss)
 
     @cached_property
-    def ishl(self) -> IShlOperator:
-        return self._built(IShlOperator.build, self.int_format, self.options.ishl)
-
-    @cached_property
-    def ishr(self) -> IShrOperator:
-        return self._built(IShrOperator.build, self.int_format, self.options.ishr)
+    def ishft(self) -> IShftOperator:
+        return self._built(IShftOperator.build, self.int_format, self.options.ishft)
 
     @cached_property
     def ipopcnt(self) -> IPopcntOperator:

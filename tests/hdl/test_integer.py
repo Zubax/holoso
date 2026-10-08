@@ -14,8 +14,6 @@ from holoso import (
     ICmpOptions,
     IntFormat,
     IPopcntOptions,
-    IShlOptions,
-    IShrOptions,
     ISubOptions,
 )
 from holoso._operators import (
@@ -24,8 +22,6 @@ from holoso._operators import (
     IAddOperator,
     ICmpOperator,
     IPopcntOperator,
-    IShlOperator,
-    IShrOperator,
     ISubOperator,
 )
 
@@ -48,8 +44,6 @@ _OPERATORS: list[Callable[[IntFormat], HardwareOperator]] = [
     lambda fmt: ISubOperator.build(fmt, ISubOptions()),
     lambda fmt: IAbsOperator.build(fmt, IAbsOptions()),
     lambda fmt: ICmpOperator.build(fmt, ICmpOptions()),
-    lambda fmt: IShlOperator.build(fmt, IShlOptions()),
-    lambda fmt: IShrOperator.build(fmt, IShrOptions()),
     lambda fmt: IPopcntOperator.build(fmt, IPopcntOptions()),
 ]
 
@@ -97,37 +91,13 @@ async def integer_operator_cocotb(dut: Any) -> None:
             if unary:
                 await step(a)
             else:
-                operands_b = directed
-                if "shamt" in operands:
-                    # The last four are past the word yet still inside the shifter's low count field,
-                    # a band every other corner here misses.
-                    field = 1 << (width - 1).bit_length()
-                    operands_b = [
-                        value & mask
-                        for value in (
-                            *(0, 1, -1, width - 1, 1 - width, width, -width, width + 1, -width - 1, -minimum),
-                            *(field - 1, 1 - field, field, -field),
-                        )
-                    ]
-                for b in operands_b:
+                for b in directed:
                     await step(a, b)
-        if operator == "holoso_ishl":
-            # Straddle the exact/overflow boundary of every left shift amount, which is what the overflow mask
-            # actually decides. The boundary is asymmetric by one -- -2**k shifts exactly where +2**k already
-            # overflows -- so both signs are driven on both sides of it; the trailing corners pin the two operands
-            # whose magnitude alone cannot decide them.
-            for shift in range(width + 1):
-                headroom = 1 << (width - 1 - shift) if shift < width else 0
-                for value in (headroom, headroom - 1, -headroom, -headroom - 1):
-                    await step(value & mask, shift)
-            for value, shift in ((-minimum, 0), (-minimum, 1), (-1, width - 1), (-1, width)):
-                await step(value & mask, shift)
         rng = np.random.default_rng(int(os.environ.get("HOLOSO_TEST_SEED", "12345")))
         for _ in range(int(os.environ.get("HOLOSO_INTEGER_RANDOM", "1000"))):
+            a = int(rng.integers(0, 1 << width, dtype=np.uint64))
             b = int(rng.integers(0, 1 << width, dtype=np.uint64))
-            if "shamt" in operands and rng.random() < 0.5:
-                b = int(rng.integers(-width - 2, width + 3)) & mask
-            await step(int(rng.integers(0, 1 << width, dtype=np.uint64)), b, bool(rng.random() >= 0.2))
+            await step(a, b, bool(rng.random() >= 0.2))
 
     await scoreboard.drain()
     mask = (1 << width) - 1

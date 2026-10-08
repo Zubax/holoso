@@ -59,6 +59,7 @@ from rigid_body_rates import update as rigid_body_update  # noqa: E402  # bare n
 from schmitt_trigger import SchmittTrigger as SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
+from tunable_lowpass import TunableLowpass  # noqa: E402
 from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
 # The wide scalar datapath: the one configuration the example matrix is synthesized in.
@@ -856,6 +857,40 @@ _FIXED_POINT_MANUAL = [
 def _draw_fixed_point(rng: np.random.Generator) -> InputVector:
     reference, measurement = (int(word) for word in rng.integers(Current.lo, Current.hi + 1, size=2))
     return _fixed_point_row(reference, measurement, int(rng.integers(Gain.lo, Gain.hi + 1)))
+
+
+# The tunable low-pass filter's domain as its docstring states it. Every vector stays inside, the edge sweep included:
+# no operation saturates there, and a shift count outside it has no reference to compare against, since CPython raises
+# on a negative count and keeps the bits a word drops.
+_LOWPASS_SAMPLE_MAX = (1 << 23) - 1
+_LOWPASS_SAMPLE_MIN = -(1 << 23)
+_LOWPASS_K_MAX = 15
+_LOWPASS_G_MAX = 6
+
+
+def _lowpass_row(x: int, k: int, g: int = 0) -> InputVector:
+    return {"x": x, "k": k, "g": g}
+
+
+_LOWPASS_MANUAL = (
+    [_lowpass_row(1000, 2)] * 24  # settles at 997 and holds: the flooring shift's dead band under a rising step
+    + [_lowpass_row(-1000, 2)] * 26  # a falling step has none and lands on -1000
+    + [_lowpass_row(-1000, 2, g) for g in range(1, _LOWPASS_G_MAX + 1)]  # the settled state through every gain
+    + [
+        _lowpass_row(_LOWPASS_SAMPLE_MAX, 0, _LOWPASS_G_MAX),  # a zero count tracks the sample: the widest output
+        _lowpass_row(_LOWPASS_SAMPLE_MIN, _LOWPASS_K_MAX),  # the widest difference, at the longest time constant
+        _lowpass_row(_LOWPASS_SAMPLE_MIN, 0, _LOWPASS_G_MAX),
+        _lowpass_row(_LOWPASS_SAMPLE_MAX, _LOWPASS_K_MAX, _LOWPASS_G_MAX),
+    ]
+)
+
+
+def _draw_lowpass(rng: np.random.Generator) -> InputVector:
+    return _lowpass_row(
+        int(rng.integers(_LOWPASS_SAMPLE_MIN, _LOWPASS_SAMPLE_MAX + 1)),
+        int(rng.integers(0, _LOWPASS_K_MAX + 1)),
+        int(rng.integers(0, _LOWPASS_G_MAX + 1)),
+    )
 
 
 def _draw_imu_fusion(rng: np.random.Generator) -> InputVector:
@@ -1713,5 +1748,18 @@ SPECS = [
         edge_overrides={"kp_word": (0, 1, -1, Gain.hi, Gain.lo)},
         formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
         wint_min=20,  # the proportional product is at most 4095 * 128 in magnitude: 19 bits, plus the sign bit
+    ),
+    ExampleSpec(
+        name="tunable_lowpass",  # the one bundled kernel whose shift counts are run-time operands
+        inputs=("x", "k", "g"),
+        make_kernel=lambda: TunableLowpass().__call__,
+        nominal=_lowpass_row(1000, 4, 2),
+        manual=_LOWPASS_MANUAL,
+        draw_random=_draw_lowpass,
+        edge_values=(0, 1, -1, _LOWPASS_SAMPLE_MAX, _LOWPASS_SAMPLE_MIN),
+        # The sweep is uniform over the inputs, so each shift count takes its own range instead of the samples' rails.
+        edge_overrides={"k": (0, 1, 8, _LOWPASS_K_MAX), "g": (0, 1, 3, _LOWPASS_G_MAX)},
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=32,  # the scaled output needs 30 bits and the difference 25, which the shipped 32-bit word holds
     ),
 ]

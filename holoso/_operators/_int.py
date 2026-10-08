@@ -6,6 +6,7 @@ native Verilog over the whole wide bank, sound because an integer fills that reg
 
 from abc import ABC
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import ClassVar, Self
 
 from .._value import IntValue, ScalarValue
@@ -16,6 +17,8 @@ from ._common import (
     ComparatorPrimitive,
     HardwareOperator,
     InlinePrimitive,
+    ModePort,
+    OperatorMode,
     OperatorPort,
     PooledPrimitive,
     ScalarSignature,
@@ -210,32 +213,54 @@ class IAbsPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IShlOptions(BaseOperatorOptions): ...
+class IShftOptions(BaseOperatorOptions): ...
 
 
-class IShlOperator(HardwareOperator):
+class ShiftMode(IntEnum):
+    """The value driven on `right`."""
+
+    LEFT = 0
+    RIGHT = 1
+
+
+class IShftOperator(HardwareOperator):
+    """
+    One barrel shifter serving the left shift and the right shift, chosen per firing on `right`, at one latency. The
+    shift is the raw bit shift either way, so the module raises no saturation sideband.
+    """
+
     __slots__ = ()
-    name = "ishl"
+    name = "ishft"
+    mode_port = ModePort("right", 1)
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IShlOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("x", "shamt"), ("shft", "prod"))
+    def build(cls, fmt: IntFormat, options: IShftOptions) -> Self:
+        ints = IntType(fmt)
+        modes = tuple(OperatorMode(int(mode), "LATENCY", 1, 2, (0,)) for mode in ShiftMode)
+        operands = (OperatorPort("x", ints), OperatorPort("shamt", ints))
+        outputs = (OperatorPort("shft", ints),)
+        return cls({"W": fmt.width, "LATENCY": 2}, options.instances, operands, outputs, modes)
+
+    def mode_of_shift(self, mode: ShiftMode) -> OperatorMode:
+        return self.mode_of(int(mode))
 
 
 @dataclass(frozen=True, slots=True)
 class IShlPrimitive(IntPrimitive):
     """
-    An arithmetic shift by a signed amount, left when positive. It emits both readings of a left shift at once:
-    `shft` lets the high bits fall off the word, while `prod` is the multiplication by a power of two, saturating
-    instead. Which one a shift wants is a lowering decision, so the primitive commits to neither.
+    An arithmetic shift by a signed amount, left when positive and right when negative. A left shift lets the high
+    bits fall off the word: saturating instead is what a multiplication by a power of two does, on the multiplier.
     """
 
-    operator: IShlOperator
-    output_labels: ClassVar[tuple[str, ...]] = ("shft", "prod")
+    operator: IShftOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_shift(ShiftMode.LEFT)
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
-        return a.shift_left(b)
+        return (a.shift_left(b),)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -243,26 +268,17 @@ class IShlPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IShrOptions(BaseOperatorOptions): ...
-
-
-class IShrOperator(HardwareOperator):
-    __slots__ = ()
-    name = "ishr"
-
-    @classmethod
-    def build(cls, fmt: IntFormat, options: IShrOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("x", "shamt"), ("shft",))
-
-
-@dataclass(frozen=True, slots=True)
 class IShrPrimitive(IntPrimitive):
     """
-    The mirror of IShlPrimitive, right when positive.
-    Neither direction can rail, so it emits one raw reading and no saturation.
+    The mirror of IShlPrimitive on the same operator: right when positive and left when negative, that left shift
+    dropping what leaves the word as well.
     """
 
-    operator: IShrOperator
+    operator: IShftOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_shift(ShiftMode.RIGHT)
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
@@ -423,8 +439,8 @@ class IntBwNotPrimitive(IntInlinePrimitive):
 @dataclass(frozen=True, slots=True)
 class IntShiftConstPrimitive(IntInlinePrimitive):
     """
-    An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
-    drops what leaves the word rather than saturating as the pooled `holoso_ishl` also offers.
+    An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, as the pooled
+    `holoso_ishft` computes for a runtime count, so a left shift drops what leaves the word.
     """
 
     mnemonic: ClassVar[str] = "ishiftc"
@@ -452,7 +468,7 @@ class IntShiftConstPrimitive(IntInlinePrimitive):
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
-        return (a.shift_left(IntValue.from_int(self.fmt, self.shamt)).shft,)
+        return (a.shift_left(IntValue.from_int(self.fmt, self.shamt)),)
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,17 +2,16 @@
 //
 // Every operator has a mandatory input and output latches, exposing no combinational circuits outside.
 //
-//  Module          | Operation                             |Latency| Inputs    | Outputs
-//  ----------------|---------------------------------------|-------|-----------|---------------------------
-//  holoso_iadds    | Signed addition, saturated            | 2     | a, b      | y, saturated
-//  holoso_isubs    | Signed subtraction, saturated         | 2     | a, b      | y, saturated
-//  holoso_imuls    | Signed multiplication, saturated      | 2..6  | a, b      | y, saturated
-//  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den  | quo, rem, saturated, div0
-//  holoso_iabss    | Absolute value, saturated             | 2     | x         | y, saturated
-//  holoso_ishl     | Arith. shift, left+/right-            | 2     | x, shamt  | shft, prod, saturated
-//  holoso_ishr     | Arith. shift, right+/left-            | 2     | x, shamt  | shft
-//  holoso_icmp     | Signed comparison                     | 2     | a, b      | a_gt_b, a_eq_b, a_lt_b
-//  holoso_ipopcnt  | Population count of the magnitude     | 2     | x         | y
+//  Module          | Operation                             |Latency| Inputs          | Outputs
+//  ----------------|---------------------------------------|-------|-----------------|---------------------------
+//  holoso_iadds    | Signed addition, saturated            | 2     | a, b            | y, saturated
+//  holoso_isubs    | Signed subtraction, saturated         | 2     | a, b            | y, saturated
+//  holoso_imuls    | Signed multiplication, saturated      | 2..6  | a, b            | y, saturated
+//  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den        | quo, rem, saturated, div0
+//  holoso_iabss    | Absolute value, saturated             | 2     | x               | y, saturated
+//  holoso_ishft    | Signed arithmetic shift, left/right   | 2     | right, x, shamt | shft
+//  holoso_icmp     | Signed comparison                     | 2     | a, b            | a_gt_b, a_eq_b, a_lt_b
+//  holoso_ipopcnt  | Population count of the magnitude     | 2     | x               | y
 
 `timescale 1ns/1ps
 
@@ -604,130 +603,14 @@ module holoso_iabss#(parameter W = 44, parameter integer LATENCY = 0) (
     end
 endmodule
 
-// Signed integer barrel shifter: shift left if shamt>0, shift right if shamt<0.
-// A left shift can overflow, and both readings of that event are emitted at once: `shft` is the raw bit shift that
-// lets the high bits fall off the word, while `prod` is the saturating multiplication by a power of two that clamps
-// to the representable range and reports the clamp on `saturated`.
-// Right shifts cannot overflow, so there the two results agree and the flag stays low.
-module holoso_ishl#(parameter W = 44, parameter integer LATENCY = 0) (
+// Signed integer barrel shifter for both directions: it shifts left when `right` is low and right when it is high, and
+// a negative shamt reverses whichever of the two that is. The shift is the raw bit shift -- a left shift lets the high
+// bits fall off the word instead of saturating, a right shift fills with the sign.
+module holoso_ishft#(parameter W = 44, parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-    input  wire signed [W-1:0] x,
-    input  wire signed [W-1:0] shamt,
-    output reg out_valid,
-    output reg signed [W-1:0] shft,
-    output reg signed [W-1:0] prod,
-    output reg saturated
-);
-    localparam integer LATENCY_REF = 2;
-    localparam integer SW = $clog2(W);
-    localparam integer PW = $clog2(SW);
-    localparam integer GROUP_BITS = 2;
-    localparam integer GROUP = 1 << GROUP_BITS;
-    // Sized by the index range rather than by the data, so no shift amount can walk the group select off the end;
-    // the groups past the magnitude are constant zero and fold away.
-    localparam integer NGROUPS = ((1 << SW) + GROUP - 1) / GROUP;
-    localparam [SW:0] W_AMOUNT = W;
-    localparam signed [W-1:0] MIN = {1'b1, {(W-1){1'b0}}};
-    localparam signed [W-1:0] MAX = {1'b0, {(W-1){1'b1}}};
-    generate
-        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
-            _holoso_invalid_integer_latency u_invalid();
-        end
-    endgenerate
-
-    reg signed [W-1:0] x_q;
-    reg signed [W-1:0] shamt_q;
-    reg input_valid_q;
-    wire [SW-1:0] shamt_narrow = shamt_q[SW-1:0];
-    wire [SW-1:0] right_prefix [0:PW];
-    assign right_prefix[0] = shamt_narrow;
-    genvar i;
-    generate
-        for (i = 0; i < PW; i = i + 1) begin : g_right_prefix
-            assign right_prefix[i+1] = right_prefix[i] | (right_prefix[i] << (1 << i));
-        end
-    endgenerate
-    wire [SW-1:0] right_amount = shamt_narrow ^ (right_prefix[PW] << 1);
-    wire [SW:0] left_amount_ext = {1'b0, shamt_narrow};
-    // The left flag tests for a count past the word because `left_overflow` below reads it to decide the saturation
-    // flag, where such a count overflows for every operand but zero -- which the magnitude cannot see. The right flag
-    // only steers the mux and needs no such test: a count filling the whole word vacates every bit position, and
-    // IEEE 1364-2005 section 5.1.12 fills each one with the sign for `>>>` on a signed result, which is the word the
-    // fill arm writes.
-    wire left_large = (|shamt_q[W-1:SW]) | (left_amount_ext >= W_AMOUNT);
-    wire right_large = (~&shamt_q[W-1:SW]) | (~|shamt_narrow);
-    wire signed [W-1:0] shifted_left = x_q << shamt_narrow;
-    wire signed [W-1:0] shifted_right = x_q >>> right_amount;
-
-    // A left shift by s is exact iff the top s+1 bits of x already equal its sign, so overflow is the question of
-    // whether any of the s bits the shift pushes out differs from the sign. Reversing the magnitude turns "the top s
-    // bits" into "the low s bits", and splitting s into a group index and an offset inside the group lets the two
-    // halves of the test resolve in parallel: whole groups below the boundary are reduced without consulting s at
-    // all, and only the straddled group needs a bit-level mask. Masking the whole word instead, which reads more
-    // directly, stacks a decode and a word-wide reduction behind the shift amount and fails the timing closure.
-    // A shift past the word is exact only for zero, which the magnitude alone cannot tell from -1, hence the branch.
-    wire [W-2:0] magnitude = x_q[W-2:0] ^ {(W-1){x_q[W-1]}};
-    wire [NGROUPS*GROUP-1:0] lost_order;
-    wire [NGROUPS-1:0] group_any;
-    generate
-        for (i = 0; i < NGROUPS * GROUP; i = i + 1) begin : g_lost_order
-            if (i < W - 1) begin : g_bit
-                assign lost_order[i] = magnitude[W-2-i];
-            end else begin : g_pad
-                assign lost_order[i] = 1'b0;
-            end
-        end
-        for (i = 0; i < NGROUPS; i = i + 1) begin : g_group_any
-            assign group_any[i] = |lost_order[i*GROUP +: GROUP];
-        end
-    endgenerate
-    wire [SW-1:0] group_index = shamt_narrow >> GROUP_BITS;
-    wire [GROUP_BITS-1:0] group_offset = shamt_narrow;  // truncation is the intent; a slice would not fit W = 2
-    wire [NGROUPS-1:0] whole_groups = ~({NGROUPS{1'b1}} << group_index);
-    wire [GROUP-1:0] straddled_group = lost_order[group_index*GROUP +: GROUP];
-    wire [GROUP-1:0] straddled_mask = ~({GROUP{1'b1}} << group_offset);
-    wire left_overflow = left_large ? (|x_q) : (|(group_any & whole_groups) | |(straddled_group & straddled_mask));
-    wire clamp = ~shamt_q[W-1] & left_overflow;
-
-    // Zero fill and sign fill are the same uniform word once the direction is known, so folding the two range flags
-    // into one select leaves every `prod` bit a six-input function of three selects, the operand sign and the two
-    // shifter bits: one slice rank on a 4-LUT fabric.
-    wire unshifted = shamt_q[W-1] ? right_large : left_large;
-    wire fill = shamt_q[W-1] & x_q[W-1];
-
-    always @(posedge clk) begin
-        x_q <= x;
-        shamt_q <= shamt;
-        casez ({unshifted, shamt_q[W-1]})
-            2'b1?: shft <= {W{fill}};
-            2'b00: shft <= shifted_left;
-            2'b01: shft <= shifted_right;
-        endcase
-        casez ({clamp, unshifted, shamt_q[W-1]})
-            3'b1??: prod <= x_q[W-1] ? MIN : MAX;
-            3'b01?: prod <= {W{fill}};
-            3'b000: prod <= shifted_left;
-            3'b001: prod <= shifted_right;
-        endcase
-        saturated <= clamp;
-        if (rst) begin
-            input_valid_q <= 1'b0;
-            out_valid <= 1'b0;
-        end else begin
-            input_valid_q <= in_valid;
-            out_valid <= input_valid_q;
-        end
-    end
-endmodule
-
-// Signed integer barrel shifter, the mirror of holoso_ishl: shift right if shamt>0, shift left if shamt<0.
-// Neither direction can rail here -- a right shift cannot overflow and the left one is the raw bit shift.
-module holoso_ishr#(parameter W = 44, parameter integer LATENCY = 0) (
-    input  wire clk,
-    input  wire rst,
-    input  wire in_valid,
+    input  wire right,
     input  wire signed [W-1:0] x,
     input  wire signed [W-1:0] shamt,
     output reg out_valid,
@@ -744,35 +627,49 @@ module holoso_ishr#(parameter W = 44, parameter integer LATENCY = 0) (
 
     reg signed [W-1:0] x_q;
     reg signed [W-1:0] shamt_q;
+    reg right_q;
     reg input_valid_q;
+    wire negative = shamt_q[W-1];
+    wire go_right = right_q ^ negative;
+
+    // The magnitude of a negative amount is the two's-complement negation of its low bits, which inverts every bit
+    // above the lowest set one; a prefix OR finds those bits without a carry chain.
     wire [SW-1:0] shamt_narrow = shamt_q[SW-1:0];
-    wire [SW-1:0] left_prefix [0:PW];
-    assign left_prefix[0] = shamt_narrow;
+    wire [SW-1:0] prefix [0:PW];
+    assign prefix[0] = shamt_narrow;
     genvar i;
     generate
-        for (i = 0; i < PW; i = i + 1) begin : g_left_prefix
-            assign left_prefix[i+1] = left_prefix[i] | (left_prefix[i] << (1 << i));
+        for (i = 0; i < PW; i = i + 1) begin : g_prefix
+            assign prefix[i+1] = prefix[i] | (prefix[i] << (1 << i));
         end
     endgenerate
-    wire [SW-1:0] left_amount = shamt_narrow ^ (left_prefix[PW] << 1);
-    // Neither flag reaches an overflow test here, so neither tests for a count past the word: such a count vacates
-    // every bit position, and IEEE 1364-2005 section 5.1.12 fills each one with the sign for `>>>` on a signed result
-    // and with zero for `<<`, which is exactly the word the fill arm writes.
-    wire right_large = |shamt_q[W-1:SW];
-    wire left_large = (~&shamt_q[W-1:SW]) | (~|shamt_narrow);
-    wire signed [W-1:0] shifted_right = x_q >>> shamt_narrow;
-    wire signed [W-1:0] shifted_left = x_q << left_amount;
+    wire [SW-1:0] amount = shamt_narrow ^ ((prefix[PW] << 1) & {SW{negative}});
 
-    wire unshifted = shamt_q[W-1] ? left_large : right_large;
-    wire fill = ~shamt_q[W-1] & x_q[W-1];
+    // The shifter answers every amount its count field can express, because the fill below reaches as far as the
+    // field does; only a magnitude past the field itself needs the fill word chosen here.
+    wire unshifted = negative ? ((~&shamt_q[W-1:SW]) | (~|shamt_narrow)) : (|shamt_q[W-1:SW]);
+    wire fill = go_right & x_q[W-1];
+
+    wire [W-1:0] x_reversed;
+    wire [W-1:0] entering = go_right ? x_reversed : x_q;
+    wire [W+(1<<SW)-1:0] spanned = {entering, {(1 << SW){fill}}} << amount;
+    wire [W-1:0] leaving = spanned[W+(1<<SW)-1:(1<<SW)];
+    wire [W-1:0] leaving_reversed;
+    generate
+        for (i = 0; i < W; i = i + 1) begin : g_reverse
+            assign x_reversed[i] = x_q[W-1-i];
+            assign leaving_reversed[i] = leaving[W-1-i];
+        end
+    endgenerate
 
     always @(posedge clk) begin
         x_q <= x;
         shamt_q <= shamt;
-        casez ({unshifted, shamt_q[W-1]})
+        right_q <= right;
+        casez ({unshifted, go_right})
             2'b1?: shft <= {W{fill}};
-            2'b00: shft <= shifted_right;
-            2'b01: shft <= shifted_left;
+            2'b00: shft <= leaving;
+            2'b01: shft <= leaving_reversed;
         endcase
         if (rst) begin
             input_valid_q <= 1'b0;

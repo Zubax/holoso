@@ -55,8 +55,7 @@ from ._operators import (
     IDivOptions as IDivOptions,
     IMulOptions as IMulOptions,
     IPopcntOptions as IPopcntOptions,
-    IShlOptions as IShlOptions,
-    IShrOptions as IShrOptions,
+    IShftOptions as IShftOptions,
     ISubOptions as ISubOptions,
     OperatorOptions as OperatorOptions,
 )

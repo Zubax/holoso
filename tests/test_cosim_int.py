@@ -4,6 +4,7 @@ vectors, and the bench's own bounded integer sweep.
 """
 
 import dataclasses
+import re
 from collections.abc import Callable
 
 import pytest
@@ -16,7 +17,7 @@ from ._eeloracle import InputRow
 from ._modelref import default_options
 from .hdl.hdl_float_oracle import SIMULATORS
 from .test_int_selection import countdown
-from .test_int_synthesis import divmod_pair, every_rounding_both_ways, popcount_of
+from .test_int_synthesis import divmod_pair, every_rounding_both_ways, popcount_of, shift_pair, shift_right_only
 
 # NcoPhase sums a 2**30 increment over a 32-bit mask, so exactness needs at least a 34-bit word.
 _OPTIONS = dataclasses.replace(default_options(FloatFormat(wexp=6, wman=18)), wint_min=34)
@@ -123,13 +124,47 @@ def pow2_strength(x: int) -> tuple[int, int, int, int, int]:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_pow2_strength_reduction_cosim(sim: str) -> None:
     """
-    The minted power-of-two forms in RTL: the shifter's saturating product tap (its first end-to-end reader),
-    the inline right shift both in-word and clamped past the word, the mask, and negation on the subtractor,
-    driven through the rails and the negative dividends whose floor/mask behavior the rewrites must preserve.
+    The minted power-of-two forms in RTL: the inline right shift both in-word and clamped past the word, the mask,
+    and negation on the subtractor, beside a power-of-two product, which stays on the multiplier; driven through the
+    rails and the negative dividends whose floor/mask behavior the rewrites must preserve.
     """
     values = [0, 1, -1, 7, -7, 8, -8, 31, -33, 4095, -4096, _IFMT.max, _IFMT.min, _IFMT.max // 4 + 1]
     result = holoso.synthesize(pow2_strength, _OPTIONS, name="pow2_strength_int")
     run_cosim(sim, result, vectors=rows("x", values))
+
+
+# Each operand under the counts that separate the shifter's cases: inside the word, at it and past it, and the
+# negative ones, which reverse the direction.
+_SHIFT_VECTORS = [
+    {"x": x, "n": n}
+    for x in (0, 1, -1, 12345, -12345, _IFMT.min, _IFMT.max)
+    for n in (
+        *(0, 1, 5, _IFMT.width - 1, _IFMT.width, _IFMT.width + 1, 100, _IFMT.max),
+        *(-1, -5, 1 - _IFMT.width, -_IFMT.width, -_IFMT.width - 1, -100, _IFMT.min),
+    )
+]
+
+
+@pytest.mark.cosim
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_int_shift_in_both_directions_cosim(sim: str) -> None:
+    """`x << n` and `x >> n` as two firings of one shifter, the microcode switching its direction bit between them."""
+    result = holoso.synthesize(shift_pair, _OPTIONS, name="shift_pair_int")
+    assert result.verilog_output.verilog.count("holoso_ishft #") == 1
+    run_cosim(sim, result, vectors=_SHIFT_VECTORS)
+
+
+@pytest.mark.cosim
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_int_shift_right_alone_cosim(sim: str) -> None:
+    """
+    A kernel that only shifts right holds the shifter's direction bit constant across the program, so the emitted top
+    ties it high instead of driving it from the microcode. Tied low, the module would shift left, which the model --
+    never reading the bit -- cannot see.
+    """
+    result = holoso.synthesize(shift_right_only, _OPTIONS, name="shift_right_int")
+    assert re.search(r"\buc_ishft_0_mode\s*=\s*1'd1;", result.verilog_output.verilog), "the premise of this test"
+    run_cosim(sim, result, vectors=_SHIFT_VECTORS)
 
 
 @pytest.mark.cosim

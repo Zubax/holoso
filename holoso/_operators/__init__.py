@@ -100,14 +100,13 @@ from ._int import (
     IPopcntOperator as IPopcntOperator,
     IPopcntOptions as IPopcntOptions,
     IPopcntPrimitive as IPopcntPrimitive,
-    IShlOperator as IShlOperator,
-    IShlOptions as IShlOptions,
+    IShftOperator as IShftOperator,
+    IShftOptions as IShftOptions,
     IShlPrimitive as IShlPrimitive,
-    IShrOperator as IShrOperator,
-    IShrOptions as IShrOptions,
     IShrPrimitive as IShrPrimitive,
     ISubOperator as ISubOperator,
     ISubOptions as ISubOptions,
     ISubPrimitive as ISubPrimitive,
+    ShiftMode as ShiftMode,
 )
 from ._config import OpConfig as OpConfig, OperatorOptions as OperatorOptions

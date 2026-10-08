@@ -64,7 +64,7 @@ class _DividerTarget:
 
 _TARGETS = tuple(
     _Target(operator, width, flow, frequency)
-    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishl", "holoso_ishr", "holoso_ipopcnt")
+    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishft", "holoso_ipopcnt")
     for width in (24, 44)
     for flow, frequency in (
         (FlowId.YOSYS_ECP5, 100.0),
@@ -263,10 +263,8 @@ def _build_ooc_design(operator: str, width: int) -> OocDesign:
     top = f"{operator}_w{width}_ooc"
     if operator == "holoso_icmp":
         wrapper = _render_cmp_wrapper(top, width)
-    elif operator == "holoso_ishl":
+    elif operator == "holoso_ishft":
         wrapper = _render_shift_wrapper(top, width)
-    elif operator == "holoso_ishr":
-        wrapper = _render_shift_right_wrapper(top, width)
     elif operator == "holoso_ipopcnt":
         wrapper = _render_popcnt_wrapper(top, width)
     elif operator == "holoso_iabss":
@@ -715,81 +713,20 @@ endmodule
 
 
 def _render_shift_wrapper(top: str, width: int) -> str:
+    """One output and no sideband, so the result needs no selector; the direction bit is registered as an operand is."""
     return f"""`default_nettype none
 
 module {top} (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-    input  wire in_sel,
-    input  wire [{width - 1}:0] io_in,
-    output wire out_valid,
-    input  wire [1:0] out_sel,
-    output wire [{width - 1}:0] io_out
-);
-    {KEEP_ATTR} reg r_in_valid;
-    {KEEP_ATTR} reg [{width - 1}:0] r_x;
-    {KEEP_ATTR} reg [{width - 1}:0] r_shamt;
-    wire dut_out_valid;
-    wire [{width - 1}:0] dut_shft;
-    wire [{width - 1}:0] dut_prod;
-    wire dut_saturated;
-    {KEEP_ATTR} reg [{width - 1}:0] r_shft;
-    {KEEP_ATTR} reg [{width - 1}:0] r_prod;
-    {KEEP_ATTR} reg r_saturated;
-    {KEEP_ATTR} reg r_out_valid;
-    reg [{width - 1}:0] io_out_mux;
-
-    assign out_valid = r_out_valid;
-    assign io_out = io_out_mux;
-
-    always @* begin
-        case (out_sel)
-            2'd0: io_out_mux = r_shft;
-            2'd1: io_out_mux = r_prod;
-            default: io_out_mux = {{{width}{{r_saturated}}}};
-        endcase
-    end
-
-    holoso_ishl#(.W({width}), .LATENCY(2)) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
-        .out_valid(dut_out_valid), .shft(dut_shft), .prod(dut_prod), .saturated(dut_saturated)
-    );
-
-    always @(posedge clk) begin
-        if (in_sel) r_shamt <= io_in;
-        else        r_x <= io_in;
-        r_shft <= dut_shft;
-        r_prod <= dut_prod;
-        r_saturated <= dut_saturated;
-        if (rst) begin
-            r_in_valid <= 1'b0;
-            r_out_valid <= 1'b0;
-        end else begin
-            r_in_valid <= in_valid;
-            r_out_valid <= dut_out_valid;
-        end
-    end
-endmodule
-
-`default_nettype wire
-"""
-
-
-def _render_shift_right_wrapper(top: str, width: int) -> str:
-    """One output and no sideband, so the result needs no selector."""
-    return f"""`default_nettype none
-
-module {top} (
-    input  wire clk,
-    input  wire rst,
-    input  wire in_valid,
-    input  wire in_sel,
+    input  wire [1:0] in_sel,
     input  wire [{width - 1}:0] io_in,
     output wire out_valid,
     output wire [{width - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
+    {KEEP_ATTR} reg r_right;
     {KEEP_ATTR} reg [{width - 1}:0] r_x;
     {KEEP_ATTR} reg [{width - 1}:0] r_shamt;
     wire dut_out_valid;
@@ -800,14 +737,18 @@ module {top} (
     assign out_valid = r_out_valid;
     assign io_out = r_shft;
 
-    holoso_ishr#(.W({width}), .LATENCY(2)) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
+    holoso_ishft#(.W({width}), .LATENCY(2)) dut (
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .right(r_right), .x(r_x), .shamt(r_shamt),
         .out_valid(dut_out_valid), .shft(dut_shft)
     );
 
     always @(posedge clk) begin
-        if (in_sel) r_shamt <= io_in;
-        else        r_x <= io_in;
+        case (in_sel)
+            2'd0: r_x <= io_in;
+            2'd1: r_shamt <= io_in;
+            2'd2: r_right <= io_in[0];
+            default: ;
+        endcase
         r_shft <= dut_shft;
         if (rst) begin
             r_in_valid <= 1'b0;

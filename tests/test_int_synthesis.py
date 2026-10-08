@@ -1,6 +1,7 @@
 """
 Black-box integer synthesis through the public API: every kernel drives `synthesize` and the numerical model
-against CPython or independent literals. Selection facts are asserted through the one public spelling they have --
+against CPython or independent literals, or against the HDL benches' fixed-width oracle where CPython has no answer
+(a negative shift count). Selection facts are asserted through the one public spelling they have --
 `holoso_<mnemonic> #(` instantiations present or absent in `verilog_output.verilog` -- and refusal diagnostics
 verbatim. `wint_min` alone pins the machine word of a float-free kernel, so the vectors that depend on it say so; the
 inline primitives (`ishiftc`, `ibwand`, ...) have no public name, so their selection lives in
@@ -17,6 +18,8 @@ import numpy as np
 import pytest
 
 import holoso
+
+from .hdl.hdl_integer_oracle import ishl, ishr, signed
 
 _OPTIONS = holoso.Options(holoso.OperatorOptions())
 
@@ -375,7 +378,7 @@ def test_each_integer_output_still_holds_its_own_value_at_the_boundary() -> None
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Shifts: the runtime shifters, the constant folds, and the machine-word substitution fixpoint.
+# Shifts: the runtime shifter, the constant folds, and the machine-word substitution fixpoint.
 
 
 def shift_pair(x: int, n: int) -> tuple[int, int]:
@@ -406,7 +409,7 @@ def test_a_negative_runtime_shift_count_reverses_the_direction(
     shift_pair_sim: holoso.NumericalSimulator, x: int, n: int, expected: list[int]
 ) -> None:
     """
-    CPython refuses a negative count; each shifter is total over every representable one and reads it as its other
+    CPython refuses a negative count; the shifter is total over every representable one and reads it as the other
     direction. A kernel reaches this only through a value it did not constrain, so the hardware's answer is the
     definition -- there is no other.
     """
@@ -430,6 +433,38 @@ def test_a_folded_shift_answers_exactly_as_the_runtime_shifter_does(
         want = [_wrap(x << count), x >> count]
         assert _run(sim, x) == want, (count, x)
         assert _run(shift_pair_sim, x, count) == want, (count, x)
+
+
+_SHIFT_OPERANDS = (0, 1, -1, 5, -5, 12345, -12345, MIN, MAX)
+_SHIFT_COUNTS = (0, 1, 3, 14, 15, 16, 17, 40, MAX, -1, -3, -14, -15, -16, -17, -40, MIN)
+
+
+def _shift_pair_reference(x: int, n: int) -> list[int]:
+    """
+    What the 16-bit word answers for `x << n, x >> n` at any count, from the fixed-width oracle the shifter's own
+    bench is scored against: CPython refuses a negative count and keeps the bits a word drops.
+    """
+    x_bits, n_bits = x & 0xFFFF, n & 0xFFFF
+    return [signed(ishl(x_bits, n_bits, 16), 16), signed(ishr(x_bits, n_bits, 16), 16)]
+
+
+def test_both_directions_of_one_operand_pair_time_share_one_shifter() -> None:
+    """
+    `x << n` and `x >> n` are two firings of the one module, told apart by its direction bit alone, so the pair costs
+    a single shifter and one cycle over a single shift. A second instance buys that cycle back.
+    """
+    shared = holoso.synthesize(shift_pair, _INT16, name="ShiftPairShared")
+    assert _modules(shared) == ["ishft"] and shared.verilog_output.verilog.count("holoso_ishft #") == 1
+    assert shared.initiation_interval == (6, 6)
+    operators = dataclasses.replace(_INT16.operator, ishft=holoso.IShftOptions(instances=2))
+    split = holoso.synthesize(shift_pair, dataclasses.replace(_INT16, operator=operators), name="ShiftPairSplit")
+    assert _modules(split) == ["ishft"] and split.verilog_output.verilog.count("holoso_ishft #") == 2
+    assert split.initiation_interval == (5, 5)
+    for result in (shared, split):
+        sim = result.numerical_model.elaborate()
+        for x in _SHIFT_OPERANDS:
+            for n in _SHIFT_COUNTS:
+                assert _run(sim, x, n) == _shift_pair_reference(x, n), (x, n)
 
 
 def shift_past_every_word(x: int) -> tuple[int, int]:
@@ -676,19 +711,22 @@ def shift_right_only(x: int, n: int) -> int:
     return x >> n
 
 
-def test_a_right_shift_costs_exactly_what_a_left_shift_costs() -> None:
+def test_a_shift_in_one_direction_alone_builds_the_one_shifter() -> None:
     """
-    The point of a second shifter: a right shift no longer negates its count, so it pays neither the subtractor nor
-    the cycles that dependency cost. Matching latency alone would pass if both regressed, so the module each
-    kernel builds is pinned too.
+    A kernel shifting one way only builds the same single module, its direction bit constant across the program. A
+    right shift costs exactly what a left shift costs: it is the shifter's other mode, so it pays neither a
+    subtractor to negate its count nor the cycles that dependency would cost.
     """
     left = holoso.synthesize(shift_left_only, _INT16, name="LeftOnly")
     right = holoso.synthesize(shift_right_only, _INT16, name="RightOnly")
-    assert _modules(left) == ["ishl"] and _modules(right) == ["ishr"]
-    assert left.initiation_interval == right.initiation_interval
+    for result in (left, right):
+        assert _modules(result) == ["ishft"] and result.verilog_output.verilog.count("holoso_ishft #") == 1
+    assert left.initiation_interval == right.initiation_interval == (5, 5)
     left_sim, right_sim = left.numerical_model.elaborate(), right.numerical_model.elaborate()
-    for x, n in [(5, 2), (-5, 2), (12345, 15), (MIN, 1)]:
-        assert _run(left_sim, x, n) == [_wrap(x << n)] and _run(right_sim, x, n) == [x >> n], (x, n)
+    for x in _SHIFT_OPERANDS:
+        for n in _SHIFT_COUNTS:
+            want_left, want_right = _shift_pair_reference(x, n)
+            assert _run(left_sim, x, n) == [want_left] and _run(right_sim, x, n) == [want_right], (x, n)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -704,16 +742,17 @@ def _scale_by(k: int) -> Callable[[int], int]:
     return scaled
 
 
-@pytest.mark.parametrize("k", [1, 2, 14, 15, 16, 40])
-def test_a_power_of_two_scaling_reads_the_shifter_where_it_saturates(k: int) -> None:
+@pytest.mark.parametrize("k", [1, 2, 3, 14])
+def test_a_power_of_two_product_rails_where_the_shift_would_wrap(k: int) -> None:
     """
-    The one thing separating this primitive from `x << k`: a multiplication rails where the raw shift drops what
-    leaves the word. The count is unbounded where the word is not, so every one past the width rails the same way.
+    What separates `x * 2**k` from `x << k`: a multiplication rails where the raw shift drops what leaves the word,
+    so the product stays on the multiplier and is never rewritten into a shift.
     """
     result = holoso.synthesize(_scale_by(k), _INT16, name=f"ScaleBy{k}")
-    assert _modules(result) == ["ishl"], "the scaling must ride the shifter, not a multiplier"
+    assert _modules(result) == ["imuls"]
     sim = result.numerical_model.elaborate()
-    for x in (0, 1, -1, 3, -3, 1000, -1000, MIN, MAX):
+    edge = 2 ** (15 - k)  # the least magnitude whose product leaves the word, give or take the sign's asymmetry
+    for x in (0, 1, -1, 3, -3, 1000, -1000, MIN, MAX, edge - 1, edge, edge + 1, -edge + 1, -edge, -edge - 1):
         assert _run(sim, x) == [_clamp(x * 2**k)], (k, x)
 
 
@@ -733,21 +772,8 @@ def past_the_word_quotient(x: int) -> int:
     return x // 2**40
 
 
-def past_the_word_product(x: int) -> int:
-    return x * 2**40
-
-
 def negated_by_product(x: int) -> int:
     return x * -1
-
-
-def test_a_minted_power_of_two_product_saturates_like_the_multiplication() -> None:
-    """Strength reduction hands `x * 8` to the shifter's saturating tap, so the rails answer as the product."""
-    result = holoso.synthesize(times_eight, _INT16, name="TimesEight")
-    assert _modules(result) == ["ishl"]
-    sim = result.numerical_model.elaborate()
-    for x in (0, 1, -1, 5, -5, -8, 12345, -12345, MIN, MAX):
-        assert _run(sim, x) == [_clamp(x * 8)], x
 
 
 def test_a_minted_power_of_two_quotient_is_one_inline_shift() -> None:
@@ -773,15 +799,6 @@ def test_a_minted_quotient_past_the_word_is_the_sign_fill() -> None:
     sim = _elaborate(past_the_word_quotient, "PastWordQuotient")
     for x in (MAX, 1, 0, -1, MIN):
         assert _run(sim, x) == [x // 2**40], x
-
-
-def test_a_minted_product_past_the_word_rails_by_sign() -> None:
-    """A count past the width rails every nonzero operand, exactly as the multiplication it stands for would."""
-    result = holoso.synthesize(past_the_word_product, _INT16, name="PastWordProduct")
-    assert _modules(result) == ["ishl"]
-    sim = result.numerical_model.elaborate()
-    for x in (MAX, 1, 0, -1, MIN):
-        assert _run(sim, x) == [_clamp(x * 2**40)], x
 
 
 def boundary_remainder(x: int) -> int:

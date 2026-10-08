@@ -132,9 +132,9 @@ def countdown(n: int) -> int:
         (mux_and_casts, ["iadds", "ifrombool", "itobool", "select"]),
         (_min_max_of_ints, ["iadds", "icmp", "icmp", "imuls", "select", "select"]),
         (family_crossings, ["ffromint", "frint"]),
-        (shift_pair, ["ishl", "ishr"]),
+        (shift_pair, ["ishft", "ishft"]),
         (countdown, ["iadds", "icmp", "isubs"]),
-        (times_eight, ["ishl"]),
+        (times_eight, ["imuls"]),
         (eighth, ["ishiftc"]),
         (eighth_remainder, ["ibwand"]),
         (negated_by_product, ["isubs"]),
@@ -185,18 +185,16 @@ def strength_mix(x: int, n: int) -> tuple[int, int, int, int]:
     return x * 2, x << n, x // 5, x << 3
 
 
-def test_strength_selection_shares_the_shifter_and_keeps_the_divider() -> None:
+def test_strength_selection_keeps_the_multiplier_the_shifter_and_the_divider() -> None:
     """
-    One graph holding every strength decision: the saturating scale and the raw runtime shift bind to a SINGLE
-    `ishl` instance through their opposite taps, the non-power-of-two quotient still pays the divider, and the
-    constant count `3` is an `ishiftc` immediate -- neither a module nor a pooled constant.
+    One graph holding every strength decision: a power-of-two product is a multiplication like any other (it rails
+    where a shift would wrap), the runtime shift takes the shifter, the non-power-of-two quotient still pays the
+    divider, and the constant count `3` is an `ishiftc` immediate -- neither a module nor a pooled constant.
     """
     mir = _select(strength_mix)
-    assert _mnemonics(mir) == ["idivs", "ishiftc", "ishl", "ishl"]
+    assert _mnemonics(mir) == ["idivs", "imuls", "ishft", "ishiftc"]
     lir = build_lir(mir, "strength_mix")
-    assert sorted(instance.operator.name for instance in lir.instances) == ["idivs", "ishl"]
-    shifter_taps = {write.result for op in _wide_firings(lir) if op.inst.operator.name == "ishl" for write in op.writes}
-    assert shifter_taps == {0, 1}, "the raw reading and the saturating reading must come off the one module"
+    assert sorted(instance.operator.name for instance in lir.instances) == ["idivs", "imuls", "ishft"]
     assert 3 not in {
         node.value
         for node in mir.nodes.values()

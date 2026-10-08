@@ -74,8 +74,8 @@ consistency the language does not have would mean inventing an answer. Nothing e
 representability in the target format. A constant the machine must HOLD is another matter: one whose encoding
 crosses between finite-nonzero and zero or infinity is refused at selection rather than silently becoming what it
 encodes to, integers and floats alike. Only a constant that materializes is asked -- one an operator absorbs, such
-as a power-of-two scale, never becomes a word and is never refused -- except where an adjacent addition absorbs it
-into a fused multiply-add, which materializes the scale and so is taken only where the format holds it exactly.
+as a float's power-of-two scale, never becomes a word and is never refused -- except where an adjacent addition absorbs
+it into a fused multiply-add, which materializes the scale and so is taken only where the format holds it exactly.
 
 The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware answers 1 even when `x` is zero at run
 time, while `0.0/0.0` written out is refused at compile time.
@@ -211,8 +211,8 @@ is tried once, not iterated.
 Integers are signed two's complement and saturate at the extremes rather than wrapping. Saturation is defined
 behaviour, the dual of a float overflowing to infinity, so it is not an error flag -- were it one, an if-converted
 arm that saturated would raise an error the untaken path never earned. The deliberate exception is `<<`: the raw bit
-shift truncates at the word, so `5000 << 3` wraps where `5000 * 8` rails, and a rewrite of a power-of-two multiply
-must tap the shifter's saturating reading instead. There is no modular or unsigned flavour, so a wrapping
+shift truncates at the word, so `5000 << 3` wraps where `5000 * 8` rails, and a power-of-two multiply is therefore
+built as a multiplication, never as a shift. There is no modular or unsigned flavour, so a wrapping
 accumulator carries an explicit mask -- which cannot rescue the add it guards, saturation applying first -- and pays
 for its carry and sign headroom in the global word width; inferring wrapping/unsigned operations from adjacent
 static masks, or checking a mask's modulus against the width its addend needs, are possible future answers.
@@ -255,7 +255,8 @@ angle and magnitude from two) at different latencies, each re-accepting one step
 serves sin, cos, atan2 and a fused magnitude alike. The divider's modes share one latency and differ in the operands
 they read: one digit-recurrence pipeline answers a quotient from two operands or a square root from one. The rounder's
 modes differ in arithmetic only: each reads one operand and answers its rounding on two ports at once, as a float and as
-an integer.
+an integer. The shifter is the integer operator with modes: a direction bit selects the left or the right shift, both at
+one latency and both driving the one output.
 
 An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
 schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
@@ -466,12 +467,13 @@ license as `x/x`), negation and complement tracked as involutions so every spell
 `-(-x)` costs nothing, and the constant power-of-two rewrites -- the product into a saturating power-of-two scaling, the
 quotient into the right shift (exactly the floor division, negative dividends included), the remainder into the
 two's-complement mask. No rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR) is bounded by the
-count of left shifts in the graph. An absorbed scale never becomes a word -- only its exponent materializes -- and
-constant scalings compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width
-and composing two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of
-their sum. A conversion to an integer converts in the mode of a rounding it reads, and converting back is that rounding.
-An infinity test conjoined with a sign test of the same value is the directional classifier it amounts to (`isinf(x) and
-x > 0` is `x == inf`), taken where it retires a test nothing else reads.
+count of left shifts in the graph. A float's absorbed scale never becomes a word -- only its exponent materializes --
+and constant scalings compose as exponents rather than as the numbers they multiply to, so a float `x * 2**40` builds at
+any width and composing two scalings of one value cannot itself fail; an integer scaling is built as the multiplication
+it is, so the word must hold its factor. Two addends scaled by the same constant are one scaling of their sum. A
+conversion to an integer converts in the mode of a rounding it reads, and converting back is that rounding. An infinity
+test conjoined with a sign test of the same value is the directional classifier it amounts to (`isinf(x) and x > 0` is
+`x == inf`), taken where it retires a test nothing else reads.
 
 A constant scaling over a value has one HIR shape, decided in one place and read back by one reader: the value itself,
 an exponent scaling, or a multiplication by a positive constant with the sign peeled into a negation over it, so
@@ -528,7 +530,9 @@ is one mode of a shared operator, the float-to-integer conversion being the inte
 operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel can be
 refused for want of an operator it never wrote. The integer lowerer answers a constant shift count from the count
 itself: a right shift past the word is the sign fill (a negative count being the refusal gate's), and a count no other
-use reads is never lowered; a saturating power-of-two scaling rides the same shifter through its saturating product tap.
+use reads is never lowered; a runtime count takes the shifter in the mode of its direction. A power-of-two scaling is an
+ordinary multiplication by that power, railing where a shift would drop what leaves the word, and one whose factor the
+word cannot hold is refused.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
 sin and cos of one angle computed by one CORDIC rotation, a rounding and its integer conversion in one rounder

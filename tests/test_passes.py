@@ -1176,20 +1176,17 @@ def test_the_integer_subtraction_rules_the_shared_algebra_cannot_state() -> None
         assert _ints(sim.run(n)) == list(f(n))
 
 
-def test_a_power_of_two_integer_product_mints_the_saturating_scaling() -> None:
-    # The exponent is absorbed into the operator from either side, and the constant -- even one no machine word
-    # holds -- goes dead with it, so it is never asked to materialize and no multiplier is instantiated.
+def test_a_power_of_two_integer_product_is_built_as_a_multiplication() -> None:
+    # The exponent is absorbed into the scaling operator from either side; the machine builds that as an ordinary
+    # multiplication, because a product rails where a left shift would drop what leaves the word.
     def f(n: int) -> tuple[int, int]:
-        return n * 8, (2**40) * n
+        return n * 8, 4 * n
 
     result = _synth(f, INT_OPTIONS, name="int_pow2_product")
-    assert "holoso_imuls" not in result.verilog_output.verilog
+    assert "holoso_imuls" in result.verilog_output.verilog and "holoso_ishft" not in result.verilog_output.verilog
     sim = result.numerical_model.elaborate()
-    word = result.int_format
     for n in (-9, -1, 0, 1, 7, 1000):
-        # 2**40 lies far past any machine word, so every nonzero product rails by sign whatever the kernel settled on.
-        railed = word.min if n < 0 else word.max if n > 0 else 0
-        assert _ints(sim.run(n)) == [n * 8, railed]
+        assert _ints(sim.run(n)) == [n * 8, 4 * n]
 
 
 def test_integer_negations_share_one_tracking_across_their_spellings() -> None:

@@ -83,6 +83,8 @@ _BASELINE: dict[str, dict[str, tuple[float, float]]] = {
     "fixed_point_pi-e6m18-ffma": {},
     "lfsr16-e6m18": {},
     "lfsr16-e6m18-ffma": {},
+    "tunable_lowpass-e6m18": {},
+    "tunable_lowpass-e6m18-ffma": {},
     "uart_tx-e6m18": {},
     "uart_tx-e6m18-ffma": {},
     "uart_rx-e6m18": {},

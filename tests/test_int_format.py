@@ -211,7 +211,7 @@ def test_the_second_derivation_reshapes_the_graph_under_the_word_it_settled_on()
     options = dataclasses.replace(default_options(FMT), wint_min=16)  # the count lies inside [16, 24)
     result = holoso.synthesize(_shift_past_the_narrow_word, options, name="ShiftFoldsLate")
     assert result.int_format == IntFormat(16)
-    assert "holoso_ishl" not in result.verilog_output.verilog, "the count is past the settled word, so it folded"
+    assert "holoso_ishft" not in result.verilog_output.verilog, "the count is past the settled word, so it folded"
     (out,) = result.numerical_model.elaborate().run(3)
     assert isinstance(out, IntValue) and int(out) == 0
 
@@ -231,10 +231,6 @@ def _loop_behind_a_shift(x: int) -> int:
     while (x << 20) == 0:  # a real loop at the wide word; at the narrow one the header decides and never exits
         y = y + 1
     return y
-
-
-def _scale_past_a_tiny_word(n: int) -> int:
-    return n * 4  # the absorbed count is itself a machine integer, which a two-bit word cannot hold
 
 
 def test_a_narrowing_that_leaves_nothing_buildable_keeps_the_widest_word() -> None:
@@ -257,17 +253,6 @@ def test_a_narrowing_the_refusal_gate_convicts_keeps_the_widest_word() -> None:
     assert result.int_format == IntFormat(24)
     (out,) = result.numerical_model.elaborate().run(1)
     assert isinstance(out, IntValue) and int(out) == 0
-
-
-def test_an_absorbed_shift_count_fits_the_word_that_carries_it() -> None:
-    """Only a two-bit word cannot represent its own width, and every count from width-1 up rails identically."""
-    options = dataclasses.replace(default_options(FMT), wint_min=2)
-    result = holoso.synthesize(_scale_past_a_tiny_word, options, name="TinyWordScale")
-    assert result.int_format == IntFormat(2)
-    sim = result.numerical_model.elaborate()
-    for n, expect in ((0, 0), (1, 1), (-1, -2), (-2, -2)):  # int2 holds -2..1, so every nonzero product rails
-        (out,) = sim.run(n)
-        assert isinstance(out, IntValue) and int(out) == expect, n
 
 
 def test_judgement_waits_for_the_graph_the_machine_actually_builds() -> None:

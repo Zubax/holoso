@@ -78,6 +78,14 @@ async def imuls_cocotb(dut: Any) -> None:
         for a in directed:
             for b in directed:
                 await step(a, b)
+        # A product by a power of two is where the rail is closest to an exact answer: each factor 2**k has one
+        # magnitude at which the product first leaves the word, asymmetric by one between the signs, and both sides
+        # of it are driven in both operand orders.
+        for k in range(1, width - 1):
+            factor, edge = 1 << k, 1 << (width - 1 - k)
+            for value in (edge - 1, edge, edge + 1, 1 - edge, -edge, -edge - 1):
+                await step(value & mask, factor)
+                await step(factor, value & mask)
         rng = np.random.default_rng(int(os.environ.get("HOLOSO_TEST_SEED", "12345")))
         for _ in range(int(os.environ.get("HOLOSO_IMULS_RANDOM", "512"))):
             a = int(rng.integers(0, 1 << width, dtype=np.uint64))

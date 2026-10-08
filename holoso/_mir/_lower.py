@@ -406,13 +406,11 @@ class _IntLowerer(_FamilyLowerer):
             case Operation(operator=IntMul(), operands=operands):
                 return self.emit(IMulPrimitive(ops.imuls), operands)
             case Operation(operator=IntMulPow2(k=k), operands=(a,)):
-                # The left shifter's OTHER reading: `prod` saturates where `shft` lets the high bits fall off the word,
-                # and saturating is what a multiplication does. The count clamps at the width -- past that every count
-                # rails the same operand the same way -- and into the word, since a two-bit word cannot hold its own
-                # width: every count from `width - 1` up rails identically.
-                count = self._const(fmt.saturate(min(k, fmt.width)))
+                # An ordinary multiplication by the power of two: the product rails where a left shift would drop
+                # what leaves the word, and the shifter has no such reading. The factor is therefore a number the
+                # word must hold, and a scaling whose factor it cannot is refused.
                 return self.builder.operation(
-                    IShlPrimitive(ops.ishl), [self.remap[a], count], [IntIdentity()] * 2, result=1
+                    IMulPrimitive(ops.imuls), [self.remap[a], self._const(1 << k)], [IntIdentity()] * 2
                 )
             case Operation(operator=IntNeg(), operands=(a,)):
                 # `0 - x`: there is no negation module, and the subtractor saturates `-MIN` correctly.
@@ -452,18 +450,17 @@ class _IntLowerer(_FamilyLowerer):
 
     def _lower_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
         """
-        Each direction has the module that names it, so neither negates its count to reach the other's. The left
-        shifter is tapped on its raw reading, because `<<` drops what leaves the word rather than saturating. Both
-        modules clamp the amount at the word, which is where the two readings of an unbounded count meet -- a left
-        shift past the word answers zero and a right shift past it answers the sign fill, as Python's own unbounded
-        shift does once the word truncates it.
+        Each direction is a mode of the one shifter, so neither negates its count to reach the other. The shifter
+        clamps the amount at the word, which is where the two readings of an unbounded count meet -- a left shift
+        past the word answers zero and a right shift past it answers the sign fill, as Python's own unbounded shift
+        does once the word truncates it.
 
-        A constant count needs neither module and is never materialized.
+        A constant count needs no module and is never materialized.
         """
         constant = constant_shift_count(self.hir, count)
         if constant is None:
             shifter = (
-                IShrPrimitive(self.ops.ishr) if isinstance(semantic, IntShiftRight) else IShlPrimitive(self.ops.ishl)
+                IShrPrimitive(self.ops.ishft) if isinstance(semantic, IntShiftRight) else IShlPrimitive(self.ops.ishft)
             )
             return self.emit(shifter, [a, count])
         width = self.ops.int_format.width

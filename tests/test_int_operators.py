@@ -31,8 +31,7 @@ from holoso import (
     IMulOptions,
     IntFormat,
     IPopcntOptions,
-    IShlOptions,
-    IShrOptions,
+    IShftOptions,
     ISubOptions,
     OperatorOptions,
     Options,
@@ -64,14 +63,14 @@ from holoso._operators import (
     IntToBoolPrimitive,
     IPopcntOperator,
     IPopcntPrimitive,
-    IShlOperator,
+    IShftOperator,
     IShlPrimitive,
-    IShrOperator,
     IShrPrimitive,
     ISubOperator,
     ISubPrimitive,
     OperatorPort,
     RoundMode,
+    ShiftMode,
 )
 from holoso._operators._int import IntPrimitive, IntInlinePrimitive
 from holoso._util import Relation
@@ -79,7 +78,7 @@ from holoso._type import IntType
 from holoso._value import IntValue
 
 from ._modelref import build_ops
-from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishl, signed
+from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishl, ishr, signed
 
 EXHAUSTIVE_WIDTHS = (2, 3, 4, 5, 6)
 PRODUCTION_WIDTHS = (24, 33, 44)
@@ -130,9 +129,9 @@ def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: i
         IAddPrimitive(IAddOperator.build(fmt, IAddOptions())),
         ISubPrimitive(ISubOperator.build(fmt, ISubOptions())),
         ICmpPrimitive(ICmpOperator.build(fmt, ICmpOptions())),
-        IShlPrimitive(IShlOperator.build(fmt, IShlOptions())),
-        IShrPrimitive(IShrOperator.build(fmt, IShrOptions())),
     ]
+    shifter = IShftOperator.build(fmt, IShftOptions())
+    shift_left, shift_right = IShlPrimitive(shifter), IShrPrimitive(shifter)
     idiv = IDivPrimitive(IDivOperator.build(fmt, IDivOptions()))
     unary = [
         IAbsPrimitive(IAbsOperator.build(fmt, IAbsOptions())),
@@ -148,6 +147,9 @@ def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: i
             for primitive in binary:
                 want = expected_simple(primitive.operator.module_name, a, b, width)
                 assert _bits(primitive, a, b) == _oracle(want, primitive), (type(primitive).__name__, a, b)
+            # One module answers both shifts, so its name cannot select the reference: each direction has its own.
+            assert _bits(shift_left, a, b) == {"shft": ishl(a, b, width)}, (a, b)
+            assert _bits(shift_right, a, b) == {"shft": ishr(a, b, width)}, (a, b)
             for imul in multipliers:
                 assert _bits(imul, a, b) == _oracle(expected_imuls(a, b, width), imul), (imul.operator.params, a, b)
             assert _bits(idiv, a, b) == _oracle(expected_idivs(a, b, width, True), idiv), (a, b)
@@ -210,15 +212,19 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
     for numerator in _corners(fmt):
         assert _evaluate(idiv, numerator, 0) == [fmt.min if numerator < 0 else fmt.max, numerator]
 
-    shift = IShlPrimitive(IShlOperator.build(fmt, IShlOptions()))
+    shifter = IShftOperator.build(fmt, IShftOptions())
+    left = IShlPrimitive(shifter)
     for count in (0, 1, width - 1, width, width + 1, fmt.max):
-        assert _evaluate(shift, 0, count) == [0, 0]
-        assert _evaluate(shift, -1, -count) == [-1, -1], "sign fill makes -1 a fixed point of every right shift"
-        assert _evaluate(shift, 1, count)[1] == (1 << count if count < width - 1 else fmt.max)
-    assert _evaluate(shift, fmt.min, fmt.min) == [-1, -1], "a count past the word saturates to the word itself"
-    assert _evaluate(shift, fmt.max, 1) == [-2, fmt.max], "the raw shift drops the bit the saturating one clamps on"
+        assert _evaluate(left, 0, count) == [0]
+        assert _evaluate(left, -1, -count) == [-1], "sign fill makes -1 a fixed point of every right shift"
+    # The shift is raw: the bit walks up into the sign and then off the word.
+    assert _evaluate(left, 1, width - 2) == [1 << (width - 2)]
+    assert _evaluate(left, 1, width - 1) == [fmt.min]
+    assert _evaluate(left, 1, width) == [0]
+    assert _evaluate(left, fmt.min, fmt.min) == [-1], "a count past the word saturates to the word itself"
+    assert _evaluate(left, fmt.max, 1) == [-2], "the left shift drops what leaves the word rather than clamping"
 
-    right = IShrPrimitive(IShrOperator.build(fmt, IShrOptions()))
+    right = IShrPrimitive(shifter)
     for count in (0, 1, width - 1, width, width + 1, fmt.max):
         assert _evaluate(right, 0, count) == [0]
         assert _evaluate(right, -1, count) == [-1], "sign fill makes -1 a fixed point of every right shift"
@@ -231,13 +237,15 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
 
 
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
-def test_the_two_shifters_mirror_each_other_over_every_operand_pair(width: int) -> None:
-    # Each must be the other read backwards, or the pair is not worth two modules. MIN has no negation in the
-    # format, so it is the one count they legitimately part on.
+def test_the_two_shift_modes_mirror_each_other_over_every_operand_pair(width: int) -> None:
+    # Each mode must be the other read backwards: the direction bit and the sign of the count say the same thing.
+    # MIN has no negation in the format, so it is the one count they legitimately part on.
     fmt = IntFormat(width)
-    left, right = IShlPrimitive(IShlOperator.build(fmt, IShlOptions())), IShrPrimitive(
-        IShrOperator.build(fmt, IShrOptions())
-    )
+    shifter = IShftOperator.build(fmt, IShftOptions())
+    left, right = IShlPrimitive(shifter), IShrPrimitive(shifter)
+    # The reference arithmetic never reads the mode, so nothing below would notice the two primitives exchanging
+    # their direction bits; only the cosimulation would.
+    assert (left.mode.code, right.mode.code) == (ShiftMode.LEFT, ShiftMode.RIGHT)
     for a in range(1 << width):
         for b in range(fmt.min + 1, fmt.max + 1):
             (mirrored,) = right.evaluate(IntValue.from_bits(fmt, a), IntValue.from_int(fmt, -b))
@@ -255,8 +263,8 @@ def test_closed_form_latencies(width: int) -> None:
         IAddPrimitive(IAddOperator.build(fmt, IAddOptions())),
         ISubPrimitive(ISubOperator.build(fmt, ISubOptions())),
         IAbsPrimitive(IAbsOperator.build(fmt, IAbsOptions())),
-        IShlPrimitive(IShlOperator.build(fmt, IShlOptions())),
-        IShrPrimitive(IShrOperator.build(fmt, IShrOptions())),
+        IShlPrimitive(IShftOperator.build(fmt, IShftOptions())),
+        IShrPrimitive(IShftOperator.build(fmt, IShftOptions())),
         ICmpPrimitive(ICmpOperator.build(fmt, ICmpOptions())),
         IPopcntPrimitive(IPopcntOperator.build(fmt, IPopcntOptions())),
     ):
@@ -281,8 +289,7 @@ def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None
         ISubOperator.build(fmt, ISubOptions()),
         IMulOperator.build(fmt, IMulOptions()),
         IAbsOperator.build(fmt, IAbsOptions()),
-        IShlOperator.build(fmt, IShlOptions()),
-        IShrOperator.build(fmt, IShrOptions()),
+        IShftOperator.build(fmt, IShftOptions()),
         ICmpOperator.build(fmt, ICmpOptions()),
         IPopcntOperator.build(fmt, IPopcntOptions()),
     ):
@@ -360,7 +367,7 @@ def test_constant_shift_over_every_count_and_operand(width: int) -> None:
     for count in (count for count in range(1 - width, width) if count != 0):
         primitive = IntShiftConstPrimitive(fmt, count)
         for a in range(1 << width):
-            want = ishl(a, fmt.encode(count), width).shft
+            want = ishl(a, fmt.encode(count), width)
             assert primitive.evaluate(IntValue.from_bits(fmt, a)) == (IntValue.from_bits(fmt, want),), (count, a)
 
     assert IntShiftConstPrimitive(fmt, 1).render("r0") == "r0<<1"
@@ -370,10 +377,12 @@ def test_constant_shift_over_every_count_and_operand(width: int) -> None:
 
 
 def test_the_constant_shift_is_the_raw_shift_and_not_the_saturating_one() -> None:
-    # The inline shift drops what leaves the word; the saturating reading needs the pooled `holoso_ishl`.
+    # The inline shift drops what leaves the word, as the pooled shifter does; the saturating reading is the
+    # multiplier's.
     fmt = IntFormat(33)
     assert _evaluate(IntShiftConstPrimitive(fmt, 1), fmt.max) == [-2]
-    assert _evaluate(IShlPrimitive(IShlOperator.build(fmt, IShlOptions())), fmt.max, 1) == [-2, fmt.max]
+    assert _evaluate(IShlPrimitive(IShftOperator.build(fmt, IShftOptions())), fmt.max, 1) == [-2]
+    assert _evaluate(IMulPrimitive(IMulOperator.build(fmt, IMulOptions())), fmt.max, 2) == [fmt.max]
 
 
 @pytest.mark.parametrize("wint", (4, 17, 44))

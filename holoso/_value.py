@@ -198,11 +198,6 @@ class DivResult(NamedTuple):
     rem: IntValue
 
 
-class ShiftResult(NamedTuple):
-    shft: IntValue  # the raw bit shift, letting a left shift push bits past the word
-    prod: IntValue  # the same shift as a multiplication by a power of two, saturating instead
-
-
 @dataclass(frozen=True, slots=True, init=False, repr=False)
 class IntValue:
     """
@@ -282,18 +277,19 @@ class IntValue:
         assert fmt.fits(quotient) and fmt.fits(remainder)
         return DivResult(self._wrap(fmt, quotient), self._wrap(fmt, remainder))
 
-    def shift_left(self, count: IntValue) -> ShiftResult:
-        """Arithmetic shift, left for a positive count and right for a negative one, as `holoso_ishl`."""
+    def shift_left(self, count: IntValue) -> IntValue:
+        """
+        Arithmetic shift, left for a positive count and right for a negative one, as `holoso_ishft` with `right` low.
+        It is the raw bit shift: what a left shift pushes past the word is dropped, so nothing saturates.
+        """
         fmt = _matching_int_format(self, count)
-        if count.value < 0:  # Any amount past the word is indistinguishable from the word itself.
-            shifted = self._wrap(fmt, self.value >> min(-count.value, fmt.width))
-            return ShiftResult(shifted, shifted)
-        exact = self.value << min(count.value, fmt.width)
-        truncated = fmt.decode(exact & ((1 << fmt.width) - 1))
-        return ShiftResult(self._wrap(fmt, truncated), self._wrap(fmt, fmt.saturate(exact)))
+        magnitude = min(abs(count.value), fmt.width)  # any amount past the word is the word itself
+        if count.value >= 0:
+            return self._wrap(fmt, fmt.decode((self.value << magnitude) & ((1 << fmt.width) - 1)))
+        return self._wrap(fmt, self.value >> magnitude)
 
     def shift_right(self, count: IntValue) -> IntValue:
-        """The mirror of shift_left, as `holoso_ishr`: right for a positive count, left for a negative one."""
+        """The mirror of shift_left, as `holoso_ishft` with `right` high: right for a positive count, left otherwise."""
         fmt = _matching_int_format(self, count)
         magnitude = min(abs(count.value), fmt.width)  # any amount past the word is the word itself
         if count.value >= 0:
