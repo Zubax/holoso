@@ -108,6 +108,7 @@ from ._modelref import (
     branch_boundary_kernel,
     mir_options,
     const_branch_kernel,
+    adder_modes,
     DEFAULT_IFCONV_MAX_OPS,
     default_tolerance,
     DEFAULT_UNROLL_MAX_TRIPS,
@@ -1163,14 +1164,14 @@ def test_integer_folding_has_no_size_limit() -> None:
 
 def test_the_integer_subtraction_rules_the_shared_algebra_cannot_state() -> None:
     # `x - 0` is `x` while `0 - x` is the negation, so each direction is its own rule; the negation is the
-    # only direction that needs the subtractor. Pooling hides op counts, so the artifact pins one subtractor
-    # instance and no other module class.
+    # only direction that needs a subtraction. Pooling hides op counts, so the artifact pins one instance of the
+    # adder, elaborated for subtraction alone, and no other module class.
     def f(n: int) -> tuple[int, int, int]:
         return n - 0, 0 - n, n - n
 
     result = _synth(f, INT_OPTIONS, name="int_sub_rules")
-    assert _instantiated(result) == {"holoso_isubs"}
-    assert result.verilog_output.verilog.count("holoso_isubs #") == 1
+    assert _instantiated(result) == {"holoso_iadds"}
+    assert adder_modes(result) == [1]
     sim = result.numerical_model.elaborate()
     for n in (-9, -1, 0, 1, 7, 1000):
         assert _ints(sim.run(n)) == list(f(n))
@@ -1191,15 +1192,15 @@ def test_a_power_of_two_integer_product_is_built_as_a_multiplication() -> None:
 
 def test_integer_negations_share_one_tracking_across_their_spellings() -> None:
     # `x * -1` and `x // -1` are negations rather than a product and a quotient, so no multiplier or divider
-    # module appears; `-(-x)` returns the base and `n + (-n)` folds to zero, so no adder appears either. The
-    # surviving negations bind the one pooled subtractor instance.
+    # module appears; `-(-x)` returns the base and `n + (-n)` folds to zero, so nothing is added either. The
+    # surviving negations bind the one pooled adder, which is elaborated for subtraction alone.
     def f(n: int) -> tuple[int, int, int, int]:
         return -(-n), n + (-n), n * -1, n // -1
 
     result = _synth(f, INT_OPTIONS, name="int_negations")
     verilog = result.verilog_output.verilog
-    assert verilog.count("holoso_isubs #") == 1
-    assert "holoso_imuls" not in verilog and "holoso_idivs" not in verilog and "holoso_iadds" not in verilog
+    assert adder_modes(result) == [1]
+    assert "holoso_imuls" not in verilog and "holoso_idivs" not in verilog
     sim = result.numerical_model.elaborate()
     for n in (-9, -1, 0, 1, 7, 1000):
         assert _ints(sim.run(n)) == list(f(n))

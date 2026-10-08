@@ -11,6 +11,7 @@ from typing import ClassVar, Self
 
 from .._value import IntValue, ScalarValue
 from .._type import BoolType, IntFormat, IntType
+from .._util import Relation
 from ._common import (
     BaseOperatorOptions,
     BoolInversion,
@@ -22,7 +23,6 @@ from ._common import (
     OperatorPort,
     PooledPrimitive,
     ScalarSignature,
-    comparator_ports,
 )
 
 
@@ -62,22 +62,75 @@ class IntPrimitive(PooledPrimitive, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class IAddOptions(BaseOperatorOptions): ...
+class IAddOptions(BaseOperatorOptions):
+    """
+    The adder also runs every integer subtraction, negation and comparison, one firing per cycle, so a kernel issuing
+    several of them at once shortens by raising `instances`.
+    """
+
+    fast: bool = False
+    """Trades area for shorter combinational paths."""
+
+
+class AddMode(IntEnum):
+    """The value driven on `sub`, which is also the `MODE` elaborating the adder for that operation alone."""
+
+    ADD = 0
+    SUB = 1
 
 
 class IAddOperator(HardwareOperator):
+    """
+    The saturating adder, which also subtracts, chosen per firing on `sub`, at one latency. A subtraction orders `a`
+    against `b` on the flags as a side effect, so its mode drives them beside the difference, and a comparison is the
+    same code read through the flags alone. Firings of all three contend for the one adder.
+    """
+
     __slots__ = ()
     name = "iadds"
+    mode_port = ModePort("sub", 1)
 
     @classmethod
     def build(cls, fmt: IntFormat, options: IAddOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("a", "b"), ("y",))
+        ints, flag = IntType(fmt), BoolType()
+        operands = (OperatorPort("a", ints), OperatorPort("b", ints))
+        outputs = (
+            OperatorPort("y", ints),
+            OperatorPort("a_gt_b", flag),
+            OperatorPort("a_eq_b", flag),
+            OperatorPort("a_lt_b", flag),
+        )
+        add = OperatorMode(int(AddMode.ADD), "LATENCY", 1, 2, (0,))
+        subtract = OperatorMode(int(AddMode.SUB), "LATENCY", 1, 2, (0, 1, 2, 3))
+        compare = OperatorMode(int(AddMode.SUB), "LATENCY", 1, 2, (1, 2, 3))
+        fast = int(options.fast)
+        adding = {"W": fmt.width, "MODE": int(AddMode.ADD), "FAST": fast, "LATENCY": 2}
+        subtracting = {"W": fmt.width, "MODE": int(AddMode.SUB), "FAST": fast, "LATENCY": 2}
+        single_mode_params = {add: adding, subtract: subtracting, compare: subtracting}
+        params = {"W": fmt.width, "MODE": 2, "FAST": fast, "LATENCY": 2}  # MODE=2 takes `sub` per firing
+        return cls(params, options.instances, operands, outputs, (add, subtract, compare), single_mode_params)
+
+    @property
+    def addition(self) -> OperatorMode:
+        return self.modes[0]
+
+    @property
+    def subtraction(self) -> OperatorMode:
+        return self.modes[1]
+
+    @property
+    def comparison(self) -> OperatorMode:
+        return self.modes[2]
 
 
 @dataclass(frozen=True, slots=True)
 class IAddPrimitive(IntPrimitive):
     operator: IAddOperator
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.addition
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
@@ -89,31 +142,54 @@ class IAddPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class ISubOptions(BaseOperatorOptions): ...
-
-
-class ISubOperator(HardwareOperator):
-    __slots__ = ()
-    name = "isubs"
-
-    @classmethod
-    def build(cls, fmt: IntFormat, options: ISubOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("a", "b"), ("y",))
-
-
-@dataclass(frozen=True, slots=True)
 class ISubPrimitive(IntPrimitive):
-    """Also serves negation as `0-x`: there is no negation module, and this one saturates `-MIN` correctly."""
+    """
+    Also serves negation as `0-x`: there is no negation module, and the subtraction saturates `-MIN` correctly. The
+    order flags of the operands leave beside the difference, so a comparison of the same two operands taps this firing
+    instead of taking one of its own.
+    """
 
-    operator: ISubOperator
+    operator: IAddOperator
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.subtraction
+
+    def flag_of(self, relation: Relation) -> tuple[int, BoolInversion]:
+        """The result carrying `relation`, and the inversion reading it: the comparison's tap, found by its port."""
+        tap, inversion = ICmpPrimitive.tap_of(relation)
+        return self.mode.outputs.index(self.operator.comparison.outputs[tap]), inversion
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue | bool, ...]:
         a, b = self._validated_operands(operands)
-        return (a - b,)
+        ordering = a.compare(b)
+        return a - b, ordering > 0, ordering == 0, ordering < 0
 
     def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}-{b}"
+
+    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
+        if inversion is None:
+            return self.render(*operands)
+        tap = self.operator.comparison.outputs.index(self.mode.outputs[result])
+        return ICmpPrimitive(self.operator).render_output(tap, inversion, *operands)
+
+
+@dataclass(frozen=True, slots=True)
+class ICmpPrimitive(IntPrimitive, ComparatorPrimitive):
+    """Two's complement is totally ordered."""
+
+    operator: IAddOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.comparison
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+        a, b = self._validated_operands(operands)
+        ordering = a.compare(b)
+        return ordering > 0, ordering == 0, ordering < 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,32 +405,6 @@ class IPopcntPrimitive(IntPrimitive):
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"popcnt({a})"
-
-
-@dataclass(frozen=True, slots=True)
-class ICmpOptions(BaseOperatorOptions): ...
-
-
-class ICmpOperator(HardwareOperator):
-    __slots__ = ()
-    name = "icmp"
-
-    @classmethod
-    def build(cls, fmt: IntFormat, options: ICmpOptions) -> Self:
-        params = {"W": fmt.width, "LATENCY": 2}
-        return cls.of_one_mode(params, options.instances, *comparator_ports(IntType(fmt)), initiation_interval=1)
-
-
-@dataclass(frozen=True, slots=True)
-class ICmpPrimitive(IntPrimitive, ComparatorPrimitive):
-    """Two's complement is totally ordered."""
-
-    operator: ICmpOperator
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
-        a, b = self._validated_operands(operands)
-        ordering = a.compare(b)
-        return ordering > 0, ordering == 0, ordering < 0
 
 
 @dataclass(frozen=True, slots=True)

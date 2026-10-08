@@ -29,14 +29,12 @@ from holoso import (
     FRintOptions,
     IAbsOptions,
     IAddOptions,
-    ICmpOptions,
     IDivOptions,
     IMulOptions,
     IntFormat,
     IntValue,
     IPopcntOptions,
     IShftOptions,
-    ISubOptions,
     OperatorOptions,
     Options,
     UnsupportedConstruct,
@@ -57,12 +55,10 @@ from holoso._operators import (
     HardwareOperator,
     IAbsOperator,
     IAddOperator,
-    ICmpOperator,
     IDivOperator,
     IMulOperator,
     IPopcntOperator,
     IShftOperator,
-    ISubOperator,
 )
 from holoso import SynthesisResult
 from holoso._type import FloatType, IntType, ScalarType
@@ -183,11 +179,10 @@ endmodule
 def _integer_operators(ifmt: IntFormat) -> list[HardwareOperator]:
     return [
         IAddOperator.build(ifmt, IAddOptions()),
-        ISubOperator.build(ifmt, ISubOptions()),
+        IAddOperator.build(ifmt, IAddOptions(fast=True)),
         IDivOperator.build(ifmt, IDivOptions()),
         IAbsOperator.build(ifmt, IAbsOptions()),
         IShftOperator.build(ifmt, IShftOptions()),
-        ICmpOperator.build(ifmt, ICmpOptions()),
         IPopcntOperator.build(ifmt, IPopcntOptions()),
         *(IMulOperator.build(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
     ]
@@ -256,9 +251,10 @@ def _pooled_probe(name: str, operators: list[HardwareOperator], single_modes: bo
 @pytest.mark.parametrize("width", (2, 3, 24, 33, 44))
 def test_integer_operators_elaborate_as_they_declare_themselves(width: int, tmp_path: Path) -> None:
     # A wrong latency instantiates the undefined _holoso_invalid_integer_latency; an odd width is mandatory because
-    # that is where the divider's ceiling can slip.
+    # that is where the divider's ceiling can slip. The adder is elaborated for each of its modes alone as well, a
+    # `MODE` the module does not know instantiating the undefined _holoso_invalid_iadds_mode.
     name = f"int_probe_w{width}"
-    _elaborate(name, _pooled_probe(name, _integer_operators(IntFormat(width))), tmp_path)
+    _elaborate(name, _pooled_probe(name, _integer_operators(IntFormat(width)), single_modes=True), tmp_path)
 
 
 @_requires_iverilog

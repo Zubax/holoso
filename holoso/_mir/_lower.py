@@ -138,6 +138,7 @@ from .._type import (
     ScalarType,
 )
 from ._ir import Mir, MirBuilder, MirOperation
+from ._difference import plan_fusions as plan_comparison_fusions
 from ._hypot import count as hypot_count, expand_unfused, plan_fusions
 from ._options import MirOptions
 from ._fma import contract_fmas
@@ -179,6 +180,7 @@ class _LoweringContext:
         self.fused_hypots = plan_fusions(hir, ops)
         # The derivation expanded every unfused magnitude, so the survivors all ride an atan2's magnitude port.
         assert hypot_count(hir) == len(self.fused_hypots)
+        self.fused_comparisons = plan_comparison_fusions(hir)
         # Values their readers consume whole, so no MIR value stands for them: a sign or NOT chain folds into every
         # reader's conditioner, a constant shift count into an immediate.
         self.absorbed = {
@@ -402,7 +404,7 @@ class _IntLowerer(_FamilyLowerer):
             case Operation(operator=IntAdd(), operands=operands):
                 return self.emit(IAddPrimitive(ops.iadds), operands)
             case Operation(operator=IntSub(), operands=operands):
-                return self.emit(ISubPrimitive(ops.isubs), operands)
+                return self.emit(ISubPrimitive(ops.iadds), operands)
             case Operation(operator=IntMul(), operands=operands):
                 return self.emit(IMulPrimitive(ops.imuls), operands)
             case Operation(operator=IntMulPow2(k=k), operands=(a,)):
@@ -413,9 +415,9 @@ class _IntLowerer(_FamilyLowerer):
                     IMulPrimitive(ops.imuls), [self.remap[a], self._const(1 << k)], [IntIdentity()] * 2
                 )
             case Operation(operator=IntNeg(), operands=(a,)):
-                # `0 - x`: there is no negation module, and the subtractor saturates `-MIN` correctly.
+                # `0 - x`: there is no negation module, and the subtraction saturates `-MIN` correctly.
                 return self.builder.operation(
-                    ISubPrimitive(ops.isubs), [self._const(0), self.remap[a]], [IntIdentity()] * 2
+                    ISubPrimitive(ops.iadds), [self._const(0), self.remap[a]], [IntIdentity()] * 2
                 )
             case Operation(operator=IntAbs(), operands=operands):
                 return self.emit(IAbsPrimitive(ops.iabss), operands)
@@ -480,6 +482,16 @@ class _IntLowerer(_FamilyLowerer):
 
 class _BoolLowerer(_FamilyLowerer):
     def lower_operation(self, old_id: ValueId, node: Operation) -> ValueId:
+        fused = self.context.fused_comparisons.get(old_id)
+        if fused is not None:
+            # The subtraction's own operands make the two collapse into one adder firing, whose flags order them; a
+            # comparison reading them the other way round asks for the mirrored relation.
+            subtraction = self.hir.nodes[fused.subtraction]
+            assert isinstance(subtraction, Operation) and isinstance(node.operator, IntComparison)
+            relation = node.operator.relation.mirror if fused.mirrored else node.operator.relation
+            subtractor = ISubPrimitive(self.ops.iadds)
+            port, inversion = subtractor.flag_of(relation)
+            return self.emit(subtractor, subtraction.operands, result=port, output_inversion=inversion)
         match node:
             case Operation(operator=FloatComparison() | IntComparison() as semantic, operands=operands):
                 # A relation is one comparator output port with an optional inversion (both orderings are total and
@@ -488,7 +500,7 @@ class _BoolLowerer(_FamilyLowerer):
                 comparator: FCmpPrimitive | ICmpPrimitive = (
                     FCmpPrimitive(self.ops.fcmp)
                     if isinstance(semantic, FloatComparison)
-                    else ICmpPrimitive(self.ops.icmp)
+                    else ICmpPrimitive(self.ops.iadds)
                 )
                 port, inversion = comparator.tap_of(semantic.relation)
                 return self.emit(comparator, operands, result=port, output_inversion=inversion)

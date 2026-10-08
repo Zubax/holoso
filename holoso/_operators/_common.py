@@ -6,6 +6,7 @@ hierarchy, and the two primitives that belong to no one family.
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import ClassVar, Self, assert_never
 
 from .._value import FloatValue, IntValue, ScalarValue
@@ -163,7 +164,7 @@ class OperatorMode:
     operator without one), the RTL parameter carrying its latency, its initiation interval, how many leading operand
     ports it reads, and which output ports carry its results, in result order. Every observable output of the mode,
     error ports included, is independent of the operand ports past that count, so their read and sign fields may be
-    left don't-care.
+    left don't-care. Modes sharing a code are one operation of the module read through different output ports.
     """
 
     code: int | None
@@ -182,8 +183,8 @@ class HardwareOperator:
 
     `single_mode_params` holds, for each mode the module can also be elaborated for alone, the parameters doing so: the
     module's parameter names less the other modes' latency parameters, the mode's own latency unchanged. An operator
-    offering them asserts that the mode keeps its whole timing alone, so an instance whose firings all run that mode
-    can shed the rest without the schedule noticing.
+    offering them asserts that the mode keeps its whole timing alone, so an instance whose firings all drive that
+    mode's code can shed the rest without the schedule noticing.
 
     A firing's busy window is its own mode's initiation interval. Requiring `L_a - L_b < II_a` for every ordered pair
     of modes that share an output port makes the earliest next firing on that port commit strictly after its
@@ -235,7 +236,7 @@ class HardwareOperator:
             0 <= position < len(self.operand_ports) and has_sign_control(self.operand_ports[position].scalar_type)
             for position in self.operands_without_sideband
         ), self.name
-        assert self.modes and len({mode.code for mode in self.modes}) == len(self.modes), self.name
+        assert self.modes and len(set(self.modes)) == len(self.modes), self.name
         named = {mode.latency_param for mode in self.modes}
         assert named == {name for name in self.params if name.startswith("LATENCY")}, (self.name, named)
         for mode in self.modes:
@@ -252,6 +253,14 @@ class HardwareOperator:
         for a in self.modes:
             shared = [b for b in self.modes if self.error_ports or set(a.outputs) & set(b.outputs)]
             assert all(self.latency(a) - self.latency(b) < a.initiation_interval for b in shared), self.name
+        for a, b in combinations(self.modes, 2):
+            if a.code == b.code:
+                assert (a.latency_param, a.initiation_interval, a.operand_count) == (
+                    b.latency_param,
+                    b.initiation_interval,
+                    b.operand_count,
+                ), self.name
+                assert self.single_mode_params.get(a) == self.single_mode_params.get(b), self.name
         assert not self.single_mode_params or self.mode_port is not None, self.name
         for mode, narrowed in self.single_mode_params.items():
             assert mode in self.modes, self.name
@@ -285,9 +294,8 @@ class HardwareOperator:
     def params_for(self, modes: frozenset[OperatorMode]) -> Mapping[str, int]:
         """The parameters elaborating an instance whose firings run `modes`."""
         assert modes and modes <= set(self.modes), self.name
-        if len(modes) == 1:
-            (mode,) = modes
-            return self.single_mode_params.get(mode, self.params)
+        if len({mode.code for mode in modes}) == 1:
+            return self.single_mode_params.get(next(iter(modes)), self.params)
         return self.params
 
     @property
@@ -508,14 +516,6 @@ class ComparatorPrimitive(PooledPrimitive, ABC):
         assert inversion is not None
         a, b = operands
         return f"{a}{self._RELATION_OF_TAP[(result, inversion)].value}{b}"
-
-
-def comparator_ports(scalar_type: ScalarType) -> tuple[tuple[OperatorPort, ...], tuple[OperatorPort, ...]]:
-    """The operand and output ports every comparator wrapper shares: the order flags of `a` against `b`."""
-    return (
-        (OperatorPort("a", scalar_type), OperatorPort("b", scalar_type)),
-        tuple(OperatorPort(name, BoolType()) for name in ("a_gt_b", "a_eq_b", "a_lt_b")),
-    )
 
 
 @dataclass(frozen=True, slots=True)

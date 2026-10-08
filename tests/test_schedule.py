@@ -2225,7 +2225,7 @@ def test_a_zero_leg_costs_a_magnitude_nothing() -> None:
 
     padded, bare = (build_lir(_run(k, _CORDIC_OPS), n) for k, n in ((four, "zero_leg"), (three, "no_zero_leg")))
     assert _instance_counts(padded) == _instance_counts(bare)
-    for mnemonic in ("filog2", "fmul_ilog2", "fmul", "fadd", "icmp"):
+    for mnemonic in ("filog2", "fmul_ilog2", "fmul", "fadd", "iadds"):
         assert len(_firings(padded, mnemonic)) == len(_firings(bare, mnemonic)), mnemonic
 
 

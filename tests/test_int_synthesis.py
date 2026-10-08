@@ -19,6 +19,7 @@ import pytest
 
 import holoso
 
+from ._modelref import adder_modes
 from .hdl.hdl_integer_oracle import ishl, ishr, signed
 
 _OPTIONS = holoso.Options(holoso.OperatorOptions())
@@ -378,6 +379,157 @@ def test_each_integer_output_still_holds_its_own_value_at_the_boundary() -> None
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# The adder: sums, differences and comparisons on one module.
+
+
+def sum_difference_and_order(a: int, b: int) -> tuple[int, int, bool, bool, bool]:
+    return a + b, a - b, a < b, a == b, a > b
+
+
+def sum_only(a: int, b: int) -> int:
+    return a + b
+
+
+def difference_only(a: int, b: int) -> int:
+    return a - b
+
+
+def order_only(a: int, b: int) -> tuple[bool, bool, bool]:
+    return a < b, a == b, a > b
+
+
+def difference_and_order(a: int, b: int) -> tuple[int, bool, bool, bool]:
+    return a - b, a < b, a == b, a > b
+
+
+# Neither the sum nor the difference of these leaves the word, so CPython is the reference.
+_ADDER_PAIRS = [
+    *((0, 0), (7, 3), (3, 7), (-7, 3), (7, -3), (-5, -5), (12345, -6789)),
+    *((MAX, 0), (MIN, 0), (16383, 16383), (-16384, 16383)),
+]
+
+# Where one of them does, it rails, and the order stays that of the operands even where their difference overflows.
+# Each row lists the operands and then `a + b, a - b, a < b, a == b, a > b`.
+_ADDER_RAILS: list[tuple[tuple[int, int], list[int | bool]]] = [
+    ((MAX, 1), [MAX, MAX - 1, False, False, True]),
+    ((MAX, MAX), [MAX, 0, False, True, False]),
+    ((MIN, -1), [MIN, MIN + 1, True, False, False]),
+    ((MIN, MIN), [MIN, 0, False, True, False]),
+    ((MAX, MIN), [-1, MAX, False, False, True]),
+    ((MIN, MAX), [-1, MIN, True, False, False]),
+    ((MAX, -1), [MAX - 1, MAX, False, False, True]),
+    ((MIN, 1), [MIN + 1, MIN, True, False, False]),
+    ((0, MIN), [MIN, MAX, False, False, True]),
+]
+
+
+def test_a_sum_a_difference_and_an_order_time_share_one_adder() -> None:
+    """
+    `a + b` and `a - b` are two firings of the one module, the relations of the pair riding the subtraction, so the
+    single instance takes `sub` with every firing.
+    """
+    result = holoso.synthesize(sum_difference_and_order, _INT16, name="SumDifferenceAndOrder")
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [2]
+    sim = result.numerical_model.elaborate()
+    for a, b in _ADDER_PAIRS:
+        assert _run(sim, a, b) == _expected(sum_difference_and_order, a, b), (a, b)
+    for (a, b), expected in _ADDER_RAILS:
+        assert _run(sim, a, b) == expected, (a, b)
+
+
+@pytest.mark.parametrize(
+    "target,mode,answered",
+    [
+        (sum_only, 0, slice(0, 1)),
+        (difference_only, 1, slice(1, 2)),
+        (order_only, 1, slice(2, 5)),
+        (difference_and_order, 1, slice(1, 5)),
+    ],
+    ids=["add", "subtract", "compare", "subtract_and_compare"],
+)
+def test_a_kernel_that_never_adds_or_only_adds_builds_the_adder_for_that_alone(
+    target: Callable[..., object], mode: int, answered: slice
+) -> None:
+    """
+    A comparison is a subtraction read through the flags, so an instance whose firings all add, or all subtract or
+    compare, is elaborated for that operation alone; `answered` is the part of a rail row the kernel returns.
+    """
+    result = holoso.synthesize(target, _INT16, name="OneAdderMode")
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [mode]
+    sim = result.numerical_model.elaborate()
+    for a, b in _ADDER_PAIRS:
+        assert _run(sim, a, b) == _expected(target, a, b), (a, b)
+    for (a, b), expected in _ADDER_RAILS:
+        assert _run(sim, a, b) == expected[answered], (a, b)
+
+
+def sums_beside_orders(a: int, b: int, c: int, d: int) -> tuple[int, int, bool, bool]:
+    return a + b, c + d, a < c, b < d
+
+
+def test_independent_sums_and_orders_contend_for_the_adder_until_a_second_one_is_allowed() -> None:
+    """
+    Two sums and two comparisons depend on nothing but the inputs, yet on one adder they issue one after another. A
+    second instance takes half of them, which buys the two cycles back.
+    """
+    shared = holoso.synthesize(sums_beside_orders, _INT16, name="SumsBesideOrdersShared")
+    assert _modules(shared) == ["iadds"] and len(adder_modes(shared)) == 1
+    assert shared.initiation_interval == (8, 8)
+    operators = dataclasses.replace(_INT16.operator, iadds=holoso.IAddOptions(instances=2))
+    options = dataclasses.replace(_INT16, operator=operators)
+    split = holoso.synthesize(sums_beside_orders, options, name="SumsBesideOrdersSplit")
+    assert _modules(split) == ["iadds"] and len(adder_modes(split)) == 2
+    assert split.initiation_interval == (6, 6)
+    for result in (shared, split):
+        sim = result.numerical_model.elaborate()
+        for a, b, c, d in [(1, 2, 3, 4), (4, 3, 2, 1), (-7, 7, -7, 7), (MAX, 1, MIN, -1), (MIN, MAX, MAX, MIN)]:
+            assert _run(sim, a, b, c, d) == [_clamp(a + b), _clamp(c + d), a < c, b < d], (a, b, c, d)
+
+
+def order_beside_reversed_difference(a: int, b: int) -> tuple[int, bool, bool]:
+    return b - a, a < b, a != b
+
+
+def order_beside_unrelated_difference(a: int, b: int, c: int) -> tuple[int, bool, bool, bool]:
+    return a - c, a < b, a == b, a > b
+
+
+def every_relation_beside_reversed_difference(a: int, b: int) -> tuple[int, bool, bool, bool, bool, bool, bool]:
+    return b - a, a < b, a <= b, a > b, a >= b, a == b, a != b
+
+
+def test_a_comparison_rides_the_subtraction_of_its_own_operands() -> None:
+    """
+    A subtraction orders its operands as a side effect, so the relations of that pair cost no firing in either
+    operand order: the kernel is as long as the subtraction alone, where a comparison of another pair adds a cycle.
+    """
+    assert holoso.synthesize(difference_only, _INT16, name="DifferenceAlone").initiation_interval == (5, 5)
+    fused = holoso.synthesize(difference_and_order, _INT16, name="DifferenceAndOrder")
+    mirrored = holoso.synthesize(order_beside_reversed_difference, _INT16, name="ReversedDifference")
+    apart = holoso.synthesize(order_beside_unrelated_difference, _INT16, name="UnrelatedDifference")
+    assert fused.initiation_interval == mirrored.initiation_interval == (5, 5)
+    assert apart.initiation_interval == (6, 6)
+    fused_sim, mirrored_sim, apart_sim = (result.numerical_model.elaborate() for result in (fused, mirrored, apart))
+    for a, b in [*_ADDER_PAIRS, *(pair for pair, _ in _ADDER_RAILS)]:
+        assert _run(fused_sim, a, b) == [_clamp(a - b), a < b, a == b, a > b], (a, b)
+        assert _run(mirrored_sim, a, b) == [_clamp(b - a), a < b, a != b], (a, b)
+        assert _run(apart_sim, a, b, 5) == [_clamp(a - 5), a < b, a == b, a > b], (a, b)
+
+
+def test_every_relation_reads_a_reversed_subtraction_mirrored() -> None:
+    """
+    Each relation of `a` against `b` taps the flags of `b - a` as its mirror. A flag and its complement take a firing
+    each, so the six relations ride two subtractions where three firings would serve them apart.
+    """
+    result = holoso.synthesize(every_relation_beside_reversed_difference, _INT16, name="EveryRelationReversed")
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [1]
+    assert result.initiation_interval == (6, 6)
+    sim = result.numerical_model.elaborate()
+    for a, b in [*_ADDER_PAIRS, *(pair for pair, _ in _ADDER_RAILS)]:
+        assert _run(sim, a, b) == [_clamp(b - a), a < b, a <= b, a > b, a >= b, a == b, a != b], (a, b)
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # Shifts: the runtime shifter, the constant folds, and the machine-word substitution fixpoint.
 
 
@@ -555,7 +707,7 @@ def an_oversize_shift_proving_a_guard(x: int, y: int) -> int:
 
 def test_an_oversize_shift_proves_the_guard_that_reads_it() -> None:
     result = holoso.synthesize(an_oversize_shift_proving_a_guard, _INT16, name="ProvenGuard")
-    assert _modules(result) == ["iadds"], "only the taken arm may survive"
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [0], "only the taken arm may survive"
     sim = result.numerical_model.elaborate()
     for y in (0, 1, -7, 12345):
         assert _run(sim, 3, y) == [y + 1], y
@@ -715,7 +867,7 @@ def test_a_shift_in_one_direction_alone_builds_the_one_shifter() -> None:
     """
     A kernel shifting one way only builds the same single module, its direction bit constant across the program. A
     right shift costs exactly what a left shift costs: it is the shifter's other mode, so it pays neither a
-    subtractor to negate its count nor the cycles that dependency would cost.
+    subtraction to negate its count nor the cycles that dependency would cost.
     """
     left = holoso.synthesize(shift_left_only, _INT16, name="LeftOnly")
     right = holoso.synthesize(shift_right_only, _INT16, name="RightOnly")
@@ -821,9 +973,9 @@ def test_the_boundary_exponent_builds_where_its_divisor_constant_could_not() -> 
         assert _run(quotient_sim, x) == [x // 2**15], x
 
 
-def test_a_product_with_minus_one_negates_on_the_subtractor() -> None:
+def test_a_product_with_minus_one_negates_as_a_subtraction() -> None:
     result = holoso.synthesize(negated_by_product, _INT16, name="NegatedByProduct")
-    assert _modules(result) == ["isubs"]
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [1]
     sim = result.numerical_model.elaborate()
     assert _run(sim, MIN) == [MAX], "the negation saturates at the rail"
     assert _run(sim, MAX) == [MIN + 1]
@@ -886,7 +1038,7 @@ _ROUNDINGS = [0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.
     ids=lambda value: getattr(value, "__name__", str(value)),
 )
 def test_a_conversion_takes_the_rounder_alone(target: Callable[..., object]) -> None:
-    """No `holoso_isubs` beside it: a sign folds onto the conversion's operand rather than costing a module."""
+    """No `holoso_iadds` beside it: a sign folds onto the conversion's operand rather than costing a module."""
     result = holoso.synthesize(target, _INT16, name="Conv")
     assert _modules(result) == ["frint"]
     sim = result.numerical_model.elaborate()

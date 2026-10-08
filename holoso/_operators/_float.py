@@ -25,7 +25,6 @@ from ._common import (
     OperatorPort,
     PooledPrimitive,
     ScalarSignature,
-    comparator_ports,
 )
 
 _ROUND_LABEL: dict[RoundMode, str] = {
@@ -330,7 +329,9 @@ class FCmpOperator(HardwareOperator):
     @classmethod
     def build(cls, fmt: FloatFormat, options: FCmpOptions) -> Self:
         model = zkf.CmpModel(_format(fmt), **_knobs(options))
-        return _zkf_operator(cls, model, options, *comparator_ports(FloatType(fmt)))
+        flag = BoolType()
+        outputs = (OperatorPort("a_gt_b", flag), OperatorPort("a_eq_b", flag), OperatorPort("a_lt_b", flag))
+        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b"), outputs)
 
 
 @dataclass(frozen=True, slots=True)

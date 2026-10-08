@@ -39,13 +39,11 @@ class OperatorOptions:
     ffromint: FFromIntOptions | None = None
 
     iadds: IAddOptions = IAddOptions()
-    isubs: ISubOptions = ISubOptions()
     imuls: IMulOptions = IMulOptions()
     idivs: IDivOptions = IDivOptions()
     iabss: IAbsOptions = IAbsOptions()
     ishft: IShftOptions = IShftOptions()
     ipopcnt: IPopcntOptions = IPopcntOptions()
-    icmp: ICmpOptions = ICmpOptions()
 
 
 @dataclass(frozen=True)
@@ -151,10 +149,6 @@ class OpConfig:
         return self._built(IAddOperator.build, self.int_format, self.options.iadds)
 
     @cached_property
-    def isubs(self) -> ISubOperator:
-        return self._built(ISubOperator.build, self.int_format, self.options.isubs)
-
-    @cached_property
     def imuls(self) -> IMulOperator:
         return self._built(IMulOperator.build, self.int_format, self.options.imuls)
 
@@ -173,10 +167,6 @@ class OpConfig:
     @cached_property
     def ipopcnt(self) -> IPopcntOperator:
         return self._built(IPopcntOperator.build, self.int_format, self.options.ipopcnt)
-
-    @cached_property
-    def icmp(self) -> ICmpOperator:
-        return self._built(ICmpOperator.build, self.int_format, self.options.icmp)
 
     def serves(self, kind: type[HardwareOperator]) -> bool:
         """Whether this machine is configured with operators of `kind`, answered without building one."""
@@ -208,9 +198,11 @@ class OpConfig:
             operator.name,
             operator.instances,
             ", ".join(
-                ("" if mode.code is None else f"mode {mode.code} ")
-                + f"latency {operator.latency(mode)} II {mode.initiation_interval}"
-                for mode in operator.modes
+                dict.fromkeys(
+                    ("" if mode.code is None else f"mode {mode.code} ")
+                    + f"latency {operator.latency(mode)} II {mode.initiation_interval}"
+                    for mode in operator.modes
+                )
             ),
         )
         return operator

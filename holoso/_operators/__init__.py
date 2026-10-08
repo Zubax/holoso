@@ -75,6 +75,7 @@ from ._float import (
     FSqrtPrimitive as FSqrtPrimitive,
 )
 from ._int import (
+    AddMode as AddMode,
     BoolToIntPrimitive as BoolToIntPrimitive,
     IAbsOperator as IAbsOperator,
     IAbsOptions as IAbsOptions,
@@ -82,8 +83,6 @@ from ._int import (
     IAddOperator as IAddOperator,
     IAddOptions as IAddOptions,
     IAddPrimitive as IAddPrimitive,
-    ICmpOperator as ICmpOperator,
-    ICmpOptions as ICmpOptions,
     ICmpPrimitive as ICmpPrimitive,
     IDivOperator as IDivOperator,
     IDivOptions as IDivOptions,
@@ -104,8 +103,6 @@ from ._int import (
     IShftOptions as IShftOptions,
     IShlPrimitive as IShlPrimitive,
     IShrPrimitive as IShrPrimitive,
-    ISubOperator as ISubOperator,
-    ISubOptions as ISubOptions,
     ISubPrimitive as ISubPrimitive,
     ShiftMode as ShiftMode,
 )

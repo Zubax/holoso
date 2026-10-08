@@ -26,18 +26,17 @@ from holoso import (
     FRintOptions,
     IAbsOptions,
     IAddOptions,
-    ICmpOptions,
     IDivOptions,
     IMulOptions,
     IntFormat,
     IPopcntOptions,
     IShftOptions,
-    ISubOptions,
     OperatorOptions,
     Options,
     UnsupportedConstruct,
 )
 from holoso._operators import (
+    AddMode,
     BaseOperatorOptions,
     BoolToIntPrimitive,
     FFromIntOperator,
@@ -49,7 +48,6 @@ from holoso._operators import (
     IAbsPrimitive,
     IAddOperator,
     IAddPrimitive,
-    ICmpOperator,
     ICmpPrimitive,
     IDivOperator,
     IDivPrimitive,
@@ -66,7 +64,6 @@ from holoso._operators import (
     IShftOperator,
     IShlPrimitive,
     IShrPrimitive,
-    ISubOperator,
     ISubPrimitive,
     OperatorPort,
     RoundMode,
@@ -78,7 +75,17 @@ from holoso._type import IntType
 from holoso._value import IntValue
 
 from ._modelref import build_ops
-from .hdl.hdl_integer_oracle import expected_idivs, expected_imuls, expected_simple, ishl, ishr, signed
+from .hdl.hdl_integer_oracle import (
+    expected_iadds_add,
+    expected_iadds_cmp,
+    expected_iadds_sub,
+    expected_idivs,
+    expected_imuls,
+    expected_simple,
+    ishl,
+    ishr,
+    signed,
+)
 
 EXHAUSTIVE_WIDTHS = (2, 3, 4, 5, 6)
 PRODUCTION_WIDTHS = (24, 33, 44)
@@ -125,11 +132,8 @@ def _outputs(primitive: IntPrimitive) -> list[OperatorPort]:
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: int) -> None:
     fmt = IntFormat(width)
-    binary = [
-        IAddPrimitive(IAddOperator.build(fmt, IAddOptions())),
-        ISubPrimitive(ISubOperator.build(fmt, ISubOptions())),
-        ICmpPrimitive(ICmpOperator.build(fmt, ICmpOptions())),
-    ]
+    adder = IAddOperator.build(fmt, IAddOptions())
+    add, subtract, compare = IAddPrimitive(adder), ISubPrimitive(adder), ICmpPrimitive(adder)
     shifter = IShftOperator.build(fmt, IShftOptions())
     shift_left, shift_right = IShlPrimitive(shifter), IShrPrimitive(shifter)
     idiv = IDivPrimitive(IDivOperator.build(fmt, IDivOptions()))
@@ -141,13 +145,15 @@ def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: i
     multipliers = [IMulPrimitive(IMulOperator.build(fmt, IMulOptions(stage_product=stage))) for stage in range(5)]
     for a in range(1 << width):
         for primitive in unary:
-            want = expected_simple(primitive.operator.module_name, a, 0, width)
+            want = expected_simple(primitive.operator.module_name, a, width)
             assert _bits(primitive, a) == _oracle(want, primitive), (type(primitive).__name__, a)
         for b in range(1 << width):
-            for primitive in binary:
-                want = expected_simple(primitive.operator.module_name, a, b, width)
-                assert _bits(primitive, a, b) == _oracle(want, primitive), (type(primitive).__name__, a, b)
-            # One module answers both shifts, so its name cannot select the reference: each direction has its own.
+            # One module adds, subtracts and compares, so its name cannot select the reference: each has its own,
+            # and so has each direction of the shifter.
+            assert _bits(add, a, b) == _oracle(expected_iadds_add(a, b, width), add), (a, b)
+            difference, order = expected_iadds_sub(a, b, width), expected_iadds_cmp(a, b, width)
+            assert _bits(subtract, a, b) == _oracle({**difference, **order}, subtract), (a, b)
+            assert _bits(compare, a, b) == _oracle(order, compare), (a, b)
             assert _bits(shift_left, a, b) == {"shft": ishl(a, b, width)}, (a, b)
             assert _bits(shift_right, a, b) == {"shft": ishr(a, b, width)}, (a, b)
             for imul in multipliers:
@@ -173,7 +179,7 @@ def test_floor_division_obeys_the_division_identity(width: int) -> None:
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_comparator_flags_are_one_hot_and_serve_every_relation(width: int) -> None:
     fmt = IntFormat(width)
-    primitive = ICmpPrimitive(ICmpOperator.build(fmt, ICmpOptions()))
+    primitive = ICmpPrimitive(IAddOperator.build(fmt, IAddOptions()))
     answers: dict[Relation, Callable[[int, int], bool]] = {
         Relation.GT: lambda a, b: a > b,
         Relation.EQ: lambda a, b: a == b,
@@ -195,15 +201,15 @@ def test_comparator_flags_are_one_hot_and_serve_every_relation(width: int) -> No
 def test_edge_cases_at_the_production_widths(width: int) -> None:
     # The sweeps stop far below these, and saturation is where a width-dependent slip would hide.
     fmt = IntFormat(width)
-    iadd = IAddPrimitive(IAddOperator.build(fmt, IAddOptions()))
-    isub = ISubPrimitive(ISubOperator.build(fmt, ISubOptions()))
+    adder = IAddOperator.build(fmt, IAddOptions())
+    iadd, isub = IAddPrimitive(adder), ISubPrimitive(adder)
     imul = IMulPrimitive(IMulOperator.build(fmt, IMulOptions()))
     idiv = IDivPrimitive(IDivOperator.build(fmt, IDivOptions()))
     assert _evaluate(IAbsPrimitive(IAbsOperator.build(fmt, IAbsOptions())), fmt.min) == [fmt.max]
     assert _evaluate(iadd, fmt.min, fmt.min) == [fmt.min]
     assert _evaluate(iadd, fmt.max, fmt.max) == [fmt.max]
-    assert _evaluate(isub, fmt.min, fmt.max) == [fmt.min]
-    assert _evaluate(isub, 0, fmt.min) == [fmt.max], "negation via 0-x saturates instead of wrapping"
+    assert _evaluate(isub, fmt.min, fmt.max) == [fmt.min, False, False, True], "the order survives the overflow"
+    assert _evaluate(isub, 0, fmt.min) == [fmt.max, True, False, False], "negation via 0-x saturates, not wraps"
     assert _evaluate(imul, fmt.min, fmt.min) == [fmt.max]
     assert _evaluate(imul, fmt.min, 1) == [fmt.min]
     assert _evaluate(idiv, fmt.min, -1) == [fmt.max, 0]
@@ -236,6 +242,29 @@ def test_edge_cases_at_the_production_widths(width: int) -> None:
     assert _evaluate(right, fmt.max, -1) == [-2], "the left shift drops what leaves the word rather than clamping"
 
 
+def test_each_adder_primitive_selects_its_own_mode() -> None:
+    # The reference arithmetic never reads the mode, so no sweep here would notice two primitives exchanging their
+    # codes or a comparison tapping the port of the sum; only the cosimulation would. A comparison drives the
+    # subtraction's code, so an instance that subtracts and compares is elaborated for subtraction alone.
+    adder = IAddOperator.build(IntFormat(33), IAddOptions())
+    add, subtract, compare = IAddPrimitive(adder), ISubPrimitive(adder), ICmpPrimitive(adder)
+    assert (add.mode.code, subtract.mode.code, compare.mode.code) == (AddMode.ADD, AddMode.SUB, AddMode.SUB)
+    assert [port.name for port in _outputs(add)] == ["y"]
+    assert [port.name for port in _outputs(subtract)] == ["y", "a_gt_b", "a_eq_b", "a_lt_b"]
+    assert [port.name for port in _outputs(compare)] == ["a_gt_b", "a_eq_b", "a_lt_b"]
+    assert adder.params == {"W": 33, "MODE": 2, "FAST": 0, "LATENCY": 2}
+    for primitive, code in ((add, 0), (subtract, 1), (compare, 1)):
+        assert adder.params_for(frozenset({primitive.mode})) == {"W": 33, "MODE": code, "FAST": 0, "LATENCY": 2}
+    assert adder.params_for(frozenset({subtract.mode, compare.mode})) == {"W": 33, "MODE": 1, "FAST": 0, "LATENCY": 2}
+    assert adder.params_for(frozenset({add.mode, compare.mode})) == adder.params
+    assert IAddOperator.build(IntFormat(33), IAddOptions(fast=True)).params["FAST"] == 1
+    # A relation taps the subtraction where the comparison of the same operands would, one port up past the difference.
+    for relation in Relation:
+        tap, inversion = compare.tap_of(relation)
+        assert subtract.flag_of(relation) == (tap + 1, inversion)
+        assert subtract.physical_port(tap + 1) == compare.physical_port(tap)
+
+
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_the_two_shift_modes_mirror_each_other_over_every_operand_pair(width: int) -> None:
     # Each mode must be the other read backwards: the direction bit and the sign of the count say the same thing.
@@ -261,11 +290,11 @@ def test_closed_form_latencies(width: int) -> None:
     assert idiv.latency == 3 + -(-width // 2), "one radix-4 step per two quotient bits, rounded up"
     for primitive in (
         IAddPrimitive(IAddOperator.build(fmt, IAddOptions())),
-        ISubPrimitive(ISubOperator.build(fmt, ISubOptions())),
+        ISubPrimitive(IAddOperator.build(fmt, IAddOptions())),
+        ICmpPrimitive(IAddOperator.build(fmt, IAddOptions())),
         IAbsPrimitive(IAbsOperator.build(fmt, IAbsOptions())),
         IShlPrimitive(IShftOperator.build(fmt, IShftOptions())),
         IShrPrimitive(IShftOperator.build(fmt, IShftOptions())),
-        ICmpPrimitive(ICmpOperator.build(fmt, ICmpOptions())),
         IPopcntPrimitive(IPopcntOperator.build(fmt, IPopcntOptions())),
     ):
         assert primitive.latency == 2
@@ -286,11 +315,9 @@ def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None
     assert IDivOperator.build(fmt, IDivOptions()).error_ports == ("div0",)
     for operator in (
         IAddOperator.build(fmt, IAddOptions()),
-        ISubOperator.build(fmt, ISubOptions()),
         IMulOperator.build(fmt, IMulOptions()),
         IAbsOperator.build(fmt, IAbsOptions()),
         IShftOperator.build(fmt, IShftOptions()),
-        ICmpOperator.build(fmt, ICmpOptions()),
         IPopcntOperator.build(fmt, IPopcntOptions()),
     ):
         assert operator.error_ports == (), operator.name
@@ -533,21 +560,6 @@ def test_the_instance_cap_reaches_the_operator_but_never_the_rtl() -> None:
     for name in (field.name for field in fields(OperatorOptions)):
         operator: HardwareOperator = getattr(ops, name)
         assert "INSTANCES" not in {param.upper() for param in operator.params}
-
-
-def _sum_and_difference(a: int, b: int) -> tuple[int, int]:
-    return a + b, a - b
-
-
-def test_operators_alike_in_every_physical_field_remain_different_kinds() -> None:
-    # The adder and the subtractor agree in parameters, ports and timing, so their kind alone keeps an addition from
-    # time-sharing the subtractor's module.
-    result = holoso.synthesize(_sum_and_difference, Options(OperatorOptions(), wint_min=16), name="SumAndDifference")
-    verilog = result.verilog_output.verilog
-    assert verilog.count("holoso_iadds #") == 1 and verilog.count("holoso_isubs #") == 1
-    sim = result.numerical_model.elaborate()
-    for a, b in ((3, 5), (-7, 2), (100, -100)):
-        assert [int(value) for value in sim.run(a, b) if isinstance(value, holoso.IntValue)] == [a + b, a - b]
 
 
 def _add(a: float, b: float) -> float:

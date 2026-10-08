@@ -71,7 +71,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
     # the actuator split.
-    "image_agc_streamed-e8m36": (38, 155),
+    "image_agc_streamed-e8m36": (33, 150),
     "pwm-e6m18": (11, 11),
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
@@ -82,7 +82,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # Branchy kernels whose phi-arm installs have settled sources (boolean/float live-out constants, or an
     # input/state read) on the normal path -- no read-first push, so each lands within the work boundary,
     # shrinking every downstream block base.
-    "uart_tx-e6m18": (11, 36),
+    "uart_tx-e6m18": (11, 37),
     "uart_rx-e6m18": (5, 50),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.

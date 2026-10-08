@@ -2,29 +2,36 @@
 //
 // Every operator has a mandatory input and output latches, exposing no combinational circuits outside.
 //
-//  Module          | Operation                             |Latency| Inputs          | Outputs
-//  ----------------|---------------------------------------|-------|-----------------|---------------------------
-//  holoso_iadds    | Signed addition, saturated            | 2     | a, b            | y, saturated
-//  holoso_isubs    | Signed subtraction, saturated         | 2     | a, b            | y, saturated
-//  holoso_imuls    | Signed multiplication, saturated      | 2..6  | a, b            | y, saturated
-//  holoso_idivs    | Signed division and modulo, saturated | 3+W/2 | num, den        | quo, rem, saturated, div0
-//  holoso_iabss    | Absolute value, saturated             | 2     | x               | y, saturated
-//  holoso_ishft    | Signed arithmetic shift, left/right   | 2     | right, x, shamt | shft
-//  holoso_icmp     | Signed comparison                     | 2     | a, b            | a_gt_b, a_eq_b, a_lt_b
-//  holoso_ipopcnt  | Population count of the magnitude     | 2     | x               | y
+//  Module         | Operation                                |Latency| Inputs          | Outputs
+//  ---------------|------------------------------------------|-------|-----------------|---------------------------
+//  holoso_iadds   | Signed saturating ALU: add, sub, compare | 2     | sub, a, b       | y, saturated, a_{gt,eq,lt}_b
+//  holoso_imuls   | Signed multiplication, saturated         | 2..6  | a, b            | y, saturated
+//  holoso_idivs   | Signed division and modulo, saturated    | 3+W/2 | num, den        | quo, rem, saturated, div0
+//  holoso_iabss   | Absolute value, saturated                | 2     | x               | y, saturated
+//  holoso_ishft   | Signed arithmetic shift, left/right      | 2     | right, x, shamt | shft
+//  holoso_ipopcnt | Population count of the magnitude        | 2     | x               | y
 
 `timescale 1ns/1ps
 
-// Signed integer adder with saturation.
-module holoso_iadds#(parameter W = 44, parameter integer LATENCY = 0) (
+// Signed integer additive ALU with saturation: `a+b` when sub=0, else `a-b`.
+// A subtraction also compares `a` against `b` on the flags as a side effect.
+// Flags a_gt_b, a_eq_b, a_lt_b are only valid in subtraction mode, otherwise their state is undefined.
+// MODE=2 takes `sub` per transaction; MODE=0 always adds and MODE=1 always subtracts (and compares), ignoring `sub`.
+// FAST=1 trades area for shorter combinational paths (no behavioral effects).
+module holoso_iadds#(parameter W = 44, parameter integer MODE = 2, parameter integer FAST = 0,
+                     parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
+    input  wire sub,
     input  wire signed [W-1:0] a,
     input  wire signed [W-1:0] b,
     output reg out_valid,
     output reg signed [W-1:0] y,
-    output reg saturated
+    output reg saturated,
+    output reg a_gt_b,
+    output reg a_eq_b,
+    output reg a_lt_b
 );
     localparam integer LATENCY_REF = 2;
     localparam signed [W-1:0] MIN = {1'b1, {(W-1){1'b0}}};
@@ -33,61 +40,41 @@ module holoso_iadds#(parameter W = 44, parameter integer LATENCY = 0) (
         if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
             _holoso_invalid_integer_latency u_invalid();
         end
+        if ((MODE != 0) && (MODE != 1) && (MODE != 2)) begin : g_invalid_mode
+            _holoso_invalid_iadds_mode u_invalid();
+        end
     endgenerate
 
     reg signed [W-1:0] a_q;
     reg signed [W-1:0] b_q;
+    reg sub_q;
     reg input_valid_q;
-    wire [W:0] sum_ext = {1'b0, a_q} + {1'b0, b_q};
-    wire carry_into_sign = sum_ext[W-1] ^ a_q[W-1] ^ b_q[W-1];
+    wire subtract = (MODE == 2) ? sub_q : (MODE == 1);
+    wire [W-1:0] rhs = b_q ^ {W{subtract}};
+    wire [W:0] sum_ext = {1'b0, a_q} + {1'b0, rhs} + subtract;
+    wire carry_into_sign = sum_ext[W-1] ^ a_q[W-1] ^ rhs[W-1];
     wire overflow = carry_into_sign ^ sum_ext[W];
+    wire less = sum_ext[W-1] ^ overflow;  // the sign of the unbounded difference
+    wire equal;
+    generate
+        if (FAST == 0) begin : g_zero_difference
+            assign equal = ~|sum_ext[W-1:0];
+        end else if (FAST == 1) begin : g_beside_adder
+            assign equal = a_q == b_q;
+        end else begin : g_invalid_fast
+            _holoso_invalid_iadds_fast u_invalid();
+        end
+    endgenerate
 
     always @(posedge clk) begin
         a_q <= a;
         b_q <= b;
+        sub_q <= sub;
         y <= overflow ? (a_q[W-1] ? MIN : MAX) : sum_ext[W-1:0];
         saturated <= overflow;
-        if (rst) begin
-            input_valid_q <= 1'b0;
-            out_valid <= 1'b0;
-        end else begin
-            input_valid_q <= in_valid;
-            out_valid <= input_valid_q;
-        end
-    end
-endmodule
-
-// Signed integer subtractor with saturation.
-module holoso_isubs#(parameter W = 44, parameter integer LATENCY = 0) (
-    input  wire clk,
-    input  wire rst,
-    input  wire in_valid,
-    input  wire signed [W-1:0] a,
-    input  wire signed [W-1:0] b,
-    output reg out_valid,
-    output reg signed [W-1:0] y,
-    output reg saturated
-);
-    localparam integer LATENCY_REF = 2;
-    localparam signed [W-1:0] MIN = {1'b1, {(W-1){1'b0}}};
-    localparam signed [W-1:0] MAX = {1'b0, {(W-1){1'b1}}};
-    generate
-        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
-            _holoso_invalid_integer_latency u_invalid();
-        end
-    endgenerate
-
-    reg signed [W-1:0] a_q;
-    reg signed [W-1:0] b_q;
-    reg input_valid_q;
-    wire signed [W-1:0] diff = a_q - b_q;
-    wire overflow = (a_q[W-1] ^ b_q[W-1]) & (diff[W-1] ^ a_q[W-1]);
-
-    always @(posedge clk) begin
-        a_q <= a;
-        b_q <= b;
-        y <= overflow ? (a_q[W-1] ? MIN : MAX) : diff;
-        saturated <= overflow;
+        a_gt_b <= ~less & ~equal;
+        a_eq_b <= equal;
+        a_lt_b <= less;
         if (rst) begin
             input_valid_q <= 1'b0;
             out_valid <= 1'b0;
@@ -671,48 +658,6 @@ module holoso_ishft#(parameter W = 44, parameter integer LATENCY = 0) (
             2'b00: shft <= leaving;
             2'b01: shft <= leaving_reversed;
         endcase
-        if (rst) begin
-            input_valid_q <= 1'b0;
-            out_valid <= 1'b0;
-        end else begin
-            input_valid_q <= in_valid;
-            out_valid <= input_valid_q;
-        end
-    end
-endmodule
-
-// Signed integer comparator.
-module holoso_icmp#(parameter W = 44, parameter integer LATENCY = 0) (
-    input  wire clk,
-    input  wire rst,
-    input  wire in_valid,
-    input  wire signed [W-1:0] a,
-    input  wire signed [W-1:0] b,
-    output reg out_valid,
-    output reg a_gt_b,
-    output reg a_eq_b,
-    output reg a_lt_b
-);
-    localparam integer LATENCY_REF = 2;
-    generate
-        if ((LATENCY != 0) && (LATENCY != LATENCY_REF)) begin : g_invalid_latency
-            _holoso_invalid_integer_latency u_invalid();
-        end
-    endgenerate
-
-    reg signed [W-1:0] a_q;
-    reg signed [W-1:0] b_q;
-    reg input_valid_q;
-    wire signed [W:0] diff = $signed({a_q[W-1], a_q}) - $signed({b_q[W-1], b_q});
-    wire less = diff[W];
-    wire equal = a_q == b_q;
-
-    always @(posedge clk) begin
-        a_q <= a;
-        b_q <= b;
-        a_gt_b <= ~less & ~equal;
-        a_eq_b <= equal;
-        a_lt_b <= less;
         if (rst) begin
             input_valid_q <= 1'b0;
             out_valid <= 1'b0;

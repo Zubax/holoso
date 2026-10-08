@@ -234,11 +234,11 @@ resource-sharing key and the single home of every physical fact: float operators
 the external ZKF library, integer ones carry a closed-form latency. A PRIMITIVE is what a firing computes -- a
 signature, bit-exact reference arithmetic, a rendering -- and a MIR operation is one use of a primitive. A pooled
 primitive names the operator it runs on, reads its signature off that operator's ports, and runs in one MODE of it,
-selected through the operator. A mode is one code on the operator's per-firing mode port, or its only mode when it has
-none, bound to the RTL parameter carrying its latency, its initiation interval, the leading operand ports it reads, and
-the output ports it drives; this is how one operator serves several primitives, and why latency is per firing yet
-statically known. A mode's initiation interval exceeds its latency by at most one, which keeps an instance's busy window
-from outliving the block that issued it (see Control flow), and a firing's busy window is its own mode's.
+selected through the operator. A mode drives one code on the operator's per-firing mode port, or is its only mode when
+it has none, and binds the RTL parameter carrying its latency, its initiation interval, the leading operand ports it
+reads, and the output ports it drives; this is how one operator serves several primitives, and why latency is per firing
+yet statically known. A mode's initiation interval exceeds its latency by at most one, which keeps an instance's busy
+window from outliving the block that issued it (see Control flow), and a firing's busy window is its own mode's.
 
 The mode condition. Where latency depends on the mode, two firings of one instance can be in flight at different
 latencies, and one issued later could land before one issued earlier. Results must leave any one output port in issue
@@ -255,19 +255,22 @@ angle and magnitude from two) at different latencies, each re-accepting one step
 serves sin, cos, atan2 and a fused magnitude alike. The divider's modes share one latency and differ in the operands
 they read: one digit-recurrence pipeline answers a quotient from two operands or a square root from one. The rounder's
 modes differ in arithmetic only: each reads one operand and answers its rounding on two ports at once, as a float and as
-an integer. The shifter is the integer operator with modes: a direction bit selects the left or the right shift, both at
-one latency and both driving the one output.
+an integer. The shifter's direction bit selects the left or the right shift, both driving the one output.
+The adder's mode bit makes it subtract, and a subtraction orders its operands on flags of their own as a side effect,
+so its mode drives them beside the difference, and a comparison is a third mode that drives the same code and reads the
+flags alone: modes sharing a code are one operation of the module read through different outputs.
+A kernel whose sums, differences and comparisons contend for the one adder asks for more instances.
 
 An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
 schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
-is made per instance at emission: an instance whose firings all run one mode is elaborated for it alone (a CORDIC that
-only rotates sheds the vectoring datapath, a divider that only divides the square root's), and any other keeps the
-elaboration serving every mode. The operator is still built from the latter, so its format limits are those of every
-mode.
+is made per instance at emission: an instance whose firings all drive one code is elaborated for it alone (a CORDIC
+that only rotates sheds the vectoring datapath, a divider that only divides the square root's, and an adder that never
+adds only subtracts), and any other keeps the elaboration serving every mode. The operator is still built from the
+latter, so its format limits are those of every mode.
 
 Primitives split structurally into POOLED -- running on operators the scheduler contends for -- and INLINE -- pure
 expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is never
-materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparator firing,
+materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparison firing,
 min and max over one pair share a sorter firing, a rounding and the integer conversion of the same rounding share a
 rounder firing, and negation/inversion chains fold into consumer sidebands.
 
@@ -530,17 +533,19 @@ is one mode of a shared operator, the float-to-integer conversion being the inte
 operators a build demands therefore follows the optimized graph rather than the source's spelling, so a kernel can be
 refused for want of an operator it never wrote. The integer lowerer answers a constant shift count from the count
 itself: a right shift past the word is the sign fill (a negative count being the refusal gate's), and a count no other
-use reads is never lowered; a runtime count takes the shifter in the mode of its direction. A power-of-two scaling is an
-ordinary multiplication by that power, railing where a shift would drop what leaves the word, and one whose factor the
-word cannot hold is refused.
+use reads is never lowered; a runtime count takes the shifter in the mode of its direction. Addition, subtraction, a
+negation as the subtraction from zero, and every relation take the adder, each in its own mode. A power-of-two
+scaling is an ordinary multiplication by that power, railing where a shift would drop what leaves the word, and one
+whose factor the word cannot hold is refused.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
 sin and cos of one angle computed by one CORDIC rotation, a rounding and its integer conversion in one rounder
-transaction, FMA contraction of `a*b+c` wherever the additions that read the product absorb it entirely (each fma
-carrying its own rounding, which is why a product anything else observes is left alone) -- matched at MIR because this
-is the first layer aware of hardware semantics; operations selected onto distinct outputs of one transaction become a
-single firing when the LIR is built. Some semantic operators lower into combinations of primitives depending on
-availability and context (e.g. a two-legged magnitude via the CORDIC's vectoring).
+transaction, an integer comparison on the flags of a subtraction of the same two operands, FMA contraction of `a*b+c`
+wherever the additions that read the product absorb it entirely (each fma carrying its own rounding, which is why a
+product anything else observes is left alone) -- matched at MIR because this is the first layer aware of hardware
+semantics; operations selected onto distinct outputs of one transaction become a single firing when the LIR is built.
+Some semantic operators lower into combinations of primitives depending on availability and context (e.g. a two-legged
+magnitude via the CORDIC's vectoring).
 
 The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
 configured float and integer formats explicitly. The CFG is scheduled per block and register-allocated over the

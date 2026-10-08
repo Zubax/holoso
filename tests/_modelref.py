@@ -181,6 +181,15 @@ def instantiated_modules(result: holoso.SynthesisResult) -> set[str]:
     return set(re.findall(r"\b(holoso_\w+)\s+#\(", result.verilog_output.verilog))
 
 
+def adder_modes(result: holoso.SynthesisResult) -> list[int]:
+    """
+    The `MODE` each instance of the adder is elaborated for, in instance order: 0 for one that only adds, 1 for one
+    that only subtracts or compares, 2 for one taking `sub` with every firing. The module name tells none of them apart.
+    """
+    elaborations = re.findall(r"\bholoso_iadds\s+#\(\s*\.W\(\d+\), \.MODE\((\d+)\)", result.verilog_output.verilog)
+    return [int(mode) for mode in elaborations]
+
+
 def bounded(rng: np.random.Generator, lo: float, hi: float) -> float:
     return float(rng.uniform(lo, hi))
 

@@ -311,7 +311,7 @@ _BASELINE: dict[str, Metrics] = {
     # Its two copy-only arms are threaded into the blocks that branch to them; the arm this adds to one read port is the
     # price of the cycles threading saves, which the threading rule does not weigh.
     "imu_fusion": Metrics(
-        False, nreg=41, bnreg=5, steering=157, max_read_port=28, max_write_select=7,
+        False, nreg=42, bnreg=5, steering=160, max_read_port=26, max_write_select=7,
         copies=14, min_ii=258, last_pc=434, max_block_span=133,
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's. fir's shifted-out tap is
@@ -349,7 +349,7 @@ _BASELINE: dict[str, Metrics] = {
     # toward its other arm; the steering arms this costs are the price of the four cycles threading saves. One CORDIC
     # serves both the observer's atan2 and the Park rotation, so their results share its two output lanes.
     "foc": Metrics(
-        False, nreg=29, bnreg=3, steering=91, max_read_port=13, max_write_select=5,
+        False, nreg=29, bnreg=3, steering=92, max_read_port=14, max_write_select=4,
         copies=4, min_ii=289, last_pc=336, max_block_span=226,
     ),
 }

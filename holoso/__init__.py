@@ -51,12 +51,10 @@ from ._operators import (
     FSortOptions as FSortOptions,
     IAbsOptions as IAbsOptions,
     IAddOptions as IAddOptions,
-    ICmpOptions as ICmpOptions,
     IDivOptions as IDivOptions,
     IMulOptions as IMulOptions,
     IPopcntOptions as IPopcntOptions,
     IShftOptions as IShftOptions,
-    ISubOptions as ISubOptions,
     OperatorOptions as OperatorOptions,
 )
 

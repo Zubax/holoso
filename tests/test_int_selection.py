@@ -42,7 +42,11 @@ from holoso._operators import (
     FMulILog2Operator,
     FMulILog2Primitive,
     FRintPrimitive,
+    IAddPrimitive,
+    ICmpPrimitive,
     IntIdentity,
+    ISubPrimitive,
+    PooledPrimitive,
     Primitive,
     RoundMode,
 )
@@ -126,18 +130,18 @@ def countdown(n: int) -> int:
     "target,selected",
     [
         (divmod_pair, ["idivs", "idivs"]),
-        (three_relations, ["icmp", "icmp", "icmp"]),
-        (sign_ops, ["iabss", "isubs"]),
+        (three_relations, ["iadds", "iadds", "iadds"]),
+        (sign_ops, ["iabss", "iadds"]),
         (bitwise_ops, ["ibwand", "ibwnot", "ibwor", "ibwxor"]),
         (mux_and_casts, ["iadds", "ifrombool", "itobool", "select"]),
-        (_min_max_of_ints, ["iadds", "icmp", "icmp", "imuls", "select", "select"]),
+        (_min_max_of_ints, ["iadds", "iadds", "iadds", "imuls", "select", "select"]),
         (family_crossings, ["ffromint", "frint"]),
         (shift_pair, ["ishft", "ishft"]),
-        (countdown, ["iadds", "icmp", "isubs"]),
+        (countdown, ["iadds", "iadds", "iadds"]),
         (times_eight, ["imuls"]),
         (eighth, ["ishiftc"]),
         (eighth_remainder, ["ibwand"]),
-        (negated_by_product, ["isubs"]),
+        (negated_by_product, ["iadds"]),
         (popcount_of, ["ipopcnt"]),
     ],
     ids=lambda value: getattr(value, "__name__", str(value)),
@@ -146,12 +150,35 @@ def test_the_lowering_names_each_integer_operator_in_one_table(
     target: Callable[..., object], selected: list[str]
 ) -> None:
     """
-    Every primitive the lowering can choose, named in one place: `-x` selects `isubs` because there is no
+    Every primitive the lowering can choose, named in one place: `-x` selects the adder because there is no
     negation module, each shift direction selects the module that names it, the strength rewrites pick the
     inline `ishiftc`/`ibwand` no public artifact can name, and `min`/`max` become one compare-and-select
     pair each rather than branches.
     """
     assert _mnemonics(_select(target)) == selected
+
+
+@pytest.mark.parametrize(
+    "target,primitives",
+    [
+        (three_relations, [ICmpPrimitive, ICmpPrimitive, ICmpPrimitive]),
+        (sign_ops, [ISubPrimitive]),
+        (mux_and_casts, [IAddPrimitive]),
+        (_min_max_of_ints, [IAddPrimitive, ICmpPrimitive, ICmpPrimitive]),
+        (countdown, [IAddPrimitive, ICmpPrimitive, ISubPrimitive]),
+        (negated_by_product, [ISubPrimitive]),
+    ],
+    ids=lambda value: getattr(value, "__name__", str(value)),
+)
+def test_the_lowering_selects_the_adder_primitive_each_use_means(
+    target: Callable[..., object], primitives: list[type[PooledPrimitive]]
+) -> None:
+    """
+    The adder's name cannot tell an addition from a subtraction or a comparison, so the primitive each use selects is
+    the sentinel: a negation is the subtraction from zero, a relation the comparison, and a sum the addition.
+    """
+    selected = sorted(type(operation.primitive).__name__ for operation in _operations(_select(target), "iadds"))
+    assert selected == [primitive.__name__ for primitive in primitives]
 
 
 def _wide_firings(lir: Lir) -> list[PooledScheduledOp]:
@@ -169,16 +196,16 @@ def test_the_quotient_and_the_remainder_share_one_divider_firing() -> None:
 def test_relations_fuse_into_one_firing_and_opposite_inversions_split() -> None:
     """
     Three relations, three flags, one activation. A firing taps each port at most once, so `a <= b` and `a > b`
-    -- the same flag under opposite inversions -- need an activation each, still bound to the one pooled comparator:
-    the cost is a cycle, never a module.
+    -- the same flag under opposite inversions -- need an activation each, still bound to the one pooled unit: the
+    cost is a cycle, never a module.
     """
     fused = build_lir(_select(three_relations), "three_relations")
     (firing,) = _wide_firings(fused)
-    assert [instance.operator.name for instance in fused.instances] == ["icmp"]
-    assert len(firing.writes) == 3
+    assert [instance.operator.name for instance in fused.instances] == ["iadds"]
+    assert isinstance(firing.primitive, ICmpPrimitive) and len(firing.writes) == 3
     split = build_lir(_select(four_relations), "four_relations")
-    assert [instance.operator.name for instance in split.instances] == ["icmp"]
-    assert len(_wide_firings(split)) == 2
+    assert [instance.operator.name for instance in split.instances] == ["iadds"]
+    assert [type(firing.primitive) for firing in _wide_firings(split)] == [ICmpPrimitive, ICmpPrimitive]
 
 
 def strength_mix(x: int, n: int) -> tuple[int, int, int, int]:

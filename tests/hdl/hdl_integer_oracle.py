@@ -42,28 +42,45 @@ def ishr(a_bits: int, b_bits: int, width: int) -> int:
     return ((a >> shift) if b >= 0 else (a_bits << shift)) & mask
 
 
-def expected_simple(module: str, a_bits: int, b_bits: int, width: int) -> dict[str, int]:
+def expected_iadds_add(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
     """
-    What one of the modules taking neither a mode nor a parameter beyond the width answers, keyed by its own output
-    port names. This, the two shift directions above and the two configurable siblings below are the reference the
-    HDL benches score every module against, so they are also what the Python operator model must reproduce.
+    What `holoso_iadds` answers when it adds, keyed by the output ports that mode drives and its saturation sideband.
+    Each mode of the adder has its own reference, the module's name selecting none of them.
     """
-    modulus = 1 << width
     minimum = -(1 << (width - 1))
     maximum = (1 << (width - 1)) - 1
+    exact = signed(a_bits, width) + signed(b_bits, width)
+    clamped = min(max(exact, minimum), maximum)
+    return {"y": clamped & ((1 << width) - 1), "saturated": int(clamped != exact)}
+
+
+def expected_iadds_sub(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
+    minimum = -(1 << (width - 1))
+    maximum = (1 << (width - 1)) - 1
+    exact = signed(a_bits, width) - signed(b_bits, width)
+    clamped = min(max(exact, minimum), maximum)
+    return {"y": clamped & ((1 << width) - 1), "saturated": int(clamped != exact)}
+
+
+def expected_iadds_cmp(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
     a = signed(a_bits, width)
     b = signed(b_bits, width)
-    if module == "holoso_icmp":
-        return {"a_gt_b": int(a > b), "a_eq_b": int(a == b), "a_lt_b": int(a < b)}
+    return {"a_gt_b": int(a > b), "a_eq_b": int(a == b), "a_lt_b": int(a < b)}
+
+
+def expected_simple(module: str, a_bits: int, width: int) -> dict[str, int]:
+    """
+    What one of the single-operand modules taking neither a mode nor a parameter beyond the width answers, keyed by
+    its own output port names. This, the shift directions and the adder's modes above and the two configurable
+    siblings below are the reference the HDL benches score every module against, so they are also what the Python
+    operator model must reproduce.
+    """
+    a = signed(a_bits, width)
     if module == "holoso_ipopcnt":
         return {"y": abs(a).bit_count()}
-    exact = {
-        "holoso_iadds": a + b,
-        "holoso_isubs": a - b,
-        "holoso_iabss": abs(a),
-    }[module]
-    clamped = min(max(exact, minimum), maximum)
-    return {"y": clamped & (modulus - 1), "saturated": int(clamped != exact)}
+    assert module == "holoso_iabss"
+    clamped = min(abs(a), (1 << (width - 1)) - 1)
+    return {"y": clamped, "saturated": int(clamped != abs(a))}
 
 
 def expected_imuls(a_bits: int, b_bits: int, width: int) -> dict[str, int]:

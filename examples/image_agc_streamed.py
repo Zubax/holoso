@@ -10,8 +10,8 @@ exposure time first, then analog gain, digital gain last; the two sensor-side co
 and forwarded to the sensor by the host. Metering is centre-weighted, and a frame that saturates more than a small
 fraction of its pixels refuses any further increase, so highlights are not traded for the mean.
 
-A beat that ends no frame takes 39 cycles, or 195 ns at 200 MHz, and a frame is 1920*1200/16 = 144000 beats, so
-28.1 ms and 35 FPS max. A wider beat buys frame rate at the cost of kernel area, which is often a better trade than a
+A beat that ends no frame takes 33 cycles, or 165 ns at 200 MHz, and a frame is 1920*1200/16 = 144000 beats, so
+23.8 ms and 42 FPS max. A wider beat buys frame rate at the cost of kernel area, which is often a better trade than a
 conventional II=1 pipeline because time-sharing one set of operators utilizes the fabric better.
 """
 
@@ -124,6 +124,9 @@ def main() -> None:
             flog2=holoso.FLog2Options(),
             ffromint=holoso.FFromIntOptions(),
             frint=holoso.FRintOptions(),
+            # A beat's statistics are dozens of independent sums and comparisons, which a single adder would issue
+            # one after another, nearly doubling the beat.
+            iadds=holoso.IAddOptions(instances=2),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=36),
         wint_min=31,  # the frame sum reaches 1920*1200*255, plus the sign bit

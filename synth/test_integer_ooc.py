@@ -12,8 +12,6 @@ from synth._ooc import KEEP_ATTR
 from synth._synth import BUILD_ROOT
 from synth.flows import FlowId, make_flow
 
-_SATURATING = ("holoso_iadds", "holoso_isubs", "holoso_iabss")
-
 
 @dataclass(frozen=True, slots=True)
 class _Target:
@@ -25,6 +23,18 @@ class _Target:
     @property
     def label(self) -> str:
         return f"{self.operator}-w{self.width}-{self.flow.value}-{self.target_frequency_MHz:g}MHz"
+
+
+@dataclass(frozen=True, slots=True)
+class _AdderTarget:
+    width: int
+    fast: bool
+    flow: FlowId
+    target_frequency_MHz: float
+
+    @property
+    def label(self) -> str:
+        return f"holoso_iadds-w{self.width}-f{int(self.fast)}-{self.flow.value}-{self.target_frequency_MHz:g}MHz"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,8 +74,19 @@ class _DividerTarget:
 
 _TARGETS = tuple(
     _Target(operator, width, flow, frequency)
-    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishft", "holoso_ipopcnt")
+    for operator in ("holoso_iabss", "holoso_ishft", "holoso_ipopcnt")
     for width in (24, 44)
+    for flow, frequency in (
+        (FlowId.YOSYS_ECP5, 100.0),
+        (FlowId.DIAMOND_ECP5, 100.0),
+        (FlowId.VIVADO_ARTIX7, 150.0),
+    )
+)
+
+_ADDER_TARGETS = tuple(
+    _AdderTarget(width, fast, flow, frequency)
+    for width in (24, 44)
+    for fast in (False, True)
     for flow, frequency in (
         (FlowId.YOSYS_ECP5, 100.0),
         (FlowId.DIAMOND_ECP5, 100.0),
@@ -261,16 +282,21 @@ pytestmark = pytest.mark.synth
 
 def _build_ooc_design(operator: str, width: int) -> OocDesign:
     top = f"{operator}_w{width}_ooc"
-    if operator == "holoso_icmp":
-        wrapper = _render_cmp_wrapper(top, width)
-    elif operator == "holoso_ishft":
+    if operator == "holoso_ishft":
         wrapper = _render_shift_wrapper(top, width)
     elif operator == "holoso_ipopcnt":
         wrapper = _render_popcnt_wrapper(top, width)
-    elif operator == "holoso_iabss":
-        wrapper = _render_abs_wrapper(top, width)
     else:
-        wrapper = _render_saturating_wrapper(top, operator, width)
+        assert operator == "holoso_iabss"
+        wrapper = _render_abs_wrapper(top, width)
+    files = [SourceFile(Path(name), content) for name, content in support_files().items()]
+    files.append(SourceFile(Path(f"{top}.v"), wrapper))
+    return OocDesign(top=top, files=files)
+
+
+def _build_adder_ooc_design(target: _AdderTarget) -> OocDesign:
+    top = f"holoso_iadds_w{target.width}_f{int(target.fast)}_ooc"
+    wrapper = _render_adder_wrapper(top, target)
     files = [SourceFile(Path(name), content) for name, content in support_files().items()]
     files.append(SourceFile(Path(f"{top}.v"), wrapper))
     return OocDesign(top=top, files=files)
@@ -278,8 +304,7 @@ def _build_ooc_design(operator: str, width: int) -> OocDesign:
 
 def _build_multiplier_ooc_design(target: _MultiplierTarget) -> OocDesign:
     top = f"holoso_imuls_w{target.width}_s{target.stage_product}_ooc"
-    parameters = f".W({target.width}), .STAGE_PRODUCT({target.stage_product}), .LATENCY({target.latency})"
-    wrapper = _render_saturating_wrapper(top, "holoso_imuls", target.width, parameters)
+    wrapper = _render_multiplier_wrapper(top, target)
     files = [SourceFile(Path(name), content) for name, content in support_files().items()]
     files.append(SourceFile(Path(f"{top}.v"), wrapper))
     return OocDesign(top=top, files=files)
@@ -551,8 +576,8 @@ endmodule
 """
 
 
-def _render_saturating_wrapper(top: str, operator: str, width: int, parameters: str | None = None) -> str:
-    parameters = parameters or f".W({width}), .LATENCY(2)"
+def _render_multiplier_wrapper(top: str, target: _MultiplierTarget) -> str:
+    width = target.width
     return f"""`default_nettype none
 
 module {top} (
@@ -578,7 +603,7 @@ module {top} (
     assign out_valid = r_out_valid;
     assign io_out = out_sel ? {{{width}{{r_saturated}}}} : r_y;
 
-    {operator}#({parameters}) dut (
+    holoso_imuls#(.W({width}), .STAGE_PRODUCT({target.stage_product}), .LATENCY({target.latency})) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a), .b(r_b),
         .out_valid(dut_out_valid), .y(dut_y), .saturated(dut_saturated)
     );
@@ -649,7 +674,13 @@ endmodule
 """
 
 
-def _render_cmp_wrapper(top: str, width: int) -> str:
+def _render_adder_wrapper(top: str, target: _AdderTarget) -> str:
+    """
+    The adder taking `sub` with every firing, registered beside the operands. The sum and the three flags are all
+    registered and brought out, so the adder, the rail select and the flags are each timed; the saturation sideband is
+    left open, as every kernel leaves it.
+    """
+    width = target.width
     zero_padding = f"{{{width - 1}{{1'b0}}}}"
     return f"""`default_nettype none
 
@@ -657,19 +688,22 @@ module {top} (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-    input  wire in_sel,
+    input  wire [1:0] in_sel,
     input  wire [{width - 1}:0] io_in,
     output wire out_valid,
     input  wire [1:0] out_sel,
     output wire [{width - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
+    {KEEP_ATTR} reg r_sub;
     {KEEP_ATTR} reg [{width - 1}:0] r_a;
     {KEEP_ATTR} reg [{width - 1}:0] r_b;
     wire dut_out_valid;
+    wire [{width - 1}:0] dut_y;
     wire dut_a_gt_b;
     wire dut_a_eq_b;
     wire dut_a_lt_b;
+    {KEEP_ATTR} reg [{width - 1}:0] r_y;
     {KEEP_ATTR} reg r_a_gt_b;
     {KEEP_ATTR} reg r_a_eq_b;
     {KEEP_ATTR} reg r_a_lt_b;
@@ -681,20 +715,27 @@ module {top} (
 
     always @* begin
         case (out_sel)
-            2'd0: io_out_mux = {{{zero_padding}, r_a_gt_b}};
-            2'd1: io_out_mux = {{{zero_padding}, r_a_eq_b}};
+            2'd0: io_out_mux = r_y;
+            2'd1: io_out_mux = {{{zero_padding}, r_a_gt_b}};
+            2'd2: io_out_mux = {{{zero_padding}, r_a_eq_b}};
             default: io_out_mux = {{{zero_padding}, r_a_lt_b}};
         endcase
     end
 
-    holoso_icmp#(.W({width}), .LATENCY(2)) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a), .b(r_b), .out_valid(dut_out_valid),
+    holoso_iadds#(.W({width}), .MODE(2), .FAST({int(target.fast)}), .LATENCY(2)) dut (
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .sub(r_sub), .a(r_a), .b(r_b),
+        .out_valid(dut_out_valid), .y(dut_y), .saturated(),
         .a_gt_b(dut_a_gt_b), .a_eq_b(dut_a_eq_b), .a_lt_b(dut_a_lt_b)
     );
 
     always @(posedge clk) begin
-        if (in_sel) r_b <= io_in;
-        else        r_a <= io_in;
+        case (in_sel)
+            2'd0: r_a <= io_in;
+            2'd1: r_b <= io_in;
+            2'd2: r_sub <= io_in[0];
+            default: ;
+        endcase
+        r_y <= dut_y;
         r_a_gt_b <= dut_a_gt_b;
         r_a_eq_b <= dut_a_eq_b;
         r_a_lt_b <= dut_a_lt_b;
@@ -824,6 +865,21 @@ def test_integer_operator_closes_timing(target: _Target) -> None:
     directory = BUILD_ROOT / "integer" / target.label
     shutil.rmtree(directory, ignore_errors=True)
     report = flow.prepare(_build_ooc_design(target.operator, target.width)).synthesize(directory)
+    assert report.fmax_MHz >= target.target_frequency_MHz, (
+        f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
+        f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
+    )
+
+
+@pytest.mark.parametrize("target", _ADDER_TARGETS, ids=lambda target: target.label)
+def test_integer_adder_closes_timing(target: _AdderTarget) -> None:
+    flow = make_flow(target.flow, target.target_frequency_MHz)
+    if not flow.available():
+        pytest.skip(f"{target.flow.value} tool not available")
+
+    directory = BUILD_ROOT / "integer" / target.label
+    shutil.rmtree(directory, ignore_errors=True)
+    report = flow.prepare(_build_adder_ooc_design(target)).synthesize(directory)
     assert report.fmax_MHz >= target.target_frequency_MHz, (
         f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
         f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
