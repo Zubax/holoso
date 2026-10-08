@@ -92,9 +92,12 @@ a few perturbed orders per block keeping the shortest, are the candidates.
 ### Sign tests against zero and a branchless absolute value
 
 A comparison against a constant zero occupies a comparator firing even where it only reads its operand's sign bit.
-Inline primitives answering "negative" and "nonnegative" for an integer (`iisneg`, `iisnonneg`), and their float
-counterparts, would take those comparisons off the comparator; equality with zero and its negation lower through the
-existing conversion to boolean. "Positive" and "nonpositive" look past the sign bit, so they stay on the comparator.
+We need inline primitives and lower comparisons against zero through them:
+
+- `iisneg`, `iisnonneg` evaluating the sign bit only.
+- `iispos`, `iisnonpos` evaluating the sign bit and the integer value. This may turn out expensive, subject to test.
+- `fisneg`, `fisnonneg`, `fispos`, `fisnonpos` evaluating the sign bit and the exponent of the float.
+  Exponent is needed always to handle `-0.0` correctly; it is cheap because always narrow.
 
 The integer absolute value then needs no operator of its own: it lowers to the saturating `0 + x` and `0 - x` and an
 inline select between them on the sign test, which removes `holoso_iabss`.
