@@ -6,6 +6,12 @@ on:
       - 'docs/**'
       - '.claude/**'
 
+# A newer push to a branch stops the run of an older one, except on main, whose every commit is gated. A `#yolo` push
+# is kept in a group of its own, since it runs nothing and must not stop the run of the commit before it.
+concurrency:
+  group: ${{ github.ref }}-${{ contains(github.event.head_commit.message, '#yolo') && github.sha || 'ci' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 # A push whose head commit message contains `#yolo` skips every job, for trivial commits. Never on main, whose CI gates
 # the release.
 jobs:
