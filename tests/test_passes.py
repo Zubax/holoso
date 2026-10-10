@@ -19,7 +19,7 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
@@ -30,7 +30,7 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
-from holoso._operators import FDivOperator
+from holoso._operators import FDivsqrtOperator
 from holoso._util import ValueId
 from holoso._eel import lower
 from holoso._hir import (
@@ -108,6 +108,7 @@ from ._modelref import (
     branch_boundary_kernel,
     mir_options,
     const_branch_kernel,
+    adder_modes,
     DEFAULT_IFCONV_MAX_OPS,
     default_tolerance,
     DEFAULT_UNROLL_MAX_TRIPS,
@@ -124,7 +125,7 @@ OPTIONS = Options(
     OperatorOptions(
         fadd=FAddOptions(),
         fmul=FMulOptions(),
-        fdiv=FDivOptions(),
+        fdivsqrt=FDivsqrtOptions(),
         fmul_ilog2=FMulILog2Options(),
         fcmp=FCmpOptions(),
     ),
@@ -261,7 +262,7 @@ def test_a_reciprocal_the_host_cannot_hold_leaves_the_division_standing() -> Non
         return a / 1e-320
 
     result = _synth(f, _WIDE_OPTIONS, name="div_subnormal")
-    assert _instantiated(result) == {"holoso_fdiv"}
+    assert _instantiated(result) == {"holoso_fdivsqrt"}
     got = float(result.numerical_model.elaborate().run(1e-20)[0])
     want = 1e-20 / 1e-320
     assert within(got, want, *default_tolerance(_WIDE_OPTIONS.ffmt, 2, magnitude=want))
@@ -359,7 +360,7 @@ def test_a_scale_past_the_formats_reach_is_refused_rather_than_split() -> None:
 def test_without_the_scaler_the_constant_is_still_what_is_refused() -> None:
     # The split needs the exponent scaler. Without it the kernel must be refused over the constant it cannot hold,
     # which names both the trouble and the way out, rather than over an operator the kernel never asked for.
-    options = Options(OperatorOptions(fmul=FMulOptions(), fdiv=FDivOptions()), ffmt=FMT)
+    options = Options(OperatorOptions(fmul=FMulOptions(), fdivsqrt=FDivsqrtOptions()), ffmt=FMT)
 
     def f(x: float) -> float:
         return x / 3e9
@@ -571,7 +572,7 @@ def test_ekf1_stateless_synthesis() -> None:
     assert len(result.input_ports) == 17
     assert len(result.output_ports) == 9
     verilog = result.verilog_output.verilog
-    assert verilog.count("holoso_fdiv #") == 1  # the source's only division, x22 = 1 / x21, on one pooled divider
+    assert verilog.count("holoso_fdivsqrt #") == 1  # the source's only division, x22 = 1 / x21, on one pooled divider
     assert verilog.count("holoso_fmul_ilog2 #") >= 1  # the "2 * ..." terms
 
 
@@ -655,7 +656,7 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
 
     result = _synth(f, name="unspec_arm")
     assert result.initiation_interval[1] is None  # the diamond survives as a real branch
-    assert "holoso_fdiv" in _instantiated(result)
+    assert "holoso_fdivsqrt" in _instantiated(result)
     sim = result.numerical_model.elaborate()
     for a, b in [(3.0, 1.0), (1.0, 2.0), (1.0, 4.0)]:
         assert float(sim.run(a, b)[0]) == f(a, b)
@@ -673,7 +674,7 @@ def test_if_conversion_speculates_a_hypotenuse() -> None:
 
     options = dataclasses.replace(
         OPTIONS,
-        operator=dataclasses.replace(OPTIONS.operator, filog2=holoso.FILog2Options(), fsqrt=holoso.FSqrtOptions()),
+        operator=dataclasses.replace(OPTIONS.operator, filog2=holoso.FILog2Options()),
     )
     result = _synth(f, options, name="spec_hypot")
     assert result.initiation_interval[1] is not None  # the diamond collapsed rather than surviving as a branch
@@ -965,7 +966,7 @@ def test_speculatable_hir_operators_map_to_error_free_hardware() -> None:
     # The speculation flag and the hardware error sideband are two declarations of one fact: an error-bearing operator
     # such as division must keep the default speculatable=False on its HIR side, or if-conversion would assert the
     # module error flag for a never-taken path.
-    assert FDivOperator.build(FMT, FDivOptions()).error_ports and not HirFloatDiv.speculatable
+    assert FDivsqrtOperator.build(FMT, FDivsqrtOptions()).error_ports and not HirFloatDiv.speculatable
 
 
 def test_dead_diamond_frees_its_condition_cone() -> None:
@@ -1163,46 +1164,43 @@ def test_integer_folding_has_no_size_limit() -> None:
 
 def test_the_integer_subtraction_rules_the_shared_algebra_cannot_state() -> None:
     # `x - 0` is `x` while `0 - x` is the negation, so each direction is its own rule; the negation is the
-    # only direction that needs the subtractor. Pooling hides op counts, so the artifact pins one subtractor
-    # instance and no other module class.
+    # only direction that needs a subtraction. Pooling hides op counts, so the artifact pins one instance of the
+    # adder, elaborated for subtraction alone, and no other module class.
     def f(n: int) -> tuple[int, int, int]:
         return n - 0, 0 - n, n - n
 
     result = _synth(f, INT_OPTIONS, name="int_sub_rules")
-    assert _instantiated(result) == {"holoso_isubs"}
-    assert result.verilog_output.verilog.count("holoso_isubs #") == 1
+    assert _instantiated(result) == {"holoso_iadds"}
+    assert adder_modes(result) == [1]
     sim = result.numerical_model.elaborate()
     for n in (-9, -1, 0, 1, 7, 1000):
         assert _ints(sim.run(n)) == list(f(n))
 
 
-def test_a_power_of_two_integer_product_mints_the_saturating_scaling() -> None:
-    # The exponent is absorbed into the operator from either side, and the constant -- even one no machine word
-    # holds -- goes dead with it, so it is never asked to materialize and no multiplier is instantiated.
+def test_a_power_of_two_integer_product_is_built_as_a_multiplication() -> None:
+    # The exponent is absorbed into the scaling operator from either side; the machine builds that as an ordinary
+    # multiplication, because a product rails where a left shift would drop what leaves the word.
     def f(n: int) -> tuple[int, int]:
-        return n * 8, (2**40) * n
+        return n * 8, 4 * n
 
     result = _synth(f, INT_OPTIONS, name="int_pow2_product")
-    assert "holoso_imuls" not in result.verilog_output.verilog
+    assert "holoso_imuls" in result.verilog_output.verilog and "holoso_ishft" not in result.verilog_output.verilog
     sim = result.numerical_model.elaborate()
-    word = result.int_format
     for n in (-9, -1, 0, 1, 7, 1000):
-        # 2**40 lies far past any machine word, so every nonzero product rails by sign whatever the kernel settled on.
-        railed = word.min if n < 0 else word.max if n > 0 else 0
-        assert _ints(sim.run(n)) == [n * 8, railed]
+        assert _ints(sim.run(n)) == [n * 8, 4 * n]
 
 
 def test_integer_negations_share_one_tracking_across_their_spellings() -> None:
     # `x * -1` and `x // -1` are negations rather than a product and a quotient, so no multiplier or divider
-    # module appears; `-(-x)` returns the base and `n + (-n)` folds to zero, so no adder appears either. The
-    # surviving negations bind the one pooled subtractor instance.
+    # module appears; `-(-x)` returns the base and `n + (-n)` folds to zero, so nothing is added either. The
+    # surviving negations bind the one pooled adder, which is elaborated for subtraction alone.
     def f(n: int) -> tuple[int, int, int, int]:
         return -(-n), n + (-n), n * -1, n // -1
 
     result = _synth(f, INT_OPTIONS, name="int_negations")
     verilog = result.verilog_output.verilog
-    assert verilog.count("holoso_isubs #") == 1
-    assert "holoso_imuls" not in verilog and "holoso_idivs" not in verilog and "holoso_iadds" not in verilog
+    assert adder_modes(result) == [1]
+    assert "holoso_imuls" not in verilog and "holoso_idivs" not in verilog
     sim = result.numerical_model.elaborate()
     for n in (-9, -1, 0, 1, 7, 1000):
         assert _ints(sim.run(n)) == list(f(n))

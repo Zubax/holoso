@@ -431,29 +431,25 @@ class _Latch:
         self.y = x
 
 
-def _latch_hir(state_port: bool, port_value_of_x: bool) -> Hir:
+def test_miswired_state_port_convicts() -> None:
     builder = HirBuilder()
     builder.block()
     x = builder.input("x", FloatType())
     builder.state_slot("y", FloatConst(0.0), x)
-    if state_port:
-        builder.output("state_y", x if port_value_of_x else builder.float_const(0.0))
+    builder.output("state_y", builder.float_const(0.0))
     builder.ret()
-    return builder.finish()
-
-
-def test_miswired_state_port_convicts() -> None:
     with pytest.raises(AssertionError):
-        assert_hir_matches_reference(
-            _latch_hir(state_port=True, port_value_of_x=False), _Latch().step, [{"x": 3.0}], label="miswired"
-        )
+        assert_hir_matches_reference(builder.finish(), _Latch().step, [{"x": 3.0}], label="miswired")
 
 
 def test_missing_public_state_port_convicts() -> None:
+    builder = HirBuilder()
+    builder.block()
+    x = builder.input("x", FloatType())
+    builder.state_slot("y", FloatConst(0.0), x)
+    builder.ret()
     with pytest.raises(AssertionError):
-        assert_hir_matches_reference(
-            _latch_hir(state_port=False, port_value_of_x=True), _Latch().step, [{"x": 3.0}], label="portless"
-        )
+        assert_hir_matches_reference(builder.finish(), _Latch().step, [{"x": 3.0}], label="portless")
 
 
 def _first_kernel(x: float, y: float) -> float:

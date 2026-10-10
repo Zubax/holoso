@@ -1,11 +1,11 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from .._detect import find_tool, require_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
-from .._flow_id import FlowId
+from .._flow_id import DeviceClass, FlowId
 from ._flow import Flow
 
 _SCRIPT = "synth.ys"
@@ -21,6 +21,10 @@ class Ecp5Device:
     size: str = "25k"  # nextpnr-ecp5 --<size>
     package: str = "CABGA381"
     speed_grade: int = 6
+
+    @classmethod
+    def of(cls, device_class: DeviceClass) -> Self:
+        return cls(size="45k") if device_class is DeviceClass.LARGE else cls()
 
 
 @dataclass(frozen=True, slots=True)

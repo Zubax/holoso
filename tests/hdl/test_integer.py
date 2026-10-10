@@ -8,26 +8,8 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import (
-    IAbsOptions,
-    IAddOptions,
-    ICmpOptions,
-    IntFormat,
-    IPopcntOptions,
-    IShlOptions,
-    IShrOptions,
-    ISubOptions,
-)
-from holoso._operators import (
-    HardwareOperator,
-    IAbsOperator,
-    IAddOperator,
-    ICmpOperator,
-    IPopcntOperator,
-    IShlOperator,
-    IShrOperator,
-    ISubOperator,
-)
+from holoso import IAbssOptions, IntFormat, IPopcntOptions
+from holoso._operators import HardwareOperator, IAbsOperator, IPopcntOperator
 
 from .hdl_float_oracle import (
     HDL_DIR,
@@ -44,12 +26,7 @@ from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, expected_simp
 # The operator is the source of the module name, its RTL parameters, its port names and its latency, so a declaration
 # that drifted from the hardware fails right here, across every width the sweep covers.
 _OPERATORS: list[Callable[[IntFormat], HardwareOperator]] = [
-    lambda fmt: IAddOperator.build(fmt, IAddOptions()),
-    lambda fmt: ISubOperator.build(fmt, ISubOptions()),
-    lambda fmt: IAbsOperator.build(fmt, IAbsOptions()),
-    lambda fmt: ICmpOperator.build(fmt, ICmpOptions()),
-    lambda fmt: IShlOperator.build(fmt, IShlOptions()),
-    lambda fmt: IShrOperator.build(fmt, IShrOptions()),
+    lambda fmt: IAbsOperator.build(fmt, IAbssOptions()),
     lambda fmt: IPopcntOperator.build(fmt, IPopcntOptions()),
 ]
 
@@ -58,82 +35,42 @@ _OPERATORS: list[Callable[[IntFormat], HardwareOperator]] = [
 async def integer_operator_cocotb(dut: Any) -> None:
     operator = os.environ["HOLOSO_INTEGER_OPERATOR"]
     width = int(os.environ["HOLOSO_INTEGER_WIDTH"])
-    operands = os.environ["HOLOSO_INTEGER_OPERANDS"].split(",")
+    (operand,) = os.environ["HOLOSO_INTEGER_OPERANDS"].split(",")
     results = os.environ["HOLOSO_INTEGER_RESULTS"].split(",")
-    unary = len(operands) == 1
     # Value ports from the operator, so a name it declares and the RTL lacks fails here; sidebands from the oracle,
     # which is what knows whether this module raises one.
-    sidebands = sorted(set(expected_simple(operator, 0, 0, width)) - set(results))
+    sidebands = sorted(set(expected_simple(operator, 0, width)) - set(results))
     outputs = [(port, port) for port in results + sidebands]
     scoreboard = PipelineScoreboard(dut, outputs, latency=int(os.environ["HOLOSO_EXPECTED_LATENCY"]))
     await start_clock(dut)
     await drive_reset(dut)
 
-    async def step(a: int, b: int = 0, valid: bool = True) -> None:
-        # Driven through the operator's own operand port names, in its own order, so a misdeclared pair miscomputes.
-        for port, value in zip(operands, (a, b), strict=False):
-            getattr(dut, port).value = value
+    async def step(a: int, valid: bool = True) -> None:
+        # Driven through the operator's own operand port name, so a misdeclared one fails here.
+        getattr(dut, operand).value = a
         dut.in_valid.value = valid
         if valid:
-            scoreboard.push(
-                {**expected_simple(operator, a, b, width), "_desc": f"{operator} W={width} a=0x{a:x} b=0x{b:x}"}
-            )
+            scoreboard.push({**expected_simple(operator, a, width), "_desc": f"{operator} W={width} a=0x{a:x}"})
         await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         scoreboard.sample()
 
     if width <= EXHAUSTIVE_MAX_WIDTH:
         for a in range(1 << width):
-            if unary:
-                await step(a)
-            else:
-                for b in range(1 << width):
-                    await step(a, b)
+            await step(a)
     else:
         mask = (1 << width) - 1
         minimum = 1 << (width - 1)
-        directed = [0, 1, 2, minimum - 1, minimum, minimum + 1, mask - 1, mask]
-        for a in directed:
-            if unary:
-                await step(a)
-            else:
-                operands_b = directed
-                if "shamt" in operands:
-                    # The last four are past the word yet still inside the shifter's low count field,
-                    # a band every other corner here misses.
-                    field = 1 << (width - 1).bit_length()
-                    operands_b = [
-                        value & mask
-                        for value in (
-                            *(0, 1, -1, width - 1, 1 - width, width, -width, width + 1, -width - 1, -minimum),
-                            *(field - 1, 1 - field, field, -field),
-                        )
-                    ]
-                for b in operands_b:
-                    await step(a, b)
-        if operator == "holoso_ishl":
-            # Straddle the exact/overflow boundary of every left shift amount, which is what the overflow mask
-            # actually decides. The boundary is asymmetric by one -- -2**k shifts exactly where +2**k already
-            # overflows -- so both signs are driven on both sides of it; the trailing corners pin the two operands
-            # whose magnitude alone cannot decide them.
-            for shift in range(width + 1):
-                headroom = 1 << (width - 1 - shift) if shift < width else 0
-                for value in (headroom, headroom - 1, -headroom, -headroom - 1):
-                    await step(value & mask, shift)
-            for value, shift in ((-minimum, 0), (-minimum, 1), (-1, width - 1), (-1, width)):
-                await step(value & mask, shift)
+        for a in (0, 1, 2, minimum - 1, minimum, minimum + 1, mask - 1, mask):
+            await step(a)
         rng = np.random.default_rng(int(os.environ.get("HOLOSO_TEST_SEED", "12345")))
         for _ in range(int(os.environ.get("HOLOSO_INTEGER_RANDOM", "1000"))):
-            b = int(rng.integers(0, 1 << width, dtype=np.uint64))
-            if "shamt" in operands and rng.random() < 0.5:
-                b = int(rng.integers(-width - 2, width + 3)) & mask
-            await step(int(rng.integers(0, 1 << width, dtype=np.uint64)), b, bool(rng.random() >= 0.2))
+            await step(int(rng.integers(0, 1 << width, dtype=np.uint64)), bool(rng.random() >= 0.2))
 
     await scoreboard.drain()
     mask = (1 << width) - 1
     for value in range(4):
-        for port, driven in zip(operands, (value & mask, (value + 1) & mask), strict=False):
-            getattr(dut, port).value = driven
+        getattr(dut, operand).value = value & mask
         dut.in_valid.value = 1
         await RisingEdge(dut.clk)
     dut.rst.value = 1

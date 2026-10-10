@@ -247,8 +247,8 @@ def meaning(
     served = ScalarMeaning(tuple(_lowering_of(stub) for stub in stubs))
     if elementwise:
         _admit_elementwise(served)
-    for keys, over_arrays in ((scalar, False), (elementwise, True)):
-        _register(Spelling(served, over_arrays, protocol), keys)
+    _register(Spelling(served, elementwise=False, protocol=protocol), scalar)
+    _register(Spelling(served, elementwise=True, protocol=protocol), elementwise)
 
 
 def _lowering_of(stub: object) -> ScalarLowering:

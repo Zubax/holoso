@@ -121,7 +121,7 @@ options = holoso.Options(
     holoso.OperatorOptions(
         fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
         fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-        fdiv=holoso.FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+        fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
         fmul_ilog2=holoso.FMulILog2Options(),
         fcmp=holoso.FCmpOptions(),
     ),
@@ -138,12 +138,13 @@ A second copy shortens the transaction but tends to increase the fabric area and
 You only need to set the options for the operators that the kernel actually uses.
 If the kernel needs an unconfigured operator, the behavior depends on whether Holoso can express the missing
 operator in terms of the configured ones. If it can, it will do so silently; if not, it will raise an error.
-For example, the fused multiply-add operator (`ffma`) is entirely optional, but `fadd` is not substitutable.
+For example, the fused multiply-add operator (`ffma`) is entirely optional -- without it, `math.fma(a, b, c)` is
+computed as a separate multiplication and an addition -- but `fadd` is not substitutable.
 
 How does one actually obtain the optimal staging configuration? Empirically.
-Start with the default configuration (all stages disabled) and see if it achieves timing closure at the target frequency.
+Start with the default configuration (no optional stages) and see if it achieves timing closure at the target frequency.
 If not, inspect the synthesis logs to see where the critical path is --
-it's going to be inside one of the arithmetic operators like fadd/fdiv/etc. --
+it's going to be inside one of the arithmetic operators like fadd/fdivsqrt/etc. --
 and enable the operator stage that splits that path. Repeat until timings close.
 
 Pro tip: even small (local) LLMs can execute this loop very efficiently, no need to waste human time on this.
@@ -151,9 +152,9 @@ With AI automation this approach is superior to automatic target-frequency-based
 because it does not rely on heuristics, but instead utilizes feedback from final PnR, thus being truly closed-loop.
 
 Synthesis output depends not only on the kernel but also on the configured operators due to optimization.
-For example, if the fused multiply-add (FMA) operator is set up, Holoso will fuse all eligible `a*b+c` patterns into
-FMA rather than separate `fmul` and `fadd` (fast-math style -- bit-exact results are not guaranteed across transforms),
-hypotenuse is folded into `atan2` when computed nearby, etc.
+For example, if the fused multiply-add (FMA) operator is set up, `math.fma` uses it, and so do some library
+routines built on it, such as `@`, `np.linalg.inv`, `np.linalg.norm`, `np.cross`, `np.polyval`, etc.;
+a hypotenuse is folded into `atan2` when computed nearby, etc.
 Overall, Holoso pattern-matches heavily to reduce execution latency;
 e.g., nearby sin and cos are folded into a single CORDIC rotation.
 If the kernel cannot be lowered using the available operators, Holoso will raise an error.
@@ -186,9 +187,17 @@ for filename, path in out.items():
     print(f"{filename}: {path}")
 ```
 
-The generated RTL is tool-neutral with per-flow customization hooks.
-One such hook is the `HOLOSO_ATTRIBUTE_ROM` macro that can be defined to control the microcode ROM implementation; e.g.,
-`` `define HOLOSO_ATTRIBUTE_ROM (* rom_style = "block" *) `` for Vivado.
+#### Per-flow customization macro hooks
+
+The generated RTL is tool-neutral with per-flow customization macro hooks in cases where flow-specific attributes may
+be useful.
+
+`HOLOSO_ATTRIBUTE_ROM` is placed on the microcode ROM and on the lookup tables in operator modules.
+For example, `` `define HOLOSO_ATTRIBUTE_ROM (* rom_style = "block" *) `` for Vivado to avoid LUT ROM.
+
+`HOLOSO_ATTRIBUTE_KEEP` is placed on nets that synthesis must not restructure.
+For example, under LSE enable resource sharing and set `` `define HOLOSO_ATTRIBUTE_KEEP (* syn_keep = 1 *) ``
+to prevent the synthesizer from sharing nets where it worsens the results.
 
 ### Inspect the results
 
@@ -261,7 +270,7 @@ Holoso follows Python with minimal deviations where it makes sense for hardware 
   may perform constant folding using higher-precision arithmetic than the target format,
   assumes that domain errors do not occur, may freely discard constant and non-constant operations
   (e.g., Holoso assumes `x/x==1` but this does not hold per IEEE 754),
-  arbitrarily increase the local precision (e.g., by FMA-folding nearby multiplications and additions), etc.
+  arbitrarily increase the local precision (e.g., using FMA in some library routines), etc.
 
 - No exceptions: division by zero, domain errors, etc. produce zero or infinity (depending on context) and assert
   the error flag (unless the operation is thrown away by the optimizer).

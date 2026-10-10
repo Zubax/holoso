@@ -43,7 +43,7 @@ Optimization identities are provided for what the compiler cannot see. Over an o
 whatever that value turns out to be; the absence of NaN is a significant enabler:
 commutativity, associativity, and distributivity; `x/x == 1` (even for x=0);
 `x/y == x*(1/y)`; `1/(x*y) == (1/x)*(1/y)` (which parts company at `x=0, y=inf`, where the left is an infinity and the
-right a zero); `x*0 == 0` (even for non-finite x); `0/x == 0`; `x+(-x) == 0`;
+right a zero); `x*0 == 0` (even for non-finite x); `0/x == 0`; `x+(-x) == 0`; `(-x)*y == -(x*y)`;
 `int(float(i)) ≈ i`; `float(int(f)) == trunc(f)`; and a sum read as a linear combination, which distributes a
 constant across it, rounds the distributed constant, and cancels terms that sum to zero. The list is extensible on
 the same principles.
@@ -74,8 +74,7 @@ consistency the language does not have would mean inventing an answer. Nothing e
 representability in the target format. A constant the machine must HOLD is another matter: one whose encoding
 crosses between finite-nonzero and zero or infinity is refused at selection rather than silently becoming what it
 encodes to, integers and floats alike. Only a constant that materializes is asked -- one an operator absorbs, such
-as a power-of-two scale, never becomes a word and is never refused -- except where an adjacent addition absorbs it
-into a fused multiply-add, which materializes the scale and so is taken only where the format holds it exactly.
+as a float's power-of-two scale, never becomes a word and is never refused.
 
 The two halves diverge, by design: `x/x` rewrites to `1`, so the hardware answers 1 even when `x` is zero at run
 time, while `0.0/0.0` written out is refused at compile time.
@@ -211,8 +210,8 @@ is tried once, not iterated.
 Integers are signed two's complement and saturate at the extremes rather than wrapping. Saturation is defined
 behaviour, the dual of a float overflowing to infinity, so it is not an error flag -- were it one, an if-converted
 arm that saturated would raise an error the untaken path never earned. The deliberate exception is `<<`: the raw bit
-shift truncates at the word, so `5000 << 3` wraps where `5000 * 8` rails, and a rewrite of a power-of-two multiply
-must tap the shifter's saturating reading instead. There is no modular or unsigned flavour, so a wrapping
+shift truncates at the word, so `5000 << 3` wraps where `5000 * 8` rails, and a power-of-two multiply is therefore
+built as a multiplication, never as a shift. There is no modular or unsigned flavour, so a wrapping
 accumulator carries an explicit mask -- which cannot rescue the add it guards, saturation applying first -- and pays
 for its carry and sign headroom in the global word width; inferring wrapping/unsigned operations from adjacent
 static masks, or checking a mask's modulus against the width its addend needs, are possible future answers.
@@ -221,9 +220,8 @@ One wide register holds either family whole: an integer fills it exactly, a floa
 in unused flip-flops and slightly wider read muxes, but only where an integer in the same kernel asked for the extra
 width; one representation with no edge cases is worth more than the bits it wastes.
 
-Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers
-travel the whole pipeline into every backend. A static integer the kernel wrote folds away before MIR ever sees it;
-the integer constants MIR holds are the machine's own -- a shift count, a scaler exponent.
+Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers travel
+the whole pipeline into every backend.
 
 ## Operators
 
@@ -234,37 +232,50 @@ resource-sharing key and the single home of every physical fact: float operators
 the external ZKF library, integer ones carry a closed-form latency. A PRIMITIVE is what a firing computes -- a
 signature, bit-exact reference arithmetic, a rendering -- and a MIR operation is one use of a primitive. A pooled
 primitive names the operator it runs on, reads its signature off that operator's ports, and runs in one MODE of it,
-selected through the operator. A mode is one code on the operator's per-firing mode port, or its only mode when it has
-none, bound to the RTL parameter carrying its latency, its initiation interval, the leading operand ports it reads, and
-the output ports it drives; this is how one operator serves several primitives, and why latency is per firing yet
-statically known. A mode's initiation interval exceeds its latency by at most one, which keeps an instance's busy window
-from outliving the block that issued it (see Control flow). A firing's busy window is its own mode's, and modes that
-share an output port must satisfy `L_a - L_b < II_a` for every ordered pair, so results on any one port leave in issue
-order and the busy window stays the only per-instance constraint; modes on disjoint ports interleave freely whatever
-their latencies, the error sideband counting as a port every mode drives. An operator whose acceptance depends on the
-next firing's mode is outside the model. The CORDIC is the operator whose modes differ in timing: it rotates (a sine
-and cosine from one operand) and vectors (an angle and magnitude from two) at different latencies, each re-accepting one
-step after it retires, so one instance serves sin, cos, atan2 and a fused magnitude alike.
+selected through the operator. A mode drives one code on the operator's per-firing mode port, or is its only mode when
+it has none, and binds the RTL parameter carrying its latency, its initiation interval, the leading operand ports it
+reads, and the output ports it drives; this is how one operator serves several primitives, and why latency is per firing
+yet statically known. A mode's initiation interval exceeds its latency by at most one, which keeps an instance's busy
+window from outliving the block that issued it (see Control flow), and a firing's busy window is its own mode's.
+
+The mode condition. Where latency depends on the mode, two firings of one instance can be in flight at different
+latencies, and one issued later could land before one issued earlier. Results must leave any one output port in issue
+order, so every ordered pair of modes `a`, `b` that share an output port must satisfy `L_a - L_b < II_a`: the earliest
+firing that can follow one in mode `a` then lands strictly after it, and the busy window stays the only per-instance
+constraint. The error ports count as output ports that every mode drives, so on an operator with an error port all modes
+share one. The condition holds by itself between modes of equal latency, and for any latencies where the initiation
+interval is the latency plus one, the instance then holding a single transaction in flight. A pair that fails it must
+land on disjoint output ports, error ports included; such modes interleave freely. It is checked when an operator is
+built. An operator whose acceptance depends on the next firing's mode is outside the model.
+
+One CORDIC thus serves sin, cos, atan2 and a fused magnitude, one digit-recurrence pipeline a quotient and a square
+root, and one integer adder sums, differences and comparisons; a kernel whose operations contend for one operator asks
+for more instances.
 
 An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
 schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
-is made per instance at emission: an instance whose firings all run one mode is elaborated for it alone (a CORDIC that
-only rotates sheds the vectoring datapath), and any other keeps the elaboration serving every mode. The operator is
-still built from the latter, so its format limits are those of every mode.
+is made per instance at emission: an instance whose firings all drive one code is elaborated for it alone (a CORDIC
+that only rotates sheds the vectoring datapath, a divider that only divides the square root's, and an adder that never
+adds only subtracts), and any other keeps the elaboration serving every mode. The operator is still built from the
+latter, so its format limits are those of every mode.
 
 Primitives split structurally into POOLED -- running on operators the scheduler contends for -- and INLINE -- pure
 expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is never
-materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparator firing,
-min and max over one pair share a sorter firing, and negation/inversion chains fold into consumer sidebands.
+materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparison firing,
+min and max over one pair share a sorter firing, a rounding and the integer conversion of the same rounding share a
+rounder firing, and negation/inversion chains fold into consumer sidebands.
 
 Every kind of operator, float or integer, is named by exactly one field of the public options and carries its own knobs
 there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
 reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every float
-operator is optional, so presence is a semantic choice as well as an area one (`ffma` enables FMA contraction, `fsort`
-enables min/max, `fsqrt` with `filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean norms included);
-what a kernel cannot reach through the operators it was given is refused at MIR lowering. Planning asks the catalogue
-whether the machine is configured to run a primitive, never which options it was given. An integer operator is never
-optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially all of it.
+operator is optional, so presence is a semantic choice as well as an area one (`ffma` rounds a spelled fused
+multiply-add once where the machine without it rounds the product and the sum, `fsort` enables min/max, `fdivsqrt` with
+`filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean norms included); what a kernel cannot reach
+through the operators it was given is refused at MIR lowering. An operator serving several operations is configured as
+one, so division and the square root arrive together, as a rounding and the float-to-integer conversion do. Planning
+asks the catalogue whether the machine is configured with an operator, never which options it was given. An integer
+operator is never optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially
+all of it.
 
 ## Front-end
 
@@ -304,32 +315,20 @@ aggregates only with identical kind and shape -- for a record, identical class.
 
 Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an array
 the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle fixed by its
-class -- a plain generated frozen dataclass, so construction is structural and field reads fold, while a property of the
-class is inlined as the user's code it is and a class constant reads as the value it holds. One assignment-target
-vocabulary serves every statement that binds one -- a plain assignment, an unpack, a `for` header: a name, an attribute,
-an element, or a tuple of those nested arbitrarily, bound left to right off one evaluation of the right-hand side as
-CPython binds it. A comprehension keeps its own narrower rule, a plain name. `enumerate` answers a one-shot iterator
-exactly as in Python: consumed by a single iteration, refused elsewhere. Arrays and records never exist as hardware
-aggregates: they are compile-time bookkeeping over scalar wires, decomposed at the module boundary into indexed and
-field-path ports, and only scalar leaves reach HIR. Structural transforms (slices, transposes, reshapes) restructure the
-same storage; a family-changing conversion mints a fresh array exactly where the host copies, a dtype naming only its
-family since widths are erased throughout the value model.
+class. Arrays and records never exist as hardware aggregates: they are compile-time bookkeeping over scalar wires,
+decomposed at the module boundary into indexed and field-path ports, and only scalar leaves reach HIR.
 
 Mutation is admitted only where reference and value semantics cannot be told apart, and rejected with advice
 everywhere else, sparing the compiler a heap model and escape analysis. Persistent state is the one mutable
 resident; its trees stay disjoint from each other and from everything captured, or a later transaction would write
 through an alias the flat state slots cannot represent.
 
-State ownership spans the receiver's whole COMPONENT TREE: every plain instance reachable from the compile root
-through attribute chains gets a canonical path, so a kernel object may hold stateful sub-components and any method
-may write its own receiver's attributes; a void procedure (`reset()`) is callable as a bare statement, its
-None answering only at a use, exactly as in Python. Writes resolve by object identity, never by parameter name, so every
-alias of a component reads and writes the same slots; a component with state reachable under two distinct tree
-paths is rejected (naming would depend on traversal), while back-reference cycles are simply the same object.
-Whether an attribute is state is still decided by running: the assumed set seeds from a syntactic may-write scan
-of every desugarable method over every component class, and runs re-trim it to the writes actually reached.
-A seeded path whose snapshot cannot be state is POISONED rather than rejected -- it gets no slot,
-reads keep folding frozen, and only a reached write convicts -- so host-only utility methods cost a kernel nothing.
+State ownership spans the receiver's whole COMPONENT TREE: every plain instance reachable from the compile root through
+attribute chains gets a canonical path, so a kernel object may hold stateful sub-components and any method may write its
+own receiver's attributes. Writes resolve by object identity, never by parameter name, so every alias of a component
+reads and writes the same slots; a component with state reachable under two distinct tree paths is rejected (naming
+would depend on traversal), while back-reference cycles are simply the same object. Whether an attribute is state is
+decided by running: only a reached write makes it so, and host-only utility methods cost a kernel nothing.
 
 Interpretation carries state in the frame environment beside locals and temps, under a key family nothing else
 mints, forked and joined at every control meet (branch arms, exit lanes, the inline boundary, residual-frame rows,
@@ -357,11 +356,15 @@ square root, a small whole one a chain); selection takes the unique most refined
 accepts the operand. An entry of no fixed arity mints its operator for the call's own count, which is what `math.hypot`
 is and what the Euclidean norms reach.
 
-An array composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
-pairwise trees, log-deep in the operator's latency, while the dot product stays a left fold so FMA contraction remains
-reachable. Joins along an axis (concatenation and the stacking spellings) are copying composites over a sequence of
-parts, promoting the whole result across the parts' families as numpy's conversion does. A composite may admit a
-sequence at a declared argument position.
+An array composite declares no scalar domain, rank and shape deciding its meaning. Whole-array reductions are static
+pairwise trees, log-deep in the operator's latency, and so is the dot product, its terms taken in pairs with one product
+of each fused into the other; a dot product of four or more terms therefore needs the adder beside the fused operator.
+Where many dot products share one multiplier and no fused operator, the schedule is bound by that multiplier and the
+additions above its last product cost a few cycles a fold does not, which more instances relieve. The library spells the
+fused multiply-add itself wherever a step adds a product that nothing else reads, and takes the cross product's
+differences of two products by Kahan's algorithm; over integers each stays integer arithmetic. Joins along an axis
+(concatenation and the stacking spellings) are copying composites over a sequence of parts, promoting the whole result
+across the parts' families as numpy's conversion does.
 
 A spelling may map elementwise over arrays of one shape, scalars broadcasting: it does wherever the host maps it over an
 array and its answer stays in a family the subset has (an unsigned answer erasing to integer), as the arithmetic
@@ -444,19 +447,20 @@ composites, not of the rule.
 Strength reduction speaks all three scalar families with one grammar. Each binary operator also declares its MIRROR, the
 operator that means the same with its operands exchanged, so a constant operand settles on the right and a product or
 relation by a constant names one node whichever side it was written on; it is declared rather than inferred because the
-answer is about bits, `fmin` and `fmax` breaking ties toward the second operand. Beyond that and the identity and
+answer is about bits, `fmin` and `fmax` breaking ties by operand position. Beyond that and the identity and
 absorbing elements and the idempotence the operators declare, it states the rules the shared algebra cannot: the
 one-sided constant rules of the non-commutative operators, the value-equality and complement folds (under the same
 license as `x/x`), negation and complement tracked as involutions so every spelling of a negation names one node and
 `-(-x)` costs nothing, and the constant power-of-two rewrites -- the product into a saturating power-of-two scaling, the
 quotient into the right shift (exactly the floor division, negative dividends included), the remainder into the
 two's-complement mask. No rule may mint a LEFT shift: the machine-word substitution fixpoint (see MIR) is bounded by the
-count of left shifts in the graph. An absorbed scale never becomes a word -- only its exponent materializes -- and
-constant scalings compose as exponents rather than as the numbers they multiply to, so `x * 2**40` builds at any width
-and composing two scalings of one value cannot itself fail. Two addends scaled by the same constant are one scaling of
-their sum. A conversion to an integer converts in the mode of a rounding it reads, and converting back is that rounding.
-An infinity test conjoined with a sign test of the same value is the directional classifier it amounts to (`isinf(x) and
-x > 0` is `x == inf`), taken where it retires a test nothing else reads.
+count of left shifts in the graph. A float's absorbed scale never becomes a word -- only its exponent materializes --
+and constant scalings compose as exponents rather than as the numbers they multiply to, so a float `x * 2**40` builds at
+any width and composing two scalings of one value cannot itself fail; an integer scaling is built as the multiplication
+it is, so the word must hold its factor. Two addends scaled by the same constant are one scaling of their sum. A
+conversion to an integer converts in the mode of a rounding it reads, and converting back is that rounding. An infinity
+test conjoined with a sign test of the same value is the directional classifier it amounts to (`isinf(x) and x > 0` is
+`x == inf`), taken where it retires a test nothing else reads.
 
 A constant scaling over a value has one HIR shape, decided in one place and read back by one reader: the value itself,
 an exponent scaling, or a multiplication by a positive constant with the sign peeled into a negation over it, so
@@ -468,6 +472,16 @@ denotes, so `x - 0.999*x` is one multiply and `(x+y)-y` is `x`. Every such answe
 addition with at most one operation whatever else reads the terms. A sum that is a constant multiple of ANOTHER sum is
 not answered: it would inherit that sum's rounding error scaled by the factor between them, unbounded where that sum's
 terms cancel.
+
+A fused multiply-add is spelled, by the program as `math.fma` or by a library routine on its behalf, a magnitude's
+expansion included: no pass fuses a written product with a written sum. Fused where something else reads the product,
+the sum would see it unrounded and the other reader rounded, so `if a*b >= c: sqrt(a*b - c)` would take the root of a
+negative; fused only where nothing else does, a sum's rounding would depend on what else reads its product. A spelled
+one is still the product and the sum it fuses, and every pass that reads either reads it so: a product by a sign or a
+power of two leaves the plain sum, exact short of the format's rails, and a zero addend the product; a constant factor
+composes with the scalings under it and stays fused, and a sum cancels across it. What these reduce to a plain product
+or sum is no longer fused, and the rest stays one fused operation. Between two unknowns the product is not a value of
+the graph, so nothing cancels against it: `fma(a, b, -(a*b))` keeps the rounding error it was written to extract.
 
 Reciprocal sharing adopts a value on behalf of another rather than rewriting one in place: one reciprocal serves
 every division by a divisor that already has one. Being the only rewrite a value about to die can mislead, it waits
@@ -485,22 +499,25 @@ It is also where what the machine knows is written back INTO HIR -- the directio
 may ASK a format, but the machine may TELL HIR, since a fact answered only at selection would be stranded past every
 fold it could have enabled. The trigonometric cores count angles in turns, so the radian operators are restated over a
 turn-native vocabulary with an explicit conversion, ahead of the optimizer, letting a kernel whose phase is already in
-turns have its own scaling meet that conversion and cancel. The machine word is told from inside the fixpoint, since
-only a fold can reveal a shift count. A magnitude no adjacent atan2 will carry is told its format's exponent range
+turns have its own scaling meet that conversion and cancel. A fused multiply-add on a machine without `ffma` is restated
+there too, as the product and the sum, each rounding on its own. The machine word is told from inside the fixpoint,
+since only a fold can reveal a shift count. A magnitude no adjacent atan2 will carry is told its format's exponent range
 and expanded into `2^-k*sqrt(sum((x_i*2^k)^2))`, the scale taken at the top of what the range allows. Being exact it
 cannot overflow the dominant square, and it keeps the smaller legs wherever the significand is no wider than the
-exponent range affords, which the written sum of squares never does. The scale is bounded both ways -- the dominant
-square must stay normal and the sum must stay finite -- and a format leaving no room between them is refused. The
-upper bound moves with the arity, n scaled squares accumulating `ceil(log2 n)` binades where two accumulate one, so a
-format serving a pair can refuse a longer vector. Only a pair fuses with an atan2, which is what its magnitude port
-carries; expansion and fusion settle together, since expanding one magnitude can cancel an expression and delete the
-atan2 another was to fuse with. The float format is told last, once nothing more will move: a multiplication by a
-constant the format cannot hold splits into one by its significand and one by its exponent, so a kernel is not refused
-over a number the optimizer minted and it never wrote; told any earlier, the optimizer would compose the pair straight
-back. A scale past the format's own exponent span is left to be refused. What may be told is bounded by the same
-unboundedness that motivates it: a rule qualifies only if its answer is independent of every operand, since a later
-round can reveal one as a constant no word holds -- a left shift past the word is zero whatever it shifts, while the
-right shift's sign fill holds only for a value the word already holds, so that clamp stays at lowering.
+exponent range affords, which the written sum of squares never does. The squares are summed through fused multiply-adds.
+The scale is bounded both ways -- the dominant square must stay normal and the sum must stay finite -- and a format
+leaving no room between them is refused. The upper bound moves with the arity, n scaled squares accumulating `ceil(log2
+n)` binades where two accumulate one, so a format serving a pair can refuse a longer vector. Only a pair fuses with an
+atan2, which is what its magnitude port carries; expansion and fusion settle together, since expanding one magnitude can
+cancel an expression and delete the atan2 another was to fuse with. The float format is told last, once nothing more
+will move: a multiplication by a constant the format cannot hold splits into one by its significand and one by its
+exponent, so a kernel is not refused over a number the optimizer minted and it never wrote; told any earlier, the
+optimizer would compose the pair straight back. In a fused multiply-add the exponent moves onto the other factor, exact
+short of the format's rails, and the product by the significand stays fused. A scale past the format's own exponent span
+is left to be refused. What may be told is bounded by the same unboundedness that motivates it: a rule qualifies only if
+its answer is independent of every operand, since a later round can reveal one as a constant no word holds -- a left
+shift past the word is zero whatever it shifts, while the right shift's sign fill holds only for a value the word
+already holds, so that clamp stays at lowering.
 
 HIR-to-MIR lowering selects concrete hardware, one lowerer per scalar family, each owning the operations whose RESULT is
 its own. Every operand, output wire and phi arm folds its own family's sideband chain into its conditioner -- a
@@ -508,25 +525,25 @@ negation/absolute-value chain into a float's sign control, a NOT chain into a bo
 integer -- except onto an operand its primitive declares UNCONDITIONED, where the builder drops the chain outright
 rather than folding it, for EVERY producer of MIR operations and not the lowering alone, since a transform no result can
 observe would otherwise buy a second firing for one answer. Multiply-by-power-of-two selects the `fmul_ilog2` scaler,
-its exponent an ordinary integer operand, unless an adjacent addition absorbs it into an fma instead; and every
-rounding, the float-to-integer conversion's included, is one mode of a shared operator. Which operators a build demands
-therefore follows the optimized graph rather than the source's spelling, so a kernel can be refused for want of an
-operator it never wrote. The integer lowerer answers a constant shift count from the count itself: a right shift past
-the word is the sign fill (a negative count being the refusal gate's), and a count no other use reads is never lowered;
-a saturating power-of-two scaling rides the same shifter through its saturating product tap.
+its exponent an ordinary integer operand; and every rounding is one mode of a shared operator, the float-to-integer
+conversion being the integer result of that same rounding. Which operators a build demands therefore follows the
+optimized graph rather than the source's spelling, so a kernel can be refused for want of an operator it never wrote.
+The integer lowerer answers a constant shift count from the count itself: a right shift past the word is the sign fill
+(a negative count being the refusal gate's), and a count no other use reads is never lowered; a runtime count takes the
+shifter in the mode of its direction. Addition, subtraction, a negation as the subtraction from zero, and every relation
+take the adder, each in its own mode. A power-of-two scaling is an ordinary multiplication by that power, railing where
+a shift would drop what leaves the word, and one whose factor the word cannot hold is refused.
 
 Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
-sin and cos of one angle computed by one CORDIC rotation, FMA contraction of `a*b+c` wherever the additions that read
-the product absorb it entirely (each fma carrying its own rounding, which is why a product anything else observes is
-left alone) -- matched at MIR because this is the first layer aware of hardware semantics. Some semantic operators
-lower into combinations of primitives depending on availability and context (e.g. a two-legged magnitude via
-the CORDIC's vectoring).
+sin and cos of one angle computed by one CORDIC rotation, a rounding and its integer conversion in one rounder
+transaction, an integer comparison on the flags of a subtraction of the same two operands -- matched at MIR because
+this is the first layer aware of hardware semantics; operations selected onto distinct outputs of one transaction become
+a single firing when the LIR is built. Some semantic operators lower into combinations of primitives depending on
+availability and context (e.g. a two-legged magnitude via the CORDIC's vectoring).
 
-The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
-configured float and integer formats explicitly. The CFG is scheduled per block and register-allocated over the
-whole CFG, the allocator splitting the nodes between the wide data bank and the boolean bank structurally, on scalar
-width, so the wide bank is neutral storage rather than a float family, and a float and an integer share it with
-neither privileged.
+The CFG is scheduled per block and register-allocated over the whole CFG, the allocator splitting the nodes between the
+wide data bank and the boolean bank structurally, on scalar width, so the wide bank is neutral storage rather than a
+float family, and a float and an integer share it with neither privileged.
 
 ## LIR
 
@@ -544,9 +561,8 @@ two's-complement negation is not free in fabric. A primitive that reads no sign 
 extractor, the finiteness and zero tests -- declares the operand UNCONDITIONED and then admits only the identity
 conditioner; an operator whose operand port serves only such primitives has no sideband there, which is the operator's
 to declare. A result is never conditioned at its producer: its sign folds into whatever reads it, so only a boolean
-result carries an inversion, folded into its register write. Each scheduled firing carries its operands and
-conditioners, its register writes, and an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API
-plus shared analysis helpers (per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
+result carries an inversion, folded into its register write. LIR exposes a minimal API plus shared analysis helpers
+(per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach
@@ -568,13 +584,11 @@ inline, on either bank -- writes the register array combinationally and becomes 
 fetch-lag-plus-read-first edge after its commit, and both banks sample operands alike (per-result writeback and
 read-address latches were tried and dropped: inconsistent across result classes and needlessly delaying short installs).
 Because the banks and the pooled/inline classes are uniform instances of one model rather than hand-coded cases,
-boolean-logic and cast chains schedule back-to-back. Block-resident operands (inputs, state reads, phis) are available
-from the block's first control word. Ready ops issue in critical-path order onto free instances, pooled by operator
-(equal-by-value), whichever of its primitives they run; the budget is the operator's own `instances` option, a cap
-rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it serialize. A firing
-keeps its instance busy for its own mode's initiation interval. The scheduler's first-free binding of a firing to an
-instance is only a seed: the register allocator rebinds firings among the realized instances without changing an issue
-cycle or the instance count.
+boolean-logic and cast chains schedule back-to-back. Ready ops issue in critical-path order onto free instances, pooled
+by operator (equal-by-value), whichever of its primitives they run; the budget is the operator's own `instances` option,
+a cap rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it serialize. The
+scheduler's first-free binding of a firing to an instance is only a seed: the register allocator rebinds firings among
+the realized instances without changing an issue cycle or the instance count.
 
 Read-first plus the +1 edge, not write-through forwarding, is a deliberate trade: forwarding would erase the +1 but its
 muxes grow with the product of the read-port and write-port counts -- unsustainable -- while the +1 hides under
@@ -591,9 +605,7 @@ flip-flop count, and there is no spilling to memory. Three decisions share that 
 register, a commutative firing's orientation (after Chen & Cong), and a firing's instance where its operator has
 several. The search is simulated annealing from the seed, deterministic and with incremental cost updates, finished by a
 local-improvement descent, so the result is never worse than the seed. The boolean bank is allocated first, since a wide
-inline result names the boolean register it reads. Every block is scheduled once per graph (arm threading tries several;
-see Control flow); the install fixpoint iterates only the draining blocks' terminator offsets and the coalescing, and
-the coloring runs once on the converged layout.
+inline result names the boolean register it reads.
 
 Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed, identity-arm
 predecessors merge by union-find whenever the two sides do not interfere, so the arm value flows straight into the
@@ -615,11 +627,7 @@ allocator, and the handshake-gated writes are enumerated once.
 ### Control flow
 
 `branch` is the real control transfer: the PC jumps, untaken ops never run, and the II is whatever the executed path
-costs. Blocks lay out in reverse-postorder, so a back-edge is a jump to a lower address; each block's terminator
-redirects the fetch PC via a small `case(pc)` that, for a branch, reads the condition's 1-bit register. A jumping
-block that does no work and receives nothing takes no PC, its predecessors taking its arm directly; the transaction
-ends on whichever terminator arm reaches the canonical return block, out_valid asserting at that terminator,
-conditionally on a branch.
+costs.
 
 A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the
 block does not forward to a successor, tail installs included. An install's source is classified exactly: a source
@@ -669,18 +677,16 @@ or block RAM), unlike the array-plus-`initial` form, which some tools flatten to
 block RAM even when tiny; it occupies its own clocked block, the sole sanctioned second `always @(posedge clk)`, since
 that dedicated form is what triggers the inference. The RTL stays tool-neutral: the ROM read register carries the
 `HOLOSO_ATTRIBUTE_ROM` macro where a flow defines it, through which the flow attaches its synthesizer's mapping
-attribute. The ROM is read through a short multi-stage fetch (PC latch, ROM read register, routing register) so the
-controller is short register-to-register paths rather than a wide combinational cone; the fetch leads the executing
-step, which under static scheduling only adds to the makespan/II. For the same reason `in_ready` is a register the
-sequencer sets beside the next PC, so the input loads' wide write-enable fanout starts at a flip-flop rather than
-behind a PC decode.
+attribute, and a net that a synthesizer must not restructure carries `HOLOSO_ATTRIBUTE_KEEP` the same way (the keep
+hook); the support library passes both on to the float library's own. The ROM is read through a short multi-stage fetch
+(PC latch, ROM read register, routing register) so the controller is short register-to-register paths rather than a wide
+combinational cone; the fetch leads the executing step, which under static scheduling only adds to the makespan/II. For
+the same reason `in_ready` is a register the sequencer sets beside the next PC, so the input loads' wide write-enable
+fanout starts at a flip-flop rather than behind a PC decode.
 
-The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
-`in_valid`); the PC advances every clock; at an exit it asserts `out_valid` while outputs drive combinationally
-from their registers by fixed index. The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP,
-and while the PC dwells, `transacting` (high only while a transaction is in flight) forces every operator's
-`in_valid` and every register's write opcode to the inert NOP code, so the idle re-fetch commits nothing and the
-entry word can carry real work.
+The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP, and while the PC dwells, `transacting`
+(high only while a transaction is in flight) forces every operator's `in_valid` and every register's write opcode to the
+inert NOP code, so the idle re-fetch commits nothing and the entry word can carry real work.
 
 Value routing is uniform across two dual endpoints: a per-operand READ opcode selects that port's source, and a
 per-register WRITE opcode selects that register's next value (code 0 == NOP hold). An operator output, an inline
@@ -789,6 +795,18 @@ Adopted (lossless, f_max-neutral):
   on every gapped row, growing with the gap); Vivado and Yosys sweep the dead bits under either spelling. X-filling
   the constant pool was measured null (a constant's high bits are dead at every use) and skipped.
 
+Resource sharing in Lattice Diamond's LSE synthesizer, which folds mutually exclusive arithmetic onto one adder behind
+operand multiplexers, is adopted at a price that the keep hook (see Backend) contains. LSE maps a ROM into block RAM
+only with sharing enabled, whatever the coding form or attribute, and then needs no ROM-style setting. Without sharing
+the exp2/log2 lookup tables stay in LUT logic, which at a 36-bit significand is three times the whole machine (18.8
+thousand LUTs against 6.0 thousand and twelve block RAMs). The microcode ROM moves to block RAM too, saving its LUTs; a
+path from it into an operator then calls for that operator's input stage. The price is the longer path through each
+shared adder, and the hook pins the nets where that lost closures: the integer divider's floor correction (100 MHz
+without the hook against 115 with it, at 44 bits) and the float divider elaborated for the root alone (81 MHz against
+135 at a 36-bit significand). The hook also pins a net of the float library's power-of-two scaler, costing that operator
+a few percent in isolation and no closure. Where sharing costs f_max and the design still closes -- the popcount of the
+small integer kernels, the rounder -- nothing is pinned.
+
 The register price. The allocator trades registers for mux arms at `regalloc_register_price` (2.0), and across the
 example kernels the trades go both ways: the EKF kernels spend registers to remove arms, foc and imu_fusion spend arms
 to remove registers. Across the synthesis matrix the price acts as a step at one arm per register, where the trade
@@ -797,7 +815,17 @@ for as many flip-flops, with f_max gains confined to small kernels far above tar
 it nothing moves. The price stays 2.0.
 
 Operator replication (`instances`) trades area for latency and pays in mux arms; it is not an area loss: a second
-multiplier shortens the EKF transaction by about a sixth for a similar fraction more LUTs under the annealer's binding.
+multiplier shortens the EKF transaction by about a seventh for an eighth more LUTs under the annealer's binding.
+
+Pinning the microcode ROM under LSE resource sharing was measured null. Over ten kernels, leaving the ROM in block RAM,
+forcing it into logic through its attribute hook (which LSE honors only in part) and marking its routing register to be
+preserved (retiming moves it regardless) came within one percent of each other in geometric-mean f_max. Only the first
+saves the LUTs, so nothing is pinned.
+
+Place-and-route noise bounds such comparisons. A one-LUT netlist difference -- the keep hook on a single net of the
+scaler -- moved an unrelated kernel's f_max by 8 percent, and any perturbation reshuffles a design within a few percent
+of its target that much either way. A single on/off pair therefore attributes nothing smaller than the 15-40 percent the
+real sharing regressions show, and a hook is adopted only where it holds at two widths.
 
 Explored and rejected for register-pressure-bound kernels:
 
@@ -806,8 +834,8 @@ Explored and rejected for register-pressure-bound kernels:
 - Register-file size cap via pressure-limited scheduling: the register count floors at peak liveness, so it trades large
   latency and f_max for a couple percent.
 - FMA fusion as an area reduction: it raises read-operand traffic (a wider read port), enlarging total mux area
-  despite fewer ops. This is why the FMA contraction is opt-in (only when `ffma` is configured): it is a numerical
-  feature (single- vs double-rounding), so a pressure-bound kernel should leave `ffma` unconfigured.
+  despite fewer ops. The fused operator is a numerical feature (single- vs double-rounding), so a pressure-bound
+  kernel should leave `ffma` unconfigured.
 - Operand collectors (copy/move ops off the worst-reach ports): a copy relocates fan-in rather than removing it -- a
   net gain needs a value moved onto a co-reachable but not co-live target, which the interference floor denies, and
   copies on the shared operator also cost cycles.

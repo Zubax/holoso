@@ -6,6 +6,7 @@ behavior through the model and the emitted machine.
 """
 
 import random
+import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import holoso._lir._regalloc as regalloc_module
-from holoso import FAddOptions, FCmpOptions, FDivOptions, FloatFormat, FMulOptions, FSortOptions
+from holoso import FAddOptions, FCmpOptions, FDivsqrtOptions, FloatFormat, FMulOptions, FSortOptions
 from holoso._eel import lower
 from holoso._lir import (
     BoolOperand,
@@ -50,7 +51,7 @@ from holoso._lir._regalloc import (
 )
 from holoso._mir import lower as lower_to_mir
 from holoso._operators import FAddPrimitive, FCmpPrimitive, FDivPrimitive, FMulPrimitive, SelectPrimitive
-from holoso._operators import FAddOperator, FDivOperator, FMulOperator
+from holoso._operators import FAddOperator, FDivsqrtOperator, FMulOperator
 from holoso._operators import BoolInversion, FloatSignControl
 from holoso._type import FloatType
 from holoso._value import coerce_scalar
@@ -75,7 +76,7 @@ from cordic_sincos import CordicSinCos  # noqa: E402
 _FMT = FloatFormat(8, 36)
 _FADD = FAddPrimitive(FAddOperator.build(_FMT, FAddOptions()))
 _FMUL = FMulPrimitive(FMulOperator.build(_FMT, FMulOptions(), 0))
-_FDIV = FDivPrimitive(FDivOperator.build(_FMT, FDivOptions()))
+_FDIV = FDivPrimitive(FDivsqrtOperator.build(_FMT, FDivsqrtOptions()))
 _SELECT = SelectPrimitive(FloatType(_FMT))
 _SIGN = FloatSignControl()
 
@@ -364,38 +365,9 @@ def test_two_slots_ending_on_one_value_hold_it_once_and_copy_once() -> None:
     assert_model_equals_interpreter(model, interpreter, vectors, "shared_resets")
 
 
-def _sorter_witness(a: float, b: float, c: float) -> float:
-    x = min(a, b)
-    y = max(x, c)
-    z = min(y, a)
-    return max(z, b)
-
-
-def _casts_witness(a: float, b: float, c: float) -> float:
-    return float(a < b) + float(b < c) + float(c < a)
-
-
-def _select_witness(x: float) -> float:
-    for _ in range(3):
-        x = x * 2.0 if x < 1.0 else -0.5
-    return x
-
-
-# The build asserts the wide bank's objective against the emitted arms on every kernel; these witnesses pin that the
-# merges the objective must price alike are really exercised. The sorter chain is the lane-keying witness: two of its
-# firings land the min and the max lane in one register, which an instance-keyed writer count would price as one
-# writer. cordic_sincos is the inline-result witness, keyed by the registers its operands resolve to; the casts are the
-# boolean-register witness (two casts of predicates sharing a boolean register into one wide register are one arm,
-# which the wide bank sees because the boolean bank is allocated first); the selects are the signed constant witness
-# (three selects over `-0.5` and one register are one arm); SharedLiveOut is the slot witness (a boundary-installing
-# slot whose register also takes opcode writes).
-_WITNESSES: dict[str, tuple[Callable[[], Callable[..., object]], FSortOptions | None]] = {
-    "sorter": (lambda: _sorter_witness, FSortOptions()),
-    "cordic_sincos": (lambda: CordicSinCos().__call__, None),
-    "casts": (lambda: _casts_witness, None),
-    "selects": (lambda: _select_witness, None),
-    "shared_live_out": (lambda: SharedLiveOut().step, None),
-}
+# The build asserts the wide bank's objective against the emitted arms on every kernel; the witnesses below pin that
+# the merges the objective must price alike are really exercised. The instance counts reach the annealer's rebinding
+# moves, whose objective the build checks against the arms.
 
 
 def _merged_inline_arms(lir: Lir) -> tuple[int, int]:
@@ -404,41 +376,90 @@ def _merged_inline_arms(lir: Lir) -> tuple[int, int]:
     return len(events), len({(e.dst, e.source) for e in events})
 
 
+def _sorter_witness(a: float, b: float, c: float) -> float:
+    x = min(a, b)
+    y = max(x, c)
+    z = min(y, a)
+    return max(z, b)
+
+
 @pytest.mark.parametrize("instances", [1, 2, 3])
-@pytest.mark.parametrize("name", list(_WITNESSES))
-def test_the_steering_witnesses_exercise_their_merges(name: str, instances: int) -> None:
-    # The instance counts reach the annealer's rebinding moves, whose objective the build checks against the arms.
-    make_kernel, fsort = _WITNESSES[name]
+def test_the_sorter_witness_exercises_its_merge(instances: int) -> None:
+    # The lane-keying witness: two firings of the sorter chain land the min and the max lane in one register, which an
+    # instance-keyed writer count would price as one writer.
     options = default_options(_FMT)
-    if fsort is not None:
-        options = replace(options, operator=replace(options.operator, fsort=fsort))
+    options = replace(options, operator=replace(options.operator, fsort=FSortOptions()))
     options = with_instances(options, instances)
-    lir = build_lir(lower_to_mir(lower(make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name)
-    if name in ("cordic_sincos", "casts", "selects") and instances == 1:
+    lir = build_lir(lower_to_mir(lower(_sorter_witness, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "sorter")
+    lanes = {
+        dst: {(source.inst, source.port) for source in sources if isinstance(source, OpWriteSource)}
+        for dst, sources in write_sources_per_register(write_events(lir)).items()
+    }
+    assert any(
+        len(ports) > len({inst for inst, _ in ports}) for ports in lanes.values()
+    ), "the witness needs a shared lane"
+
+
+@pytest.mark.parametrize("instances", [1, 2, 3])
+def test_the_cordic_sincos_witness_exercises_its_merge(instances: int) -> None:
+    # The inline-result witness: an inline result is keyed by the registers its operands resolve to.
+    options = with_instances(default_options(_FMT), instances)
+    kernel = CordicSinCos().__call__
+    lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "cordic_sincos")
+    if instances == 1:
         events, arms = _merged_inline_arms(lir)
         assert events > arms, "the witness needs one emitted arm serving several inline results"
-    if name == "selects":
-        signed = [
-            operand
-            for e in write_events(lir)
-            if isinstance(e.source, InlineWriteSource)
-            for operand in e.source.operands
-            if isinstance(operand.source, WideConstRef) and not operand.conditioner.is_identity
-        ]
-        assert signed, "the witness needs a signed pool word among the merged operands"
-    if name == "shared_live_out":
-        written = {e.dst for e in write_events(lir)}
-        assert any(
-            isinstance(slot.install, Boundary) and slot.reg in written for slot in lir.wide_state_slots
-        ), "the witness needs a boundary-installing slot whose register also takes opcode writes"
-    if name == "sorter":
-        lanes = {
-            dst: {(source.inst, source.port) for source in sources if isinstance(source, OpWriteSource)}
-            for dst, sources in write_sources_per_register(write_events(lir)).items()
-        }
-        assert any(
-            len(ports) > len({inst for inst, _ in ports}) for ports in lanes.values()
-        ), "the witness needs a shared lane"
+
+
+def _casts_witness(a: float, b: float, c: float) -> float:
+    return float(a < b) + float(b < c) + float(c < a)
+
+
+@pytest.mark.parametrize("instances", [1, 2, 3])
+def test_the_casts_witness_exercises_its_merge(instances: int) -> None:
+    # The boolean-register witness: two casts of predicates sharing a boolean register into one wide register are one
+    # arm, which the wide bank sees because the boolean bank is allocated first.
+    options = with_instances(default_options(_FMT), instances)
+    lir = build_lir(lower_to_mir(lower(_casts_witness, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "casts")
+    if instances == 1:
+        events, arms = _merged_inline_arms(lir)
+        assert events > arms, "the witness needs one emitted arm serving several inline results"
+
+
+def _select_witness(x: float) -> float:
+    for _ in range(3):
+        x = x * 2.0 if x < 1.0 else -0.5
+    return x
+
+
+@pytest.mark.parametrize("instances", [1, 2, 3])
+def test_the_selects_witness_exercises_its_merge(instances: int) -> None:
+    # The signed constant witness: three selects over `-0.5` and one register are one arm.
+    options = with_instances(default_options(_FMT), instances)
+    lir = build_lir(lower_to_mir(lower(_select_witness, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "selects")
+    if instances == 1:
+        events, arms = _merged_inline_arms(lir)
+        assert events > arms, "the witness needs one emitted arm serving several inline results"
+    signed = [
+        operand
+        for e in write_events(lir)
+        if isinstance(e.source, InlineWriteSource)
+        for operand in e.source.operands
+        if isinstance(operand.source, WideConstRef) and not operand.conditioner.is_identity
+    ]
+    assert signed, "the witness needs a signed pool word among the merged operands"
+
+
+@pytest.mark.parametrize("instances", [1, 2, 3])
+def test_the_shared_live_out_witness_exercises_its_merge(instances: int) -> None:
+    # The slot witness: a boundary-installing slot whose register also takes opcode writes.
+    options = with_instances(default_options(_FMT), instances)
+    kernel = SharedLiveOut().step
+    lir = build_lir(lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "shared_live_out")
+    written = {e.dst for e in write_events(lir)}
+    assert any(
+        isinstance(slot.install, Boundary) and slot.reg in written for slot in lir.wide_state_slots
+    ), "the witness needs a boundary-installing slot whose register also takes opcode writes"
 
 
 def test_a_swapped_comparator_keeps_every_relation() -> None:
@@ -535,9 +556,13 @@ def test_a_rejected_swap_is_undone_without_assertions() -> None:
     """
     `-O` strips every assert, so the rollback of a rejected instance swap must be a plain call whose result is
     asserted, never the assert itself: with the rollback gone the descent keeps the swap and cycles. Run the
-    two-multiplier chain kernel at effort 0 in an optimized interpreter and require it to finish.
+    two-multiplier chain kernel at effort 0 in an optimized interpreter and require it to finish. The bound is on the
+    interpreter's own processor time, a couple of seconds here, because a loaded machine stretches the wall clock
+    without limit.
     """
     script = (
+        "import resource\n"
+        "resource.setrlimit(resource.RLIMIT_CPU, (120, resource.getrlimit(resource.RLIMIT_CPU)[1]))\n"
         "from dataclasses import replace\n"
         "import holoso\n"
         "from tests._modelref import default_options\n"
@@ -547,13 +572,9 @@ def test_a_rejected_swap_is_undone_without_assertions() -> None:
         "operator=replace(options.operator, fmul=holoso.FMulOptions(instances=2)))\n"
         "holoso.synthesize(_k_chain, options)\n"
     )
-    try:
-        subprocess.run(
-            [sys.executable, "-O", "-c", script],
-            cwd=Path(__file__).resolve().parents[1],
-            check=True,
-            timeout=120,
-            capture_output=True,
-        )
-    except subprocess.TimeoutExpired:
+    done = subprocess.run(
+        [sys.executable, "-O", "-c", script], cwd=Path(__file__).resolve().parents[1], capture_output=True
+    )
+    if done.returncode == -signal.SIGXCPU:
         pytest.fail("the descent did not terminate under -O")
+    assert done.returncode == 0, done.stderr.decode()

@@ -57,7 +57,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "poly3-e8m36": (23, 23),
     "iir1_lpf-e8m36": (15, 15),
     "iir1_hpf-e8m36": (20, 20),
-    "pid-e8m36": (36, 68),
+    "pid-e8m36": (36, 64),
     "schmitt_trigger-e8m36": (6, 6),
     "quadrature_encoder-e8m36": (6, 6),
     "phase_frequency_detector-e8m36": (6, 6),
@@ -65,23 +65,24 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "majority_voter-e6m18": (14, 19),
     # The turn-native trigonometric ABI lets the phase scaling meet the cores' own conversion and cancel, so the I/Q
     # oscillator's two general multiplies collapse to one exponent add.
-    "iq_oscillator-e8m36": (56, 56),
+    "iq_oscillator-e8m36": (53, 53),
     "nco-e6m18": (12, 12),
     # The sixteen pixel lanes scale, clamp and round independently on the float operators while the
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
     # the actuator split.
-    "image_agc_streamed-e8m36": (38, 166),
+    "image_agc_streamed-e8m36": (33, 150),
     "pwm-e6m18": (11, 11),
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
     "crc32-e6m18": (45, 45),
     "fixed_point_pi-e6m18": (37, 37),
     "lfsr16-e6m18": (12, 12),
+    "tunable_lowpass-e6m18": (14, 14),
     # Branchy kernels whose phi-arm installs have settled sources (boolean/float live-out constants, or an
     # input/state read) on the normal path -- no read-first push, so each lands within the work boundary,
     # shrinking every downstream block base.
-    "uart_tx-e6m18": (11, 36),
+    "uart_tx-e6m18": (11, 37),
     "uart_rx-e6m18": (5, 50),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
@@ -94,16 +95,16 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # arms of remainder and octave_index, are threaded into the blocks that branch to them.
     "finite_set_current_controller-e8m36": (157, 189),
     "remainder-e8m36": (33, 47),
-    "octave_index-e6m18": (9, 31),
-    "octave_index-e8m36": (9, 40),
+    "octave_index-e6m18": (9, 27),
+    "octave_index-e8m36": (9, 36),
     "equal_temperament-e8m36": (40, 40),
     "cordic_sincos-e8m36": (104, 104),
     "polar_to-e8m36": (63, 63),
     "polar_from-e8m36": (39, 39),
     # The three pivot-swap diamonds of the 3x3 Gauss-Jordan inversion if-convert into selects, so the whole
     # kernel is one straight-line block serialized on the pooled divider.
-    "rigid_body_scalar-e8m36": (126, 126),
-    "kepler-e8m36": (75, 151),
+    "rigid_body_scalar-e8m36": (114, 114),
+    "kepler-e8m36": (71, 143),
     "integrator-e8m36": (16, 16),
     "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
@@ -119,11 +120,11 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # The controller that embeds that observer: the same atan2 tail, then a sincos, a norm, and the divides of the
     # limiter and the modulator, with the alignment, the branch-cut correction and the anti-windup freeze all
     # surviving as real branches -- so the last PC covers arms the shortest static path does not.
-    "foc-e8m36": (295, 346),
-    # The fusion capstone: three rsqrt sites, each one native fsqrt and one fdiv (a native rsqrt operator would fold
-    # the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
-    "imu_fusion-e8m36": (266, 456),
-    "imu_fusion-e6m18": (239, 393),
+    "foc-e8m36": (289, 336),
+    # The fusion capstone: three rsqrt sites, each a root and a division on one divider (a native rsqrt operator would
+    # fold the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
+    "imu_fusion-e8m36": (258, 435),
+    "imu_fusion-e6m18": (231, 372),
 }
 
 

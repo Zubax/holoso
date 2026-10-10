@@ -1,20 +1,16 @@
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
 
 import pytest
-from holoso import FFromIntOptions, FToIntOptions, FloatFormat, IPopcntOptions, IntFormat
+from holoso import FFromIntOptions, FRintOptions, FloatFormat, IPopcntOptions, IntFormat
 from holoso._backend.verilog._support import support_files
-from holoso._operators import FFromIntOperator, FToIntOperator, HardwareOperator, IPopcntOperator
+from holoso._operators import FFromIntOperator, FRintOperator, HardwareOperator, IPopcntOperator
 from synth import OocDesign, SourceFile
 
 from synth._ooc import KEEP_ATTR
 from synth._synth import BUILD_ROOT
 from synth.flows import FlowId, make_flow
-
-_SATURATING = ("holoso_iadds", "holoso_isubs", "holoso_iabss")
-_SATURATING_UNARY = frozenset(("holoso_iabss",))  # the saturating wrapper shape that reads one operand
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +23,18 @@ class _Target:
     @property
     def label(self) -> str:
         return f"{self.operator}-w{self.width}-{self.flow.value}-{self.target_frequency_MHz:g}MHz"
+
+
+@dataclass(frozen=True, slots=True)
+class _AdderTarget:
+    width: int
+    fast: bool
+    flow: FlowId
+    target_frequency_MHz: float
+
+    @property
+    def label(self) -> str:
+        return f"holoso_iadds-w{self.width}-f{int(self.fast)}-{self.flow.value}-{self.target_frequency_MHz:g}MHz"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +74,19 @@ class _DividerTarget:
 
 _TARGETS = tuple(
     _Target(operator, width, flow, frequency)
-    for operator in (*_SATURATING, "holoso_icmp", "holoso_ishl", "holoso_ishr", "holoso_ipopcnt")
+    for operator in ("holoso_iabss", "holoso_ishft", "holoso_ipopcnt")
     for width in (24, 44)
+    for flow, frequency in (
+        (FlowId.YOSYS_ECP5, 100.0),
+        (FlowId.DIAMOND_ECP5, 100.0),
+        (FlowId.VIVADO_ARTIX7, 150.0),
+    )
+)
+
+_ADDER_TARGETS = tuple(
+    _AdderTarget(width, fast, flow, frequency)
+    for width in (24, 44)
+    for fast in (False, True)
     for flow, frequency in (
         (FlowId.YOSYS_ECP5, 100.0),
         (FlowId.DIAMOND_ECP5, 100.0),
@@ -101,50 +120,21 @@ _DIVIDER_TARGETS = (
 
 
 @dataclass(frozen=True, slots=True)
-class _MixedTarget(ABC):
+class _FromIntTarget:
     wexp: int
     wman: int
     wint: int
     flow: FlowId
     target_frequency_MHz: float
-
-    def _validate(self) -> None:
-        assert self.wexp >= 2
-        assert self.wman >= 4
-        assert self.wint >= 2
-
-    @property
-    @abstractmethod
-    def operator(self) -> str:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def latency(self) -> int:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def stage_label(self) -> str:
-        raise NotImplementedError
-
-    @property
-    def label(self) -> str:
-        return (
-            f"{self.operator}-e{self.wexp}m{self.wman}-i{self.wint}-{self.stage_label}-"
-            f"{self.flow.value}-{self.target_frequency_MHz:g}MHz"
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _FromIntTarget(_MixedTarget):
     stage_input: int = 0
     stage_normalize: int = 0
     stage_pack: int = 0
     stage_output: int = 0
 
     def __post_init__(self) -> None:
-        self._validate()
+        assert self.wexp >= 2
+        assert self.wman >= 4
+        assert self.wint >= 2
 
     @property
     def _hardware_operator(self) -> HardwareOperator:
@@ -168,21 +158,42 @@ class _FromIntTarget(_MixedTarget):
         return self._hardware_operator.latencies[0]
 
     @property
-    def stage_label(self) -> str:
-        return f"i{self.stage_input}n{self.stage_normalize}p{self.stage_pack}o{self.stage_output}"
+    def label(self) -> str:
+        return (
+            f"{self.operator}-e{self.wexp}m{self.wman}-i{self.wint}-"
+            f"i{self.stage_input}n{self.stage_normalize}p{self.stage_pack}o{self.stage_output}-"
+            f"{self.flow.value}-{self.target_frequency_MHz:g}MHz"
+        )
 
 
 @dataclass(frozen=True, slots=True)
-class _ToIntTarget(_MixedTarget):
+class _RintTarget:
+    wexp: int
+    wman: int
+    wint: int
+    flow: FlowId
+    target_frequency_MHz: float
     stage_input: int = 0
+    stage_shift: int = 1
+    stage_round: int = 0
+    stage_output: int = 0
 
     def __post_init__(self) -> None:
-        self._validate()
+        assert self.wexp >= 2
+        assert self.wman >= 4
+        assert self.wint >= 2
 
     @property
     def _hardware_operator(self) -> HardwareOperator:
-        return FToIntOperator.build(
-            FloatFormat(self.wexp, self.wman), IntFormat(self.wint), FToIntOptions(stage_input=self.stage_input)
+        return FRintOperator.build(
+            FloatFormat(self.wexp, self.wman),
+            IntFormat(self.wint),
+            FRintOptions(
+                stage_input=self.stage_input,
+                stage_shift=self.stage_shift,
+                stage_round=self.stage_round,
+                stage_output=self.stage_output,
+            ),
         )
 
     @property
@@ -194,49 +205,65 @@ class _ToIntTarget(_MixedTarget):
         return self._hardware_operator.latencies[0]
 
     @property
-    def stage_label(self) -> str:
-        return f"i{self.stage_input}"
+    def label(self) -> str:
+        return (
+            f"{self.operator}-e{self.wexp}m{self.wman}-i{self.wint}-"
+            f"i{self.stage_input}s{self.stage_shift}r{self.stage_round}o{self.stage_output}-"
+            f"{self.flow.value}-{self.target_frequency_MHz:g}MHz"
+        )
 
 
 @dataclass(frozen=True, slots=True)
-class _MulILog2Target(_MixedTarget):
+class _MulILog2Target:
+    wexp: int
+    wman: int
+    wint: int
+    flow: FlowId
+    target_frequency_MHz: float
     stage_input: int = 0
     stage_decode: int = 0
 
     def __post_init__(self) -> None:
-        self._validate()
-
-    @property
-    def operator(self) -> str:
-        return "holoso_fmul_ilog2"
+        assert self.wexp >= 2
+        assert self.wman >= 4
+        assert self.wint >= 2
 
     @property
     def latency(self) -> int:
         return 1 + self.stage_input + self.stage_decode
 
     @property
-    def stage_label(self) -> str:
-        return f"i{self.stage_input}d{self.stage_decode}"
+    def label(self) -> str:
+        return (
+            f"holoso_fmul_ilog2-e{self.wexp}m{self.wman}-i{self.wint}-i{self.stage_input}d{self.stage_decode}-"
+            f"{self.flow.value}-{self.target_frequency_MHz:g}MHz"
+        )
 
 
-_MIXED_TARGETS: tuple[_MixedTarget, ...] = (
+_FROM_INT_TARGETS = (
     *(
         _FromIntTarget(wexp, wman, wint, flow, frequency, stage_normalize=1)
         for wexp, wman, wint in ((6, 18, 24), (8, 36, 44))
         for flow, frequency in ((FlowId.YOSYS_ECP5, 100.0), (FlowId.DIAMOND_ECP5, 100.0))
     ),
     *(_FromIntTarget(wexp, wman, wint, FlowId.VIVADO_ARTIX7, 150.0) for wexp, wman, wint in ((6, 18, 24), (8, 36, 44))),
+)
+
+_RINT_TARGETS = (
     *(
-        _ToIntTarget(6, 18, 24, flow, frequency)
+        _RintTarget(6, 18, 24, flow, frequency)
         for flow, frequency in (
             (FlowId.YOSYS_ECP5, 100.0),
             (FlowId.DIAMOND_ECP5, 100.0),
             (FlowId.VIVADO_ARTIX7, 150.0),
         )
     ),
-    _ToIntTarget(8, 36, 44, FlowId.YOSYS_ECP5, 100.0, stage_input=1),
-    _ToIntTarget(8, 36, 44, FlowId.DIAMOND_ECP5, 100.0),
-    _ToIntTarget(8, 36, 44, FlowId.VIVADO_ARTIX7, 150.0),
+    _RintTarget(8, 36, 44, FlowId.YOSYS_ECP5, 100.0),
+    _RintTarget(8, 36, 44, FlowId.DIAMOND_ECP5, 100.0),
+    _RintTarget(8, 36, 44, FlowId.VIVADO_ARTIX7, 150.0),
+)
+
+_MUL_ILOG2_TARGETS = (
     *(
         _MulILog2Target(6, 18, 24, flow, frequency)
         for flow, frequency in (
@@ -255,16 +282,21 @@ pytestmark = pytest.mark.synth
 
 def _build_ooc_design(operator: str, width: int) -> OocDesign:
     top = f"{operator}_w{width}_ooc"
-    if operator == "holoso_icmp":
-        wrapper = _render_cmp_wrapper(top, width)
-    elif operator == "holoso_ishl":
+    if operator == "holoso_ishft":
         wrapper = _render_shift_wrapper(top, width)
-    elif operator == "holoso_ishr":
-        wrapper = _render_shift_right_wrapper(top, width)
     elif operator == "holoso_ipopcnt":
         wrapper = _render_popcnt_wrapper(top, width)
     else:
-        wrapper = _render_saturating_wrapper(top, operator, width)
+        assert operator == "holoso_iabss"
+        wrapper = _render_abs_wrapper(top, width)
+    files = [SourceFile(Path(name), content) for name, content in support_files().items()]
+    files.append(SourceFile(Path(f"{top}.v"), wrapper))
+    return OocDesign(top=top, files=files)
+
+
+def _build_adder_ooc_design(target: _AdderTarget) -> OocDesign:
+    top = f"holoso_iadds_w{target.width}_f{int(target.fast)}_ooc"
+    wrapper = _render_adder_wrapper(top, target)
     files = [SourceFile(Path(name), content) for name, content in support_files().items()]
     files.append(SourceFile(Path(f"{top}.v"), wrapper))
     return OocDesign(top=top, files=files)
@@ -272,8 +304,7 @@ def _build_ooc_design(operator: str, width: int) -> OocDesign:
 
 def _build_multiplier_ooc_design(target: _MultiplierTarget) -> OocDesign:
     top = f"holoso_imuls_w{target.width}_s{target.stage_product}_ooc"
-    parameters = f".W({target.width}), .STAGE_PRODUCT({target.stage_product}), .LATENCY({target.latency})"
-    wrapper = _render_saturating_wrapper(top, "holoso_imuls", target.width, parameters)
+    wrapper = _render_multiplier_wrapper(top, target)
     files = [SourceFile(Path(name), content) for name, content in support_files().items()]
     files.append(SourceFile(Path(f"{top}.v"), wrapper))
     return OocDesign(top=top, files=files)
@@ -287,21 +318,28 @@ def _build_divider_ooc_design(target: _DividerTarget) -> OocDesign:
     return OocDesign(top=top, files=files)
 
 
-def _build_mixed_ooc_design(target: _MixedTarget) -> OocDesign:
+def _build_ffromint_ooc_design(target: _FromIntTarget) -> OocDesign:
     top = f"{target.operator.removeprefix('holoso_')}_e{target.wexp}m{target.wman}_i{target.wint}_ooc"
-    wrapper = _render_mixed_wrapper(top, target)
+    wrapper = _render_ffromint_wrapper(top, target)
     files = [SourceFile(Path(name), content) for name, content in support_files().items()]
     files.append(SourceFile(Path(f"{top}.v"), wrapper))
     return OocDesign(top=top, files=files)
 
 
-def _render_mixed_wrapper(top: str, target: _MixedTarget) -> str:
-    if isinstance(target, _FromIntTarget):
-        return _render_ffromint_wrapper(top, target)
-    if isinstance(target, _ToIntTarget):
-        return _render_ftoint_wrapper(top, target)
-    assert isinstance(target, _MulILog2Target)
-    return _render_fmul_ilog2_wrapper(top, target)
+def _build_frint_ooc_design(target: _RintTarget) -> OocDesign:
+    top = f"{target.operator.removeprefix('holoso_')}_e{target.wexp}m{target.wman}_i{target.wint}_ooc"
+    wrapper = _render_frint_wrapper(top, target)
+    files = [SourceFile(Path(name), content) for name, content in support_files().items()]
+    files.append(SourceFile(Path(f"{top}.v"), wrapper))
+    return OocDesign(top=top, files=files)
+
+
+def _build_fmul_ilog2_ooc_design(target: _MulILog2Target) -> OocDesign:
+    top = f"fmul_ilog2_e{target.wexp}m{target.wman}_i{target.wint}_ooc"
+    wrapper = _render_fmul_ilog2_wrapper(top, target)
+    files = [SourceFile(Path(name), content) for name, content in support_files().items()]
+    files.append(SourceFile(Path(f"{top}.v"), wrapper))
+    return OocDesign(top=top, files=files)
 
 
 def _render_ffromint_wrapper(top: str, target: _FromIntTarget) -> str:
@@ -354,10 +392,9 @@ endmodule
 """
 
 
-def _render_ftoint_wrapper(top: str, target: _ToIntTarget) -> str:
+def _render_frint_wrapper(top: str, target: _RintTarget) -> str:
+    """Both results are registered and brought out, so neither tap's logic is pruned and both are timed."""
     wfull = target.wexp + target.wman
-    wio = max(wfull, target.wint)
-    zero_padding = f"{{{wio - target.wint}{{1'b0}}}}"
     return f"""`default_nettype none
 
 module {top} (
@@ -365,43 +402,45 @@ module {top} (
     input  wire rst,
     input  wire in_valid,
     input  wire [1:0] in_sel,
-    input  wire [{wio - 1}:0] io_in,
+    input  wire [{wfull - 1}:0] io_in,
     output wire out_valid,
-    output wire [{wio - 1}:0] io_out
+    output wire [{wfull + target.wint - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
     {KEEP_ATTR} reg [{wfull - 1}:0] r_a;
     {KEEP_ATTR} reg [1:0] r_a_sgnop;
     {KEEP_ATTR} reg [1:0] r_round_mode;
     wire dut_out_valid;
-    wire signed [{target.wint - 1}:0] dut_y;
+    wire [{wfull - 1}:0] dut_y_float;
+    wire signed [{target.wint - 1}:0] dut_y_int;
     {KEEP_ATTR} reg r_out_valid;
-    {KEEP_ATTR} reg signed [{target.wint - 1}:0] r_y;
+    {KEEP_ATTR} reg [{wfull - 1}:0] r_y_float;
+    {KEEP_ATTR} reg signed [{target.wint - 1}:0] r_y_int;
 
     assign out_valid = r_out_valid;
-    assign io_out = {{{zero_padding}, r_y}};
+    assign io_out = {{r_y_float, r_y_int}};
 
-    holoso_ftoint#(
+    holoso_frint#(
         .WEXP({target.wexp}), .WMAN({target.wman}), .WINT({target.wint}),
-        .STAGE_INPUT({target.stage_input}), .LATENCY({target.latency})
+        .STAGE_INPUT({target.stage_input}), .STAGE_SHIFT({target.stage_shift}),
+        .STAGE_ROUND({target.stage_round}), .STAGE_OUTPUT({target.stage_output}), .LATENCY({target.latency})
     ) dut (
         .clk(clk), .rst(rst), .in_valid(r_in_valid), .a_sgnop(r_a_sgnop), .round_mode(r_round_mode), .a(r_a),
-        .out_valid(dut_out_valid), .y(dut_y)
+        .out_valid(dut_out_valid), .y_float(dut_y_float), .y_int(dut_y_int)
     );
 
     always @(posedge clk) begin
         case (in_sel)
-            2'd0: r_a <= io_in[{wfull - 1}:0];
+            2'd0: r_a <= io_in;
             2'd1: r_a_sgnop <= io_in[1:0];
             2'd2: r_round_mode <= io_in[1:0];
             default: ;
         endcase
-        r_y <= dut_y;
+        r_y_float <= dut_y_float;
+        r_y_int <= dut_y_int;
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
-            r_a_sgnop <= 2'b00;
-            r_round_mode <= 2'b00;
         end else begin
             r_in_valid <= in_valid;
             r_out_valid <= dut_out_valid;
@@ -459,7 +498,6 @@ module {top} (
         if (rst) begin
             r_in_valid <= 1'b0;
             r_out_valid <= 1'b0;
-            r_a_sgnop <= 2'b00;
         end else begin
             r_in_valid <= in_valid;
             r_out_valid <= dut_out_valid;
@@ -538,31 +576,24 @@ endmodule
 """
 
 
-def _render_saturating_wrapper(top: str, operator: str, width: int, parameters: str | None = None) -> str:
-    binary_port = f"    input  wire in_sel,\n" if operator not in _SATURATING_UNARY else ""
-    operand_reg = f"    {KEEP_ATTR} reg [{width - 1}:0] r_b;\n" if operator not in _SATURATING_UNARY else ""
-    operand_port = ", .b(r_b)" if operator not in _SATURATING_UNARY else ""
-    first_operand_port = "x" if operator in _SATURATING_UNARY else "a"
-    operand_load = (
-        "        if (in_sel) r_b <= io_in;\n        else        r_a <= io_in;"
-        if operator not in _SATURATING_UNARY
-        else ("        r_a <= io_in;")
-    )
-    parameters = parameters or f".W({width}), .LATENCY(2)"
+def _render_multiplier_wrapper(top: str, target: _MultiplierTarget) -> str:
+    width = target.width
     return f"""`default_nettype none
 
 module {top} (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-{binary_port}    input  wire [{width - 1}:0] io_in,
+    input  wire in_sel,
+    input  wire [{width - 1}:0] io_in,
     output wire out_valid,
     input  wire out_sel,
     output wire [{width - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
     {KEEP_ATTR} reg [{width - 1}:0] r_a;
-{operand_reg}    wire dut_out_valid;
+    {KEEP_ATTR} reg [{width - 1}:0] r_b;
+    wire dut_out_valid;
     wire [{width - 1}:0] dut_y;
     wire dut_saturated;
     {KEEP_ATTR} reg [{width - 1}:0] r_y;
@@ -572,13 +603,14 @@ module {top} (
     assign out_valid = r_out_valid;
     assign io_out = out_sel ? {{{width}{{r_saturated}}}} : r_y;
 
-    {operator}#({parameters}) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .{first_operand_port}(r_a){operand_port},
+    holoso_imuls#(.W({width}), .STAGE_PRODUCT({target.stage_product}), .LATENCY({target.latency})) dut (
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a), .b(r_b),
         .out_valid(dut_out_valid), .y(dut_y), .saturated(dut_saturated)
     );
 
     always @(posedge clk) begin
-{operand_load}
+        if (in_sel) r_b <= io_in;
+        else        r_a <= io_in;
         r_y <= dut_y;
         r_saturated <= dut_saturated;
         if (rst) begin
@@ -595,7 +627,60 @@ endmodule
 """
 
 
-def _render_cmp_wrapper(top: str, width: int) -> str:
+def _render_abs_wrapper(top: str, width: int) -> str:
+    return f"""`default_nettype none
+
+module {top} (
+    input  wire clk,
+    input  wire rst,
+    input  wire in_valid,
+    input  wire [{width - 1}:0] io_in,
+    output wire out_valid,
+    input  wire out_sel,
+    output wire [{width - 1}:0] io_out
+);
+    {KEEP_ATTR} reg r_in_valid;
+    {KEEP_ATTR} reg [{width - 1}:0] r_a;
+    wire dut_out_valid;
+    wire [{width - 1}:0] dut_y;
+    wire dut_saturated;
+    {KEEP_ATTR} reg [{width - 1}:0] r_y;
+    {KEEP_ATTR} reg r_saturated;
+    {KEEP_ATTR} reg r_out_valid;
+
+    assign out_valid = r_out_valid;
+    assign io_out = out_sel ? {{{width}{{r_saturated}}}} : r_y;
+
+    holoso_iabss#(.W({width}), .LATENCY(2)) dut (
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_a),
+        .out_valid(dut_out_valid), .y(dut_y), .saturated(dut_saturated)
+    );
+
+    always @(posedge clk) begin
+        r_a <= io_in;
+        r_y <= dut_y;
+        r_saturated <= dut_saturated;
+        if (rst) begin
+            r_in_valid <= 1'b0;
+            r_out_valid <= 1'b0;
+        end else begin
+            r_in_valid <= in_valid;
+            r_out_valid <= dut_out_valid;
+        end
+    end
+endmodule
+
+`default_nettype wire
+"""
+
+
+def _render_adder_wrapper(top: str, target: _AdderTarget) -> str:
+    """
+    The adder taking `sub` with every firing, registered beside the operands. The sum and the three flags are all
+    registered and brought out, so the adder, the rail select and the flags are each timed; the saturation sideband is
+    left open, as every kernel leaves it.
+    """
+    width = target.width
     zero_padding = f"{{{width - 1}{{1'b0}}}}"
     return f"""`default_nettype none
 
@@ -603,19 +688,22 @@ module {top} (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-    input  wire in_sel,
+    input  wire [1:0] in_sel,
     input  wire [{width - 1}:0] io_in,
     output wire out_valid,
     input  wire [1:0] out_sel,
     output wire [{width - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
+    {KEEP_ATTR} reg r_sub;
     {KEEP_ATTR} reg [{width - 1}:0] r_a;
     {KEEP_ATTR} reg [{width - 1}:0] r_b;
     wire dut_out_valid;
+    wire [{width - 1}:0] dut_y;
     wire dut_a_gt_b;
     wire dut_a_eq_b;
     wire dut_a_lt_b;
+    {KEEP_ATTR} reg [{width - 1}:0] r_y;
     {KEEP_ATTR} reg r_a_gt_b;
     {KEEP_ATTR} reg r_a_eq_b;
     {KEEP_ATTR} reg r_a_lt_b;
@@ -627,20 +715,27 @@ module {top} (
 
     always @* begin
         case (out_sel)
-            2'd0: io_out_mux = {{{zero_padding}, r_a_gt_b}};
-            2'd1: io_out_mux = {{{zero_padding}, r_a_eq_b}};
+            2'd0: io_out_mux = r_y;
+            2'd1: io_out_mux = {{{zero_padding}, r_a_gt_b}};
+            2'd2: io_out_mux = {{{zero_padding}, r_a_eq_b}};
             default: io_out_mux = {{{zero_padding}, r_a_lt_b}};
         endcase
     end
 
-    holoso_icmp#(.W({width}), .LATENCY(2)) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .a(r_a), .b(r_b), .out_valid(dut_out_valid),
+    holoso_iadds#(.W({width}), .MODE(2), .FAST({int(target.fast)}), .LATENCY(2)) dut (
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .sub(r_sub), .a(r_a), .b(r_b),
+        .out_valid(dut_out_valid), .y(dut_y), .saturated(),
         .a_gt_b(dut_a_gt_b), .a_eq_b(dut_a_eq_b), .a_lt_b(dut_a_lt_b)
     );
 
     always @(posedge clk) begin
-        if (in_sel) r_b <= io_in;
-        else        r_a <= io_in;
+        case (in_sel)
+            2'd0: r_a <= io_in;
+            2'd1: r_b <= io_in;
+            2'd2: r_sub <= io_in[0];
+            default: ;
+        endcase
+        r_y <= dut_y;
         r_a_gt_b <= dut_a_gt_b;
         r_a_eq_b <= dut_a_eq_b;
         r_a_lt_b <= dut_a_lt_b;
@@ -659,81 +754,20 @@ endmodule
 
 
 def _render_shift_wrapper(top: str, width: int) -> str:
+    """One output and no sideband, so the result needs no selector; the direction bit is registered as an operand is."""
     return f"""`default_nettype none
 
 module {top} (
     input  wire clk,
     input  wire rst,
     input  wire in_valid,
-    input  wire in_sel,
-    input  wire [{width - 1}:0] io_in,
-    output wire out_valid,
-    input  wire [1:0] out_sel,
-    output wire [{width - 1}:0] io_out
-);
-    {KEEP_ATTR} reg r_in_valid;
-    {KEEP_ATTR} reg [{width - 1}:0] r_x;
-    {KEEP_ATTR} reg [{width - 1}:0] r_shamt;
-    wire dut_out_valid;
-    wire [{width - 1}:0] dut_shft;
-    wire [{width - 1}:0] dut_prod;
-    wire dut_saturated;
-    {KEEP_ATTR} reg [{width - 1}:0] r_shft;
-    {KEEP_ATTR} reg [{width - 1}:0] r_prod;
-    {KEEP_ATTR} reg r_saturated;
-    {KEEP_ATTR} reg r_out_valid;
-    reg [{width - 1}:0] io_out_mux;
-
-    assign out_valid = r_out_valid;
-    assign io_out = io_out_mux;
-
-    always @* begin
-        case (out_sel)
-            2'd0: io_out_mux = r_shft;
-            2'd1: io_out_mux = r_prod;
-            default: io_out_mux = {{{width}{{r_saturated}}}};
-        endcase
-    end
-
-    holoso_ishl#(.W({width}), .LATENCY(2)) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
-        .out_valid(dut_out_valid), .shft(dut_shft), .prod(dut_prod), .saturated(dut_saturated)
-    );
-
-    always @(posedge clk) begin
-        if (in_sel) r_shamt <= io_in;
-        else        r_x <= io_in;
-        r_shft <= dut_shft;
-        r_prod <= dut_prod;
-        r_saturated <= dut_saturated;
-        if (rst) begin
-            r_in_valid <= 1'b0;
-            r_out_valid <= 1'b0;
-        end else begin
-            r_in_valid <= in_valid;
-            r_out_valid <= dut_out_valid;
-        end
-    end
-endmodule
-
-`default_nettype wire
-"""
-
-
-def _render_shift_right_wrapper(top: str, width: int) -> str:
-    """One output and no sideband, so the result needs no selector."""
-    return f"""`default_nettype none
-
-module {top} (
-    input  wire clk,
-    input  wire rst,
-    input  wire in_valid,
-    input  wire in_sel,
+    input  wire [1:0] in_sel,
     input  wire [{width - 1}:0] io_in,
     output wire out_valid,
     output wire [{width - 1}:0] io_out
 );
     {KEEP_ATTR} reg r_in_valid;
+    {KEEP_ATTR} reg r_right;
     {KEEP_ATTR} reg [{width - 1}:0] r_x;
     {KEEP_ATTR} reg [{width - 1}:0] r_shamt;
     wire dut_out_valid;
@@ -744,14 +778,18 @@ module {top} (
     assign out_valid = r_out_valid;
     assign io_out = r_shft;
 
-    holoso_ishr#(.W({width}), .LATENCY(2)) dut (
-        .clk(clk), .rst(rst), .in_valid(r_in_valid), .x(r_x), .shamt(r_shamt),
+    holoso_ishft#(.W({width}), .LATENCY(2)) dut (
+        .clk(clk), .rst(rst), .in_valid(r_in_valid), .right(r_right), .x(r_x), .shamt(r_shamt),
         .out_valid(dut_out_valid), .shft(dut_shft)
     );
 
     always @(posedge clk) begin
-        if (in_sel) r_shamt <= io_in;
-        else        r_x <= io_in;
+        case (in_sel)
+            2'd0: r_x <= io_in;
+            2'd1: r_shamt <= io_in;
+            2'd2: r_right <= io_in[0];
+            default: ;
+        endcase
         r_shft <= dut_shft;
         if (rst) begin
             r_in_valid <= 1'b0;
@@ -833,6 +871,21 @@ def test_integer_operator_closes_timing(target: _Target) -> None:
     )
 
 
+@pytest.mark.parametrize("target", _ADDER_TARGETS, ids=lambda target: target.label)
+def test_integer_adder_closes_timing(target: _AdderTarget) -> None:
+    flow = make_flow(target.flow, target.target_frequency_MHz)
+    if not flow.available():
+        pytest.skip(f"{target.flow.value} tool not available")
+
+    directory = BUILD_ROOT / "integer" / target.label
+    shutil.rmtree(directory, ignore_errors=True)
+    report = flow.prepare(_build_adder_ooc_design(target)).synthesize(directory)
+    assert report.fmax_MHz >= target.target_frequency_MHz, (
+        f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
+        f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
+    )
+
+
 @pytest.mark.parametrize("target", _MULTIPLIER_TARGETS, ids=lambda target: target.label)
 def test_integer_multiplier_closes_timing(target: _MultiplierTarget) -> None:
     flow = make_flow(target.flow, target.target_frequency_MHz)
@@ -871,38 +924,50 @@ def test_integer_divider_closes_timing(target: _DividerTarget) -> None:
     assert dsp_used == 0, f"{target.label}: unexpected DSP resources reported; logs in {report.artifact_dir}"
 
 
-@pytest.mark.parametrize("target", _MIXED_TARGETS, ids=lambda target: target.label)
-def test_mixed_operator_closes_timing(target: _MixedTarget) -> None:
+@pytest.mark.parametrize("target", _FROM_INT_TARGETS, ids=lambda target: target.label)
+def test_ffromint_closes_timing(target: _FromIntTarget) -> None:
     flow = make_flow(target.flow, target.target_frequency_MHz)
     if not flow.available():
         pytest.skip(f"{target.flow.value} tool not available")
 
     directory = BUILD_ROOT / "integer" / target.label
     shutil.rmtree(directory, ignore_errors=True)
-    report = flow.prepare(_build_mixed_ooc_design(target)).synthesize(directory)
+    report = flow.prepare(_build_ffromint_ooc_design(target)).synthesize(directory)
     assert report.fmax_MHz >= target.target_frequency_MHz, (
         f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
         f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
     )
-    if target.operator == "holoso_fmul_ilog2":
-        dsp_used = sum(
-            resource.used
-            for name, resource in report.resources.items()
-            if "DSP" in name.upper() or "MULT" in name.upper()
-        )
-        assert dsp_used == 0, f"{target.label}: unexpected DSP resources reported; logs in {report.artifact_dir}"
 
 
-def test_mixed_wrapper_registers_native_result_width() -> None:
-    from_int = _render_ffromint_wrapper("top", _FromIntTarget(6, 18, 44, FlowId.YOSYS_ECP5, 100.0))
-    to_int = _render_ftoint_wrapper("top", _ToIntTarget(8, 36, 24, FlowId.YOSYS_ECP5, 100.0))
-    mul_ilog2 = _render_fmul_ilog2_wrapper("top", _MulILog2Target(6, 18, 44, FlowId.YOSYS_ECP5, 100.0))
-    assert "reg [23:0] r_y;" in from_int
-    assert "reg signed [23:0] r_y;" in to_int
-    assert "input  wire [1:0] in_sel," in to_int
-    assert "reg [1:0] r_round_mode;" in to_int
-    assert ".round_mode(r_round_mode)" in to_int
-    assert "reg [23:0] r_y;" in mul_ilog2
-    assert "r_io_out" not in from_int
-    assert "r_io_out" not in to_int
-    assert "r_io_out" not in mul_ilog2
+@pytest.mark.parametrize("target", _RINT_TARGETS, ids=lambda target: target.label)
+def test_frint_closes_timing(target: _RintTarget) -> None:
+    flow = make_flow(target.flow, target.target_frequency_MHz)
+    if not flow.available():
+        pytest.skip(f"{target.flow.value} tool not available")
+
+    directory = BUILD_ROOT / "integer" / target.label
+    shutil.rmtree(directory, ignore_errors=True)
+    report = flow.prepare(_build_frint_ooc_design(target)).synthesize(directory)
+    assert report.fmax_MHz >= target.target_frequency_MHz, (
+        f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
+        f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
+    )
+
+
+@pytest.mark.parametrize("target", _MUL_ILOG2_TARGETS, ids=lambda target: target.label)
+def test_fmul_ilog2_closes_timing(target: _MulILog2Target) -> None:
+    flow = make_flow(target.flow, target.target_frequency_MHz)
+    if not flow.available():
+        pytest.skip(f"{target.flow.value} tool not available")
+
+    directory = BUILD_ROOT / "integer" / target.label
+    shutil.rmtree(directory, ignore_errors=True)
+    report = flow.prepare(_build_fmul_ilog2_ooc_design(target)).synthesize(directory)
+    assert report.fmax_MHz >= target.target_frequency_MHz, (
+        f"{target.label}: f_max {report.fmax_MHz:.2f} MHz < target {target.target_frequency_MHz:.2f} MHz "
+        f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
+    )
+    dsp_used = sum(
+        resource.used for name, resource in report.resources.items() if "DSP" in name.upper() or "MULT" in name.upper()
+    )
+    assert dsp_used == 0, f"{target.label}: unexpected DSP resources reported; logs in {report.artifact_dir}"

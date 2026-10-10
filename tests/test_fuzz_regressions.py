@@ -29,12 +29,14 @@ def _replay_entry() -> None:
     """
     Subprocess entry: load the saved reproducer module named by `argv[1]`, pull its kernel callable and `META`, and
     replay the saved check. Exits 0 on PASS; prints the failure detail and exits 1 on FAIL. The kernel symbol shares the
-    reproducer's filename (`META['kernel_name']`): a function for a stateless kernel, a class for a stateful one.
+    reproducer's filename (`META['kernel_name']`): a function for a stateless kernel, a class for a stateful one. A
+    twin saved beside the kernel is the reference it is replayed against.
     """
     import importlib.util
 
     sys.path.insert(0, str(_REPO))
-    from tests._fuzz import replay_case  # imported here so the child sets the effort env before this module loads
+    # Imported here so the child sets the effort env before this module loads.
+    from tests._fuzz import reference_twin_name, replay_case
 
     case_path = Path(sys.argv[1])
     spec = importlib.util.spec_from_file_location(case_path.stem, case_path)
@@ -45,7 +47,9 @@ def _replay_entry() -> None:
     symbol = getattr(module, meta["kernel_name"])
     kernel_callable = symbol().__call__ if meta["is_stateful"] else symbol
 
-    passes_now, detail = replay_case(kernel_callable, meta)
+    twin = getattr(module, reference_twin_name(meta["kernel_name"]), None)
+
+    passes_now, detail = replay_case(kernel_callable, twin, meta)
     if passes_now:
         print(f"PASS {meta['kernel_name']} [{meta['op_label']}] {meta['check']}")
         sys.exit(0)

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso import FFromIntOptions, FloatFormat, FSortOptions, FToIntOptions, OperatorOptions, Options
+from holoso import FFromIntOptions, FloatFormat, FSortOptions, FRintOptions, IAddsOptions, OperatorOptions, Options
 from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -59,6 +59,7 @@ from rigid_body_rates import update as rigid_body_update  # noqa: E402  # bare n
 from schmitt_trigger import SchmittTrigger as SchmittTrigger  # noqa: E402
 from signal_window import signal_window  # noqa: E402
 from trapezoidal_leaky_streaming_integrator import TrapezoidalLeakyStreamingIntegrator  # noqa: E402
+from tunable_lowpass import TunableLowpass  # noqa: E402
 from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
 
 # The wide scalar datapath: the one configuration the example matrix is synthesized in.
@@ -285,9 +286,9 @@ class ExampleSpec:
     # tolerance check but not from the accuracy freeze, which measures against the reference rather than a budget.
     reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
     # The front-end oracle's slack (`test_eel_oracle`), where both sides are float64 in the same operation order and
-    # only the host's own library shape differs -- numpy reaching BLAS for a dot or a norm may contract a product the
-    # evaluator rounds. A kernel that carries such a difference through a feedback recurrence needs more than the
-    # shared default; one that does not must not be given any.
+    # only the rounding of a library step differs -- the evaluator fuses each multiply-add of a dot product where the
+    # host rounds the product first, or reaches BLAS and fuses another. A kernel that carries such a difference through
+    # a feedback recurrence needs more than the shared default; one that does not must not be given any.
     oracle_ulps: int = 16
 
     def __post_init__(self) -> None:
@@ -689,7 +690,7 @@ def _fresh_imu_fusion() -> Callable[..., object]:
 # rows walking the attitude further, eight in-band rows alternating between two world-frame gravity targets (the
 # filter keeps chasing, so every output lane stays far from zero while the bias rails on every row and both clamp
 # arms fire), then the high-magnitude reject, the clip latch, a hot row, and a cold row. Every in-band row keeps
-# all |out| lanes above ~0.6 m/s^2 -- below that, the benign BLAS-vs-left-fold summation difference outgrows the
+# all |out| lanes above ~0.6 m/s^2 -- below that, the benign BLAS-vs-pairwise summation difference outgrows the
 # eel oracle's relative budget on the g-scale operands.
 _IMU_FUSION_MANUAL = [
     {**dict(zip((*_IMU_FUSION_MEAS, "temperature", "dt"), values)), **_IMU_FUSION_CAL_LANES}
@@ -856,6 +857,40 @@ _FIXED_POINT_MANUAL = [
 def _draw_fixed_point(rng: np.random.Generator) -> InputVector:
     reference, measurement = (int(word) for word in rng.integers(Current.lo, Current.hi + 1, size=2))
     return _fixed_point_row(reference, measurement, int(rng.integers(Gain.lo, Gain.hi + 1)))
+
+
+# The tunable low-pass filter's domain as its docstring states it. Every vector stays inside, the edge sweep included:
+# no operation saturates there, and a shift count outside it has no reference to compare against, since CPython raises
+# on a negative count and keeps the bits a word drops.
+_LOWPASS_SAMPLE_MAX = (1 << 23) - 1
+_LOWPASS_SAMPLE_MIN = -(1 << 23)
+_LOWPASS_K_MAX = 15
+_LOWPASS_G_MAX = 6
+
+
+def _lowpass_row(x: int, k: int, g: int = 0) -> InputVector:
+    return {"x": x, "k": k, "g": g}
+
+
+_LOWPASS_MANUAL = (
+    [_lowpass_row(1000, 2)] * 24  # settles at 997 and holds: the flooring shift's dead band under a rising step
+    + [_lowpass_row(-1000, 2)] * 26  # a falling step has none and lands on -1000
+    + [_lowpass_row(-1000, 2, g) for g in range(1, _LOWPASS_G_MAX + 1)]  # the settled state through every gain
+    + [
+        _lowpass_row(_LOWPASS_SAMPLE_MAX, 0, _LOWPASS_G_MAX),  # a zero count tracks the sample: the widest output
+        _lowpass_row(_LOWPASS_SAMPLE_MIN, _LOWPASS_K_MAX),  # the widest difference, at the longest time constant
+        _lowpass_row(_LOWPASS_SAMPLE_MIN, 0, _LOWPASS_G_MAX),
+        _lowpass_row(_LOWPASS_SAMPLE_MAX, _LOWPASS_K_MAX, _LOWPASS_G_MAX),
+    ]
+)
+
+
+def _draw_lowpass(rng: np.random.Generator) -> InputVector:
+    return _lowpass_row(
+        int(rng.integers(_LOWPASS_SAMPLE_MIN, _LOWPASS_SAMPLE_MAX + 1)),
+        int(rng.integers(0, _LOWPASS_K_MAX + 1)),
+        int(rng.integers(0, _LOWPASS_G_MAX + 1)),
+    )
 
 
 def _draw_imu_fusion(rng: np.random.Generator) -> InputVector:
@@ -1144,7 +1179,7 @@ SPECS = [
         edge_values=_WIDE_EDGES,
         formats=(_FMT,),  # wman >= 32: a shallower format would quantize the grid and measure itself, not the compiler
         wint_min=34,  # a carry bit above the phase, then a sign bit
-        operators=lambda ops: dataclasses.replace(ops, ffromint=FFromIntOptions(), ftoint=FToIntOptions()),
+        operators=lambda ops: dataclasses.replace(ops, ffromint=FFromIntOptions(), frint=FRintOptions()),
     ),
     ExampleSpec(
         name="nco",
@@ -1184,8 +1219,9 @@ SPECS = [
         # Every port carries an 8-bit quantity, so the sweep leaves that range on purpose: the far end saturates the
         # accumulator, and the rounding of the gained pixel back to an integer saturates too, on both sides alike.
         edge_values=(0, 1, 128, PIXEL_MAX, -1, 1 << 42),
+        # The second adder is the example's own: a beat's statistics are dozens of independent sums and orders.
         operators=lambda ops: dataclasses.replace(
-            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), ftoint=FToIntOptions()
+            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), frint=FRintOptions(), iadds=IAddsOptions(instances=2)
         ),
     ),
     ExampleSpec(
@@ -1389,7 +1425,7 @@ SPECS = [
         edge_values=_WIDE_EDGES,
     ),
     ExampleSpec(
-        name="rigid_body_scalar",  # pivoted Gauss-Jordan inversion: data-dependent swap branches feeding one fdiv
+        name="rigid_body_scalar",  # pivoted Gauss-Jordan inversion: data-dependent swap branches feeding one divider
         inputs=_RIGID_BODY_INPUTS,
         make_kernel=lambda: rigid_body_scalar,
         # omega' lanes: the inversion's forward error over the driven domain (cond <= ~4) enters scaled by dt <= 1e-2
@@ -1678,8 +1714,8 @@ SPECS = [
             "state_u_alpha_beta_1": OutputTolerance(ulps=256, growth_ulps=8),
         },
         # The Clarke and Park products and the voltage norm are numpy calls the host may serve from BLAS, whose
-        # contracted products differ from the evaluator's separately rounded ones by an ulp the kernel then divides
-        # by a PWM period into the speed estimate. The measured requirement is about two thousand float64 ulps, so
+        # rounding differs from the evaluator's fused multiply-adds by an ulp the kernel then divides by a PWM
+        # period into the speed estimate. The measured requirement is about two thousand float64 ulps, so
         # this is set a factor of four above it -- loose against a fold-exact kernel, and still four parts in a
         # trillion against a front end that got an operand or a term wrong.
         oracle_ulps=8192,
@@ -1713,5 +1749,18 @@ SPECS = [
         edge_overrides={"kp_word": (0, 1, -1, Gain.hi, Gain.lo)},
         formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
         wint_min=20,  # the proportional product is at most 4095 * 128 in magnitude: 19 bits, plus the sign bit
+    ),
+    ExampleSpec(
+        name="tunable_lowpass",  # the one bundled kernel whose shift counts are run-time operands
+        inputs=("x", "k", "g"),
+        make_kernel=lambda: TunableLowpass().__call__,
+        nominal=_lowpass_row(1000, 4, 2),
+        manual=_LOWPASS_MANUAL,
+        draw_random=_draw_lowpass,
+        edge_values=(0, 1, -1, _LOWPASS_SAMPLE_MAX, _LOWPASS_SAMPLE_MIN),
+        # The sweep is uniform over the inputs, so each shift count takes its own range instead of the samples' rails.
+        edge_overrides={"k": (0, 1, 8, _LOWPASS_K_MAX), "g": (0, 1, 3, _LOWPASS_G_MAX)},
+        formats=(_NARROW,),  # float-free, so the format sizes nothing; this is the one main() builds
+        wint_min=32,  # the scaled output needs 30 bits and the difference 25, which the shipped 32-bit word holds
     ),
 ]

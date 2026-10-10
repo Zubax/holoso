@@ -14,13 +14,12 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FCordicOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FExp2Options,
     FILog2Options,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
-    FSqrtOptions,
     OperatorOptions,
     Options,
 )
@@ -182,6 +181,15 @@ def instantiated_modules(result: holoso.SynthesisResult) -> set[str]:
     return set(re.findall(r"\b(holoso_\w+)\s+#\(", result.verilog_output.verilog))
 
 
+def adder_modes(result: holoso.SynthesisResult) -> list[int]:
+    """
+    The `MODE` each instance of the adder is elaborated for, in instance order: 0 for one that only adds, 1 for one
+    that only subtracts or compares, 2 for one taking `sub` with every firing. The module name tells none of them apart.
+    """
+    elaborations = re.findall(r"\bholoso_iadds\s+#\(\s*\.W\(\d+\), \.MODE\((\d+)\)", result.verilog_output.verilog)
+    return [int(mode) for mode in elaborations]
+
+
 def bounded(rng: np.random.Generator, lo: float, hi: float) -> float:
     return float(rng.uniform(lo, hi))
 
@@ -280,14 +288,13 @@ def default_options(fmt: FloatFormat) -> Options:
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             filog2=FILog2Options(),
             fcmp=FCmpOptions(),
             # Configured at every format: ZKF alone knows which it supports, and refuses as the operator is built.
             fexp2=FExp2Options(),
             flog2=FLog2Options(),
-            fsqrt=FSqrtOptions(),  # no tables, hence no format that leaves it unsupported
             fcordic=FCordicOptions(),
         ),
         ffmt=fmt,
@@ -433,7 +440,7 @@ def staged_options(fmt: FloatFormat) -> Options:
                 stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
             ),
             fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-            fdiv=FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+            fdivsqrt=FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
             filog2=FILog2Options(stage_input=1),
             fcmp=FCmpOptions(stage_input=1),
@@ -448,7 +455,6 @@ def staged_options(fmt: FloatFormat) -> Options:
                 stage_pack=1,
                 stage_output=1,
             ),
-            fsqrt=FSqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
             # A stage combination tests/hdl/test_fcordic.py verifies both switching modes and fixed to either.
             fcordic=FCordicOptions(stage_product=1, stage_normalize=1, stage_pack=1),
         ),

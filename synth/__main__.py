@@ -2,7 +2,7 @@
 Command-line entry point for the OOC synthesis-evaluation harness.
 Usage:
 
-    python -m synth <kernel.py> <expression> --wexp W --wman M --flow FLOW:freq=MHz[,OP.KNOB=VALUE...]
+    python -m synth <kernel.py> <expression> --wexp W --wman M --flow FLOW:freq=MHz[,device=CLASS][,OP.KNOB=VALUE...]
 
 Repeat `--flow` to run multiple flows, each with its own target frequency.
 Each flow may override operator knobs using fields such as `fadd.stage_decode=1`.
@@ -25,7 +25,7 @@ from pathlib import Path
 from holoso import FloatFormat, OperatorOptions, Options, synthesize
 
 from ._synth import BUILD_ROOT, SynthReport, build_compiler_ooc_design
-from .flows import Flow, FlowId, make_flow
+from .flows import DeviceClass, Flow, FlowId, make_flow
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +46,7 @@ class _OperatorKnob:
 class _FlowRequest:
     flow_id: FlowId
     target_frequency_MHz: float
+    device_class: DeviceClass
     op_knobs: list[_OperatorKnob]
 
 
@@ -73,9 +74,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         dest="flow_specs",
         required=True,
-        metavar="FLOW:freq=MHz[,OP.KNOB=VALUE...]",
+        metavar="FLOW:freq=MHz[,device=CLASS][,OP.KNOB=VALUE...]",
         help=(
             f"synthesis flow to run; repeatable; supported flows: {', '.join(FlowId)}; "
+            f"CLASS picks the device ({', '.join(DeviceClass)}; the larger one is for a design that outgrows the "
+            "default); "
             "optional operator knob fields are OP.KNOB, where OP is an OperatorOptions field"
         ),
     )
@@ -98,7 +101,7 @@ def _parse_flow_requests(parser: argparse.ArgumentParser, specs: list[str]) -> l
 
 def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest:
     if ":" not in spec:
-        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,OP.KNOB=VALUE...]")
+        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,device=CLASS][,OP.KNOB=VALUE...]")
     flow_id, raw_fields = (part.strip() for part in spec.split(":", 1))
     if flow_id not in FlowId:
         parser.error(f"unknown flow {flow_id!r}; supported flows: {', '.join(FlowId)}")
@@ -106,6 +109,7 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
         parser.error(f"flow spec {spec!r} has no fields; expected freq=MHz")
 
     raw_frequency: str | None = None
+    device_class: DeviceClass | None = None
     op_knobs: list[_OperatorKnob] = []
     knob_keys: set[tuple[str, str]] = set()
     for item in raw_fields.split(","):
@@ -116,6 +120,13 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
             if raw_frequency is not None:
                 parser.error(f"flow field {key!r} is duplicated in {spec!r}")
             raw_frequency = value
+            continue
+        if key == "device":
+            if device_class is not None:
+                parser.error(f"flow field {key!r} is duplicated in {spec!r}")
+            if value not in DeviceClass:
+                parser.error(f"unknown device class {value!r} in {spec!r}; supported: {', '.join(DeviceClass)}")
+            device_class = DeviceClass(value)
             continue
         if op_knob := _parse_op_knob(parser, spec, key, value):
             knob_key = (op_knob.operator_name, op_knob.field_name)
@@ -133,7 +144,12 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
         parser.error(f"flow spec {spec!r} has invalid frequency {raw_frequency!r}")
     if not math.isfinite(target_frequency_MHz) or target_frequency_MHz <= 0.0:
         parser.error(f"flow spec {spec!r} has invalid frequency {raw_frequency!r}")
-    return _FlowRequest(flow_id=FlowId(flow_id), target_frequency_MHz=target_frequency_MHz, op_knobs=op_knobs)
+    return _FlowRequest(
+        flow_id=FlowId(flow_id),
+        target_frequency_MHz=target_frequency_MHz,
+        device_class=device_class or DeviceClass.DEFAULT,
+        op_knobs=op_knobs,
+    )
 
 
 def _parse_op_knob(parser: argparse.ArgumentParser, spec: str, key: str, raw_value: str) -> _OperatorKnob | None:
@@ -176,7 +192,6 @@ def _load_target(kernel: Path, expression: str) -> object:
 
 
 def _options(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> Options:
-    """Every operator is configured except ffma, whose contraction is a numerical choice the caller must request."""
     grouped_overrides: dict[str, dict[str, object]] = {}
     for override in op_knobs:
         grouped_overrides.setdefault(override.operator_name, {})[override.field_name] = override.value
@@ -192,7 +207,7 @@ def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], li
     flows: list[_SelectedFlow] = []
     skipped: list[FlowId] = []
     for request in requests:
-        flow: Flow = make_flow(request.flow_id, request.target_frequency_MHz)
+        flow: Flow = make_flow(request.flow_id, request.target_frequency_MHz, request.device_class)
         if flow.available():
             flows.append(_SelectedFlow(request, flow))
         else:

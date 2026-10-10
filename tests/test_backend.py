@@ -16,27 +16,25 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FCordicOptions,
-    FDivOptions,
+    FDivsqrtOptions,
+    FExp2Options,
     FFromIntOptions,
     FILog2Options,
+    FLog2Options,
     FloatFormat,
     FloatValue,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
-    FSqrtOptions,
-    FToIntOptions,
-    IAbsOptions,
-    IAddOptions,
-    ICmpOptions,
-    IDivOptions,
-    IMulOptions,
+    FRintOptions,
+    IAbssOptions,
+    IAddsOptions,
+    IDivsOptions,
+    IMulsOptions,
     IntFormat,
     IntValue,
     IPopcntOptions,
-    IShlOptions,
-    IShrOptions,
-    ISubOptions,
+    IShftOptions,
     OperatorOptions,
     Options,
     UnsupportedConstruct,
@@ -45,23 +43,22 @@ from holoso import (
 from holoso._operators import (
     CordicMode,
     FCordicOperator,
+    FExp2Operator,
     FFromIntOperator,
     FILog2Operator,
+    FLog2Operator,
     FMulILog2Operator,
     FSortOperator,
     FSortPrimitive,
-    FSqrtOperator,
-    FToIntOperator,
+    FDivsqrtOperator,
+    FRintOperator,
     HardwareOperator,
     IAbsOperator,
     IAddOperator,
-    ICmpOperator,
     IDivOperator,
     IMulOperator,
     IPopcntOperator,
-    IShlOperator,
-    IShrOperator,
-    ISubOperator,
+    IShftOperator,
 )
 from holoso import SynthesisResult
 from holoso._type import FloatType, IntType, ScalarType
@@ -89,7 +86,7 @@ def _ops(fmt: FloatFormat) -> MirOptions:
             OperatorOptions(
                 fadd=FAddOptions(),
                 fmul=FMulOptions(),
-                fdiv=FDivOptions(),
+                fdivsqrt=FDivsqrtOptions(),
                 fmul_ilog2=FMulILog2Options(),
                 fcmp=FCmpOptions(),
             ),
@@ -154,8 +151,7 @@ def test_comparisons_share_one_pooled_fcmp_instance() -> None:
 
 
 def test_streaming_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
-    # holoso_fcmp defaults LATENCY to 1 + STAGE_INPUT (the only correct value), so an instance need not specify it. An
-    # explicitly wrong LATENCY must be caught by the zkf_cmp register-stage-count guard rather than silently elaborate.
+    # A wrong LATENCY must be caught by the zkf_cmp register-stage-count guard rather than silently elaborate.
     verilog = """
 module wrong_latency;
     wire clk = 1'b0;
@@ -182,15 +178,13 @@ endmodule
 
 def _integer_operators(ifmt: IntFormat) -> list[HardwareOperator]:
     return [
-        IAddOperator.build(ifmt, IAddOptions()),
-        ISubOperator.build(ifmt, ISubOptions()),
-        IDivOperator.build(ifmt, IDivOptions()),
-        IAbsOperator.build(ifmt, IAbsOptions()),
-        IShlOperator.build(ifmt, IShlOptions()),
-        IShrOperator.build(ifmt, IShrOptions()),
-        ICmpOperator.build(ifmt, ICmpOptions()),
+        IAddOperator.build(ifmt, IAddsOptions()),
+        IAddOperator.build(ifmt, IAddsOptions(fast=True)),
+        IDivOperator.build(ifmt, IDivsOptions()),
+        IAbsOperator.build(ifmt, IAbssOptions()),
+        IShftOperator.build(ifmt, IShftOptions()),
         IPopcntOperator.build(ifmt, IPopcntOptions()),
-        *(IMulOperator.build(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
+        *(IMulOperator.build(ifmt, IMulsOptions(stage_product=stage)) for stage in range(5)),
     ]
 
 
@@ -200,8 +194,8 @@ def _mixed_format_operators(ffmt: FloatFormat, ifmt: IntFormat) -> list[Hardware
         FFromIntOperator.build(
             ffmt, ifmt, FFromIntOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1)
         ),
-        FToIntOperator.build(ffmt, ifmt, FToIntOptions()),
-        FToIntOperator.build(ffmt, ifmt, FToIntOptions(stage_input=2)),
+        FRintOperator.build(ffmt, ifmt, FRintOptions()),
+        FRintOperator.build(ffmt, ifmt, FRintOptions(stage_input=2)),
         FMulILog2Operator.build(ffmt, ifmt, FMulILog2Options()),
         FMulILog2Operator.build(ffmt, ifmt, FMulILog2Options(stage_input=1, stage_decode=1)),
         FILog2Operator.build(ffmt, ifmt, FILog2Options()),
@@ -214,13 +208,20 @@ def _net(scalar_type: ScalarType) -> str:
     return f"[{scalar_type.width - 1}:0] " if scalar_type.is_wide else ""
 
 
-def _pooled_probe(name: str, operators: list[HardwareOperator]) -> str:
+def _pooled_probe(name: str, operators: list[HardwareOperator], single_modes: bool = False) -> str:
     """
     A module instantiating each operator through the ports, widths, parameters, mode and error ports it declares
-    for itself -- so a port, sign sideband or parameter it declares and the RTL lacks fails right here.
+    for itself -- so a port, sign sideband or parameter it declares and the RTL lacks fails right here. With
+    `single_modes`, an operator that can be elaborated for one of its modes alone is instantiated once more per such
+    elaboration.
     """
     lines = [f"module {name};", "    wire clk = 1'b0;", "    wire rst = 1'b0;", "    wire in_valid = 1'b0;"]
-    for index, operator in enumerate(operators):
+    elaborations = [
+        (operator, params)
+        for operator in operators
+        for params in (operator.params, *(operator.single_mode_params.values() if single_modes else ()))
+    ]
+    for index, (operator, elaboration) in enumerate(elaborations):
         connections = []
         for position, operand in enumerate(operator.operand_ports):
             port, ty = operand.name, operand.scalar_type
@@ -237,7 +238,7 @@ def _pooled_probe(name: str, operators: list[HardwareOperator]) -> str:
         for port in operator.error_ports:
             lines.append(f"    wire u{index}_{port};")
             connections.append(f".{port}(u{index}_{port})")
-        params = ", ".join(f".{pname}({value})" for pname, value in operator.params.items())
+        params = ", ".join(f".{pname}({value})" for pname, value in elaboration.items())
         # out_valid and the saturation sideband are deliberately left out: an omitted named port is unconnected.
         lines.append(
             f"    {operator.module_name} #({params}) u{index} "
@@ -250,9 +251,10 @@ def _pooled_probe(name: str, operators: list[HardwareOperator]) -> str:
 @pytest.mark.parametrize("width", (2, 3, 24, 33, 44))
 def test_integer_operators_elaborate_as_they_declare_themselves(width: int, tmp_path: Path) -> None:
     # A wrong latency instantiates the undefined _holoso_invalid_integer_latency; an odd width is mandatory because
-    # that is where the divider's ceiling can slip.
+    # that is where the divider's ceiling can slip. The adder is elaborated for each of its modes alone as well, a
+    # `MODE` the module does not know instantiating the undefined _holoso_invalid_iadds_mode.
     name = f"int_probe_w{width}"
-    _elaborate(name, _pooled_probe(name, _integer_operators(IntFormat(width))), tmp_path)
+    _elaborate(name, _pooled_probe(name, _integer_operators(IntFormat(width)), single_modes=True), tmp_path)
 
 
 @_requires_iverilog
@@ -268,22 +270,58 @@ def test_mixed_format_operators_elaborate_as_they_declare_themselves(
 
 @_requires_iverilog
 @pytest.mark.parametrize("wexp,wman", ((6, 18), (8, 24), (3, 5), (8, 37)))
-def test_fsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tmp_path: Path) -> None:
-    # Both significand parities, which the kernel-level and cocotb coverage (binary32 only) never reach: the core's
-    # rounding-guard rule and its stage count both depend on WMAN's parity.
-    name = f"fsqrt_probe_e{wexp}m{wman}"
+def test_fdivsqrt_wrapper_elaborates_as_it_declares_itself(wexp: int, wman: int, tmp_path: Path) -> None:
+    # Both significand parities, which the kernel-level and cocotb coverage (even significands only) never reach: the
+    # core's digit count, the reach of its decode stage and the frame of each single-operation build all depend on
+    # WMAN's parity.
+    name = f"fdivsqrt_probe_e{wexp}m{wman}"
     fmt = FloatFormat(wexp, wman)
     operators: list[HardwareOperator] = [
-        FSqrtOperator.build(fmt, FSqrtOptions()),
-        FSqrtOperator.build(fmt, FSqrtOptions(stage_input=2, stage_pack=1, stage_output=1)),
+        FDivsqrtOperator.build(fmt, FDivsqrtOptions()),
+        FDivsqrtOperator.build(fmt, FDivsqrtOptions(stage_decode=1)),
+        FDivsqrtOperator.build(fmt, FDivsqrtOptions(stage_input=2, stage_decode=1, stage_pack=1, stage_output=1)),
     ]
-    _elaborate(name, _pooled_probe(name, operators), tmp_path)
+    _elaborate(name, _pooled_probe(name, operators, single_modes=True), tmp_path)
+
+
+@_requires_iverilog
+def test_support_library_elaborates_with_the_keep_hooks_defined(tmp_path: Path) -> None:
+    # A flow that defines the hooks compiles a text of the support library that no simulation here otherwise sees.
+    name = "keep_hooks_probe"
+    ffmt, ifmt = FloatFormat(8, 36), IntFormat(44)
+    operators: list[HardwareOperator] = [
+        IDivOperator.build(ifmt, IDivsOptions()),
+        FDivsqrtOperator.build(ffmt, FDivsqrtOptions()),
+        FMulILog2Operator.build(ffmt, ifmt, FMulILog2Options()),
+    ]
+    probe = _pooled_probe(name, operators, single_modes=True)
+    _elaborate(name, "`define HOLOSO_ATTRIBUTE_KEEP (* syn_keep = 1 *)\n" + probe, tmp_path)
+    # The one hook must reach the ZKF library's own keep sites too, which a body that cannot parse shows: it fails at
+    # the integer divider's site and at each of ZKF's two.
+    broken = _compile(name, "`define HOLOSO_ATTRIBUTE_KEEP (* syn_keep = *)\n" + probe, tmp_path)
+    assert broken.returncode != 0 and broken.stderr.count("syntax error") >= 3, broken.stderr
+
+
+@_requires_iverilog
+def test_support_library_passes_the_rom_hook_to_the_lookup_tables(tmp_path: Path) -> None:
+    # The microcode ROM carrying this hook is in the generated module, so its only sites in the support library are
+    # ZKF's lookup tables: a body that cannot parse fails there only if the hook is passed on.
+    name = "rom_hook_probe"
+    fmt = FloatFormat(8, 36)
+    operators: list[HardwareOperator] = [
+        FExp2Operator.build(fmt, FExp2Options(), 18),
+        FLog2Operator.build(fmt, FLog2Options(), 18),
+    ]
+    probe = _pooled_probe(name, operators)
+    _elaborate(name, '`define HOLOSO_ATTRIBUTE_ROM (* rom_style = "block" *)\n' + probe, tmp_path)
+    broken = _compile(name, "`define HOLOSO_ATTRIBUTE_ROM (* rom_style = *)\n" + probe, tmp_path)
+    assert broken.returncode != 0 and "syntax error" in broken.stderr, broken.stderr
 
 
 @_requires_iverilog
 def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     # The negative twin of the probe above, so its silence means something.
-    operator = IDivOperator.build(IntFormat(33), IDivOptions())
+    operator = IDivOperator.build(IntFormat(33), IDivsOptions())
     latency = operator.latencies[0]
     verilog = _pooled_probe("wrong_int_latency", [operator]).replace(f".LATENCY({latency})", f".LATENCY({latency + 1})")
     result = _compile("wrong_int_latency", verilog, tmp_path)
@@ -391,7 +429,7 @@ def test_popcount_wrapper_rejects_wrong_result_width(tmp_path: Path) -> None:
     "operator",
     (
         FFromIntOperator.build(FloatFormat(6, 18), IntFormat(44), FFromIntOptions()),
-        FToIntOperator.build(FloatFormat(6, 18), IntFormat(44), FToIntOptions()),
+        FRintOperator.build(FloatFormat(6, 18), IntFormat(44), FRintOptions()),
         FMulILog2Operator.build(FloatFormat(6, 18), IntFormat(44), FMulILog2Options()),
     ),
     ids=lambda operator: operator.name,
@@ -568,20 +606,20 @@ def test_ekf1_stateful_elaborates(tmp_path: Path) -> None:
 
 
 def _two_division_kernel(a: float, b: float, c: float, d: float) -> float:
-    return a / b + c / d  # two divisions share one fdiv instance and land in two distinct registers
+    return a / b + c / d  # two divisions share one fdivsqrt instance and land in two distinct registers
 
 
 def test_error_gate_ors_over_multiple_landing_registers() -> None:
-    # An error-bearing operator (fdiv) whose result lands in >=2 distinct registers reconstructs its commit window as
-    # the OR, over those registers, of `uc_op_<reg> == <its source code>`. No bundled example produces a multi-term
+    # An error-bearing operator (fdivsqrt) whose result lands in >=2 distinct registers reconstructs its commit window
+    # as the OR, over those registers, of `uc_op_<reg> == <its source code>`. No bundled example produces a multi-term
     # err gate, and the numerical model does not simulate `err`, so cosim cannot reach it -- pin the reconstruction.
     options = Options(
-        OperatorOptions(fadd=FAddOptions(), fdiv=FDivOptions()),
+        OperatorOptions(fadd=FAddOptions(), fdivsqrt=FDivsqrtOptions()),
         ffmt=FloatFormat(6, 18),
     )
     verilog = synthesize(_two_division_kernel, options, name="two_div").verilog_output.verilog
     err = next(line.strip() for line in verilog.splitlines() if line.strip().startswith("assign err ="))
-    assert err.count("uc_op_") >= 2 and " | " in err and "div0" in err, err
+    assert err.count("uc_op_") >= 2 and " | " in err and "_error" in err, err
 
 
 def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Path) -> None:
@@ -692,9 +730,9 @@ _INT_OPTIONS = Options(
         fadd=FAddOptions(),
         fcmp=FCmpOptions(),
         fsort=FSortOptions(),  # a min alone leaves the max lane untapped
-        imul=IMulOptions(),
+        imuls=IMulsOptions(),
         ffromint=FFromIntOptions(),
-        ftoint=FToIntOptions(),
+        frint=FRintOptions(),
     ),
     ffmt=FloatFormat(6, 18),
     wint_min=34,  # wider than the float, so a port sized at WFLT would silently lose its top bits
@@ -785,13 +823,13 @@ def test_an_integer_port_binds_no_sign_sideband_and_declares_its_own_width(_inte
     register rather than as the float -- the silent half, which elaborates either way and drops the top bits.
     """
     verilog = _integer_result.verilog_output.verilog
-    ffromint, ftoint, iadds = (_instantiation(verilog, name) for name in ("ffromint", "ftoint", "iadds"))
+    ffromint, frint, iadds = (_instantiation(verilog, name) for name in ("ffromint", "frint", "iadds"))
     assert "_sgnop(" not in ffromint  # integer operand, float result
-    assert ftoint.count("_sgnop(") == 1 and ".a_sgnop(" in ftoint  # float operand, integer result
+    assert frint.count("_sgnop(") == 1 and ".a_sgnop(" in frint  # float operand, integer result
     assert "_sgnop(" not in iadds
     assert re.search(r"reg  \[WINT-1:0\] s_iadds_\w+_a;", verilog)
-    assert re.search(r"wire \[WINT-1:0\] s_ftoint_\w+_y0;", verilog)
-    assert re.search(r"reg  \[WFLT-1:0\] s_ftoint_\w+_a;", verilog)
+    assert re.search(r"wire \[WINT-1:0\] s_frint_\w+_y1;", verilog)
+    assert re.search(r"reg  \[WFLT-1:0\] s_frint_\w+_a;", verilog)
 
 
 def test_only_a_float_port_is_allocated_a_microcode_sign_field(_integer_result: SynthesisResult) -> None:
@@ -804,7 +842,7 @@ def test_only_a_float_port_is_allocated_a_microcode_sign_field(_integer_result: 
         "uc_fadd_0_bsgn",
         "uc_fsort_0_asgn",
         "uc_fsort_0_bsgn",
-        "uc_ftoint_0_asgn",
+        "uc_frint_0_asgn",
     }
 
 

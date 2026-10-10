@@ -14,12 +14,11 @@ from holoso import (
     FAddOptions,
     FCmpOptions,
     FCordicOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FILog2Options,
     FMulILog2Options,
     FMulOptions,
     FSortOptions,
-    FSqrtOptions,
     FloatFormat,
     OperatorOptions,
     Options,
@@ -33,6 +32,7 @@ from holoso._mir import lower as lower_to_mir
 
 from holoso._value import ScalarLike
 from ._cosim import run_cosim
+from ._public import divsqrt_modes
 from ._modelref import (
     branch_boundary_kernel,
     build_lir,
@@ -159,7 +159,7 @@ def test_cosim_min_max(sim: str) -> None:
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             fcmp=FCmpOptions(),
             fsort=FSortOptions(),
@@ -254,15 +254,15 @@ def test_cosim_unused_bool_input_keeps_cfg_state_timing(sim: str, config: Option
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_new_operator_stages(sim: str) -> None:
     def kernel(a: float, b: float, c: float) -> float:
-        return (a - b) / c + a * b * 0.25  # fadd, fdiv, fmul, and fmul_ilog2 (the 2^-2 scale) all in one kernel
+        return (a - b) / c + a * b * 0.25  # fadd, fdivsqrt, fmul, and fmul_ilog2 (the 2^-2 scale) all in one kernel
 
-    # Nondefault pipeline stages on fadd, fmul, fdiv and fmul_ilog2, so the latency model must match the staged RTL end
-    # to end.
+    # Nondefault pipeline stages on fadd, fmul, fdivsqrt and fmul_ilog2, so the latency model must match the staged RTL
+    # end to end.
     options = Options(
         OperatorOptions(
             fadd=FAddOptions(stage_input=1, stage_normalize=2, stage_pack=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
-            fdiv=FDivOptions(stage_pack=1),
+            fdivsqrt=FDivsqrtOptions(stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fcmp=FCmpOptions(),
         ),
@@ -271,9 +271,9 @@ def test_cosim_new_operator_stages(sim: str) -> None:
     run_cosim(sim, holoso.synthesize(kernel, options, name="new_stages"))
 
 
-# The generated bench only checks err_pc == 0 over a bounded input range, so it never exercises the div0 -> err_pc
-# path. This custom bench drives an exact zero divisor and asserts the diagnostic is set, then cleared on the next
-# accepted transaction. It cannot reuse the generated bench because the numerical model does not predict errors.
+# The generated bench only checks err_pc == 0 over a bounded input range, so it never exercises the zero-divisor ->
+# err_pc path. This custom bench drives an exact zero divisor and asserts the diagnostic is set, then cleared on the
+# next accepted transaction. It cannot reuse the generated bench because the numerical model does not predict errors.
 _ERR_BENCH = """
 import cocotb
 from cocotb.clock import Clock
@@ -348,7 +348,7 @@ def _run_err_bench(sim: str, name: str, fmt: FloatFormat, verilog: str, bench_te
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_div0_error(sim: str) -> None:
-    # Staged only: this is the one public-entry row where the error rides fdiv's full stage pipeline.
+    # Staged only: this is the one public-entry row where the error rides the divider's full stage pipeline.
     def kdiv(a: float, b: float) -> float:
         return a / b
 
@@ -359,9 +359,9 @@ def test_cosim_div0_error(sim: str) -> None:
     _run_err_bench(sim, name, fmt, verilog, bench)
 
 
-# log2 has two error ports (domain_error for x<0, pole for x==0), both ORed into the single err_pc. Like div0, the
-# generated bench never reaches the error path (it asserts err_pc == 0 and the numerical model does not predict errors),
-# so this custom bench drives both error operands and asserts err_pc latches for each, then clears.
+# log2 has two error ports (domain_error for x<0, pole for x==0), both ORed into the single err_pc. As with a zero
+# divisor, the generated bench never reaches the error path (it asserts err_pc == 0 and the numerical model does not
+# predict errors), so this custom bench drives both error operands and asserts err_pc latches for each, then clears.
 _LOG2_ERR_BENCH = """
 import cocotb
 from cocotb.clock import Clock
@@ -892,7 +892,7 @@ def test_cosim_root_and_lone_hypot(sim: str) -> None:
     # The native root inside a real design, and the lone hypot's expansion around it -- two exponent extractions,
     # an integer max, three exact scalings and a sum of squares. The wrapper bench proves the modules; this proves
     # the machine built around them, including the integer datapath the expansion reaches into. No sorter, no
-    # divider and no comparator: the expansion needs none of them.
+    # division and no comparator: the expansion needs none of them.
     def kernel(x: float, y: float) -> tuple[float, float]:
         return math.sqrt(abs(x)), math.hypot(x, y)
 
@@ -902,11 +902,22 @@ def test_cosim_root_and_lone_hypot(sim: str) -> None:
             fmul=FMulOptions(),
             fmul_ilog2=FMulILog2Options(),
             filog2=FILog2Options(),
-            fsqrt=FSqrtOptions(),
+            fdivsqrt=FDivsqrtOptions(),
         ),
         ffmt=FloatFormat(8, 24),
     )
     run_cosim(sim, holoso.synthesize(kernel, options, name="cs_root_hypot"))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_divider_shared_by_quotient_and_root(sim: str) -> None:
+    # The one elaboration no other kernel here reaches: the instance choosing its operation per firing.
+    def kernel(a: float, b: float) -> tuple[float, float]:
+        return a / b, math.sqrt(abs(a))
+
+    result = holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="cs_quotient_and_root")
+    assert divsqrt_modes(result.verilog_output.verilog) == [2]
+    run_cosim(sim, result)
 
 
 @pytest.mark.parametrize("sim", SIMULATORS)
@@ -923,7 +934,7 @@ def test_cosim_n_ary_norm(sim: str) -> None:
             fmul=FMulOptions(),
             fmul_ilog2=FMulILog2Options(),
             filog2=FILog2Options(),
-            fsqrt=FSqrtOptions(),
+            fdivsqrt=FDivsqrtOptions(),
         ),
         ffmt=FloatFormat(8, 24),
     )

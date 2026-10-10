@@ -12,7 +12,7 @@ import pytest
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
@@ -62,7 +62,7 @@ from holoso._operators import (
     FAddOperator,
     FAddPrimitive,
     FCmpPrimitive,
-    FDivOperator,
+    FDivsqrtOperator,
     FDivPrimitive,
     FloatSignControl,
     FMulILog2Primitive,
@@ -116,7 +116,7 @@ OPS = mir_options(
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             fcmp=FCmpOptions(),
         ),
@@ -1716,7 +1716,7 @@ def test_is_commutative_marks_only_the_symmetric_operators() -> None:
     # test_arithmetic_behavior.py's commuted-edge sweeps.
     assert FAddPrimitive(FAddOperator.build(FMT, FAddOptions())).is_commutative
     assert FMulPrimitive(FMulOperator.build(FMT, FMulOptions(), 0)).is_commutative
-    assert not FDivPrimitive(FDivOperator.build(FMT, FDivOptions())).is_commutative
+    assert not FDivPrimitive(FDivsqrtOperator.build(FMT, FDivsqrtOptions())).is_commutative
 
 
 def test_orientation_reclaims_multiplier_reach() -> None:
@@ -2205,10 +2205,11 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
     lir = build_lir(_run(kernel, _CORDIC_OPS), "lone_hypot")
     counts = _instance_counts(lir)
     assert "fcordic" not in counts  # no CORDIC is spun up for a hypotenuse that has no angle beside it
-    # The exponent scaling needs no sorter and no divider, and the root sees a sum of two squares taken at a scale
+    # The exponent scaling needs no sorter and no division, and the root sees a sum of two squares taken at a scale
     # that cannot overflow.
-    assert counts.get("fsqrt") == 1 and counts.get("filog2") == 1
-    assert "fsort" not in counts and "fdiv" not in counts
+    assert counts.get("fdivsqrt") == 1 and counts.get("filog2") == 1
+    assert "fsort" not in counts
+    assert not any(isinstance(op.primitive, FDivPrimitive) for op in _firings(lir, "fdivsqrt"))
     # Both legs are extracted on the one instance and all three scalings ride one scaler.
     assert len(_firings(lir, "filog2")) == 2 and len(_firings(lir, "fmul_ilog2")) == 3
 
@@ -2224,7 +2225,7 @@ def test_a_zero_leg_costs_a_magnitude_nothing() -> None:
 
     padded, bare = (build_lir(_run(k, _CORDIC_OPS), n) for k, n in ((four, "zero_leg"), (three, "no_zero_leg")))
     assert _instance_counts(padded) == _instance_counts(bare)
-    for mnemonic in ("filog2", "fmul_ilog2", "fmul", "fadd", "icmp"):
+    for mnemonic in ("filog2", "fmul_ilog2", "fmul", "fadd", "iadds"):
         assert len(_firings(padded, mnemonic)) == len(_firings(bare, mnemonic)), mnemonic
 
 
@@ -2237,7 +2238,7 @@ def test_dropping_a_zero_leg_hands_the_pair_back_to_the_cordic() -> None:
     lir = build_lir(_run(kernel, _CORDIC_OPS), "zero_leg_fuse")
     assert len(_firings(lir, "fcordic")) == 1
     counts = _instance_counts(lir)
-    assert "filog2" not in counts and "fsqrt" not in counts
+    assert "filog2" not in counts and "fdivsqrt" not in counts
 
 
 def test_a_two_legged_magnitude_still_fuses_with_an_adjacent_atan2() -> None:

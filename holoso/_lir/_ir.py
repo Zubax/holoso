@@ -20,7 +20,7 @@ from .._operators import (
     WideConditioner,
     identity_conditioner,
 )
-from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType, ScalarType
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType
 from .._value import WideValue
 from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputPort, DataOutputPort, Port
 
@@ -263,16 +263,10 @@ class WideOperand:
 
 
 @dataclass(frozen=True, slots=True)
-class _InputLoad:
+class WideInputLoad:
     """An input port sampled into a typed register at in_valid."""
 
     name: str
-    dst: RegRef | BoolRegRef
-    scalar_type: ScalarType
-
-
-@dataclass(frozen=True, slots=True)
-class WideInputLoad(_InputLoad):
     dst: RegRef
     scalar_type: FloatType | IntType
 
@@ -317,7 +311,10 @@ class WideStateSlot:
 
 
 @dataclass(frozen=True, slots=True)
-class BoolInputLoad(_InputLoad):
+class BoolInputLoad:
+    """An input port sampled into a typed register at in_valid."""
+
+    name: str
     dst: BoolRegRef
     scalar_type: BoolType = BoolType()
 
@@ -457,22 +454,19 @@ class InlineScheduledOp:
 
 
 @dataclass(frozen=True, slots=True)
-class _OutputWire:
+class WideOutputWire:
     """An output port: a named external sink driven at an exit PC by a typed source tap."""
 
     name: str
-    tap: WideOperand | BoolOperand
-    scalar_type: ScalarType
-
-
-@dataclass(frozen=True, slots=True)
-class WideOutputWire(_OutputWire):
     tap: WideOperand
     scalar_type: FloatType | IntType
 
 
 @dataclass(frozen=True, slots=True)
-class BoolOutputWire(_OutputWire):
+class BoolOutputWire:
+    """An output port: a named external sink driven at an exit PC by a typed source tap."""
+
+    name: str
     tap: BoolOperand
     scalar_type: BoolType = BoolType()
 

@@ -10,7 +10,7 @@ from typing import Self
 
 import pytest
 
-from holoso import FloatFormat, ICmpOptions
+from holoso import FloatFormat, IAddsOptions
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._lir import OpWriteSource, RegallocTuning, landing_cycle, read_sources_per_port, write_events
 from holoso._backend.verilog._microcode import build_microcode, f_mode, read_codebook, write_codebook
@@ -18,8 +18,9 @@ from holoso._mir import Mir
 from holoso._mir._interpret import MirInterpreter
 from holoso._mir._ir import MirBuilder
 from holoso._operators import (
+    AddMode,
     HardwareOperator,
-    ICmpOperator,
+    IAddOperator,
     ICmpPrimitive,
     IntIdentity,
     ModePort,
@@ -129,7 +130,7 @@ def _modal_kernel(instances: int, slow_interval: int, split: bool) -> Mir:
         [IntIdentity()],
     )
     spilled = builder.operation(slow, [builder.operation(fast, [x, y], [IntIdentity()] * 2)], [IntIdentity()])
-    comparator = ICmpPrimitive(ICmpOperator.build(_IFMT, ICmpOptions()))
+    comparator = ICmpPrimitive(IAddOperator.build(_IFMT, IAddsOptions()))
     builder.branch(builder.operation(comparator, [x, y], [IntIdentity()] * 2, result=2), left, right)
     builder.position_at(left)
     from_left = builder.operation(fast, [spilled, x], [IntIdentity()] * 2)
@@ -275,7 +276,7 @@ def test_each_instance_is_elaborated_for_the_modes_its_own_firings_run() -> None
     x, y = builder.input("x", ints), builder.input("y", ints)
     alone = builder.operation(slow, [x], [IntIdentity()])
     mixed = builder.operation(fast, [x, y], [IntIdentity()] * 2)
-    comparator = ICmpPrimitive(ICmpOperator.build(_IFMT, ICmpOptions()))
+    comparator = ICmpPrimitive(IAddOperator.build(_IFMT, IAddsOptions()))
     builder.branch(builder.operation(comparator, [x, y], [IntIdentity()] * 2, result=2), left, right)
     builder.position_at(left)
     from_left = builder.operation(slow, [mixed], [IntIdentity()])
@@ -290,7 +291,11 @@ def test_each_instance_is_elaborated_for_the_modes_its_own_firings_run() -> None
     mir = builder.finish()
     lir = build_lir(mir, "modal_pair", _TUNING)
     codes = {inst.name: {mode.code for mode in modes} for inst, modes in lir.instance_modes.items()}
-    assert codes == {"modal_0": {_SLOW}, "modal_1": {_SLOW, _FAST}, "icmp_0": {None}}, "the premise of this test"
+    assert codes == {
+        "modal_0": {_SLOW},
+        "modal_1": {_SLOW, _FAST},
+        "iadds_0": {AddMode.SUB},
+    }, "the premise of this test"
     assert _elaborations(generate_verilog(lir).verilog) == {
         "modal_0": f".W({_IFMT.width}), .MODE(0), .LATENCY_SLOW(4)",
         "modal_1": f".W({_IFMT.width}), .MODE(2), .LATENCY_SLOW(4), .LATENCY_FAST(1)",

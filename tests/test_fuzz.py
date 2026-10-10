@@ -19,6 +19,7 @@ from holoso._type import FloatFormat
 
 from . import _fuzz as fuzz_impl
 from ._fuzz import CampaignStats, CheckKind, Divergence, Shape, run_campaign, save_reproducer
+from ._fuzz_fma import run_fma_batch
 
 # The campaign datapath: a shallow format keeps the per-kernel build fast while still exercising rounding, branches,
 # and the bool bank. The differential oracle is format-agnostic, so one well-chosen format suffices.
@@ -46,7 +47,8 @@ def _print_summary(stats: CampaignStats) -> None:
         f"{_ansi('stateful', '96')}={stats.stateful}  {_ansi('exact-mode', '96')}={stats.exact_mode}  "
         f"{_ansi('secondary', '96')}={stats.secondary_checked}✓/{stats.secondary_skipped}⤳  "
         f"{_ansi('cont-drift', '96')}={stats.continuous_drift}  "
-        f"{_ansi('armed-deadarm', '96')}={stats.dead_arm_forced}"
+        f"{_ansi('armed-deadarm', '96')}={stats.dead_arm_forced}  "
+        f"{_ansi('fma-batch', '96')}={stats.fma_batch_kernels}"
     )
     print(f"  {_ansi('shape histogram (kernels realizing each shape)', '93')}")
     peak = max((stats.shape_counts[s] for s in Shape), default=1) or 1
@@ -66,7 +68,7 @@ def _print_summary(stats: CampaignStats) -> None:
 def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
     """
     Run a campaign, save a reproducer for every divergence, print the summary, and fail if any divergence occurred. An
-    `interp_vs_model` divergence is a genuine LIR-layer miscompile; a `model_vs_float64` divergence (only ever
+    `interp_vs_model` divergence is a genuine LIR-layer miscompile; a `model_vs_reference` divergence (only ever
     reported in EXACT mode) is a front/mid-end or operator discrepancy. Either is a real bug -- the saved reproducer is
     a permanent regression.
     """
@@ -77,6 +79,7 @@ def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
         saved.append((divergence, str(path)))
 
     stats = run_campaign(n_kernels, n_vectors, seed, _EFFORT, _FMT, on_divergence)
+    run_fma_batch(stats, n_kernels, n_vectors, seed, _EFFORT, _FMT, on_divergence)
     _print_summary(stats)
 
     if stats.divergences:
@@ -96,6 +99,7 @@ def _run_and_assert(n_kernels: int, n_vectors: int, seed: int) -> None:
     assert stats.shape_counts[Shape.NESTED_IF] > 0, "no nested-branch kernels generated"
     assert stats.shape_counts[Shape.RELATION_PAIR] > 0, "no relation-pair kernels generated"
     assert stats.shape_counts[Shape.EXACT_WIRING] >= 2, "exact wiring kernels were not both generated"
+    assert stats.shape_counts[Shape.FMA] > stats.fma_batch_kernels, "no fma was spelled outside the fma batch"
 
 
 def _surviving_forward_branches_for_probe(name: str, emit: Callable[[fuzz_impl._Emitter], fuzz_impl._Fragment]) -> int:
@@ -136,7 +140,8 @@ def test_fuzz_campaign() -> None:
 def test_fuzz_smoke() -> None:
     """
     A tiny fixed-budget campaign that runs in the NORMAL (unmarked) `tests` session so the fuzzer can never bit-rot.
-    It exercises the full generator + runner end to end on a handful of kernels and asserts the differential oracle.
+    It exercises the full generator + runner end to end on a handful of kernels and one of each fma shape, and
+    asserts the differential oracle.
     Deliberately UNMARKED, so it is collected by `-m "not cosim and not fuzz"`.
     """
     _run_and_assert(n_kernels=8, n_vectors=12, seed=0x5A1ED)

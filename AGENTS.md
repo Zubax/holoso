@@ -7,6 +7,7 @@ Whenever introducing nontrivial changes, update `DESIGN.md` as well to keep it f
 with the implementation. However, do not attempt to capture minor implementation minutiae there, keep it high-level.
 
 Do not commit anything unless asked explicitly to do so.
+Never alter the git staging index unless asked; it is often used for manual partial progress tracking by humans.
 
 When (sub)agents fail or get stuck, e.g. due to a connection error or a transient environment error,
 retry them until success.

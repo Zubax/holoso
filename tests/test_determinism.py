@@ -116,12 +116,12 @@ def _roundings(x: float, y: float) -> tuple[float, float, int, int]:
 
 
 def _emit_roundings_two_instances() -> None:
-    from holoso import FloatFormat, FRoundOptions, FToIntOptions, synthesize
+    from holoso import FloatFormat, FRintOptions, synthesize
 
     from ._modelref import default_options, with_instances
 
     options = default_options(FloatFormat(6, 18))
-    options = replace(options, operator=replace(options.operator, fround=FRoundOptions(), ftoint=FToIntOptions()))
+    options = replace(options, operator=replace(options.operator, frint=FRintOptions()))
     _dump(synthesize(_roundings, with_instances(options, 2)))
 
 

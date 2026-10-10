@@ -1,9 +1,9 @@
 """
 Tests for holoso_flog2 (pipelined; y = log2(sgnop(a)); domain_error and pole alongside out_valid).
 
-Unlike fdiv (whose y is unspecified on div0), zkf_log2 defines y = -inf for both error cases, so this bench checks y in
-every case and additionally checks the two flags: pole when the conditioned operand is +0, domain_error when it is
-negative. The value oracle is the exact ZKF model (FloatValue.log2); the flags are an independent bit classification.
+zkf_log2 defines y = -inf for both error cases, so this bench checks y in every case and additionally checks the two
+flags: pole when the conditioned operand is +0, domain_error when it is negative. The value oracle is the exact ZKF
+model (FloatValue.log2); the flags are an independent bit classification.
 """
 
 import os
@@ -43,7 +43,7 @@ STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {"stage_input": 1, "stage_output": 1},
     {"stage_decode": 1, "stage_normalize": 1, "stage_pack": 1},
     {"stage_product": 2, "stage_product_final": 1, "stage_normalize_output": 1},
-    # The equal-temperament timing-closed configuration (the target-used stage_product_final=2 / stage_normalize=2).
+    # Both products split and both normalizer barriers, as timing closure of a wide format takes.
     {"stage_product": 2, "stage_product_final": 2, "stage_normalize": 2, "stage_pack": 1},
 )
 

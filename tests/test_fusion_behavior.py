@@ -164,7 +164,7 @@ def test_a_flag_its_loop_never_raises_settles_the_branch_it_guards() -> None:
     # The folded flag is itself the condition of a diamond small enough to convert, which must be pruned instead.
     vectors: list[tuple[float | int, ...]] = [(1.5, 0), (-0.5, 5)]
     assert _cycles(settled_flag, vectors) == _cycles(unflagged, vectors)
-    assert "holoso_fdiv" not in instantiated_modules(_synthesize(settled_flag_guarding_a_division))
+    assert "holoso_fdivsqrt" not in instantiated_modules(_synthesize(settled_flag_guarding_a_division))
     _cycles(settled_flag_guarding_a_division, [(1.5, 2.0, 0), (-0.5, 4.0, 3)])
 
 

@@ -48,8 +48,9 @@ Parameter and return annotations are checked, so the module boundary is judged w
 The LIR build threads an arm block holding nothing but phi-arm installs into its predecessor wherever that shortens
 the arm's path and lengthens none. An arm whose predecessor overlaps keeps its frame, about four cycles on that path:
 pid's first arm, foc's and imu_fusion's first arms, image_agc_streamed's and majority_voter's block 2. Threading them
-makes the predecessor drain into the merge, trading latency between the paths (a probe moved `x / y if c else 0.0`
-from 6/18 to 4/20 cycles); flux_observer's arm sits behind the empty entry, whose frame would grow from 2 to 4 PCs.
+makes the predecessor drain into the merge, trading latency between the paths (a probe took two cycles off the short
+path of `x / y if c else 0.0` and added two to the long one); flux_observer's arm sits behind the empty entry, whose
+frame would grow from 2 to 4 PCs.
 Gaining here needs overlap across a multi-predecessor edge.
 
 ### Interference that keeps a copy-only arm
@@ -72,15 +73,45 @@ deferred until a real kernel needs it.
 ### Mode-aware binding
 
 The register allocator binds firings to instances without regard to their modes, but an instance whose firings all run
-in one mode elaborates its operator for that mode alone, as a CORDIC that only rotates sheds the vectoring datapath.
-With two or more instances, steering rotations and vectorings onto separate instances where the schedule allows would
-make more of them single-mode and so smaller. The binding objective counts only registers and steering arms today, so
-this needs an area term for each instance's mode set.
+in one mode elaborates its operator for that mode alone, as a CORDIC that only rotates sheds the vectoring datapath
+and a divider that only divides sheds the square root. With two or more instances, steering rotations and vectorings,
+or divisions and roots, onto separate instances where the schedule allows would make more of them single-mode and so
+smaller. The binding objective counts only registers and steering arms today, so this needs an area term for each
+instance's mode set.
 
 ### List-scheduler priority
 
 `schedule_ops` issues ready firings by latency-weighted height to a sink, which ignores instance contention. A
 randomized slack-based priority, 300 trials per block under an independent timing model, found shorter blocks the
-height order misses: rigid_body_scalar 126 -> 124 cycles, imu_fusion's entry and one arm block one cycle each. Other
+height order misses: rigid_body_scalar by two cycles, imu_fusion's entry and one arm block by one cycle each. Other
 large kernels (both EKFs, cordic_sincos, foc) showed no gain, so the benefit is uneven; a contention-aware priority, or
 a few perturbed orders per block keeping the shortest, are the candidates.
+
+## MIR
+
+### Sign tests against zero and a branchless absolute value
+
+A comparison against a constant zero occupies a comparator firing even where it only reads its operand's sign bit.
+We need inline primitives and lower comparisons against zero through them:
+
+- `iisneg`, `iisnonneg` evaluating the sign bit only.
+- `iispos`, `iisnonpos` evaluating the sign bit and the integer value. This may turn out expensive, subject to test.
+- `fisneg`, `fisnonneg`, `fispos`, `fisnonpos` evaluating the sign bit and the exponent of the float.
+  Exponent is needed always to handle `-0.0` correctly; it is cheap because always narrow.
+
+The integer absolute value then needs no operator of its own: it lowers to the saturating `0 + x` and `0 - x` and an
+inline select between them on the sign test, which removes `holoso_iabss`.
+
+### An early product output on the fused multiply-add
+
+`zkf_fma` could present the rounded product `a*b` on a second output at the multiplier's latency, enabled at
+elaboration since its packer costs fabric. A product sharing a block with an `fma(a, b, c)` over the same two factors
+would then tap that firing instead of taking a multiplier, as a comparison taps a subtraction's flags.
+
+- An operator mode carries one latency; this needs one per output port. The schedule is already kept per value; the
+  firing record (`PooledScheduledOp.commit_cycle` and its readers) commits every write together.
+- A fused `c - a*b` yields the product negated, which folds into its readers as any sign does; a site taking the
+  product's magnitude cannot host the tap.
+
+Running plain multiplications on the same output would let a kernel with `ffma` do without `fmul`,
+and enable kernels with both to achieve greater issue parallelism.

@@ -6,8 +6,10 @@ and no accuracy the single constant would have had, since it has none.
 
 import logging
 
+from .._errors import UnsupportedConstruct
 from .._hir import (
     FloatConst,
+    FloatFma,
     FloatMul,
     FloatMulPow2,
     Hir,
@@ -20,10 +22,10 @@ from .._hir import (
     rebuild,
     scaling_of,
 )
-from .._operators import FMulILog2Primitive, OpConfig
+from .._operators import FMulILog2Operator, OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
-from ._ir import degrades, refuse_degrading
+from ._ir import degrades
 
 _logger = logging.getLogger(__name__)
 
@@ -47,6 +49,20 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
     fmt = ops.float_format
     rewrites = 0
 
+    def carried(factor: ValueId) -> Scaling | None:
+        constant = hir.nodes[factor]
+        if not (isinstance(constant, FloatConst) and degrades(constant.value, fmt)):
+            return None
+        scaling = scaling_of(constant.value)
+        assert scaling is not None
+        reaches = _reaches(fmt, scaling.k)
+        if not ops.serves(FMulILog2Operator):
+            # Past the format's reach the scaler does not help either, so it is not the remedy to name.
+            remedy = _NO_SCALER if reaches else "widen wexp or rescale"
+            degraded = fmt.decode(fmt.encode(constant.value))
+            raise UnsupportedConstruct(f"constant {constant.value!r} degrades to {degraded!r} in {fmt}; {remedy}")
+        return scaling if reaches else None
+
     def split(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId:
         # The significand only ever amplifies, so it goes on the smaller-magnitude side of the exponent step, where
         # the least is at stake against the format's rails.
@@ -60,21 +76,24 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
 
     def build_value(builder: HirBuilder, vid: ValueId, node: Node, remap: dict[ValueId, ValueId]) -> ValueId:
         nonlocal rewrites
-        if isinstance(node, Operation) and isinstance(node.operator, FloatMul):
-            assert len(node.operands) == 2
-            for base, other in (node.operands, node.operands[::-1]):
-                constant = hir.nodes[other]
-                if isinstance(constant, FloatConst) and degrades(constant.value, fmt):
-                    scaling = scaling_of(constant.value)
-                    assert scaling is not None
-                    reaches = _reaches(fmt, scaling.k)
-                    if not ops.serves(FMulILog2Primitive):
-                        # Past the format's reach the scaler does not help either, so it is not the remedy to name.
-                        remedy = _NO_SCALER if reaches else "widen wexp or rescale"
-                        refuse_degrading(constant.value, fmt, "constant", remedy)
-                    if reaches:
+        match node:
+            case Operation(operator=FloatMul(), operands=(x, y)):
+                for base, other in ((x, y), (y, x)):
+                    scaling = carried(other)
+                    if scaling is not None:
                         rewrites += 1
                         return split(builder, remap[base], scaling)
+            case Operation(operator=FloatFma(), operands=(x, y, addend)):
+                for base, other in ((x, y), (y, x)):
+                    scaling = carried(other)
+                    if scaling is not None:
+                        # The exponent step is exact short of the format's rails, so it moves onto the other factor
+                        # and the product stays fused.
+                        assert not scaling.negative, "strength reduction peels a constant factor's sign"
+                        rewrites += 1
+                        scaled = builder.operation(FloatMulPow2(scaling.k), [remap[base]])
+                        significand = builder.float_const(scaling.significand)
+                        return builder.operation(FloatFma(), [scaled, significand, remap[addend]])
         return copy_node(builder, node, remap)
 
     result = rebuild(hir, build_value)

@@ -41,7 +41,7 @@ def main() -> None:
             fmul_ilog2=holoso.FMulILog2Options(),  # scaling a turn fraction by a power of two is an exponent add
             fcordic=holoso.FCordicOptions(),
             ffromint=holoso.FFromIntOptions(),
-            ftoint=holoso.FToIntOptions(),
+            frint=holoso.FRintOptions(),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=36),
         wint_min=34,  # a carry bit above the phase, then a sign bit

@@ -126,8 +126,8 @@ class Operator(ABC):
     @property
     def mirror(self) -> "Operator | None":
         """
-        Declared rather than inferred from the algebra, because the answer is about bits: `fmin`/`fmax` break ties
-        toward the second operand, so exchanging them flips the sign of a zero.
+        Declared rather than inferred from the algebra, because the answer is about bits: `fmin` breaks a tie toward
+        the second operand and `fmax` toward the first, so exchanging them flips the sign of a zero.
         """
         return None
 
@@ -470,7 +470,7 @@ class FloatIsNegInf(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
-    """Always single-rounds, so the contraction may not absorb another addition into it."""
+    """`a*b + c` rounded once, the product never a value of its own."""
 
     mnemonic: ClassVar[str] = "ffma"
     signature: ClassVar[Signature] = Signature((FloatType(), FloatType(), FloatType()), FloatType())

@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from holoso import SynthesisResult
@@ -77,6 +77,11 @@ class SynthReport:
     resources: Mapping[str, ResourceUse]
     artifact_dir: Path
     logs: list[Path]
+    block_ram_owners: Mapping[str, int] = field(default_factory=dict)
+    """
+    Block RAMs under each instance path, descendants included, where the flow's reports attribute them; a total cannot
+    tell an operator's lookup table from the microcode ROM.
+    """
 
 
 @dataclass(frozen=True, slots=True)

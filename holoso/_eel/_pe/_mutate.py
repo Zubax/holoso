@@ -140,55 +140,55 @@ def _state_store(
     if isinstance(stmt, AugStore):
         interp.check_mark(frame, stmt.mark, origin)
     slot_value = interp.readable(frame.env[key], origin)
-    in_place = True
-    value: Value
     if rest:
         if not isinstance(slot_value, _CONTAINERS):
             reject(origin, f"{spell_state(key)} is a scalar state attribute; it has no elements")
-        value = _element_store(interp, stmt, spell_state(key), slot_value, rest, rhs, frame, sink)
-    elif isinstance(stmt, AugStore) and isinstance(slot_value, _CONTAINERS):
-        value = aug_aggregate(interp, origin, spell_state(key), slot_value, stmt.op, rhs, frame, sink)
+        frame.env[key] = _element_store(interp, stmt, spell_state(key), slot_value, rest, rhs, frame, sink)
+        interp.note_state_write()
+        interp.bump_root_epoch(key)
+        return
+    if isinstance(stmt, AugStore) and isinstance(slot_value, _CONTAINERS):
+        frame.env[key] = aug_aggregate(interp, origin, spell_state(key), slot_value, stmt.op, rhs, frame, sink)
+        interp.note_state_write()
+        interp.bump_root_epoch(key)
+        return
+    if isinstance(stmt, AugStore):
+        if isinstance(slot_value, Opaque):
+            reject(origin, _describe_opaque(slot_value))
+        value = _express.operator_call(interp, origin, stmt.op, [slot_value, rhs], frame, sink)
     else:
-        in_place = False
-        if isinstance(stmt, AugStore):
-            if isinstance(slot_value, Opaque):
-                reject(origin, _describe_opaque(slot_value))
-            value = _express.operator_call(interp, origin, stmt.op, [slot_value, rhs], frame, sink)
-        else:
-            value = rhs
-        spec = interp.specs[key]
-        match value:
-            case BoundMethod():
-                reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
-            case RecordValue():
-                reject(origin, f"a record cannot be installed into {spell_state(key)}; store its fields separately")
-            case IteratorValue():
-                # Hardware state holds leaves, not exhaustion: a reloaded slot would replay what Python drained.
-                reject(origin, f"an enumerate iterator cannot be installed into {spell_state(key)}")
-            case SequenceValue() | TensorValue():
-                if same(value, slot_value):
-                    return  # rebinding the attribute to its own current tree is Python's no-op
-                if ctx.loop:
-                    reject(
-                        origin,
-                        f"installing a new aggregate into the state attribute {spell_state(key)} inside a "
-                        "data-dependent loop is not supported yet; store its elements instead",
-                    )
-                _install(interp, origin, key, spec, value)
-            case StaticScalar() | ResidualScalar():
-                if not isinstance(spec, ScalarSpec):
-                    reject(
-                        origin,
-                        f"{spell_state(key)} is an aggregate state attribute; a scalar cannot replace it -- "
-                        "store its elements instead",
-                    )
-            case Opaque():  # judged at use or at the commit, like any captured scalar
-                if not isinstance(spec, ScalarSpec):
-                    reject(origin, _describe_opaque(value))
+        value = rhs
+    spec = interp.specs[key]
+    match value:
+        case BoundMethod():
+            reject(origin, f"{_aggregate.a_kind(value)} cannot be stored")
+        case RecordValue():
+            reject(origin, f"a record cannot be installed into {spell_state(key)}; store its fields separately")
+        case IteratorValue():
+            # Hardware state holds leaves, not exhaustion: a reloaded slot would replay what Python drained.
+            reject(origin, f"an enumerate iterator cannot be installed into {spell_state(key)}")
+        case SequenceValue() | TensorValue():
+            if same(value, slot_value):
+                return  # rebinding the attribute to its own current tree is Python's no-op
+            if ctx.loop:
+                reject(
+                    origin,
+                    f"installing a new aggregate into the state attribute {spell_state(key)} inside a "
+                    "data-dependent loop is not supported yet; store its elements instead",
+                )
+            _install(interp, origin, key, spec, value)
+        case StaticScalar() | ResidualScalar():
+            if not isinstance(spec, ScalarSpec):
+                reject(
+                    origin,
+                    f"{spell_state(key)} is an aggregate state attribute; a scalar cannot replace it -- "
+                    "store its elements instead",
+                )
+        case Opaque():  # judged at use or at the commit, like any captured scalar
+            if not isinstance(spec, ScalarSpec):
+                reject(origin, _describe_opaque(value))
     frame.env[key] = value
     interp.note_state_write()
-    if in_place:
-        interp.bump_root_epoch(key)
 
 
 def _install(
