@@ -1,6 +1,7 @@
 import html
 import re
 import shlex
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
@@ -13,6 +14,7 @@ from ._flow import Flow
 _TCL = "run_diamond.tcl"
 _DEFINES = "holoso_defines.v"
 _LOG = "diamond.log"
+_FAILED_LOG = "diamond_failed.log"
 _CLOCK_NET = "clk_c"  # Diamond names the net driven by the `clk` input port `clk_c`.
 
 
@@ -53,7 +55,15 @@ class DiamondEcp5Flow(Flow):
         commands = [CommandSpec(["pnmainc", _TCL])]
 
         def runner(directory: Path) -> SynthReport:
-            run_logged(["bash", "-lc", _console_script(directory / _TCL)], directory / _LOG, cwd=directory)
+            command: list[str | Path] = ["bash", "-lc", _console_script(directory / _TCL)]
+            try:
+                run_logged(command, directory / _LOG, cwd=directory)
+            except subprocess.CalledProcessError:
+                # Diamond's mapper has died without a diagnostic on a design it maps cleanly a moment later, so one
+                # failure says nothing about the design; a real fault fails again.
+                print(f"Diamond failed; trying once more, the failed log kept as {_FAILED_LOG}", flush=True)
+                (directory / _LOG).replace(directory / _FAILED_LOG)
+                run_logged(command, directory / _LOG, cwd=directory)
             return _parse(self, directory)
 
         return SynthArtifact(

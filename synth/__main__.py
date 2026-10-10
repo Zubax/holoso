@@ -192,7 +192,6 @@ def _load_target(kernel: Path, expression: str) -> object:
 
 
 def _options(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> Options:
-    """Every operator is configured except ffma, whose contraction is a numerical choice the caller must request."""
     grouped_overrides: dict[str, dict[str, object]] = {}
     for override in op_knobs:
         grouped_overrides.setdefault(override.operator_name, {})[override.field_name] = override.value
