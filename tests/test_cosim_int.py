@@ -229,7 +229,7 @@ def test_int_comparison_on_a_reversed_subtraction_cosim(sim: str) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_fast_adder_cosim(sim: str) -> None:
     """The equality detector beside the adder is a second arm of the RTL, which the model cannot tell from the first."""
-    operators = dataclasses.replace(_OPTIONS.operator, iadds=holoso.IAddOptions(fast=True))
+    operators = dataclasses.replace(_OPTIONS.operator, iadds=holoso.IAddsOptions(fast=True))
     result = holoso.synthesize(
         sum_difference_and_order, dataclasses.replace(_OPTIONS, operator=operators), name="fast_adder_int"
     )

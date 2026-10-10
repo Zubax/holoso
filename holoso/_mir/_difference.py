@@ -19,7 +19,7 @@ class FusedComparison:
     """Whether the comparison reads the subtraction's operands in the opposite order."""
 
 
-def plan_fusions(hir: Hir) -> dict[ValueId, FusedComparison]:
+def plan_comparison_fusions(hir: Hir) -> dict[ValueId, FusedComparison]:
     """
     Map each integer comparison to a same-block subtraction of the same two operands, in either order, so MIR can tap
     the subtraction's flags (the two fuse into one adder firing) rather than fire a comparison. Block-local, like the

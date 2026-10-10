@@ -15,7 +15,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import IAddOptions, IntFormat
+from holoso import IAddsOptions, IntFormat
 from holoso._operators import AddMode, IAddOperator
 
 from .hdl_float_oracle import (
@@ -133,7 +133,7 @@ def _run(sim: str, width: int, fixed: AddMode | None, fast: bool) -> None:
     supplies the module name, the RTL parameters, the port names and the latency, so a declaration that drifted from the
     hardware fails right here, across every width the sweep covers.
     """
-    operator = IAddOperator.build(IntFormat(width), IAddOptions(fast=fast))
+    operator = IAddOperator.build(IntFormat(width), IAddsOptions(fast=fast))
     match fixed:
         case None:
             modes = frozenset(operator.modes)

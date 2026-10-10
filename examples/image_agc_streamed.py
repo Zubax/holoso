@@ -126,7 +126,7 @@ def main() -> None:
             frint=holoso.FRintOptions(),
             # A beat's statistics are dozens of independent sums and comparisons, which a single adder would issue
             # one after another, nearly doubling the beat.
-            iadds=holoso.IAddOptions(instances=2),
+            iadds=holoso.IAddsOptions(instances=2),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=36),
         wint_min=31,  # the frame sum reaches 1920*1200*255, plus the sign bit

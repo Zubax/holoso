@@ -504,7 +504,7 @@ def _emit_fma_horner_loop(em: _FmaEmitter) -> _FmaShape:
 
 # One operand shape per kernel: the linear pass and the scaling reader see through sums, scalings and fmas by a constant
 # alike, so two shapes sharing operands in one kernel could cancel or share a layer in ways neither twin states.
-FMA_TEMPLATES: list[Callable[[_FmaEmitter], _FmaShape]] = [
+_FMA_TEMPLATES: list[Callable[[_FmaEmitter], _FmaShape]] = [
     _emit_fma_zero_factor,
     _emit_fma_zero_addend,
     _emit_fma_unit_factor,
@@ -533,7 +533,7 @@ FMA_TEMPLATES: list[Callable[[_FmaEmitter], _FmaShape]] = [
 ]
 
 
-def generate_fma_kernel(
+def _generate_fma_kernel(
     name: str,
     master_seed: int,
     index: int,
@@ -580,8 +580,8 @@ def run_fma_batch(
     """
     The templates are taken in turn and the batch is never smaller than their number, so each runs in every campaign.
     """
-    for j in range(max(len(FMA_TEMPLATES), n_kernels // 2)):
-        template = FMA_TEMPLATES[j % len(FMA_TEMPLATES)]
-        kernel = generate_fma_kernel(f"fuzz_fma_{master_seed:x}_{j}", master_seed, 0xF3A00000 + j, template, fmt)
+    for j in range(max(len(_FMA_TEMPLATES), n_kernels // 2)):
+        template = _FMA_TEMPLATES[j % len(_FMA_TEMPLATES)]
+        kernel = _generate_fma_kernel(f"fuzz_fma_{master_seed:x}_{j}", master_seed, 0xF3A00000 + j, template, fmt)
         stats.fma_batch_kernels += 1
         _run_campaign_kernel(kernel, stats, fmt, effort, n_vectors, on_divergence)

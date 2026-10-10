@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso import FFromIntOptions, FloatFormat, FSortOptions, FRintOptions, IAddOptions, OperatorOptions, Options
+from holoso import FFromIntOptions, FloatFormat, FSortOptions, FRintOptions, IAddsOptions, OperatorOptions, Options
 from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -1221,7 +1221,7 @@ SPECS = [
         edge_values=(0, 1, 128, PIXEL_MAX, -1, 1 << 42),
         # The second adder is the example's own: a beat's statistics are dozens of independent sums and orders.
         operators=lambda ops: dataclasses.replace(
-            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), frint=FRintOptions(), iadds=IAddOptions(instances=2)
+            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), frint=FRintOptions(), iadds=IAddsOptions(instances=2)
         ),
     ),
     ExampleSpec(

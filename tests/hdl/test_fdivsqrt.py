@@ -40,8 +40,8 @@ from .hdl_float_oracle import (
 
 _FMT = FloatFormat(8, 24)
 
-# Base + each knob alone + the staged fixture's combination (tests/_modelref.py) + the synthesis matrix's (the input
-# stage with the decode stage) + a multi-stage input.
+# Base + each knob alone + the staged fixture's combination (tests/_modelref.py) + the input stage with the decode
+# stage + a multi-stage input.
 STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {},
     {"stage_input": 1},

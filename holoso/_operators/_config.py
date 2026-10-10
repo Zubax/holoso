@@ -38,10 +38,10 @@ class OperatorOptions:
     fcordic: FCordicOptions | None = None
     ffromint: FFromIntOptions | None = None
 
-    iadds: IAddOptions = IAddOptions()
-    imuls: IMulOptions = IMulOptions()
-    idivs: IDivOptions = IDivOptions()
-    iabss: IAbsOptions = IAbsOptions()
+    iadds: IAddsOptions = IAddsOptions()
+    imuls: IMulsOptions = IMulsOptions()
+    idivs: IDivsOptions = IDivsOptions()
+    iabss: IAbssOptions = IAbssOptions()
     ishft: IShftOptions = IShftOptions()
     ipopcnt: IPopcntOptions = IPopcntOptions()
 

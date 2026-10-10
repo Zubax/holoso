@@ -14,7 +14,7 @@ RMS, which is what actually moves when a rewrite shifts many transactions a litt
 whose figures both round away is omitted, so its bound is zero and any error there is a regression. Every spec is
 measured at every format it declares and with `ffma` both absent and configured, since the fused operator changes
 which operand is rounded wherever a kernel reaches it, and the reference suite drives only the first format at the
-default operator set.
+default operator set. A kernel that reaches no fused multiply-add builds one machine either way, so its two rows agree.
 
 Each figure is an upper bound taken on the build that froze it, not an equality: a rewrite that improves a lane
 passes, and re-taking the row keeps the bound tight. Figures are independent of `HOLOSO_REGALLOC_EFFORT`, and of

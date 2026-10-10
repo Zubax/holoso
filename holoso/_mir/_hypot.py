@@ -48,7 +48,7 @@ def _pair(hir: Hir, vid: ValueId) -> Operation | None:
     return None
 
 
-def plan_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
+def plan_magnitude_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     """
     Map each two-legged FloatHypot to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's
     magnitude port (the two fuse into one CORDIC) rather than expand into elementary operations. Block-local, like the
@@ -111,7 +111,7 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
     Fusion is planned here rather than by the caller because it must be re-planned on every round: an expansion can
     let an expression cancel, and the cancellation can delete the atan2 another magnitude was to fuse with.
     """
-    fused, fmt = plan_fusions(hir, ops), ops.float_format
+    fused, fmt = plan_magnitude_fusions(hir, ops), ops.float_format
     targets = {
         vid: node
         for vid, node in hir.nodes.items()

@@ -126,8 +126,8 @@ class Operator(ABC):
     @property
     def mirror(self) -> "Operator | None":
         """
-        Declared rather than inferred from the algebra, because the answer is about bits: `fmin`/`fmax` break ties
-        toward the second operand, so exchanging them flips the sign of a zero.
+        Declared rather than inferred from the algebra, because the answer is about bits: `fmin` breaks a tie toward
+        the second operand and `fmax` toward the first, so exchanging them flips the sign of a zero.
         """
         return None
 

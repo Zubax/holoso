@@ -143,6 +143,7 @@ def countdown(n: int) -> int:
         (eighth_remainder, ["ibwand"]),
         (negated_by_product, ["iadds"]),
         (popcount_of, ["ipopcnt"]),
+        (cross_boundary, ["ffromint", "frint", "ibwand"]),
     ],
     ids=lambda value: getattr(value, "__name__", str(value)),
 )
@@ -151,7 +152,7 @@ def test_the_lowering_names_each_integer_operator_in_one_table(
 ) -> None:
     """
     Every primitive the lowering can choose, named in one place: `-x` selects the adder because there is no
-    negation module, each shift direction selects the module that names it, the strength rewrites pick the
+    negation module, both shift directions select the one shifter, the strength rewrites pick the
     inline `ishiftc`/`ibwand` no public artifact can name, and `min`/`max` become one compare-and-select
     pair each rather than branches.
     """
@@ -196,7 +197,7 @@ def test_the_quotient_and_the_remainder_share_one_divider_firing() -> None:
 def test_relations_fuse_into_one_firing_and_opposite_inversions_split() -> None:
     """
     Three relations, three flags, one activation. A firing taps each port at most once, so `a <= b` and `a > b`
-    -- the same flag under opposite inversions -- need an activation each, still bound to the one pooled unit: the
+    -- the same flag under opposite inversions -- need an activation each, still bound to the one pooled adder: the
     cost is a cycle, never a module.
     """
     fused = build_lir(_select(three_relations), "three_relations")
@@ -316,9 +317,6 @@ def test_two_roundings_of_one_value_share_the_instance_but_not_a_firing() -> Non
     lir = build_lir(mir, "truncated_and_floored")
     assert [instance.operator.name for instance in lir.instances] == ["frint"]
     assert len(_wide_firings(lir)) == 2
-
-    mir = _select(cross_boundary)  # the folded negation's dual: an integer constant crossing beside both conversions
-    assert _mnemonics(mir) == ["ffromint", "frint", "ibwand"]
 
 
 def test_a_negated_operand_folds_onto_the_conversion() -> None:

@@ -126,8 +126,8 @@ def _mnemonic_counts(fn: Callable[..., object], ops: MirOptions) -> dict[str, in
     counts: dict[str, int] = {}
     for node in mir.nodes.values():
         if isinstance(node, MirOperation):
-            stem = hardware_name(node.primitive).split("_")[0]
-            counts[stem] = counts.get(stem, 0) + 1
+            name = hardware_name(node.primitive)
+            counts[name] = counts.get(name, 0) + 1
     return counts
 
 
@@ -304,7 +304,7 @@ def test_a_degrading_coefficient_of_a_dot_product_takes_the_scaler_with_ffma() -
     # exact, and the product by its significand stays fused; left as one constant, the kernel would be refused.
     fmt = FloatFormat(6, 18)
     options = _with_operators(default_options(fmt), ffma=FFmaOptions())
-    assert _mnemonic_counts(dot, mir_options(options)) == {"fmul": 1, "ffma": 2}  # the count's `fmul` is the scaler
+    assert _mnemonic_counts(dot, mir_options(options)) == {"fmul_ilog2": 1, "ffma": 2}
     built = holoso.synthesize(dot, options, name="degrading").numerical_model.elaborate()
 
     def held(x: float) -> holoso.FloatValue:
@@ -1743,12 +1743,15 @@ def test_a_magnitude_sums_its_squares_by_fused_multiply_adds() -> None:
         return float(np.linalg.norm(v))
 
     # A pair of legs starts from one product and every other square is fused into the sum that takes it; two such
-    # sums meet in a plain addition. The multiplier's count includes the exponent scalings, the same on both machines.
-    for kernel, fused_sums, plain_sums in ((norm3, 0, 2), (norm4, 1, 3)):
-        fused = _mnemonic_counts(kernel, mir_options(_WITH_FFMA))
-        plain = _mnemonic_counts(kernel, default_mir(_FMT))
-        assert (fused["ffma"], fused.get("fadd", 0), plain["fmul"] - fused["fmul"]) == (2, fused_sums, 2)
-        assert (plain.get("ffma", 0), plain["fadd"]) == (0, plain_sums)
+    # sums meet in a plain addition.
+    def arithmetic(kernel: Callable[..., object], ops: MirOptions) -> tuple[int, int, int]:
+        counts = _mnemonic_counts(kernel, ops)
+        return counts.get("fmul", 0), counts.get("ffma", 0), counts.get("fadd", 0)
+
+    assert arithmetic(norm3, mir_options(_WITH_FFMA)) == (1, 2, 0)
+    assert arithmetic(norm4, mir_options(_WITH_FFMA)) == (2, 2, 1)
+    assert arithmetic(norm3, default_mir(_FMT)) == (3, 0, 2)
+    assert arithmetic(norm4, default_mir(_FMT)) == (4, 0, 3)
     _assert_python_matches_holoso(norm3, np.array([1.5, -2.0, 0.25]), options=_WITH_FFMA)
     _assert_python_matches_holoso(norm4, np.array([3.0, -1.25, 0.5, 7.0]), options=_WITH_FFMA)
 

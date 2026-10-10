@@ -634,7 +634,7 @@ module holoso_ishft#(parameter W = 44, parameter integer LATENCY = 0) (
 
     // The shifter answers every amount its count field can express, because the fill below reaches as far as the
     // field does; only a magnitude past the field itself needs the fill word chosen here.
-    wire unshifted = negative ? ((~&shamt_q[W-1:SW]) | (~|shamt_narrow)) : (|shamt_q[W-1:SW]);
+    wire past_field = negative ? ((~&shamt_q[W-1:SW]) | (~|shamt_narrow)) : (|shamt_q[W-1:SW]);
     wire fill = go_right & x_q[W-1];
 
     wire [W-1:0] x_reversed;
@@ -653,7 +653,7 @@ module holoso_ishft#(parameter W = 44, parameter integer LATENCY = 0) (
         x_q <= x;
         shamt_q <= shamt;
         right_q <= right;
-        casez ({unshifted, go_right})
+        casez ({past_field, go_right})
             2'b1?: shft <= {W{fill}};
             2'b00: shft <= leaving;
             2'b01: shft <= leaving_reversed;

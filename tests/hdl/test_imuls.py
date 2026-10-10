@@ -8,7 +8,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import IMulOptions, IntFormat
+from holoso import IMulsOptions, IntFormat
 from holoso._operators import IMulOperator
 
 from .hdl_float_oracle import (
@@ -120,7 +120,7 @@ _CONFIGURATIONS = tuple((width, stage) for width in (*range(2, 7), 24, 44) for s
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_imuls(sim: str, width: int, stage_product: int) -> None:
     # The operator supplies the RTL parameters and the expected latency, so a drifted closed form fails.
-    operator = IMulOperator.build(IntFormat(width), IMulOptions(stage_product=stage_product))
+    operator = IMulOperator.build(IntFormat(width), IMulsOptions(stage_product=stage_product))
     runner = get_runner(sim)
     tag = f"holoso_imuls_w{width}_s{stage_product}"
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / tag

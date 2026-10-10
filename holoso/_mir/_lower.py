@@ -138,8 +138,8 @@ from .._type import (
     ScalarType,
 )
 from ._ir import Mir, MirBuilder, MirOperation
-from ._difference import plan_fusions as plan_comparison_fusions
-from ._hypot import count as hypot_count, expand_unfused, plan_fusions
+from ._difference import plan_comparison_fusions
+from ._hypot import count as hypot_count, expand_unfused, plan_magnitude_fusions
 from ._options import MirOptions
 from ._fma import expand_fmas
 from ._signs import collapse_bool_inversions, collapse_conditioner, collapse_signs, sign_of
@@ -177,7 +177,7 @@ class _LoweringContext:
         self.ops = ops
         self.builder = MirBuilder(ops.float_format, ops.int_format)
         self.remap: dict[ValueId, ValueId] = {}
-        self.fused_hypots = plan_fusions(hir, ops)
+        self.fused_hypots = plan_magnitude_fusions(hir, ops)
         # The derivation expanded every unfused magnitude, so the survivors all ride an atan2's magnitude port.
         assert hypot_count(hir) == len(self.fused_hypots)
         self.fused_comparisons = plan_comparison_fusions(hir)

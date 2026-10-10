@@ -10,7 +10,7 @@ from typing import Self
 
 import pytest
 
-from holoso import FloatFormat, IAddOptions
+from holoso import FloatFormat, IAddsOptions
 from holoso._backend.verilog import generate as generate_verilog
 from holoso._lir import OpWriteSource, RegallocTuning, landing_cycle, read_sources_per_port, write_events
 from holoso._backend.verilog._microcode import build_microcode, f_mode, read_codebook, write_codebook
@@ -130,7 +130,7 @@ def _modal_kernel(instances: int, slow_interval: int, split: bool) -> Mir:
         [IntIdentity()],
     )
     spilled = builder.operation(slow, [builder.operation(fast, [x, y], [IntIdentity()] * 2)], [IntIdentity()])
-    comparator = ICmpPrimitive(IAddOperator.build(_IFMT, IAddOptions()))
+    comparator = ICmpPrimitive(IAddOperator.build(_IFMT, IAddsOptions()))
     builder.branch(builder.operation(comparator, [x, y], [IntIdentity()] * 2, result=2), left, right)
     builder.position_at(left)
     from_left = builder.operation(fast, [spilled, x], [IntIdentity()] * 2)
@@ -276,7 +276,7 @@ def test_each_instance_is_elaborated_for_the_modes_its_own_firings_run() -> None
     x, y = builder.input("x", ints), builder.input("y", ints)
     alone = builder.operation(slow, [x], [IntIdentity()])
     mixed = builder.operation(fast, [x, y], [IntIdentity()] * 2)
-    comparator = ICmpPrimitive(IAddOperator.build(_IFMT, IAddOptions()))
+    comparator = ICmpPrimitive(IAddOperator.build(_IFMT, IAddsOptions()))
     builder.branch(builder.operation(comparator, [x, y], [IntIdentity()] * 2, result=2), left, right)
     builder.position_at(left)
     from_left = builder.operation(slow, [mixed], [IntIdentity()])

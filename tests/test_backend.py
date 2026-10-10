@@ -27,10 +27,10 @@ from holoso import (
     FMulOptions,
     FSortOptions,
     FRintOptions,
-    IAbsOptions,
-    IAddOptions,
-    IDivOptions,
-    IMulOptions,
+    IAbssOptions,
+    IAddsOptions,
+    IDivsOptions,
+    IMulsOptions,
     IntFormat,
     IntValue,
     IPopcntOptions,
@@ -178,13 +178,13 @@ endmodule
 
 def _integer_operators(ifmt: IntFormat) -> list[HardwareOperator]:
     return [
-        IAddOperator.build(ifmt, IAddOptions()),
-        IAddOperator.build(ifmt, IAddOptions(fast=True)),
-        IDivOperator.build(ifmt, IDivOptions()),
-        IAbsOperator.build(ifmt, IAbsOptions()),
+        IAddOperator.build(ifmt, IAddsOptions()),
+        IAddOperator.build(ifmt, IAddsOptions(fast=True)),
+        IDivOperator.build(ifmt, IDivsOptions()),
+        IAbsOperator.build(ifmt, IAbssOptions()),
         IShftOperator.build(ifmt, IShftOptions()),
         IPopcntOperator.build(ifmt, IPopcntOptions()),
-        *(IMulOperator.build(ifmt, IMulOptions(stage_product=stage)) for stage in range(5)),
+        *(IMulOperator.build(ifmt, IMulsOptions(stage_product=stage)) for stage in range(5)),
     ]
 
 
@@ -290,7 +290,7 @@ def test_support_library_elaborates_with_the_keep_hooks_defined(tmp_path: Path) 
     name = "keep_hooks_probe"
     ffmt, ifmt = FloatFormat(8, 36), IntFormat(44)
     operators: list[HardwareOperator] = [
-        IDivOperator.build(ifmt, IDivOptions()),
+        IDivOperator.build(ifmt, IDivsOptions()),
         FDivsqrtOperator.build(ffmt, FDivsqrtOptions()),
         FMulILog2Operator.build(ffmt, ifmt, FMulILog2Options()),
     ]
@@ -321,7 +321,7 @@ def test_support_library_passes_the_rom_hook_to_the_lookup_tables(tmp_path: Path
 @_requires_iverilog
 def test_integer_wrapper_rejects_wrong_latency(tmp_path: Path) -> None:
     # The negative twin of the probe above, so its silence means something.
-    operator = IDivOperator.build(IntFormat(33), IDivOptions())
+    operator = IDivOperator.build(IntFormat(33), IDivsOptions())
     latency = operator.latencies[0]
     verilog = _pooled_probe("wrong_int_latency", [operator]).replace(f".LATENCY({latency})", f".LATENCY({latency + 1})")
     result = _compile("wrong_int_latency", verilog, tmp_path)
@@ -730,7 +730,7 @@ _INT_OPTIONS = Options(
         fadd=FAddOptions(),
         fcmp=FCmpOptions(),
         fsort=FSortOptions(),  # a min alone leaves the max lane untapped
-        imuls=IMulOptions(),
+        imuls=IMulsOptions(),
         ffromint=FFromIntOptions(),
         frint=FRintOptions(),
     ),

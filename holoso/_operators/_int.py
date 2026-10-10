@@ -49,7 +49,7 @@ def _int_operator[O: HardwareOperator](
 class IntPrimitive(PooledPrimitive, ABC):
     """
     The dual of FloatPrimitive. Saturation is what the integer type does at its extremes rather than a failure,
-    and HIR marks the saturating operations speculatable, so the `saturated` sideband every module raises stays
+    and HIR marks the saturating operations speculatable, so the `saturated` sideband a saturating module raises stays
     unconnected and unmodeled -- an if-converted arm that saturates must not raise the machine's error flag.
     """
 
@@ -62,7 +62,7 @@ class IntPrimitive(PooledPrimitive, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class IAddOptions(BaseOperatorOptions):
+class IAddsOptions(BaseOperatorOptions):
     """
     The adder also runs every integer subtraction, negation and comparison, one firing per cycle, so a kernel issuing
     several of them at once shortens by raising `instances`.
@@ -91,7 +91,7 @@ class IAddOperator(HardwareOperator):
     mode_port = ModePort("sub", 1)
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IAddOptions) -> Self:
+    def build(cls, fmt: IntFormat, options: IAddsOptions) -> Self:
         ints, flag = IntType(fmt), BoolType()
         operands = (OperatorPort("a", ints), OperatorPort("b", ints))
         outputs = (
@@ -193,7 +193,7 @@ class ICmpPrimitive(IntPrimitive, ComparatorPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IMulOptions(BaseOperatorOptions):
+class IMulsOptions(BaseOperatorOptions):
     stage_product: int = 0
     """Splitting the product is useful when the width exceeds the DSP slice input. See Verilog holoso_imuls."""
 
@@ -203,7 +203,7 @@ class IMulOperator(HardwareOperator):
     name = "imuls"
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IMulOptions) -> Self:
+    def build(cls, fmt: IntFormat, options: IMulsOptions) -> Self:
         if not 0 <= options.stage_product <= 4:
             raise ValueError(f"imuls stage_product must be in 0..4, got {options.stage_product}")
         knobs = {"STAGE_PRODUCT": options.stage_product}
@@ -225,7 +225,7 @@ class IMulPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IDivOptions(BaseOperatorOptions): ...
+class IDivsOptions(BaseOperatorOptions): ...
 
 
 class IDivOperator(HardwareOperator):
@@ -234,7 +234,7 @@ class IDivOperator(HardwareOperator):
     error_ports = ("div0",)
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IDivOptions) -> Self:
+    def build(cls, fmt: IntFormat, options: IDivsOptions) -> Self:
         latency = 3 + (fmt.width + 1) // 2  # one radix-4 step per two quotient bits
         # Floor, because that is what Python's `//` and `%` mean and HIR has no other division; the core's truncating
         # mode is unreachable from a kernel.
@@ -263,7 +263,7 @@ class IDivPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IAbsOptions(BaseOperatorOptions): ...
+class IAbssOptions(BaseOperatorOptions): ...
 
 
 class IAbsOperator(HardwareOperator):
@@ -271,7 +271,7 @@ class IAbsOperator(HardwareOperator):
     name = "iabss"
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IAbsOptions) -> Self:
+    def build(cls, fmt: IntFormat, options: IAbssOptions) -> Self:
         return _int_operator(cls, fmt, options, ("x",), ("y",))
 
 

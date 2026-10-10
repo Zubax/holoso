@@ -324,7 +324,6 @@ module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer S
 endmodule
 
 // Base-two exponential with sign conditioning:  y = 2 ** sgnop(a)
-// The input is sampled once at in_valid and is not required to remain stable during operation.
 module holoso_fexp2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
                      parameter STAGE_INPUT = 0, parameter STAGE_REDUCE = 0, parameter STAGE_PRODUCT = 0,
                      parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
@@ -351,7 +350,7 @@ endmodule
 
 // Base-two logarithm with sign conditioning:  y = log2(sgnop(a))
 // domain_error is asserted alongside out_valid when the conditioned operand is negative; pole when it is zero. y is
-// -inf in both cases. The input is sampled once at in_valid and is not required to remain stable during operation.
+// -inf in both cases.
 module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
                      parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0, parameter STAGE_PRODUCT = 0,
                      parameter STAGE_PRODUCT_FINAL = 0, parameter STAGE_NORMALIZE = 0,

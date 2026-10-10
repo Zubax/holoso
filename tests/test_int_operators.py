@@ -24,10 +24,10 @@ from holoso import (
     FloatType,
     FloatValue,
     FRintOptions,
-    IAbsOptions,
-    IAddOptions,
-    IDivOptions,
-    IMulOptions,
+    IAbssOptions,
+    IAddsOptions,
+    IDivsOptions,
+    IMulsOptions,
     IntFormat,
     IPopcntOptions,
     IShftOptions,
@@ -132,17 +132,17 @@ def _outputs(primitive: IntPrimitive) -> list[OperatorPort]:
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: int) -> None:
     fmt = IntFormat(width)
-    adder = IAddOperator.build(fmt, IAddOptions())
+    adder = IAddOperator.build(fmt, IAddsOptions())
     add, subtract, compare = IAddPrimitive(adder), ISubPrimitive(adder), ICmpPrimitive(adder)
     shifter = IShftOperator.build(fmt, IShftOptions())
     shift_left, shift_right = IShlPrimitive(shifter), IShrPrimitive(shifter)
-    idiv = IDivPrimitive(IDivOperator.build(fmt, IDivOptions()))
+    idiv = IDivPrimitive(IDivOperator.build(fmt, IDivsOptions()))
     unary = [
-        IAbsPrimitive(IAbsOperator.build(fmt, IAbsOptions())),
+        IAbsPrimitive(IAbsOperator.build(fmt, IAbssOptions())),
         IPopcntPrimitive(IPopcntOperator.build(fmt, IPopcntOptions())),
     ]
     # Staging is a timing knob, so every multiplier configuration must answer the one product.
-    multipliers = [IMulPrimitive(IMulOperator.build(fmt, IMulOptions(stage_product=stage))) for stage in range(5)]
+    multipliers = [IMulPrimitive(IMulOperator.build(fmt, IMulsOptions(stage_product=stage))) for stage in range(5)]
     for a in range(1 << width):
         for primitive in unary:
             want = expected_simple(primitive.operator.module_name, a, width)
@@ -165,7 +165,7 @@ def test_every_operator_answers_as_the_rtl_does_over_every_operand_pair(width: i
 def test_floor_division_obeys_the_division_identity(width: int) -> None:
     # What the oracle comparison cannot show: that the answers are a division at all, not a shared misreading.
     fmt = IntFormat(width)
-    primitive = IDivPrimitive(IDivOperator.build(fmt, IDivOptions()))
+    primitive = IDivPrimitive(IDivOperator.build(fmt, IDivsOptions()))
     for num in range(fmt.min, fmt.max + 1):
         for den in range(fmt.min, fmt.max + 1):
             quotient, remainder = _evaluate(primitive, num, den)
@@ -179,7 +179,7 @@ def test_floor_division_obeys_the_division_identity(width: int) -> None:
 @pytest.mark.parametrize("width", EXHAUSTIVE_WIDTHS)
 def test_comparator_flags_are_one_hot_and_serve_every_relation(width: int) -> None:
     fmt = IntFormat(width)
-    primitive = ICmpPrimitive(IAddOperator.build(fmt, IAddOptions()))
+    primitive = ICmpPrimitive(IAddOperator.build(fmt, IAddsOptions()))
     answers: dict[Relation, Callable[[int, int], bool]] = {
         Relation.GT: lambda a, b: a > b,
         Relation.EQ: lambda a, b: a == b,
@@ -201,11 +201,11 @@ def test_comparator_flags_are_one_hot_and_serve_every_relation(width: int) -> No
 def test_edge_cases_at_the_production_widths(width: int) -> None:
     # The sweeps stop far below these, and saturation is where a width-dependent slip would hide.
     fmt = IntFormat(width)
-    adder = IAddOperator.build(fmt, IAddOptions())
+    adder = IAddOperator.build(fmt, IAddsOptions())
     iadd, isub = IAddPrimitive(adder), ISubPrimitive(adder)
-    imul = IMulPrimitive(IMulOperator.build(fmt, IMulOptions()))
-    idiv = IDivPrimitive(IDivOperator.build(fmt, IDivOptions()))
-    assert _evaluate(IAbsPrimitive(IAbsOperator.build(fmt, IAbsOptions())), fmt.min) == [fmt.max]
+    imul = IMulPrimitive(IMulOperator.build(fmt, IMulsOptions()))
+    idiv = IDivPrimitive(IDivOperator.build(fmt, IDivsOptions()))
+    assert _evaluate(IAbsPrimitive(IAbsOperator.build(fmt, IAbssOptions())), fmt.min) == [fmt.max]
     assert _evaluate(iadd, fmt.min, fmt.min) == [fmt.min]
     assert _evaluate(iadd, fmt.max, fmt.max) == [fmt.max]
     assert _evaluate(isub, fmt.min, fmt.max) == [fmt.min, False, False, True], "the order survives the overflow"
@@ -246,7 +246,7 @@ def test_each_adder_primitive_selects_its_own_mode() -> None:
     # The reference arithmetic never reads the mode, so no sweep here would notice two primitives exchanging their
     # codes or a comparison tapping the port of the sum; only the cosimulation would. A comparison drives the
     # subtraction's code, so an instance that subtracts and compares is elaborated for subtraction alone.
-    adder = IAddOperator.build(IntFormat(33), IAddOptions())
+    adder = IAddOperator.build(IntFormat(33), IAddsOptions())
     add, subtract, compare = IAddPrimitive(adder), ISubPrimitive(adder), ICmpPrimitive(adder)
     assert (add.mode.code, subtract.mode.code, compare.mode.code) == (AddMode.ADD, AddMode.SUB, AddMode.SUB)
     assert [port.name for port in _outputs(add)] == ["y"]
@@ -257,7 +257,7 @@ def test_each_adder_primitive_selects_its_own_mode() -> None:
         assert adder.params_for(frozenset({primitive.mode})) == {"W": 33, "MODE": code, "FAST": 0, "LATENCY": 2}
     assert adder.params_for(frozenset({subtract.mode, compare.mode})) == {"W": 33, "MODE": 1, "FAST": 0, "LATENCY": 2}
     assert adder.params_for(frozenset({add.mode, compare.mode})) == adder.params
-    assert IAddOperator.build(IntFormat(33), IAddOptions(fast=True)).params["FAST"] == 1
+    assert IAddOperator.build(IntFormat(33), IAddsOptions(fast=True)).params["FAST"] == 1
     # A relation taps the subtraction where the comparison of the same operands would, one port up past the difference.
     for relation in Relation:
         tap, inversion = compare.tap_of(relation)
@@ -286,13 +286,13 @@ def test_the_two_shift_modes_mirror_each_other_over_every_operand_pair(width: in
 @pytest.mark.parametrize("width", (2, 3, 24, 33, 44))
 def test_closed_form_latencies(width: int) -> None:
     fmt = IntFormat(width)
-    idiv = IDivPrimitive(IDivOperator.build(fmt, IDivOptions()))
+    idiv = IDivPrimitive(IDivOperator.build(fmt, IDivsOptions()))
     assert idiv.latency == 3 + -(-width // 2), "one radix-4 step per two quotient bits, rounded up"
     for primitive in (
-        IAddPrimitive(IAddOperator.build(fmt, IAddOptions())),
-        ISubPrimitive(IAddOperator.build(fmt, IAddOptions())),
-        ICmpPrimitive(IAddOperator.build(fmt, IAddOptions())),
-        IAbsPrimitive(IAbsOperator.build(fmt, IAbsOptions())),
+        IAddPrimitive(IAddOperator.build(fmt, IAddsOptions())),
+        ISubPrimitive(IAddOperator.build(fmt, IAddsOptions())),
+        ICmpPrimitive(IAddOperator.build(fmt, IAddsOptions())),
+        IAbsPrimitive(IAbsOperator.build(fmt, IAbssOptions())),
         IShlPrimitive(IShftOperator.build(fmt, IShftOptions())),
         IShrPrimitive(IShftOperator.build(fmt, IShftOptions())),
         IPopcntPrimitive(IPopcntOperator.build(fmt, IPopcntOptions())),
@@ -303,7 +303,7 @@ def test_closed_form_latencies(width: int) -> None:
 
 @pytest.mark.parametrize("stage_product", range(5))
 def test_multiplier_staging_costs_exactly_one_cycle_each(stage_product: int) -> None:
-    primitive = IMulPrimitive(IMulOperator.build(IntFormat(33), IMulOptions(stage_product=stage_product)))
+    primitive = IMulPrimitive(IMulOperator.build(IntFormat(33), IMulsOptions(stage_product=stage_product)))
     assert primitive.latency == 2 + stage_product
     assert primitive.initiation_interval == 1
 
@@ -312,11 +312,11 @@ def test_only_the_divider_reports_an_error_and_only_a_division_by_zero() -> None
     # Saturation is the integer type's defined behaviour, and the saturating operators are speculatable, so none of
     # them may raise the machine's error flag; MIN // -1 saturates the divider too, and must stay off `div0`.
     fmt = IntFormat(33)
-    assert IDivOperator.build(fmt, IDivOptions()).error_ports == ("div0",)
+    assert IDivOperator.build(fmt, IDivsOptions()).error_ports == ("div0",)
     for operator in (
-        IAddOperator.build(fmt, IAddOptions()),
-        IMulOperator.build(fmt, IMulOptions()),
-        IAbsOperator.build(fmt, IAbsOptions()),
+        IAddOperator.build(fmt, IAddsOptions()),
+        IMulOperator.build(fmt, IMulsOptions()),
+        IAbsOperator.build(fmt, IAbssOptions()),
         IShftOperator.build(fmt, IShftOptions()),
         IPopcntOperator.build(fmt, IPopcntOptions()),
     ):
@@ -349,19 +349,19 @@ def test_the_population_count_counts_the_magnitude_and_answers_on_a_minimal_port
 def test_multiplier_staging_is_part_of_the_hardware_identity() -> None:
     # The operator is the resource-sharing key: two differently staged multipliers must not pool onto one module.
     fmt = IntFormat(33)
-    operators = [IMulOperator.build(fmt, IMulOptions(stage_product=stage)) for stage in range(5)]
+    operators = [IMulOperator.build(fmt, IMulsOptions(stage_product=stage)) for stage in range(5)]
     assert len(set(operators)) == len(operators)
-    assert IMulOperator.build(fmt, IMulOptions()) == IMulOperator.build(fmt, IMulOptions(stage_product=0))
+    assert IMulOperator.build(fmt, IMulsOptions()) == IMulOperator.build(fmt, IMulsOptions(stage_product=0))
 
 
 def test_the_multiplier_knob_reaches_the_built_machine() -> None:
     # It must arrive carrying the user's staging AND the machine's integer format, not the float one.
-    imul = build_ops(Options(OperatorOptions(imuls=IMulOptions(stage_product=3)), wint_min=44), 44).imuls
+    imul = build_ops(Options(OperatorOptions(imuls=IMulsOptions(stage_product=3)), wint_min=44), 44).imuls
     assert {port.scalar_type for port in imul.operand_ports + imul.output_ports} == {IntType(IntFormat(44))}
     assert imul.latencies[0] == 5
     assert imul.params == {"W": 44, "STAGE_PRODUCT": 3, "LATENCY": 5}
     assert build_ops(Options(OperatorOptions()), 16).imuls == IMulOperator.build(
-        IntFormat(16), IMulOptions(stage_product=0)
+        IntFormat(16), IMulsOptions(stage_product=0)
     )
 
 
@@ -409,7 +409,7 @@ def test_the_constant_shift_is_the_raw_shift_and_not_the_saturating_one() -> Non
     fmt = IntFormat(33)
     assert _evaluate(IntShiftConstPrimitive(fmt, 1), fmt.max) == [-2]
     assert _evaluate(IShlPrimitive(IShftOperator.build(fmt, IShftOptions())), fmt.max, 1) == [-2]
-    assert _evaluate(IMulPrimitive(IMulOperator.build(fmt, IMulOptions())), fmt.max, 2) == [fmt.max]
+    assert _evaluate(IMulPrimitive(IMulOperator.build(fmt, IMulsOptions())), fmt.max, 2) == [fmt.max]
 
 
 @pytest.mark.parametrize("wint", (4, 17, 44))
@@ -551,8 +551,8 @@ def test_every_operator_is_publicly_configurable() -> None:
 def test_the_instance_cap_reaches_the_operator_but_never_the_rtl() -> None:
     # The count is a machine-level budget, so it rides operator identity (two configurations are different operators)
     # but must not become a module parameter, which would fail elaboration against the shipped cores.
-    narrow, wide = IMulOperator.build(IntFormat(32), IMulOptions()), IMulOperator.build(
-        IntFormat(32), IMulOptions(instances=4)
+    narrow, wide = IMulOperator.build(IntFormat(32), IMulsOptions()), IMulOperator.build(
+        IntFormat(32), IMulsOptions(instances=4)
     )
     assert wide.instances == 4 and narrow != wide
     options = _everything_configured()

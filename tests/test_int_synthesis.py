@@ -475,7 +475,7 @@ def test_independent_sums_and_orders_contend_for_the_adder_until_a_second_one_is
     shared = holoso.synthesize(sums_beside_orders, _INT16, name="SumsBesideOrdersShared")
     assert _modules(shared) == ["iadds"] and len(adder_modes(shared)) == 1
     assert shared.initiation_interval == (8, 8)
-    operators = dataclasses.replace(_INT16.operator, iadds=holoso.IAddOptions(instances=2))
+    operators = dataclasses.replace(_INT16.operator, iadds=holoso.IAddsOptions(instances=2))
     options = dataclasses.replace(_INT16, operator=operators)
     split = holoso.synthesize(sums_beside_orders, options, name="SumsBesideOrdersSplit")
     assert _modules(split) == ["iadds"] and len(adder_modes(split)) == 2
@@ -1049,7 +1049,7 @@ def test_a_conversion_takes_the_rounder_alone(target: Callable[..., object]) -> 
 def test_two_conversions_over_one_value_stay_apart_on_their_modes_alone() -> None:
     """One shared instance, two firings: the outputs differ wherever truncation and floor do."""
     result = holoso.synthesize(truncated_and_floored, _INT16, name="TruncAndFloor")
-    assert _modules(result) == ["frint"]
+    assert _modules(result) == ["frint"] and result.verilog_output.verilog.count("holoso_frint #(") == 1
     sim = result.numerical_model.elaborate()
     for x in _ROUNDINGS:
         assert _run(sim, x) == _expected(truncated_and_floored, x), x

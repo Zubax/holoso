@@ -273,7 +273,7 @@ multiply-add once where the machine without it rounds the product and the sum, `
 `filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean norms included); what a kernel cannot reach
 through the operators it was given is refused at MIR lowering. An operator serving several operations is configured as
 one, so division and the square root arrive together, as a rounding and the float-to-integer conversion do. Planning
-asks the catalogue whether the machine is configured to run a primitive, never which options it was given. An integer
+asks the catalogue whether the machine is configured with an operator, never which options it was given. An integer
 operator is never optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially
 all of it.
 

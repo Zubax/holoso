@@ -483,8 +483,9 @@ class FSortPrimitive(FloatPrimitive):
     A 2-element float sorter emitting the ascending `(min, max)` of its sign-conditioned operands. `min(a,b)` is
     result 0 and `max(a,b)` result 1; one instance serves both, and a min and a max over one operand pair fuse into a
     single firing (as the comparator's relations do).
-    NOT commutative: min/max preserve the selected operand's exact bits, and the sorter breaks a tie toward the second
-    operand, so swapping operands can flip the sign of a zero result (a -0 conditioned from a zero magnitude).
+    NOT commutative: min/max preserve the selected operand's exact bits, and on a tie the sorter answers the second
+    operand as the min and the first as the max, so swapping operands can flip the sign of a zero result (a -0
+    conditioned from a zero magnitude).
     """
 
     operator: FSortOperator

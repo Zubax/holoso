@@ -46,9 +46,9 @@ STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {"unroll100": 50},
     {"unroll100": 200, "stage_product": 2},
     {"stage_pack": 1, "stage_product": 2, "stage_normalize": 2},
-    {"stage_normalize": 2, "stage_product": 3},  # the synthesis matrix's foc, whose CORDIC runs both modes
+    {"stage_normalize": 2, "stage_product": 3},
 )
-# Besides a generic sweep, each mode's combinations are those the synthesis matrix closes its single-mode rows with.
+# Besides a generic sweep, each mode runs stage combinations of its own.
 _GENERIC: tuple[dict[str, int], ...] = (
     _LEAN,
     _STAGED,

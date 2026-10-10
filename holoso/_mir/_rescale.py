@@ -89,7 +89,7 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
                     if scaling is not None:
                         # The exponent step is exact short of the format's rails, so it moves onto the other factor
                         # and the product stays fused.
-                        assert not scaling.negative
+                        assert not scaling.negative, "strength reduction peels a constant factor's sign"
                         rewrites += 1
                         scaled = builder.operation(FloatMulPow2(scaling.k), [remap[base]])
                         significand = builder.float_const(scaling.significand)

@@ -8,7 +8,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import IAbsOptions, IntFormat, IPopcntOptions
+from holoso import IAbssOptions, IntFormat, IPopcntOptions
 from holoso._operators import HardwareOperator, IAbsOperator, IPopcntOperator
 
 from .hdl_float_oracle import (
@@ -26,7 +26,7 @@ from .hdl_integer_oracle import EXHAUSTIVE_MAX_WIDTH, TEST_WIDTHS, expected_simp
 # The operator is the source of the module name, its RTL parameters, its port names and its latency, so a declaration
 # that drifted from the hardware fails right here, across every width the sweep covers.
 _OPERATORS: list[Callable[[IntFormat], HardwareOperator]] = [
-    lambda fmt: IAbsOperator.build(fmt, IAbsOptions()),
+    lambda fmt: IAbsOperator.build(fmt, IAbssOptions()),
     lambda fmt: IPopcntOperator.build(fmt, IPopcntOptions()),
 ]
 

@@ -44,7 +44,7 @@ from ._modelref import (
 FMT = FloatFormat(8, 18)
 
 
-def _options(*, fma: bool = True) -> Options:
+def _options(*, fma: bool) -> Options:
     return Options(
         OperatorOptions(
             fcmp=FCmpOptions(),
