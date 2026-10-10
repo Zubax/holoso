@@ -7,6 +7,7 @@ from .._errors import UnsupportedConstruct
 from .._hir import (
     FloatAdd,
     FloatAtan2Turns,
+    FloatFma,
     FloatHypot,
     FloatILog2,
     FloatMul,
@@ -144,11 +145,17 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
             lambda a, b: builder.operation(IntSelect(), [builder.operation(IntComparison(Relation.GT), [a, b]), a, b]),
         )
         k = builder.operation(IntSub(), [builder.int_const(scale), largest])
-        squares = [
-            builder.operation(FloatMul(), [scaled, scaled])
-            for scaled in (builder.operation(FloatMulPow2Dynamic(), [leg, k]) for leg in legs)
+
+        # A square is fused into the sum that takes it, so only the first of a pair of legs is a product, and an odd
+        # leg joins the last pair.
+        scaled = [builder.operation(FloatMulPow2Dynamic(), [leg, k]) for leg in legs]
+        sums = [
+            builder.operation(FloatFma(), [b, b, builder.operation(FloatMul(), [a, a])])
+            for a, b in zip(scaled[0::2], scaled[1::2])
         ]
-        summed = _tree(squares, lambda a, b: builder.operation(FloatAdd(), [a, b]))
+        if len(scaled) % 2:
+            sums[-1] = builder.operation(FloatFma(), [scaled[-1], scaled[-1], sums[-1]])
+        summed = _tree(sums, lambda a, b: builder.operation(FloatAdd(), [a, b]))
         root = builder.operation(FloatSqrt(), [summed])
         return builder.operation(FloatMulPow2Dynamic(), [root, builder.operation(IntNeg(), [k])])
 

@@ -470,7 +470,7 @@ class FloatIsNegInf(Operator):
 
 @dataclass(frozen=True, slots=True)
 class FloatFma(Operator):
-    """Always single-rounds, so the contraction may not absorb another addition into it."""
+    """`a*b + c` rounded once, the product never a value of its own."""
 
     mnemonic: ClassVar[str] = "ffma"
     signature: ClassVar[Signature] = Signature((FloatType(), FloatType(), FloatType()), FloatType())

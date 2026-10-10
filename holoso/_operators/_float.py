@@ -447,8 +447,8 @@ class FFmaOperator(HardwareOperator):
 @dataclass(frozen=True, slots=True)
 class FFmaPrimitive(FloatPrimitive):
     """
-    Fused multiply-add `a*b + c`, single-rounded (full-width product rounded once with `c`). Arity 3; serves the
-    explicit `math.fma` and the implicit `a*b+c` fusion. Not commutative under operand reversal (gives `c*b+a`).
+    Fused multiply-add `a*b + c`, single-rounded (full-width product rounded once with `c`). Not commutative under
+    operand reversal (gives `c*b+a`).
     """
 
     operator: FFmaOperator

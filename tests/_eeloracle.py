@@ -26,12 +26,14 @@ Protocol, per transaction of the ordered vector sequence:
   accepted because no information is lost through it.
 - Every evaluator slot is compared against the instance-attribute leaf of the same name (row-major decomposition,
   the slot naming convention), and the exact SET of slots that changed must equal the exact set of attribute
-  leaves that changed -- a missed state write and an invented one both surface.
+  leaves that changed -- a missed state write and an invented one both surface. A slot computed through a fused
+  multiply-add is excused from the set: one side may land on the old value and the other a rounding away.
 
 Comparable-domain edges, accepted: the evaluator has no negative zero, so a kernel observing the sign of zero
-(`atan2(-0.0, x)`) diverges; a NaN the reference computes and consumes WITHOUT surfacing it in any leaf (say, a
-comparison against `inf - inf`) is undetectable host-side and fails loudly for eye triage. An array kernel
-parameter is driven through its decomposed scalar leaves: the vector row stays name -> value with the leaf names
+(`atan2(-0.0, x)`) diverges; a step the library fuses rounds once in the graph where the reference rounds twice, so a
+result the reference cancels to exactly zero diverges; a NaN the reference computes and consumes WITHOUT surfacing it
+in any leaf (say, a comparison against `inf - inf`) is undetectable host-side and fails loudly for eye triage. An array
+kernel parameter is driven through its decomposed scalar leaves: the vector row stays name -> value with the leaf names
 (`v_0`, `v_1`), the expected port set derives from the reference's own jaxtyping annotation (read
 structurally, exactly as the frontend reads it), and the binder reassembles the ndarray argument for CPython.
 """
@@ -47,8 +49,10 @@ import numpy as np
 
 from holoso._eel._annotations import unaliased
 from holoso._eel._names import indexed_names, spelled
-from holoso._hir import Hir, InPort, NoNumber
+from holoso._hir import FloatFma, Hir, InPort, NoNumber, Operation
+from holoso._hir._ir import references
 from holoso._hir._evaluate import HirEvaluator
+from holoso._util import ValueId
 
 from ._modelref import flatten_value, port_name
 
@@ -272,6 +276,23 @@ def _elidable_eq(leaf: object, slot_value: object) -> bool:
     return _kind(leaf) is _kind(slot_value) and _raw_eq(leaf, slot_value)
 
 
+def _fused_slots(hir: Hir) -> set[str]:
+    fused: set[str] = set()
+    for slot in hir.state_slots:
+        pending, seen = [slot.live_out], set[ValueId]()
+        while pending:
+            vid = pending.pop()
+            if vid in seen:
+                continue
+            seen.add(vid)
+            node = hir.nodes[vid]
+            if isinstance(node, Operation) and isinstance(node.operator, FloatFma):
+                fused.add(slot.name)
+                break
+            pending.extend(references(node))
+    return fused
+
+
 def assert_hir_matches_reference(
     hir: Hir,
     reference: Callable[..., object],
@@ -282,6 +303,7 @@ def assert_hir_matches_reference(
 ) -> int:
     """Drive the ordered `vectors` through both sides; returns the number of compared transactions."""
     evaluator = HirEvaluator(hir)
+    fused = _fused_slots(hir)
     input_names = [node.name for vid in hir.input_ids if isinstance(node := hir.nodes[vid], InPort)]
     parameter_names = expected_input_names(reference)
     assert input_names == parameter_names, f"{label}: input ports {input_names} != parameters {parameter_names}"
@@ -345,7 +367,8 @@ def assert_hir_matches_reference(
             _compare(f"{context}: state {slot}", actual, after[slot], ulps)
         reference_changed = {name for name, value in after.items() if not _raw_eq(before[name], value)}
         evaluator_changed = {slot for slot, value in state_after.items() if not _raw_eq(state_before[slot], value)}
-        assert evaluator_changed == reference_changed, (
+        # The value of a slot computed through a fused multiply-add was compared above.
+        assert evaluator_changed ^ reference_changed <= fused, (
             f"{context}: changed-slot sets diverge: "
             f"evaluator {sorted(evaluator_changed)} vs reference {sorted(reference_changed)}"
         )

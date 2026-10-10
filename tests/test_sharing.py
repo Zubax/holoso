@@ -29,8 +29,7 @@ from holoso import (
     UnsupportedConstruct,
 )
 from holoso._eel import lower
-from holoso._operators import FMulPrimitive
-from holoso._mir import MirConst, MirOperation
+from holoso._mir import MirOperation
 from holoso._mir import lower as lower_to_mir
 
 from ._modelref import (
@@ -45,7 +44,7 @@ from ._modelref import (
 FMT = FloatFormat(8, 18)
 
 
-def _options(*, fma: bool = True, fmt: FloatFormat = FMT) -> Options:
+def _options(*, fma: bool = True) -> Options:
     return Options(
         OperatorOptions(
             fcmp=FCmpOptions(),
@@ -55,7 +54,7 @@ def _options(*, fma: bool = True, fmt: FloatFormat = FMT) -> Options:
             fmul_ilog2=FMulILog2Options(),
             ffma=FFmaOptions() if fma else None,
         ),
-        ffmt=fmt,
+        ffmt=FMT,
     )
 
 
@@ -82,123 +81,87 @@ def _run(fn: Callable[..., object], options: Options, name: str, *args: float) -
     return tuple(float(v) for v in model.run(*args))
 
 
-def _scaled_sum(a: float, c: float) -> float:
-    return a * 8.0 + c
+def _fused_bits(a: float, b: float, c: float) -> int:
+    return FloatValue.fma(*(FloatValue.from_float(FMT, value) for value in (a, b, c))).bits
 
 
-def test_exponent_scaling_contracts_into_an_fma() -> None:
-    # A scaler that forfeits the fusion is not the cheaper operator. The ffma-less control is what pins the
-    # contraction as the reason the count moved.
-    fused = _mnemonics(_scaled_sum, _options(fma=True))
-    assert fused["ffma"] == 1 and fused["fmul_ilog2"] == 0 and fused["fadd"] == 0
-    separate = _mnemonics(_scaled_sum, _options(fma=False))
-    assert separate["fmul_ilog2"] == 1 and separate["fadd"] == 1
+def _fused_model(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
+    return holoso.synthesize(fn, _options(fma=True), name=name).numerical_model.elaborate()
 
 
-def _composed_product_first(a: float, c: float, d: float) -> float:
-    return (a * 2.0) * 3.0 + c * d
+def _bits(model: holoso.NumericalSimulator, *args: float) -> list[int]:
+    return [value.bits for value in model.run(*args) if isinstance(value, FloatValue)]
 
 
-def _composed_product_last(a: float, c: float, d: float) -> float:
-    return c * d + (a * 2.0) * 3.0
+def test_a_negated_factor_negates_the_product() -> None:
+    # `(-a)*b` is `-(a*b)` however the negation is spelled, so every one of these is the one multiplication `a*b` is.
+    def spelled(a: float, b: float, c: float) -> tuple[float, float, float, float, float]:
+        return (-a) * b, a * b, c + a * (0.0 - b), (a * -1.0) * b, math.fma(-a, b, c)
+
+    def plain(a: float, b: float, c: float) -> tuple[float, float, float, float, float]:
+        return -(a * b), a * b, c - a * b, -(a * b), c - a * b
+
+    options = _options(fma=False)
+    assert _mnemonics(spelled, options) == collections.Counter({"fmul": 1, "fadd": 1})
+    for a, b, c in [(0.1, 0.7, 2.5), (-3.0, 7.0, 1e-3), (1e3, -1e-3, -1.0)]:
+        assert _run(spelled, options, "negated_factor", a, b, c) == _run(plain, options, "negated_product", a, b, c)
 
 
-def _standing_multiply_reads_a_constant(fn: Callable[..., object]) -> bool:
-    hir = lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir
-    mir = lower_to_mir(hir, mir_options(_options(fma=True)))
-    (multiply,) = [
-        node
-        for node in mir.nodes.values()
-        if isinstance(node, MirOperation) and isinstance(node.primitive, FMulPrimitive)
-    ]
-    return any(isinstance(mir.nodes[operand], MirConst) for operand in multiply.operands)
-
-
-def test_an_add_offered_two_products_contracts_the_one_computed_first() -> None:
-    # The graph's own order of computation decides which product the fma rounds exactly, not the value's name.
-    assert not _standing_multiply_reads_a_constant(_composed_product_first)
-    assert _standing_multiply_reads_a_constant(_composed_product_last)
-
-
-def test_exponent_contraction_declines_where_the_format_rounds_the_scale() -> None:
-    # FloatFormat(3, 4) encodes 0.125 as 0.25 -- finite and nonzero, so a degradation test would admit it, and the
-    # contraction would multiply by twice the scale the scaler applies exactly.
+def test_a_fused_product_by_a_constant_composes_with_the_scaling_under_it() -> None:
+    # `fma(a*2, 3, c)` is `fma(a, 6, c)`, as `(a*2)*3 + c` written apart is `a*6 + c`: no scaler fires.
     def kernel(a: float, c: float) -> float:
-        return a * 0.125 + c
+        return math.fma(a * 2.0, -3.0, c)
 
-    narrow = _options(fma=True, fmt=FloatFormat(3, 4))
-    assert _mnemonics(kernel, narrow)["fmul_ilog2"] == 1, "the scaler must stand where 2**k is not exact"
-    assert _mnemonics(kernel, narrow)["ffma"] == 0
-
-
-def test_exponent_contraction_declines_past_the_host_range() -> None:
-    # A composed exponent is unbounded by design, while `2.0**k` rails past k=1023 in the compiler's own arithmetic.
-    def kernel(a: float, c: float) -> float:
-        return (a * 2.0**1000) * 2.0**1000 + c
-
-    counts = _mnemonics(kernel, _options(fma=True))
-    assert counts["fmul_ilog2"] == 1 and counts["fadd"] == 1
+    assert _mnemonics(kernel, _options(fma=True)) == collections.Counter({"ffma": 1})
+    model = _fused_model(kernel, "composed_fma")
+    rng = np.random.default_rng(0xC0)
+    for _ in range(100):
+        a, c = (float(np.float32(rng.standard_normal() * 7)) for _ in range(2))
+        assert _bits(model, a, c) == [_fused_bits(a, -6.0, c)], (a, c)
 
 
-def _twice_read_product(a: float, b: float, c: float, d: float) -> tuple[float, float]:
-    p = a * b
-    return p + c, p + d
+def test_a_fused_product_composes_onto_a_scaling_another_consumer_keeps() -> None:
+    # `t` is read twice and stays, yet `fma(t, 3, c)` is `fma(a, 15, c)`, as `t*3 + c` written apart is `a*15 + c`.
+    def kernel(a: float, c: float) -> tuple[float, float]:
+        t = a * 5.0
+        return math.fma(t, 3.0, c), t
+
+    assert _mnemonics(kernel, _options(fma=True)) == collections.Counter({"ffma": 1, "fmul": 1})
+    model = _fused_model(kernel, "composed_shared")
+    rng = np.random.default_rng(0xC1)
+    for _ in range(100):
+        a, c = (float(np.float32(rng.standard_normal() * 7)) for _ in range(2))
+        assert _bits(model, a, c)[0] == _fused_bits(a, 15.0, c), (a, c)
 
 
-def test_product_read_only_by_additions_is_carried_by_all_of_them() -> None:
-    # Nothing observes the rounding that contracting removes, and each fma keeps its own product.
-    counts = _mnemonics(_twice_read_product, _options(fma=True))
-    assert counts["ffma"] == 2 and counts["fmul"] == 0 and counts["fadd"] == 0
-    rng = np.random.default_rng(0xA1)
-    fused = holoso.synthesize(_twice_read_product, _options(fma=True), name="absorbed").numerical_model.elaborate()
-    for _ in range(200):
-        a, b, c, d = (float(np.float32(rng.standard_normal() * 7)) for _ in range(4))
-        va, vb = FloatValue.from_float(FMT, a), FloatValue.from_float(FMT, b)
-        expected = tuple(FloatValue.fma(va, vb, FloatValue.from_float(FMT, addend)).bits for addend in (c, d))
-        got = tuple(v for v in fused.run(a, b, c, d))
-        assert all(isinstance(v, FloatValue) for v in got)
-        assert tuple(v.bits for v in got if isinstance(v, FloatValue)) == expected, f"a={a} b={b} c={c} d={d}"
+def test_a_fused_product_and_an_addend_scaled_alike_are_one_scaling_of_their_sum() -> None:
+    # `fma(a, 3, 3*c)` is `3*(c + a)`, as `3*c + 3*a` written apart is: the sum the algebra leaves is not fused.
+    def fused(a: float, c: float) -> float:
+        return math.fma(a, 3.0, 3.0 * c)
+
+    def apart(a: float, c: float) -> float:
+        return 3.0 * c + 3.0 * a
+
+    assert _mnemonics(fused, _options(fma=True)) == collections.Counter({"fadd": 1, "fmul": 1})
+    fused_model, apart_model = _fused_model(fused, "factored_fma"), _fused_model(apart, "factored_apart")
+    for a, c in [(0.1, 0.7), (7.7, 0.3), (-2.5, 1e-3)]:
+        assert _bits(fused_model, a, c) == _bits(apart_model, a, c), (a, c)
 
 
-def test_product_an_addition_reads_twice_is_not_absorbed() -> None:
-    # One fma carries one product, so a sum naming it twice absorbs only one use; the absolute value keeps this a sum.
-    def kernel(a: float, b: float) -> float:
-        p = a * b
-        return p + abs(p)
+def test_a_sum_cancels_across_a_fused_product_by_a_constant() -> None:
+    # An fma by a constant is the terms it adds: `fma(a, 3, 2*a)` is `5*a`, and `fma(a, 1e-3, b) - b` is `1e-3*a`
+    # where the fused sum, subtracted from, keeps none of the product's digits.
+    def gathered(a: float) -> float:
+        return math.fma(a, 3.0, 2.0 * a)
 
-    counts = _mnemonics(kernel, _options(fma=True))
-    assert counts["fmul"] == 1 and counts["fadd"] == 1 and counts["ffma"] == 0
+    def cancelled(a: float, b: float) -> float:
+        return math.fma(a, 1e-3, b) - b
 
-
-def test_product_read_through_a_shared_sign_is_carried_by_every_addition() -> None:
-    # A negation two additions share goes with them exactly as the product does.
-    def kernel(x: float, y: float, z: float) -> tuple[float, float]:
-        p = x * -3.0
-        return p + y, p + z
-
-    assert _mnemonics(kernel, _options(fma=True)) == collections.Counter({"ffma": 2})
-    assert _schedule(kernel, _options(fma=True), "shared_sign_fma") == (9, 9)
-    assert _run(kernel, _options(fma=True), "shared_sign_fma", 2.0, 1.0, 5.0) == (-5.0, -1.0)
-
-
-def test_product_reached_through_a_sign_something_else_reads_is_not_absorbed() -> None:
-    # The negated product is an output too, so the product is observed and every addition keeps its own rounding.
-    def kernel(a: float, b: float, c: float, d: float) -> tuple[float, float, float]:
-        n = -(a * b)
-        return n + c, n + d, n
-
-    counts = _mnemonics(kernel, _options(fma=True))
-    assert counts["fmul"] == 1 and counts["fadd"] == 2 and counts["ffma"] == 0
-
-
-def test_product_an_output_also_reads_is_not_absorbed() -> None:
-    # The rounded product is observed elsewhere, so the sum keeps its own rounding.
-    def kernel(a: float, b: float, c: float) -> tuple[float, float]:
-        p = a * b
-        return p + c, p
-
-    counts = _mnemonics(kernel, _options(fma=True))
-    assert counts["fmul"] == 1 and counts["fadd"] == 1 and counts["ffma"] == 0
+    assert _mnemonics(gathered, _options(fma=True)) == collections.Counter({"fmul": 1})
+    assert _run(gathered, _options(fma=True), "gathered_fma", 1.25) == (6.25,)
+    assert _mnemonics(cancelled, _options(fma=True)) == collections.Counter({"fmul": 1})
+    (got,) = _run(cancelled, _options(fma=True), "cancelled_fma", 1.0, 1000.0)
+    assert within(got, 1e-3, *default_tolerance(FMT, 2, magnitude=1e-3))
 
 
 def _two_divides(x: float, y: float) -> tuple[float, float]:
@@ -682,6 +645,18 @@ def test_a_written_subnormal_literal_keeps_its_magnitude() -> None:
     assert _mnemonics(kernel, options) == collections.Counter({"fmul": 1, "fmul_ilog2": 1})
     (got,) = _run(kernel, options, "subnormal_literal", 1e300)
     assert within(got, -3e-10, *default_tolerance(fmt, 2, magnitude=3e-10))
+
+
+def test_a_fused_product_by_a_written_subnormal_literal_peels_its_sign_too() -> None:
+    # The machine holds the positive significand, as for the written product by the same literal.
+    def kernel(x: float, c: float) -> float:
+        return math.fma(x, -3e-310, c)
+
+    fmt = FloatFormat(11, 36)
+    options = Options(OperatorOptions(fadd=FAddOptions(), ffma=FFmaOptions(), fmul_ilog2=FMulILog2Options()), ffmt=fmt)
+    assert _mnemonics(kernel, options) == collections.Counter({"ffma": 1, "fmul_ilog2": 1})
+    (got,) = _run(kernel, options, "fused_subnormal_literal", 1e300, 1.0)
+    assert within(got, 1.0 - 3e-10, *default_tolerance(fmt, 2, magnitude=1.0))
 
 
 def test_composition_stops_where_the_composed_coefficient_is_unnameable() -> None:

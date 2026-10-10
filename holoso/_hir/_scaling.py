@@ -11,7 +11,7 @@ from fractions import Fraction
 
 from .._util import ValueId
 from ._ir import Hir, Operation
-from ._operators import FloatMul, FloatMulPow2, FloatNeg
+from ._operators import FloatFma, FloatMul, FloatMulPow2, FloatNeg
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +175,27 @@ def scaling_layer(
                 factor = constant(other)
                 if factor is not None and (found := scaling_of(factor)) is not None:
                     return base, found
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class FusedScaling:
+    base: ValueId
+    scaling: Scaling
+    rendering: Rendering  # of the factor as a written constant, which a subnormal has where its scaling has none
+    addend: ValueId
+
+
+def fused_scaling(hir: Hir, vid: ValueId, constant: Callable[[ValueId], float | None]) -> FusedScaling | None:
+    """A fused multiply-add by a constant factor is a constant scaling and a sum, so whatever reads either reads it."""
+    match hir.nodes[vid]:
+        case Operation(operator=FloatFma(), operands=(x, y, addend)):
+            for base, other in ((x, y), (y, x)):
+                factor = constant(other)
+                if factor is not None and (found := scaling_of(factor)) is not None:
+                    rendering = rendering_of(factor)
+                    assert rendering is not None
+                    return FusedScaling(base, found, rendering, addend)
     return None
 
 

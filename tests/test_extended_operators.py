@@ -4,6 +4,7 @@ Every test drives the compiler only through `holoso.synthesize(fn, ops).numerica
 and asserts on observable output values against an INDEPENDENT reference.
 """
 
+import dataclasses
 import math
 from collections.abc import Callable
 
@@ -253,6 +254,82 @@ def test_fma_matches_single_rounded_reference() -> None:
         assert _bits(sim.run(a, b, c)[0]) == ref.bits, f"a={a} b={b} c={c}"
 
 
+def test_a_degenerate_fma_is_what_is_left_of_it() -> None:
+    # Away from the format's rails every case answers as the exact fma, since what is dropped is exact there.
+    def zero_factor(x: float, y: float) -> float:
+        return math.fma(x, 0.0, y)
+
+    def zero_addend(x: float, y: float) -> float:
+        return math.fma(x, y, 0.0)
+
+    def unit_factor(x: float, y: float) -> float:
+        return math.fma(-1.0, x, y)
+
+    def scaled(x: float, y: float) -> float:
+        return math.fma(x, -4.0, y)
+
+    def known_factors(x: float, y: float) -> float:
+        return math.fma(3.0, 5.0, y)
+
+    def tripled(x: float, y: float) -> float:
+        return math.fma(x, 3.0, y)
+
+    cases: list[tuple[Callable[..., float], list[str], Callable[[float, float], tuple[float, float, float]]]] = [
+        (zero_factor, [], lambda x, y: (x, 0.0, y)),
+        (zero_addend, ["fmul"], lambda x, y: (x, y, 0.0)),
+        (unit_factor, ["fadd"], lambda x, y: (-1.0, x, y)),
+        (scaled, ["fadd", "fmul_ilog2"], lambda x, y: (x, -4.0, y)),
+        (known_factors, ["fadd"], lambda x, y: (3.0, 5.0, y)),
+        (tripled, ["ffma"], lambda x, y: (x, 3.0, y)),
+    ]
+    rng = np.random.default_rng(0xFA)
+    for kernel, modules, operands in cases:
+        result = holoso.synthesize(kernel, _ops(), name=kernel.__name__)
+        assert _modules(result) == {f"holoso_{name}" for name in modules}, kernel.__name__
+        sim = result.numerical_model.elaborate()
+        for _ in range(300):
+            x, y = (float(np.float32(rng.standard_normal() * 12)) for _ in range(2))
+            ref = FloatValue.fma(*(FloatValue.from_float(FMT, value) for value in operands(x, y)))
+            assert _bits(sim.run(x, y)[0]) == ref.bits, (kernel.__name__, x, y)
+
+
+def test_a_degenerate_fma_asks_for_the_operator_its_answer_needs() -> None:
+    # The fused operator does not stand in for a missing one.
+    def product(a: float, b: float) -> float:
+        return math.fma(a, b, 0.0)
+
+    def total(a: float, c: float) -> float:
+        return math.fma(a, 1.0, c)
+
+    def scaled(a: float, c: float) -> float:
+        return math.fma(a, 4.0, c)
+
+    def fused(a: float, c: float) -> float:
+        return math.fma(a, 3.0, c)
+
+    ops = _ops()
+    fused_alone = dataclasses.replace(ops, operator=dataclasses.replace(ops.operator, fmul=None, fadd=None))
+    with pytest.raises(UnsupportedConstruct, match="'fmul'"):
+        holoso.synthesize(product, fused_alone, name="product_without_fmul")
+    with pytest.raises(UnsupportedConstruct, match="'fadd'"):
+        holoso.synthesize(total, fused_alone, name="sum_without_fadd")
+    with pytest.raises(UnsupportedConstruct, match="'fmul_ilog2'"):
+        holoso.synthesize(scaled, _ops(with_scaler=False), name="scaling_without_fmul_ilog2")
+    sim = holoso.synthesize(fused, fused_alone, name="fused_alone").numerical_model.elaborate()
+    assert _bits(sim.run(1.5, 0.25)[0]) == FloatValue.from_float(FMT, 4.75).bits
+
+
+def test_an_fma_of_infinity_by_zero_is_not_its_addend() -> None:
+    # A zero factor leaves the addend beside a factor the compiler cannot see. With both in view the product is
+    # `inf*0`, which names no number, and the build is refused with the operator as it is without.
+    def kernel(c: float) -> float:
+        return math.fma(math.inf, 0.0, c)
+
+    for ops in (_ops(), _ops(with_fma=False)):
+        with pytest.raises(SynthesisError, match="names no number"):
+            holoso.synthesize(kernel, ops, name="inf_by_zero")
+
+
 def test_fma_sign_folds_per_operand() -> None:
     # Each operand's sign chain folds independently: math.fma(-a, |b|, -c) is (-a)*|b| + (-c).
     def kernel(a: float, b: float, c: float) -> float:
@@ -266,14 +343,6 @@ def test_fma_sign_folds_per_operand() -> None:
             FloatValue.from_float(FMT, -a), FloatValue.from_float(FMT, abs(b)), FloatValue.from_float(FMT, -c)
         )
         assert _bits(sim.run(a, b, c)[0]) == ref.bits, f"a={a} b={b} c={c}"
-
-
-def test_fma_unconfigured_is_rejected() -> None:
-    def kernel(a: float, b: float, c: float) -> float:
-        return math.fma(a, b, c)
-
-    with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_fma=False), name="fma_unconfigured")
 
 
 def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
@@ -304,92 +373,32 @@ def _v(x: float) -> FloatValue:
     return FloatValue.from_float(FMT, float(x))
 
 
-def test_implicit_mul_add_contracts_to_fma_only_with_ffma() -> None:
-    # `a*b + c` with a single-use product contracts to one fma (single rounding) when ffma is configured, and stays
-    # a separate multiply-then-add (double rounding) when it is not. The two genuinely differ on many inputs, so the
-    # contraction is observable; the test asserts the exact reference for each configuration and that they diverge.
-    def kernel(a: float, b: float, c: float) -> float:
+def test_a_product_and_sum_fuse_only_where_the_program_spells_the_fma_and_the_machine_has_it() -> None:
+    def written(a: float, b: float, c: float) -> float:
         return a * b + c
 
-    fused = holoso.synthesize(kernel, _ops(with_fma=True), name="contract_on").numerical_model.elaborate()
-    separate = holoso.synthesize(kernel, _ops(with_fma=False), name="contract_off").numerical_model.elaborate()
+    def spelled(a: float, b: float, c: float) -> float:
+        return math.fma(a, b, c)
+
+    sims: list[tuple[bool, str, holoso.NumericalSimulator]] = []
+    for kernel in (written, spelled):
+        for with_fma in (False, True):
+            name = f"{kernel.__name__}_{'with' if with_fma else 'without'}_ffma"
+            result = holoso.synthesize(kernel, _ops(with_fma=with_fma), name=name)
+            fused = kernel is spelled and with_fma
+            arithmetic = _modules(result) & {"holoso_ffma", "holoso_fmul", "holoso_fadd"}
+            assert arithmetic == ({"holoso_ffma"} if fused else {"holoso_fmul", "holoso_fadd"}), name
+            sims.append((fused, name, result.numerical_model.elaborate()))
     rng = np.random.default_rng(0x515)
     diverged = 0
-    for _ in range(5000):
+    for _ in range(3000):
         a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
         single = FloatValue.fma(_v(a), _v(b), _v(c)).bits
         double = ((_v(a) * _v(b)) + _v(c)).bits
-        assert _bits(fused.run(a, b, c)[0]) == single, f"fused a={a} b={b} c={c}"
-        assert _bits(separate.run(a, b, c)[0]) == double, f"separate a={a} b={b} c={c}"
+        for fused, name, sim in sims:
+            assert _bits(sim.run(a, b, c)[0]) == (single if fused else double), f"{name} a={a} b={b} c={c}"
         diverged += single != double
     assert diverged > 0, "expected single- and double-rounded results to differ on some inputs"
-
-
-def test_implicit_fma_not_contracted_when_product_is_shared() -> None:
-    # A product used by more than the add (here also returned) must NOT contract -- the rounded product is observed
-    # elsewhere, so the add keeps double-rounding semantics even with ffma configured.
-    def kernel(a: float, b: float, c: float) -> tuple[float, float]:
-        p = a * b
-        return p + c, p
-
-    sim = holoso.synthesize(kernel, _ops(with_fma=True), name="shared_product").numerical_model.elaborate()
-    rng = np.random.default_rng(0x5AD)
-    for _ in range(5000):
-        a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
-        product = _v(a) * _v(b)
-        assert _bits(sim.run(a, b, c)[0]) == (product + _v(c)).bits, f"add a={a} b={b} c={c}"
-        assert _bits(sim.run(a, b, c)[1]) == product.bits, f"product a={a} b={b} c={c}"
-
-
-def test_implicit_fma_contracts_across_blocks() -> None:
-    # The product is computed in the entry block but its only consumer (the add) lives in a conditional arm, so the
-    # multiply migrates blocks when it contracts. A division in the other arm keeps the diamond a real branch (division
-    # is not speculatable, so if-conversion cannot collapse it to one block), exercising the cross-block path.
-    def kernel(a: float, b: float, c: float, cond: bool) -> float:
-        p = a * b
-        if cond:
-            r = p + c
-        else:
-            r = c / a
-        return r
-
-    sim = holoso.synthesize(kernel, _ops(with_fma=True), name="fma_cross_block").numerical_model.elaborate()
-    rng = np.random.default_rng(0xB10C)
-    diverged = 0
-    for _ in range(4000):
-        a, b, c = (float(np.float32(rng.standard_normal() * 9 + 1e-3)) for _ in range(3))
-        single = FloatValue.fma(_v(a), _v(b), _v(c)).bits
-        assert _bits(sim.run(a, b, c, True)[0]) == single, f"taken-arm a={a} b={b} c={c}"
-        diverged += single != ((_v(a) * _v(b)) + _v(c)).bits
-    assert (
-        diverged > 0
-    ), "expected the contracted (single-rounded) result to differ from multiply-then-add on the cross-block path"
-
-
-def test_implicit_fma_distributes_product_sign() -> None:
-    # The product's folded sign distributes onto the multiplier operands: negation onto one, absolute onto both. Each
-    # variant is its OWN kernel so its product stays single-use (sharing one `a*b` across all three would intern to a
-    # used-twice product and suppress the contraction).
-    def k_neg(a: float, b: float, c: float) -> float:
-        return -(a * b) + c
-
-    def k_abs(a: float, b: float, c: float) -> float:
-        return abs(a * b) + c
-
-    def k_neg_abs(a: float, b: float, c: float) -> float:
-        return -abs(a * b) + c
-
-    cases: list[tuple[Callable[[float, float, float], float], Callable[[float, float, float], int]]] = [
-        (k_neg, lambda a, b, c: FloatValue.fma(_v(-a), _v(b), _v(c)).bits),
-        (k_abs, lambda a, b, c: FloatValue.fma(_v(abs(a)), _v(abs(b)), _v(c)).bits),
-        (k_neg_abs, lambda a, b, c: FloatValue.fma(_v(-abs(a)), _v(abs(b)), _v(c)).bits),
-    ]
-    rng = np.random.default_rng(0x516)
-    for kernel, reference in cases:
-        sim = holoso.synthesize(kernel, _ops(with_fma=True), name=kernel.__name__).numerical_model.elaborate()
-        for _ in range(2000):
-            a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
-            assert _bits(sim.run(a, b, c)[0]) == reference(a, b, c), f"{kernel.__name__} a={a} b={b} c={c}"
 
 
 # Pairs spanning equal values, both infinities, sign-crossing, zero, and ordinary magnitudes.

@@ -17,14 +17,14 @@ from typing import Any
 import numpy as np
 
 from .._ir import BinaryOp
+from ._numpy import difference_of_products, multiply_add
 from ._registry import array
 
 
 def _dot(u: np.ndarray, v: np.ndarray) -> Any:
-    """A left fold to enable FMA contraction."""
     acc = u[0] * v[0]
     for k in range(1, len(u)):
-        acc = acc + u[k] * v[k]
+        acc = multiply_add(u[k], v[k], acc)
     return acc
 
 
@@ -107,13 +107,13 @@ def cross(u: np.ndarray, v: np.ndarray) -> Any:
     if u.ndim != 1 or v.ndim != 1:
         raise ValueError(f"cross requires 1-D operands, got {u.ndim}-D and {v.ndim}-D")
     if len(u) == 2 and len(v) == 2:
-        return np.array([u[0] * v[1] - u[1] * v[0]])
+        return np.array([difference_of_products(u[0], v[1], u[1], v[0])])
     if len(u) == 3 and len(v) == 3:
         return np.array(
             [
-                u[1] * v[2] - u[2] * v[1],
-                u[2] * v[0] - u[0] * v[2],
-                u[0] * v[1] - u[1] * v[0],
+                difference_of_products(u[1], v[2], u[2], v[1]),
+                difference_of_products(u[2], v[0], u[0], v[2]),
+                difference_of_products(u[0], v[1], u[1], v[0]),
             ]
         )
     raise ValueError(f"unsupported cross product arguments of length {len(u)} and {len(v)}")
@@ -184,6 +184,6 @@ def inv(m: np.ndarray) -> Any:
             if i != k:
                 f = a[i, k]
                 for j in range(n):
-                    a[i, j] = a[i, j] - f * a[k, j]
-                    r[i, j] = r[i, j] - f * r[k, j]
+                    a[i, j] = multiply_add(-f, a[k, j], a[i, j])
+                    r[i, j] = multiply_add(-f, r[k, j], r[i, j])
     return r

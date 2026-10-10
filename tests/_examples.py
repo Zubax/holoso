@@ -286,9 +286,9 @@ class ExampleSpec:
     # tolerance check but not from the accuracy freeze, which measures against the reference rather than a budget.
     reference: Mapping[str, OutputTolerance] | None = field(default_factory=dict)
     # The front-end oracle's slack (`test_eel_oracle`), where both sides are float64 in the same operation order and
-    # only the host's own library shape differs -- numpy reaching BLAS for a dot or a norm may contract a product the
-    # evaluator rounds. A kernel that carries such a difference through a feedback recurrence needs more than the
-    # shared default; one that does not must not be given any.
+    # only the rounding of a library step differs -- the evaluator fuses each multiply-add of a dot product where the
+    # host rounds the product first, or reaches BLAS and fuses another. A kernel that carries such a difference through
+    # a feedback recurrence needs more than the shared default; one that does not must not be given any.
     oracle_ulps: int = 16
 
     def __post_init__(self) -> None:
@@ -1714,8 +1714,8 @@ SPECS = [
             "state_u_alpha_beta_1": OutputTolerance(ulps=256, growth_ulps=8),
         },
         # The Clarke and Park products and the voltage norm are numpy calls the host may serve from BLAS, whose
-        # contracted products differ from the evaluator's separately rounded ones by an ulp the kernel then divides
-        # by a PWM period into the speed estimate. The measured requirement is about two thousand float64 ulps, so
+        # rounding differs from the evaluator's fused multiply-adds by an ulp the kernel then divides by a PWM
+        # period into the speed estimate. The measured requirement is about two thousand float64 ulps, so
         # this is set a factor of four above it -- loose against a fold-exact kernel, and still four parts in a
         # trillion against a front end that got an operand or a term wrong.
         oracle_ulps=8192,

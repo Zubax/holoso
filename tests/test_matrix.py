@@ -3,8 +3,8 @@ Statically-shaped matrix/vector support: the `@` operator, elementwise aggregate
 subscripts, jaxtyping-annotated parameters/returns, matrix state, and ndarray module constants. Diagnostics and
 structure are checked through the public synthesis artifacts (ports, initiation interval, emitted Verilog, residual
 `frontend_ir`); numerical behavior is checked black-box through the public API against numpy executing the very
-same kernel. The binding-time tests pinning what folds statically stay on the lowered HIR, and the FMA-chain test
-keeps a compact MIR population sentinel for the exact operation count that module pooling erases from the Verilog.
+same kernel. The binding-time tests pinning what folds statically stay on the lowered HIR, and the FMA tests keep
+a compact MIR population sentinel for the exact operation count that module pooling erases from the Verilog.
 """
 
 import dataclasses
@@ -12,6 +12,7 @@ import math
 import operator
 import warnings
 from collections.abc import Callable
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -31,7 +32,7 @@ from holoso._eel import lower
 from holoso._mir import MirOperation, MirOptions, lower as lower_to_mir
 
 from ._examples import _FUSION_ACCEL_CAL, _FUSION_GYRO_CAL, ImuFusion
-from ._modelref import default_mir, default_options, mir_options, hardware_name, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import default_mir, default_options, mir_options, hardware_name, unit_roundoff, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude, strip_locations
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
@@ -115,6 +116,9 @@ def _assert_python_matches_holoso(
 
 def _with_operators(options: holoso.Options, **replacements: Any) -> holoso.Options:
     return dataclasses.replace(options, operator=dataclasses.replace(options.operator, **replacements))
+
+
+_WITH_FFMA = _with_operators(default_options(_FMT), ffma=FFmaOptions())
 
 
 def _mnemonic_counts(fn: Callable[..., object], ops: MirOptions) -> dict[str, int]:
@@ -225,24 +229,85 @@ def test_matmul_rejections() -> None:
     _refused(boolean)
 
 
-def test_dot_product_left_fold_contracts_to_an_ffma_chain() -> None:
+def test_dot_product_is_a_left_fold_of_fused_multiply_adds() -> None:
     # An n-element dot lowers to one fmul plus n-1 ffma, which the MIR counts pin since pooling erases them from the
     # Verilog; the residual pins the left fold the front end emits.
     def dot(v: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
-    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
-    assert _mnemonic_counts(dot, fma_mir) == {"fmul": 1, "ffma": 3}
-    assert _mnemonic_counts(dot, default_mir(_FMT)) == {"fmul": 4, "fadd": 3}
+    def int_dot(a: int, b: int, c: int, d: int) -> int:
+        return np.array([a, b]) @ np.array([c, d])  # type: ignore[no-any-return]
 
-    options = _with_operators(default_options(_FMT), ffma=FFmaOptions())
-    result = holoso.synthesize(dot, options, name="kernel")
+    assert _mnemonic_counts(dot, mir_options(_WITH_FFMA)) == {"fmul": 1, "ffma": 3}
+    assert _mnemonic_counts(dot, default_mir(_FMT)) == {"fmul": 4, "fadd": 3}
+    assert _mnemonic_counts(int_dot, mir_options(_WITH_FFMA)) == {"imuls": 2, "iadds": 1}
+
+    result = holoso.synthesize(dot, _WITH_FFMA, name="kernel")
     verilog = result.verilog_output.verilog
     assert "holoso_ffma #(" in verilog and "holoso_fadd #(" not in verilog
     residual = strip_locations(result.frontend_ir[-1])
-    assert "    %2: float = intrinsic fadd(%0, %1)\n" in residual
-    assert "    %4: float = intrinsic fadd(%2, %3)\n" in residual
-    assert "    %6: float = intrinsic fadd(%4, %5)\n" in residual
+    assert "    %1: float = intrinsic ffma(v_1, w_1, %0)\n" in residual
+    assert "    %2: float = intrinsic ffma(v_2, w_2, %1)\n" in residual
+    assert "    %3: float = intrinsic ffma(v_3, w_3, %2)\n" in residual
+    _assert_python_matches_holoso(
+        dot, np.array([1.5, -2.0, 0.25, 3.0]), np.array([0.5, 4.0, -8.0, 1.25]), options=_WITH_FFMA
+    )
+
+
+def test_a_dot_product_is_fused_where_the_same_sum_written_apart_is_not() -> None:
+    # The dot product is the fold written with `math.fma`: a product something else reads takes its own multiplication.
+    def observed(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> tuple[float, float, float]:
+        return v @ w, v[0] * w[0], v[1] * w[1]
+
+    def spelled(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> tuple[float, float, float]:
+        return math.fma(v[2], w[2], math.fma(v[1], w[1], v[0] * w[0])), v[0] * w[0], v[1] * w[1]
+
+    def apart(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> tuple[float, float, float]:
+        return v[0] * w[0] + v[1] * w[1] + v[2] * w[2], v[0] * w[0], v[1] * w[1]
+
+    assert _mnemonic_counts(observed, mir_options(_WITH_FFMA)) == {"fmul": 2, "ffma": 2}
+    assert _mnemonic_counts(apart, mir_options(_WITH_FFMA)) == {"fmul": 3, "fadd": 2}
+    observed_sim = holoso.synthesize(observed, _WITH_FFMA, name="observed").numerical_model.elaborate()
+    spelled_sim = holoso.synthesize(spelled, _WITH_FFMA, name="spelled").numerical_model.elaborate()
+    rng = np.random.default_rng(7)
+    for _ in range(50):
+        v, w = rng.uniform(-8.0, 8.0, 3), rng.uniform(-8.0, 8.0, 3)
+        assert np.array_equal(_run(observed_sim, v, w), _run(spelled_sim, v, w)), (v, w)
+
+
+def test_a_degrading_coefficient_of_a_dot_product_takes_the_scaler_with_ffma() -> None:
+    def dot(v: Float64[np.ndarray, "3"]) -> float:
+        return np.array([1.0, 1e-10, 3.0]) @ v  # type: ignore[no-any-return]
+
+    # 1e-10 is below what this format holds, so its exponent moves onto the other factor through the scaler, which is
+    # exact, and the product by its significand stays fused; left as one constant, the kernel would be refused.
+    fmt = FloatFormat(6, 18)
+    options = _with_operators(default_options(fmt), ffma=FFmaOptions())
+    assert _mnemonic_counts(dot, mir_options(options)) == {"fmul": 1, "ffma": 2}  # the count's `fmul` is the scaler
+    built = holoso.synthesize(dot, options, name="degrading").numerical_model.elaborate()
+
+    def held(x: float) -> holoso.FloatValue:
+        return holoso.FloatValue.from_float(fmt, x)
+
+    fraction, exponent = math.frexp(1e-10)
+    for v0, v1, v2 in ((1.0, 2.0e9, 3.0), (-0.5, 7.0e10, 0.25)):
+        scaled = held(math.ldexp(float(held(v1)), exponent - 1))
+        inner = holoso.FloatValue.fma(held(2.0 * fraction), scaled, held(v0))
+        (got,) = built.run(v0, v1, v2)
+        assert isinstance(got, holoso.FloatValue)
+        assert got.bits == holoso.FloatValue.fma(held(3.0), held(v2), inner).bits, (v0, v1, v2)
+
+
+def test_a_term_cancels_across_a_constant_dot_product_with_ffma() -> None:
+    def cancelling(x: Float64[np.ndarray, "2"]) -> float:
+        return (np.array([[1.0, 1e-3], [0.0, 1.0]]) @ x - x)[0]  # type: ignore[no-any-return]
+
+    # `x[0]` cancels across the dot product and the subtraction, leaving the one product. Left fused, the sum would
+    # round `x[0] + 1e-3*x[1]` to the digits of `x[0]` and answer 0.0009765625 here.
+    binary32 = _with_operators(default_options(FloatFormat(8, 24)), ffma=FFmaOptions())
+    assert _mnemonic_counts(cancelling, mir_options(binary32)) == {"fmul": 1}
+    model = holoso.synthesize(cancelling, binary32, name="cancelling").numerical_model.elaborate()
+    assert _run(model, np.array([1000.0, 1.0]))[0] == float(np.float32(1e-3))
 
 
 def test_np_matmul_keyword_arguments_are_rejected() -> None:
@@ -849,11 +914,9 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
         assert np.allclose(got, want, rtol=1e-9, atol=1e-12), step
 
 
-def _fusion_options(fmt: FloatFormat, contract_fma: bool) -> holoso.Options:
+def _fusion_options(fmt: FloatFormat, ffma: bool) -> holoso.Options:
     options = default_options(fmt)
-    operator = dataclasses.replace(
-        options.operator, fsort=holoso.FSortOptions(), ffma=FFmaOptions() if contract_fma else None
-    )
+    operator = dataclasses.replace(options.operator, fsort=holoso.FSortOptions(), ffma=FFmaOptions() if ffma else None)
     return dataclasses.replace(options, operator=operator)
 
 
@@ -861,14 +924,14 @@ def _drive_fusion(model: holoso.NumericalSimulator, row: list[float]) -> dict[st
     return {port.name: float(value) for port, value in zip(model.outputs, model.run(*row), strict=True)}
 
 
-@pytest.mark.parametrize("contract_fma", [False, True], ids=["plain", "ffma"])
-def test_imu_fusion_example_matches_python(contract_fma: bool) -> None:
+@pytest.mark.parametrize("ffma", [False, True], ids=["plain", "ffma"])
+def test_imu_fusion_example_matches_python(ffma: bool) -> None:
     # The bundled fusion example must agree with its own plain-numpy execution across carried-state transactions,
-    # on both datapaths the synth matrix ships: the fmul+fadd expansion and the ffma-contracted one (contraction
-    # changes only the rounding). Rows exercise both gate arms, the clip latch, and the first-sample branch.
+    # on both datapaths the synth matrix ships: without the fused operator and with it (which changes only the
+    # rounding). Rows exercise both gate arms, the clip latch, and the first-sample branch.
     fmt = FloatFormat(8, 36)
     model = holoso.synthesize(
-        ImuFusion().update, _fusion_options(fmt, contract_fma), name="imu_fusion_lockstep"
+        ImuFusion().update, _fusion_options(fmt, ffma), name="imu_fusion_lockstep"
     ).numerical_model.elaborate()
     reference = ImuFusion()
     inv_g = np.linalg.inv(_FUSION_GYRO_CAL)
@@ -1197,16 +1260,6 @@ def test_reductions_are_independent_of_the_unroll_threshold() -> None:
     _assert_python_matches_holoso(kernel, np.array([1.25, -0.5, 3.0]), options=options)
 
 
-def test_sum_of_products_contracts_at_the_leaves_of_the_tree() -> None:
-    # The sum is a pairwise tree, so the products contract into its leaves -- each pair one fmul then one ffma -- and
-    # the level above is a plain add; a kernel that wants the full n-1 ffma chain writes the dot product `u @ w`.
-    def kernel(u: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
-        return float(np.sum(u * w))
-
-    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
-    assert _mnemonic_counts(kernel, fma_mir) == {"fmul": 2, "ffma": 2, "fadd": 1}
-
-
 def test_reductions_are_log_deep() -> None:
     # A whole-array reduction must finish well ahead of an explicit left fold over the same elements: the fold
     # serializes on the operator's latency, the reduction on its logarithm. The compiler does not reassociate, so a
@@ -1468,12 +1521,23 @@ def test_polyval_preserves_the_integer_family_and_promotes_heterogeneous_coeffic
     assert float(sim2.run(huge, 4)[0]) == pytest.approx(float(np.polyval((huge, 0.5), 4)), rel=1e-12)
 
 
-def test_polyval_contracts_to_fma_chain() -> None:
+def test_polyval_is_a_horner_chain_of_fused_multiply_adds() -> None:
     def kernel(p: Float64[np.ndarray, "4"], x: float) -> float:
         return float(np.polyval(p, x))
 
-    fma_mir = mir_options(_with_operators(default_options(_FMT), ffma=FFmaOptions()))
-    assert _mnemonic_counts(kernel, fma_mir) == {"ffma": 3}  # Horner; the zero seed folds away entirely
+    def over_array(p: Float64[np.ndarray, "3"], v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.polyval(p, v)
+
+    def int_poly(a: int, b: int, c: int, x: int) -> int:
+        return np.polyval(np.array([a, b, c]), x)  # type: ignore[return-value]
+
+    # The zero seed folds away entirely, its step being an fma by zero.
+    assert _mnemonic_counts(kernel, mir_options(_WITH_FFMA)) == {"ffma": 3}
+    assert _mnemonic_counts(kernel, default_mir(_FMT)) == {"fmul": 3, "fadd": 3}
+    assert _mnemonic_counts(over_array, mir_options(_WITH_FFMA)) == {"ffma": 4}
+    assert _mnemonic_counts(int_poly, mir_options(_WITH_FFMA)) == {"imuls": 2, "iadds": 2}
+    _assert_python_matches_holoso(kernel, np.array([2.0, -1.0, 0.5, 3.0]), 1.5, options=_WITH_FFMA)
+    _assert_python_matches_holoso(over_array, np.array([1.0, -2.0, 0.5]), np.array([0.5, -3.0]), options=_WITH_FFMA)
 
 
 def test_abs_on_arrays_across_spellings() -> None:
@@ -1630,6 +1694,52 @@ class VectorMeasurementFilter:
         return prediction
 
 
+def test_a_magnitude_sums_its_squares_by_fused_multiply_adds() -> None:
+    def norm3(v: Float64[np.ndarray, "3"]) -> float:
+        return float(np.linalg.norm(v))
+
+    def norm4(v: Float64[np.ndarray, "4"]) -> float:
+        return float(np.linalg.norm(v))
+
+    # A pair of legs starts from one product and every other square is fused into the sum that takes it; two such
+    # sums meet in a plain addition. The multiplier's count includes the exponent scalings, the same on both machines.
+    for kernel, fused_sums, plain_sums in ((norm3, 0, 2), (norm4, 1, 3)):
+        fused = _mnemonic_counts(kernel, mir_options(_WITH_FFMA))
+        plain = _mnemonic_counts(kernel, default_mir(_FMT))
+        assert (fused["ffma"], fused.get("fadd", 0), plain["fmul"] - fused["fmul"]) == (2, fused_sums, 2)
+        assert (plain.get("ffma", 0), plain["fadd"]) == (0, plain_sums)
+    _assert_python_matches_holoso(norm3, np.array([1.5, -2.0, 0.25]), options=_WITH_FFMA)
+    _assert_python_matches_holoso(norm4, np.array([3.0, -1.25, 0.5, 7.0]), options=_WITH_FFMA)
+
+
+def test_np_cross_is_kahans_difference_of_products() -> None:
+    def cross(u: Float64[np.ndarray, "3"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.cross(u, v)
+
+    def int_cross(a: int, b: int, c: int, d: int, e: int, f: int) -> tuple[int, int, int]:
+        r = np.cross(np.array([a, b, c]), np.array([d, e, f]))
+        return r[0], r[1], r[2]
+
+    # Without the operator the recovered rounding error is nothing, and over integers this is the integer difference.
+    assert _mnemonic_counts(cross, mir_options(_WITH_FFMA)) == {"fmul": 3, "ffma": 6, "fadd": 3}
+    assert _mnemonic_counts(cross, default_mir(_FMT)) == {"fmul": 6, "fadd": 3}
+    assert _mnemonic_counts(int_cross, mir_options(_WITH_FFMA)) == {"imuls": 6, "iadds": 3}
+    _assert_python_matches_holoso(cross, np.array([1.5, -2.0, 0.25]), np.array([0.5, 4.0, -8.0]), options=_WITH_FFMA)
+    sim = holoso.synthesize(int_cross, _WITH_FFMA, name="int_cross").numerical_model.elaborate()
+    got = [value for value in sim.run(3, -7, 5, 2, 11, -4) if isinstance(value, holoso.IntValue)]
+    assert [int(value) for value in got] == np.cross([3, -7, 5], [2, 11, -4]).tolist()
+
+    # What fusing one product alone gets wrong: a vector's product with itself, and a nearly parallel pair.
+    fused = holoso.synthesize(cross, _WITH_FFMA, name="kahan_cross").numerical_model.elaborate()
+    u = np.array([float(holoso.FloatValue.from_float(_FMT, x)) for x in (1.1, 0.3, 7.7)])
+    assert _run(fused, u, u).tolist() == [0.0, 0.0, 0.0]
+    nearly_parallel = u * (1.0 + 2.0**-30) + np.array([2.0**-40, 0.0, -(2.0**-41)])
+    v = np.array([float(holoso.FloatValue.from_float(_FMT, float(x))) for x in nearly_parallel])
+    exact = [Fraction(u[i]) * Fraction(v[j]) - Fraction(u[j]) * Fraction(v[i]) for i, j in ((1, 2), (2, 0), (0, 1))]
+    for got_component, want in zip(_run(fused, u, v).tolist(), exact):
+        assert abs(Fraction(got_component) - want) <= 2 * Fraction(unit_roundoff(_FMT)) * abs(want), float(want)
+
+
 def test_np_linalg_inv_matches_numpy() -> None:
     def inv2(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
         return np.linalg.inv(m)
@@ -1647,6 +1757,18 @@ def test_np_linalg_inv_matches_numpy() -> None:
         _assert_python_matches_holoso(kernel, rng.uniform(-1.0, 1.0, (n, n)) + np.eye(n) * n)
         factor = np.tril(rng.uniform(-1.0, 1.0, (n, n)), -1) + np.diag(rng.uniform(1.0, 2.0, n))
         _assert_python_matches_holoso(kernel, factor @ factor.T)  # SPD
+
+
+def test_np_linalg_inv_eliminates_by_fused_multiply_adds() -> None:
+    def inv2(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
+        return np.linalg.inv(m)
+
+    # Each elimination step is `row - factor*pivot_row`, one firing with the fused operator and two without.
+    shared = {"fcmp": 1, "select": 6, "fdivsqrt": 5}
+    assert _mnemonic_counts(inv2, mir_options(_WITH_FFMA)) == {**shared, "ffma": 5}
+    assert _mnemonic_counts(inv2, default_mir(_FMT)) == {**shared, "fmul": 5, "fadd": 5}
+    _assert_python_matches_holoso(inv2, np.array([[0.0, 1.0], [1.0, 0.0]]), options=_WITH_FFMA)
+    _assert_python_matches_holoso(inv2, np.array([[4.0, 1.0], [-2.0, 3.0]]), options=_WITH_FFMA)
 
 
 def test_np_linalg_inv_1x1_is_the_reciprocal() -> None:

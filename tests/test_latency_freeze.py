@@ -123,8 +123,8 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "foc-e8m36": (289, 336),
     # The fusion capstone: three rsqrt sites, each a root and a division on one divider (a native rsqrt operator would
     # fold the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
-    "imu_fusion-e8m36": (258, 434),
-    "imu_fusion-e6m18": (231, 371),
+    "imu_fusion-e8m36": (258, 435),
+    "imu_fusion-e6m18": (231, 372),
 }
 
 

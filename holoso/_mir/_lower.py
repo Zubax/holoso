@@ -141,7 +141,7 @@ from ._ir import Mir, MirBuilder, MirOperation
 from ._difference import plan_fusions as plan_comparison_fusions
 from ._hypot import count as hypot_count, expand_unfused, plan_fusions
 from ._options import MirOptions
-from ._fma import contract_fmas
+from ._fma import expand_fmas
 from ._signs import collapse_bool_inversions, collapse_conditioner, collapse_signs, sign_of
 
 _logger = logging.getLogger(__name__)
@@ -532,10 +532,12 @@ class _BoolLowerer(_FamilyLowerer):
 
 def _derive(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Hir:
     """
-    Everything this machine knows, told to the graph. The trigonometric unit goes first, since it is the optimizer's
-    input rather than its consumer, and the word width from within the fixpoint, since only a fold can reveal a count.
+    Everything this machine knows, told to the graph. The trigonometric unit is restated first, being the optimizer's
+    input rather than its consumer. So is every fused multiply-add of a machine that cannot fuse, again after each
+    magnitude is expanded, since its expansion spells more of them. The word width is told from within the fixpoint,
+    since only a fold can reveal a count.
     """
-    hir = optimize(trig_abi(hir), ifconv_max_ops)
+    hir = optimize(expand_fmas(trig_abi(hir), ops), ifconv_max_ops)
     # Each rewrite deletes one of these and no pass grows either count: a magnitude is re-minted only in place of
     # the one it replaced.
     fuel = left_shifts(hir) + hypot_count(hir) + 1
@@ -545,7 +547,7 @@ def _derive(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Hir:
             break
         fuel -= 1
         assert fuel > 0, "the derivation is not settling"
-        hir = optimize(rewritten, ifconv_max_ops)
+        hir = optimize(expand_fmas(rewritten, ops), ifconv_max_ops)
     return rescale(hir, ops)  # last: strength reduction would compose the pair it splits straight back
 
 
@@ -598,4 +600,4 @@ def lower(hir: Hir, options: MirOptions) -> Mir:
         len(hir.blocks),
     )
     refuse(hir)
-    return _LoweringContext(contract_fmas(hir, ops), ops).run()
+    return _LoweringContext(hir, ops).run()

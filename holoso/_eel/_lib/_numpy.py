@@ -12,6 +12,8 @@ exception: its bounds are arrays as readily as scalars, so it composes `np.maxim
 The intrinsic stub pins each intrinsic to the numpy/math variant matching the hardware behavior -- e.g. exp2 saturates
 to inf like the hardware where math.exp2 would raise -- so a composite built on the stubs inherits that
 hardware-faithful behavior, and its plain-Python run uses exactly the intrinsics (and fast-math choices) it lowers to.
+`multiply_add` and `difference_of_products` are the exceptions: their plain-Python bodies round each product, which
+their float lowerings fuse.
 """
 
 import math
@@ -19,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from ._intrinsics import atan2, ceil, cos, exp2, floor, isinf, log2, round_, sin, sqrt
+from ._intrinsics import atan2, ceil, cos, exp2, floor, fma, isinf, log2, round_, sin, sqrt
 from ._registry import array, lib
 
 _LOG2E = math.log2(math.e)
@@ -84,6 +86,40 @@ def equal_bool(a: bool, b: bool) -> bool:
     return not (a != b)
 
 
+def multiply_add(a: Any, b: Any, c: Any) -> Any:
+    """Lowers to one fused multiply-add where the operands are floats."""
+    return c + a * b
+
+
+@lib
+def multiply_add_int(a: int, b: int, c: int) -> int:
+    return c + a * b
+
+
+def difference_of_products(a: Any, b: Any, c: Any, d: Any) -> Any:
+    """Lowers to Kahan's algorithm where the operands are floats."""
+    return a * b - c * d
+
+
+@lib
+def difference_of_products_int(a: int, b: int, c: int, d: int) -> int:
+    return a * b - c * d
+
+
+@lib
+def difference_of_products_float(a: float, b: float, c: float, d: float) -> float:
+    """
+    Fusing one product alone would leave the other's rounding error in the difference, so that `a*b - a*b` would not
+    be zero. Kahan recovers that error with a second fma and adds it back: equal products cancel exactly, and the
+    difference is accurate however close the two are. Without the operator the recovered error is `w - w`, and the
+    whole is the plain difference.
+    """
+    w = a * b
+    e = fma(a, b, -w)
+    f = fma(-c, d, w)
+    return f + e
+
+
 @lib
 def square_int(x: int) -> int:
     return x * x
@@ -127,7 +163,7 @@ def polyval(p: np.ndarray, x: Any) -> Any:
     acc = 0 * x
     if len(p) > 0:
         for c in np.asarray(p):
-            acc = acc * x + c
+            acc = multiply_add(acc, x, c)
     return acc
 
 
@@ -178,17 +214,17 @@ def atan(x: float) -> float:
     return atan2(x, 1.0)
 
 
-# `1 - x*x` cancels as |x| approaches 1, exactly where these are steepest, and `ffma` answers it by not rounding
-# the product first. Spelling it `(1-x)*(1+x)` would buy the same without `ffma`, but it destroys the `a*b + c`
-# shape and costs a cycle everywhere -- so an accuracy-sensitive build configures `ffma` instead.
+# `1 - x*x` cancels as |x| approaches 1, exactly where these are steepest, and the fused multiply-add answers it by
+# not rounding the product first. Spelling it `(1-x)*(1+x)` would buy the same without `ffma`, but it costs a cycle
+# everywhere -- so an accuracy-sensitive build configures `ffma` instead.
 @lib
 def asin(x: float) -> float:
-    return atan2(x, sqrt(1.0 - x * x))
+    return atan2(x, sqrt(fma(-x, x, 1.0)))
 
 
 @lib
 def acos(x: float) -> float:
-    return atan2(sqrt(1.0 - x * x), x)
+    return atan2(sqrt(fma(-x, x, 1.0)), x)
 
 
 @lib

@@ -67,8 +67,8 @@ def _op_config(
 ) -> Options:
     """
     The Options for fmt; pass an options object to give an operator stage knobs, else that operator is lean.
-    ffma/fexp2/flog2/fcordic/fsort/frint/ffromint are absent unless supplied, so MAC chains stay expanded (fmul + fadd)
-    and a kernel that uses no transcendental, min/max, rounding or integer conversion needs no such module.
+    ffma/fexp2/flog2/fcordic/fsort/frint/ffromint are absent unless supplied, so a kernel that uses no fused
+    multiply-add, transcendental, min/max, rounding or integer conversion needs no such module.
     """
     return Options(
         OperatorOptions(
@@ -280,8 +280,14 @@ TARGETS: list[SynthTarget] = [
         100,
         # 87.9 MHz lean: the microcode through the adder's operand read mux into its exponent difference, the
         # multiplier's DSP product through its pack rounding into the register file (90.9 MHz), the microcode through
-        # the multiplier's operand read mux into its unregistered DSP operand (98.2 MHz, then 105.8).
-        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_input=1, stage_pack=1)),
+        # the multiplier's operand read mux into its unregistered DSP operand (98.2 MHz), the adder's close-cancellation
+        # normalizer (99.2 MHz), the adder's normalize shift count through its exponent adjustment and pack into the
+        # register file (99.97 MHz, then 116.2).
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+        ),
     ),
     _for_example(
         "ekf1_stateless",
@@ -289,19 +295,26 @@ TARGETS: list[SynthTarget] = [
         150,
         # 131.0 MHz lean: the register file through the adder's operand read mux into its magnitude compare and exponent
         # difference, the microcode word through the multiplier's operand read mux into the unregistered DSP input
-        # (131.5 MHz), the adder's pack logic into the register file (151.6 MHz with 0.07 ns to spare; then 159.8).
-        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_pack=1), fmul=FMulOptions(stage_input=1)),
+        # (131.5 MHz), the adder's pack logic into the register file (151.6 MHz with 0.07 ns to spare), the adder's
+        # close-cancellation normalizer (151.4 MHz with 0.06 ns to spare; then 157.9).
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
+            fmul=FMulOptions(stage_input=1),
+        ),
     ),
     # The same EKF with a second multiplier: the allocator binds the co-issued products across the two instances.
-    # Against the one-multiplier row at the same stages: 14 percent more LUTs for a 22 percent shorter transaction
+    # Against the one-multiplier row at the same stages: 13 percent more LUTs for a 15 percent shorter transaction
     # (DESIGN.md).
     _for_example(
         "ekf1_stateless",
         FlowId.VIVADO_ARTIX7,
         150,
-        # 136.2 MHz lean; held to the one-multiplier row's stages so that the pair compares like for like (then 154.8).
+        # 136.2 MHz lean; held to the one-multiplier row's stages so that the pair compares like for like (then 159.3).
         _op_config(
-            _F_e6m18, fadd=FAddOptions(stage_input=1, stage_pack=1), fmul=FMulOptions(instances=2, stage_input=1)
+            _F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
+            fmul=FMulOptions(instances=2, stage_input=1),
         ),
         name="ekf1_stateless_e6m18_fmul2",
     ),
@@ -311,8 +324,14 @@ TARGETS: list[SynthTarget] = [
         100,
         # 73.8 MHz lean: the microcode operand read mux into the multiplier's DSP product, the same read mux into the
         # adder's magnitude compare and exponent select (82.5 MHz), the adder's rounder and pack across a long route
-        # into the register-file write select (98.9 MHz, then 102.4).
-        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_output=1), fmul=FMulOptions(stage_input=1)),
+        # into the register-file write select (98.9 MHz), the microcode through the scaler's read mux into its exponent
+        # adder and overflow check (96.5 MHz, then 101.8).
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1),
+        ),
         kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
@@ -328,9 +347,10 @@ TARGETS: list[SynthTarget] = [
         "ekf1_stateful",
         FlowId.VIVADO_ARTIX7,
         150,
-        # 131.3 MHz lean: the microcode word through the multiplier's operand read mux into the unregistered DSP input
-        # (then 155.3).
-        _op_config(_F_e6m18, fmul=FMulOptions(stage_input=1)),
+        # 131.3 MHz lean: the microcode word through the multiplier's operand read mux into the unregistered DSP input,
+        # the register file through the adder's operand read mux, its exponent difference retimed back toward it, into
+        # the alignment shift (151.2 MHz with 0.05 ns to spare; then 154.6).
+        _op_config(_F_e6m18, fadd=FAddOptions(stage_input=1), fmul=FMulOptions(stage_input=1)),
         kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
@@ -473,10 +493,12 @@ TARGETS: list[SynthTarget] = [
         # output register, the register file through the adder's operand read mux into its magnitude compare and first-
         # stage exponent difference (78.7 MHz), the adder's last stage through the pack range classification and the
         # register file's write mux (86.5 MHz), the multiplier's post-product cone through the packer's rounding
-        # increment into the register file (88.2 MHz), the adder's close-cancellation normalizer (86.8 MHz, then 104.2).
+        # increment into the register file (88.2 MHz), the adder's close-cancellation normalizer (86.8 MHz), the adder's
+        # normalize shift count through its exponent adjustment and the pack range classification into its output
+        # register (99.0 MHz, then 100.5).
         _op_config(
             _F_e8m36,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1, stage_output=1),
             fmul=FMulOptions(stage_product=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
         ),
@@ -593,8 +615,13 @@ TARGETS: list[SynthTarget] = [
         target_frequency_MHz=100,
         # 79.7 MHz lean: the microcode through the adder's operand read mux into its exponent difference, the
         # multiplier's DSP product through its pack rounding into the register file (89.9 MHz), the adder's close-
-        # cancellation normalize cascade (90.6 MHz, then 105.9).
-        ops=_op_config(_F_e6m18, fadd=FAddOptions(stage_input=1, stage_normalize=1), fmul=FMulOptions(stage_pack=1)),
+        # cancellation normalize cascade (90.6 MHz), the microcode through the multiplier's operand read mux into its
+        # DSP product (99.0 MHz, then 101.5).
+        ops=_op_config(
+            _F_e6m18,
+            fadd=FAddOptions(stage_input=1, stage_normalize=1),
+            fmul=FMulOptions(stage_input=1, stage_pack=1),
+        ),
         name="rigid_body_rates_e6m18",
     ),
     SynthTarget(
@@ -604,10 +631,11 @@ TARGETS: list[SynthTarget] = [
         # 139.8 MHz lean: the microcode word through the adder's operand read mux into its magnitude compare and
         # exponent difference, the register file through the multiplier's operand read mux into the unregistered DSP
         # input (143.2 MHz), the register file through the divider's operand read mux into its folded first-digit
-        # subtracts (146.2 MHz, then 157.9).
+        # subtracts (146.2 MHz, then 150.6 with 0.03 ns to spare). For margin, the adder's raw sum through its
+        # cancellation normalize shift (then 152.2).
         ops=_op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1),
+            fadd=FAddOptions(stage_input=1, stage_normalize=1),
             fmul=FMulOptions(stage_input=1),
             fdivsqrt=FDivsqrtOptions(stage_input=1),
         ),
@@ -692,8 +720,8 @@ TARGETS: list[SynthTarget] = [
     ),
     # imu_fusion: the fusion capstone -- three norm/rsqrt chains (a root and a division each on the one divider, one
     # feeding the coarse alignment), the sorter-backed clamp, and real gate branches over the heaviest register pressure
-    # in the matrix, in the plain and the ffma-contracted datapaths. The Euclidean norms expand by exact exponent
-    # scaling, a `filog2` per leg and its scalings.
+    # in the matrix, in the plain and the ffma datapaths. The Euclidean norms expand by exact exponent scaling, a
+    # `filog2` per leg and its scalings.
     _for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
@@ -703,14 +731,14 @@ TARGETS: list[SynthTarget] = [
         # operand select off the microcode into its magnitude compare (75.7 MHz), the divisor straight off the register
         # file into the divider's folded first digit (88.2 MHz), the adder's pack rounding into the register file (89.2
         # MHz), the multiplier's pack rounding into the register file (97.7 MHz), the divider's folded first digit from
-        # its latched divisor (99.2 MHz, then 100.4). For margin, the microcode through the sorter's read mux into its
-        # compare (then 108.6).
+        # its latched divisor (99.2 MHz), the microcode through the sorter's read mux into its compare (100.4 MHz), the
+        # scaler's exponent adder and overflow check from its latched operand (99.3 MHz, then 111.4).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),
             fmul=FMulOptions(stage_input=1, stage_output=1),
             fdivsqrt=FDivsqrtOptions(stage_input=1, stage_decode=1),
-            fmul_ilog2=FMulILog2Options(stage_input=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
             fsort=FSortOptions(stage_input=1),
         ),
         kernel=_imu_fusion_kernel,
@@ -719,16 +747,14 @@ TARGETS: list[SynthTarget] = [
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
-        # 82.1 MHz lean: the microcode through the adder's operand read mux into its exponent difference, the microcode
-        # through the scaler's read mux into its zero/infinity classification (93.0 MHz), the multiplier's DSP product
-        # through its pack rounding into the register file (88.9 MHz), the microcode through the multiplier's operand
-        # read mux into its DSP operand (98.6 MHz), the adder's pack tail into the register file (91.2 MHz), the
-        # divider's last digit through its pack rounding into the register file (96.4 MHz, then 103.5).
+        # 88.9 MHz lean: the microcode through the adder's operand read mux into its exponent difference, the
+        # multiplier's DSP product through its pack rounding into the register file (88.6 MHz), the microcode through
+        # the multiplier's operand read mux into its DSP operand (90.6 MHz), the microcode through the scaler's read mux
+        # into its zero/infinity classification (91.3 MHz, then 103.5).
         _op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_output=1),
+            fadd=FAddOptions(stage_input=1),
             fmul=FMulOptions(stage_input=1, stage_pack=1),
-            fdivsqrt=FDivsqrtOptions(stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             fsort=FSortOptions(),
         ),
@@ -743,7 +769,7 @@ TARGETS: list[SynthTarget] = [
         # into its folded first digit (132.4 MHz), the register file through the scaler's read mux into its exponent
         # adder and overflow check (140.8 MHz), the register file through the adder's read mux into its magnitude
         # compare and exponent difference (148.4 MHz), the microcode through the sorter's read mux and compare into its
-        # max register (151.1 MHz with 0.05 ns to spare; then 157.3).
+        # max register (151.1 MHz with 0.05 ns to spare; then 157.1).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_output=1, stage_input=1),
@@ -764,9 +790,9 @@ TARGETS: list[SynthTarget] = [
         # through its pack rounding into the register file (74.4 MHz), the dividend select off the microcode into the
         # divider's folded first digit (83.8 MHz), the fma's normalize shift (86.8 MHz), the adder's exponent through
         # its pack rounding into the register file (81.1 MHz), the divider's folded first digit from its latched divisor
-        # (95.2 MHz), the multiplier's exponent adjust through its pack into the register file (95.5 MHz, then 100.1).
-        # For margin, the fma's product exponent adjust through its alignment-shift count into the alignment register
-        # (then 105.1).
+        # (95.2 MHz), the multiplier's exponent adjust through its pack into the register file (95.5 MHz), the fma's
+        # product exponent adjust through its alignment-shift count into the alignment register (100.1 MHz), the
+        # register file through the sorter's read mux into its compare and select (97.2 MHz, then 104.9).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),
@@ -774,7 +800,7 @@ TARGETS: list[SynthTarget] = [
             fdivsqrt=FDivsqrtOptions(stage_input=1, stage_decode=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
             ffma=FFmaOptions(stage_input=1, stage_decode=1, stage_output=1, stage_normalize=1),
-            fsort=FSortOptions(),
+            fsort=FSortOptions(stage_input=1),
             wmultiplier=18,
         ),
         kernel=_imu_fusion_kernel,
@@ -789,7 +815,7 @@ TARGETS: list[SynthTarget] = [
         # scaler's read mux into its exponent adder and overflow detect (85.4 MHz), the fma's close-cancellation
         # normalize cascade (84.0 MHz), the fma's sticky through its pack rounding into the register file (90.2 MHz),
         # the microcode through the fma's operand read mux into its DSP operand (97.9 MHz), the adder's sticky through
-        # its pack into the register file (98.4 MHz, then 105.5).
+        # its pack into the register file (98.4 MHz, then 102.6).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),
@@ -810,14 +836,18 @@ TARGETS: list[SynthTarget] = [
         # its DSP operand (137.1 MHz), the register file through the scaler's read mux into its exponent adder and
         # overflow check (135.2 MHz), the fma's close-cancellation normalize shift (149.4 MHz), the adder's exponent
         # difference, retimed back toward its inputs, through its alignment shift (150.5 MHz with 0.02 ns to spare), the
-        # microcode through the sorter's read mux into its max register (150.4 MHz, then 154.5).
+        # microcode through the sorter's read mux into its max register (150.4 MHz), the adder's sum through its pack
+        # into the register file (148.9 MHz), the divider's folded first digit from its latched divisor (150.1 MHz with
+        # 0.01 ns to spare), the divider's last digit through its pack rounding into the register file (150.3 MHz with
+        # 0.02 ns to spare), the fma's exponent adjustment through its pack into the register file (145.0 MHz, then
+        # 156.4).
         _op_config(
             _F_e6m18,
-            fadd=FAddOptions(stage_input=1),
+            fadd=FAddOptions(stage_input=1, stage_output=1),
             fmul=FMulOptions(stage_input=1),
-            fdivsqrt=FDivsqrtOptions(stage_input=1),
+            fdivsqrt=FDivsqrtOptions(stage_input=1, stage_decode=1, stage_pack=1),
             fmul_ilog2=FMulILog2Options(stage_input=1),
-            ffma=FFmaOptions(stage_input=1, stage_normalize=1),
+            ffma=FFmaOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fsort=FSortOptions(stage_input=1),
         ),
         kernel=_imu_fusion_kernel,
