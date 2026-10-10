@@ -229,33 +229,54 @@ def test_matmul_rejections() -> None:
     _refused(boolean)
 
 
-def test_dot_product_is_a_left_fold_of_fused_multiply_adds() -> None:
-    # An n-element dot lowers to one fmul plus n-1 ffma, which the MIR counts pin since pooling erases them from the
-    # Verilog; the residual pins the left fold the front end emits.
+def test_dot_product_fuses_pairs_of_terms_and_sums_them_as_a_tree() -> None:
+    # The MIR counts pin the shape since pooling erases operation counts from the Verilog.
     def dot(v: Float64[np.ndarray, "4"], w: Float64[np.ndarray, "4"]) -> float:
+        return v @ w  # type: ignore[no-any-return]
+
+    def odd(v: Float64[np.ndarray, "5"], w: Float64[np.ndarray, "5"]) -> float:
         return v @ w  # type: ignore[no-any-return]
 
     def int_dot(a: int, b: int, c: int, d: int) -> int:
         return np.array([a, b]) @ np.array([c, d])  # type: ignore[no-any-return]
 
-    assert _mnemonic_counts(dot, mir_options(_WITH_FFMA)) == {"fmul": 1, "ffma": 3}
+    assert _mnemonic_counts(dot, mir_options(_WITH_FFMA)) == {"fmul": 2, "ffma": 2, "fadd": 1}
     assert _mnemonic_counts(dot, default_mir(_FMT)) == {"fmul": 4, "fadd": 3}
+    assert _mnemonic_counts(odd, mir_options(_WITH_FFMA)) == {"fmul": 2, "ffma": 3, "fadd": 1}
     assert _mnemonic_counts(int_dot, mir_options(_WITH_FFMA)) == {"imuls": 2, "iadds": 1}
 
-    result = holoso.synthesize(dot, _WITH_FFMA, name="kernel")
-    verilog = result.verilog_output.verilog
-    assert "holoso_ffma #(" in verilog and "holoso_fadd #(" not in verilog
-    residual = strip_locations(result.frontend_ir[-1])
+    residual = strip_locations(holoso.synthesize(dot, _WITH_FFMA, name="kernel").frontend_ir[-1])
     assert "    %1: float = intrinsic ffma(v_1, w_1, %0)\n" in residual
-    assert "    %2: float = intrinsic ffma(v_2, w_2, %1)\n" in residual
     assert "    %3: float = intrinsic ffma(v_3, w_3, %2)\n" in residual
+    assert "    %4: float = intrinsic fadd(%1, %3)\n" in residual
     _assert_python_matches_holoso(
         dot, np.array([1.5, -2.0, 0.25, 3.0]), np.array([0.5, 4.0, -8.0, 1.25]), options=_WITH_FFMA
     )
+    _assert_python_matches_holoso(
+        odd, np.array([1.5, -2.0, 0.25, 3.0, -0.75]), np.array([0.5, 4.0, -8.0, 1.25, 2.0]), options=_WITH_FFMA
+    )
+
+
+def test_a_dot_product_is_log_deep() -> None:
+    # It must finish well ahead of the same sum of products folded by hand, with the fused operator and without.
+    def tree(v: Float64[np.ndarray, "16"], w: Float64[np.ndarray, "16"]) -> float:
+        return v @ w  # type: ignore[no-any-return]
+
+    def chain(v: Float64[np.ndarray, "16"], w: Float64[np.ndarray, "16"]) -> float:
+        acc = v[0] * w[0]
+        for k in range(1, 16):
+            acc = math.fma(v[k], w[k], acc)
+        return float(acc)
+
+    # Two thirds, not the half a plain sum is held to: without the fused operator the sixteen products still leave
+    # one multiplier a cycle apart, which the tree cannot shorten.
+    for options in (_WITH_FFMA, default_options(_FMT)):
+        tree_ii = holoso.synthesize(tree, options, name="tree").initiation_interval[0]
+        assert tree_ii < holoso.synthesize(chain, options, name="chain").initiation_interval[0] * 2 // 3
 
 
 def test_a_dot_product_is_fused_where_the_same_sum_written_apart_is_not() -> None:
-    # The dot product is the fold written with `math.fma`: a product something else reads takes its own multiplication.
+    # The dot product's steps are `math.fma` spelled out: a product something else reads takes its own multiplication.
     def observed(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "3"]) -> tuple[float, float, float]:
         return v @ w, v[0] * w[0], v[1] * w[1]
 
@@ -1104,7 +1125,7 @@ def test_np_trace_and_np_outer() -> None:
     result = _synth(tr)
     assert [p.name for p in result.output_ports] == ["out_0"]
     verilog = result.verilog_output.verilog
-    assert "holoso_fadd #(" in verilog and "holoso_fmul #(" not in verilog  # a fold of the diagonal, no multiplies
+    assert "holoso_fadd #(" in verilog and "holoso_fmul #(" not in verilog  # a sum of the diagonal, no multiplies
     m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
     assert _run(result.numerical_model.elaborate(), m)[0] == np.trace(m)
 
@@ -1135,8 +1156,8 @@ def test_np_trace_and_np_outer() -> None:
 
 
 def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
-    # The diagonal fold is seeded at 0.0, so even a 1x1 trace contracts through an addition and rejects a boolean
-    # diagonal, rather than passing the boolean through where numpy would widen it to an integer.
+    # An array cannot hold booleans, so even a 1x1 trace rejects a boolean diagonal rather than passing the boolean
+    # through where numpy would widen it to an integer.
     def bool_trace(flag: bool) -> bool:
         return np.trace(np.array([[flag]]))  # type: ignore[no-any-return]
 
@@ -1256,8 +1277,18 @@ def test_reductions_are_independent_of_the_unroll_threshold() -> None:
     def kernel(v: Float64[np.ndarray, "3"]) -> float:
         return float(np.sum(v))
 
+    def dot(v: Float64[np.ndarray, "5"]) -> float:
+        return v @ v  # type: ignore[no-any-return]
+
+    def trace(m: Float64[np.ndarray, "3 3"]) -> float:
+        return float(np.trace(m))
+
     options = dataclasses.replace(default_options(_FMT), unroll_max_trips=0)
     _assert_python_matches_holoso(kernel, np.array([1.25, -0.5, 3.0]), options=options)
+    _assert_python_matches_holoso(dot, np.array([1.25, -0.5, 3.0, 0.75, -2.0]), options=options)
+    _assert_python_matches_holoso(
+        trace, np.array([[1.25, -0.5, 3.0], [0.5, 2.0, -1.0], [4.0, 0.25, -3.5]]), options=options
+    )
 
 
 def test_reductions_are_log_deep() -> None:
@@ -1282,11 +1313,21 @@ def test_reductions_are_log_deep() -> None:
             acc = acc + x
         return float(acc)
 
+    def trace_tree(m: Float64[np.ndarray, "8 8"]) -> float:
+        return float(np.trace(m))
+
+    def trace_chain(m: Float64[np.ndarray, "8 8"]) -> float:
+        acc = m[0, 0]
+        for i in range(1, 8):
+            acc = acc + m[i, i]
+        return float(acc)
+
     def min_ii(fn: Callable[..., object]) -> int:
         return _synth(fn).initiation_interval[0]
 
     assert min_ii(int_tree) < min_ii(int_chain) // 2
     assert min_ii(float_tree) < min_ii(float_chain) // 2
+    assert min_ii(trace_tree) < min_ii(trace_chain) * 2 // 3  # eight terms: three levels against seven steps
 
 
 # ---------------------------------------------------------------- reshape and dtype conversions

@@ -732,7 +732,7 @@ TARGETS: list[SynthTarget] = [
         # file into the divider's folded first digit (88.2 MHz), the adder's pack rounding into the register file (89.2
         # MHz), the multiplier's pack rounding into the register file (97.7 MHz), the divider's folded first digit from
         # its latched divisor (99.2 MHz), the microcode through the sorter's read mux into its compare (100.4 MHz), the
-        # scaler's exponent adder and overflow check from its latched operand (99.3 MHz, then 111.4).
+        # scaler's exponent adder and overflow check from its latched operand (99.3 MHz, then 113.6).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),
@@ -750,7 +750,7 @@ TARGETS: list[SynthTarget] = [
         # 88.9 MHz lean: the microcode through the adder's operand read mux into its exponent difference, the
         # multiplier's DSP product through its pack rounding into the register file (88.6 MHz), the microcode through
         # the multiplier's operand read mux into its DSP operand (90.6 MHz), the microcode through the scaler's read mux
-        # into its zero/infinity classification (91.3 MHz, then 103.5).
+        # into its zero/infinity classification (91.3 MHz, then 105.5).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1),
@@ -769,7 +769,7 @@ TARGETS: list[SynthTarget] = [
         # into its folded first digit (132.4 MHz), the register file through the scaler's read mux into its exponent
         # adder and overflow check (140.8 MHz), the register file through the adder's read mux into its magnitude
         # compare and exponent difference (148.4 MHz), the microcode through the sorter's read mux and compare into its
-        # max register (151.1 MHz with 0.05 ns to spare; then 157.1).
+        # max register (151.1 MHz with 0.05 ns to spare; then 158.4).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_output=1, stage_input=1),
@@ -792,7 +792,7 @@ TARGETS: list[SynthTarget] = [
         # its pack rounding into the register file (81.1 MHz), the divider's folded first digit from its latched divisor
         # (95.2 MHz), the multiplier's exponent adjust through its pack into the register file (95.5 MHz), the fma's
         # product exponent adjust through its alignment-shift count into the alignment register (100.1 MHz), the
-        # register file through the sorter's read mux into its compare and select (97.2 MHz, then 104.9).
+        # register file through the sorter's read mux into its compare and select (97.2 MHz, then 101.5).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),
@@ -815,7 +815,7 @@ TARGETS: list[SynthTarget] = [
         # scaler's read mux into its exponent adder and overflow detect (85.4 MHz), the fma's close-cancellation
         # normalize cascade (84.0 MHz), the fma's sticky through its pack rounding into the register file (90.2 MHz),
         # the microcode through the fma's operand read mux into its DSP operand (97.9 MHz), the adder's sticky through
-        # its pack into the register file (98.4 MHz, then 102.6).
+        # its pack into the register file (98.4 MHz, then 101.6).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),
@@ -840,7 +840,7 @@ TARGETS: list[SynthTarget] = [
         # into the register file (148.9 MHz), the divider's folded first digit from its latched divisor (150.1 MHz with
         # 0.01 ns to spare), the divider's last digit through its pack rounding into the register file (150.3 MHz with
         # 0.02 ns to spare), the fma's exponent adjustment through its pack into the register file (145.0 MHz, then
-        # 156.4).
+        # 154.2).
         _op_config(
             _F_e6m18,
             fadd=FAddOptions(stage_input=1, stage_output=1),

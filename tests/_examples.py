@@ -690,7 +690,7 @@ def _fresh_imu_fusion() -> Callable[..., object]:
 # rows walking the attitude further, eight in-band rows alternating between two world-frame gravity targets (the
 # filter keeps chasing, so every output lane stays far from zero while the bias rails on every row and both clamp
 # arms fire), then the high-magnitude reject, the clip latch, a hot row, and a cold row. Every in-band row keeps
-# all |out| lanes above ~0.6 m/s^2 -- below that, the benign BLAS-vs-left-fold summation difference outgrows the
+# all |out| lanes above ~0.6 m/s^2 -- below that, the benign BLAS-vs-pairwise summation difference outgrows the
 # eel oracle's relative budget on the g-scale operands.
 _IMU_FUSION_MANUAL = [
     {**dict(zip((*_IMU_FUSION_MEAS, "temperature", "dt"), values)), **_IMU_FUSION_CAL_LANES}

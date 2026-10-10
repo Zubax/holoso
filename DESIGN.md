@@ -220,9 +220,8 @@ One wide register holds either family whole: an integer fills it exactly, a floa
 in unused flip-flops and slightly wider read muxes, but only where an integer in the same kernel asked for the extra
 width; one representation with no edge cases is worth more than the bits it wastes.
 
-Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers
-travel the whole pipeline into every backend. A static integer the kernel wrote folds away before MIR ever sees it;
-the integer constants MIR holds are the machine's own -- a shift count, a scaler exponent.
+Compile-time shapes and aggregate structure are resolved in the front-end and never reach HIR; runtime integers travel
+the whole pipeline into every backend.
 
 ## Operators
 
@@ -249,16 +248,9 @@ interval is the latency plus one, the instance then holding a single transaction
 land on disjoint output ports, error ports included; such modes interleave freely. It is checked when an operator is
 built. An operator whose acceptance depends on the next firing's mode is outside the model.
 
-The CORDIC is the operator whose modes differ in timing: it rotates (a sine and cosine from one operand) and vectors (an
-angle and magnitude from two) at different latencies, each re-accepting one step after it retires, so one instance
-serves sin, cos, atan2 and a fused magnitude alike. The divider's modes share one latency and differ in the operands
-they read: one digit-recurrence pipeline answers a quotient from two operands or a square root from one. The rounder's
-modes differ in arithmetic only: each reads one operand and answers its rounding on two ports at once, as a float and as
-an integer. The shifter's direction bit selects the left or the right shift, both driving the one output.
-The adder's mode bit makes it subtract, and a subtraction orders its operands on flags of their own as a side effect,
-so its mode drives them beside the difference, and a comparison is a third mode that drives the same code and reads the
-flags alone: modes sharing a code are one operation of the module read through different outputs.
-A kernel whose sums, differences and comparisons contend for the one adder asks for more instances.
+One CORDIC thus serves sin, cos, atan2 and a fused magnitude, one digit-recurrence pipeline a quotient and a square
+root, and one integer adder sums, differences and comparisons; a kernel whose operations contend for one operator asks
+for more instances.
 
 An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
 schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
@@ -323,32 +315,20 @@ aggregates only with identical kind and shape -- for a record, identical class.
 
 Aggregates are one container of three kinds fixed by provenance, not shape: a sequence is immutable structure, an array
 the numerical kind carrying elementwise arithmetic and all mutation, and a record an immutable typed bundle fixed by its
-class -- a plain generated frozen dataclass, so construction is structural and field reads fold, while a property of the
-class is inlined as the user's code it is and a class constant reads as the value it holds. One assignment-target
-vocabulary serves every statement that binds one -- a plain assignment, an unpack, a `for` header: a name, an attribute,
-an element, or a tuple of those nested arbitrarily, bound left to right off one evaluation of the right-hand side as
-CPython binds it. A comprehension keeps its own narrower rule, a plain name. `enumerate` answers a one-shot iterator
-exactly as in Python: consumed by a single iteration, refused elsewhere. Arrays and records never exist as hardware
-aggregates: they are compile-time bookkeeping over scalar wires, decomposed at the module boundary into indexed and
-field-path ports, and only scalar leaves reach HIR. Structural transforms (slices, transposes, reshapes) restructure the
-same storage; a family-changing conversion mints a fresh array exactly where the host copies, a dtype naming only its
-family since widths are erased throughout the value model.
+class. Arrays and records never exist as hardware aggregates: they are compile-time bookkeeping over scalar wires,
+decomposed at the module boundary into indexed and field-path ports, and only scalar leaves reach HIR.
 
 Mutation is admitted only where reference and value semantics cannot be told apart, and rejected with advice
 everywhere else, sparing the compiler a heap model and escape analysis. Persistent state is the one mutable
 resident; its trees stay disjoint from each other and from everything captured, or a later transaction would write
 through an alias the flat state slots cannot represent.
 
-State ownership spans the receiver's whole COMPONENT TREE: every plain instance reachable from the compile root
-through attribute chains gets a canonical path, so a kernel object may hold stateful sub-components and any method
-may write its own receiver's attributes; a void procedure (`reset()`) is callable as a bare statement, its
-None answering only at a use, exactly as in Python. Writes resolve by object identity, never by parameter name, so every
-alias of a component reads and writes the same slots; a component with state reachable under two distinct tree
-paths is rejected (naming would depend on traversal), while back-reference cycles are simply the same object.
-Whether an attribute is state is still decided by running: the assumed set seeds from a syntactic may-write scan
-of every desugarable method over every component class, and runs re-trim it to the writes actually reached.
-A seeded path whose snapshot cannot be state is POISONED rather than rejected -- it gets no slot,
-reads keep folding frozen, and only a reached write convicts -- so host-only utility methods cost a kernel nothing.
+State ownership spans the receiver's whole COMPONENT TREE: every plain instance reachable from the compile root through
+attribute chains gets a canonical path, so a kernel object may hold stateful sub-components and any method may write its
+own receiver's attributes. Writes resolve by object identity, never by parameter name, so every alias of a component
+reads and writes the same slots; a component with state reachable under two distinct tree paths is rejected (naming
+would depend on traversal), while back-reference cycles are simply the same object. Whether an attribute is state is
+decided by running: only a reached write makes it so, and host-only utility methods cost a kernel nothing.
 
 Interpretation carries state in the frame environment beside locals and temps, under a key family nothing else
 mints, forked and joined at every control meet (branch arms, exit lanes, the inline boundary, residual-frame rows,
@@ -376,13 +356,15 @@ square root, a small whole one a chain); selection takes the unique most refined
 accepts the operand. An entry of no fixed arity mints its operator for the call's own count, which is what `math.hypot`
 is and what the Euclidean norms reach.
 
-An array composite declares no scalar domain, rank and shape deciding its meaning; whole-array reductions are static
-pairwise trees, log-deep in the operator's latency, while the dot product is a left fold of fused multiply-adds. The
-library spells the fused multiply-add itself wherever a step adds a product that nothing else reads, and takes the cross
-product's differences of two products by Kahan's algorithm; over integers each stays integer arithmetic. Joins along an
-axis (concatenation and the stacking spellings) are copying composites over a sequence of parts, promoting the whole
-result across the parts' families as numpy's conversion does. A composite may admit a sequence at a declared argument
-position.
+An array composite declares no scalar domain, rank and shape deciding its meaning. Whole-array reductions are static
+pairwise trees, log-deep in the operator's latency, and so is the dot product, its terms taken in pairs with one product
+of each fused into the other; a dot product of four or more terms therefore needs the adder beside the fused operator.
+Where many dot products share one multiplier and no fused operator, the schedule is bound by that multiplier and the
+additions above its last product cost a few cycles a fold does not, which more instances relieve. The library spells the
+fused multiply-add itself wherever a step adds a product that nothing else reads, and takes the cross product's
+differences of two products by Kahan's algorithm; over integers each stays integer arithmetic. Joins along an axis
+(concatenation and the stacking spellings) are copying composites over a sequence of parts, promoting the whole result
+across the parts' families as numpy's conversion does.
 
 A spelling may map elementwise over arrays of one shape, scalars broadcasting: it does wherever the host maps it over an
 array and its answer stays in a family the subset has (an unsigned answer erasing to integer), as the arithmetic
@@ -465,7 +447,7 @@ composites, not of the rule.
 Strength reduction speaks all three scalar families with one grammar. Each binary operator also declares its MIRROR, the
 operator that means the same with its operands exchanged, so a constant operand settles on the right and a product or
 relation by a constant names one node whichever side it was written on; it is declared rather than inferred because the
-answer is about bits, `fmin` and `fmax` breaking ties toward the second operand. Beyond that and the identity and
+answer is about bits, `fmin` and `fmax` breaking ties by operand position. Beyond that and the identity and
 absorbing elements and the idempotence the operators declare, it states the rules the shared algebra cannot: the
 one-sided constant rules of the non-commutative operators, the value-equality and complement folds (under the same
 license as `x/x`), negation and complement tracked as involutions so every spelling of a negation names one node and
@@ -559,11 +541,9 @@ this is the first layer aware of hardware semantics; operations selected onto di
 a single firing when the LIR is built. Some semantic operators lower into combinations of primitives depending on
 availability and context (e.g. a two-legged magnitude via the CORDIC's vectoring).
 
-The MIR builder has no global scalar type, so mixed-type expressions share one value namespace, but carries the
-configured float and integer formats explicitly. The CFG is scheduled per block and register-allocated over the
-whole CFG, the allocator splitting the nodes between the wide data bank and the boolean bank structurally, on scalar
-width, so the wide bank is neutral storage rather than a float family, and a float and an integer share it with
-neither privileged.
+The CFG is scheduled per block and register-allocated over the whole CFG, the allocator splitting the nodes between the
+wide data bank and the boolean bank structurally, on scalar width, so the wide bank is neutral storage rather than a
+float family, and a float and an integer share it with neither privileged.
 
 ## LIR
 
@@ -581,9 +561,8 @@ two's-complement negation is not free in fabric. A primitive that reads no sign 
 extractor, the finiteness and zero tests -- declares the operand UNCONDITIONED and then admits only the identity
 conditioner; an operator whose operand port serves only such primitives has no sideband there, which is the operator's
 to declare. A result is never conditioned at its producer: its sign folds into whatever reads it, so only a boolean
-result carries an inversion, folded into its register write. Each scheduled firing carries its operands and
-conditioners, its register writes, and an issue cycle; the makespan is the last commit cycle. LIR exposes a minimal API
-plus shared analysis helpers (per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
+result carries an inversion, folded into its register write. LIR exposes a minimal API plus shared analysis helpers
+(per-cycle grouping, liveness, read/writer sets) so backends do not each re-derive them.
 
 Storage is a sparse register file synthesized per kernel: each operand's read mux spans only the sources it reads,
 each register's write mux only the sources it takes (see Backend for the encoding). A CPU-conventional full-reach
@@ -605,13 +584,11 @@ inline, on either bank -- writes the register array combinationally and becomes 
 fetch-lag-plus-read-first edge after its commit, and both banks sample operands alike (per-result writeback and
 read-address latches were tried and dropped: inconsistent across result classes and needlessly delaying short installs).
 Because the banks and the pooled/inline classes are uniform instances of one model rather than hand-coded cases,
-boolean-logic and cast chains schedule back-to-back. Block-resident operands (inputs, state reads, phis) are available
-from the block's first control word. Ready ops issue in critical-path order onto free instances, pooled by operator
-(equal-by-value), whichever of its primitives they run; the budget is the operator's own `instances` option, a cap
-rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it serialize. A firing
-keeps its instance busy for its own mode's initiation interval. The scheduler's first-free binding of a firing to an
-instance is only a seed: the register allocator rebinds firings among the realized instances without changing an issue
-cycle or the instance count.
+boolean-logic and cast chains schedule back-to-back. Ready ops issue in critical-path order onto free instances, pooled
+by operator (equal-by-value), whichever of its primitives they run; the budget is the operator's own `instances` option,
+a cap rather than a count -- only the copies the schedule binds are emitted -- and co-issues beyond it serialize. The
+scheduler's first-free binding of a firing to an instance is only a seed: the register allocator rebinds firings among
+the realized instances without changing an issue cycle or the instance count.
 
 Read-first plus the +1 edge, not write-through forwarding, is a deliberate trade: forwarding would erase the +1 but its
 muxes grow with the product of the read-port and write-port counts -- unsustainable -- while the +1 hides under
@@ -628,9 +605,7 @@ flip-flop count, and there is no spilling to memory. Three decisions share that 
 register, a commutative firing's orientation (after Chen & Cong), and a firing's instance where its operator has
 several. The search is simulated annealing from the seed, deterministic and with incremental cost updates, finished by a
 local-improvement descent, so the result is never worse than the seed. The boolean bank is allocated first, since a wide
-inline result names the boolean register it reads. Every block is scheduled once per graph (arm threading tries several;
-see Control flow); the install fixpoint iterates only the draining blocks' terminator offsets and the coalescing, and
-the coloring runs once on the converged layout.
+inline result names the boolean register it reads.
 
 Phi-arm coalescing eliminates most install copies: before coloring, each phi and its register-backed, identity-arm
 predecessors merge by union-find whenever the two sides do not interfere, so the arm value flows straight into the
@@ -652,11 +627,7 @@ allocator, and the handshake-gated writes are enumerated once.
 ### Control flow
 
 `branch` is the real control transfer: the PC jumps, untaken ops never run, and the II is whatever the executed path
-costs. Blocks lay out in reverse-postorder, so a back-edge is a jump to a lower address; each block's terminator
-redirects the fetch PC via a small `case(pc)` that, for a branch, reads the condition's 1-bit register. A jumping
-block that does no work and receives nothing takes no PC, its predecessors taking its arm directly; the transaction
-ends on whichever terminator arm reaches the canonical return block, out_valid asserting at that terminator,
-conditionally on a branch.
+costs.
 
 A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the
 block does not forward to a successor, tail installs included. An install's source is classified exactly: a source
@@ -713,12 +684,9 @@ combinational cone; the fetch leads the executing step, which under static sched
 the same reason `in_ready` is a register the sequencer sets beside the next PC, so the input loads' wide write-enable
 fanout starts at a flip-flop rather than behind a PC decode.
 
-The schedule replays step by step: at PC 0 the machine accepts and parallel-loads inputs in one cycle (gated by
-`in_valid`); the PC advances every clock; at an exit it asserts `out_valid` while outputs drive combinationally
-from their registers by fixed index. The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP,
-and while the PC dwells, `transacting` (high only while a transaction is in flight) forces every operator's
-`in_valid` and every register's write opcode to the inert NOP code, so the idle re-fetch commits nothing and the
-entry word can carry real work.
+The PC holds only at the two I/O boundaries; bubble steps carry an explicit NOP, and while the PC dwells, `transacting`
+(high only while a transaction is in flight) forces every operator's `in_valid` and every register's write opcode to the
+inert NOP code, so the idle re-fetch commits nothing and the entry word can carry real work.
 
 Value routing is uniform across two dual endpoints: a per-operand READ opcode selects that port's source, and a
 per-register WRITE opcode selects that register's next value (code 0 == NOP hold). An operator output, an inline

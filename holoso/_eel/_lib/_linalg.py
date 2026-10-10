@@ -12,6 +12,7 @@ reject a scalar operand by asking its rank rather than by a type test the subset
 
 import math
 import operator
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -21,11 +22,28 @@ from ._numpy import difference_of_products, multiply_add
 from ._registry import array
 
 
+def pairwise(v: Any, f: Callable[[Any, Any], Any]) -> Any:
+    """
+    A comprehension unrolls whatever the unroll threshold, where a `for` over a longer range becomes a counted loop
+    whose subscripts are no longer static. Each level's length is static, so the odd-element passthrough folds away.
+    """
+    while len(v) > 1:
+        v = [(f(v[i], v[i + 1]) if i + 1 < len(v) else v[i]) for i in range(0, len(v), 2)]
+    return v[0]
+
+
 def _dot(u: np.ndarray, v: np.ndarray) -> Any:
-    acc = u[0] * v[0]
-    for k in range(1, len(u)):
-        acc = multiply_add(u[k], v[k], acc)
-    return acc
+    """
+    A tree of fused pairs where a fold of fused steps would serialize on the operator's latency. An odd last term is
+    fused into the last pair rather than summed as a leaf of its own, so three terms take no adder.
+    """
+    n = len(u)
+    if n == 1:
+        return u[0] * v[0]
+    pairs = np.array([multiply_add(u[k + 1], v[k + 1], u[k] * v[k]) for k in range(0, n - 1, 2)])
+    if n % 2 == 1:
+        pairs[-1] = multiply_add(u[n - 1], v[n - 1], pairs[-1])
+    return pairwise(pairs, operator.add)
 
 
 @array(
@@ -87,10 +105,7 @@ def trace(a: np.ndarray) -> Any:
         raise ValueError(f"trace requires a matrix, got a {a.ndim}-D value")
     if len(a) != len(a[0]):
         raise ValueError(f"trace requires a square matrix, got {len(a)}×{len(a[0])}")
-    acc = a[0][0]
-    for i in range(1, len(a)):
-        acc = acc + a[i][i]
-    return acc
+    return pairwise([a[i][i] for i in range(len(a))], operator.add)
 
 
 @array(np.outer, np.linalg.outer)

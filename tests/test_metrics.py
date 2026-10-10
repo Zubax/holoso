@@ -311,7 +311,7 @@ _BASELINE: dict[str, Metrics] = {
     # Its two copy-only arms are threaded into the blocks that branch to them; the arm this adds to one read port is the
     # price of the cycles threading saves, which the threading rule does not weigh.
     "imu_fusion": Metrics(
-        False, nreg=41, bnreg=5, steering=156, max_read_port=27, max_write_select=8,
+        False, nreg=42, bnreg=5, steering=159, max_read_port=24, max_write_select=9,
         copies=15, min_ii=258, last_pc=435, max_block_span=133,
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's. fir's shifted-out tap is
