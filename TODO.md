@@ -101,3 +101,17 @@ We need inline primitives and lower comparisons against zero through them:
 
 The integer absolute value then needs no operator of its own: it lowers to the saturating `0 + x` and `0 - x` and an
 inline select between them on the sign test, which removes `holoso_iabss`.
+
+### An early product output on the fused multiply-add
+
+`zkf_fma` could present the rounded product `a*b` on a second output at the multiplier's latency, enabled at
+elaboration since its packer costs fabric. A product sharing a block with an `fma(a, b, c)` over the same two factors
+would then tap that firing instead of taking a multiplier, as a comparison taps a subtraction's flags.
+
+- An operator mode carries one latency; this needs one per output port. The schedule is already kept per value; the
+  firing record (`PooledScheduledOp.commit_cycle` and its readers) commits every write together.
+- A fused `c - a*b` yields the product negated, which folds into its readers as any sign does; a site taking the
+  product's magnitude cannot host the tap.
+
+Running plain multiplications on the same output would let a kernel with `ffma` do without `fmul`,
+and enable kernels with both to achieve greater issue parallelism.
