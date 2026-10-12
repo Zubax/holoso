@@ -5,6 +5,7 @@ and asserts on observable output values against an INDEPENDENT reference.
 """
 
 import dataclasses
+import itertools
 import math
 from collections.abc import Callable
 
@@ -25,7 +26,6 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FRintOptions,
-    FSortOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
@@ -33,6 +33,8 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
+from holoso._operators import FCmpOperator, FCmpPrimitive, FSortPrimitive
+from holoso._util import Relation
 from holoso._value import ScalarValue
 from ._modelref import instantiated_modules as _modules, random_legal_bits
 from ._public import divsqrt_modes
@@ -54,7 +56,7 @@ def _ops(
     *,
     with_round: bool = True,
     with_fma: bool = True,
-    with_sort: bool = True,
+    with_cmp: bool = True,
     with_exp2: bool = True,
     with_log2: bool = True,
     with_divsqrt: bool = True,
@@ -70,10 +72,9 @@ def _ops(
             fdivsqrt=FDivsqrtOptions() if with_divsqrt else None,
             fmul_ilog2=FMulILog2Options() if with_scaler else None,
             filog2=FILog2Options() if with_ilog2 else None,
-            fcmp=FCmpOptions(),
+            fcmp=FCmpOptions() if with_cmp else None,
             frint=FRintOptions() if with_round else None,
             ffma=FFmaOptions() if with_fma else None,
-            fsort=FSortOptions() if with_sort else None,
             fexp2=FExp2Options() if with_exp2 else None,
             flog2=FLog2Options() if with_log2 else None,
             fcordic=FCordicOptions() if with_cordic else None,
@@ -420,7 +421,7 @@ _MINMAX_VECTORS = [
 
 
 def test_min_max_match_reference() -> None:
-    # min(a,b) and max(a,b) over the same pair fuse into one sorter firing that writes two wide registers at once;
+    # min(a,b) and max(a,b) over the same pair fuse into one comparator firing that writes two wide registers at once;
     # both outputs are checked against the bit-preserving reference (FloatValue.sort), which the HDL bench anchors to
     # the RTL. The equal and infinity pairs pin the tie direction and the total-order handling of the extrema.
     def kernel(a: float, b: float) -> tuple[float, float]:
@@ -440,9 +441,27 @@ def test_min_max_match_reference() -> None:
         assert _bits(out[0]) == lo.bits and _bits(out[1]) == hi.bits, f"a={a} b={b}"
 
 
+def test_relations_beside_min_max_match_reference() -> None:
+    # Relations over the operands of a min/max tap that firing's flags, mirrored where they read the pair the other way
+    # round. The conditioned operand makes the -0 against +0 tie, where the min is the second operand and the two are
+    # equal.
+    def kernel(a: float, b: float) -> tuple[float, float, bool, bool, bool]:
+        return min(-a, b), max(-a, b), -a < b, b < -a, b == -a
+
+    sim = _sim(kernel, "min_max_flags")
+    grid = [k * 1.5 for k in range(-3, 4)]
+    for a, b in [*_MINMAX_VECTORS, *itertools.product(grid, grid)]:
+        negated = _v(a).apply_sign(negate=True, absolute=False)
+        lo, hi = FloatValue.sort(negated, _v(b))
+        ordering = negated.compare(_v(b))
+        out = sim.run(a, b)
+        assert (_bits(out[0]), _bits(out[1])) == (lo.bits, hi.bits), f"a={a} b={b}"
+        assert tuple(out[2:]) == (ordering < 0, ordering > 0, ordering == 0), f"a={a} b={b}"
+
+
 def test_min_max_sign_folds_into_operands() -> None:
-    # Each operand's sign chain folds onto its sorter operand and is applied BEFORE the sort: min(-a, |b|) is the
-    # sorter fed (-a, |b|). This drives the operand conditioners on a multi-output primitive.
+    # Each operand's sign chain folds onto its comparator operand and is applied BEFORE the sort: min(-a, |b|) is the
+    # comparator fed (-a, |b|). This drives the operand conditioners on a multi-output primitive.
     def kernel(a: float, b: float) -> tuple[float, float]:
         return (min(-a, abs(b)), max(abs(a), -b))
 
@@ -458,7 +477,7 @@ def test_min_max_sign_folds_into_operands() -> None:
 
 
 def test_min_max_dispatch_numpy() -> None:
-    # numpy.minimum/maximum are the binary elementwise forms and must dispatch by callee identity to the sorter.
+    # numpy.minimum/maximum are the binary elementwise forms and must dispatch by callee identity to the comparator.
     def kernel(a: float, b: float) -> tuple[float, float]:
         return (np.minimum(a, b), np.maximum(a, b))
 
@@ -477,12 +496,26 @@ def test_min_max_wrong_arity_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(), name="min_max_arity")
 
 
+def test_each_comparator_primitive_reads_its_own_ports() -> None:
+    # The reference arithmetic never reads the port map, so no sweep here would notice a relation tapping the port of
+    # the min; only the cosimulation would.
+    comparator = FCmpOperator.build(FMT, FCmpOptions())
+    compare, sort = FCmpPrimitive(comparator), FSortPrimitive(comparator)
+    names = [port.name for port in comparator.output_ports]
+    assert [names[port] for port in compare.mode.outputs] == ["a_gt_b", "a_eq_b", "a_lt_b"]
+    assert [names[port] for port in sort.mode.outputs] == ["min", "max", "a_gt_b", "a_eq_b", "a_lt_b"]
+    for relation in Relation:
+        tap, inversion = FCmpPrimitive.tap_of(relation)
+        result, sort_inversion = sort.flag_of(relation)
+        assert (sort.mode.outputs[result], sort_inversion) == (compare.mode.outputs[tap], inversion), relation
+
+
 def test_min_max_unconfigured_is_rejected() -> None:
     def kernel(a: float, b: float) -> float:
         return min(a, b)
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_unconfigured")
+        holoso.synthesize(kernel, _ops(with_cmp=False), name="min_max_unconfigured")
 
 
 def test_min_max_is_not_bit_commutative() -> None:
@@ -519,11 +552,11 @@ def test_min_max_against_a_constant_keeps_its_operand_order() -> None:
 
 def test_min_max_of_constants_fold() -> None:
     # min/max of two constants fold in the format-agnostic HIR, so a kernel using only constant min/max needs no
-    # fsort hardware; synthesizing with fsort unconfigured proves the fold (an unfolded min/max would be rejected).
+    # comparator; synthesizing with it unconfigured proves the fold (an unfolded min/max would be rejected).
     def kernel(x: float) -> float:
         return x + min(2.5, 1.5) + max(2.5, 1.5)
 
-    sim = holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_fold").numerical_model.elaborate()
+    sim = holoso.synthesize(kernel, _ops(with_cmp=False), name="min_max_fold").numerical_model.elaborate()
     for x in [0.0, 3.0, -1.5, 100.25]:
         ref = (_v(x) + _v(1.5)) + _v(2.5)
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
@@ -533,7 +566,7 @@ def test_min_max_infinity_constants_fold() -> None:
     def kernel(x: float) -> float:
         return x + min(1e400, 2.0) + max(-1e400, 3.0)
 
-    sim = holoso.synthesize(kernel, _ops(with_sort=False), name="min_max_inf_fold").numerical_model.elaborate()
+    sim = holoso.synthesize(kernel, _ops(with_cmp=False), name="min_max_inf_fold").numerical_model.elaborate()
     for x in [0.0, 3.0, -1.5, 100.25]:
         ref = (_v(x) + _v(2.0)) + _v(3.0)
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
@@ -974,14 +1007,14 @@ def test_hypot_lone_decomposition_is_approximate() -> None:
 
 
 def test_hypot_lone_missing_primitive_is_rejected() -> None:
-    # The expansion needs the exponent extractor, the divider (for the root), and the scaler, but not the sorter.
+    # The expansion needs the exponent extractor, the divider (for the root), and the scaler, but not the comparator.
     def kernel(y: float, x: float) -> float:
         return math.hypot(y, x)
 
     for ops in (_ops(with_ilog2=False), _ops(with_divsqrt=False), _ops(with_scaler=False)):
         with pytest.raises(UnsupportedConstruct):
             holoso.synthesize(kernel, ops, name="hypot_lone_reject")
-    holoso.synthesize(kernel, _ops(with_sort=False), name="hypot_lone_no_sorter")
+    holoso.synthesize(kernel, _ops(with_cmp=False), name="hypot_lone_no_comparator")
 
 
 def _sqrt_ref(x: float) -> int:
@@ -1065,7 +1098,7 @@ def test_trig_of_constants_fold() -> None:
     def kernel(x: float) -> tuple[float, float, float, float, float]:
         return (math.sin(0.5), math.cos(0.5), math.atan2(1.0, 2.0), math.hypot(3.0, 4.0), math.sqrt(2.0))
 
-    ops = _ops(with_cordic=False, with_exp2=False, with_log2=False, with_sort=False, with_divsqrt=False)
+    ops = _ops(with_cordic=False, with_exp2=False, with_log2=False, with_cmp=False, with_divsqrt=False)
     sim = holoso.synthesize(kernel, ops, name="trig_fold").numerical_model.elaborate()
     out = sim.run(0.0)
     for index, ref in enumerate(
@@ -1467,7 +1500,7 @@ def test_a_hypotenuse_orphaned_by_a_cancelled_fusion_is_still_expanded() -> None
     assert "holoso_fcordic" not in modules, "the cancellation must have deleted the only atan2"
     assert {"holoso_filog2", "holoso_fdivsqrt", "holoso_fmul_ilog2"} <= modules
     # The root alone: the expansion divides nothing.
-    assert "holoso_fsort" not in modules and divsqrt_modes(result.verilog_output.verilog) == [1]
+    assert "holoso_fcmp" not in modules and divsqrt_modes(result.verilog_output.verilog) == [1]
     sim = _sim(kernel, "hypot_orphan")
     for a, b in ((3.0, 4.0), (0.0, 0.0), (-3.0, 4.0)):
         assert float(sim.run(a, b, 1.0, 2.0)[0]) == float(_v(math.hypot(a, b))), (a, b)

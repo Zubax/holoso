@@ -32,7 +32,6 @@ class OperatorOptions:
     fcmp: FCmpOptions | None = None
     frint: FRintOptions | None = None
     ffma: FFmaOptions | None = None
-    fsort: FSortOptions | None = None
     fexp2: FExp2Options | None = None
     flog2: FLog2Options | None = None
     fcordic: FCordicOptions | None = None
@@ -109,10 +108,6 @@ class OpConfig:
         return self._built(
             FFmaOperator.build, self.float_format, self._configured(self.options.ffma, "ffma"), self.wmultiplier
         )
-
-    @cached_property
-    def fsort(self) -> FSortOperator:
-        return self._built(FSortOperator.build, self.float_format, self._configured(self.options.fsort, "fsort"))
 
     @cached_property
     def fexp2(self) -> FExp2Operator:

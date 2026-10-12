@@ -135,7 +135,7 @@ def has_sign_control(scalar_type: ScalarType) -> bool:
 class ScalarSignature:
     """
     Operand- and result-port types for a concrete primitive. A primitive may produce several results (e.g. a
-    comparator's three one-hot order flags, a sorter's min and max), one per output port, each independently typed.
+    comparator's three one-hot order flags beside its min and max), one per output port, each independently typed.
     """
 
     operand_types: tuple[ScalarType, ...]

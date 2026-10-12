@@ -18,7 +18,6 @@ from holoso import (
     FILog2Options,
     FMulILog2Options,
     FMulOptions,
-    FSortOptions,
     FloatFormat,
     OperatorOptions,
     Options,
@@ -149,7 +148,7 @@ def test_cosim_overlap_dead_arm_spill(sim: str, config: OptionsCase) -> None:
 
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_cosim_min_max(sim: str) -> None:
-    # Binary min/max lower to holoso_fsort. Taking BOTH min and max of one pair fuses to a SINGLE firing that writes two
+    # Binary min/max lower to holoso_fcmp. Taking BOTH min and max of one pair fuses to a SINGLE firing that writes two
     # wide registers at once, so this proves the generated RTL lands both results bit-exactly against the model. The
     # |a|,|b| sort in a second firing exercises the operand sign conditioners.
     def kernel(a: float, b: float) -> tuple[float, ...]:
@@ -162,11 +161,23 @@ def test_cosim_min_max(sim: str) -> None:
             fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             fcmp=FCmpOptions(),
-            fsort=FSortOptions(),
         ),
         ffmt=FloatFormat(8, 24),
     )
     run_cosim(sim, holoso.synthesize(kernel, options, name="min_max"))
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_cosim_relations_beside_min_max(sim: str) -> None:
+    # One comparator orders a pair for its min, its max and two relations in a single firing, one relation tapped
+    # mirrored, and compares another pair in a firing of its own; only the RTL's port wiring can get those taps wrong.
+    def kernel(a: float, b: float, c: float) -> tuple[float, float, bool, bool, bool]:
+        return min(a, -b), max(a, -b), a < -b, -b < a, a < c
+
+    result = holoso.synthesize(kernel, default_options(FloatFormat(8, 24)), name="min_max_flags")
+    assert result.verilog_output.verilog.count("holoso_fcmp #") == 1, "the premise of this test"
+    values = (0.0, 1.5, -1.5, 2.0, -7.25, float("inf"), float("-inf"))
+    run_cosim(sim, result, vectors=[{"a": a, "b": b, "c": c} for a in values for b in values for c in values[:3]])
 
 
 class _ShiftRegister2:
@@ -891,8 +902,8 @@ def test_cosim_atan2_hypot_fused(sim: str) -> None:
 def test_cosim_root_and_lone_hypot(sim: str) -> None:
     # The native root inside a real design, and the lone hypot's expansion around it -- two exponent extractions,
     # an integer max, three exact scalings and a sum of squares. The wrapper bench proves the modules; this proves
-    # the machine built around them, including the integer datapath the expansion reaches into. No sorter, no
-    # division and no comparator: the expansion needs none of them.
+    # the machine built around them, including the integer datapath the expansion reaches into. No division
+    # and no comparator: the expansion needs neither.
     def kernel(x: float, y: float) -> tuple[float, float]:
         return math.sqrt(abs(x)), math.hypot(x, y)
 

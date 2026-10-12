@@ -218,35 +218,6 @@ module holoso_fdivsqrt#(parameter WEXP = 6, parameter WMAN = 18,
     );
 endmodule
 
-// Floating point min/max sorter with sign conditioning:
-//      min = min(sgnop(a), sgnop(b))
-//      max = max(sgnop(a), sgnop(b))
-// Useful for e.g. sort-by-absolute-value.
-module holoso_fsort#(parameter WEXP = 6, parameter WMAN = 18, parameter integer STAGE_INPUT = 0,
-                     parameter integer LATENCY = 0) (
-    input  wire clk,
-    input  wire rst,
-    input  wire                 in_valid,
-    input  wire           [1:0] a_sgnop,
-    input  wire           [1:0] b_sgnop,
-    input  wire [WEXP+WMAN-1:0] a,
-    input  wire [WEXP+WMAN-1:0] b,
-    output wire                 out_valid,
-    output wire [WEXP+WMAN-1:0] min,
-    output wire [WEXP+WMAN-1:0] max
-);
-    localparam WFULL = WEXP + WMAN;
-    wire [WFULL-1:0] a1;
-    wire [WFULL-1:0] b1;
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
-    holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_b (.x(b), .op(b_sgnop), .y(b1));
-    zkf_sort#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .LATENCY(LATENCY)) u_sort (
-        .clk(clk), .rst(rst),
-        .in_valid(in_valid), .a(a1), .b(b1),
-        .out_valid(out_valid), .min(min), .max(max)
-    );
-endmodule
-
 // Fixed-latency facade over the handshaked, non-throughput-1 zkf_cordic (one transaction in flight), its mode chosen
 // per transaction, or fixed by MODE (0 rotation, 1 vectoring), which drops the other mode's datapath and ignores
 // `vectoring` and the other mode's latency parameter:
@@ -297,7 +268,10 @@ endmodule
 
 // Floating point comparator with sign conditioning:
 //      (a_gt_b, a_eq_b, a_lt_b) = compare(sgnop(a), sgnop(b))
-// Outputs are mutually-exclusive one-hot flags.
+//      min = min(sgnop(a), sgnop(b))
+//      max = max(sgnop(a), sgnop(b))
+// The flags are mutually-exclusive and one-hot. min and max are the conditioned operands themselves, bit for bit; when
+// they compare equal, min is the second and max the first. An output left unconnected costs no logic.
 module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer STAGE_INPUT = 0,
                     parameter integer STAGE_OUTPUT = 0, parameter integer LATENCY = 0) (
     input  wire clk,
@@ -310,7 +284,9 @@ module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer S
     output wire                 out_valid,
     output wire                 a_gt_b,
     output wire                 a_eq_b,
-    output wire                 a_lt_b
+    output wire                 a_lt_b,
+    output wire [WEXP+WMAN-1:0] min,
+    output wire [WEXP+WMAN-1:0] max
 );
     localparam WFULL = WEXP + WMAN;
     wire [WFULL-1:0] a1;
@@ -320,13 +296,14 @@ module holoso_fcmp#(parameter WEXP = 6, parameter WMAN = 18, parameter integer S
     zkf_cmp#(.WEXP(WEXP), .WMAN(WMAN), .STAGE_INPUT(STAGE_INPUT), .STAGE_OUTPUT(STAGE_OUTPUT),
              .LATENCY(LATENCY)) u_cmp (
         .clk(clk), .rst(rst), .in_valid(in_valid), .a(a1), .b(b1),
-        .out_valid(out_valid), .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b));
+        .out_valid(out_valid), .a_gt_b(a_gt_b), .a_eq_b(a_eq_b), .a_lt_b(a_lt_b), .min(min), .max(max));
 endmodule
 
 // Base-two exponential with sign conditioning:  y = 2 ** sgnop(a)
 module holoso_fexp2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
                      parameter STAGE_INPUT = 0, parameter STAGE_REDUCE = 0, parameter STAGE_PRODUCT = 0,
-                     parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                     parameter STAGE_PRODUCT_SQUARE = 0, parameter STAGE_PRODUCT_ODD = 0,
+                     parameter STAGE_PRODUCT_CHAIN = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
                      parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
@@ -341,7 +318,9 @@ module holoso_fexp2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPL
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     zkf_exp2#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER),
               .STAGE_INPUT(STAGE_INPUT), .STAGE_REDUCE(STAGE_REDUCE), .STAGE_PRODUCT(STAGE_PRODUCT),
-              .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT), .LATENCY(LATENCY)) u_exp2 (
+              .STAGE_PRODUCT_SQUARE(STAGE_PRODUCT_SQUARE), .STAGE_PRODUCT_ODD(STAGE_PRODUCT_ODD),
+              .STAGE_PRODUCT_CHAIN(STAGE_PRODUCT_CHAIN), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
+              .LATENCY(LATENCY)) u_exp2 (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .x(a1),
         .out_valid(out_valid), .y(y)
@@ -352,9 +331,9 @@ endmodule
 // domain_error is asserted alongside out_valid when the conditioned operand is negative; pole when it is zero. y is
 // -inf in both cases.
 module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPLIER = 0,
-                     parameter STAGE_INPUT = 0, parameter STAGE_DECODE = 0, parameter STAGE_PRODUCT = 0,
-                     parameter STAGE_PRODUCT_FINAL = 0, parameter STAGE_NORMALIZE = 0,
-                     parameter STAGE_NORMALIZE_OUTPUT = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
+                     parameter STAGE_INPUT = 0, parameter STAGE_PRODUCT = 0, parameter STAGE_PRODUCT_SQUARE = 0,
+                     parameter STAGE_PRODUCT_ODD = 0, parameter STAGE_PRODUCT_CHAIN = 0, parameter STAGE_ALIGN = 0,
+                     parameter STAGE_PRODUCT_FINAL = 0, parameter STAGE_PACK = 0, parameter STAGE_OUTPUT = 0,
                      parameter integer LATENCY = 0) (
     input  wire clk,
     input  wire rst,
@@ -370,9 +349,10 @@ module holoso_flog2#(parameter WEXP = 6, parameter WMAN = 18, parameter WMULTIPL
     wire [WFULL-1:0] a1;
     holoso_fsgnop#(.WFULL(WFULL)) u_sgnop_a (.x(a), .op(a_sgnop), .y(a1));
     zkf_log2#(.WEXP(WEXP), .WMAN(WMAN), .WMULTIPLIER(WMULTIPLIER),
-              .STAGE_INPUT(STAGE_INPUT), .STAGE_DECODE(STAGE_DECODE), .STAGE_PRODUCT(STAGE_PRODUCT),
-              .STAGE_PRODUCT_FINAL(STAGE_PRODUCT_FINAL), .STAGE_NORMALIZE(STAGE_NORMALIZE),
-              .STAGE_NORMALIZE_OUTPUT(STAGE_NORMALIZE_OUTPUT), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
+              .STAGE_INPUT(STAGE_INPUT), .STAGE_PRODUCT(STAGE_PRODUCT),
+              .STAGE_PRODUCT_SQUARE(STAGE_PRODUCT_SQUARE), .STAGE_PRODUCT_ODD(STAGE_PRODUCT_ODD),
+              .STAGE_PRODUCT_CHAIN(STAGE_PRODUCT_CHAIN), .STAGE_ALIGN(STAGE_ALIGN),
+              .STAGE_PRODUCT_FINAL(STAGE_PRODUCT_FINAL), .STAGE_PACK(STAGE_PACK), .STAGE_OUTPUT(STAGE_OUTPUT),
               .LATENCY(LATENCY)) u_log2 (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .x(a1),

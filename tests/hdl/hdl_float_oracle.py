@@ -265,13 +265,16 @@ def atan2_oracle(y_bits: int, x_bits: int) -> tuple[int, int]:
     return th.bits, mag.bits
 
 
-def sort_oracle_bits(a_bits: int, b_bits: int) -> tuple[int, int]:
-    """Return (min_bits, max_bits) for the float32 min/max of two ZKF-legal inputs."""
-    a = bits_to_f32(a_bits)
-    b = bits_to_f32(b_bits)
-    mn = np.minimum(a, b)
-    mx = np.maximum(a, b)
-    return _flush_to_zkf(f32_to_bits(mn)), _flush_to_zkf(f32_to_bits(mx))
+def order_oracle(a_bits: int, b_bits: int) -> tuple[int, int, int, int, int]:
+    """
+    Reference `(a_gt_b, a_eq_b, a_lt_b, min_bits, max_bits)` via the exact ZKF model, which is the only one that
+    orders operands equal in value and distinct in bits: the min and the max are the operands themselves, the second
+    being the min on a tie.
+    """
+    a, b = holoso.FloatValue.from_bits(_ZKF_F32, a_bits), holoso.FloatValue.from_bits(_ZKF_F32, b_bits)
+    ordering = a.compare(b)
+    low, high = holoso.FloatValue.sort(a, b)
+    return int(ordering > 0), int(ordering == 0), int(ordering < 0), low.bits, high.bits
 
 
 def cmp_oracle(a_bits: int, b_bits: int) -> tuple[int, int, int]:

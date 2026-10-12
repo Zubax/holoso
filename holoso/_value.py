@@ -133,8 +133,8 @@ class FloatValue:
     @staticmethod
     def sort(a: FloatValue, b: FloatValue) -> SortResult:
         fmt = _matching_format(a, b)
-        lo, hi = a._zval.sort(b._zval)
-        return SortResult(FloatValue.from_bits(fmt, lo.bits), FloatValue.from_bits(fmt, hi.bits))
+        ordered = a._zval.cmp(b._zval)
+        return SortResult(FloatValue.from_bits(fmt, ordered.min.bits), FloatValue.from_bits(fmt, ordered.max.bits))
 
     def round(self) -> FloatValue:
         return FloatValue.from_bits(self.fmt, self._zval.round().bits)

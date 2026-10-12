@@ -47,6 +47,7 @@ STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {"unroll100": 200, "stage_product": 2},
     {"stage_pack": 1, "stage_product": 2, "stage_normalize": 2},
     {"stage_normalize": 2, "stage_product": 3},
+    {"stage_normalize": 3},
 )
 # Besides a generic sweep, each mode runs stage combinations of its own.
 _GENERIC: tuple[dict[str, int], ...] = (
@@ -62,6 +63,7 @@ FIXED_MODE_COMBOS: dict[CordicMode, tuple[dict[str, int], ...]] = {
         {"unroll100": 50, "stage_normalize": 1, "stage_product": 1, "stage_pack": 1},
         {"stage_normalize": 1, "stage_product": 1},
         {"stage_normalize": 2, "stage_product": 1},
+        {"stage_normalize": 3},
     ),
     CordicMode.VECTORING: (
         *_GENERIC,
@@ -69,6 +71,7 @@ FIXED_MODE_COMBOS: dict[CordicMode, tuple[dict[str, int], ...]] = {
         {"stage_normalize": 2, "stage_product": 1, "stage_pack": 1},
         {"stage_normalize": 2, "stage_product": 2, "stage_pack": 2},
         {"stage_normalize": 2, "stage_product": 3, "stage_pack": 1},
+        {"stage_normalize": 3},
     ),
 }
 

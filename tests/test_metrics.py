@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from holoso import FloatFormat, FMulOptions, FSortOptions, OperatorOptions
+from holoso import FloatFormat, FMulOptions, OperatorOptions
 from holoso._eel import lower
 from holoso._lir import (
     BoolRegRef,
@@ -77,12 +77,9 @@ from foc import FocController  # noqa: E402
 
 _FMT = FloatFormat(8, 36)
 
-# Kernels the shared default operator set cannot lower take their spec-style adjustment here.
+# Kernels measured on other than the shared default operator set take their spec-style adjustment here.
 _EXTRA_OPERATORS: dict[str, Callable[[OperatorOptions], OperatorOptions]] = {
     "ekf1_stateless_fmul2": lambda ops: dataclasses.replace(ops, fmul=FMulOptions(instances=2)),
-    "imu_fusion": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
-    "finite_set_current_controller": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
-    "foc": lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
 }
 
 _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
@@ -147,7 +144,7 @@ class Metrics:
 
 
 def _mir_for(name: str) -> MirOptions:
-    """The shared default, adjusted per kernel where the default operator set cannot lower it (min/max needs fsort)."""
+    """The shared default, adjusted per kernel as `_EXTRA_OPERATORS` says."""
     if name in _EXTRA_OPERATORS:
         options = default_options(_FMT)
         options = dataclasses.replace(options, operator=_EXTRA_OPERATORS[name](options.operator))
@@ -302,7 +299,7 @@ _BASELINE: dict[str, Metrics] = {
     # active drives hold two partial maxima live where a sequential fold would hold one, at no cost in latency: the dot
     # products bound that block, not the max.
     "finite_set_current_controller": Metrics(
-        False, nreg=16, bnreg=4, steering=69, max_read_port=8, max_write_select=7,
+        False, nreg=16, bnreg=4, steering=67, max_read_port=9, max_write_select=5,
         copies=12, min_ii=157, last_pc=189, max_block_span=109,
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
@@ -311,7 +308,7 @@ _BASELINE: dict[str, Metrics] = {
     # Its two copy-only arms are threaded into the blocks that branch to them; the arm this adds to one read port is the
     # price of the cycles threading saves, which the threading rule does not weigh.
     "imu_fusion": Metrics(
-        False, nreg=42, bnreg=5, steering=159, max_read_port=24, max_write_select=9,
+        False, nreg=41, bnreg=5, steering=155, max_read_port=25, max_write_select=7,
         copies=15, min_ii=258, last_pc=435, max_block_span=133,
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's. fir's shifted-out tap is
@@ -349,7 +346,7 @@ _BASELINE: dict[str, Metrics] = {
     # toward its other arm; the steering arms this costs are the price of the four cycles threading saves. One CORDIC
     # serves both the observer's atan2 and the Park rotation, so their results share its two output lanes.
     "foc": Metrics(
-        False, nreg=29, bnreg=3, steering=92, max_read_port=14, max_write_select=4,
+        False, nreg=30, bnreg=3, steering=93, max_read_port=13, max_write_select=5,
         copies=4, min_ii=289, last_pc=336, max_block_span=226,
     ),
 }

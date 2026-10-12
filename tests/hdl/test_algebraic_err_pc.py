@@ -17,7 +17,6 @@ from holoso import (
     FILog2Options,
     FMulILog2Options,
     FMulOptions,
-    FSortOptions,
     FloatFormat,
     OperatorOptions,
     Options,
@@ -42,7 +41,6 @@ def _ops() -> MirOptions:
                 fmul_ilog2=FMulILog2Options(),
                 filog2=FILog2Options(),
                 fcmp=FCmpOptions(),
-                fsort=FSortOptions(),
             ),
             ffmt=FMT,
         )

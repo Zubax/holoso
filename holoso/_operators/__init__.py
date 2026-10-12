@@ -69,8 +69,6 @@ from ._float import (
     FRintOptions as FRintOptions,
     FRintPrimitive as FRintPrimitive,
     FSincosPrimitive as FSincosPrimitive,
-    FSortOperator as FSortOperator,
-    FSortOptions as FSortOptions,
     FSortPrimitive as FSortPrimitive,
     FSqrtPrimitive as FSqrtPrimitive,
 )

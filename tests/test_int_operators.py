@@ -501,7 +501,6 @@ def _everything_configured() -> Options:
             fcmp=holoso.FCmpOptions(),
             frint=holoso.FRintOptions(),
             ffma=holoso.FFmaOptions(),
-            fsort=holoso.FSortOptions(),
             fexp2=holoso.FExp2Options(),
             flog2=holoso.FLog2Options(),
             fcordic=holoso.FCordicOptions(),

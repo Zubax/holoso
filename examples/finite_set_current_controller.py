@@ -126,7 +126,6 @@ def main() -> None:
             fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
-            fsort=holoso.FSortOptions(),
             fcordic=holoso.FCordicOptions(),
         ),
         ffmt=float_format,

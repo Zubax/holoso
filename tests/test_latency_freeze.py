@@ -71,7 +71,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
     # the actuator split.
-    "image_agc_streamed-e8m36": (33, 150),
+    "image_agc_streamed-e8m36": (33, 134),
     "pwm-e6m18": (11, 11),
     "debouncer-e6m18": (10, 10),
     "priority_encoder-e6m18": (21, 21),
@@ -97,7 +97,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "remainder-e8m36": (33, 47),
     "octave_index-e6m18": (9, 27),
     "octave_index-e8m36": (9, 36),
-    "equal_temperament-e8m36": (40, 40),
+    "equal_temperament-e8m36": (24, 24),
     "cordic_sincos-e8m36": (104, 104),
     "polar_to-e8m36": (63, 63),
     "polar_from-e8m36": (39, 39),
@@ -113,7 +113,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "biquad-e8m36": (21, 21),
     # No sum is computed as a multiple of another, so the two covariance sums run side by side rather than in series.
     "ekf1_stateful-e8m36": (123, 123),
-    # The clamped flux update is a short fadd/fmul/fsort dataflow serialized behind the long CORDIC atan2 tail, and
+    # The clamped flux update is a short fadd/fmul/fcmp dataflow serialized behind the long CORDIC atan2 tail, and
     # the aligning first transaction is a real branch around the whole integrator -- so the shortest static path is
     # the one that adopts the prior, well under the last PC that covers the integrating arm.
     "flux_observer-e8m36": (74, 97),
@@ -122,7 +122,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     # surviving as real branches -- so the last PC covers arms the shortest static path does not.
     "foc-e8m36": (289, 336),
     # The fusion capstone: three rsqrt sites, each a root and a division on one divider (a native rsqrt operator would
-    # fold the division away too), the gate and first-sample diamonds as real branches, and the clamp on the sorter.
+    # fold the division away too), the gate and first-sample diamonds as real branches, and the clamp on the comparator.
     "imu_fusion-e8m36": (258, 435),
     "imu_fusion-e6m18": (231, 372),
 }

@@ -446,14 +446,7 @@ def staged_options(fmt: FloatFormat) -> Options:
             fcmp=FCmpOptions(stage_input=1),
             fexp2=FExp2Options(stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1),
             flog2=FLog2Options(
-                stage_input=1,
-                stage_decode=1,
-                stage_product=1,
-                stage_product_final=1,
-                stage_normalize=1,
-                stage_normalize_output=1,
-                stage_pack=1,
-                stage_output=1,
+                stage_input=1, stage_product=1, stage_align=1, stage_product_final=1, stage_pack=1, stage_output=1
             ),
             # A stage combination tests/hdl/test_fcordic.py verifies both switching modes and fixed to either.
             fcordic=FCordicOptions(stage_product=1, stage_normalize=1, stage_pack=1),

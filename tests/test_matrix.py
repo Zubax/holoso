@@ -24,12 +24,12 @@ from holoso import (
     FFmaOptions,
     FFromIntOptions,
     FloatFormat,
-    FSortOptions,
     FRintOptions,
     UnsupportedConstruct,
 )
 from holoso._eel import lower
 from holoso._mir import MirOperation, MirOptions, lower as lower_to_mir
+from holoso._operators import FSortPrimitive
 
 from ._examples import _FUSION_ACCEL_CAL, _FUSION_GYRO_CAL, ImuFusion
 from ._modelref import default_mir, default_options, mir_options, hardware_name, unit_roundoff, DEFAULT_UNROLL_MAX_TRIPS
@@ -858,7 +858,7 @@ def test_operators_and_their_spellings_map_over_arrays() -> None:
     _assert_python_matches_holoso(products, v, w)
     _assert_python_matches_holoso(powers, v)
     _assert_python_matches_holoso(reflected, m)
-    _assert_python_matches_holoso(extrema, v, w, options=_with_operators(default_options(_FMT), fsort=FSortOptions()))
+    _assert_python_matches_holoso(extrema, v, w, options=default_options(_FMT))
 
     def integers(a: Int64[np.ndarray, "3"], k: Int64[np.ndarray, "3"]) -> Int64[np.ndarray, "27"]:
         # np.bitwise_count maps over an array where the `int` method it shares a meaning with reads one scalar.
@@ -891,7 +891,7 @@ def test_an_elementwise_result_leaves_its_operands_mutable() -> None:
         u[2] = 7.0
         return c + d + e + u  # type: ignore[no-any-return]
 
-    options = _with_operators(default_options(_FMT), fsort=FSortOptions())
+    options = default_options(_FMT)
     _assert_python_matches_holoso(kernel, np.array([0.5, -1.5, 2.0]), options=options)
 
 
@@ -937,7 +937,7 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
 
 def _fusion_options(fmt: FloatFormat, ffma: bool) -> holoso.Options:
     options = default_options(fmt)
-    operator = dataclasses.replace(options.operator, fsort=holoso.FSortOptions(), ffma=FFmaOptions() if ffma else None)
+    operator = dataclasses.replace(options.operator, ffma=FFmaOptions() if ffma else None)
     return dataclasses.replace(options, operator=operator)
 
 
@@ -1195,11 +1195,14 @@ def test_float_extrema_reductions_across_spellings() -> None:
             float(v.min()),
         )
 
-    options = _with_operators(default_options(_FMT), fsort=FSortOptions())
+    options = default_options(_FMT)
     for vec in (np.array([1.5, -2.0, 8.25, 0.5]), np.array([-1.0, -1.0, -3.5, -0.25])):
         _assert_python_matches_holoso(extrema, vec, options=options)
-    # The extrema must reach the pooled sorter, not a compare/select fallback.
-    assert _mnemonic_counts(extrema, mir_options(options)).get("fsort", 0) >= 1
+    # The extrema must reach the comparator's sort, not a compare/select fallback.
+    mir = lower_to_mir(lower(extrema, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
+    assert any(
+        isinstance(node, MirOperation) and isinstance(node.primitive, FSortPrimitive) for node in mir.nodes.values()
+    )
 
 
 def test_sum_and_mean_reductions_across_spellings() -> None:

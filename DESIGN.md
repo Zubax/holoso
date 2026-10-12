@@ -232,11 +232,14 @@ resource-sharing key and the single home of every physical fact: float operators
 the external ZKF library, integer ones carry a closed-form latency. A PRIMITIVE is what a firing computes -- a
 signature, bit-exact reference arithmetic, a rendering -- and a MIR operation is one use of a primitive. A pooled
 primitive names the operator it runs on, reads its signature off that operator's ports, and runs in one MODE of it,
-selected through the operator. A mode drives one code on the operator's per-firing mode port, or is its only mode when
-it has none, and binds the RTL parameter carrying its latency, its initiation interval, the leading operand ports it
-reads, and the output ports it drives; this is how one operator serves several primitives, and why latency is per firing
-yet statically known. A mode's initiation interval exceeds its latency by at most one, which keeps an instance's busy
-window from outliving the block that issued it (see Control flow), and a firing's busy window is its own mode's.
+selected through the operator. A mode drives one code on the operator's per-firing mode port, or none where the operator
+has no such port, and binds the RTL parameter carrying its latency, its initiation interval, the leading operand ports
+it reads, and the output ports it drives; this is how one operator serves several primitives, and why latency is per
+firing yet statically known. Modes sharing a code are one operation of the module read through different output ports:
+a subtraction drives the adder's difference and its order flags where a comparison reads the flags alone, and a sort
+drives the comparator's min and max beside the flags a comparison reads. A mode's initiation interval exceeds its
+latency by at most one, which keeps an instance's busy window from outliving the block that issued it (see Control
+flow), and a firing's busy window is its own mode's.
 
 The mode condition. Where latency depends on the mode, two firings of one instance can be in flight at different
 latencies, and one issued later could land before one issued earlier. Results must leave any one output port in issue
@@ -249,8 +252,8 @@ land on disjoint output ports, error ports included; such modes interleave freel
 built. An operator whose acceptance depends on the next firing's mode is outside the model.
 
 One CORDIC thus serves sin, cos, atan2 and a fused magnitude, one digit-recurrence pipeline a quotient and a square
-root, and one integer adder sums, differences and comparisons; a kernel whose operations contend for one operator asks
-for more instances.
+root, one integer adder sums, differences and comparisons, and one float comparator relations, minima and maxima; a
+kernel whose operations contend for one operator asks for more instances.
 
 An operator may offer, per mode, the parameters elaborating it for that mode alone; they keep the mode's latency, so the
 schedule never depends on them. Which modes an instance runs is settled only once its firings are bound, so the choice
@@ -262,20 +265,22 @@ latter, so its format limits are those of every mode.
 Primitives split structurally into POOLED -- running on operators the scheduler contends for -- and INLINE -- pure
 expressions folded into a register write; the split is load-bearing for scheduling and emission. Hardware is never
 materialized where a shared firing or a sideband suffices: relations over one operand pair share a comparison firing,
-min and max over one pair share a sorter firing, a rounding and the integer conversion of the same rounding share a
-rounder firing, and negation/inversion chains fold into consumer sidebands.
+min and max over one pair share a sorting firing of the comparator, whose flags serve the relations over that pair
+too, a rounding and the integer conversion of the same rounding share a rounder firing, and negation/inversion chains
+fold into consumer sidebands. The comparison nonetheless stays a primitive of its own beside the sort: it is
+commutative under an exchange of its flags, which port assignment uses to shrink the operand read muxes, and the
+sort is not, since on a tie the min is the second operand bit for bit.
 
 Every kind of operator, float or integer, is named by exactly one field of the public options and carries its own knobs
 there; the catalogue builds each from the machine's formats on first use, so a configured operator the kernel never
 reaches costs nothing and a build whose format is out of an operator's range is only refused if it needs it. Every float
 operator is optional, so presence is a semantic choice as well as an area one (`ffma` rounds a spelled fused
-multiply-add once where the machine without it rounds the product and the sum, `fsort` enables min/max, `fdivsqrt` with
-`filog2` and `fmul_ilog2` enables the standalone magnitude, the Euclidean norms included); what a kernel cannot reach
-through the operators it was given is refused at MIR lowering. An operator serving several operations is configured as
-one, so division and the square root arrive together, as a rounding and the float-to-integer conversion do. Planning
-asks the catalogue whether the machine is configured with an operator, never which options it was given. An integer
-operator is never optional, only tuned: the vocabulary is small enough that a kernel using integers needs essentially
-all of it.
+multiply-add once where the machine without it rounds the product and the sum, `fdivsqrt` with `filog2` and `fmul_ilog2`
+enables the standalone magnitude, the Euclidean norms included); what a kernel cannot reach through the operators it was
+given is refused at MIR lowering. An operator serving several operations is configured as one, so division and the
+square root arrive together, as a rounding and the float-to-integer conversion do, and the relations with min and max.
+An integer operator is never optional, only tuned: the vocabulary is small enough that a kernel using integers needs
+essentially all of it.
 
 ## Front-end
 
@@ -534,12 +539,13 @@ shifter in the mode of its direction. Addition, subtraction, a negation as the s
 take the adder, each in its own mode. A power-of-two scaling is an ordinary multiplication by that power, railing where
 a shift would drop what leaves the word, and one whose factor the word cannot hold is refused.
 
-Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one pooled sorter transaction,
+Some lowerings are context-sensitive, depending on the nearby operations -- min/max in one comparator transaction,
 sin and cos of one angle computed by one CORDIC rotation, a rounding and its integer conversion in one rounder
-transaction, an integer comparison on the flags of a subtraction of the same two operands -- matched at MIR because
-this is the first layer aware of hardware semantics; operations selected onto distinct outputs of one transaction become
-a single firing when the LIR is built. Some semantic operators lower into combinations of primitives depending on
-availability and context (e.g. a two-legged magnitude via the CORDIC's vectoring).
+transaction, a comparison on the flags of an operation that already orders the same two operands (an integer
+subtraction, a float min or max) -- matched at MIR because this is the first layer aware of hardware semantics;
+operations selected onto distinct outputs of one transaction become a single firing when the LIR is built.
+Some semantic operators lower into combinations of primitives depending on availability and context
+(e.g. a two-legged magnitude via the CORDIC's vectoring).
 
 The CFG is scheduled per block and register-allocated over the whole CFG, the allocator splitting the nodes between the
 wide data bank and the boolean bank structurally, on scalar width, so the wide bank is neutral storage rather than a
@@ -798,9 +804,9 @@ Adopted (lossless, f_max-neutral):
 Resource sharing in Lattice Diamond's LSE synthesizer, which folds mutually exclusive arithmetic onto one adder behind
 operand multiplexers, is adopted at a price that the keep hook (see Backend) contains. LSE maps a ROM into block RAM
 only with sharing enabled, whatever the coding form or attribute, and then needs no ROM-style setting. Without sharing
-the exp2/log2 lookup tables stay in LUT logic, which at a 36-bit significand is three times the whole machine (18.8
-thousand LUTs against 6.0 thousand and twelve block RAMs). The microcode ROM moves to block RAM too, saving its LUTs; a
-path from it into an operator then calls for that operator's input stage. The price is the longer path through each
+the exp2/log2 lookup tables stay in LUT logic, which at a 36-bit significand is many times the whole machine.
+The microcode ROM moves to block RAM too, saving its LUTs;
+a path from it into an operator then calls for that operator's input stage. The price is the longer path through each
 shared adder, and the hook pins the nets where that lost closures: the integer divider's floor correction (100 MHz
 without the hook against 115 with it, at 44 bits) and the float divider elaborated for the root alone (81 MHz against
 135 at a 36-bit significand). The hook also pins a net of the float library's power-of-two scaler, costing that operator
@@ -815,7 +821,7 @@ for as many flip-flops, with f_max gains confined to small kernels far above tar
 it nothing moves. The price stays 2.0.
 
 Operator replication (`instances`) trades area for latency and pays in mux arms; it is not an area loss: a second
-multiplier shortens the EKF transaction by about a seventh for an eighth more LUTs under the annealer's binding.
+multiplier shortens the EKF transaction for a few more LUTs under the annealer's binding.
 
 Pinning the microcode ROM under LSE resource sharing was measured null. Over ten kernels, leaving the ROM in block RAM,
 forcing it into logic through its attribute hook (which LSE honors only in part) and marking its routing register to be

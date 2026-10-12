@@ -12,6 +12,7 @@ from typing import ClassVar, Self
 
 import zkf
 
+from .._util import Relation
 from .._value import FloatValue, IntValue, RoundMode, ScalarValue
 from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType
 from ._common import (
@@ -316,22 +317,44 @@ class FMulILog2Primitive(PooledPrimitive):
 
 @dataclass(frozen=True, slots=True)
 class FCmpOptions(BaseOperatorOptions):
-    """The zkf core is combinational, hence the nonzero default: an operator needs latency >= 1."""
+    """
+    The comparator runs every float relation, min and max, one firing per cycle, so a kernel issuing several of them at
+    once shortens by raising `instances`. The zkf core is combinational, hence the nonzero default: an operator needs
+    latency >= 1.
+    """
 
     stage_input: int = 0
     stage_output: int = 1
 
 
 class FCmpOperator(HardwareOperator):
+    """
+    The comparator, which orders its operands on the flags and answers them sorted beside. A comparison reads the
+    flags alone; a sort reads the sorted pair and the flags, so a comparison of the operands a min or max already
+    orders taps that firing. Firings of both contend for the one comparator.
+    """
+
     __slots__ = ()
     name = "fcmp"
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FCmpOptions) -> Self:
         model = zkf.CmpModel(_format(fmt), **_knobs(options))
+        interval = _timing(cls.name, model).initiation_interval
         flag = BoolType()
-        outputs = (OperatorPort("a_gt_b", flag), OperatorPort("a_eq_b", flag), OperatorPort("a_lt_b", flag))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b"), outputs)
+        flags = (OperatorPort("a_gt_b", flag), OperatorPort("a_eq_b", flag), OperatorPort("a_lt_b", flag))
+        comparison = OperatorMode(None, "LATENCY", interval, 2, (0, 1, 2))
+        sorting = OperatorMode(None, "LATENCY", interval, 2, (3, 4, 0, 1, 2))
+        outputs = (*flags, *_floats(fmt, "min", "max"))
+        return cls(model.params, options.instances, _floats(fmt, "a", "b"), outputs, (comparison, sorting))
+
+    @property
+    def comparison(self) -> OperatorMode:
+        return self.modes[0]
+
+    @property
+    def sorting(self) -> OperatorMode:
+        return self.modes[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,10 +363,53 @@ class FCmpPrimitive(FloatPrimitive, ComparatorPrimitive):
 
     operator: FCmpOperator
 
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.comparison
+
     def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
         a, b = self._validated_operands(operands)
         ordering = a.compare(b)
         return ordering > 0, ordering == 0, ordering < 0
+
+
+@dataclass(frozen=True, slots=True)
+class FSortPrimitive(FloatPrimitive):
+    """
+    The ascending `(min, max)` of the sign-conditioned operands, `min(a,b)` result 0 and `max(a,b)` result 1, so a min
+    and a max over one operand pair fuse into a single firing. The order flags of the operands leave beside them, so a
+    comparison of the same two operands taps this firing instead of taking one of its own.
+    NOT commutative: min/max preserve the selected operand's exact bits, and on a tie the comparator answers the second
+    operand as the min and the first as the max, so swapping operands can flip the sign of a zero result (a -0
+    conditioned from a zero magnitude).
+    """
+
+    operator: FCmpOperator
+    output_labels: ClassVar[tuple[str, ...]] = ("min", "max")
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.sorting
+
+    def flag_of(self, relation: Relation) -> tuple[int, BoolInversion]:
+        """The result carrying `relation`, and the inversion reading it: the comparison's tap, found by its port."""
+        tap, inversion = FCmpPrimitive.tap_of(relation)
+        return self.mode.outputs.index(self.operator.comparison.outputs[tap]), inversion
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue | bool, ...]:
+        a, b = self._validated_operands(operands)
+        ordering = a.compare(b)
+        return *FloatValue.sort(a, b), ordering > 0, ordering == 0, ordering < 0
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"sort({a},{b})"
+
+    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
+        if inversion is None:
+            return super().render_output(result, inversion, *operands)
+        tap = self.operator.comparison.outputs.index(self.mode.outputs[result])
+        return FCmpPrimitive(self.operator).render_output(tap, inversion, *operands)
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,48 +529,18 @@ class FFmaPrimitive(FloatPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class FSortOptions(BaseOperatorOptions):
-    stage_input: int = 0
-
-
-class FSortOperator(HardwareOperator):
-    __slots__ = ()
-    name = "fsort"
-
-    @classmethod
-    def build(cls, fmt: FloatFormat, options: FSortOptions) -> Self:
-        model = zkf.SortModel(_format(fmt), **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b"), _floats(fmt, "min", "max"))
-
-
-@dataclass(frozen=True, slots=True)
-class FSortPrimitive(FloatPrimitive):
-    """
-    A 2-element float sorter emitting the ascending `(min, max)` of its sign-conditioned operands. `min(a,b)` is
-    result 0 and `max(a,b)` result 1; one instance serves both, and a min and a max over one operand pair fuse into a
-    single firing (as the comparator's relations do).
-    NOT commutative: min/max preserve the selected operand's exact bits, and on a tie the sorter answers the second
-    operand as the min and the first as the max, so swapping operands can flip the sign of a zero result (a -0
-    conditioned from a zero magnitude).
-    """
-
-    operator: FSortOperator
-    output_labels: ClassVar[tuple[str, ...]] = ("min", "max")
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands)
-        return FloatValue.sort(a, b)
-
-    def render(self, *operands: str) -> str:
-        a, b = operands
-        return f"fsort({a},{b})"
-
-
-@dataclass(frozen=True, slots=True)
 class FExp2Options(BaseOperatorOptions):
+    """
+    The four product knobs stage the parallel products of the table kernel, whose latency is that of its longest
+    branch: a stage on a shorter one costs no cycle. `zkf_exp2.v` says which product each stages.
+    """
+
     stage_input: int = 0
     stage_reduce: int = 0
     stage_product: int = 0
+    stage_product_square: int = 0
+    stage_product_odd: int = 0  # takes effect from a 27-bit significand up
+    stage_product_chain: int = 0
     stage_pack: int = 0
     stage_output: int = 0
 
@@ -534,12 +570,15 @@ class FExp2Primitive(FloatPrimitive):
 
 @dataclass(frozen=True, slots=True)
 class FLog2Options(BaseOperatorOptions):
+    """The product knobs are those of `FExp2Options`; `stage_product_final` stages the multiply after the kernel."""
+
     stage_input: int = 0
-    stage_decode: int = 0
     stage_product: int = 0
+    stage_product_square: int = 0
+    stage_product_odd: int = 0  # takes effect from a 27-bit significand up
+    stage_product_chain: int = 0
+    stage_align: int = 0
     stage_product_final: int = 0
-    stage_normalize: int = 0
-    stage_normalize_output: int = 0
     stage_pack: int = 0
     stage_output: int = 0
 
@@ -609,9 +648,12 @@ class FCordicOperator(HardwareOperator):
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FCordicOptions, wmultiplier: int) -> Self:
-        model = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
+        knobs = _knobs(options)
+        model = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, **knobs)
         timing = model.timing
         assert not isinstance(timing, zkf.Timing) and set(timing) == set(CordicMode)
+        # The wrapper carries the knobs the options offer; one the core has beside them stays at the core's default.
+        unoffered = {f.name.upper() for f in fields(model)} - {name.upper() for name in knobs} - {"WMULTIPLIER", "MODE"}
         modes: list[OperatorMode] = []
         single_mode_params: dict[OperatorMode, dict[str, int]] = {}
         for mode in CordicMode:
@@ -620,11 +662,12 @@ class FCordicOperator(HardwareOperator):
             interval = timing[mode].initiation_interval
             operator_mode = OperatorMode(int(mode), latency_param, interval, mode.operand_count, (0, 1))
             modes.append(operator_mode)
-            fixed = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, mode=int(mode), **_knobs(options))
+            fixed = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, mode=int(mode), **knobs)
             assert fixed.timing == timing[mode], "a fixed mode must keep its timing, which the schedule was built on"
-            single_mode_params[operator_mode] = fixed.params
+            single_mode_params[operator_mode] = {k: v for k, v in fixed.params.items() if k not in unoffered}
+        params = {k: v for k, v in model.params.items() if k not in unoffered}
         ports = _floats(fmt, "a", "b"), _floats(fmt, "r0", "r1")
-        return cls(model.params, options.instances, *ports, tuple(modes), single_mode_params)
+        return cls(params, options.instances, *ports, tuple(modes), single_mode_params)
 
     def mode_of_cordic(self, mode: CordicMode) -> OperatorMode:
         return self.mode_of(int(mode))

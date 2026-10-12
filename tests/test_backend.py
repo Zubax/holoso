@@ -25,7 +25,6 @@ from holoso import (
     FloatValue,
     FMulILog2Options,
     FMulOptions,
-    FSortOptions,
     FRintOptions,
     IAbssOptions,
     IAddsOptions,
@@ -42,13 +41,13 @@ from holoso import (
 )
 from holoso._operators import (
     CordicMode,
+    FCmpOperator,
     FCordicOperator,
     FExp2Operator,
     FFromIntOperator,
     FILog2Operator,
     FLog2Operator,
     FMulILog2Operator,
-    FSortOperator,
     FSortPrimitive,
     FDivsqrtOperator,
     FRintOperator,
@@ -639,14 +638,14 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
 
     fmt = FloatFormat(6, 18)
     op = PooledScheduledOp(
-        primitive=FSortPrimitive(FSortOperator.build(fmt, FSortOptions())),
+        primitive=FSortPrimitive(FCmpOperator.build(fmt, FCmpOptions())),
         instance=0,
         operands=[WideOperand(RegRef(0), FloatSignControl()), WideOperand(RegRef(1), FloatSignControl())],
         writes=[PortWrite(0, RegRef(2), None), PortWrite(1, RegRef(3), None)],
         issue_cycle=1,
     )
     lir = Lir(
-        module_name="fsort_probe",
+        module_name="sort_probe",
         instances=[op.inst],
         wide_consts=[],
         float_format=fmt,
@@ -664,16 +663,16 @@ def test_wide_multi_output_operator_elaborates_with_per_port_lanes(tmp_path: Pat
         bool_state_slots=[],
     )
     verilog = generate(lir).verilog
-    for q in (0, 1):
+    for q in (3, 4):
         assert f"_y{q}_q" not in verilog, "the per-port result register must not be emitted"
-        assert re.search(rf"wire\s+\[WFLT-1:0\]\s+s_fsort_0_y{q}\s*;", verilog), "per-port combinational result wire"
+        assert re.search(rf"wire\s+\[WFLT-1:0\]\s+s_fcmp_0_y{q}\s*;", verilog), "per-port combinational result wire"
         assert re.search(
-            rf"regs\[\d+\] <= s_fsort_0_y{q}\b", verilog
+            rf"regs\[\d+\] <= s_fcmp_0_y{q}\b", verilog
         ), "the wide write must read the combinational output wire directly"
     assert ".min(" in verilog and ".max(" in verilog
     if shutil.which("iverilog") is None:
         pytest.skip("iverilog not installed")
-    _elaborate("fsort_probe", verilog, tmp_path)
+    _elaborate("sort_probe", verilog, tmp_path)
 
 
 def _and_gate(a: bool, b: bool, /) -> bool:
@@ -728,8 +727,7 @@ def test_a_boundary_install_coexisting_with_opcode_writes_elaborates(bank: str, 
 _INT_OPTIONS = Options(
     OperatorOptions(
         fadd=FAddOptions(),
-        fcmp=FCmpOptions(),
-        fsort=FSortOptions(),  # a min alone leaves the max lane untapped
+        fcmp=FCmpOptions(),  # a min alone leaves the max lane untapped
         imuls=IMulsOptions(),
         ffromint=FFromIntOptions(),
         frint=FRintOptions(),
@@ -840,8 +838,8 @@ def test_only_a_float_port_is_allocated_a_microcode_sign_field(_integer_result: 
     assert set(re.findall(r"\buc_\w+?sgn\b", _integer_result.verilog_output.verilog)) == {
         "uc_fadd_0_asgn",
         "uc_fadd_0_bsgn",
-        "uc_fsort_0_asgn",
-        "uc_fsort_0_bsgn",
+        "uc_fcmp_0_asgn",
+        "uc_fcmp_0_bsgn",
         "uc_frint_0_asgn",
     }
 

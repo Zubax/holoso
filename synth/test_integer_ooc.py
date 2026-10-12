@@ -273,7 +273,7 @@ _MUL_ILOG2_TARGETS = (
         )
     ),
     _MulILog2Target(8, 36, 44, FlowId.YOSYS_ECP5, 100.0),
-    _MulILog2Target(8, 36, 44, FlowId.DIAMOND_ECP5, 100.0, stage_decode=1),
+    _MulILog2Target(8, 36, 44, FlowId.DIAMOND_ECP5, 100.0),
     _MulILog2Target(8, 36, 44, FlowId.VIVADO_ARTIX7, 150.0),
 )
 

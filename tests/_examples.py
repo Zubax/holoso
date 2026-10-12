@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso import FFromIntOptions, FloatFormat, FSortOptions, FRintOptions, IAddsOptions, OperatorOptions, Options
+from holoso import FFromIntOptions, FloatFormat, FRintOptions, IAddsOptions, OperatorOptions, Options
 from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -1221,7 +1221,7 @@ SPECS = [
         edge_values=(0, 1, 128, PIXEL_MAX, -1, 1 << 42),
         # The second adder is the example's own: a beat's statistics are dozens of independent sums and orders.
         operators=lambda ops: dataclasses.replace(
-            ops, fsort=FSortOptions(), ffromint=FFromIntOptions(), frint=FRintOptions(), iadds=IAddsOptions(instances=2)
+            ops, ffromint=FFromIntOptions(), frint=FRintOptions(), iadds=IAddsOptions(instances=2)
         ),
     ),
     ExampleSpec(
@@ -1606,7 +1606,6 @@ SPECS = [
         },
         edge_values=_WIDE_EDGES,
         formats=(_FMT, FloatFormat(6, 18)),  # the deep datapath, and the narrow one the synth matrix ships
-        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
         # The evaluator answers each of the three norms as the correctly rounded magnitude where the host reaches
         # numpy's `sqrt(dot)`, so each carries an ulp the two sides do not share and the recurrence accumulates
         # them. Measured at 20 ulps over this sequence; four times that, as `foc` below is set.
@@ -1655,7 +1654,6 @@ SPECS = [
         # Finite magnitudes only: an infinity edge would send inf - inf through the zero-mean pipeline, whose
         # defined +0 answer raises the error sideband the generic bench asserts silent.
         edge_values=(0.0, 1.0, -1.0, 100.0, -100.0, 1e4, -1e4),
-        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
     ExampleSpec(
         name="flux_observer",  # stateful record/2-vector I/O driven through its decomposed scalar port lanes
@@ -1683,7 +1681,6 @@ SPECS = [
             "params_flux_linkage": (0.0, 1e-3, _FLUX_LINKAGE, 1.0),
         },
         edge_values=_WIDE_EDGES,
-        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
     ExampleSpec(
         name="foc",  # the capstone: the observer above embedded in a full sensorless current controller
@@ -1736,7 +1733,6 @@ SPECS = [
             "v_dc": (6.0, 12.0, 24.0, 48.0),
         },
         edge_values=(0.0, 5.0, -5.0, 40.0, -40.0),  # the current lanes: quiet, nominal, and both saturating rails
-        operators=lambda ops: dataclasses.replace(ops, fsort=FSortOptions()),
     ),
     ExampleSpec(
         name="fixed_point_pi",

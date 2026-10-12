@@ -119,7 +119,6 @@ def main() -> None:
             fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
-            fsort=holoso.FSortOptions(),
             fexp2=holoso.FExp2Options(),
             flog2=holoso.FLog2Options(),
             ffromint=holoso.FFromIntOptions(),

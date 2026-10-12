@@ -138,7 +138,7 @@ from .._type import (
     ScalarType,
 )
 from ._ir import Mir, MirBuilder, MirOperation
-from ._difference import plan_comparison_fusions
+from ._ordering import plan_comparison_fusions
 from ._hypot import count as hypot_count, expand_unfused, plan_magnitude_fusions
 from ._options import MirOptions
 from ._fma import expand_fmas
@@ -298,7 +298,7 @@ def _is_sideband(node: Operation) -> bool:
 class _FamilyLowerer(ABC):
     """
     One per scalar family, owning every operation whose RESULT is of that family. Every operand folds its own
-    family's sideband chain into its conditioner, whichever family reads it: `min(-a, b)` feeds the sorter `-a`,
+    family's sideband chain into its conditioner, whichever family reads it: `min(-a, b)` feeds the comparator `-a`,
     `band(~a, b)` is one gate, and an integer operand folds nothing.
     """
 
@@ -379,7 +379,7 @@ class _FloatLowerer(_FamilyLowerer):
                 return self.emit(FAtan2Primitive(ops.fcordic), operands)
             case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=operands):
                 # min taps the low output port, max the high one; a min and a max over one pair fuse into one firing.
-                return self.emit(FSortPrimitive(ops.fsort), operands, result=int(isinstance(semantic, FloatMax)))
+                return self.emit(FSortPrimitive(ops.fcmp), operands, result=int(isinstance(semantic, FloatMax)))
             case Operation(operator=FloatFma(), operands=operands):
                 return self.emit(FFmaPrimitive(ops.ffma), operands)
             case Operation(operator=BoolToFloat(), operands=operands):
@@ -484,14 +484,18 @@ class _BoolLowerer(_FamilyLowerer):
     def lower_operation(self, old_id: ValueId, node: Operation) -> ValueId:
         fused = self.context.fused_comparisons.get(old_id)
         if fused is not None:
-            # The subtraction's own operands make the two collapse into one adder firing, whose flags order them; a
-            # comparison reading them the other way round asks for the mirrored relation.
-            subtraction = self.hir.nodes[fused.subtraction]
-            assert isinstance(subtraction, Operation) and isinstance(node.operator, IntComparison)
+            # The host's own operands make the two collapse into one firing, whose flags order them; a comparison
+            # reading them the other way round asks for the mirrored relation.
+            host = self.hir.nodes[fused.host]
+            assert isinstance(host, Operation) and isinstance(node.operator, FloatComparison | IntComparison)
             relation = node.operator.relation.mirror if fused.mirrored else node.operator.relation
-            subtractor = ISubPrimitive(self.ops.iadds)
-            port, inversion = subtractor.flag_of(relation)
-            return self.emit(subtractor, subtraction.operands, result=port, output_inversion=inversion)
+            primitive: FSortPrimitive | ISubPrimitive = (
+                FSortPrimitive(self.ops.fcmp)
+                if isinstance(node.operator, FloatComparison)
+                else ISubPrimitive(self.ops.iadds)
+            )
+            port, inversion = primitive.flag_of(relation)
+            return self.emit(primitive, host.operands, result=port, output_inversion=inversion)
         match node:
             case Operation(operator=FloatComparison() | IntComparison() as semantic, operands=operands):
                 # A relation is one comparator output port with an optional inversion (both orderings are total and

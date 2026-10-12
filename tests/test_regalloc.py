@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import holoso._lir._regalloc as regalloc_module
-from holoso import FAddOptions, FCmpOptions, FDivsqrtOptions, FloatFormat, FMulOptions, FSortOptions
+from holoso import FAddOptions, FCmpOptions, FDivsqrtOptions, FloatFormat, FMulOptions
 from holoso._eel import lower
 from holoso._lir import (
     BoolOperand,
@@ -376,7 +376,7 @@ def _merged_inline_arms(lir: Lir) -> tuple[int, int]:
     return len(events), len({(e.dst, e.source) for e in events})
 
 
-def _sorter_witness(a: float, b: float, c: float) -> float:
+def _sort_witness(a: float, b: float, c: float) -> float:
     x = min(a, b)
     y = max(x, c)
     z = min(y, a)
@@ -384,13 +384,12 @@ def _sorter_witness(a: float, b: float, c: float) -> float:
 
 
 @pytest.mark.parametrize("instances", [1, 2, 3])
-def test_the_sorter_witness_exercises_its_merge(instances: int) -> None:
-    # The lane-keying witness: two firings of the sorter chain land the min and the max lane in one register, which an
+def test_the_sort_witness_exercises_its_merge(instances: int) -> None:
+    # The lane-keying witness: two firings of the min/max chain land the min and the max lane in one register, which an
     # instance-keyed writer count would price as one writer.
     options = default_options(_FMT)
-    options = replace(options, operator=replace(options.operator, fsort=FSortOptions()))
     options = with_instances(options, instances)
-    lir = build_lir(lower_to_mir(lower(_sorter_witness, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "sorter")
+    lir = build_lir(lower_to_mir(lower(_sort_witness, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "sort")
     lanes = {
         dst: {(source.inst, source.port) for source in sources if isinstance(source, OpWriteSource)}
         for dst, sources in write_sources_per_register(write_events(lir)).items()

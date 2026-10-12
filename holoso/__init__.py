@@ -48,7 +48,6 @@ from ._operators import (
     FMulILog2Options as FMulILog2Options,
     FMulOptions as FMulOptions,
     FRintOptions as FRintOptions,
-    FSortOptions as FSortOptions,
     IAbssOptions as IAbssOptions,
     IAddsOptions as IAddsOptions,
     IDivsOptions as IDivsOptions,
