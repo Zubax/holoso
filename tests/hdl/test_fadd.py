@@ -103,7 +103,7 @@ async def holoso_fadd_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0, "out_valid asserted while idle after reset"
 
 
-# Base + every knob alone + the closure-used counts above one (stage_input=2, stage_normalize=2) + all-on.
+# Base + every knob alone + counts above one (stage_input=2, stage_normalize=2) + all-on.
 STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {},
     {"stage_input": 1},

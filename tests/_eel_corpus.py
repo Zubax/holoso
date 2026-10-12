@@ -190,11 +190,11 @@ def int_corpus_options() -> holoso.Options:
         holoso.OperatorOptions(
             fadd=holoso.FAddOptions(),
             fmul=holoso.FMulOptions(),
-            fdiv=holoso.FDivOptions(),
+            fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
             ffromint=holoso.FFromIntOptions(),
-            ftoint=holoso.FToIntOptions(),
+            frint=holoso.FRintOptions(),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=23),
         wint_min=34,

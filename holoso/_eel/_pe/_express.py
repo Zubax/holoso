@@ -108,9 +108,10 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
                 )
             reject(origin, f"a sequence has no supported attribute {attr!r}")
         case StaticScalar() | ResidualScalar():
-            shaped = _shape_attr((), attr)
-            if shaped is not None:
-                return shaped
+            if attr == "ndim":
+                return StaticScalar.of(0)
+            if attr == "shape":
+                return SequenceValue((), Allocation())
             found = resolve(getattr(host_type(base_value.stype), attr, None))
             if isinstance(found, Spelling):
                 return BoundMethod(base_value, attr, found)
@@ -133,20 +134,13 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
             raise AssertionError(base_value)
 
 
-def _shape_attr(shape: tuple[int, ...], attr: str) -> Value | None:
-    if attr == "ndim":
-        return StaticScalar.of(len(shape))
-    if attr == "shape":
-        return SequenceValue(tuple(StaticScalar.of(dim) for dim in shape), Allocation())
-    return None
-
-
 def _tensor_attr(
     interp: Interpreter, origin: Origin, tensor: TensorValue, attr: str, frame: Frame, sink: Sink
 ) -> Value:
-    shaped = _shape_attr(tensor.shape, attr)
-    if shaped is not None:
-        return shaped
+    if attr == "ndim":
+        return StaticScalar.of(len(tensor.shape))
+    if attr == "shape":
+        return SequenceValue(tuple(StaticScalar.of(dim) for dim in tensor.shape), Allocation())
     descriptor = getattr(np.ndarray, attr, None)
     found = resolve(descriptor)
     if isinstance(found, Array) and inspect.isdatadescriptor(descriptor):

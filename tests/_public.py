@@ -31,3 +31,11 @@ def strip_inline_prelude(verilog: str) -> str:
     ends = [i for i, line in enumerate(lines) if _PRELUDE_END in line]
     assert len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]
     return "".join(lines[: begins[0]] + lines[ends[0] + 1 :])
+
+
+def divsqrt_modes(verilog: str) -> list[int]:
+    """
+    The `MODE` each `holoso_fdivsqrt` instance of an emitted module is elaborated for: 0 divides only, 1 takes roots
+    only, 2 does both. One operator serves both operations, so its mere presence says nothing of which a kernel kept.
+    """
+    return [int(mode) for mode in re.findall(r"holoso_fdivsqrt #\([^;]*?\.MODE\((\d)\)", verilog)]

@@ -10,6 +10,7 @@ row and the on-prem Diamond/Vivado rows skip cleanly, while `test_some_target_fl
 tool is present at all, so a fully-missing toolchain cannot pass green.
 """
 
+import re
 import shutil
 
 import pytest
@@ -39,7 +40,7 @@ _BY_COST = sorted(TARGETS, key=lambda t: t.ops.ffmt.wman, reverse=True)
 
 @pytest.mark.parametrize("target", _BY_COST, ids=lambda t: t.label)
 def test_target_closes_timing(target: SynthTarget) -> None:
-    flow = make_flow(target.flow, target.target_frequency_MHz)
+    flow = make_flow(target.flow, target.target_frequency_MHz, target.device_class)
     if not flow.available():
         pytest.skip(f"{target.flow.value} tool not available")
 
@@ -57,3 +58,12 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         # machine, DESIGN.md's fabric-area exploration).
         block_rams = report.resources["RAMB36/FIFO*"].used + report.resources["RAMB18"].used
         assert block_rams >= 1, f"{target.label}: the microcode ROM is not in block RAM"
+    if target.flow == FlowId.DIAMOND_ECP5:
+        # LSE maps a lookup table into block RAM only with resource sharing enabled; left in LUT logic the tables
+        # still close at a narrow format, so timing alone would not notice the flow losing them (DESIGN.md's
+        # fabric-area exploration). A total cannot tell a table from the microcode ROM, hence the owners. This sees a
+        # table that is not mapped at all, not one mapped in part.
+        tables = len(re.findall(r"^holoso_f(?:exp2|log2) #\(", result.verilog_output.verilog, re.MULTILINE))
+        owners = report.block_ram_owners.items()
+        owning = [path for path, n in owners if n and re.search(r"/u_f(?:exp2|log2)_\d+$", path)]
+        assert len(owning) == tables, f"{target.label}: a lookup table is not in block RAM: {owning}"

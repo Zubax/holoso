@@ -6,20 +6,23 @@ native Verilog over the whole wide bank, sound because an integer fills that reg
 
 from abc import ABC
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import ClassVar, Self
 
 from .._value import IntValue, ScalarValue
 from .._type import BoolType, IntFormat, IntType
+from .._util import Relation
 from ._common import (
     BaseOperatorOptions,
     BoolInversion,
     ComparatorPrimitive,
     HardwareOperator,
     InlinePrimitive,
+    ModePort,
+    OperatorMode,
     OperatorPort,
     PooledPrimitive,
     ScalarSignature,
-    comparator_ports,
 )
 
 
@@ -46,7 +49,7 @@ def _int_operator[O: HardwareOperator](
 class IntPrimitive(PooledPrimitive, ABC):
     """
     The dual of FloatPrimitive. Saturation is what the integer type does at its extremes rather than a failure,
-    and HIR marks the saturating operations speculatable, so the `saturated` sideband every module raises stays
+    and HIR marks the saturating operations speculatable, so the `saturated` sideband a saturating module raises stays
     unconnected and unmodeled -- an if-converted arm that saturates must not raise the machine's error flag.
     """
 
@@ -59,22 +62,75 @@ class IntPrimitive(PooledPrimitive, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class IAddOptions(BaseOperatorOptions): ...
+class IAddsOptions(BaseOperatorOptions):
+    """
+    The adder also runs every integer subtraction, negation and comparison, one firing per cycle, so a kernel issuing
+    several of them at once shortens by raising `instances`.
+    """
+
+    fast: bool = False
+    """Trades area for shorter combinational paths."""
+
+
+class AddMode(IntEnum):
+    """The value driven on `sub`, which is also the `MODE` elaborating the adder for that operation alone."""
+
+    ADD = 0
+    SUB = 1
 
 
 class IAddOperator(HardwareOperator):
+    """
+    The saturating adder, which also subtracts, chosen per firing on `sub`, at one latency. A subtraction orders `a`
+    against `b` on the flags as a side effect, so its mode drives them beside the difference, and a comparison is the
+    same code read through the flags alone. Firings of all three contend for the one adder.
+    """
+
     __slots__ = ()
     name = "iadds"
+    mode_port = ModePort("sub", 1)
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IAddOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("a", "b"), ("y",))
+    def build(cls, fmt: IntFormat, options: IAddsOptions) -> Self:
+        ints, flag = IntType(fmt), BoolType()
+        operands = (OperatorPort("a", ints), OperatorPort("b", ints))
+        outputs = (
+            OperatorPort("y", ints),
+            OperatorPort("a_gt_b", flag),
+            OperatorPort("a_eq_b", flag),
+            OperatorPort("a_lt_b", flag),
+        )
+        add = OperatorMode(int(AddMode.ADD), "LATENCY", 1, 2, (0,))
+        subtract = OperatorMode(int(AddMode.SUB), "LATENCY", 1, 2, (0, 1, 2, 3))
+        compare = OperatorMode(int(AddMode.SUB), "LATENCY", 1, 2, (1, 2, 3))
+        fast = int(options.fast)
+        adding = {"W": fmt.width, "MODE": int(AddMode.ADD), "FAST": fast, "LATENCY": 2}
+        subtracting = {"W": fmt.width, "MODE": int(AddMode.SUB), "FAST": fast, "LATENCY": 2}
+        single_mode_params = {add: adding, subtract: subtracting, compare: subtracting}
+        params = {"W": fmt.width, "MODE": 2, "FAST": fast, "LATENCY": 2}  # MODE=2 takes `sub` per firing
+        return cls(params, options.instances, operands, outputs, (add, subtract, compare), single_mode_params)
+
+    @property
+    def addition(self) -> OperatorMode:
+        return self.modes[0]
+
+    @property
+    def subtraction(self) -> OperatorMode:
+        return self.modes[1]
+
+    @property
+    def comparison(self) -> OperatorMode:
+        return self.modes[2]
 
 
 @dataclass(frozen=True, slots=True)
 class IAddPrimitive(IntPrimitive):
     operator: IAddOperator
     swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.addition
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
@@ -86,35 +142,58 @@ class IAddPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class ISubOptions(BaseOperatorOptions): ...
-
-
-class ISubOperator(HardwareOperator):
-    __slots__ = ()
-    name = "isubs"
-
-    @classmethod
-    def build(cls, fmt: IntFormat, options: ISubOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("a", "b"), ("y",))
-
-
-@dataclass(frozen=True, slots=True)
 class ISubPrimitive(IntPrimitive):
-    """Also serves negation as `0-x`: there is no negation module, and this one saturates `-MIN` correctly."""
+    """
+    Also serves negation as `0-x`: there is no negation module, and the subtraction saturates `-MIN` correctly. The
+    order flags of the operands leave beside the difference, so a comparison of the same two operands taps this firing
+    instead of taking one of its own.
+    """
 
-    operator: ISubOperator
+    operator: IAddOperator
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.subtraction
+
+    def flag_of(self, relation: Relation) -> tuple[int, BoolInversion]:
+        """The result carrying `relation`, and the inversion reading it: the comparison's tap, found by its port."""
+        tap, inversion = ICmpPrimitive.tap_of(relation)
+        return self.mode.outputs.index(self.operator.comparison.outputs[tap]), inversion
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue | bool, ...]:
         a, b = self._validated_operands(operands)
-        return (a - b,)
+        ordering = a.compare(b)
+        return a - b, ordering > 0, ordering == 0, ordering < 0
 
     def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}-{b}"
 
+    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
+        if inversion is None:
+            return self.render(*operands)
+        tap = self.operator.comparison.outputs.index(self.mode.outputs[result])
+        return ICmpPrimitive(self.operator).render_output(tap, inversion, *operands)
+
 
 @dataclass(frozen=True, slots=True)
-class IMulOptions(BaseOperatorOptions):
+class ICmpPrimitive(IntPrimitive, ComparatorPrimitive):
+    """Two's complement is totally ordered."""
+
+    operator: IAddOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.comparison
+
+    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+        a, b = self._validated_operands(operands)
+        ordering = a.compare(b)
+        return ordering > 0, ordering == 0, ordering < 0
+
+
+@dataclass(frozen=True, slots=True)
+class IMulsOptions(BaseOperatorOptions):
     stage_product: int = 0
     """Splitting the product is useful when the width exceeds the DSP slice input. See Verilog holoso_imuls."""
 
@@ -124,7 +203,7 @@ class IMulOperator(HardwareOperator):
     name = "imuls"
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IMulOptions) -> Self:
+    def build(cls, fmt: IntFormat, options: IMulsOptions) -> Self:
         if not 0 <= options.stage_product <= 4:
             raise ValueError(f"imuls stage_product must be in 0..4, got {options.stage_product}")
         knobs = {"STAGE_PRODUCT": options.stage_product}
@@ -146,7 +225,7 @@ class IMulPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IDivOptions(BaseOperatorOptions): ...
+class IDivsOptions(BaseOperatorOptions): ...
 
 
 class IDivOperator(HardwareOperator):
@@ -155,7 +234,7 @@ class IDivOperator(HardwareOperator):
     error_ports = ("div0",)
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IDivOptions) -> Self:
+    def build(cls, fmt: IntFormat, options: IDivsOptions) -> Self:
         latency = 3 + (fmt.width + 1) // 2  # one radix-4 step per two quotient bits
         # Floor, because that is what Python's `//` and `%` mean and HIR has no other division; the core's truncating
         # mode is unreachable from a kernel.
@@ -184,7 +263,7 @@ class IDivPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IAbsOptions(BaseOperatorOptions): ...
+class IAbssOptions(BaseOperatorOptions): ...
 
 
 class IAbsOperator(HardwareOperator):
@@ -192,7 +271,7 @@ class IAbsOperator(HardwareOperator):
     name = "iabss"
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IAbsOptions) -> Self:
+    def build(cls, fmt: IntFormat, options: IAbssOptions) -> Self:
         return _int_operator(cls, fmt, options, ("x",), ("y",))
 
 
@@ -210,32 +289,54 @@ class IAbsPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IShlOptions(BaseOperatorOptions): ...
+class IShftOptions(BaseOperatorOptions): ...
 
 
-class IShlOperator(HardwareOperator):
+class ShiftMode(IntEnum):
+    """The value driven on `right`."""
+
+    LEFT = 0
+    RIGHT = 1
+
+
+class IShftOperator(HardwareOperator):
+    """
+    One barrel shifter serving the left shift and the right shift, chosen per firing on `right`, at one latency. The
+    shift is the raw bit shift either way, so the module raises no saturation sideband.
+    """
+
     __slots__ = ()
-    name = "ishl"
+    name = "ishft"
+    mode_port = ModePort("right", 1)
 
     @classmethod
-    def build(cls, fmt: IntFormat, options: IShlOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("x", "shamt"), ("shft", "prod"))
+    def build(cls, fmt: IntFormat, options: IShftOptions) -> Self:
+        ints = IntType(fmt)
+        modes = tuple(OperatorMode(int(mode), "LATENCY", 1, 2, (0,)) for mode in ShiftMode)
+        operands = (OperatorPort("x", ints), OperatorPort("shamt", ints))
+        outputs = (OperatorPort("shft", ints),)
+        return cls({"W": fmt.width, "LATENCY": 2}, options.instances, operands, outputs, modes)
+
+    def mode_of_shift(self, mode: ShiftMode) -> OperatorMode:
+        return self.mode_of(int(mode))
 
 
 @dataclass(frozen=True, slots=True)
 class IShlPrimitive(IntPrimitive):
     """
-    An arithmetic shift by a signed amount, left when positive. It emits both readings of a left shift at once:
-    `shft` lets the high bits fall off the word, while `prod` is the multiplication by a power of two, saturating
-    instead. Which one a shift wants is a lowering decision, so the primitive commits to neither.
+    An arithmetic shift by a signed amount, left when positive and right when negative. A left shift lets the high
+    bits fall off the word: saturating instead is what a multiplication by a power of two does, on the multiplier.
     """
 
-    operator: IShlOperator
-    output_labels: ClassVar[tuple[str, ...]] = ("shft", "prod")
+    operator: IShftOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_shift(ShiftMode.LEFT)
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
-        return a.shift_left(b)
+        return (a.shift_left(b),)
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -243,26 +344,17 @@ class IShlPrimitive(IntPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class IShrOptions(BaseOperatorOptions): ...
-
-
-class IShrOperator(HardwareOperator):
-    __slots__ = ()
-    name = "ishr"
-
-    @classmethod
-    def build(cls, fmt: IntFormat, options: IShrOptions) -> Self:
-        return _int_operator(cls, fmt, options, ("x", "shamt"), ("shft",))
-
-
-@dataclass(frozen=True, slots=True)
 class IShrPrimitive(IntPrimitive):
     """
-    The mirror of IShlPrimitive, right when positive.
-    Neither direction can rail, so it emits one raw reading and no saturation.
+    The mirror of IShlPrimitive on the same operator: right when positive and left when negative, that left shift
+    dropping what leaves the word as well.
     """
 
-    operator: IShrOperator
+    operator: IShftOperator
+
+    @property
+    def mode(self) -> OperatorMode:
+        return self.operator.mode_of_shift(ShiftMode.RIGHT)
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         a, b = self._validated_operands(operands)
@@ -313,32 +405,6 @@ class IPopcntPrimitive(IntPrimitive):
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"popcnt({a})"
-
-
-@dataclass(frozen=True, slots=True)
-class ICmpOptions(BaseOperatorOptions): ...
-
-
-class ICmpOperator(HardwareOperator):
-    __slots__ = ()
-    name = "icmp"
-
-    @classmethod
-    def build(cls, fmt: IntFormat, options: ICmpOptions) -> Self:
-        params = {"W": fmt.width, "LATENCY": 2}
-        return cls.of_one_mode(params, options.instances, *comparator_ports(IntType(fmt)), initiation_interval=1)
-
-
-@dataclass(frozen=True, slots=True)
-class ICmpPrimitive(IntPrimitive, ComparatorPrimitive):
-    """Two's complement is totally ordered."""
-
-    operator: ICmpOperator
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
-        a, b = self._validated_operands(operands)
-        ordering = a.compare(b)
-        return ordering > 0, ordering == 0, ordering < 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,8 +489,8 @@ class IntBwNotPrimitive(IntInlinePrimitive):
 @dataclass(frozen=True, slots=True)
 class IntShiftConstPrimitive(IntInlinePrimitive):
     """
-    An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, so a left shift
-    drops what leaves the word rather than saturating as the pooled `holoso_ishl` also offers.
+    An arithmetic shift by a count fixed at compile time, left when positive; the raw bit shift, as the pooled
+    `holoso_ishft` computes for a runtime count, so a left shift drops what leaves the word.
     """
 
     mnemonic: ClassVar[str] = "ishiftc"
@@ -452,7 +518,7 @@ class IntShiftConstPrimitive(IntInlinePrimitive):
 
     def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
         (a,) = self._validated_operands(operands)
-        return (a.shift_left(IntValue.from_int(self.fmt, self.shamt)).shft,)
+        return (a.shift_left(IntValue.from_int(self.fmt, self.shamt)),)
 
 
 @dataclass(frozen=True, slots=True)

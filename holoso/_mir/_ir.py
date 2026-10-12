@@ -41,12 +41,6 @@ def degrades(value: float, fmt: FloatFormat) -> bool:
     return bits == 0 or not fmt.is_finite(bits)
 
 
-def refuse_degrading(value: float, fmt: FloatFormat, what: str, remedy: str = "widen wexp or rescale") -> None:
-    """`remedy` is the way out the caller knows of beyond the format itself."""
-    if degrades(value, fmt):
-        raise UnsupportedConstruct(f"{what} {value!r} degrades to {fmt.decode(fmt.encode(value))!r} in {fmt}; {remedy}")
-
-
 def _refuse_unholdable(value: float | int | bool, scalar_type: ScalarType, what: str) -> None:
     """
     A value the machine must hold is refused where its encoding is not the number written; saturation is what the
@@ -55,7 +49,9 @@ def _refuse_unholdable(value: float | int | bool, scalar_type: ScalarType, what:
     match scalar_type:
         case FloatType(fmt=fmt):
             assert type(value) is float
-            refuse_degrading(value, fmt, what)
+            if degrades(value, fmt):
+                degraded = fmt.decode(fmt.encode(value))
+                raise UnsupportedConstruct(f"{what} {value!r} degrades to {degraded!r} in {fmt}; widen wexp or rescale")
         case IntType(fmt=fmt):
             assert type(value) is int
             if not fmt.fits(value):

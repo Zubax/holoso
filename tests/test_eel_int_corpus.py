@@ -62,7 +62,7 @@ def _ops() -> holoso.Options:
         holoso.OperatorOptions(
             fadd=holoso.FAddOptions(),
             fmul=holoso.FMulOptions(),
-            fdiv=holoso.FDivOptions(),
+            fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
         ),

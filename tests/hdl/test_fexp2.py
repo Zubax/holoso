@@ -37,12 +37,18 @@ from .hdl_float_oracle import (
     start_clock,
 )
 
-# A few stage configurations spanning every knob and a range of latencies (not the full cross-product).
+# A few stage configurations spanning every knob and a range of latencies (not the full cross-product). The core's
+# latency is a maximum over its parallel products, so most settings of the four product knobs would elaborate just the
+# same with one knob dropped or two exchanged on the way to the core; the settings here and in `WIDE_STAGES` are chosen
+# so that each such defect hands the core another latency than the model's, which the core refuses to elaborate with.
 STAGE_COMBOS: tuple[dict[str, int], ...] = (
     {},
     {"stage_input": 1, "stage_output": 1},
-    {"stage_reduce": 1, "stage_product": 2, "stage_pack": 1},  # stage_product=2 is the DSP-split path used in closure
+    {"stage_reduce": 1, "stage_product": 2, "stage_pack": 1},  # stage_product=2 splits the widest product
+    {"stage_product_square": 1, "stage_product_chain": 1},
 )
+# The odd products exist from a 27-bit significand up, wider than the bench's operands, so that knob is only elaborated.
+WIDE_STAGES = {"stage_product_odd": 1, "stage_product_chain": 1}
 
 
 @cocotb.test()
@@ -121,4 +127,20 @@ def test_holoso_fexp2(sim: str, stages: dict[str, int]) -> None:
         build_dir=build_dir,
         extra_env={"HOLOSO_EXPECTED_LATENCY": str(operator.latencies[0])},
         results_xml=str(build_dir / "results.xml"),
+    )
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_holoso_fexp2_product_knobs_reach_a_wide_core(sim: str) -> None:
+    operator = FExp2Operator.build(FloatFormat(8, 36), FExp2Options(**WIDE_STAGES), 0)
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fexp2_e8m36_{stage_tag(WIDE_STAGES)}"
+    get_runner(sim).build(
+        sources=sources(),
+        includes=[HDL_DIR],
+        hdl_toplevel="holoso_fexp2",
+        parameters=operator.params,
+        build_args=build_args(sim),
+        build_dir=build_dir,
+        clean=True,
+        timescale=("1ns", "1ps"),
     )

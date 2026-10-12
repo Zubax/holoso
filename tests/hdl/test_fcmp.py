@@ -1,7 +1,9 @@
 """
-Tests for holoso_fcmp (pipelined; comparison of sign-conditioned operands).
+Tests for holoso_fcmp (pipelined; comparison and min/max of sign-conditioned operands).
 
 Outputs a_gt_b, a_eq_b, a_lt_b are mutually-exclusive one-hot flags; a_sgnop and b_sgnop can vary every cycle.
+The flags are checked against float32 and the min/max against the exact ZKF model, which alone says which of two equal
+operands is which.
 """
 
 import os
@@ -29,8 +31,10 @@ from .hdl_float_oracle import (
     drive_reset,
     get_random_count,
     get_seed,
+    order_oracle,
     random_zkf_f32,
     sources,
+    stage_tag,
     start_clock,
 )
 
@@ -46,6 +50,8 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
             ("a_gt_b", "gt"),
             ("a_eq_b", "eq"),
             ("a_lt_b", "lt"),
+            ("min", "min"),
+            ("max", "max"),
         ],
         latency=int(os.environ["HOLOSO_EXPECTED_LATENCY"]),
     )
@@ -58,11 +64,14 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
         sb.sample()
         # One-hot invariant only meaningful when out_valid; nothing extra here.
 
-    async def step(a: int, b: int, a_op: int, b_op: int) -> None:
+    async def step(a: int, b: int, a_op: int, b_op: int, float32_orders: bool = True) -> None:
         a_eff = apply_sgnop(a, a_op)
         b_eff = apply_sgnop(b, b_op)
-        gt, eq, lt = cmp_oracle(a_eff, b_eff)
+        gt, eq, lt, low, high = order_oracle(a_eff, b_eff)
         assert gt + eq + lt == 1, "oracle produced non-one-hot result"
+        if float32_orders:  # then float32 and the tie rule say independently what the model says
+            assert (gt, eq, lt) == cmp_oracle(a_eff, b_eff)
+            assert (low, high) == ((a_eff, b_eff) if lt else (b_eff, a_eff))
         dut.a.value = a
         dut.b.value = b
         dut.a_sgnop.value = a_op
@@ -73,6 +82,8 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
                 "gt": gt,
                 "eq": eq,
                 "lt": lt,
+                "min": low,
+                "max": high,
                 "_desc": f"a=0x{a:08x} b=0x{b:08x} ops={a_op}{b_op}",
             }
         )
@@ -109,6 +120,16 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
     await step(pi_p, pi_n, 0, 2)  # +pi vs abs(-pi)=+pi  -> equal
     await sb.drain()
 
+    # Operands equal in value and distinct in bits: the second is then the min and the first the max. A zero conditioned
+    # negative is the one a design makes; a zero or an infinity with a stray fraction is one it may be handed, and
+    # float32 reads those as other values.
+    for a_op, b_op in ((1, 0), (0, 1), (1, 1), (0, 0)):
+        await step(0, 0, a_op, b_op)
+    for a, b in ((0x00000005, 0), (0, 0x80000005), (0x7F800001, 0x7F800000), (0xFF800000, 0xFFC00000)):
+        await step(a, b, 0, 0, float32_orders=False)
+        await step(b, a, 0, 0, float32_orders=False)
+    await sb.drain()
+
     # Random bulk with random sgnops.
     for _ in range(get_random_count()):
         if rng.random() < 0.2:
@@ -129,12 +150,22 @@ async def holoso_fcmp_cocotb(dut: Any) -> None:
         assert int(dut.out_valid.value) == 0
 
 
-@pytest.mark.parametrize("stage_input", (0, 1), ids=lambda s: f"s{s}")
+# The public default (the output register alone), the input register alone, and both. The output register is on by
+# default, so the input register alone has to switch it off.
+STAGE_COMBOS: tuple[dict[str, int], ...] = (
+    {},
+    {"stage_input": 1, "stage_output": 0},
+    {"stage_input": 1, "stage_output": 1},
+    {"stage_input": 2, "stage_output": 1},
+)
+
+
+@pytest.mark.parametrize("stages", STAGE_COMBOS, ids=stage_tag)
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_holoso_fcmp(sim: str, stage_input: int) -> None:
-    operator = FCmpOperator.build(FloatFormat(8, 24), FCmpOptions(stage_input=stage_input))
+def test_holoso_fcmp(sim: str, stages: dict[str, int]) -> None:
+    operator = FCmpOperator.build(FloatFormat(8, 24), FCmpOptions(**stages))
     runner = get_runner(sim)
-    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fcmp_s{stage_input}"
+    build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"fcmp_{stage_tag(stages)}"
     runner.build(
         sources=sources(),
         includes=[HDL_DIR],

@@ -22,7 +22,7 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
@@ -41,7 +41,7 @@ def _ops() -> Options:
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             fcmp=FCmpOptions(),
         ),
@@ -417,7 +417,7 @@ def test_trivial_fast_math_float_folds_are_operator_free_and_bit_exact() -> None
     verilog = result.verilog_output.verilog
     assert "holoso_fadd #" not in verilog
     assert "holoso_fmul #" not in verilog
-    assert "holoso_fdiv #" not in verilog
+    assert "holoso_fdivsqrt #" not in verilog
     assert "holoso_fmul_ilog2" not in verilog
 
     sim = result.numerical_model.elaborate()
@@ -463,9 +463,9 @@ def _dynamic_div(x: float, y: float) -> float:
     return x / y
 
 
-def test_dynamic_non_identical_division_still_emits_fdiv() -> None:
+def test_dynamic_non_identical_division_still_emits_a_divider() -> None:
     result = holoso.synthesize(_dynamic_div, _ops(), name="dynamic_div")
-    assert "holoso_fdiv #" in result.verilog_output.verilog
+    assert "holoso_fdivsqrt #" in result.verilog_output.verilog
 
 
 def _div_by_zero_const(x: float) -> float:
@@ -519,13 +519,13 @@ def test_a_failure_an_identity_deletes_is_not_refused() -> None:
 
 def test_a_division_by_a_zero_constant_stays_a_division() -> None:
     # A fold answers only where it knows EVERY operand, and an unknown numerator over a zero divisor is not that: the
-    # quotient goes to hardware, which asserts div0 on every run. That the compiler could have named the fault and did
-    # not is the charter's license at work -- a missed refusal is never a defect -- and the constant twin (0.0/0.0,
+    # quotient goes to hardware, which asserts its error on every run. That the compiler could have named the fault and
+    # did not is the charter's license at work -- a missed refusal is never a defect -- and the constant twin (0.0/0.0,
     # pinned above) is what a fold does name. What must NOT happen is the reciprocal rewrite: there is no 1/0 to
     # multiply by, so the division has to survive as itself rather than become a multiply or a folded infinity.
     for kernel in (_div_by_zero_const, _div_by_zero_in_a_live_arm):
         verilog = holoso.synthesize(kernel, _ops(), name=kernel.__name__.lstrip("_")).verilog_output.verilog
-        assert "holoso_fdiv #" in verilog, kernel
+        assert "holoso_fdivsqrt #" in verilog, kernel
         assert "holoso_fmul #" not in verilog, kernel
     # A value nothing reads is deleted before the sweep sees it, and so is an arm a guard excludes -- whether that
     # guard is resolved by the front end or by HIR. Neither is in the program the sweep is given.
@@ -765,7 +765,7 @@ def test_a_power_of_two_scale_past_the_carrier_folds_to_an_infinity() -> None:
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             fcmp=FCmpOptions(),
         ),

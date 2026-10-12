@@ -1,11 +1,11 @@
 """
-Directed cosim: a divide-by-zero latches `err_pc` to the fdiv's write step, and it resets each run.
+Directed cosim: a divide-by-zero latches `err_pc` to the divider's write step, and it resets each run.
 
 Builds the tiny module `a / b`, then drives three back-to-back invocations: a normal one (err_pc stays 0), a
-zero-divisor one (err_pc latches the executing step on which the fdiv result is written back -- the commit step
-itself -- which is nonzero), and a normal one again (the per-initiation reset
-must have cleared the prior error). Parametrized over the fdiv output stage so the err flag and the result are shown
-to latch/land together whether or not an output register stage delays the commit.
+zero-divisor one (err_pc latches the executing step on which the divider's result is written back -- the commit step
+itself -- which is nonzero), and a normal one again (the per-initiation reset must have cleared the prior error).
+Parametrized over the divider's output stage so the err flag and the result are shown to latch/land together whether
+or not an output register stage delays the commit.
 """
 
 import json
@@ -20,7 +20,7 @@ from cocotb_tools.runner import get_runner
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
@@ -45,7 +45,7 @@ def _ops(stage_output: int) -> MirOptions:
             OperatorOptions(
                 fadd=FAddOptions(),
                 fmul=FMulOptions(),
-                fdiv=FDivOptions(stage_output=stage_output),
+                fdivsqrt=FDivsqrtOptions(stage_output=stage_output),
                 fmul_ilog2=FMulILog2Options(),
                 fcmp=FCmpOptions(),
             ),
@@ -87,8 +87,8 @@ async def err_pc_latches_div0(dut: Any) -> None:
         return latched
 
     assert await invoke(2.0) == 0, "no-error run must leave err_pc clear"
-    # Divide by zero: the fdiv asserts div0 at its commit; the write step is the commit step itself.
-    assert await invoke(0.0) == err_step, "div0 must latch err_pc to the fdiv write step"
+    # Divide by zero: the divider asserts its error at its commit; the write step is the commit step itself.
+    assert await invoke(0.0) == err_step, "a zero divisor must latch err_pc to the divider's write step"
     assert await invoke(2.0) == 0, "the per-initiation reset must clear the previous run's error"
 
 
@@ -99,9 +99,9 @@ def test_err_pc(sim: str, stage_output: int) -> None:
         lower_to_mir(lower(_divide, DEFAULT_UNROLL_MAX_TRIPS).hir, _ops(stage_output)),
         "divide",
     )
-    # The fdiv asserts div0 at its commit; err_pc latches the write word -- the
-    # commit step itself (pooled_write_word). An fdiv output stage pushes the commit later, and the err flag and the
-    # result still latch/land together: err_step is recomputed from this build's actual fdiv commit.
+    # The divider asserts its error at its commit; err_pc latches the write word -- the commit step itself
+    # (pooled_write_word). A divider output stage pushes the commit later, and the err flag and the result still
+    # latch/land together: err_step is recomputed from this build's actual divider commit.
     (block,) = lir.blocks
     commit_cycle = next(op.commit_cycle for op in block.ops if isinstance(op.primitive, FDivPrimitive))
     err_step = pooled_write_word(commit_cycle)

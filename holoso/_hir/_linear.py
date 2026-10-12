@@ -14,8 +14,8 @@ from ._const import Const, FloatConst
 from ._copy import copy_node, rebuild, reverse_postorder
 from .._util import ValueId
 from ._ir import Hir, HirBuilder, Node, Operation, StateRead
-from ._operators import FloatAdd, FloatNeg
-from ._scaling import Rendering, scaled_node, scaling_layer, scaling_of_ratio
+from ._operators import FloatAdd, FloatFma, FloatNeg
+from ._scaling import Rendering, fused_scaling, scaled_node, scaling_layer, scaling_of_ratio
 
 _logger = logging.getLogger(__name__)
 
@@ -122,6 +122,10 @@ def _forms(hir: Hir) -> dict[ValueId, _LinearForm]:
             if abs(scaling.k) > _MAX_BITS:
                 return _opaque(vid)
             combined = forms[base].scaled(scaling.ratio())
+        elif (fused := fused_scaling(hir, vid, constant)) is not None:
+            if abs(fused.scaling.k) > _MAX_BITS:
+                return _opaque(vid)
+            combined = forms[fused.addend].plus(forms[fused.base].scaled(fused.scaling.ratio()))
         else:
             return _opaque(vid)
         return _opaque(vid) if combined.oversized else combined
@@ -142,13 +146,13 @@ def _forms(hir: Hir) -> dict[ValueId, _LinearForm]:
 
 def run(hir: Hir) -> Hir:
     """
-    Every answer is taken: it replaces an addition with at most one operation whatever else reads the terms, so no
-    liveness is read to know it does not add work.
+    Every answer is taken: it replaces an addition, fused with a product or not, with at most one operation whatever
+    else reads the terms, so no liveness is read to know it does not add work.
     """
     forms = _forms(hir)
     answers: dict[ValueId, _Answer] = {}
     for vid, node in hir.nodes.items():
-        if isinstance(node, Operation) and isinstance(node.operator, FloatAdd):
+        if isinstance(node, Operation) and isinstance(node.operator, (FloatAdd, FloatFma)):
             answer = forms[vid].collapsed(vid)
             if answer is not None:
                 answers[vid] = answer

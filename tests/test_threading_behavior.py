@@ -117,11 +117,11 @@ def latch(n: float, k: float) -> float:
 
 
 def test_a_constant_arm_costs_its_path_nothing() -> None:
-    assert _paths(constant_arm, [(2.0, 4.0), (0.5, 4.0)]) == [12, 28]  # 16 and 28 without the threading
+    assert _paths(constant_arm, [(2.0, 4.0), (0.5, 4.0)]) == [12, 24]  # 16 and 24 without the threading
 
 
 def test_a_boolean_arm_costs_its_path_nothing() -> None:
-    assert _paths(boolean_arm, [(2.0, 4.0), (0.5, 4.0)]) == [4, 20]  # 8 and 20
+    assert _paths(boolean_arm, [(2.0, 4.0), (0.5, 4.0)]) == [4, 16]  # 8 and 16
 
 
 def test_an_arm_threads_straight_into_a_loop_header() -> None:
@@ -130,19 +130,19 @@ def test_an_arm_threads_straight_into_a_loop_header() -> None:
 
 
 def test_an_arm_inside_a_loop_saves_its_frame_on_every_trip() -> None:
-    assert _paths(inside_a_loop, [(-1.0, 4), (2.0, 4)]) == [85, 169]  # 101 and 169: four trips through the arm
+    assert _paths(inside_a_loop, [(-1.0, 4), (2.0, 4)]) == [85, 153]  # 101 and 153: four trips through the arm
 
 
 def test_an_arm_whose_predecessor_overlaps_keeps_its_frame() -> None:
     # The predecessor's results land past its terminator in both arms; installing there would make it drain.
-    assert _paths(overlapping, [(2.0, 4.0, True), (2.0, 4.0, False)]) == [13, 25]
+    assert _paths(overlapping, [(2.0, 4.0, True), (2.0, 4.0, False)]) == [13, 21]
 
 
 def test_an_arm_whose_threading_would_cost_another_path_keeps_its_frame() -> None:
     # Threading the constant arm leaves its predecessor's frame alone, but the merge phi then occupies its register
     # across that frame's boundary, where `x` is still live toward the other arms: the `z = x` arm could no longer
     # coalesce onto the phi, and would take a frame of its own.
-    assert _paths(three_way, [(2.0, 4.0, True), (0.5, 4.0, True), (0.5, 4.0, False)]) == [13, 10, 26]
+    assert _paths(three_way, [(2.0, 4.0, True), (0.5, 4.0, True), (0.5, 4.0, False)]) == [13, 10, 22]
 
 
 def test_a_latch_arm_is_never_threaded() -> None:

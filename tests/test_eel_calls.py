@@ -23,15 +23,13 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FExp2Options,
     FFromIntOptions,
     FLog2Options,
     FMulILog2Options,
     FMulOptions,
-    FRoundOptions,
-    FSqrtOptions,
-    FToIntOptions,
+    FRintOptions,
     OperatorOptions,
     Options,
     SynthesisError,
@@ -57,29 +55,27 @@ _INT_ONLY = Options(OperatorOptions())
 _FADD = Options(OperatorOptions(fadd=FAddOptions()))
 _FMUL = Options(OperatorOptions(fmul=FMulOptions()))
 _FADD_FMUL = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
-_FMUL_FDIV = Options(OperatorOptions(fmul=FMulOptions(), fdiv=FDivOptions()))
+_FMUL_FDIVSQRT = Options(OperatorOptions(fmul=FMulOptions(), fdivsqrt=FDivsqrtOptions()))
 _CONVERSIONS = Options(
     OperatorOptions(
         fadd=FAddOptions(),
         fmul=FMulOptions(),
-        fdiv=FDivOptions(),
+        fdivsqrt=FDivsqrtOptions(),
         fcmp=FCmpOptions(),
-        fround=FRoundOptions(),
+        frint=FRintOptions(),
         ffromint=FFromIntOptions(),
-        ftoint=FToIntOptions(),
     )
 )
 _GENERAL_POW = Options(
     OperatorOptions(
         fadd=FAddOptions(),
         fmul=FMulOptions(),
-        fdiv=FDivOptions(),
+        fdivsqrt=FDivsqrtOptions(),
         fcmp=FCmpOptions(),
         fexp2=FExp2Options(),
         flog2=FLog2Options(),
-        fsqrt=FSqrtOptions(),
         fmul_ilog2=FMulILog2Options(),
-        fround=FRoundOptions(),
+        frint=FRintOptions(),
         ffromint=FFromIntOptions(),
     )
 )
@@ -227,7 +223,7 @@ def test_a_rounding_answers_what_its_own_spelling_answers() -> None:
     _oracle(_numpy_roundings_of_a_float, vectors)
     # The cast costs nothing where a float consumes the result: it reduces back to the bare rounder, so even
     # with every conversion operator configured the machine instantiates nothing but the rounder.
-    assert _pooled_modules(holoso.synthesize(_floor_consumed_as_a_float, _CONVERSIONS, name="k")) == {"fround"}
+    assert _pooled_modules(holoso.synthesize(_floor_consumed_as_a_float, _CONVERSIONS, name="k")) == {"frint"}
 
 
 def _dot_of_static_ints(x: float) -> float:
@@ -372,9 +368,9 @@ def test_the_pow_table_selects_a_lowering_per_operand_position() -> None:
     _oracle(_pow_static_negative_exponent, [{"x": 0.0}, {"x": 1.5}])
     assert "0.5" in _residual(_pow_static_negative_exponent, _FADD)
     assert _pooled_modules(holoso.synthesize(_pow_runtime_base_static_exponent, _FMUL, name="k")) == {"fmul"}
-    assert _pooled_modules(holoso.synthesize(_pow_runtime_base_negative_exponent, _FMUL_FDIV, name="k")) == {
+    assert _pooled_modules(holoso.synthesize(_pow_runtime_base_negative_exponent, _FMUL_FDIVSQRT, name="k")) == {
         "fmul",
-        "fdiv",
+        "fdivsqrt",
     }
     holoso.synthesize(_pow_runtime_int_base, _INT_ONLY, name="k")  # a runtime int base stays integral, as in CPython
     assert {"fexp2", "flog2"} <= _pooled_modules(holoso.synthesize(_pow_runtime_exponent, _GENERAL_POW, name="k"))
@@ -397,7 +393,11 @@ _WIDE_ROW = np.full(64, 0.5)
 
 _OPERATORS = Options(
     OperatorOptions(
-        fadd=FAddOptions(), fmul=FMulOptions(), fdiv=FDivOptions(), fcmp=FCmpOptions(), ffromint=FFromIntOptions()
+        fadd=FAddOptions(),
+        fmul=FMulOptions(),
+        fdivsqrt=FDivsqrtOptions(),
+        fcmp=FCmpOptions(),
+        ffromint=FFromIntOptions(),
     ),
     wint_min=32,
 )

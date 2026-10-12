@@ -29,7 +29,7 @@ def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
         holoso.OperatorOptions(
-            fdiv=holoso.FDivOptions(),
+            fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
         ),

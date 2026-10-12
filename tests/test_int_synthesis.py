@@ -1,6 +1,7 @@
 """
 Black-box integer synthesis through the public API: every kernel drives `synthesize` and the numerical model
-against CPython or independent literals. Selection facts are asserted through the one public spelling they have --
+against CPython or independent literals, or against the HDL benches' fixed-width oracle where CPython has no answer
+(a negative shift count). Selection facts are asserted through the one public spelling they have --
 `holoso_<mnemonic> #(` instantiations present or absent in `verilog_output.verilog` -- and refusal diagnostics
 verbatim. `wint_min` alone pins the machine word of a float-free kernel, so the vectors that depend on it say so; the
 inline primitives (`ishiftc`, `ibwand`, ...) have no public name, so their selection lives in
@@ -13,9 +14,13 @@ import pickle
 import re
 from collections.abc import Callable
 
+import numpy as np
 import pytest
 
 import holoso
+
+from ._modelref import adder_modes
+from .hdl.hdl_integer_oracle import ishl, ishr, signed
 
 _OPTIONS = holoso.Options(holoso.OperatorOptions())
 
@@ -24,9 +29,8 @@ _INT16 = holoso.Options(
         fadd=holoso.FAddOptions(),
         fmul=holoso.FMulOptions(),
         fcmp=holoso.FCmpOptions(),
-        fround=holoso.FRoundOptions(),
+        frint=holoso.FRintOptions(),
         ffromint=holoso.FFromIntOptions(),
-        ftoint=holoso.FToIntOptions(),
     ),
     ffmt=holoso.FloatFormat(5, 11),
 )
@@ -375,7 +379,158 @@ def test_each_integer_output_still_holds_its_own_value_at_the_boundary() -> None
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Shifts: the runtime shifters, the constant folds, and the machine-word substitution fixpoint.
+# The adder: sums, differences and comparisons on one module.
+
+
+def sum_difference_and_order(a: int, b: int) -> tuple[int, int, bool, bool, bool]:
+    return a + b, a - b, a < b, a == b, a > b
+
+
+def sum_only(a: int, b: int) -> int:
+    return a + b
+
+
+def difference_only(a: int, b: int) -> int:
+    return a - b
+
+
+def order_only(a: int, b: int) -> tuple[bool, bool, bool]:
+    return a < b, a == b, a > b
+
+
+def difference_and_order(a: int, b: int) -> tuple[int, bool, bool, bool]:
+    return a - b, a < b, a == b, a > b
+
+
+# Neither the sum nor the difference of these leaves the word, so CPython is the reference.
+_ADDER_PAIRS = [
+    *((0, 0), (7, 3), (3, 7), (-7, 3), (7, -3), (-5, -5), (12345, -6789)),
+    *((MAX, 0), (MIN, 0), (16383, 16383), (-16384, 16383)),
+]
+
+# Where one of them does, it rails, and the order stays that of the operands even where their difference overflows.
+# Each row lists the operands and then `a + b, a - b, a < b, a == b, a > b`.
+_ADDER_RAILS: list[tuple[tuple[int, int], list[int | bool]]] = [
+    ((MAX, 1), [MAX, MAX - 1, False, False, True]),
+    ((MAX, MAX), [MAX, 0, False, True, False]),
+    ((MIN, -1), [MIN, MIN + 1, True, False, False]),
+    ((MIN, MIN), [MIN, 0, False, True, False]),
+    ((MAX, MIN), [-1, MAX, False, False, True]),
+    ((MIN, MAX), [-1, MIN, True, False, False]),
+    ((MAX, -1), [MAX - 1, MAX, False, False, True]),
+    ((MIN, 1), [MIN + 1, MIN, True, False, False]),
+    ((0, MIN), [MIN, MAX, False, False, True]),
+]
+
+
+def test_a_sum_a_difference_and_an_order_time_share_one_adder() -> None:
+    """
+    `a + b` and `a - b` are two firings of the one module, the relations of the pair riding the subtraction, so the
+    single instance takes `sub` with every firing.
+    """
+    result = holoso.synthesize(sum_difference_and_order, _INT16, name="SumDifferenceAndOrder")
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [2]
+    sim = result.numerical_model.elaborate()
+    for a, b in _ADDER_PAIRS:
+        assert _run(sim, a, b) == _expected(sum_difference_and_order, a, b), (a, b)
+    for (a, b), expected in _ADDER_RAILS:
+        assert _run(sim, a, b) == expected, (a, b)
+
+
+@pytest.mark.parametrize(
+    "target,mode,answered",
+    [
+        (sum_only, 0, slice(0, 1)),
+        (difference_only, 1, slice(1, 2)),
+        (order_only, 1, slice(2, 5)),
+        (difference_and_order, 1, slice(1, 5)),
+    ],
+    ids=["add", "subtract", "compare", "subtract_and_compare"],
+)
+def test_a_kernel_that_never_adds_or_only_adds_builds_the_adder_for_that_alone(
+    target: Callable[..., object], mode: int, answered: slice
+) -> None:
+    """
+    A comparison is a subtraction read through the flags, so an instance whose firings all add, or all subtract or
+    compare, is elaborated for that operation alone; `answered` is the part of a rail row the kernel returns.
+    """
+    result = holoso.synthesize(target, _INT16, name="OneAdderMode")
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [mode]
+    sim = result.numerical_model.elaborate()
+    for a, b in _ADDER_PAIRS:
+        assert _run(sim, a, b) == _expected(target, a, b), (a, b)
+    for (a, b), expected in _ADDER_RAILS:
+        assert _run(sim, a, b) == expected[answered], (a, b)
+
+
+def sums_beside_orders(a: int, b: int, c: int, d: int) -> tuple[int, int, bool, bool]:
+    return a + b, c + d, a < c, b < d
+
+
+def test_independent_sums_and_orders_contend_for_the_adder_until_a_second_one_is_allowed() -> None:
+    """
+    Two sums and two comparisons depend on nothing but the inputs, yet on one adder they issue one after another. A
+    second instance takes half of them, which buys the two cycles back.
+    """
+    shared = holoso.synthesize(sums_beside_orders, _INT16, name="SumsBesideOrdersShared")
+    assert _modules(shared) == ["iadds"] and len(adder_modes(shared)) == 1
+    assert shared.initiation_interval == (8, 8)
+    operators = dataclasses.replace(_INT16.operator, iadds=holoso.IAddsOptions(instances=2))
+    options = dataclasses.replace(_INT16, operator=operators)
+    split = holoso.synthesize(sums_beside_orders, options, name="SumsBesideOrdersSplit")
+    assert _modules(split) == ["iadds"] and len(adder_modes(split)) == 2
+    assert split.initiation_interval == (6, 6)
+    for result in (shared, split):
+        sim = result.numerical_model.elaborate()
+        for a, b, c, d in [(1, 2, 3, 4), (4, 3, 2, 1), (-7, 7, -7, 7), (MAX, 1, MIN, -1), (MIN, MAX, MAX, MIN)]:
+            assert _run(sim, a, b, c, d) == [_clamp(a + b), _clamp(c + d), a < c, b < d], (a, b, c, d)
+
+
+def order_beside_reversed_difference(a: int, b: int) -> tuple[int, bool, bool]:
+    return b - a, a < b, a != b
+
+
+def order_beside_unrelated_difference(a: int, b: int, c: int) -> tuple[int, bool, bool, bool]:
+    return a - c, a < b, a == b, a > b
+
+
+def every_relation_beside_reversed_difference(a: int, b: int) -> tuple[int, bool, bool, bool, bool, bool, bool]:
+    return b - a, a < b, a <= b, a > b, a >= b, a == b, a != b
+
+
+def test_a_comparison_rides_the_subtraction_of_its_own_operands() -> None:
+    """
+    A subtraction orders its operands as a side effect, so the relations of that pair cost no firing in either
+    operand order: the kernel is as long as the subtraction alone, where a comparison of another pair adds a cycle.
+    """
+    assert holoso.synthesize(difference_only, _INT16, name="DifferenceAlone").initiation_interval == (5, 5)
+    fused = holoso.synthesize(difference_and_order, _INT16, name="DifferenceAndOrder")
+    mirrored = holoso.synthesize(order_beside_reversed_difference, _INT16, name="ReversedDifference")
+    apart = holoso.synthesize(order_beside_unrelated_difference, _INT16, name="UnrelatedDifference")
+    assert fused.initiation_interval == mirrored.initiation_interval == (5, 5)
+    assert apart.initiation_interval == (6, 6)
+    fused_sim, mirrored_sim, apart_sim = (result.numerical_model.elaborate() for result in (fused, mirrored, apart))
+    for a, b in [*_ADDER_PAIRS, *(pair for pair, _ in _ADDER_RAILS)]:
+        assert _run(fused_sim, a, b) == [_clamp(a - b), a < b, a == b, a > b], (a, b)
+        assert _run(mirrored_sim, a, b) == [_clamp(b - a), a < b, a != b], (a, b)
+        assert _run(apart_sim, a, b, 5) == [_clamp(a - 5), a < b, a == b, a > b], (a, b)
+
+
+def test_every_relation_reads_a_reversed_subtraction_mirrored() -> None:
+    """
+    Each relation of `a` against `b` taps the flags of `b - a` as its mirror. A flag and its complement take a firing
+    each, so the six relations ride two subtractions where three firings would serve them apart.
+    """
+    result = holoso.synthesize(every_relation_beside_reversed_difference, _INT16, name="EveryRelationReversed")
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [1]
+    assert result.initiation_interval == (6, 6)
+    sim = result.numerical_model.elaborate()
+    for a, b in [*_ADDER_PAIRS, *(pair for pair, _ in _ADDER_RAILS)]:
+        assert _run(sim, a, b) == [_clamp(b - a), a < b, a <= b, a > b, a >= b, a == b, a != b], (a, b)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Shifts: the runtime shifter, the constant folds, and the machine-word substitution fixpoint.
 
 
 def shift_pair(x: int, n: int) -> tuple[int, int]:
@@ -406,7 +561,7 @@ def test_a_negative_runtime_shift_count_reverses_the_direction(
     shift_pair_sim: holoso.NumericalSimulator, x: int, n: int, expected: list[int]
 ) -> None:
     """
-    CPython refuses a negative count; each shifter is total over every representable one and reads it as its other
+    CPython refuses a negative count; the shifter is total over every representable one and reads it as the other
     direction. A kernel reaches this only through a value it did not constrain, so the hardware's answer is the
     definition -- there is no other.
     """
@@ -430,6 +585,38 @@ def test_a_folded_shift_answers_exactly_as_the_runtime_shifter_does(
         want = [_wrap(x << count), x >> count]
         assert _run(sim, x) == want, (count, x)
         assert _run(shift_pair_sim, x, count) == want, (count, x)
+
+
+_SHIFT_OPERANDS = (0, 1, -1, 5, -5, 12345, -12345, MIN, MAX)
+_SHIFT_COUNTS = (0, 1, 3, 14, 15, 16, 17, 40, MAX, -1, -3, -14, -15, -16, -17, -40, MIN)
+
+
+def _shift_pair_reference(x: int, n: int) -> list[int]:
+    """
+    What the 16-bit word answers for `x << n, x >> n` at any count, from the fixed-width oracle the shifter's own
+    bench is scored against: CPython refuses a negative count and keeps the bits a word drops.
+    """
+    x_bits, n_bits = x & 0xFFFF, n & 0xFFFF
+    return [signed(ishl(x_bits, n_bits, 16), 16), signed(ishr(x_bits, n_bits, 16), 16)]
+
+
+def test_both_directions_of_one_operand_pair_time_share_one_shifter() -> None:
+    """
+    `x << n` and `x >> n` are two firings of the one module, told apart by its direction bit alone, so the pair costs
+    a single shifter and one cycle over a single shift. A second instance buys that cycle back.
+    """
+    shared = holoso.synthesize(shift_pair, _INT16, name="ShiftPairShared")
+    assert _modules(shared) == ["ishft"] and shared.verilog_output.verilog.count("holoso_ishft #") == 1
+    assert shared.initiation_interval == (6, 6)
+    operators = dataclasses.replace(_INT16.operator, ishft=holoso.IShftOptions(instances=2))
+    split = holoso.synthesize(shift_pair, dataclasses.replace(_INT16, operator=operators), name="ShiftPairSplit")
+    assert _modules(split) == ["ishft"] and split.verilog_output.verilog.count("holoso_ishft #") == 2
+    assert split.initiation_interval == (5, 5)
+    for result in (shared, split):
+        sim = result.numerical_model.elaborate()
+        for x in _SHIFT_OPERANDS:
+            for n in _SHIFT_COUNTS:
+                assert _run(sim, x, n) == _shift_pair_reference(x, n), (x, n)
 
 
 def shift_past_every_word(x: int) -> tuple[int, int]:
@@ -520,7 +707,7 @@ def an_oversize_shift_proving_a_guard(x: int, y: int) -> int:
 
 def test_an_oversize_shift_proves_the_guard_that_reads_it() -> None:
     result = holoso.synthesize(an_oversize_shift_proving_a_guard, _INT16, name="ProvenGuard")
-    assert _modules(result) == ["iadds"], "only the taken arm may survive"
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [0], "only the taken arm may survive"
     sim = result.numerical_model.elaborate()
     for y in (0, 1, -7, 12345):
         assert _run(sim, 3, y) == [y + 1], y
@@ -676,19 +863,22 @@ def shift_right_only(x: int, n: int) -> int:
     return x >> n
 
 
-def test_a_right_shift_costs_exactly_what_a_left_shift_costs() -> None:
+def test_a_shift_in_one_direction_alone_builds_the_one_shifter() -> None:
     """
-    The point of a second shifter: a right shift no longer negates its count, so it pays neither the subtractor nor
-    the cycles that dependency cost. Matching latency alone would pass if both regressed, so the module each
-    kernel builds is pinned too.
+    A kernel shifting one way only builds the same single module, its direction bit constant across the program. A
+    right shift costs exactly what a left shift costs: it is the shifter's other mode, so it pays neither a
+    subtraction to negate its count nor the cycles that dependency would cost.
     """
     left = holoso.synthesize(shift_left_only, _INT16, name="LeftOnly")
     right = holoso.synthesize(shift_right_only, _INT16, name="RightOnly")
-    assert _modules(left) == ["ishl"] and _modules(right) == ["ishr"]
-    assert left.initiation_interval == right.initiation_interval
+    for result in (left, right):
+        assert _modules(result) == ["ishft"] and result.verilog_output.verilog.count("holoso_ishft #") == 1
+    assert left.initiation_interval == right.initiation_interval == (5, 5)
     left_sim, right_sim = left.numerical_model.elaborate(), right.numerical_model.elaborate()
-    for x, n in [(5, 2), (-5, 2), (12345, 15), (MIN, 1)]:
-        assert _run(left_sim, x, n) == [_wrap(x << n)] and _run(right_sim, x, n) == [x >> n], (x, n)
+    for x in _SHIFT_OPERANDS:
+        for n in _SHIFT_COUNTS:
+            want_left, want_right = _shift_pair_reference(x, n)
+            assert _run(left_sim, x, n) == [want_left] and _run(right_sim, x, n) == [want_right], (x, n)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -704,16 +894,17 @@ def _scale_by(k: int) -> Callable[[int], int]:
     return scaled
 
 
-@pytest.mark.parametrize("k", [1, 2, 14, 15, 16, 40])
-def test_a_power_of_two_scaling_reads_the_shifter_where_it_saturates(k: int) -> None:
+@pytest.mark.parametrize("k", [1, 2, 3, 14])
+def test_a_power_of_two_product_rails_where_the_shift_would_wrap(k: int) -> None:
     """
-    The one thing separating this primitive from `x << k`: a multiplication rails where the raw shift drops what
-    leaves the word. The count is unbounded where the word is not, so every one past the width rails the same way.
+    What separates `x * 2**k` from `x << k`: a multiplication rails where the raw shift drops what leaves the word,
+    so the product stays on the multiplier and is never rewritten into a shift.
     """
     result = holoso.synthesize(_scale_by(k), _INT16, name=f"ScaleBy{k}")
-    assert _modules(result) == ["ishl"], "the scaling must ride the shifter, not a multiplier"
+    assert _modules(result) == ["imuls"]
     sim = result.numerical_model.elaborate()
-    for x in (0, 1, -1, 3, -3, 1000, -1000, MIN, MAX):
+    edge = 2 ** (15 - k)  # the least magnitude whose product leaves the word, give or take the sign's asymmetry
+    for x in (0, 1, -1, 3, -3, 1000, -1000, MIN, MAX, edge - 1, edge, edge + 1, -edge + 1, -edge, -edge - 1):
         assert _run(sim, x) == [_clamp(x * 2**k)], (k, x)
 
 
@@ -733,21 +924,8 @@ def past_the_word_quotient(x: int) -> int:
     return x // 2**40
 
 
-def past_the_word_product(x: int) -> int:
-    return x * 2**40
-
-
 def negated_by_product(x: int) -> int:
     return x * -1
-
-
-def test_a_minted_power_of_two_product_saturates_like_the_multiplication() -> None:
-    """Strength reduction hands `x * 8` to the shifter's saturating tap, so the rails answer as the product."""
-    result = holoso.synthesize(times_eight, _INT16, name="TimesEight")
-    assert _modules(result) == ["ishl"]
-    sim = result.numerical_model.elaborate()
-    for x in (0, 1, -1, 5, -5, -8, 12345, -12345, MIN, MAX):
-        assert _run(sim, x) == [_clamp(x * 8)], x
 
 
 def test_a_minted_power_of_two_quotient_is_one_inline_shift() -> None:
@@ -775,15 +953,6 @@ def test_a_minted_quotient_past_the_word_is_the_sign_fill() -> None:
         assert _run(sim, x) == [x // 2**40], x
 
 
-def test_a_minted_product_past_the_word_rails_by_sign() -> None:
-    """A count past the width rails every nonzero operand, exactly as the multiplication it stands for would."""
-    result = holoso.synthesize(past_the_word_product, _INT16, name="PastWordProduct")
-    assert _modules(result) == ["ishl"]
-    sim = result.numerical_model.elaborate()
-    for x in (MAX, 1, 0, -1, MIN):
-        assert _run(sim, x) == [_clamp(x * 2**40)], x
-
-
 def boundary_remainder(x: int) -> int:
     return x % 2**15
 
@@ -804,16 +973,16 @@ def test_the_boundary_exponent_builds_where_its_divisor_constant_could_not() -> 
         assert _run(quotient_sim, x) == [x // 2**15], x
 
 
-def test_a_product_with_minus_one_negates_on_the_subtractor() -> None:
+def test_a_product_with_minus_one_negates_as_a_subtraction() -> None:
     result = holoso.synthesize(negated_by_product, _INT16, name="NegatedByProduct")
-    assert _modules(result) == ["isubs"]
+    assert _modules(result) == ["iadds"] and adder_modes(result) == [1]
     sim = result.numerical_model.elaborate()
     assert _run(sim, MIN) == [MAX], "the negation saturates at the rail"
     assert _run(sim, MAX) == [MIN + 1]
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Float-to-integer conversions: the rounding rides the conversion as a mode, never a second module.
+# Float-to-integer conversions: the rounding is a mode of the one rounder.
 
 
 def rounded_to_int(x: float) -> int:
@@ -868,50 +1037,59 @@ _ROUNDINGS = [0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.
     [rounded_to_int, floored_to_int, ceiled_to_int, truncated_to_int, negated_then_floored_to_int, negated_crossing],
     ids=lambda value: getattr(value, "__name__", str(value)),
 )
-def test_a_conversion_carries_its_rounding_as_a_mode_rather_than_a_second_module(
-    target: Callable[..., object],
-) -> None:
-    """
-    Only the conversion is instantiated: no `holoso_fround` (the rounding is a mode field) and no
-    `holoso_isubs` (a sign folds onto the conversion's operand rather than costing a module).
-    """
+def test_a_conversion_takes_the_rounder_alone(target: Callable[..., object]) -> None:
+    """No `holoso_iadds` beside it: a sign folds onto the conversion's operand rather than costing a module."""
     result = holoso.synthesize(target, _INT16, name="Conv")
-    assert _modules(result) == ["ftoint"]
+    assert _modules(result) == ["frint"]
     sim = result.numerical_model.elaborate()
     for x in _ROUNDINGS:
         assert _run(sim, x) == _expected(target, x), x
 
 
-def test_a_rounding_another_reader_observes_is_still_emitted_beside_the_conversion() -> None:
-    """A second reader adds the standalone rounding rather than cancelling the absorption."""
-    result = holoso.synthesize(floored_for_two_readers, _INT16, name="TwoReaders")
-    assert _modules(result) == ["fadd", "fround", "ftoint"]
-    sim = result.numerical_model.elaborate()
-    for x in _ROUNDINGS:
-        assert _run(sim, x) == _expected(floored_for_two_readers, x), x
-
-
 def test_two_conversions_over_one_value_stay_apart_on_their_modes_alone() -> None:
     """One shared instance, two firings: the outputs differ wherever truncation and floor do."""
     result = holoso.synthesize(truncated_and_floored, _INT16, name="TruncAndFloor")
-    assert result.verilog_output.verilog.count("holoso_ftoint #") == 1
-    assert _modules(result) == ["ftoint"]
+    assert _modules(result) == ["frint"] and result.verilog_output.verilog.count("holoso_frint #(") == 1
     sim = result.numerical_model.elaborate()
     for x in _ROUNDINGS:
         assert _run(sim, x) == _expected(truncated_and_floored, x), x
 
 
-def test_a_rounding_that_only_a_conversion_reads_needs_no_rounding_operator_configured() -> None:
-    """Absorbed, the rounding is never selected, so a kernel that only converts one no longer demands `fround`."""
-    without_fround = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(), ffromint=holoso.FFromIntOptions(), ftoint=holoso.FToIntOptions()
-        ),
-        ffmt=holoso.FloatFormat(5, 11),
-    )
-    holoso.synthesize(floored_to_int, without_fround, name="NoFround")
-    with pytest.raises(holoso.UnsupportedConstruct):
-        holoso.synthesize(floored_for_two_readers, without_fround, name="NoFroundTwoReaders")
+def every_rounding_both_ways(x: float) -> tuple[float, int, float, int, float, int, float, int]:
+    return np.rint(x), round(x), np.floor(x), math.floor(x), np.ceil(x), math.ceil(x), np.trunc(x), int(x)
+
+
+def every_rounding_as_integer(x: float) -> tuple[int, int, int, int]:
+    return round(x), math.floor(x), math.ceil(x), int(x)
+
+
+def test_a_rounding_answers_as_float_and_as_integer_in_one_firing() -> None:
+    """
+    The float result of a rounding rides the firing that converts it, in every rounding mode: the kernel wanting both
+    takes no longer than the one wanting the integers alone, which twice the firings on the one rounder would.
+    """
+    both = holoso.synthesize(every_rounding_both_ways, _INT16, name="BothWays")
+    integers = holoso.synthesize(every_rounding_as_integer, _INT16, name="IntegersOnly")
+    assert _modules(both) == _modules(integers) == ["frint"]
+    assert both.initiation_interval == integers.initiation_interval
+    sim = both.numerical_model.elaborate()
+    for x in _ROUNDINGS:
+        assert _run(sim, x) == _expected(every_rounding_both_ways, x), x
+
+
+def truncated_and_converted_back(x: float) -> tuple[int, float]:
+    return int(x), float(int(x))
+
+
+def test_converting_an_integer_back_is_the_float_result_of_the_same_firing() -> None:
+    """`float(int(x))` is the truncation itself, so it costs neither the integer-to-float converter nor a firing."""
+    result = holoso.synthesize(truncated_and_converted_back, _INT16, name="TruncatedBack")
+    alone = holoso.synthesize(truncated_to_int, _INT16, name="TruncatedAlone")
+    assert _modules(result) == ["frint"]
+    assert result.initiation_interval == alone.initiation_interval
+    sim = result.numerical_model.elaborate()
+    for x in _ROUNDINGS:
+        assert _run(sim, x) == _expected(truncated_and_converted_back, x), x
 
 
 def rounded_to_float(x: float) -> float:

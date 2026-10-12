@@ -3,7 +3,7 @@ Read-only structural and control-flow facts over MIR. They depend on nothing in 
 of the builder DAG, shared by construction, layout, and bank allocation without coupling those stages to one another.
 """
 
-from .._mir import Mir, MirOperation, MirPhi, successors
+from .._mir import Mir, MirOperation, MirPhi
 from .._util import ValueId
 
 
@@ -11,10 +11,6 @@ def mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
     node = mir.nodes[vid]
     assert isinstance(node, MirOperation)
     return node
-
-
-def succ_map(mir: Mir) -> dict[int, list[int]]:
-    return {block.id: successors(block) for block in mir.blocks}
 
 
 def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]) -> dict[int, frozenset[ValueId]]:

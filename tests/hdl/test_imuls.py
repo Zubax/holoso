@@ -8,7 +8,7 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import IMulOptions, IntFormat
+from holoso import IMulsOptions, IntFormat
 from holoso._operators import IMulOperator
 
 from .hdl_float_oracle import (
@@ -78,6 +78,14 @@ async def imuls_cocotb(dut: Any) -> None:
         for a in directed:
             for b in directed:
                 await step(a, b)
+        # A product by a power of two is where the rail is closest to an exact answer: each factor 2**k has one
+        # magnitude at which the product first leaves the word, asymmetric by one between the signs, and both sides
+        # of it are driven in both operand orders.
+        for k in range(1, width - 1):
+            factor, edge = 1 << k, 1 << (width - 1 - k)
+            for value in (edge - 1, edge, edge + 1, 1 - edge, -edge, -edge - 1):
+                await step(value & mask, factor)
+                await step(factor, value & mask)
         rng = np.random.default_rng(int(os.environ.get("HOLOSO_TEST_SEED", "12345")))
         for _ in range(int(os.environ.get("HOLOSO_IMULS_RANDOM", "512"))):
             a = int(rng.integers(0, 1 << width, dtype=np.uint64))
@@ -112,7 +120,7 @@ _CONFIGURATIONS = tuple((width, stage) for width in (*range(2, 7), 24, 44) for s
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_imuls(sim: str, width: int, stage_product: int) -> None:
     # The operator supplies the RTL parameters and the expected latency, so a drifted closed form fails.
-    operator = IMulOperator.build(IntFormat(width), IMulOptions(stage_product=stage_product))
+    operator = IMulOperator.build(IntFormat(width), IMulsOptions(stage_product=stage_product))
     runner = get_runner(sim)
     tag = f"holoso_imuls_w{width}_s{stage_product}"
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / tag

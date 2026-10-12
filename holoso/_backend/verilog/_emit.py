@@ -388,7 +388,7 @@ def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, in
         operands = list(zip(operator.operand_ports, PORT_LETTERS))
         elaboration = lir.elaboration(inst)
         if elaboration != operator.params:
-            codes = sorted(str(mode.code) for mode in lir.instance_modes[inst])
+            codes = sorted({str(mode.code) for mode in lir.instance_modes[inst]})
             _logger.info("Instance %s is elaborated for the modes its firings run alone: %s", base, ", ".join(codes))
         params = ", ".join(f".{name}({value})" for name, value in elaboration.items())
         w(f"{operator.module_name} #(", f"    {params}", f") u_{base} (")

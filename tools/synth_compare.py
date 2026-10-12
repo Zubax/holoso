@@ -11,7 +11,7 @@ target whose operator stage knobs were retuned.
 Report-only tooling -- not part of the compiler, no tests, no design-doc coupling.
 
 Usage:
-    python tools/synth_compare.py capture --out before.json
+    python tools/synth_compare.py capture --out before.json [--flow diamond-ecp5]
     python tools/synth_compare.py render --before before.json --after after.json --out report.html
 """
 
@@ -40,24 +40,27 @@ from tests._synth_targets import TARGETS  # noqa: E402
 # Per-flow resource-primitive names for the LUT/FF/DSP/BRAM report columns; each tool names them differently.
 _RES_KEYS = {
     "yosys-ecp5": (("TRELLIS_COMB", "LUT"), ("TRELLIS_FF", "FF"), ("MULT18X18D", "DSP"), ("DP16KD", "BRAM")),
-    "diamond-ecp5": (("LUT4", "LUT"), ("Registers", "FF"), ("MULT18X18D", "DSP"), ("DP16KD", "BRAM")),
+    "diamond-ecp5": (("LUT4", "LUT"), ("Registers", "FF"), ("MULT18", "DSP"), ("EBR", "BRAM")),
     "vivado-artix7": (("Slice LUTs", "LUT"), ("Slice Registers", "FF"), ("DSPs", "DSP"), ("RAMB18", "BRAM")),
 }
 
 
-def capture(out_path: str) -> None:
+def capture(out_path: str, flows: list[str]) -> None:
     commit = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
     ).stdout.strip()
     dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True).stdout)
     rows = []
     for target in TARGETS:
+        if flows and target.flow.value not in flows:
+            continue
         row: dict[str, Any] = {
             "label": target.label,
             "name": target.name,
             "example": target.example,
             "flow": target.flow.value,
             "target_MHz": target.target_frequency_MHz,
+            "device_class": target.device_class.value,
             "ops": repr(target.ops.operator),
         }
         try:
@@ -69,7 +72,7 @@ def capture(out_path: str) -> None:
             )
             row["min_ii"] = lir.min_initiation_interval
             row["last_pc"] = lir.last_pc
-            flow = make_flow(target.flow, target.target_frequency_MHz)
+            flow = make_flow(target.flow, target.target_frequency_MHz, target.device_class)
             if not flow.available():
                 row["available"] = False
             else:
@@ -173,7 +176,8 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
     for label in labels:
         a = after[label]
         b = before.get(label, {})
-        retuned = b.get("ops") is not None and b.get("ops") != a.get("ops")
+        device_b, device_a = b.get("device_class", "default"), a.get("device_class", "default")
+        retuned = b.get("ops") is not None and (b.get("ops") != a.get("ops") or device_b != device_a)
         ii_b, ii_a = b.get("min_ii"), a.get("min_ii")
         if ii_b is not None and ii_a is not None:
             cycles_saved += ii_b - ii_a
@@ -194,7 +198,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
         retune_tag = " <span class='retune'>retuned</span>" if retuned else ""
         cells = [
             f"<td class='name'>{a.get('example') or a['name']}{retune_tag}<br><span class='flow'>{a['flow']}"
-            f" @ {a['target_MHz']:.0f} MHz</span></td>",
+            f" @ {a['target_MHz']:.0f} MHz{'' if device_a == 'default' else f', {device_a} device'}</span></td>",
             _delta_cell(ii_b, ii_a, lower_is_better=True, fmt="{:.0f}"),
             _delta_cell(b.get("last_pc"), a.get("last_pc"), lower_is_better=True, fmt="{:.0f}"),
             _delta_cell(fmb, fma, lower_is_better=False, unit="", fmt="{:.1f}"),
@@ -301,13 +305,15 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     cap = sub.add_parser("capture")
     cap.add_argument("--out", required=True)
+    flows = sorted({target.flow.value for target in TARGETS})
+    cap.add_argument("--flow", action="append", default=[], choices=flows, help="restrict to this flow; repeatable")
     ren = sub.add_parser("render")
     ren.add_argument("--before", required=True)
     ren.add_argument("--after", required=True)
     ren.add_argument("--out", required=True)
     args = parser.parse_args()
     if args.cmd == "capture":
-        capture(args.out)
+        capture(args.out, args.flow)
     else:
         render(args.before, args.after, args.out)
 

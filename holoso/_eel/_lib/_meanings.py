@@ -119,6 +119,8 @@ meaning(_numpy.atanh, scalar=[math.atanh], elementwise=[np.arctanh, np.atanh])
 meaning(_numpy.degrees, scalar=[math.degrees], elementwise=[np.degrees, np.rad2deg])
 meaning(_numpy.radians, scalar=[math.radians], elementwise=[np.radians, np.deg2rad])
 meaning(_intrinsics.fma, scalar=[math.fma])
+meaning(_numpy.multiply_add_int, _intrinsics.fma, elementwise=[_numpy.multiply_add])
+meaning(_numpy.difference_of_products_int, _numpy.difference_of_products_float, scalar=[_numpy.difference_of_products])
 
 # CASTS
 

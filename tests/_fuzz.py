@@ -26,8 +26,15 @@ deliberately NOT failed: the per-operation tolerance is a heuristic, not a sound
 miscompile and -- because divergences are saved as replayable regressions that run in the normal test session -- could
 wedge that session red on a non-bug. Continuous out-of-tolerance vectors are instead counted and surfaced for
 visibility; operator rounding correctness is covered by the dedicated arithmetic tests, not by this differential net.
+
+A kernel may carry a reference of its own instead: a TWIN standing beside it in the same module, the same statements
+with every rounding operation evaluated in the format's own arithmetic on the machine under test (see
+FormatArithmetic), so that a kernel whose outputs round is EXACT all the same. That is how `_fuzz_fma` holds the fused
+multiply-add to the bit with the `ffma` operator and without it.
 """
 
+import dataclasses
+import functools
 import linecache
 import math
 import types
@@ -43,9 +50,11 @@ from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
 from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
 from holoso._lir import operand_read_cycle
-from holoso._mir import MirOptions, Mir, MirBranch, MirJump, MirTerminator
+from holoso import FFmaOptions, Options
+from holoso._mir import MirOptions, Mir, MirBranch, MirJump, MirOperation, MirTerminator
 from holoso._mir._interpret import MirInterpreter
 from holoso._mir import lower as lower_to_mir
+from holoso._operators import FFmaPrimitive
 from holoso._type import BoolType, FloatFormat
 from holoso._value import FloatValue, IntValue, ScalarValue
 
@@ -53,12 +62,15 @@ from ._modelref import (
     build_lir,
     DEFAULT_IFCONV_MAX_OPS,
     default_mir,
+    default_options,
     default_tolerance,
     DEFAULT_UNROLL_MAX_TRIPS,
     flatten_value,
     format_edge_bits,
+    mir_options,
     show_value,
     staged_mir,
+    staged_options,
     Vector,
     within,
 )
@@ -67,13 +79,31 @@ from ._modelref import (
 _REPO = Path(__file__).resolve().parent.parent
 _FUZZ_TMP = _REPO / "build" / "fuzz_tmp"
 
+
+def _with_ffma(options: Options, ffma: FFmaOptions) -> MirOptions:
+    return mir_options(dataclasses.replace(options, operator=dataclasses.replace(options.operator, ffma=ffma)))
+
+
+def _ffma_mir(fmt: FloatFormat) -> MirOptions:
+    return _with_ffma(default_options(fmt), FFmaOptions())
+
+
+def _ffma_staged_mir(fmt: FloatFormat) -> MirOptions:
+    deep = FFmaOptions(
+        stage_input=1, stage_product=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+    )
+    return _with_ffma(staged_options(fmt), deep)
+
+
 # The operator-config catalogue swept per kernel, keyed by a stable label so a saved reproducer can name its config and
-# the regression replayer can rebuild it. Two points: the minimum-latency default and a deeply-pipelined config (the
+# the regression replayer can rebuild it. Two depths: the minimum-latency default and a deeply-pipelined config (the
 # model's timing -- but never the interpreter's -- changes with latency, so this cross-checks the LIR layer at two
-# depths against the one fixed reference).
+# depths against the one fixed reference). Each also comes with the fused multiply-add operator.
 OP_CONFIGS: dict[str, Callable[[FloatFormat], MirOptions]] = {
     "default": default_mir,
     "staged": staged_mir,
+    "ffma": _ffma_mir,
+    "ffma_staged": _ffma_staged_mir,
 }
 
 
@@ -97,13 +127,57 @@ class Shape(Enum):
     EXACT_WIRING = auto()  # exact non-commutative arithmetic that exposes operand transposition
     REDUCTION = auto()  # an unrolled `for` reduction over a literal range
     STATE = auto()  # persistent private slots (a stateful class), including the chained-slot pattern
+    FMA = auto()  # a spelled fused multiply-add, which is what sends the kernel through the machines with the operator
 
 
 class Mode(Enum):
-    """The numerical regime of a kernel's float outputs -- it decides the secondary (float64) check's strictness."""
+    """The numerical regime of a kernel's float outputs -- it decides the secondary check's strictness."""
 
-    EXACT = auto()  # every float output is exact in the format: the float64 reference must match bit-for-bit
+    EXACT = auto()  # the reference must match bit-for-bit: every float output is exact in the format, or it is a twin
     CONTINUOUS = auto()  # general +,*,/ : only interpreter==model is exact; the float64 check is a gross net
+
+
+@dataclass(frozen=True, slots=True)
+class FormatArithmetic:
+    """
+    The arithmetic of one machine, for a reference that has to round as the compiled kernel does. Operands and results
+    are host floats holding format values exactly, which a format no wider than float64 allows; a constant that is no
+    format value rounds into the format as a literal of the kernel does.
+    """
+
+    fmt: FloatFormat
+    fused: bool  # whether the machine has the fused multiply-add operator
+
+    def mul(self, a: float, b: float) -> float:
+        return float(self._value(a) * self._value(b))
+
+    def add(self, a: float, b: float) -> float:
+        return float(self._value(a) + self._value(b))
+
+    def scale(self, a: float, k: int) -> float:
+        """By `2**k` as the exponent scaler does it: exact, until the result leaves the format at either rail."""
+        return float(self._value(a).scale_pow2(k))
+
+    def fma(self, a: float, b: float, c: float) -> float:
+        if self.fused:
+            return float(FloatValue.fma(self._value(a), self._value(b), self._value(c)))
+        return self.add(c, self.mul(a, b))
+
+    def _value(self, x: float) -> FloatValue:
+        return FloatValue.from_float(self.fmt, x)
+
+
+def reference_twin_name(kernel_name: str) -> str:
+    """A twin takes the FormatArithmetic ahead of the kernel's own inputs."""
+    return f"{kernel_name}__reference"
+
+
+def reference_factory(
+    kernel: Callable[..., object], twin: Callable[..., object] | None
+) -> Callable[[FormatArithmetic], Callable[..., object]]:
+    if twin is None:
+        return lambda _: kernel
+    return lambda machine: functools.partial(twin, machine)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,10 +193,12 @@ class GeneratedKernel:
     seed: int
     index: int
     is_stateful: bool
-    # A factory for a *fresh* reference instance (stateful kernels only) so the float64 reference is stepped on its own
-    # instance, independent of the one the model was compiled from. `None` for a stateless kernel.
-    fresh_reference: Callable[[], Callable[..., object]] | None = None
+    # The reference to hold the model against on one machine. A stateful kernel answers with a *fresh* instance, so the
+    # reference is stepped independently of the one the model was compiled from.
+    reference_for: Callable[[FormatArithmetic], Callable[..., object]]
     dead_arm_chain_depth: int | None = None
+    # The fused multiply-adds the machine with the operator must be left with.
+    fused_operations: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +212,7 @@ class _Fragment:
 type _Body = list[tuple[int, str]]
 _OVERBUDGET_ARM_OPS = DEFAULT_IFCONV_MAX_OPS + 1
 _DEFAULT_EXACT_FMT = FloatFormat(6, 18)
+_FMA = frozenset({Shape.FMA})
 
 
 def _fragment(
@@ -197,6 +274,13 @@ def _render_module(name: str, source: str) -> types.ModuleType:
     return module
 
 
+@dataclass(frozen=True, slots=True)
+class _Line:
+    indent: int
+    source: str
+    restated: str | None  # what the kernel's twin states in place of the source, where the two differ
+
+
 class _Emitter:
     """
     A per-kernel source builder. It tracks the live float/bool variable pools it may read from and accumulates body
@@ -210,7 +294,7 @@ class _Emitter:
         self._floats: list[str] = []
         self._bools: list[str] = []
         self._counter = 0
-        self._lines: list[tuple[int, str]] = []
+        self._lines: list[_Line] = []
         self.return_line = ""  # set by the assembly step before rendering
         self.return_annotation = "float"  # a multi-lane return overrides this to a tuple[...]
 
@@ -219,13 +303,17 @@ class _Emitter:
             return self.scaled_value()
         if self.chance(0.4) and len(self.floats) >= 2:
             return self.exact_select_value(_emit_condition(self))
-        return _fragment(self.continuous_expr(2), Mode.CONTINUOUS)
+        return self.continuous_value(2)
 
     def else_division(self) -> _Fragment:
         """
         The unspeculatable division that keeps a diamond a real branch: a numerator over a structurally-nonzero
-        divisor. This is a general division, so the returned metadata marks the fragment continuous.
+        divisor. This is a general division, so the returned metadata marks the fragment continuous. A numerator that
+        is a spelled fma is, with the operator, a fused firing inside a branch that stays.
         """
+        if self.chance(0.3):
+            numerator = f"math.fma({self.pick_float()}, {self.pick_float()}, {self.pick_float()})"
+            return _fragment(f"{numerator} / {self.nonzero_divisor()}", Mode.CONTINUOUS, _FMA)
         return _fragment(
             f"({self.pick_float()} {self.choice(['+', '*'])} {self.pick_float()}) / {self.nonzero_divisor()}",
             Mode.CONTINUOUS,
@@ -321,13 +409,19 @@ class _Emitter:
         c = self.choice(["1.0", "0.5", "2.0"])
         return f"(({self.nonneg_expr()}) + {c})"
 
-    def continuous_expr(self, depth: int) -> str:
+    def continuous_value(self, depth: int) -> _Fragment:
+        """
+        General arithmetic over the pool. A spelled fma is held to no bits here, but it puts the fused operator's
+        firings into the schedules the primary check compares.
+        """
         if depth <= 0 or not self.chance(0.7):
-            return self.pick_float()
-        op = self.choice(["+", "*"])
-        left = self.continuous_expr(depth - 1)
-        right = self.continuous_expr(depth - 1)
-        return f"({left} {op} {right})"
+            return _fragment(self.pick_float(), Mode.CONTINUOUS)
+        op = self.choice(["+", "*", "fma"])
+        operands = [self.continuous_value(depth - 1) for _ in range(3 if op == "fma" else 2)]
+        values = [operand.value for operand in operands]
+        if op == "fma":
+            return _fragment(f"math.fma({', '.join(values)})", Mode.CONTINUOUS, _combine_shapes(operands, _FMA))
+        return _fragment(f"({values[0]} {op} {values[1]})", Mode.CONTINUOUS, _combine_shapes(operands))
 
     def wide_chain(self, width: int) -> str:
         """
@@ -382,18 +476,27 @@ class _Emitter:
         self.add_float(clamped)
         return _fragment(clamped, shapes=frozenset({Shape.SELECT}))
 
-    def emit(self, line: str, indent: int = 1) -> None:
-        self._lines.append((indent, line))
+    def emit(self, line: str, indent: int = 1, restated: str | None = None) -> None:
+        self._lines.append(_Line(indent, line, restated))
 
     def reset_lines(self) -> None:
         self._lines = []
+
+    @property
+    def has_twin(self) -> bool:
+        return any(line.restated is not None for line in self._lines)
 
     def render_body(self, base_indent: int = 0) -> str:
         """
         Render the accumulated body, shifting every line by `base_indent` levels. A top-level function uses 0 (its
         body indent of 1 == 4 spaces); a class method uses 1 (its body lives one level deeper, at 8 spaces).
         """
-        return "\n".join("    " * (indent + base_indent) + line for indent, line in self._lines)
+        return "\n".join("    " * (line.indent + base_indent) + line.source for line in self._lines)
+
+    def render_twin_body(self) -> str:
+        return "\n".join(
+            "    " * line.indent + (line.source if line.restated is None else line.restated) for line in self._lines
+        )
 
 
 def _body(line: str, indent: int = 0) -> tuple[int, str]:
@@ -711,6 +814,21 @@ def _emit_constant_arm_branch(em: _Emitter) -> _Fragment:
     return _merge_fragment(r, [cond, then_value, else_fragment], frozenset({Shape.BRANCH}))
 
 
+def _emit_fused_arm_branch(em: _Emitter) -> _Fragment:
+    """
+    A real branch with a spelled fma on either arm, one of them under the unspeculatable division that keeps it: with
+    the operator the fused firings are scheduled inside arms that stay, where the primary check can see them.
+    """
+    a, b, c = em.floats[:3]
+    cond = _fragment(f"({a} < {b})")
+    r = em.fresh("fb")
+    then_value = _fragment(f"math.fma({a}, {b}, {c})", Mode.CONTINUOUS, _FMA)
+    else_value = _fragment(f"math.fma({b}, {c}, {a}) / {em.nonzero_divisor()}", Mode.CONTINUOUS, _FMA)
+    _emit_if_else(em, cond.value, _assign_body(r, then_value), _assign_body(r, else_value))
+    em.add_float(r)
+    return _merge_fragment(r, [cond, then_value, else_value], frozenset({Shape.BRANCH}))
+
+
 def _emit_exact_select(em: _Emitter) -> _Fragment:
     cond = _emit_condition(em)
     return em.exact_select_value(cond)
@@ -742,6 +860,7 @@ _DIRECTED_TEMPLATES: list[Callable[[_Emitter], _Fragment]] = [
     # The nested diamond runs in EVERY campaign (including the smoke, whose random draw need not produce one), so
     # `_assert_danger_survived` enforces the two-forward-branch nested invariant on every run.
     lambda em: _emit_diamond(em, nested=True),
+    _emit_fused_arm_branch,
 ]
 
 
@@ -776,14 +895,19 @@ def _finish_function_kernel(
     shapes: frozenset[Shape],
     mode: Mode,
     dead_arm_chain_depth: int | None = None,
+    fused_operations: int | None = None,
 ) -> GeneratedKernel:
-    source = _assemble_function(name, params, bool_set, em.render_body(), em.return_line, em.return_annotation)
+    definitions = [_assemble_function(name, params, bool_set, em.render_body(), em.return_line, em.return_annotation)]
+    if em.has_twin:
+        definitions.append(_assemble_twin(name, params, em.render_twin_body(), em.return_line))
+    source = _assemble_module(definitions)
     module = _render_module(name, source)
+    kernel = getattr(module, name)
     return GeneratedKernel(
         name=name,
         source=source,
         filename=module.__file__ or "",
-        callable=getattr(module, name),
+        callable=kernel,
         shapes=shapes,
         mode=mode,
         input_names=params,
@@ -791,7 +915,9 @@ def _finish_function_kernel(
         seed=master_seed,
         index=index,
         is_stateful=False,
+        reference_for=reference_factory(kernel, getattr(module, reference_twin_name(name), None)),
         dead_arm_chain_depth=dead_arm_chain_depth,
+        fused_operations=fused_operations,
     )
 
 
@@ -905,6 +1031,17 @@ def _assemble_function(
     return f"def {name}({sig}) -> {return_annotation}:\n{docstring}\n{body}\n    {return_line}\n"
 
 
+def _assemble_twin(name: str, params: list[str], body: str, return_line: str) -> str:
+    docstring = (
+        '    """What the kernel above must answer, bit for bit, on the machine whose arithmetic this is given."""'
+    )
+    return f"def {reference_twin_name(name)}(machine, {', '.join(params)}):\n{docstring}\n{body}\n    {return_line}\n"
+
+
+def _assemble_module(definitions: list[str]) -> str:
+    return "import math\n\n\n" + "\n\n".join(definitions)
+
+
 def _generate_stateful_kernel(
     name: str, master_seed: int, index: int, fmt: FloatFormat = _DEFAULT_EXACT_FMT
 ) -> GeneratedKernel:
@@ -957,7 +1094,9 @@ def _generate_stateful_kernel(
     carried = olds[slots[0]]
     em.return_line = f"return ({head}) * 2.0 + ({em.pick_float()} * 1.5) / {em.nonzero_divisor()} + {carried}"
 
-    source = _assemble_class(name, inputs, slots, resets, em.render_body(base_indent=1), em.return_line)
+    source = _assemble_module(
+        [_assemble_class(name, inputs, slots, resets, em.render_body(base_indent=1), em.return_line)]
+    )
     module = _render_module(name, source)
     cls = getattr(module, name)
 
@@ -973,7 +1112,7 @@ def _generate_stateful_kernel(
         seed=master_seed,
         index=index,
         is_stateful=True,
-        fresh_reference=lambda: cls().__call__,
+        reference_for=lambda _: cls().__call__,
     )
 
 
@@ -1006,7 +1145,8 @@ class CheckKind(Enum):
     """Which differential check fired on a divergence (recorded into the saved reproducer)."""
 
     INTERP_VS_MODEL = "interp_vs_model"  # bit-exact primary oracle; a failure indicts the LIR layer
-    MODEL_VS_FLOAT64 = "model_vs_float64"  # gross-net secondary; a failure may indict the front/mid-end or operators
+    # The secondary check, against float64 or the kernel's twin; a failure may indict the front/mid-end or operators.
+    MODEL_VS_REFERENCE = "model_vs_reference"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1039,6 +1179,7 @@ class CampaignStats:
     # a sound bound on continuous ZKF arithmetic). A large count would hint at a too-tight tolerance or a real bug.
     continuous_drift: int = 0
     dead_arm_forced: int = 0  # ARMED dead-arm-only kernels run (the overlap-hazard guarantee; see run_campaign)
+    fma_batch_kernels: int = 0
     shape_counts: dict[Shape, int] = field(default_factory=lambda: {shape: 0 for shape in Shape})
     divergences: list[Divergence] = field(default_factory=list)
 
@@ -1127,6 +1268,21 @@ def _has_fused_relation_pair(lir: Lir) -> bool:
             if op.inst.operator.name == "fcmp" and len(op.writes) > 1:
                 return True
     return False
+
+
+def _fused_operations(mir: Mir) -> int:
+    return sum(
+        isinstance(node, MirOperation) and isinstance(node.primitive, FFmaPrimitive) for node in mir.nodes.values()
+    )
+
+
+def _operator_sweep(kernel: GeneratedKernel, fmt: FloatFormat) -> list[tuple[str, MirOptions]]:
+    """
+    The fused operator serves a spelled fma and nothing else, so a kernel spelling none would only build the machine it
+    already ran on a second time.
+    """
+    sweep = [(label, make_ops(fmt)) for label, make_ops in OP_CONFIGS.items()]
+    return [(label, ops) for label, ops in sweep if Shape.FMA in kernel.shapes or ops.operator.ffma is None]
 
 
 def _branch_successors(terminator: MirTerminator) -> tuple[int, ...]:
@@ -1277,7 +1433,7 @@ def _reference_outputs(
     fn: Callable[..., object], fmt: FloatFormat, input_names: list[str], bool_inputs: frozenset[str], vector: Vector
 ) -> list[float | bool] | None:
     """
-    Evaluate the float64 reference for one vector, or `None` if it raises (ZeroDivisionError/OverflowError/ValueError)
+    Evaluate the reference for one vector, or `None` if it raises (ZeroDivisionError/OverflowError/ValueError)
     -- in which case the secondary check skips this vector. Float inputs are decoded from their exact ZKF bits so the
     reference sees the same value the DUT received.
     """
@@ -1297,7 +1453,7 @@ def _reference_outputs(
 
 
 class _SecondaryResult(Enum):
-    """The outcome of comparing one vector's model output against the float64 reference, leaf by leaf."""
+    """The outcome of comparing one vector's model output against the reference, leaf by leaf."""
 
     PASS = auto()  # every lane finite and within tolerance (EXACT: bit-exact)
     SKIP_NONFINITE = auto()  # a CONTINUOUS lane was inf/nan on either side, so the float64 net cannot compare it
@@ -1315,7 +1471,7 @@ def _secondary_ok(
     op_count: int,
 ) -> tuple[_SecondaryResult, str]:
     """
-    Compare the model output against the float64 reference, leaf by leaf: a bool lane must match exactly, a float lane
+    Compare the model output against the reference, leaf by leaf: a bool lane must match exactly, a float lane
     within a format tolerance (EXACT mode: rtol=atol=0). A non-finite EXACT leaf is a hard failure because every
     EXACT-mode probe is required to stay finite in the configured ZKF format; only CONTINUOUS non-finite leaves are
     reported `SKIP_NONFINITE`. The tolerance is widened by the operation count.
@@ -1338,7 +1494,7 @@ def _secondary_ok(
     for lane, (m, r) in enumerate(zip(model_out, reference, strict=True)):
         if isinstance(m, bool) != isinstance(r, bool) or isinstance(m, IntValue):
             # A lane's family must match the source's: a bool output lowered as a float (or vice versa), or an
-            # integer where this float64 reference expects none, is a real miscompile that coercing the model value
+            # integer where this float reference expects none, is a real miscompile that coercing the model value
             # with `bool(...)`/`float(...)` would mask (model True or 1 vs reference 1.0 compare ==).
             return (
                 _SecondaryResult.STRUCTURAL_FAIL,
@@ -1380,7 +1536,7 @@ def _secondary_ok(
 
 @dataclass(frozen=True, slots=True)
 class _SecondaryOutcome:
-    checked: bool  # True if the float64 reference was finite and the lanes were compared
+    checked: bool  # True if the reference was finite and the lanes were compared
     latch_off: bool  # True if a stateful kernel's float64 reference has drifted -> stop the secondary for the sequence
     exact_failure: str | None  # a finite EXACT-mode divergence detail (a real bug), else None
     continuous_drift: bool = False  # a CONTINUOUS finite out-of-tolerance miss: surfaced for visibility, never failed
@@ -1389,9 +1545,9 @@ class _SecondaryOutcome:
 class _Differential:
     """
     The per-vector differential engine shared by the campaign runner and the regression replayer: one model + one
-    interpreter built from the same MIR, plus the float64 reference function and the kernel's numerical mode.
-    `primary` returns the bit-exact interp-vs-model detail (or None), and `secondary` runs the best-effort float64
-    net with the stateful-latch rule -- so both call sites drive the identical oracle and cannot drift.
+    interpreter built from the same MIR, plus the reference function and the kernel's numerical mode. `primary`
+    returns the bit-exact interp-vs-model detail (or None), and `secondary` holds the model against the reference
+    with the stateful-latch rule -- so both call sites drive the identical oracle and cannot drift.
     """
 
     def __init__(
@@ -1429,7 +1585,7 @@ class _Differential:
 
     def secondary(self, vector: Vector, model_out: list[ScalarValue]) -> _SecondaryOutcome:
         """
-        Run the best-effort float64 check for one vector, applying the stateful latch and EXACT-mode failure rule. A
+        Run the secondary check for one vector, applying the stateful latch and EXACT-mode failure rule. A
         CONTINUOUS finite out-of-tolerance mismatch is NOT reported as a divergence: `default_tolerance` is a linear
         heuristic, not a sound bound on ZKF-vs-float64 divergence (catastrophic cancellation makes the relative error
         unbounded), so a finite continuous miss is treated as expected precision drift, not a miscompile -- the EXACT
@@ -1439,7 +1595,7 @@ class _Differential:
         reference = _reference_outputs(self._reference_fn, self._fmt, self._input_names, self._bool_inputs, vector)
         if reference is None:
             if self._mode is Mode.EXACT:
-                detail = f"EXACT-mode float64 reference raised for inputs {[show_value(v) for v in vector]}"
+                detail = f"EXACT-mode reference raised for inputs {[show_value(v) for v in vector]}"
                 return _SecondaryOutcome(checked=False, latch_off=False, exact_failure=detail)
             return _SecondaryOutcome(checked=False, latch_off=self._is_stateful, exact_failure=None)
         result, detail = _secondary_ok(self._mode, model_out, reference, self._fmt, self._op_count)
@@ -1473,12 +1629,18 @@ def run_kernel(
     interpreter (reset state shared). The model is built ONCE here and the vectors are drawn from it (so the campaign
     compiles the kernel exactly once per op-config). Returns the first Divergence found (its vector prefix
     captured), or `None` if every check passed. The primary interp==model check is unconditional and never skipped;
-    the secondary float64 check is best-effort and latches off permanently for a stateful kernel once the float64
-    reference diverges.
+    the secondary check is best-effort outside EXACT mode and latches off permanently for a stateful kernel once its
+    float64 reference diverges.
     """
     name = f"{kernel.name}__{op_label}"
     mir, lir, model, interpreter = _build_with_lir(kernel.callable, ops, name, fmt)
     _assert_danger_survived(kernel, mir, op_label)
+    machine = FormatArithmetic(fmt, fused=ops.operator.ffma is not None)
+    if kernel.fused_operations is not None and machine.fused:
+        assert _fused_operations(mir) == kernel.fused_operations, (
+            f"{name}: {_fused_operations(mir)} fused multiply-add(s) left where the shape leaves "
+            f"{kernel.fused_operations}, so it exercises another reading of the fma than the one it was generated for"
+        )
     if Shape.RELATION_PAIR in kernel.shapes:
         assert _has_fused_relation_pair(lir), f"{name}: relation-pair kernel did not fuse comparator order-flag taps"
     if expect_armed:
@@ -1488,7 +1650,7 @@ def run_kernel(
         ), f"{name}: dead-arm kernel did not spill a depth-{kernel.dead_arm_chain_depth} chain -- hazard not armed"
 
     assert model.inputs == interpreter.inputs, f"{name}: input ports differ (name or type)"
-    # The float64 reference binds by PARAMETER NAME against a vector drawn in model-port order, so a frontend bug that
+    # The reference binds by PARAMETER NAME against a vector drawn in model-port order, so a frontend bug that
     # swapped the param->port mapping and the port order together would feed model, interpreter, AND reference the same
     # wrong name->value mapping and pass vacuously. Pinning the port order to the source parameter order closes that.
     assert [p.name for p in model.inputs] == list(
@@ -1499,11 +1661,10 @@ def run_kernel(
     # from the just-built model's port order, so no throwaway compile is needed.
     vectors = _draw_vectors(kernel, model, fmt, _seed_rng(kernel.seed, kernel.index), n_vectors)
 
-    reference_fn = kernel.fresh_reference() if kernel.fresh_reference is not None else kernel.callable
     diff = _Differential(
         model,
         interpreter,
-        reference_fn,
+        kernel.reference_for(machine),
         kernel.mode,
         kernel.is_stateful,
         kernel.input_names,
@@ -1523,7 +1684,7 @@ def run_kernel(
             continue
         outcome = diff.secondary(vector, model_out)
         if outcome.exact_failure is not None:
-            return Divergence(kernel, op_label, effort, CheckKind.MODEL_VS_FLOAT64, prefix, outcome.exact_failure)
+            return Divergence(kernel, op_label, effort, CheckKind.MODEL_VS_REFERENCE, prefix, outcome.exact_failure)
         stats.secondary_checked += 1 if outcome.checked else 0
         stats.secondary_skipped += 0 if outcome.checked else 1
         stats.continuous_drift += 1 if outcome.continuous_drift else 0
@@ -1546,9 +1707,7 @@ def _armed_dead_arm_kernel(master_seed: int, index: int, fmt: FloatFormat) -> Ge
         assert kernel.dead_arm_chain_depth is not None
         # Verify the chain spills under EVERY op-config the forced batch asserts (`expect_armed`), not just the
         # default -- so a future config under which the chain happens not to spill cannot false-fail the campaign.
-        lirs = (
-            _build_with_lir(kernel.callable, make_ops(fmt), kernel.name, fmt)[1] for make_ops in OP_CONFIGS.values()
-        )
+        lirs = (_build_with_lir(kernel.callable, ops, kernel.name, fmt)[1] for _, ops in _operator_sweep(kernel, fmt))
         if all(_has_overlap_spill_at_depth(lir, kernel.dead_arm_chain_depth) for lir in lirs):
             return kernel
     raise _DangerShapeLost(f"dead-arm generator failed to arm a spill in {_ARM_RETRIES} tries (index {index})")
@@ -1565,8 +1724,8 @@ def _run_campaign_kernel(
     expect_armed: bool = False,
 ) -> None:
     stats.record_kernel(kernel)
-    for op_label, make_ops in OP_CONFIGS.items():
-        divergence = run_kernel(kernel, op_label, make_ops(fmt), fmt, effort, n_vectors, stats, expect_armed)
+    for op_label, ops in _operator_sweep(kernel, fmt):
+        divergence = run_kernel(kernel, op_label, ops, fmt, effort, n_vectors, stats, expect_armed)
         if divergence is not None:
             stats.divergences.append(divergence)
             on_divergence(divergence)
@@ -1581,9 +1740,9 @@ def run_campaign(
     on_divergence: Callable[[Divergence], None],
 ) -> CampaignStats:
     """
-    Run a full campaign: generate `n_kernels` kernels, sweep each across OP_CONFIGS, and drive `n_vectors`
-    vectors through each. `on_divergence` is invoked with the FIRST divergence per (kernel, op-config) -- the caller
-    saves a reproducer and decides whether to fail. Returns the accumulated stats.
+    Run a full campaign: generate `n_kernels` kernels, sweep each across the op-configs it is driven through, and
+    drive `n_vectors` vectors through each. `on_divergence` is invoked with the FIRST divergence per (kernel,
+    op-config) -- the caller saves a reproducer and decides whether to fail. Returns the accumulated stats.
     """
     stats = CampaignStats()
     # A dedicated batch of ARMED dead-arm-only kernels exercises the overlap register-reuse hazard every campaign,
@@ -1710,7 +1869,9 @@ def _vector_to_bits(kernel: GeneratedKernel, vector: Vector) -> dict[str, int]:
     return bits
 
 
-def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object]) -> tuple[bool, str]:
+def replay_case(
+    kernel_callable: Callable[..., object], twin: Callable[..., object] | None, meta: dict[str, object]
+) -> tuple[bool, str]:
     """
     Replay a saved reproducer: rebuild the model + interpreter at the saved op-config (via the same `_build_with_lir`
     path the campaign uses), drive the saved bit-vectors in order, and re-check the previously-failing differential
@@ -1720,6 +1881,7 @@ def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object])
     """
     repro = ReproMeta.from_dict(meta)
     ops = OP_CONFIGS[repro.op_label](repro.fmt)
+    machine = FormatArithmetic(repro.fmt, fused=ops.operator.ffma is not None)
     mir, _, model, interpreter = _build_with_lir(kernel_callable, ops, f"{repro.kernel_name}__replay", repro.fmt)
     if [p.name for p in model.inputs] != list(repro.input_names):  # the reference binds by name in port order; pin it
         return (
@@ -1740,7 +1902,7 @@ def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object])
     diff = _Differential(
         model,
         interpreter,
-        kernel_callable,
+        reference_factory(kernel_callable, twin)(machine),
         repro.mode,
         repro.is_stateful,
         repro.input_names,
@@ -1771,9 +1933,9 @@ def replay_case(kernel_callable: Callable[..., object], meta: dict[str, object])
 
 def _render_reproducer(source: str, meta: dict[str, object]) -> str:
     """
-    Render a saved reproducer module: the kernel source verbatim plus a `META` dict literal. Float inputs are stored
-    as exact ZKF bits so replay is bit-faithful regardless of the float64 round-trip. The replayer imports `META` and
-    the kernel symbol by name.
+    Render a saved reproducer module: the kernel source verbatim, its twin included where it has one, plus a `META`
+    dict literal. Float inputs are stored as exact ZKF bits so replay is bit-faithful regardless of the float64
+    round-trip. The replayer imports `META` and the kernel symbol by name.
     """
     import pprint
 

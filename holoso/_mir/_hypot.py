@@ -7,6 +7,7 @@ from .._errors import UnsupportedConstruct
 from .._hir import (
     FloatAdd,
     FloatAtan2Turns,
+    FloatFma,
     FloatHypot,
     FloatILog2,
     FloatMul,
@@ -24,7 +25,7 @@ from .._hir import (
     copy_node,
     rebuild,
 )
-from .._operators import FAtan2Primitive, OpConfig
+from .._operators import FCordicOperator, OpConfig
 from .._type import FloatFormat
 from .._util import ValueId
 from ._signs import collapse_signs
@@ -47,13 +48,13 @@ def _pair(hir: Hir, vid: ValueId) -> Operation | None:
     return None
 
 
-def plan_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
+def plan_magnitude_fusions(hir: Hir, ops: OpConfig) -> dict[ValueId, ValueId]:
     """
     Map each two-legged FloatHypot to a same-block FloatAtan2Turns over the same value pair so MIR can tap the atan2's
     magnitude port (the two fuse into one CORDIC) rather than expand into elementary operations. Block-local, like the
     LIR firing fusion it feeds; a pair is the only arity that port carries.
     """
-    if not ops.serves(FAtan2Primitive):
+    if not ops.serves(FCordicOperator):
         return {}
     plans: dict[ValueId, ValueId] = {}
     for block in hir.blocks:
@@ -110,7 +111,7 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
     Fusion is planned here rather than by the caller because it must be re-planned on every round: an expansion can
     let an expression cancel, and the cancellation can delete the atan2 another magnitude was to fuse with.
     """
-    fused, fmt = plan_fusions(hir, ops), ops.float_format
+    fused, fmt = plan_magnitude_fusions(hir, ops), ops.float_format
     targets = {
         vid: node
         for vid, node in hir.nodes.items()
@@ -144,11 +145,17 @@ def expand_unfused(hir: Hir, ops: OpConfig) -> Hir | None:
             lambda a, b: builder.operation(IntSelect(), [builder.operation(IntComparison(Relation.GT), [a, b]), a, b]),
         )
         k = builder.operation(IntSub(), [builder.int_const(scale), largest])
-        squares = [
-            builder.operation(FloatMul(), [scaled, scaled])
-            for scaled in (builder.operation(FloatMulPow2Dynamic(), [leg, k]) for leg in legs)
+
+        # A square is fused into the sum that takes it, so only the first of a pair of legs is a product, and an odd
+        # leg joins the last pair.
+        scaled = [builder.operation(FloatMulPow2Dynamic(), [leg, k]) for leg in legs]
+        sums = [
+            builder.operation(FloatFma(), [b, b, builder.operation(FloatMul(), [a, a])])
+            for a, b in zip(scaled[0::2], scaled[1::2])
         ]
-        summed = _tree(squares, lambda a, b: builder.operation(FloatAdd(), [a, b]))
+        if len(scaled) % 2:
+            sums[-1] = builder.operation(FloatFma(), [scaled[-1], scaled[-1], sums[-1]])
+        summed = _tree(sums, lambda a, b: builder.operation(FloatAdd(), [a, b]))
         root = builder.operation(FloatSqrt(), [summed])
         return builder.operation(FloatMulPow2Dynamic(), [root, builder.operation(IntNeg(), [k])])
 

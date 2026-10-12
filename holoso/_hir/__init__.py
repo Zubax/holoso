@@ -16,7 +16,6 @@ from ._ir import (
     Ret as Ret,
     StateRead as StateRead,
     Terminator as Terminator,
-    references as references,
 )
 from ._scaling import Scaling as Scaling, scaling_of as scaling_of
 from ._operators import (

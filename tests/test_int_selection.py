@@ -19,8 +19,7 @@ from holoso import (
     FloatFormat,
     FMulILog2Options,
     FMulOptions,
-    FRoundOptions,
-    FToIntOptions,
+    FRintOptions,
     OperatorOptions,
     Options,
 )
@@ -42,9 +41,12 @@ from holoso._operators import (
     FloatToBoolPrimitive,
     FMulILog2Operator,
     FMulILog2Primitive,
-    FRoundPrimitive,
-    FToIntPrimitive,
+    FRintPrimitive,
+    IAddPrimitive,
+    ICmpPrimitive,
     IntIdentity,
+    ISubPrimitive,
+    PooledPrimitive,
     Primitive,
     RoundMode,
 )
@@ -74,9 +76,8 @@ OPTIONS = Options(
         fadd=FAddOptions(),
         fmul=FMulOptions(),
         fcmp=FCmpOptions(),
-        fround=FRoundOptions(),
+        frint=FRintOptions(),
         ffromint=FFromIntOptions(),
-        ftoint=FToIntOptions(),
     ),
     ffmt=FloatFormat(5, 11),
 )
@@ -97,7 +98,7 @@ def _operations(mir: Mir, name: str) -> list[MirOperation]:
 
 
 def _rounding(operation: MirOperation) -> RoundMode:
-    assert isinstance(operation.primitive, FRoundPrimitive | FToIntPrimitive)
+    assert isinstance(operation.primitive, FRintPrimitive)
     return operation.primitive.rounding
 
 
@@ -129,19 +130,20 @@ def countdown(n: int) -> int:
     "target,selected",
     [
         (divmod_pair, ["idivs", "idivs"]),
-        (three_relations, ["icmp", "icmp", "icmp"]),
-        (sign_ops, ["iabss", "isubs"]),
+        (three_relations, ["iadds", "iadds", "iadds"]),
+        (sign_ops, ["iabss", "iadds"]),
         (bitwise_ops, ["ibwand", "ibwnot", "ibwor", "ibwxor"]),
         (mux_and_casts, ["iadds", "ifrombool", "itobool", "select"]),
-        (_min_max_of_ints, ["iadds", "icmp", "icmp", "imuls", "select", "select"]),
-        (family_crossings, ["ffromint", "ftoint"]),
-        (shift_pair, ["ishl", "ishr"]),
-        (countdown, ["iadds", "icmp", "isubs"]),
-        (times_eight, ["ishl"]),
+        (_min_max_of_ints, ["iadds", "iadds", "iadds", "imuls", "select", "select"]),
+        (family_crossings, ["ffromint", "frint"]),
+        (shift_pair, ["ishft", "ishft"]),
+        (countdown, ["iadds", "iadds", "iadds"]),
+        (times_eight, ["imuls"]),
         (eighth, ["ishiftc"]),
         (eighth_remainder, ["ibwand"]),
-        (negated_by_product, ["isubs"]),
+        (negated_by_product, ["iadds"]),
         (popcount_of, ["ipopcnt"]),
+        (cross_boundary, ["ffromint", "frint", "ibwand"]),
     ],
     ids=lambda value: getattr(value, "__name__", str(value)),
 )
@@ -149,12 +151,35 @@ def test_the_lowering_names_each_integer_operator_in_one_table(
     target: Callable[..., object], selected: list[str]
 ) -> None:
     """
-    Every primitive the lowering can choose, named in one place: `-x` selects `isubs` because there is no
-    negation module, each shift direction selects the module that names it, the strength rewrites pick the
+    Every primitive the lowering can choose, named in one place: `-x` selects the adder because there is no
+    negation module, both shift directions select the one shifter, the strength rewrites pick the
     inline `ishiftc`/`ibwand` no public artifact can name, and `min`/`max` become one compare-and-select
     pair each rather than branches.
     """
     assert _mnemonics(_select(target)) == selected
+
+
+@pytest.mark.parametrize(
+    "target,primitives",
+    [
+        (three_relations, [ICmpPrimitive, ICmpPrimitive, ICmpPrimitive]),
+        (sign_ops, [ISubPrimitive]),
+        (mux_and_casts, [IAddPrimitive]),
+        (_min_max_of_ints, [IAddPrimitive, ICmpPrimitive, ICmpPrimitive]),
+        (countdown, [IAddPrimitive, ICmpPrimitive, ISubPrimitive]),
+        (negated_by_product, [ISubPrimitive]),
+    ],
+    ids=lambda value: getattr(value, "__name__", str(value)),
+)
+def test_the_lowering_selects_the_adder_primitive_each_use_means(
+    target: Callable[..., object], primitives: list[type[PooledPrimitive]]
+) -> None:
+    """
+    The adder's name cannot tell an addition from a subtraction or a comparison, so the primitive each use selects is
+    the sentinel: a negation is the subtraction from zero, a relation the comparison, and a sum the addition.
+    """
+    selected = sorted(type(operation.primitive).__name__ for operation in _operations(_select(target), "iadds"))
+    assert selected == [primitive.__name__ for primitive in primitives]
 
 
 def _wide_firings(lir: Lir) -> list[PooledScheduledOp]:
@@ -172,34 +197,32 @@ def test_the_quotient_and_the_remainder_share_one_divider_firing() -> None:
 def test_relations_fuse_into_one_firing_and_opposite_inversions_split() -> None:
     """
     Three relations, three flags, one activation. A firing taps each port at most once, so `a <= b` and `a > b`
-    -- the same flag under opposite inversions -- need an activation each, still bound to the one pooled comparator:
-    the cost is a cycle, never a module.
+    -- the same flag under opposite inversions -- need an activation each, still bound to the one pooled adder: the
+    cost is a cycle, never a module.
     """
     fused = build_lir(_select(three_relations), "three_relations")
     (firing,) = _wide_firings(fused)
-    assert [instance.operator.name for instance in fused.instances] == ["icmp"]
-    assert len(firing.writes) == 3
+    assert [instance.operator.name for instance in fused.instances] == ["iadds"]
+    assert isinstance(firing.primitive, ICmpPrimitive) and len(firing.writes) == 3
     split = build_lir(_select(four_relations), "four_relations")
-    assert [instance.operator.name for instance in split.instances] == ["icmp"]
-    assert len(_wide_firings(split)) == 2
+    assert [instance.operator.name for instance in split.instances] == ["iadds"]
+    assert [type(firing.primitive) for firing in _wide_firings(split)] == [ICmpPrimitive, ICmpPrimitive]
 
 
 def strength_mix(x: int, n: int) -> tuple[int, int, int, int]:
     return x * 2, x << n, x // 5, x << 3
 
 
-def test_strength_selection_shares_the_shifter_and_keeps_the_divider() -> None:
+def test_strength_selection_keeps_the_multiplier_the_shifter_and_the_divider() -> None:
     """
-    One graph holding every strength decision: the saturating scale and the raw runtime shift bind to a SINGLE
-    `ishl` instance through their opposite taps, the non-power-of-two quotient still pays the divider, and the
-    constant count `3` is an `ishiftc` immediate -- neither a module nor a pooled constant.
+    One graph holding every strength decision: a power-of-two product is a multiplication like any other (it rails
+    where a shift would wrap), the runtime shift takes the shifter, the non-power-of-two quotient still pays the
+    divider, and the constant count `3` is an `ishiftc` immediate -- neither a module nor a pooled constant.
     """
     mir = _select(strength_mix)
-    assert _mnemonics(mir) == ["idivs", "ishiftc", "ishl", "ishl"]
+    assert _mnemonics(mir) == ["idivs", "imuls", "ishft", "ishiftc"]
     lir = build_lir(mir, "strength_mix")
-    assert sorted(instance.operator.name for instance in lir.instances) == ["idivs", "ishl"]
-    shifter_taps = {write.result for op in _wide_firings(lir) if op.inst.operator.name == "ishl" for write in op.writes}
-    assert shifter_taps == {0, 1}, "the raw reading and the saturating reading must come off the one module"
+    assert sorted(instance.operator.name for instance in lir.instances) == ["idivs", "imuls", "ishft"]
     assert 3 not in {
         node.value
         for node in mir.nodes.values()
@@ -269,36 +292,39 @@ def test_exponent_extraction_places_the_limit_cases_outside_the_finite_span() ->
         assert -bias < extracted(magnitude) < bias + 1
 
 
-def test_conversions_share_one_instance_and_read_the_unrounded_value() -> None:
+def test_a_rounding_and_its_conversion_are_two_taps_of_one_firing() -> None:
     """
-    Values cannot distinguish a conversion that reads the already-rounded node in this format, nor one shared
-    configured operator from two instances: the operand identity and the rounding modes are the contract.
+    Values cannot distinguish a conversion that reads the already-rounded node in this format, nor one firing from
+    two: the operand identity, the rounding modes and the firing count are the contract.
     """
     mir = _select(floored_for_two_readers)
-    assert _mnemonics(mir) == ["fadd", "fround", "ftoint"]
-    (conversion,) = _operations(mir, "ftoint")
-    (rounding,) = _operations(mir, "fround")
+    assert _mnemonics(mir) == ["fadd", "frint", "frint"]
+    rounding, conversion = sorted(_operations(mir, "frint"), key=lambda operation: operation.result)
+    assert (rounding.result, conversion.result) == (0, 1)
     assert conversion.operands == rounding.operands, "the conversion reads the value, not the rounding's result"
     assert _rounding(conversion) == _rounding(rounding) == RoundMode.FLOOR
+    lir = build_lir(mir, "floored_for_two_readers")
+    (firing,) = [op for op in _wide_firings(lir) if op.inst.operator.name == "frint"]
+    assert sorted(write.result for write in firing.writes) == [0, 1], "the float and the integer leave one firing"
 
+
+def test_two_roundings_of_one_value_share_the_instance_but_not_a_firing() -> None:
+    """One firing runs one rounding mode, so a truncation and a floor of the same operand are two firings."""
     mir = _select(truncated_and_floored)
-    conversions = _operations(mir, "ftoint")
+    conversions = _operations(mir, "frint")
     assert [_rounding(c) for c in conversions] == [RoundMode.TRUNC, RoundMode.FLOOR]
     assert len({c.operands[0] for c in conversions}) == 1
     lir = build_lir(mir, "truncated_and_floored")
-    assert [instance.operator.name for instance in lir.instances] == ["ftoint"]
+    assert [instance.operator.name for instance in lir.instances] == ["frint"]
     assert len(_wide_firings(lir)) == 2
-
-    mir = _select(cross_boundary)  # the folded negation's dual: an integer constant crossing beside both conversions
-    assert _mnemonics(mir) == ["ffromint", "ftoint", "ibwand"]
 
 
 def test_a_negated_operand_folds_onto_the_conversion() -> None:
     """
-    `int(-x)` conditions the `ftoint` float port rather than emitting a sign primitive of its own; the public
+    `int(-x)` conditions the `frint` float port rather than emitting a sign primitive of its own; the public
     module regex cannot see an inline sign, so the exact mnemonic list is the sentinel.
     """
-    assert _mnemonics(_select(negated_crossing)) == ["ftoint"]
+    assert _mnemonics(_select(negated_crossing)) == ["frint"]
 
 
 def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
@@ -314,7 +340,8 @@ def test_a_sign_applied_after_the_rounding_blocks_the_absorption() -> None:
     builder.output("y", builder.operation(FloatToInt(), [builder.operation(FloatNeg(), [floored])]))
     builder.ret()
     mir = lower_to_mir(builder.finish(), mir_options(OPTIONS))
-    assert _mnemonics(mir) == ["fround", "ftoint"]
+    assert _mnemonics(mir) == ["frint", "frint"]
+    assert len({operation.operands for operation in _operations(mir, "frint")}) == 2, "two firings, not two taps"
     interpreter = MirInterpreter(mir)
     for value in (0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.75, -3.75, 7.0, -7.0, 100.25, -100.25):
         (converted,) = interpreter.run(value)

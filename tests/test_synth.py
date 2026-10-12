@@ -10,7 +10,7 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     FloatFormat,
@@ -32,7 +32,7 @@ def _ops(fmt: FloatFormat = FMT32) -> Options:
         OperatorOptions(
             fadd=FAddOptions(),
             fmul=FMulOptions(),
-            fdiv=FDivOptions(),
+            fdivsqrt=FDivsqrtOptions(),
             fmul_ilog2=FMulILog2Options(),
             fcmp=FCmpOptions(),
         ),
@@ -67,7 +67,7 @@ def test_synthesize_threads_pipeline_stages() -> None:
             OperatorOptions(
                 fadd=FAddOptions(stage_decode=1),
                 fmul=FMulOptions(stage_product=2),
-                fdiv=FDivOptions(),
+                fdivsqrt=FDivsqrtOptions(),
                 fmul_ilog2=FMulILog2Options(),
                 fcmp=FCmpOptions(),
             ),

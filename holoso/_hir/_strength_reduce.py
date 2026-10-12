@@ -5,11 +5,21 @@ or decline because the datapath would answer differently.
 """
 
 import math
-from collections.abc import Callable
 
 from ._const import BoolConst, Const, FloatConst, IntConst
 from ._copy import copy_node, rebuild
-from ._scaling import Identity, Rendering, Scaling, read_scaling, rendering_of, scaled_node, scaling_of
+from ._scaling import (
+    Exponent,
+    Identity,
+    Product,
+    Rendering,
+    Scaling,
+    fused_scaling,
+    read_scaling,
+    rendering_of,
+    scaled_node,
+    scaling_of,
+)
 from .._util import Relation, ValueId
 from ._ir import Hir, HirBuilder, Node, Operation
 from ._operators import (
@@ -22,6 +32,7 @@ from ._operators import (
     FloatAdd,
     FloatComparison,
     FloatDiv,
+    FloatFma,
     FloatHypot,
     FloatIsInf,
     FloatIsNegInf,
@@ -144,22 +155,24 @@ def run(hir: Hir) -> Hir:
         a, b = remap[old_a], remap[old_b]
         if opposites(a, b):
             return emit_float_const(builder, 0.0)
-        factored = factor_common_scale(builder, remap, old_a, old_b)
+        factored = factor_common_scale(builder, remap, scaling(remap, old_a), scaling(remap, old_b))
         if factored is not None:
             return factored
         return reduce_algebra(builder, FloatAdd(), [a, b])
 
     def factor_common_scale(
-        builder: HirBuilder, remap: dict[ValueId, ValueId], old_a: ValueId, old_b: ValueId
+        builder: HirBuilder,
+        remap: dict[ValueId, ValueId],
+        left: tuple[ValueId, Scaling] | None,
+        right: tuple[ValueId, Scaling] | None,
     ) -> ValueId | None:
         """
-        Two addends scaled by the same constant are one scaling of their sum, the sign riding the addition.
+        Two addends scaled by the same constant are one scaling of their sum, the sign riding the addition. Each is
+        given as the value it scales, named in the old graph, and the scaling.
 
         Only at the SAME exponent, where the two scalings genuinely become one. Carrying an exponent step inside
         instead retires nothing: it swaps a multiply for a scaler and moves the multiply behind the addition.
         """
-        left = scaling(remap, old_a)
-        right = scaling(remap, old_b)
         if left is None or right is None:
             return None
         (base_a, sa), (base_b, sb) = left, right
@@ -183,31 +196,25 @@ def run(hir: Hir) -> Hir:
         scaled = base if node is None else reduce_algebra(builder, node.operator, list(node.operands))
         return make_neg(builder, scaled) if rendering.negative else scaled
 
-    def emit_scaling(builder: HirBuilder, base: ValueId, scaling: Scaling) -> ValueId | None:
-        """None where no host float names the coefficient: the operands then stand as written."""
-        rendering = scaling.rendering()
-        return None if rendering is None else emit_rendering(builder, base, rendering)
-
     def scale_or_multiply(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
-        """A written product by a constant takes the constant's own shape; by zero or an infinity it is a product."""
+        """
+        A written product by a constant takes the constant's own shape; by zero or an infinity it is a product. A
+        negated factor negates the product, so `(-a)*b` and `a*b` are one multiplication and the sign is its reader's.
+        """
         for const_side, other in ((b, a), (a, b)):
             scale = float_of(const_side)
             if scale is not None and (rendering := rendering_of(scale)) is not None:
                 return emit_rendering(builder, other, rendering)
-        return reduce_algebra(builder, FloatMul(), [a, b])
-
-    def constant_of(remap: dict[ValueId, ValueId]) -> Callable[[ValueId], float | None]:
-        """
-        Shape is read off the OLD graph and constant-ness off the REBUILT one: a fold this round may have made an
-        operand a constant.
-        """
-        return lambda old_id: float_of(remap[old_id])
+        product = reduce_algebra(builder, FloatMul(), [neg_of.get(a, a), neg_of.get(b, b)])
+        return make_neg(builder, product) if (a in neg_of) != (b in neg_of) else product
 
     def scaling(remap: dict[ValueId, ValueId], old_id: ValueId) -> tuple[ValueId, Scaling] | None:
         """Composition stops at a layer another consumer still wants, since the caller replaces what it composes."""
         if known.get(remap[old_id]) is not None:
             return None  # a node the rebuild already answered is a constant, and folding owns it
-        reading = read_scaling(hir, old_id, constant_of(remap), lambda layer: uses[layer] == 1)
+        # Shape is read off the OLD graph and constant-ness off the REBUILT one: a fold this round may have made an
+        # operand a constant.
+        reading = read_scaling(hir, old_id, lambda operand: float_of(remap[operand]), lambda layer: uses[layer] == 1)
         return None if reading is None else (reading.base, reading.scaling)
 
     def reduce_scaling(builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId) -> ValueId | None:
@@ -215,12 +222,12 @@ def run(hir: Hir) -> Hir:
         The composed node replaces the outer one; the inner layers survive only while another consumer wants them. None
         where the node scales nothing.
         """
-        reading = read_scaling(hir, vid, constant_of(remap))
+        reading = read_scaling(hir, vid, lambda operand: float_of(remap[operand]))
         if reading is None or len(reading.layers) < 2:
             return None
-        composed = emit_scaling(builder, remap[reading.base], reading.scaling)
-        assert composed is not None
-        return composed
+        rendering = reading.scaling.rendering()
+        assert rendering is not None
+        return emit_rendering(builder, remap[reading.base], rendering)
 
     def reduce_mul(
         builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId, old_a: ValueId, old_b: ValueId
@@ -233,6 +240,43 @@ def run(hir: Hir) -> Hir:
     ) -> ValueId:
         composed = reduce_scaling(builder, remap, vid)
         return composed if composed is not None else builder.operation(FloatMulPow2(k), [remap[old_a]])
+
+    def reduce_fma(
+        builder: HirBuilder, remap: dict[ValueId, ValueId], vid: ValueId, old_a: ValueId, old_b: ValueId, old_c: ValueId
+    ) -> ValueId:
+        """Read as the product and the sum it fuses, each offered the rule it would have met written apart."""
+        a, b, c = remap[old_a], remap[old_b], remap[old_c]
+        if a in known and b in known:
+            # Ahead of the zero-factor rule: the product of two known factors is the ordinary fold's to name or to
+            # decline, and `inf*0` names no number where an unknown factor by zero would have left the addend.
+            return builder.operation(FloatAdd(), [c, builder.operation(FloatMul(), [a, b])])
+        if 0.0 in (float_of(a), float_of(b)):
+            return c
+        if float_of(c) == 0.0:
+            return scale_or_multiply(builder, a, b)
+        fused = fused_scaling(hir, vid, lambda operand: float_of(remap[operand]))
+        if fused is None:
+            return builder.operation(FloatFma(), [a, b, c])
+        base, scale, rendering = fused.base, fused.scaling, fused.rendering
+        # Onto the scalings under it, a layer another consumer keeps included, where one host float names the whole.
+        inner = read_scaling(hir, base, lambda operand: float_of(remap[operand]))
+        if inner is not None:
+            composed = scale.compose(inner.scaling)
+            named = composed.rendering()
+            if named is not None:
+                base, scale, rendering = inner.base, composed, named
+        # Addend first throughout, the order the machine without the operator states the sum in, so that both arrive
+        # at the same nodes.
+        match rendering.magnitude:
+            case Identity() | Exponent():
+                # An exact product has no rounding for the fusion to spare, so this is the sum of the two.
+                return reduce_algebra(builder, FloatAdd(), [c, emit_rendering(builder, remap[base], rendering)])
+            case Product(magnitude=magnitude):
+                factored = factor_common_scale(builder, remap, scaling(remap, old_c), (base, scale))
+                if factored is not None:
+                    return factored
+                factor = make_neg(builder, remap[base]) if rendering.negative else remap[base]
+                return builder.operation(FloatFma(), [factor, emit_float_const(builder, magnitude), c])
 
     def reduce_hypot(builder: HirBuilder, legs: list[ValueId]) -> ValueId:
         """
@@ -260,8 +304,8 @@ def run(hir: Hir) -> Hir:
             reciprocal = (
                 Scaling(1.0, -scaling.k, scaling.negative) if scaling.is_power_of_two else scaling_of(1.0 / divisor)
             )
-            if reciprocal is not None and (emitted := emit_scaling(builder, a, reciprocal)) is not None:
-                return emitted
+            if reciprocal is not None and (rendering := reciprocal.rendering()) is not None:
+                return emit_rendering(builder, a, rendering)
         return reduce_algebra(builder, FloatDiv(), [a, b])
 
     def reduce_iadd(builder: HirBuilder, a: ValueId, b: ValueId) -> ValueId:
@@ -456,6 +500,8 @@ def run(hir: Hir) -> Hir:
                 return reduce_mul_pow2(builder, remap, vid, a, k)
             case Operation(operator=FloatDiv(), operands=(a, b)):
                 return reduce_div(builder, remap[a], remap[b])
+            case Operation(operator=FloatFma(), operands=(a, b, c)):
+                return reduce_fma(builder, remap, vid, a, b, c)
             case Operation(operator=FloatHypot(), operands=legs):
                 return reduce_hypot(builder, [remap[leg] for leg in legs])
             case Operation(operator=FloatRounding() as op, operands=(a,)):

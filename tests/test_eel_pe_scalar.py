@@ -18,7 +18,7 @@ import holoso
 from holoso import (
     FAddOptions,
     FCmpOptions,
-    FDivOptions,
+    FDivsqrtOptions,
     FMulILog2Options,
     FMulOptions,
     OperatorOptions,
@@ -45,7 +45,7 @@ _FADD = Options(OperatorOptions(fadd=FAddOptions()))
 _FMUL = Options(OperatorOptions(fmul=FMulOptions()))
 _FCMP = Options(OperatorOptions(fcmp=FCmpOptions()))
 _FADD_FMUL = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
-_FADD_FDIV = Options(OperatorOptions(fadd=FAddOptions(), fdiv=FDivOptions()))
+_FADD_FDIVSQRT = Options(OperatorOptions(fadd=FAddOptions(), fdivsqrt=FDivsqrtOptions()))
 _FMUL_ILOG2 = Options(OperatorOptions(fmul_ilog2=FMulILog2Options()))
 
 _NEVER = False
@@ -355,7 +355,7 @@ def test_a_static_power_the_host_refuses_saturates_like_the_datapath() -> None:
     """
     assert "inf" in _residual(_overflowing_static_power, _FADD)
     with pytest.raises(SynthesisError) as info:
-        holoso.synthesize(_zero_to_negative_power, _FADD_FDIV, name="k")
+        holoso.synthesize(_zero_to_negative_power, _FADD_FDIVSQRT, name="k")
     assert not isinstance(info.value, UnsupportedConstruct)
 
 
@@ -759,7 +759,7 @@ def _static_fault_reaches_output(x: float) -> float:
 def test_static_fault_residualizes_for_survivor_refusal() -> None:
     """CPython raises ZeroDivisionError; the compiler builds, and the fault surfaces only if it survives."""
     with pytest.raises(SynthesisError) as info:
-        holoso.synthesize(_static_fault_reaches_output, _FADD_FDIV, name="k")
+        holoso.synthesize(_static_fault_reaches_output, _FADD_FDIVSQRT, name="k")
     assert not isinstance(info.value, UnsupportedConstruct)
 
 

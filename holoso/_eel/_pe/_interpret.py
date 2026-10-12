@@ -663,19 +663,24 @@ class Interpreter:
                     continue
                 case Raise():
                     self._raise(stmt, frame, piece, here)
-                case While() | For():
-                    flow = (
-                        self._while(stmt, frame, current, here)
-                        if isinstance(stmt, While)
-                        else self._for(stmt, frame, current, here)
-                    )
+                case While():
+                    flow = self._while(stmt, frame, current, here)
                     _drop_temps(frame.env)
                     exits.extend(flow.exits)
                     current = flow.fall
                     continue
-                case Break(origin=origin) | Continue(origin=origin):
-                    kind = _ExitKind.BREAK if isinstance(stmt, Break) else _ExitKind.CONTINUE
-                    exits.append(_Exit.snap(kind, origin, frame, current))
+                case For():
+                    flow = self._for(stmt, frame, current, here)
+                    _drop_temps(frame.env)
+                    exits.extend(flow.exits)
+                    current = flow.fall
+                    continue
+                case Break(origin=origin):
+                    exits.append(_Exit.snap(_ExitKind.BREAK, origin, frame, current))
+                    current = None
+                    continue
+                case Continue(origin=origin):
+                    exits.append(_Exit.snap(_ExitKind.CONTINUE, origin, frame, current))
                     current = None
                     continue
                 case AugMark(mark=mark):
@@ -916,13 +921,18 @@ class Interpreter:
                 return self._join_scalars(origin, described, a, b, then_sinks, else_sinks)
             case Opaque(), Opaque() if a.value is b.value:
                 return a
-            case (Opaque() | RecordValue()), (Opaque() | RecordValue()):
-                cls = a.cls if isinstance(a, RecordValue) else b.cls if isinstance(b, RecordValue) else type(a.value)
-                left = a if isinstance(a, RecordValue) else self._admitted_record(cls, a, origin, then_sinks)
-                right = b if isinstance(b, RecordValue) else self._admitted_record(cls, b, origin, else_sinks)
+            case Opaque(), Opaque():
+                left = self._admitted_record(type(a.value), a, origin, then_sinks)
+                right = self._admitted_record(type(a.value), b, origin, else_sinks)
                 if left is None or right is None:
                     return None
                 return self._merge(origin, described, left, right, then_sinks, else_sinks, keep)
+            case RecordValue(), Opaque():
+                right = self._admitted_record(a.cls, b, origin, else_sinks)
+                return None if right is None else self._merge(origin, described, a, right, then_sinks, else_sinks, keep)
+            case Opaque(), RecordValue():
+                left = self._admitted_record(b.cls, a, origin, then_sinks)
+                return None if left is None else self._merge(origin, described, left, b, then_sinks, else_sinks, keep)
             case RangeValue(), RangeValue():
                 return a if same(a, b) else None
             case _:

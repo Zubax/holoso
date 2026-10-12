@@ -137,7 +137,7 @@ def main() -> None:
             holoso.OperatorOptions(
                 fadd=holoso.FAddOptions(),
                 fmul=holoso.FMulOptions(),
-                fdiv=holoso.FDivOptions(),
+                fdivsqrt=holoso.FDivsqrtOptions(),
                 fmul_ilog2=holoso.FMulILog2Options(),
                 fcmp=holoso.FCmpOptions(),
             ),
@@ -147,7 +147,7 @@ def main() -> None:
             holoso.OperatorOptions(
                 fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
                 fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
-                fdiv=holoso.FDivOptions(stage_input=1, stage_pack=1, stage_output=1),
+                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
                 fmul_ilog2=holoso.FMulILog2Options(),
                 fcmp=holoso.FCmpOptions(),
             ),

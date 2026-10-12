@@ -15,25 +15,18 @@ def sign_of(node: Operation) -> FloatSignControl | None:
             return None
 
 
-def sign_chain(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, FloatSignControl, list[ValueId]]:
+def collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, FloatSignControl]:
     """
-    The base value under a chain of semantic sign operations, the one control they amount to, and the chain itself.
-    Peeling runs outermost first while composition needs innermost first, which `sign.then(control)` supplies.
+    The base value under a chain of semantic sign operations and the one control they amount to. Peeling runs
+    outermost first while composition needs innermost first, which `sign.then(control)` supplies.
     """
-    chain: list[ValueId] = []
     control = FloatSignControl()
     node = nodes[vid]
     while isinstance(node, Operation) and (sign := sign_of(node)) is not None:
-        chain.append(vid)
         control = sign.then(control)
         (vid,) = node.operands
         node = nodes[vid]
-    return vid, control, chain
-
-
-def collapse_signs(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, FloatSignControl]:
-    base, control, _ = sign_chain(nodes, vid)
-    return base, control
+    return vid, control
 
 
 def collapse_bool_inversions(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[ValueId, BoolInversion]:
