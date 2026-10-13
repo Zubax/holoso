@@ -75,12 +75,13 @@ class FluxObserver:
 def main() -> None:
     options = holoso.Options(
         holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
+            fadd=holoso.FAddOptions(stage_input=1, stage_output=1),
+            fmul=holoso.FMulOptions(stage_product=2, stage_output=1),
             fcmp=holoso.FCmpOptions(),
-            fcordic=holoso.FCordicOptions(),
+            fcordic=holoso.FCordicOptions(stage_product=2, stage_normalize=2, stage_pack=1),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=24),
+        wmultiplier=18,
     )
     # The demo integrates the exact back-EMF of an unloaded rotor spinning up from 50 Hz.
     params = MotorParams(R=0.05, L_d=2e-5, flux_linkage=0.005)

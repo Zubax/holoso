@@ -25,15 +25,26 @@ def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
         holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
+            fadd=holoso.FAddOptions(stage_normalize=1, stage_output=1),
+            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
             fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),
-            fexp2=holoso.FExp2Options(),
-            flog2=holoso.FLog2Options(),
+            fexp2=holoso.FExp2Options(
+                stage_product=2, stage_product_square=1, stage_product_odd=2, stage_product_chain=2, stage_pack=1
+            ),
+            flog2=holoso.FLog2Options(
+                stage_product=2,
+                stage_product_square=1,
+                stage_product_odd=2,
+                stage_product_chain=2,
+                stage_align=1,
+                stage_product_final=2,
+                stage_pack=1,
+            ),
         ),
         ffmt=float_format,
+        wmultiplier=18,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(equal_temperament, options)

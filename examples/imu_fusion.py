@@ -174,10 +174,10 @@ def main() -> None:
     configs = [
         holoso.Options(
             holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(),
-                fmul=holoso.FMulOptions(),
-                fdivsqrt=holoso.FDivsqrtOptions(),
-                fmul_ilog2=holoso.FMulILog2Options(),
+                fadd=holoso.FAddOptions(stage_input=1, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_pack=1),
+                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1),
+                fmul_ilog2=holoso.FMulILog2Options(stage_input=1),
                 filog2=holoso.FILog2Options(),
                 fcmp=holoso.FCmpOptions(),
             ),
@@ -185,19 +185,17 @@ def main() -> None:
         ),
         holoso.Options(
             holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
-                fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
-                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
-                fmul_ilog2=holoso.FMulILog2Options(),
+                fadd=holoso.FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
+                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_decode=1, stage_pack=1, stage_output=1),
+                fmul_ilog2=holoso.FMulILog2Options(stage_input=1, stage_decode=1),
                 filog2=holoso.FILog2Options(),
-                fcmp=holoso.FCmpOptions(),
+                fcmp=holoso.FCmpOptions(stage_input=1),
             ),
             ffmt=wide,
         ),
     ]
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    # The wide config's stage knobs are illustrative rather than timing-closed (this script only elaborates and
-    # writes RTL/reports); the measured e6m18 closure knobs live in the test suite's synthesis matrix.
     # A static vehicle pitched 10 degrees, with raw samples generated through the inverse of the sensor model the
     # filter assumes (the demonstration calibration below and the temperature bias at 25 degrees Celsius). From
     # the identity reset the estimated attitude must converge toward the true tilt.

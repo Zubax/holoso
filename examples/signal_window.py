@@ -31,7 +31,7 @@ def main() -> None:
     options = holoso.Options(
         holoso.OperatorOptions(
             fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
+            fmul=holoso.FMulOptions(stage_product=2),
             fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),

@@ -37,13 +37,14 @@ class IqOscillator:
 def main() -> None:
     options = holoso.Options(
         holoso.OperatorOptions(
-            fmul=holoso.FMulOptions(),
+            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
             fmul_ilog2=holoso.FMulILog2Options(),  # scaling a turn fraction by a power of two is an exponent add
-            fcordic=holoso.FCordicOptions(),
-            ffromint=holoso.FFromIntOptions(),
-            frint=holoso.FRintOptions(),
+            fcordic=holoso.FCordicOptions(unroll100=50, stage_product=2, stage_normalize=2, stage_pack=1),
+            ffromint=holoso.FFromIntOptions(stage_normalize=1, stage_pack=1),
+            frint=holoso.FRintOptions(stage_input=1),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=36),
+        wmultiplier=18,
         wint_min=34,  # a carry bit above the phase, then a sign bit
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem

@@ -121,14 +121,15 @@ def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
         holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
+            fadd=holoso.FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
             fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
-            fcordic=holoso.FCordicOptions(),
+            fmul_ilog2=holoso.FMulILog2Options(stage_decode=1),
+            fcmp=holoso.FCmpOptions(stage_input=1),
+            fcordic=holoso.FCordicOptions(unroll100=50, stage_product=2, stage_normalize=2, stage_pack=1),
         ),
         ffmt=float_format,
+        wmultiplier=18,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(FiniteSetCurrentController().__call__, options)

@@ -135,20 +135,20 @@ def main() -> None:
     configs = [
         holoso.Options(
             holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(),
-                fmul=holoso.FMulOptions(),
+                fadd=holoso.FAddOptions(stage_input=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_output=1),
                 fdivsqrt=holoso.FDivsqrtOptions(),
-                fmul_ilog2=holoso.FMulILog2Options(),
+                fmul_ilog2=holoso.FMulILog2Options(stage_decode=1),
                 fcmp=holoso.FCmpOptions(),
             ),
             ffmt=narrow,
         ),
         holoso.Options(
             holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
-                fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
-                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
-                fmul_ilog2=holoso.FMulILog2Options(),
+                fadd=holoso.FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_product=2, stage_pack=1),
+                fdivsqrt=holoso.FDivsqrtOptions(),
+                fmul_ilog2=holoso.FMulILog2Options(stage_decode=1),
                 fcmp=holoso.FCmpOptions(),
             ),
             ffmt=wide,

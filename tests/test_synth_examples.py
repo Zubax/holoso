@@ -4,20 +4,30 @@ achieved f_max is asserted to meet the target frequency on its tool. This is the
 RTL-generation changes -- the functional guarantee (RTL == model) lives in the cosimulation suite, and the
 deterministic scheduling guard in `test_latency_freeze`; this layer owns the physical timing only.
 
+The bundled example scripts are held to the same standard on one flow: each is run as shipped with `holoso.synthesize`
+observed, and every circuit it synthesizes must close on Yosys/nextpnr for ECP5 at 100 MHz. The options an example
+shows are therefore the options that are placed and routed, not a restatement of them kept elsewhere. They are closed
+with about 2 percent of f_max to spare where the circuit allows it; the test itself asks only for the bar.
+
 The whole module is `synth`-marked (it needs an FPGA toolchain): `nox -s synth_examples` runs it and the normal
 suite skips it. A target whose flow's tool is absent skips individually, so a Yosys-only CI still exercises every Yosys
 row and the on-prem Diamond/Vivado rows skip cleanly, while `test_some_target_flow_is_available` fails loudly if no
 tool is present at all, so a fully-missing toolchain cannot pass green.
 """
 
+import importlib
 import re
 import shutil
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 import holoso
-from synth._synth import BUILD_ROOT, build_compiler_ooc_design
-from synth.flows import FlowId, make_flow
+from holoso import FloatFormat
+from synth._synth import BUILD_ROOT, REPO_ROOT, build_compiler_ooc_design
+from synth.flows import DeviceClass, FlowId, make_flow
 
 from ._synth_targets import TARGETS, SynthTarget
 
@@ -67,3 +77,48 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         owners = report.block_ram_owners.items()
         owning = [path for path, n in owners if n and re.search(r"/u_f(?:exp2|log2)_\d+$", path)]
         assert len(owning) == tables, f"{target.label}: a lookup table is not in block RAM: {owning}"
+
+
+_EXAMPLE_SCRIPTS = sorted((REPO_ROOT / "examples").glob("*.py"))
+_EXAMPLE_FREQUENCY_MHz = 100.0
+# An example whose circuits outgrow the default device; the examples themselves say nothing about devices.
+_EXAMPLE_DEVICE_CLASS: dict[str, DeviceClass] = {"equal_temperament": DeviceClass.LARGE}
+
+
+@pytest.mark.parametrize("script", _EXAMPLE_SCRIPTS, ids=lambda p: p.stem)
+def test_example_script_closes_timing(script: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    flow = make_flow(
+        FlowId.YOSYS_ECP5, _EXAMPLE_FREQUENCY_MHz, _EXAMPLE_DEVICE_CLASS.get(script.stem, DeviceClass.DEFAULT)
+    )
+    if not flow.available():
+        pytest.skip(f"{FlowId.YOSYS_ECP5.value} tool not available")
+
+    synthesize = holoso.synthesize
+    results: list[tuple[holoso.SynthesisResult, FloatFormat]] = []
+
+    def observed(
+        target: Callable[..., Any], /, options: holoso.Options, *, name: str | None = None
+    ) -> holoso.SynthesisResult:
+        result = synthesize(target, options, name=name)
+        results.append((result, options.ffmt))
+        return result
+
+    module = importlib.import_module(script.stem)  # `_examples` has put the examples directory on the import path
+    monkeypatch.setattr(holoso, "synthesize", observed)
+    if getattr(module, "synthesize", None) is synthesize:  # imported by name rather than reached through the package
+        monkeypatch.setattr(module, "synthesize", observed)
+    module.main()
+    assert results, f"{script.name} synthesized nothing"
+
+    failures = []
+    for index, (result, fmt) in enumerate(results):
+        directory = BUILD_ROOT / "examples" / f"{script.stem}.{index}-{FlowId.YOSYS_ECP5.value}"
+        shutil.rmtree(directory, ignore_errors=True)
+        report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
+        if report.fmax_MHz < _EXAMPLE_FREQUENCY_MHz:
+            failures.append(
+                f"synthesize() call {index} ({result.module_name}, e{fmt.wexp}m{fmt.wman}): "
+                f"f_max {report.fmax_MHz:.2f} MHz "
+                f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
+            )
+    assert not failures, f"{script.name} misses {_EXAMPLE_FREQUENCY_MHz:.0f} MHz: " + "; ".join(failures)

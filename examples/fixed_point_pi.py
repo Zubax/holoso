@@ -96,7 +96,10 @@ class CurrentRegulator:
 
 def main() -> None:
     # The widest intermediate is the proportional product, at most 4095 * 128 in magnitude: 19 bits plus the sign.
-    options = holoso.Options(holoso.OperatorOptions(), wint_min=20)
+    # A 20-bit operand is wider than a hardware multiplier's 18-bit input, so the product is split into registered
+    # partial products.
+    operators = holoso.OperatorOptions(imuls=holoso.IMulsOptions(stage_product=3))
+    options = holoso.Options(operators, wint_min=20)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(CurrentRegulator().__call__, options)
     for filename, path in result.write(out_dir).items():

@@ -114,20 +114,25 @@ class ImageAgc:
 def main() -> None:
     options = holoso.Options(
         holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
-            fexp2=holoso.FExp2Options(),
-            flog2=holoso.FLog2Options(),
-            ffromint=holoso.FFromIntOptions(),
-            frint=holoso.FRintOptions(),
+            fadd=holoso.FAddOptions(stage_normalize=1, stage_output=1),
+            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
+            fdivsqrt=holoso.FDivsqrtOptions(stage_input=1),
+            fmul_ilog2=holoso.FMulILog2Options(stage_decode=1),
+            fcmp=holoso.FCmpOptions(stage_input=1),
+            fexp2=holoso.FExp2Options(
+                stage_input=1, stage_reduce=1, stage_product=2, stage_product_chain=1, stage_pack=1
+            ),
+            flog2=holoso.FLog2Options(
+                stage_product=1, stage_product_chain=1, stage_align=1, stage_product_final=2, stage_pack=1
+            ),
+            ffromint=holoso.FFromIntOptions(stage_input=1, stage_normalize=1),
+            frint=holoso.FRintOptions(stage_input=1, stage_round=1),
             # A beat's statistics are dozens of independent sums and comparisons, which a single adder would issue
             # one after another, nearly doubling the beat.
             iadds=holoso.IAddsOptions(instances=2),
         ),
-        ffmt=holoso.FloatFormat(wexp=8, wman=36),
+        ffmt=holoso.FloatFormat(wexp=8, wman=24),  # a wider significand does not close at 100 MHz on an ECP5
+        wmultiplier=18,
         wint_min=31,  # the frame sum reaches 1920*1200*255, plus the sign bit
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem

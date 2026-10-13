@@ -47,18 +47,18 @@ def main() -> None:
     configs = [
         holoso.Options(
             holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(),
-                fmul=holoso.FMulOptions(),
-                fdivsqrt=holoso.FDivsqrtOptions(),
+                fadd=holoso.FAddOptions(stage_input=1, stage_pack=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_pack=1),
+                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1),
                 fcmp=holoso.FCmpOptions(),
             ),
             ffmt=narrow,
         ),
         holoso.Options(
             holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1),
-                fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1),
-                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
+                fadd=holoso.FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_product=2, stage_pack=1),
+                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_decode=1),
                 fcmp=holoso.FCmpOptions(),
             ),
             ffmt=wide,

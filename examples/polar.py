@@ -25,19 +25,37 @@ def from_polar(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
 
 def main() -> None:
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    for fmt in (holoso.FloatFormat(wexp=6, wman=18), holoso.FloatFormat(wexp=8, wman=36)):
-        label = f"e{fmt.wexp}m{fmt.wman}"
-        options = holoso.Options(
+    # Each scalar width wants its own operator pipelining to close timings; the wide one also halves the CORDIC's
+    # iterations per cycle. The CORDIC's product is wider than a hardware multiplier's 18-bit input at either width,
+    # so it is split to that width.
+    configs = [
+        holoso.Options(
             holoso.OperatorOptions(
                 fadd=holoso.FAddOptions(),
                 fmul=holoso.FMulOptions(),
                 fdivsqrt=holoso.FDivsqrtOptions(),
                 fmul_ilog2=holoso.FMulILog2Options(),
                 fcmp=holoso.FCmpOptions(),
-                fcordic=holoso.FCordicOptions(),
+                fcordic=holoso.FCordicOptions(stage_product=2, stage_normalize=2, stage_pack=1),
             ),
-            ffmt=fmt,
-        )
+            ffmt=holoso.FloatFormat(wexp=6, wman=18),
+            wmultiplier=18,
+        ),
+        holoso.Options(
+            holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(),
+                fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
+                fdivsqrt=holoso.FDivsqrtOptions(),
+                fmul_ilog2=holoso.FMulILog2Options(),
+                fcmp=holoso.FCmpOptions(),
+                fcordic=holoso.FCordicOptions(unroll100=50, stage_product=2, stage_normalize=2, stage_pack=2),
+            ),
+            ffmt=holoso.FloatFormat(wexp=8, wman=36),
+            wmultiplier=18,
+        ),
+    ]
+    for options in configs:
+        label = f"e{options.ffmt.wexp}m{options.ffmt.wman}"
         models = {}
         for fn in (to_polar, from_polar):
             result = holoso.synthesize(fn, options)

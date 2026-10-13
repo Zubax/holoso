@@ -55,8 +55,8 @@ def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
         holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
+            fadd=holoso.FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
+            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
             fdivsqrt=holoso.FDivsqrtOptions(),
             fmul_ilog2=holoso.FMulILog2Options(),
             fcmp=holoso.FCmpOptions(),

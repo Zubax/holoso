@@ -26,7 +26,7 @@ def main() -> None:
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     # The same kernel with and without the fused multiply-add: a Horner step rounded once, or a product and a sum.
-    for label, ffma in (("poly3", None), ("poly3_fma", holoso.FFmaOptions())):
+    for label, ffma in (("poly3", None), ("poly3_fma", holoso.FFmaOptions(stage_decode=1, stage_normalize=1))):
         options = holoso.Options(dataclasses.replace(operators, ffma=ffma), ffmt=float_format)
         result = holoso.synthesize(poly3, options, name=label)
         print(f"{label}: II {result.initiation_interval}")

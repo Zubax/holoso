@@ -211,15 +211,16 @@ def main() -> None:
 
     options = holoso.Options(
         holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fcordic=holoso.FCordicOptions(),
-            fcmp=holoso.FCmpOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
+            fadd=holoso.FAddOptions(stage_input=1, stage_output=1),
+            fmul=holoso.FMulOptions(stage_product=2, stage_output=1),
+            fdivsqrt=holoso.FDivsqrtOptions(stage_decode=1),
+            fcordic=holoso.FCordicOptions(unroll100=50, stage_product=2, stage_normalize=2, stage_pack=1),
+            fcmp=holoso.FCmpOptions(stage_input=1),
+            fmul_ilog2=holoso.FMulILog2Options(stage_decode=1),
             filog2=holoso.FILog2Options(),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=24),
+        wmultiplier=18,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(FocController().tick, options)

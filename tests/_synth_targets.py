@@ -1,12 +1,15 @@
 """
 The out-of-context synthesis matrix: a flat list of SynthTarget records, one per (kernel, flow, target f_max,
-operator configuration). This is the single source of truth for what the example synthesis suite
+operator configuration). Together with the example scripts (below) this is what the example synthesis suite
 (test_synth_examples) asserts can close timing.
 
 Deliberately a dumb-simple data table -- literal frequencies, one explicit row per (example, flow), and a full typed
 Options per row; duplication is preferred over indirection here. Catalogued example targets reuse the shared example
 registry (_examples.SPECS) so each kernel is constructed once. Off-catalogue regression cores may be added as
 SynthTarget records with example=None.
+
+The bundled example scripts are themselves synthesized on yosys-ecp5 (test_synth_examples runs each one and synthesizes
+what it produces), so a kernel has no yosys-ecp5 row here at the format and word width its script ships.
 
 The bar (all at minimum speed grade): yosys-ecp5 and diamond-ecp5 at 100 MHz, vivado-artix7 at 150 MHz. More than half
 of the rows close lean; stage knobs are row-local and appear only where measured closure or its margin needs them. Lean
@@ -184,8 +187,8 @@ def _root_only_kernel() -> Callable[..., object]:
 
 TARGETS: list[SynthTarget] = [
     # Most of the catalogue closes the bar at lean (no optional stages) on all three tools -- verified by a full lean
-    # baseline. One explicit row per (example, flow); duplication is intentional.
-    _for_example("madd", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
+    # baseline. One explicit row per (example, flow), less the yosys-ecp5 rows the example scripts stand in for;
+    # duplication is intentional.
     _for_example(
         "madd",
         FlowId.DIAMOND_ECP5,
@@ -200,7 +203,6 @@ TARGETS: list[SynthTarget] = [
         # 152.4 MHz lean with 0.11 ns to spare. For margin, the adder's close-cancellation normalizer (then 154.9).
         _op_config(_F_e6m18, fadd=FAddOptions(stage_normalize=1)),
     ),
-    _for_example("poly3", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("poly3", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
     _for_example(
         "poly3",
@@ -246,13 +248,10 @@ TARGETS: list[SynthTarget] = [
     _for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("schmitt_trigger", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
-    _for_example("quadrature_encoder", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("quadrature_encoder", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("quadrature_encoder", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
-    _for_example("phase_frequency_detector", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("phase_frequency_detector", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("phase_frequency_detector", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
-    _for_example("latching_fault_register", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("latching_fault_register", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18)),
     _for_example("latching_fault_register", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18)),
     _for_example("majority_voter", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18)),
@@ -291,27 +290,8 @@ TARGETS: list[SynthTarget] = [
     _for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e4m8)),
     # tunable_lowpass: the one bundled kernel whose shift counts are run-time operands, hence the one that builds the
     # barrel shifter; at the 32-bit word its script ships.
-    _for_example("tunable_lowpass", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wint_min=32)),
     _for_example("tunable_lowpass", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wint_min=32)),
     _for_example("tunable_lowpass", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wint_min=32)),
-    _for_example(
-        "ekf1_stateless",
-        FlowId.YOSYS_ECP5,
-        100,
-        # 67.3 MHz lean: the microcode operand select through the multiplier's read mux into the DSP product, the
-        # microcode operand select through the adder's read mux into its magnitude compare and exponent difference
-        # (82.7 MHz), the microcode operand select through the scaler's read mux, exponent adder and overflow check
-        # across a long route into the clear of its output register (91.8 MHz), the adder's pack-input select through
-        # its rounder and result select into the register-file write select (97.4 MHz), the multiplier's product
-        # register through its rounder and a long route into the register-file write select (99.0 MHz, then 112.7).
-        # The adder's pack stage is redundant beside the multiplier's output stage; without it 105.8 MHz.
-        _op_config(
-            _F_e6m18,
-            fadd=FAddOptions(stage_input=1),
-            fmul=FMulOptions(stage_input=1, stage_output=1),
-            fmul_ilog2=FMulILog2Options(stage_decode=1),
-        ),
-    ),
     _for_example(
         "ekf1_stateless",
         FlowId.DIAMOND_ECP5,
@@ -357,26 +337,6 @@ TARGETS: list[SynthTarget] = [
             fmul_ilog2=FMulILog2Options(stage_input=1),
         ),
         name="ekf1_stateless_e6m18_fmul2",
-    ),
-    _for_example(
-        "ekf1_stateful",
-        FlowId.YOSYS_ECP5,
-        100,
-        # 74.8 MHz lean: the microcode operand select through the multiplier's read mux into the DSP product, the
-        # microcode operand select through the adder's read mux into its magnitude compare and exponent difference
-        # (79.3 MHz), the adder's normalize-count exponent subtract through its pack rounding and result select into
-        # the register-file write select (93.5 MHz), a state register through the scaler's read mux, exponent adder
-        # and overflow check into the clear of its output register (99.7 MHz), the scaler's latched exponent through
-        # that adder and overflow check across a long route into the clear of its output register (99.3 MHz, then
-        # 103.2). With the scaler's decode stage in, the adder's pack stage and the scaler's input stage are
-        # redundant; without them 107.6 MHz.
-        _op_config(
-            _F_e6m18,
-            fadd=FAddOptions(stage_input=1),
-            fmul=FMulOptions(stage_input=1),
-            fmul_ilog2=FMulILog2Options(stage_decode=1),
-        ),
-        kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
         "ekf1_stateful",
@@ -474,27 +434,6 @@ TARGETS: list[SynthTarget] = [
     ),
     _for_example(
         "ekf1_stateless",
-        FlowId.YOSYS_ECP5,
-        100,
-        # 65.9 MHz lean: the microcode operand select through the adder's read mux into its magnitude compare and
-        # exponent difference, the multiplier's 36-bit product from its operand capture through the DSP tiles and the
-        # two partial-product adders, which takes the split into registered partial products (69.7 MHz), the
-        # multiplier's product register through its exponent adjust, the pack range classification and a long route
-        # into the register file (79.7 MHz), the register file through the scaler's read mux, exponent adder and
-        # overflow classification across a long route into the clear of its output register (80.5 MHz), the adder's
-        # normalize-count exponent subtract through the pack range classification and a long route into the register
-        # file (80.3 MHz), the microcode operand select through the multiplier's read mux into its exponent adder
-        # (91.6 MHz), the adder's close-cancellation normalizer (86.8 MHz, then 100.7).
-        _op_config(
-            _F_e8m36,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOptions(stage_input=1, stage_product=2, stage_output=1),
-            fmul_ilog2=FMulILog2Options(stage_decode=1),
-            wmultiplier=18,
-        ),
-    ),
-    _for_example(
-        "ekf1_stateless",
         FlowId.DIAMOND_ECP5,
         100,
         # 72.7 MHz lean: the microcode through the adder's operand read mux into its exponent difference, the
@@ -522,28 +461,6 @@ TARGETS: list[SynthTarget] = [
             fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_pack=1),
             fmul=FMulOptions(stage_product=1, stage_pack=1),
         ),
-    ),
-    _for_example(
-        "ekf1_stateful",
-        FlowId.YOSYS_ECP5,
-        100,
-        # 70.1 MHz lean: the microcode operand select through the adder's read mux into its magnitude compare and
-        # exponent difference, the multiplier's 36-bit product from its operand capture through the DSP tiles and the
-        # two partial-product adders, which takes the split into registered partial products (72.5 MHz), the microcode
-        # operand select through the scaler's read mux, exponent adder and overflow classification across a long route
-        # into the clear of its output register (74.9 MHz), the adder's close-cancellation normalizer (82.5 MHz), the
-        # multiplier's product register through the sticky reduction and the rounder across a long route into the
-        # register file (79.5 MHz), the adder's pack-input select through its rounder across a long route into the
-        # register-file write select (81.7 MHz), the microcode operand select through the multiplier's read mux into
-        # its exponent adder (96.6 MHz, then 106.0).
-        _op_config(
-            _F_e8m36,
-            fadd=FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
-            fmul=FMulOptions(stage_input=1, stage_product=2, stage_output=1),
-            fmul_ilog2=FMulILog2Options(stage_decode=1),
-            wmultiplier=18,
-        ),
-        kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
         "ekf1_stateful",
@@ -584,22 +501,6 @@ TARGETS: list[SynthTarget] = [
     # foc's CORDIC carries both modes' datapaths.
     SynthTarget(
         kernel=_to_polar_kernel,
-        flow=FlowId.YOSYS_ECP5,
-        target_frequency_MHz=100,
-        # 42.5 MHz lean: the CORDIC's product register through the whole normalizer, the exponent subtract and the
-        # rounder into the register file, the multiply -- the operand select through the DSP tiles and their fabric
-        # sum (70.8 MHz), the normalizer's second half through the exponent subtract and the rounder into the register
-        # file (78.1 MHz), the multiply again, from its operand register through the DSP tiles and the two partial-
-        # product adders, which takes the split into registered tile-sized partial products (79.5 MHz), the back-end's
-        # held angle magnitude through the result select and the normalizer's first half into its barrier (87.9 MHz,
-        # then 112.4).
-        ops=_op_config(
-            _F_e6m18, fcordic=FCordicOptions(stage_product=2, stage_normalize=2, stage_pack=1), wmultiplier=18
-        ),
-        name="to_polar_e6m18",
-    ),
-    SynthTarget(
-        kernel=_to_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
         # 41.2 MHz lean: the CORDIC's normalizer (the vectoring magnitude select through the whole normalizer and the
@@ -622,21 +523,6 @@ TARGETS: list[SynthTarget] = [
         # through the exponent subtract and the rounder into the held magnitude (then 159.3).
         ops=_op_config(_F_e6m18, fcordic=FCordicOptions(stage_product=1, stage_normalize=2, stage_pack=1)),
         name="to_polar_e6m18",
-    ),
-    SynthTarget(
-        kernel=_from_polar_kernel,
-        flow=FlowId.YOSYS_ECP5,
-        target_frequency_MHz=100,
-        # 51.0 MHz lean: the CORDIC's back-end magnitude through the whole normalizer, the exponent subtract and the
-        # rounder into the register file, the multiply -- the phase register through the operand select, the DSP tiles
-        # and their fabric sum (72.9 MHz), the multiply again, from its operand register through the DSP tiles and the
-        # two partial-product adders, which takes the split into registered tile-sized partial products (85.6 MHz),
-        # the normalizer's second half through the exponent subtract and the rounder into the register file (90.9 MHz,
-        # then 108.0).
-        ops=_op_config(
-            _F_e6m18, fcordic=FCordicOptions(stage_product=2, stage_normalize=1, stage_pack=1), wmultiplier=18
-        ),
-        name="from_polar_e6m18",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
@@ -663,23 +549,6 @@ TARGETS: list[SynthTarget] = [
     ),
     # rigid_body_rates: the pivoted 3x3 Gauss-Jordan inversion -- conditional-swap select networks feeding one pooled
     # divider. Lean start per the closure procedure.
-    SynthTarget(
-        kernel=_rigid_body_rates_kernel,
-        flow=FlowId.YOSYS_ECP5,
-        target_frequency_MHz=100,
-        # 78.5 MHz lean: the microcode operand select through the divider's read mux into its folded first-digit
-        # subtracts and digit select, the microcode operand select through the multiplier's read mux into the DSP
-        # product (77.6 MHz), the microcode operand select through the adder's read mux into its magnitude compare and
-        # exponent difference (84.5 MHz), the adder's normalize-count exponent subtract through its pack rounding and
-        # result select into the register-file write select (95.8 MHz, then 101.7).
-        ops=_op_config(
-            _F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_pack=1),
-            fmul=FMulOptions(stage_input=1),
-            fdivsqrt=FDivsqrtOptions(stage_input=1),
-        ),
-        name="rigid_body_rates_e6m18",
-    ),
     SynthTarget(
         kernel=_rigid_body_rates_kernel,
         flow=FlowId.DIAMOND_ECP5,
@@ -768,7 +637,7 @@ TARGETS: list[SynthTarget] = [
     ),
     # foc: that observer embedded in a full current controller -- one CORDIC serving the observer's atan2 and the Park
     # rotation, the clamp on the comparator, and the divides of the limiter and the modulator, over the widest
-    # microcode word in the matrix. Only the Vivado flow is measured here; the ECP5 rows are absent rather than
+    # microcode word in the matrix. Only the Vivado flow is measured here; a Diamond row is absent rather than
     # guessed, since closure is only ever established by running the flow.
     _for_example(
         "foc",
@@ -802,28 +671,6 @@ TARGETS: list[SynthTarget] = [
     # feeding the coarse alignment), the comparator-backed clamp, and real gate branches over the heaviest register
     # pressure in the matrix, in the plain and the ffma datapaths. The Euclidean norms expand by exact exponent
     # scaling, a `filog2` per leg and its scalings.
-    _for_example(
-        "imu_fusion",
-        FlowId.YOSYS_ECP5,
-        100,
-        # 71.2 MHz lean: the microcode operand select through the multiplier's read mux into the DSP product, the
-        # microcode operand select through the adder's read mux into its magnitude compare and exponent difference
-        # (77.7 MHz), the multiplier's product register through its rounder and a long route into the register-file
-        # write select (84.2 MHz), the microcode operand select through the divider's read mux into its folded first-
-        # digit subtracts (81.4 MHz), the microcode operand select through the scaler's read mux into its exponent
-        # adder and overflow check and the clear of its output register (85.4 MHz), the adder's normalize-count
-        # exponent subtract through its pack and a long route into the register-file write select (93.2 MHz), the
-        # divider's folded first digit from its latched operands (97.3 MHz, then 100.7). The multiplier's output stage
-        # is redundant beside the later ones; without it 101.9 MHz.
-        _op_config(
-            _F_e6m18,
-            fadd=FAddOptions(stage_input=1, stage_output=1),
-            fmul=FMulOptions(stage_input=1),
-            fdivsqrt=FDivsqrtOptions(stage_input=1, stage_decode=1),
-            fmul_ilog2=FMulILog2Options(stage_input=1),
-        ),
-        kernel=_imu_fusion_kernel,
-    ),
     _for_example(
         "imu_fusion",
         FlowId.DIAMOND_ECP5,

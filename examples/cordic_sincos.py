@@ -40,10 +40,10 @@ def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
         holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
+            fadd=holoso.FAddOptions(stage_normalize=1),
             fmul=holoso.FMulOptions(),
             fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
+            fmul_ilog2=holoso.FMulILog2Options(stage_decode=1),
             fcmp=holoso.FCmpOptions(),
         ),
         ffmt=float_format,
