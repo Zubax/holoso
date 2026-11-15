@@ -59,6 +59,9 @@ discover it, never presume it):
 A finding is any operation present in one artifact but absent from the other, or any matched operation
 whose kind, destination, operands, issue, or landing disagree.
 
+An operator instance with an `in_valid` port issues on its `uc_issue_*` strobe;
+an integer instance has none, so its issues show through its read opcodes and the microcode ROM's per-step comments.
+
 ## Two independent agents, opposite directions
 
 For each design, dispatch — at MAXIMUM THINKING EFFORT — two fresh-context agents that do NOT share notes:

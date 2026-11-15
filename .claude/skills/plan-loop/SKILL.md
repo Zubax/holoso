@@ -25,13 +25,16 @@ Applies whether or not plan mode is in use.
 
    Every round starts from fresh reviewer contexts.
    A reviewer carrying its own earlier critique defends that critique instead of reading the revised plan on its merits.
+   
+   All reviewers must run WITHOUT the sandbox nor any other restrictions to ensure there are no impediments
+   to full in-depth diligent review.
 
    Keep the prompts extremely terse -- goal, plan path, "critique it"; detail breeds tunnel vision.
    A prompt longer than 2 sentences is a bad prompt; 3 sentences is the absolute limit, anything larger is unacceptable.
    State the remit explicitly: critique the PLAN's reasoning -- sequencing, assumptions, omissions, wrong direction --
    NOT the current state of the worktree.
    Reviewers are read-only; they may read anything to test the plan against reality, but they change nothing
-   (creation of their own disposable copies of the worktree is allowed).
+   (creation of their own disposable copies of the worktree is encouraged).
 
 3. Vet every finding against the project's own policy docs and the original request.
    Apply the survivors, discard the rest with a reason; a finding rejected on policy does not keep the loop alive.
