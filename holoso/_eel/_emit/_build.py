@@ -158,7 +158,7 @@ def _block(em: _Emit, stmts: tuple[Stmt, ...], env: _Env) -> bool:
                 )
                 return True
             case _:
-                raise AssertionError(stmt)
+                assert False, stmt
     assert not pending_slots, "slot commits immediately precede their return site"
     return False
 
@@ -218,7 +218,7 @@ def _loop(em: _Emit, stmt: ResidualWhile, env: _Env) -> None:
     builder.position_at(loop_entry)
     phi_ids: list[int] = []
     for phi, entry_id in zip(stmt.phis, entry_ids, strict=True):
-        phi_id = builder.open_phi(_TYPES[phi.stype], (pre_exit, entry_id))
+        phi_id = builder.phi(_TYPES[phi.stype], [(pre_exit, entry_id)])
         env[phi.index] = phi_id
         phi_ids.append(phi_id)
     terminated = _block(em, stmt.header, env)
@@ -298,7 +298,7 @@ def _value(builder: HirBuilder, value: Expr, env: _Env, stype: ScalarType) -> in
         case TempRef() | LocalRef() | Const():
             value_id = _atom(builder, value, env)
         case _:
-            raise AssertionError(value)
+            assert False, value
     assert builder.type_of(value_id) == _TYPES[stype]
     return value_id
 

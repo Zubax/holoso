@@ -2,11 +2,14 @@
 
 from collections.abc import Callable
 from typing import Any
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 import inspect
 import logging
+import math
 import os
+
+import zkf
 
 from ._backend.cocotb import generate as generate_testbench, CocotbOutput
 from ._backend.html import generate as generate_html, HtmlOutput
@@ -27,6 +30,7 @@ Currently supported targets are:
 - A bound method of a class instance -- stateful. An attribute any reachable method writes is persistent state, held
   in a register while something reads it; a public one also gets a `state_...` output port, and an attribute that is
   only read folds to its value.
+- An instance of a class that defines `__call__`, which is its bound `__call__` method.
 - Later on we may potentially add support for multiple methods per class, where the generated module will provide
   a selector port to choose which method to execute, all sharing the same state. In this case we would accept
   a tuple containing the class type and a list of its unbound methods. This remains to be seen.
@@ -73,7 +77,6 @@ class SynthesisResult:
         directory.mkdir(parents=True, exist_ok=True)
         files: dict[str, str] = {
             f"{self.module_name}.v": self.verilog_output.verilog,
-            **self.verilog_output.support_files,
             f"test_{self.module_name}.py": self.cocotb_output.testbench,
             f"{self.module_name}.html": self.html_output.html,
             **{f"{self.module_name}.pass{i}.fir": text for i, text in enumerate(self.frontend_ir)},
@@ -86,11 +89,17 @@ class SynthesisResult:
         return written
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Options:
     """Everything configurable that controls how the ZISC machine and its microcode are built."""
 
     operator: OperatorOptions
+
+    wmultiplier: int
+    """
+    The operand width of the target's hardware multipliers (DSP slices), along which every integer product is cut.
+    This also affects floating-point arithmetics since under the hood it relies on integer multiplication.
+    """
 
     ffmt: FloatFormat = FloatFormat(6, 18)
     """wexp is usually 6..11 bits; wman is usually a multiple of the DSP tile operand width, 18 bits on most FPGAs."""
@@ -100,12 +109,6 @@ class Options:
     Lower bound on the native integer bit width.
     The actual integer width may be greater if the kernel uses floats and the floats are wider than this minimum.
     Integers saturate, so the settled word sets their rails; it is reported as SynthesisResult.int_format.
-    """
-
-    wmultiplier: int | None = None
-    """
-    The native DSP slice width, if known: lets the RTL split wide products along it rather than into equal halves,
-    usually saving DSP tiles and timing margin.
     """
 
     ifconv_max_ops: int = int(os.getenv("HOLOSO_IFCONV_MAX_OPS", "8"))
@@ -138,11 +141,14 @@ class Options:
     multiplexer inputs it adds cost less than this. Greater values give fewer registers and wider multiplexers.
     """
 
+    ucode_rom_attrs: zkf.Attrs = field(default_factory=dict)
+    """Synthesis attributes on the microcode ROM's read register, such as `{"rom_style": "block"}`."""
+
     def __post_init__(self) -> None:
         if self.wint_min < 2:
             raise ValueError(f"wint_min must be >= 2, got {self.wint_min}")
-        if self.wmultiplier is not None and self.wmultiplier < 2:
-            raise ValueError(f"wmultiplier must be >= 2 when set, got {self.wmultiplier}")
+        if self.wmultiplier < 2:
+            raise ValueError(f"wmultiplier must be >= 2, got {self.wmultiplier}")
         if self.ifconv_max_ops < 0:
             raise ValueError(f"ifconv_max_ops must be >= 0, got {self.ifconv_max_ops}")
         if self.unroll_max_trips < 0:
@@ -151,8 +157,8 @@ class Options:
             raise ValueError(f"ucode_fetch_stages must be >= 1, got {self.ucode_fetch_stages}")
         if self.regalloc_effort < 0:
             raise ValueError(f"regalloc_effort must be >= 0, got {self.regalloc_effort}")
-        if self.regalloc_register_price <= 0:
-            raise ValueError(f"regalloc_register_price must be > 0, got {self.regalloc_register_price}")
+        if not (math.isfinite(self.regalloc_register_price) and self.regalloc_register_price >= 0):
+            raise ValueError(f"regalloc_register_price must be finite and >= 0, got {self.regalloc_register_price}")
 
 
 def _mir_options(options: Options) -> MirOptions:
@@ -161,14 +167,14 @@ def _mir_options(options: Options) -> MirOptions:
         operator=options.operator,
         float_format=options.ffmt,
         wint_min=options.wint_min,
-        wmultiplier=options.wmultiplier or 0,
+        wmultiplier=options.wmultiplier,
         ifconv_max_ops=options.ifconv_max_ops,
     )
 
 
 def synthesize(target: Target, /, options: Options, *, name: str | None = None) -> SynthesisResult:
     """
-    Synthesize `target` (a plain function or a bound method of a constructed instance) into RTL.
+    Synthesize `target` (a plain function, a bound method of a constructed instance, or a callable instance) into RTL.
     `options` configures the machine; `name` overrides the generated module name (inferred from target by default).
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)-5.5s %(name)s: %(message)s")  # no-op if already setup
@@ -195,7 +201,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     )
     _logger.info("LIR ports:\n\t%s", "\n\t".join(f"{port}" for port in lir.ports))
 
-    verilog_output = generate_verilog(lir)
+    verilog_output = generate_verilog(lir, options.ucode_rom_attrs)
     html_output = generate_html(lir, verilog_output)
     model = generate_model(lir)
     cocotb_output = generate_testbench(model)
@@ -221,11 +227,13 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
 
 def _default_module_name(target: Target) -> str:
     if inspect.ismethod(target):
-        n = type(target.__self__).__name__
+        receiver = target.__self__
+        n = (receiver if isinstance(receiver, type) else type(receiver)).__name__
         if "__" not in target.__name__:
             n += f"_{target.__name__}"
         return n
-    return str(getattr(target, "__name__", "kernel"))
+    # A callable instance is named after its class; anything else is refused by the front end, not by its name.
+    return str(getattr(target, "__name__", type(target).__name__ if callable(target) else "kernel"))
 
 
 def _validate_module_name(name: str) -> None:

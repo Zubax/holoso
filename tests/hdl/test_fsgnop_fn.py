@@ -1,7 +1,4 @@
-"""
-Tests the holoso_fsgnop inline function. The same-named module is co-compiled from the megafile, so this also serves
-as a function/module name-coexistence canary across simulators.
-"""
+"""Tests the holoso_fsgnop inline function."""
 
 from pathlib import Path
 from typing import Any
@@ -23,7 +20,6 @@ from .hdl_float_oracle import (
     get_random_count,
     get_seed,
     random_zkf_f32,
-    sources,
 )
 
 _WEXP = 8
@@ -57,7 +53,7 @@ def test_holoso_fsgnop_fn(sim: str) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "fsgnop_fn"
     runner.build(
-        sources=[*sources(), Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
+        sources=[Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
         includes=[HDL_DIR],
         hdl_toplevel="holoso_fsgnop_tb",
         parameters={"WEXP": _WEXP, "WMAN": _WMAN},

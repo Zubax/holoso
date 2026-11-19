@@ -1,8 +1,9 @@
 """
 Loops and comprehensions: static unrolling (trip-by-trip, budget-bounded), the residual while with its
-loop-carried scalar phis and break/continue exit lanes, and the permanent bans (dynamic trip counts,
-aggregate carries, degenerate exit-on-every-path bodies). Positive shapes are oracle-verified against
-CPython; every ban is pinned as a located rejection.
+loop-carried scalar phis (a local aggregate rides them leaf by leaf) and break/continue exit lanes, and the
+permanent bans (dynamic trip counts, an aggregate rebound to another object across the back edge, degenerate
+exit-on-every-path bodies). Positive shapes are oracle-verified against CPython; every ban is pinned as a located
+rejection.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -11,19 +12,21 @@ import dataclasses
 
 import numpy as np
 import pytest
+from jaxtyping import Float64
 
 import holoso
-from holoso import FAddOptions, FCmpOptions, FMulILog2Options, FMulOptions, OperatorOptions, Options
+from holoso import OperatorOptions, Options
 from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_locations
+from . import _options as lean
 
 type _Row = Mapping[str, float | bool | int]
 
-_MIN_OPTIONS = Options(OperatorOptions())
+_MIN_OPTIONS = Options(operator=OperatorOptions(), wmultiplier=18)
 
 
 def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
@@ -429,7 +432,9 @@ def _huge_static_range(x: float) -> float:
 def test_a_huge_static_range_stop_does_not_fit_the_integer_format() -> None:
     # The format binds past the front end, so the operators the kernel needs are configured and only the word refuses.
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(_huge_static_range, Options(OperatorOptions(fadd=FAddOptions())), name="k")
+        holoso.synthesize(
+            _huge_static_range, Options(operator=OperatorOptions(fadd=lean.fadd()), wmultiplier=18), name="k"
+        )
 
 
 # ---------------------------------------------------------------------- the residual while
@@ -547,8 +552,12 @@ def test_the_public_artifacts_discriminate_unrolling_from_residualization() -> N
     location-stripped `frontend_ir[-1]` and makes the transaction latency data-dependent (max II `None`),
     while an unrolled loop leaves neither.
     """
-    unrolled = holoso.synthesize(_static_while, Options(OperatorOptions(fmul_ilog2=FMulILog2Options())), name="k")
-    residual = holoso.synthesize(_countdown, Options(OperatorOptions(fadd=FAddOptions(), fcmp=FCmpOptions())), name="k")
+    unrolled = holoso.synthesize(
+        _static_while, Options(operator=OperatorOptions(fmul_ilog2=lean.fmul_ilog2()), wmultiplier=18), name="k"
+    )
+    residual = holoso.synthesize(
+        _countdown, Options(operator=OperatorOptions(fadd=lean.fadd(), fcmp=lean.fcmp()), wmultiplier=18), name="k"
+    )
     assert unrolled.initiation_interval[1] is not None
     assert residual.initiation_interval[1] is None
     unrolled_lines = strip_locations(unrolled.frontend_ir[-1]).splitlines()
@@ -611,13 +620,298 @@ def test_residual_while_gaps_and_bans() -> None:
     for fn in [
         _body_only_name,
         _bool_to_int_carry,
-        _array_carry,
-        _array_store_inside_residual,
         _sequence_carry,
         _float_truthiness_condition,
         _aggregate_truthiness_condition,
     ]:
         _rejects(fn)
+
+
+# ---------------------------------------------------------------------- local aggregates across the back edge
+
+
+_XN: list[_Row] = [{"x": x, "n": n} for n in (0, 1, 2, 5) for x in (1.5, -0.75)]
+
+
+def _carried_array_stores(x: float, n: int) -> float:
+    a = np.array([x, 0.0])
+    c = np.array([0, 1])
+    i = 0
+    while i < n:
+        a[1] += a[0]
+        a[0] = a[0] * 0.5
+        c[0] = c[0] + c[1]
+        i += 1
+    return a[0] + a[1] + float(c[0])  # type: ignore[no-any-return]
+
+
+def _carried_array_through_exit_lanes(x: float, n: int) -> float:
+    a = np.zeros(3)
+    for i in range(n):
+        a[0] += x
+        if a[0] > 2.5:
+            a[2] = 1.0
+            break
+        if x < 0.0:
+            continue
+        a[1] += 1.0
+    return a[0] + 10.0 * a[1] + 100.0 * a[2]  # type: ignore[no-any-return]
+
+
+def _carried_sequence_spine_and_whole_array_update(x: float, n: int) -> float:
+    rows = [np.zeros(2), np.array([1.0, 2.0])]
+    whole = np.array([x, 1.0])
+    for i in range(n):
+        rows[0][1] += x
+        rows[1][0] *= 1.5
+        whole += float(i)
+    return rows[0][1] + rows[1][0] + whole[0] + whole[1]  # type: ignore[no-any-return]
+
+
+def _carried_under_nested_loops_and_branches(x: float, n: int) -> float:
+    a = np.zeros(2)
+    i = 0
+    while i < n:
+        j = 0
+        while j < i:
+            if x > float(j):
+                a[0] += x
+            else:
+                a[1] -= 1.0
+            j += 1
+        a[1] += a[0]
+        i += 1
+    return a[0] + 3.0 * a[1]  # type: ignore[no-any-return]
+
+
+def _store_then_alias_in_the_same_trip(x: float, n: int) -> float:
+    # The store is judged while the array is unique; the alias made later in the trip dies before the next store.
+    a = np.zeros(2)
+    acc = 0.0
+    for i in range(n):
+        a[0] += x
+        held = a
+        acc += held[0]
+    return acc + a[0]  # type: ignore[no-any-return]
+
+
+def _store_then_rebind_to_a_view(x: float, n: int) -> Float64[np.ndarray, "2 2"]:
+    a = np.array([[1.0, 2.0], [3.0, 4.0]])
+    for i in range(n):
+        a[0, 1] += x * float(i + 1)
+        a = a.T
+    return a
+
+
+def _views_of_one_base_rebound(x: float, n: int) -> float:
+    m = np.array([[1.0, x], [3.0, 4.0]])
+    v = m[0]
+    acc = 0.0
+    for i in range(n):
+        acc += v[1]
+        if x > float(i):
+            v = m[1]
+        else:
+            v = m[0]
+    return acc + v[0]  # type: ignore[no-any-return]
+
+
+def _fresh_rebind_on_a_break_lane(x: float, n: int) -> float:
+    a = np.zeros(2)
+    for i in range(n):
+        if x > 1.0:
+            a = np.array([7.0, 8.0])
+            break
+        a[0] += x
+    return a[0] + 10.0 * a[1]  # type: ignore[no-any-return]
+
+
+def _accumulate(x: float, n: int) -> Float64[np.ndarray, "2"]:
+    a = np.zeros(2)
+    for i in range(n):
+        a[0] += x
+        if a[0] > 2.5:
+            return a
+        a[1] += 1.0
+    return a
+
+
+def _callee_return_crossing_its_loop(x: float, n: int) -> float:
+    got = _accumulate(x, n)
+    other = _accumulate(2.0 * x, n)
+    return got[0] + 10.0 * got[1] + 100.0 * other[0] + 1000.0 * other[1]  # type: ignore[no-any-return]
+
+
+def _root_return_inside_the_loop(x: float, n: int) -> Float64[np.ndarray, "2"]:
+    a = np.zeros(2)
+    for i in range(n):
+        a[0] += x
+        if a[0] > 2.5:
+            return np.array(a)
+        a[1] += 1.0
+    return np.array(a)
+
+
+def _keeps(t: tuple[float, Float64[np.ndarray, "2"]]) -> tuple[float, Float64[np.ndarray, "2"]]:
+    return t
+
+
+def _int_leaf_promotes_beside_an_array(x: float, n: int) -> float:
+    s = (1, np.zeros(2))
+    for i in range(n):
+        s = _keeps(s)  # type: ignore[assignment]
+    return s[1][0] + s[0] + x  # type: ignore[no-any-return]
+
+
+def test_local_aggregates_are_carried_leafwise_across_a_residual_loop() -> None:
+    _oracle(_array_store_inside_residual, _X_ROWS)
+    for fn in [
+        _carried_array_stores,
+        _carried_array_through_exit_lanes,
+        _carried_sequence_spine_and_whole_array_update,
+        _carried_under_nested_loops_and_branches,
+        _store_then_alias_in_the_same_trip,
+        _store_then_rebind_to_a_view,
+        _views_of_one_base_rebound,
+        _fresh_rebind_on_a_break_lane,
+        _callee_return_crossing_its_loop,
+        _root_return_inside_the_loop,
+    ]:
+        _oracle(fn, _XN)
+
+
+def test_an_int_leaf_of_a_carried_sequence_promotes_like_a_scalar_carry() -> None:
+    _oracle(_int_leaf_promotes_beside_an_array, _XN)
+
+
+class _SeedsFromStateAndInstalls:
+    def __init__(self) -> None:
+        self.w = np.array([1.0, 0.0])
+
+    def step(self, x: float, n: int) -> float:
+        a = np.array(self.w)
+        for i in range(n):
+            a[0] = a[0] * 0.5 + x
+            if a[0] > 3.0:
+                break
+            a[1] += a[0]
+        self.w = a
+        return a[1]  # type: ignore[no-any-return]
+
+
+def test_a_carried_local_array_installs_into_state_after_the_loop() -> None:
+    _oracle(_SeedsFromStateAndInstalls().step, [{"x": 1.5, "n": 2}, {"x": -0.75, "n": 0}, {"x": 4.0, "n": 3}])
+
+
+def _alias_rebound_after_the_store(x: float, n: int) -> float:
+    a = np.zeros(2)
+    b = np.ones(2)
+    y = 0.0
+    for i in range(n):
+        a[0] += x
+        y += b[0]
+        b = a
+    return y
+
+
+def _alias_bound_before_the_loop(x: float, n: int) -> float:
+    a = np.zeros(2)
+    b = a
+    for i in range(n):
+        a[0] += x
+    return b[0]  # type: ignore[no-any-return]
+
+
+def _view_rebind_then_store(x: float, n: int) -> float:
+    a = np.array([[1.0, 2.0], [3.0, 4.0]])
+    for i in range(n):
+        a = a.T
+        a[0, 1] += x
+    return a[0, 1]  # type: ignore[no-any-return]
+
+
+def _fresh_rebind_on_a_continue_lane(x: float, n: int) -> float:
+    a = np.zeros(2)
+    for i in range(n):
+        if x > 1.0:
+            a = np.ones(2)
+            continue
+        a[0] += x
+    return a[0]  # type: ignore[no-any-return]
+
+
+def _iterator_inside_a_carried_sequence(x: float, n: int) -> float:
+    s = (enumerate((1.0, 2.0)), np.zeros(2))
+    for i in range(n):
+        s[1][0] += x
+    return s[1][0]  # type: ignore[no-any-return]
+
+
+def _bound_method_inside_a_carried_sequence(x: float, n: int) -> float:
+    m = np.ones(2)
+    s = (m.sum, np.zeros(2))
+    for i in range(n):
+        s[1][0] += x
+    return s[1][0]  # type: ignore[no-any-return]
+
+
+_NAN_PAIR = (float("nan"), 1.0)
+
+
+def _nan_leaf_in_a_carried_array(x: float, n: int) -> float:
+    a = np.array(_NAN_PAIR)
+    for i in range(n):
+        a[1] += x
+    return a[1]  # type: ignore[no-any-return]
+
+
+def _aggregate_rebound_to_a_scalar(x: float, n: int) -> float:
+    a = np.zeros(2)
+    for i in range(n):
+        a = x  # type: ignore[assignment]
+    return x
+
+
+def _store_through_a_runtime_index(x: float, n: int) -> float:
+    a = np.zeros(4)
+    for i in range(n):
+        a[i] = x
+    return a[0]  # type: ignore[no-any-return]
+
+
+def test_carried_aggregate_bans() -> None:
+    for fn in [
+        _array_carry,
+        _alias_rebound_after_the_store,
+        _alias_bound_before_the_loop,
+        _view_rebind_then_store,
+        _fresh_rebind_on_a_continue_lane,
+        _iterator_inside_a_carried_sequence,
+        _bound_method_inside_a_carried_sequence,
+        _nan_leaf_in_a_carried_array,
+        _aggregate_rebound_to_a_scalar,
+        _store_through_a_runtime_index,
+    ]:
+        _rejects(fn)
+
+
+class _InstallsThroughACalleeInsideTheLoop:
+    def __init__(self) -> None:
+        self.keep = np.zeros(2)
+
+    def stash(self, v: Float64[np.ndarray, "2"]) -> None:
+        self.keep = v
+
+    def step(self, x: float, n: int) -> float:
+        a = np.zeros(2)
+        for i in range(n):
+            a[0] += x
+            self.stash(a)
+        return a[0]  # type: ignore[no-any-return]
+
+
+def test_installing_a_carried_array_on_the_back_edge_is_rejected() -> None:
+    _rejects(_InstallsThroughACalleeInsideTheLoop().step)
 
 
 # ---------------------------------------------------------------------- dynamic trips and degenerate exits
@@ -1096,7 +1390,7 @@ def test_a_discarded_promote_pass_does_not_charge_the_budget() -> None:
     The re-run kernel therefore must synthesize, to Verilog byte-identical with its float-seeded twin under the one
     module name.
     """
-    options = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
+    options = Options(operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul()), wmultiplier=18)
     fits = holoso.synthesize(_float_carry_fits, options, name="k")
     promotes = holoso.synthesize(_int_carry_promotes_then_fits, options, name="k")
     assert promotes.initiation_interval == fits.initiation_interval
@@ -1326,8 +1620,12 @@ def test_the_unroll_threshold_selects_the_lowering_of_a_pure_kernel() -> None:
     discriminator sound. Only the lowering is claimed: a counted body is a data-dependent region, so it
     refuses what any residual loop refuses -- an aggregate state install, a runtime-int subscript.
     """
-    unrolled = holoso.synthesize(_static_counted_sum, Options(OperatorOptions(), unroll_max_trips=4), name="k")
-    counted = holoso.synthesize(_static_counted_sum, Options(OperatorOptions(), unroll_max_trips=3), name="k")
+    unrolled = holoso.synthesize(
+        _static_counted_sum, Options(operator=OperatorOptions(), unroll_max_trips=4, wmultiplier=18), name="k"
+    )
+    counted = holoso.synthesize(
+        _static_counted_sum, Options(operator=OperatorOptions(), unroll_max_trips=3, wmultiplier=18), name="k"
+    )
     assert unrolled.initiation_interval[1] is not None
     assert counted.initiation_interval[1] is None
     assert not any(line.lstrip().startswith("phi %") for line in strip_locations(unrolled.frontend_ir[-1]).splitlines())
@@ -1343,7 +1641,9 @@ def _static_counted_target() -> int:
 
 
 def test_a_static_counted_loop_defines_its_target_after_the_loop() -> None:
-    forced = holoso.synthesize(_static_counted_target, Options(OperatorOptions(), unroll_max_trips=0), name="k")
+    forced = holoso.synthesize(
+        _static_counted_target, Options(operator=OperatorOptions(), unroll_max_trips=0, wmultiplier=18), name="k"
+    )
     (out,) = forced.numerical_model.elaborate().run()
     assert _as_int(out) == 2
 
@@ -1358,7 +1658,9 @@ def _counted_rail_overshoot() -> tuple[int, int]:
 
 def test_a_saturating_counter_overshoot_is_unobservable() -> None:
     """The final advance saturates at the rail the kernel asked for, which must end the loop and never leak."""
-    options = Options(OperatorOptions(), wint_min=24, unroll_max_trips=0)  # the bounds are 24-bit; nothing lends it
+    options = Options(
+        operator=OperatorOptions(), wint_min=24, unroll_max_trips=0, wmultiplier=18
+    )  # the bounds are 24-bit; nothing lends it
     for kernel, expected in ((_counted_rail_overshoot, [3, 8388606]), (_counted_rail_overshoot_down, [3, -8388606])):
         forced = holoso.synthesize(kernel, options, name="k")
         assert [_as_int(v) for v in forced.numerical_model.elaborate().run()] == expected
@@ -1370,7 +1672,9 @@ def _unused_huge_range(x: float) -> float:
 
 
 def test_an_unconsumed_huge_range_compiles() -> None:
-    result = holoso.synthesize(_unused_huge_range, Options(OperatorOptions(fadd=FAddOptions())), name="k")
+    result = holoso.synthesize(
+        _unused_huge_range, Options(operator=OperatorOptions(fadd=lean.fadd()), wmultiplier=18), name="k"
+    )
     (out,) = result.numerical_model.elaborate().run(2.0)
     assert float(out) == 3.0
 

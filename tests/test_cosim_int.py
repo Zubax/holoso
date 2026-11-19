@@ -11,10 +11,10 @@ import pytest
 
 import holoso
 from holoso import FloatFormat, IntFormat, Options
-from ._cosim import run_cosim
+from ._cosim import rendered_instance, run_cosim
 from ._eel_corpus import INT_CASES, rows
 from ._eeloracle import InputRow
-from ._modelref import adder_modes, default_options
+from ._modelref import default_options
 from .hdl.hdl_float_oracle import SIMULATORS
 from .test_int_selection import countdown
 from .test_int_synthesis import (
@@ -30,6 +30,7 @@ from .test_int_synthesis import (
     sum_difference_and_order,
     sum_only,
 )
+from . import _options as lean
 
 # NcoPhase sums a 2**30 increment over a 32-bit mask, so exactness needs at least a 34-bit word.
 _OPTIONS = dataclasses.replace(default_options(FloatFormat(wexp=6, wman=18)), wint_min=34)
@@ -56,9 +57,9 @@ def divmod_rails(a: int, b: int) -> tuple[int, int, int]:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_popcount_cosim(sim: str) -> None:
     """
-    The count port is narrower than the word it lands in, so the emitted top zero-extends it. The bench's own sweep
-    draws small operands whose counts never set the port's top bit, which cannot tell a zero fill from a sign fill:
-    only a large-magnitude vector discriminates, so the rails are driven explicitly.
+    The count is narrower than the word it lands in, so the block widens it. The bench's own sweep draws small operands
+    whose counts never set the count's top bit, which cannot tell a zero fill from a sign fill: only a large-magnitude
+    vector discriminates, so the rails are driven explicitly.
     """
     values = [0, 1, -1, 7, -7, _IFMT.min, _IFMT.min + 1, _IFMT.max, _IFMT.max - 1, -12345]
     count_width = (_IFMT.width - 1).bit_length()
@@ -69,10 +70,13 @@ def test_int_popcount_cosim(sim: str) -> None:
 
 @pytest.mark.cosim
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_int_divmod_and_rails_cosim(sim: str) -> None:
+@pytest.mark.parametrize("stages", [0, 1])
+def test_int_divmod_and_rails_cosim(sim: str, stages: int) -> None:
     """The pooled divider's fused quotient/remainder firing plus a saturating add, driven to the format rails."""
     pairs = [(7, 3), (-7, 3), (7, -3), (-7, -3), (_IFMT.min, -1), (_IFMT.max, _IFMT.max), (_IFMT.min, 1), (0, 5)]
-    result = holoso.synthesize(divmod_rails, _OPTIONS, name="divmod_rails_int")
+    idivs = holoso.IDivsOptions(stage_input=stages, stage_output=stages)
+    options = dataclasses.replace(_OPTIONS, operator=dataclasses.replace(_OPTIONS.operator, idivs=idivs))
+    result = holoso.synthesize(divmod_rails, options, name=f"divmod_rails_int_s{stages}")
     run_cosim(sim, result, vectors=[{"a": a, "b": b} for a, b in pairs])
 
 
@@ -83,8 +87,8 @@ def int_float_crossing(x: float, n: int) -> tuple[int, float]:
 def _crossing_options() -> Options:
     operator = dataclasses.replace(
         _OPTIONS.operator,
-        frint=holoso.FRintOptions(),
-        ffromint=holoso.FFromIntOptions(),
+        frint=lean.frint(),
+        ffromint=lean.ffromint(),
     )
     return dataclasses.replace(_OPTIONS, operator=operator)
 
@@ -92,7 +96,7 @@ def _crossing_options() -> Options:
 @pytest.mark.cosim
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_float_crossing_cosim(sim: str) -> None:
-    """Pooled frint (rounding carried on its mode port) and ffromint inside one scheduled kernel, random sweep."""
+    """Pooled frint (specialized to its one rounding) and ffromint inside one scheduled kernel, random sweep."""
     run_cosim(sim, holoso.synthesize(int_float_crossing, _crossing_options(), name="int_float_crossing"))
 
 
@@ -106,7 +110,7 @@ def test_a_rounding_answered_as_float_and_integer_cosim(sim: str, wint_min: int)
     """
     options = dataclasses.replace(_crossing_options(), wint_min=wint_min)
     result = holoso.synthesize(every_rounding_both_ways, options, name=f"rounded_both_ways_w{wint_min}")
-    assert (result.int_format.width > options.ffmt.width) == (wint_min == 34)
+    assert (result.int_format.width > options.ffmt.wfull) == (wint_min == 34)
     run_cosim(sim, result)
 
 
@@ -162,7 +166,7 @@ _SHIFT_VECTORS = [
 def test_int_shift_in_both_directions_cosim(sim: str) -> None:
     """`x << n` and `x >> n` as two firings of one shifter, the microcode switching its direction bit between them."""
     result = holoso.synthesize(shift_pair, _OPTIONS, name="shift_pair_int")
-    assert result.verilog_output.verilog.count("holoso_ishft #") == 1
+    assert len(re.findall(r"\bu_ishft_\d+ \(", result.verilog_output.verilog)) == 1
     run_cosim(sim, result, vectors=_SHIFT_VECTORS)
 
 
@@ -170,12 +174,12 @@ def test_int_shift_in_both_directions_cosim(sim: str) -> None:
 @pytest.mark.parametrize("sim", SIMULATORS)
 def test_int_shift_right_alone_cosim(sim: str) -> None:
     """
-    A kernel that only shifts right holds the shifter's direction bit constant across the program, so the emitted top
-    ties it high instead of driving it from the microcode. Tied low, the module would shift left, which the model --
-    never reading the bit -- cannot see.
+    A kernel that only shifts right renders the shifter built for the right shift alone, its direction held inside the
+    module rather than driven from the microcode.
     """
     result = holoso.synthesize(shift_right_only, _OPTIONS, name="shift_right_int")
-    assert re.search(r"\buc_ishft_0_mode\s*=\s*1'd1;", result.verilog_output.verilog), "the premise of this test"
+    rendered = rendered_instance(result, "ishft_0")
+    assert "right" not in rendered.ports and rendered.knobs["_right"] == "True", "the premise of this test"
     run_cosim(sim, result, vectors=_SHIFT_VECTORS)
 
 
@@ -192,28 +196,49 @@ _ADDER_VECTORS = [
 
 @pytest.mark.cosim
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_int_adder_in_every_mode_cosim(sim: str) -> None:
+def test_int_adder_running_every_primitive_cosim(sim: str) -> None:
     """A sum, a difference and an order as three firings of one adder, the microcode switching `sub` between them."""
-    result = holoso.synthesize(sum_difference_and_order, _OPTIONS, name="adder_modes_int")
-    assert adder_modes(result) == [2], "the premise of this test"
+    result = holoso.synthesize(sum_difference_and_order, _OPTIONS, name="adder_all_int")
+    assert re.search(r"\buc_iadds_0_sub\s*=\s*ucode_word\[", result.verilog_output.verilog), "the premise of this test"
     run_cosim(sim, result, vectors=_ADDER_VECTORS)
 
 
 @pytest.mark.cosim
 @pytest.mark.parametrize(
-    "target,mode",
-    [(sum_only, 0), (difference_only, 1), (order_only, 1), (difference_and_order, 1)],
+    "target,sub",
+    [(sum_only, False), (difference_only, True), (order_only, True), (difference_and_order, True)],
     ids=["add", "subtract", "compare", "subtract_and_compare"],
 )
 @pytest.mark.parametrize("sim", SIMULATORS)
-def test_int_adder_fixed_to_one_mode_cosim(sim: str, target: Callable[..., object], mode: int) -> None:
+def test_int_adder_fixed_to_one_drive_cosim(sim: str, target: Callable[..., object], sub: bool) -> None:
     """
-    A kernel that only adds, or never adds, has the adder elaborated for that alone. Elaborated for the other, the
-    module would compute the wrong operation, which the model -- never reading the parameter -- cannot see.
+    A kernel that only adds, or never adds, renders the adder built for that operation alone, `sub` held inside the
+    module rather than driven from the microcode.
     """
     result = holoso.synthesize(target, _OPTIONS, name=f"adder_{target.__name__}_int")
-    assert adder_modes(result) == [mode], "the premise of this test"
+    rendered = rendered_instance(result, "iadds_0")
+    assert "sub" not in rendered.ports and rendered.knobs["_sub"] == str(sub), "the premise of this test"
     run_cosim(sim, result, vectors=_ADDER_VECTORS)
+
+
+@pytest.mark.cosim
+@pytest.mark.parametrize(
+    "target,operator,vectors",
+    [(shift_pair, "ishft", _SHIFT_VECTORS), (sum_difference_and_order, "iadds", _ADDER_VECTORS)],
+    ids=["shift_both_ways", "add_and_subtract"],
+)
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_int_two_drives_issued_together_take_an_instance_each_cosim(
+    sim: str, target: Callable[..., object], operator: str, vectors: list[dict[str, int]]
+) -> None:
+    """Each instance is built for its own drive alone, under a module name of its own."""
+    options = dataclasses.replace(
+        _OPTIONS.operator, **{operator: dataclasses.replace(getattr(_OPTIONS.operator, operator), instances=2)}
+    )
+    result = holoso.synthesize(target, dataclasses.replace(_OPTIONS, operator=options), name=f"two_{operator}_int")
+    rendered = [rendered_instance(result, f"{operator}_{index}") for index in range(2)]
+    assert len({instance.module for instance in rendered}) == 2, "the premise of this test"
+    run_cosim(sim, result, vectors=vectors)
 
 
 @pytest.mark.cosim
@@ -221,7 +246,7 @@ def test_int_adder_fixed_to_one_mode_cosim(sim: str, target: Callable[..., objec
 def test_int_comparison_on_a_reversed_subtraction_cosim(sim: str) -> None:
     """The relations tap the flags of `b - a` mirrored, which only the RTL's port wiring can get wrong."""
     result = holoso.synthesize(order_beside_reversed_difference, _OPTIONS, name="reversed_difference_int")
-    assert adder_modes(result) == [1] and result.initiation_interval == (5, 5), "the premise of this test"
+    assert result.initiation_interval == (3, 3), "the premise of this test"
     run_cosim(sim, result, vectors=_ADDER_VECTORS)
 
 
@@ -233,7 +258,8 @@ def test_int_fast_adder_cosim(sim: str) -> None:
     result = holoso.synthesize(
         sum_difference_and_order, dataclasses.replace(_OPTIONS, operator=operators), name="fast_adder_int"
     )
-    assert ".FAST(1)" in result.verilog_output.verilog, "the premise of this test"
+    knob_table = re.search(r"^// iadds:\n(?://   .*\n)*//   fast: True$", result.verilog_output.verilog, re.MULTILINE)
+    assert knob_table, "the premise of this test"
     run_cosim(sim, result, vectors=_ADDER_VECTORS)
 
 

@@ -30,14 +30,19 @@ class IIR1HPF:
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(stage_input=1, stage_normalize=1),
-            fmul=holoso.FMulOptions(),
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
+        operator=holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
+            fdivsqrt=holoso.FDivsqrtOptions(
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+            ),
+            fmul_ilog2=holoso.FMulILog2Options(
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+            ),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
         ),
         ffmt=float_format,
+        wmultiplier=18,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(IIR1HPF().step, options)

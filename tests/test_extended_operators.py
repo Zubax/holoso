@@ -8,24 +8,15 @@ import dataclasses
 import itertools
 import math
 from collections.abc import Callable
+from functools import cache
 
 import numpy as np
 import pytest
+import zkf
 from jaxtyping import Float64
 
 import holoso
 from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FCordicOptions,
-    FDivsqrtOptions,
-    FExp2Options,
-    FFmaOptions,
-    FILog2Options,
-    FLog2Options,
-    FMulILog2Options,
-    FMulOptions,
-    FRintOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
@@ -33,11 +24,12 @@ from holoso import (
     SynthesisError,
     UnsupportedConstruct,
 )
-from holoso._operators import FCmpOperator, FCmpPrimitive, FSortPrimitive
+from holoso._operators import FCmpPrimitive, FloatSignControl, FMaxPrimitive, FMinPrimitive
+from holoso._operators._float import FCmpOperator
 from holoso._util import Relation
 from holoso._value import ScalarValue
 from ._modelref import instantiated_modules as _modules, random_legal_bits
-from ._public import divsqrt_modes
+from ._public import divsqrt_builds
 
 # Bare-name imports so a `from math import floor` style kernel resolves through the test module globals.
 from math import ceil, floor, log2, trunc
@@ -46,6 +38,7 @@ from math import ceil, floor, log2, trunc
 from math import floor as aliased_floor
 from math import fma as aliased_fma
 from math import tan as aliased_tan
+from . import _options as lean
 
 FMT = FloatFormat(8, 24)  # binary32: a float64 decode of any in-format value is exact, so math/round is an exact oracle
 _POS_INF = float("inf")
@@ -66,20 +59,21 @@ def _ops(
     fmt: FloatFormat = FMT,
 ) -> Options:
     return Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions() if with_divsqrt else None,
-            fmul_ilog2=FMulILog2Options() if with_scaler else None,
-            filog2=FILog2Options() if with_ilog2 else None,
-            fcmp=FCmpOptions() if with_cmp else None,
-            frint=FRintOptions() if with_round else None,
-            ffma=FFmaOptions() if with_fma else None,
-            fexp2=FExp2Options() if with_exp2 else None,
-            flog2=FLog2Options() if with_log2 else None,
-            fcordic=FCordicOptions() if with_cordic else None,
+        operator=OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt() if with_divsqrt else None,
+            fmul_ilog2=lean.fmul_ilog2() if with_scaler else None,
+            filog2=lean.filog2() if with_ilog2 else None,
+            fcmp=lean.fcmp() if with_cmp else None,
+            frint=lean.frint() if with_round else None,
+            ffma=lean.ffma() if with_fma else None,
+            fexp2=lean.fexp2() if with_exp2 else None,
+            flog2=lean.flog2() if with_log2 else None,
+            fcordic=lean.fcordic() if with_cordic else None,
         ),
         ffmt=fmt,
+        wmultiplier=18,
     )
 
 
@@ -92,21 +86,78 @@ def _bits(value: ScalarValue) -> int:
     return value.bits
 
 
+# The reference arithmetic: ZKF's own models of the blocks `_ops()` configures. Results depend on the configuration
+# (exp2 and log2 on `fast` and the multiplier width), so each model is built as the kernel builds its operator.
+_ADD = zkf.Add(fmt=FMT)
+_MUL = zkf.Mul(fmt=FMT, wmultiplier=18)
+_FMA = zkf.Fma(fmt=FMT, wmultiplier=18)
+_CMP = zkf.Cmp(fmt=FMT)
+
+
+@cache
+def _exp2_model() -> zkf.Exp2:
+    return zkf.Exp2(fmt=FMT, wmultiplier=18, fast=True)
+
+
+@cache
+def _log2_model() -> zkf.Log2:
+    return zkf.Log2(fmt=FMT, wmultiplier=18, fast=True)
+
+
+@cache
+def _cordic_model() -> zkf.Cordic:
+    return zkf.Cordic(fmt=FMT, wmultiplier=18, fast=True)
+
+
+def _exp2(x: FloatValue) -> FloatValue:
+    y = _exp2_model().evaluate(x)
+    assert isinstance(y, FloatValue)
+    return y
+
+
+def _log2(x: FloatValue) -> FloatValue:
+    y = _log2_model().evaluate(x).y
+    assert isinstance(y, FloatValue)
+    return y
+
+
+def _sincos(turns: FloatValue) -> tuple[FloatValue, FloatValue]:
+    result = _cordic_model().evaluate(0, turns, FloatValue(FMT, 0))
+    assert isinstance(result.r0, FloatValue) and isinstance(result.r1, FloatValue)
+    return result.r0, result.r1
+
+
+def _atan2(y: FloatValue, x: FloatValue) -> tuple[FloatValue, FloatValue]:
+    """The angle in turns and the magnitude."""
+    result = _cordic_model().evaluate(1, y, x)
+    assert isinstance(result.r0, FloatValue) and isinstance(result.r1, FloatValue)
+    return result.r0, result.r1
+
+
+def _sort(a: FloatValue, b: FloatValue) -> tuple[FloatValue, FloatValue]:
+    result = _CMP.evaluate(a, b)
+    return result.min, result.max
+
+
+def _negated(value: FloatValue) -> FloatValue:
+    return FloatSignControl(negate=True).apply_value(value)
+
+
 def _round_ref(value: float, mode: int) -> int:
     """Independent reference: round the in-format value with Python's math/round, then re-encode. Exact at binary32."""
-    fv = FloatValue.from_float(FMT, value)
+    fv = FMT.encode(value)
     v = float(fv)
     if math.isinf(v):
         return fv.bits
     if mode == 0:
-        n = round(v)  # banker's rounding (half to even), matching zkf_rint mode 0
+        n = round(v)  # banker's rounding (half to even), matching ZKF's RoundMode.NEAREST_EVEN
     elif mode == 1:
         n = math.floor(v)
     elif mode == 2:
         n = math.ceil(v)
     else:
         n = math.trunc(v)
-    return FloatValue.from_float(FMT, float(n)).bits
+    return FMT.encode(float(n)).bits
 
 
 def test_float_classification_intrinsics() -> None:
@@ -245,13 +296,11 @@ def test_fma_matches_single_rounded_reference() -> None:
     # Hand-computed exact cases: exact cancellation to +0 and an exactly-representable sum.
     assert float(sim.run(2.0, 3.0, -6.0)[0]) == 0.0
     assert float(sim.run(1.5, 2.0, 1.0)[0]) == 4.0
-    # Random sweep against the exact fused reference (FloatValue.fma); the HDL bench anchors that reference to the RTL.
+    # Random sweep against the exact fused reference (ZKF's own model of the operator).
     rng = np.random.default_rng(0xF)
     for _ in range(3000):
         a, b, c = (float(np.float32(rng.standard_normal() * 12)) for _ in range(3))
-        ref = FloatValue.fma(
-            FloatValue.from_float(FMT, a), FloatValue.from_float(FMT, b), FloatValue.from_float(FMT, c)
-        )
+        ref = _FMA.evaluate(FMT.encode(a), FMT.encode(b), FMT.encode(c))
         assert _bits(sim.run(a, b, c)[0]) == ref.bits, f"a={a} b={b} c={c}"
 
 
@@ -277,20 +326,20 @@ def test_a_degenerate_fma_is_what_is_left_of_it() -> None:
 
     cases: list[tuple[Callable[..., float], list[str], Callable[[float, float], tuple[float, float, float]]]] = [
         (zero_factor, [], lambda x, y: (x, 0.0, y)),
-        (zero_addend, ["fmul"], lambda x, y: (x, y, 0.0)),
-        (unit_factor, ["fadd"], lambda x, y: (-1.0, x, y)),
-        (scaled, ["fadd", "fmul_ilog2"], lambda x, y: (x, -4.0, y)),
-        (known_factors, ["fadd"], lambda x, y: (3.0, 5.0, y)),
-        (tripled, ["ffma"], lambda x, y: (x, 3.0, y)),
+        (zero_addend, ["mul"], lambda x, y: (x, y, 0.0)),
+        (unit_factor, ["add"], lambda x, y: (-1.0, x, y)),
+        (scaled, ["add", "mul_ilog2"], lambda x, y: (x, -4.0, y)),
+        (known_factors, ["add"], lambda x, y: (3.0, 5.0, y)),
+        (tripled, ["fma"], lambda x, y: (x, 3.0, y)),
     ]
     rng = np.random.default_rng(0xFA)
     for kernel, modules, operands in cases:
         result = holoso.synthesize(kernel, _ops(), name=kernel.__name__)
-        assert _modules(result) == {f"holoso_{name}" for name in modules}, kernel.__name__
+        assert _modules(result) == set(modules), kernel.__name__
         sim = result.numerical_model.elaborate()
         for _ in range(300):
             x, y = (float(np.float32(rng.standard_normal() * 12)) for _ in range(2))
-            ref = FloatValue.fma(*(FloatValue.from_float(FMT, value) for value in operands(x, y)))
+            ref = _FMA.evaluate(*(FMT.encode(value) for value in operands(x, y)))
             assert _bits(sim.run(x, y)[0]) == ref.bits, (kernel.__name__, x, y)
 
 
@@ -317,7 +366,7 @@ def test_a_degenerate_fma_asks_for_the_operator_its_answer_needs() -> None:
     with pytest.raises(UnsupportedConstruct, match="'fmul_ilog2'"):
         holoso.synthesize(scaled, _ops(with_scaler=False), name="scaling_without_fmul_ilog2")
     sim = holoso.synthesize(fused, fused_alone, name="fused_alone").numerical_model.elaborate()
-    assert _bits(sim.run(1.5, 0.25)[0]) == FloatValue.from_float(FMT, 4.75).bits
+    assert _bits(sim.run(1.5, 0.25)[0]) == FMT.encode(4.75).bits
 
 
 def test_an_fma_of_infinity_by_zero_is_not_its_addend() -> None:
@@ -340,9 +389,7 @@ def test_fma_sign_folds_per_operand() -> None:
     rng = np.random.default_rng(0x5)
     for _ in range(1500):
         a, b, c = (float(np.float32(rng.standard_normal() * 12)) for _ in range(3))
-        ref = FloatValue.fma(
-            FloatValue.from_float(FMT, -a), FloatValue.from_float(FMT, abs(b)), FloatValue.from_float(FMT, -c)
-        )
+        ref = _FMA.evaluate(FMT.encode(-a), FMT.encode(abs(b)), FMT.encode(-c))
         assert _bits(sim.run(a, b, c)[0]) == ref.bits, f"a={a} b={b} c={c}"
 
 
@@ -356,7 +403,7 @@ def test_intrinsic_dispatch_resolves_aliased_imports() -> None:
     for a, b, c in [(2.7, 3.0, 1.0), (-1.5, 2.0, -0.5), (0.3, -4.0, 2.0), (-100.7, 1.5, 3.5)]:
         out = sim.run(a, b, c)
         assert _bits(out[0]) == _round_ref(a, 1), f"floor alias a={a}"
-        assert _bits(out[1]) == FloatValue.fma(_v(a), _v(b), _v(c)).bits, f"fma alias a={a} b={b} c={c}"
+        assert _bits(out[1]) == _FMA.evaluate(_v(a), _v(b), _v(c)).bits, f"fma alias a={a} b={b} c={c}"
 
 
 @pytest.mark.skipif(hasattr(np, "fma"), reason="np.fma exists on this numpy and correctly dispatches to ffma")
@@ -371,7 +418,7 @@ def test_numpy_fma_is_rejected() -> None:
 
 
 def _v(x: float) -> FloatValue:
-    return FloatValue.from_float(FMT, float(x))
+    return FMT.encode(float(x))
 
 
 def test_a_product_and_sum_fuse_only_where_the_program_spells_the_fma_and_the_machine_has_it() -> None:
@@ -387,15 +434,15 @@ def test_a_product_and_sum_fuse_only_where_the_program_spells_the_fma_and_the_ma
             name = f"{kernel.__name__}_{'with' if with_fma else 'without'}_ffma"
             result = holoso.synthesize(kernel, _ops(with_fma=with_fma), name=name)
             fused = kernel is spelled and with_fma
-            arithmetic = _modules(result) & {"holoso_ffma", "holoso_fmul", "holoso_fadd"}
-            assert arithmetic == ({"holoso_ffma"} if fused else {"holoso_fmul", "holoso_fadd"}), name
+            arithmetic = _modules(result) & {"fma", "mul", "add"}
+            assert arithmetic == ({"fma"} if fused else {"mul", "add"}), name
             sims.append((fused, name, result.numerical_model.elaborate()))
     rng = np.random.default_rng(0x515)
     diverged = 0
     for _ in range(3000):
         a, b, c = (float(np.float32(rng.standard_normal() * 9)) for _ in range(3))
-        single = FloatValue.fma(_v(a), _v(b), _v(c)).bits
-        double = ((_v(a) * _v(b)) + _v(c)).bits
+        single = _FMA.evaluate(_v(a), _v(b), _v(c)).bits
+        double = _ADD.evaluate(_MUL.evaluate(_v(a), _v(b)), _v(c)).bits
         for fused, name, sim in sims:
             assert _bits(sim.run(a, b, c)[0]) == (single if fused else double), f"{name} a={a} b={b} c={c}"
         diverged += single != double
@@ -422,21 +469,21 @@ _MINMAX_VECTORS = [
 
 def test_min_max_match_reference() -> None:
     # min(a,b) and max(a,b) over the same pair fuse into one comparator firing that writes two wide registers at once;
-    # both outputs are checked against the bit-preserving reference (FloatValue.sort), which the HDL bench anchors to
-    # the RTL. The equal and infinity pairs pin the tie direction and the total-order handling of the extrema.
+    # both outputs are checked against the bit-preserving reference (ZKF's own model of the comparator). The equal and
+    # infinity pairs pin the tie direction and the total-order handling of the extrema.
     def kernel(a: float, b: float) -> tuple[float, float]:
         return (min(a, b), max(a, b))
 
     sim = _sim(kernel, "min_max_pair")
     for a, b in _MINMAX_VECTORS:
-        lo, hi = FloatValue.sort(_v(a), _v(b))
+        lo, hi = _sort(_v(a), _v(b))
         out = sim.run(a, b)
         assert _bits(out[0]) == lo.bits, f"min a={a} b={b}"
         assert _bits(out[1]) == hi.bits, f"max a={a} b={b}"
     rng = np.random.default_rng(0x504)
     for _ in range(4000):
         a, b = (float(np.float32(rng.standard_normal() * 12)) for _ in range(2))
-        lo, hi = FloatValue.sort(_v(a), _v(b))
+        lo, hi = _sort(_v(a), _v(b))
         out = sim.run(a, b)
         assert _bits(out[0]) == lo.bits and _bits(out[1]) == hi.bits, f"a={a} b={b}"
 
@@ -451,12 +498,10 @@ def test_relations_beside_min_max_match_reference() -> None:
     sim = _sim(kernel, "min_max_flags")
     grid = [k * 1.5 for k in range(-3, 4)]
     for a, b in [*_MINMAX_VECTORS, *itertools.product(grid, grid)]:
-        negated = _v(a).apply_sign(negate=True, absolute=False)
-        lo, hi = FloatValue.sort(negated, _v(b))
-        ordering = negated.compare(_v(b))
+        compared = _CMP.evaluate(_negated(_v(a)), _v(b))
         out = sim.run(a, b)
-        assert (_bits(out[0]), _bits(out[1])) == (lo.bits, hi.bits), f"a={a} b={b}"
-        assert tuple(out[2:]) == (ordering < 0, ordering > 0, ordering == 0), f"a={a} b={b}"
+        assert (_bits(out[0]), _bits(out[1])) == (compared.min.bits, compared.max.bits), f"a={a} b={b}"
+        assert tuple(out[2:]) == (compared.a_lt_b, compared.a_gt_b, compared.a_eq_b), f"a={a} b={b}"
 
 
 def test_min_max_sign_folds_into_operands() -> None:
@@ -469,8 +514,8 @@ def test_min_max_sign_folds_into_operands() -> None:
     rng = np.random.default_rng(0x510)
     for _ in range(3000):
         a, b = (float(np.float32(rng.standard_normal() * 12)) for _ in range(2))
-        lo, _ignore = FloatValue.sort(_v(-a), _v(abs(b)))
-        _ignore2, hi = FloatValue.sort(_v(abs(a)), _v(-b))
+        lo, _ignore = _sort(_v(-a), _v(abs(b)))
+        _ignore2, hi = _sort(_v(abs(a)), _v(-b))
         out = sim.run(a, b)
         assert _bits(out[0]) == lo.bits, f"min(-a,|b|) a={a} b={b}"
         assert _bits(out[1]) == hi.bits, f"max(|a|,-b) a={a} b={b}"
@@ -483,7 +528,7 @@ def test_min_max_dispatch_numpy() -> None:
 
     sim = _sim(kernel, "min_max_numpy")
     for a, b in _MINMAX_VECTORS:
-        lo, hi = FloatValue.sort(_v(a), _v(b))
+        lo, hi = _sort(_v(a), _v(b))
         out = sim.run(a, b)
         assert _bits(out[0]) == lo.bits and _bits(out[1]) == hi.bits, f"a={a} b={b}"
 
@@ -496,18 +541,16 @@ def test_min_max_wrong_arity_is_rejected() -> None:
         holoso.synthesize(kernel, _ops(), name="min_max_arity")
 
 
-def test_each_comparator_primitive_reads_its_own_ports() -> None:
-    # The reference arithmetic never reads the port map, so no sweep here would notice a relation tapping the port of
-    # the min; only the cosimulation would.
-    comparator = FCmpOperator.build(FMT, FCmpOptions())
-    compare, sort = FCmpPrimitive(comparator), FSortPrimitive(comparator)
-    names = [port.name for port in comparator.output_ports]
-    assert [names[port] for port in compare.mode.outputs] == ["a_gt_b", "a_eq_b", "a_lt_b"]
-    assert [names[port] for port in sort.mode.outputs] == ["min", "max", "a_gt_b", "a_eq_b", "a_lt_b"]
-    for relation in Relation:
-        tap, inversion = FCmpPrimitive.tap_of(relation)
-        result, sort_inversion = sort.flag_of(relation)
-        assert (sort.mode.outputs[result], sort_inversion) == (compare.mode.outputs[tap], inversion), relation
+def test_the_comparator_primitives_read_their_own_ports() -> None:
+    # Each primitive names the comparator port it answers; test_rtl drives the block through these names against the
+    # arithmetic.
+    comparator = FCmpOperator.build(FMT, lean.fcmp())
+    assert FMinPrimitive(comparator).output_name == "min"
+    assert FMaxPrimitive(comparator).output_name == "max"
+    flags = {Relation.GT: "a_gt_b", Relation.EQ: "a_eq_b", Relation.LT: "a_lt_b"}
+    for relation, flag in flags.items():
+        primitive, inversion = FCmpPrimitive.of(comparator, relation)
+        assert primitive.output_name == flag and inversion.is_identity, relation
 
 
 def test_min_max_unconfigured_is_rejected() -> None:
@@ -528,9 +571,9 @@ def test_min_max_is_not_bit_commutative() -> None:
 
     sim = _sim(kernel, "min_max_mirror")
     for x, y in [(0.0, 0.0), (5.0, 5.0), (-3.0, -3.0), (2.0, 7.0), (-4.0, 1.5)]:
-        neg_x = _v(x).apply_sign(negate=True, absolute=False)
-        ref0 = FloatValue.sort(neg_x, _v(y))[0]
-        ref1 = FloatValue.sort(_v(y), neg_x)[0]
+        neg_x = _negated(_v(x))
+        ref0 = _sort(neg_x, _v(y))[0]
+        ref1 = _sort(_v(y), neg_x)[0]
         out = sim.run(x, y)
         assert _bits(out[0]) == ref0.bits, f"min(-x,y) x={x} y={y}"
         assert _bits(out[1]) == ref1.bits, f"min(y,-x) x={x} y={y}"
@@ -543,8 +586,8 @@ def test_min_max_against_a_constant_keeps_its_operand_order() -> None:
 
     sim = _sim(kernel, "min_max_const")
     for x in [0.0, 2.5, -2.5]:
-        neg_x = _v(x).apply_sign(negate=True, absolute=False)
-        low, high = FloatValue.sort(_v(0.0), neg_x)
+        neg_x = _negated(_v(x))
+        low, high = _sort(_v(0.0), neg_x)
         out = sim.run(x)
         assert _bits(out[0]) == low.bits, f"min(0.0,-x) x={x}"
         assert _bits(out[1]) == high.bits, f"max(0.0,-x) x={x}"
@@ -558,7 +601,7 @@ def test_min_max_of_constants_fold() -> None:
 
     sim = holoso.synthesize(kernel, _ops(with_cmp=False), name="min_max_fold").numerical_model.elaborate()
     for x in [0.0, 3.0, -1.5, 100.25]:
-        ref = (_v(x) + _v(1.5)) + _v(2.5)
+        ref = _ADD.evaluate(_ADD.evaluate(_v(x), _v(1.5)), _v(2.5))
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
@@ -568,7 +611,7 @@ def test_min_max_infinity_constants_fold() -> None:
 
     sim = holoso.synthesize(kernel, _ops(with_cmp=False), name="min_max_inf_fold").numerical_model.elaborate()
     for x in [0.0, 3.0, -1.5, 100.25]:
-        ref = (_v(x) + _v(2.0)) + _v(3.0)
+        ref = _ADD.evaluate(_ADD.evaluate(_v(x), _v(2.0)), _v(3.0))
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
@@ -604,15 +647,15 @@ def test_exp2_matches_model_and_native() -> None:
 
     sim = _sim(kernel, "exp2_basic")
     for x in _EXP2_VECTORS:
-        # sim and the reference share FloatValue.exp2 (circular); the native check breaks the circularity.
+        # sim and the reference share ZKF's model (circular); the native check breaks the circularity.
         out = sim.run(x)[0]
-        assert _bits(out) == _v(x).exp2().bits, f"exp2 bit-exact x={x}"
+        assert _bits(out) == _exp2(_v(x)).bits, f"exp2 bit-exact x={x}"
         native = math.exp2(x)
         assert abs(float(out) - native) <= 2 * _ulp32(native), f"exp2 accuracy x={x}"
     rng = np.random.default_rng(0xE2)
     for _ in range(200):
         x = float(np.float32(rng.standard_normal() * 20))
-        assert _bits(sim.run(x)[0]) == _v(x).exp2().bits, f"exp2 sweep x={x}"
+        assert _bits(sim.run(x)[0]) == _exp2(_v(x)).bits, f"exp2 sweep x={x}"
 
 
 def test_log2_matches_model_and_native() -> None:
@@ -622,13 +665,13 @@ def test_log2_matches_model_and_native() -> None:
     sim = _sim(kernel, "log2_basic")
     for x in _LOG2_VECTORS:
         out = sim.run(x)[0]
-        assert _bits(out) == _v(x).log2().bits, f"log2 bit-exact x={x}"
+        assert _bits(out) == _log2(_v(x)).bits, f"log2 bit-exact x={x}"
         native = math.log2(x)
         assert abs(float(out) - native) <= 2 * _ulp32(native), f"log2 accuracy x={x}"
     rng = np.random.default_rng(0x109)
     for _ in range(200):
         x = float(np.float32(abs(rng.standard_normal()) * 1000 + 1e-9))
-        assert _bits(sim.run(x)[0]) == _v(x).log2().bits, f"log2 sweep x={x}"
+        assert _bits(sim.run(x)[0]) == _log2(_v(x)).bits, f"log2 sweep x={x}"
 
 
 def test_pow_two_lowers_to_exp2() -> None:
@@ -641,7 +684,7 @@ def test_pow_two_lowers_to_exp2() -> None:
     for kernel in (k_int_base, k_float_base):
         sim = _sim(kernel, kernel.__name__)
         for x in (0.5, 3.5, -2.5, 7.25):  # fractional: a multiply chain could not produce these
-            assert _bits(sim.run(x)[0]) == _v(x).exp2().bits, f"{kernel.__name__} x={x}"
+            assert _bits(sim.run(x)[0]) == _exp2(_v(x)).bits, f"{kernel.__name__} x={x}"
 
 
 def test_pow_of_a_runtime_or_non_two_base_rides_the_general_lane() -> None:
@@ -668,9 +711,9 @@ def test_exp2_log2_dispatch_numpy_and_bare_name() -> None:
     sim = _sim(kernel, "exp2_log2_dispatch")
     for x in (2.0, 3.0, 100.0):  # positive; dispatch resolves by callee identity, so it is value-independent
         out = sim.run(x)
-        assert _bits(out[0]) == _v(x).exp2().bits, f"np.exp2 x={x}"
-        assert _bits(out[1]) == _v(x).log2().bits, f"np.log2 x={x}"
-        assert _bits(out[2]) == _v(x).log2().bits, f"bare log2 x={x}"
+        assert _bits(out[0]) == _exp2(_v(x)).bits, f"np.exp2 x={x}"
+        assert _bits(out[1]) == _log2(_v(x)).bits, f"np.log2 x={x}"
+        assert _bits(out[2]) == _log2(_v(x)).bits, f"bare log2 x={x}"
 
 
 def test_exp2_log2_of_constants_fold() -> None:
@@ -683,7 +726,7 @@ def test_exp2_log2_of_constants_fold() -> None:
         kernel, _ops(with_exp2=False, with_log2=False), name="exp2_log2_constants_fold"
     ).numerical_model.elaborate()
     for x in [0.0, 3.0, -1.5, 100.25]:
-        ref = _v(x) + _v(folded)
+        ref = _ADD.evaluate(_v(x), _v(folded))
         assert _bits(sim.run(x)[0]) == ref.bits, f"x={x}"
 
 
@@ -694,12 +737,12 @@ def test_exp2_log2_sign_folds_into_operand() -> None:
     sim = _sim(kernel, "exp2_log2_signs")
     for x in [1.0, -1.0, 2.5, -2.5, 0.5, -0.5, 7.0, -7.0, 0.0]:
         out = sim.run(x)
-        assert _bits(out[0]) == _v(-x).exp2().bits, f"exp2(-x) x={x}"
-        assert _bits(out[1]) == _v(abs(x)).log2().bits, f"log2(|x|) x={x}"
+        assert _bits(out[0]) == _exp2(_v(-x)).bits, f"exp2(-x) x={x}"
+        assert _bits(out[1]) == _log2(_v(abs(x))).bits, f"log2(|x|) x={x}"
 
 
 def test_log2_pole_and_domain_values() -> None:
-    # Error cases yield -inf; the pole/domain flags are not modeled here (the HDL bench checks them on the RTL).
+    # Error cases yield -inf; the pole/domain flags reach only the RTL's error report, which the model does not expose.
     def kernel(x: float) -> float:
         return math.log2(x)
 
@@ -724,8 +767,8 @@ def test_exp2_log2_unconfigured_is_rejected() -> None:
 
 # The turn<->radian scale constants the trigonometric restatement inserts, encoded in the format exactly as the
 # compiler does. They survive as ordinary multiplies wherever the kernel offers nothing for them to fold against.
-_INV_TAU = FloatValue.from_float(FMT, 1.0 / (2.0 * math.pi))
-_TAU = FloatValue.from_float(FMT, 2.0 * math.pi)
+_INV_TAU = FMT.encode(1.0 / (2.0 * math.pi))
+_TAU = FMT.encode(2.0 * math.pi)
 
 # Angles within a few periods; the turn-scale multiply grows absolute phase error with |x|.
 _TRIG_VECTORS = [0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, math.pi / 2, math.pi, -math.pi, 3.0, -6.0]
@@ -733,7 +776,7 @@ _TRIG_VECTORS = [0.0, 0.25, -0.25, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0, math.pi / 2,
 
 def _sincos_ref(x: float) -> tuple[int, int]:
     # Bit-exact reference: turn-native model of the format-scaled operand, mirroring the restated fmul and rotation.
-    s, c = (_v(x) * _INV_TAU).sincos()
+    s, c = _sincos(_MUL.evaluate(_v(x), _INV_TAU))
     return s.bits, c.bits
 
 
@@ -779,14 +822,16 @@ def test_a_turn_scaled_angle_sheds_the_conversion() -> None:
 
     # The sign-flipped spelling composes to a NEGATIVE power of two, which must still ride the exponent scaler --
     # a kernel given only that scaler and the core must build, having written no general product anywhere.
-    scaler_only = Options(OperatorOptions(fmul_ilog2=FMulILog2Options(), fcordic=FCordicOptions()), ffmt=FMT)
+    scaler_only = Options(
+        operator=OperatorOptions(fmul_ilog2=lean.fmul_ilog2(), fcordic=lean.fcordic()), ffmt=FMT, wmultiplier=18
+    )
     for label, turned, options in (
         ("full", kernel, _ops()),
         ("lean", kernel, scaler_only),
         ("neg", flipped, scaler_only),
     ):
         result = holoso.synthesize(turned, options, name=f"turn_scaled_{label}")
-        assert _modules(result) == {"holoso_fmul_ilog2", "holoso_fcordic"}, label
+        assert _modules(result) == {"mul_ilog2", "cordic"}, label
         sim = result.numerical_model.elaborate()
         for x in (0.0, 1.0, -1.0, 64.0, -96.0, 128.0):
             assert abs(float(sim.run(x)[0]) - turned(x)) <= 4 * _ulp32(1.0), f"{label} x={x}"
@@ -801,7 +846,7 @@ def test_a_full_turn_scale_cancels_the_conversion_entirely() -> None:
         return angle, math.sin(angle)
 
     result = holoso.synthesize(shared, _ops(), name="shared_turn")
-    assert _modules(result) == {"holoso_fmul", "holoso_fcordic"}
+    assert _modules(result) == {"mul", "cordic"}
     sim = result.numerical_model.elaborate()
     # 0.7, 1.3, 5.9 and 0.35 do not survive a multiply by tau followed by one by its reciprocal, so they tell a
     # cancelled conversion from a performed one; the rest are ordinary vectors.
@@ -809,8 +854,8 @@ def test_a_full_turn_scale_cancels_the_conversion_entirely() -> None:
         out = sim.run(x)
         # The sine's bits are those of the core reading x itself. Had any conversion survived, they would be the bits
         # of a value rounded twice more, which is what this pins.
-        assert _bits(out[0]) == (_v(x) * _TAU).bits, f"angle x={x}"
-        assert _bits(out[1]) == _v(x).sincos()[0].bits, f"sin of a whole turn x={x}"
+        assert _bits(out[0]) == _MUL.evaluate(_v(x), _TAU).bits, f"angle x={x}"
+        assert _bits(out[1]) == _sincos(_v(x))[0].bits, f"sin of a whole turn x={x}"
 
 
 def test_a_turn_native_fold_reduces_in_turns() -> None:
@@ -852,11 +897,11 @@ def test_a_negation_between_two_scalings_is_not_opaque() -> None:
         return math.sin((-x) * math.tau)
 
     result = holoso.synthesize(outside, _ops(), name="neg_outside")
-    assert _modules(result) == {"holoso_fcordic"}
+    assert _modules(result) == {"cordic"}
     assert result.initiation_interval == holoso.synthesize(inside, _ops(), name="neg_inside").initiation_interval
     sim = result.numerical_model.elaborate()
     for x in (0.7, 1.3, 0.25, -0.5, 2.0):
-        assert _bits(sim.run(x)[0]) == _v(-x).sincos()[0].bits, f"sin of a negated whole turn x={x}"
+        assert _bits(sim.run(x)[0]) == _sincos(_v(-x))[0].bits, f"sin of a negated whole turn x={x}"
 
 
 def test_a_turn_scaled_kernel_can_need_the_exponent_scaler() -> None:
@@ -865,7 +910,7 @@ def test_a_turn_scaled_kernel_can_need_the_exponent_scaler() -> None:
     def kernel(x: float) -> float:
         return math.sin(x * (math.tau / 2**8))
 
-    options = Options(OperatorOptions(fmul=FMulOptions(), fcordic=FCordicOptions()), ffmt=FMT)
+    options = Options(operator=OperatorOptions(fmul=lean.fmul(), fcordic=lean.fcordic()), ffmt=FMT, wmultiplier=18)
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(kernel, options, name="turn_scaled_no_ilog2")
 
@@ -907,8 +952,8 @@ _ATAN2_VECTORS = [(1.0, 1.0), (3.0, 4.0), (-3.0, 4.0), (3.0, -4.0), (-3.0, -4.0)
 
 def _atan2_ref(y: float, x: float) -> tuple[int, int]:
     # theta is scaled from turns to radians by the restatement's post-multiply; magnitude (hypot) is unscaled.
-    theta_turns, mag = FloatValue.atan2(_v(y), _v(x))
-    return (theta_turns * _TAU).bits, mag.bits
+    theta_turns, mag = _atan2(_v(y), _v(x))
+    return _MUL.evaluate(theta_turns, _TAU).bits, mag.bits
 
 
 def test_atan2_matches_model_and_native() -> None:
@@ -949,7 +994,13 @@ def test_a_configured_atan2_a_kernel_never_reaches_is_never_built() -> None:
     def kernel(x: int) -> int:
         return x + 1
 
-    options = Options(OperatorOptions(fcordic=FCordicOptions()), ffmt=FloatFormat(6, 8), wint_min=8, regalloc_effort=0)
+    options = Options(
+        operator=OperatorOptions(fcordic=lean.fcordic()),
+        ffmt=FloatFormat(6, 8),
+        wint_min=8,
+        regalloc_effort=0,
+        wmultiplier=18,
+    )
     (out,) = holoso.synthesize(kernel, options, name="k").numerical_model.elaborate().run(2)
     assert isinstance(out, holoso.IntValue) and int(out) == 3
 
@@ -1053,16 +1104,16 @@ def _quotient_and_root(a: float, b: float) -> tuple[float, ...]:
     return a / b, math.sqrt(a)
 
 
-@pytest.mark.parametrize("kernel,mode", [(_quotient, 0), (_root, 1), (_quotient_and_root, 2)])
-def test_the_divider_is_elaborated_for_the_operations_a_kernel_keeps(
-    kernel: Callable[[float, float], tuple[float, ...]], mode: int
+@pytest.mark.parametrize("kernel,build", [(_quotient, 0), (_root, 1), (_quotient_and_root, 2)])
+def test_the_divider_is_built_for_the_operations_a_kernel_keeps(
+    kernel: Callable[[float, float], tuple[float, ...]], build: int
 ) -> None:
     """
-    One instance answers the quotient and the root. A kernel keeping one of them elaborates it for that one alone,
+    One instance answers the quotient and the root. A kernel keeping one of them builds it for that one alone,
     which sheds the other's datapath; a kernel keeping both shares the instance and chooses per firing.
     """
-    verilog = holoso.synthesize(kernel, _ops(), name=f"divsqrt_mode_{mode}").verilog_output.verilog
-    assert divsqrt_modes(verilog) == [mode]
+    verilog = holoso.synthesize(kernel, _ops(), name=f"divsqrt_build_{build}").verilog_output.verilog
+    assert divsqrt_builds(verilog) == [build]
 
 
 def test_a_shared_divider_answers_the_quotient_and_the_root() -> None:
@@ -1285,12 +1336,16 @@ def test_pow_needs_transcendentals_only_for_a_fractional_exponent() -> None:
     def long_reciprocal(x: float) -> float:
         return np.power(x, -13)  # type: ignore[no-any-return]
 
-    lean = _ops(with_exp2=False, with_log2=False)
+    without_transcendentals = _ops(with_exp2=False, with_log2=False)
     for kernel, want in ((whole, 8.0), (reciprocal, 0.5)):
-        sim = holoso.synthesize(kernel, lean, name=f"lib_pow_whole_{kernel.__name__}").numerical_model
+        sim = holoso.synthesize(
+            kernel, without_transcendentals, name=f"lib_pow_whole_{kernel.__name__}"
+        ).numerical_model
         assert float(sim.elaborate().run(2.0)[0]) == want, kernel.__name__
     # 3**13 is exact, so the chain's one rounding is the reciprocal's and the result is the correctly rounded one.
-    model = holoso.synthesize(long_reciprocal, lean, name="lib_pow_long_reciprocal").numerical_model.elaborate()
+    model = holoso.synthesize(
+        long_reciprocal, without_transcendentals, name="lib_pow_long_reciprocal"
+    ).numerical_model.elaborate()
     assert _bits(model.run(3.0)[0]) == _v(3.0**-13).bits
 
 
@@ -1432,19 +1487,19 @@ def test_sqrt_over_the_whole_format_matches_binary32_sqrt() -> None:
     rng = np.random.default_rng(0x5EED)
     directed = (
         0,
-        FMT.encode(1e-30),
-        FMT.encode(-1e30),
-        FMT.encode(_POS_INF),
-        FMT.encode(_NEG_INF),
-        FMT.encode(float(np.finfo(np.float32).tiny)),
-        FMT.encode(float(np.finfo(np.float32).max)),
+        FMT.encode(1e-30).bits,
+        FMT.encode(-1e30).bits,
+        FMT.encode(_POS_INF).bits,
+        FMT.encode(_NEG_INF).bits,
+        FMT.encode(float(np.finfo(np.float32).tiny)).bits,
+        FMT.encode(float(np.finfo(np.float32).max)).bits,
     )
     for bits in (*directed, *(random_legal_bits(FMT, rng) for _ in range(2000))):
         x = np.uint32(bits).view(np.float32)
         # Compared on bits, not on the decoded value: a float compare reads +0 and -0 as one number, and the sign of
         # a zero root is exactly what the packer's masking decides.
         expected = _v(_NEG_INF).bits if x < 0 else _v(float(np.sqrt(x))).bits
-        assert _bits(sim.run(FloatValue.from_bits(FMT, bits))[0]) == expected, f"sqrt(0x{bits:08x})"
+        assert _bits(sim.run(FloatValue(FMT, bits))[0]) == expected, f"sqrt(0x{bits:08x})"
 
 
 def test_a_static_one_half_exponent_is_the_native_root() -> None:
@@ -1457,8 +1512,8 @@ def test_a_static_one_half_exponent_is_the_native_root() -> None:
         return x**0.5  # type: ignore[no-any-return]
 
     result = holoso.synthesize(kernel, _ops(), name="pow_one_half")
-    assert _modules(result) == {"holoso_fdivsqrt"}
-    assert divsqrt_modes(result.verilog_output.verilog) == [1]
+    assert _modules(result) == {"divsqrt"}
+    assert divsqrt_builds(result.verilog_output.verilog) == [1]
     sim = result.numerical_model.elaborate()
     for x in (0.0, 0.25, 1.0, 2.0, 9.0, 1e6, _POS_INF):
         assert _bits(sim.run(x)[0]) == _sqrt_ref(x), f"x**0.5 x={x}"
@@ -1480,9 +1535,9 @@ def test_other_exponents_keep_the_general_power() -> None:
         return x**3
 
     for kernel, name in ((fourth_root, "pow_quarter"), (runtime_exponent, "pow_runtime_e")):
-        verilog = holoso.synthesize(kernel, _ops(), name=name).verilog_output.verilog
-        assert "holoso_fexp2 #(" in verilog and divsqrt_modes(verilog) == []
-    assert _modules(holoso.synthesize(cube, _ops(), name="pow_cube")) == {"holoso_fmul"}
+        result = holoso.synthesize(kernel, _ops(), name=name)
+        assert "exp2" in _modules(result) and divsqrt_builds(result.verilog_output.verilog) == []
+    assert _modules(holoso.synthesize(cube, _ops(), name="pow_cube")) == {"mul"}
 
 
 def test_a_hypotenuse_orphaned_by_a_cancelled_fusion_is_still_expanded() -> None:
@@ -1497,10 +1552,10 @@ def test_a_hypotenuse_orphaned_by_a_cancelled_fusion_is_still_expanded() -> None
 
     result = holoso.synthesize(kernel, _ops(), name="hypot_orphan_modules")
     modules = _modules(result)
-    assert "holoso_fcordic" not in modules, "the cancellation must have deleted the only atan2"
-    assert {"holoso_filog2", "holoso_fdivsqrt", "holoso_fmul_ilog2"} <= modules
+    assert "cordic" not in modules, "the cancellation must have deleted the only atan2"
+    assert {"ilog2", "divsqrt", "mul_ilog2"} <= modules
     # The root alone: the expansion divides nothing.
-    assert "holoso_fcmp" not in modules and divsqrt_modes(result.verilog_output.verilog) == [1]
+    assert "cmp" not in modules and divsqrt_builds(result.verilog_output.verilog) == [1]
     sim = _sim(kernel, "hypot_orphan")
     for a, b in ((3.0, 4.0), (0.0, 0.0), (-3.0, 4.0)):
         assert float(sim.run(a, b, 1.0, 2.0)[0]) == float(_v(math.hypot(a, b))), (a, b)
@@ -1513,7 +1568,7 @@ def test_a_hypotenuse_beside_an_unholdable_multiplier_still_builds() -> None:
         return math.hypot(x, y), (x * 2.0**40) * 3.0
 
     modules = _modules(holoso.synthesize(kernel, _ops(fmt=FloatFormat(6, 18)), name="hypot_beside_wide_scale"))
-    assert {"holoso_filog2", "holoso_fdivsqrt"} <= modules
+    assert {"ilog2", "divsqrt"} <= modules
 
 
 def test_a_magnitude_is_refused_where_no_scaling_keeps_the_square_in_range() -> None:
@@ -1607,9 +1662,11 @@ def _mixed_arity(v: Float64[np.ndarray, "3"], w: Float64[np.ndarray, "8"]) -> tu
 
 def test_a_one_element_norm_needs_none_of_the_scaling_operators() -> None:
     # A lone leg is its absolute value, which rides a sign conditioner, so nothing is instantiated at all.
-    model = holoso.synthesize(_norm1, Options(OperatorOptions()), name="norm_one").numerical_model.elaborate()
+    model = holoso.synthesize(
+        _norm1, Options(operator=OperatorOptions(), wmultiplier=18), name="norm_one"
+    ).numerical_model.elaborate()
     assert float(model.run(-3.5)[0]) == 3.5
-    assert not _modules(holoso.synthesize(_norm1, Options(OperatorOptions()), name="norm_one"))
+    assert not _modules(holoso.synthesize(_norm1, Options(operator=OperatorOptions(), wmultiplier=18), name="norm_one"))
 
 
 def test_two_arities_in_one_kernel_each_take_their_own_window() -> None:

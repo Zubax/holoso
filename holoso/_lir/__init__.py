@@ -19,6 +19,7 @@ from ._ir import (
     LirBlock as LirBlock,
     OperatorInstance as OperatorInstance,
     PooledScheduledOp as PooledScheduledOp,
+    PortWrite as PortWrite,
     RegRef as RegRef,
     ScheduledOp as ScheduledOp,
     Terminator as Terminator,
@@ -28,7 +29,7 @@ from ._ir import (
     WideStateSlot as WideStateSlot,
     install_landing as install_landing,
     landing_cycle as landing_cycle,
-    operand_read_cycle as operand_read_cycle,
+    read_cycle as read_cycle,
 )
 from ._sources import (
     HandshakeArm as HandshakeArm,

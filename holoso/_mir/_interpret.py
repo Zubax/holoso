@@ -72,8 +72,7 @@ class MirInterpreter:
                     apply_conditioner(conditioner, env[operand])
                     for operand, conditioner in zip(operation.operands, operation.operand_conditioners, strict=True)
                 ]
-                results = operation.primitive.evaluate(*operands)
-                result = results[operation.result]
+                result = operation.primitive.evaluate(*operands)
                 env[op_id] = (
                     result
                     if operation.output_inversion is None
@@ -109,8 +108,7 @@ class MirInterpreter:
 
     def _initial_env(self, inputs: tuple[ScalarLike, ...]) -> dict[ValueId, ScalarValue]:
         input_nodes = self._input_nodes()
-        if len(inputs) != len(input_nodes):
-            raise ValueError(f"expected {len(input_nodes)} inputs, got {len(inputs)}")
+        assert len(inputs) == len(input_nodes), (len(inputs), len(input_nodes))
         env: dict[ValueId, ScalarValue] = {}
         for index, (vid, input_node, raw) in enumerate(zip(self._mir.input_ids, input_nodes, inputs, strict=True)):
             env[vid] = coerce_scalar(input_node.scalar_type, raw, f"input {index}")

@@ -2,7 +2,6 @@
 
 from abc import ABC
 from dataclasses import dataclass
-from typing import ClassVar
 
 from .._value import ScalarValue
 from .._type import BoolType
@@ -10,7 +9,7 @@ from ._common import InlinePrimitive, ScalarSignature
 
 
 @dataclass(frozen=True, slots=True)
-class BoolLogicPrimitive(InlinePrimitive, ABC):
+class _BoolLogicPrimitive(InlinePrimitive, ABC):
     """
     A boolean-logic primitive (AND/OR/XOR): a plain `& | ^` gate folded into its boolean register's write.
     Never added to OpConfig -- it has no module and no configuration.
@@ -18,7 +17,7 @@ class BoolLogicPrimitive(InlinePrimitive, ABC):
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(), BoolType()), (BoolType(),))
+        return ScalarSignature((BoolType(), BoolType()), BoolType())
 
     def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[bool, ...]:
         validated: list[bool] = []
@@ -29,39 +28,33 @@ class BoolLogicPrimitive(InlinePrimitive, ABC):
 
 
 @dataclass(frozen=True, slots=True)
-class BoolAndPrimitive(BoolLogicPrimitive):
-    mnemonic: ClassVar[str] = "band"
-
+class BoolAndPrimitive(_BoolLogicPrimitive):
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"({a}) & ({b})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> bool:
         a, b = self._validated_operands(operands)
-        return (a and b,)
+        return a and b
 
 
 @dataclass(frozen=True, slots=True)
-class BoolOrPrimitive(BoolLogicPrimitive):
-    mnemonic: ClassVar[str] = "bor"
-
+class BoolOrPrimitive(_BoolLogicPrimitive):
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"({a}) | ({b})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> bool:
         a, b = self._validated_operands(operands)
-        return (a or b,)
+        return a or b
 
 
 @dataclass(frozen=True, slots=True)
-class BoolXorPrimitive(BoolLogicPrimitive):
-    mnemonic: ClassVar[str] = "bxor"
-
+class BoolXorPrimitive(_BoolLogicPrimitive):
     def verilog_expr(self, *operand_nets: str) -> str:
         a, b = operand_nets
         return f"({a}) ^ ({b})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> bool:
         a, b = self._validated_operands(operands)
-        return (a != b,)
+        return a != b

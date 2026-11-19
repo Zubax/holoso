@@ -15,7 +15,7 @@ reproduces a transaction bit-for-bit AND cycle-for-cycle: the same inputs reach 
 present the same output bits. The persistent slot registers simply live in `regs`/`bregs` and carry across
 transactions; NumericalSimulator.reset reloads the reset snapshot.
 
-The timing is read off the shared LIR cycle helpers, which are in the fetch-PC frame: `operand_read_cycle(S)` and
+The timing is read off the shared LIR cycle helpers, which are in the fetch-PC frame: `read_cycle(S)` and
 `landing_cycle(commit)` are the literal `pc` values at which an operand is sampled and a result becomes readable in
 the array. So the simulator needs no separate clock frame and no growing timeline. The only mutable state beyond the
 register files is `_pending`: the in-flight operator results -- the compact stand-in for the RTL operator pipeline. A
@@ -35,10 +35,10 @@ from dataclasses import dataclass
 
 from .._value import FloatValue, IntValue, ScalarLike, ScalarValue, WideValue, coerce_scalar
 from .._lir import WideConstRef, WideOperand
-from .._lir import RegRef, ScheduledOp
+from .._lir import PooledScheduledOp, PortWrite, RegRef, ScheduledOp
 from .._lir import BoolRegRef, Lir
 from .._lir import Arm, BoolConstRef, BoolOperand, Branch, Exit, Jump, Terminator
-from .._lir import install_landing, landing_cycle, operand_read_cycle
+from .._lir import install_landing, landing_cycle, read_cycle
 from .._operators import apply_conditioner
 from .._type import FloatFormat, LogicalPort
 
@@ -98,18 +98,17 @@ class _Kernel:
 
 class NumericalSimulator(_Kernel):
     """
-    The runnable cycle-accurate, bit-exact model of a generated module (see the module docstring). `regs`/`bregs`
-    are the live register files and `pc` the fetch program counter; tick advances one clock and
-    output_values reads the result while out_valid. The persistent state is just
-    the slot registers within `regs`/`bregs`, carried across transactions.
+    The runnable cycle-accurate, bit-exact model of a generated module (see the module docstring): tick advances one
+    clock and output_values reads the result while out_valid. The persistent state is just the slot registers within
+    the register files, carried across transactions.
     Construct one from a NumericalModel via NumericalModel.elaborate.
     """
 
     def __init__(self, lir: Lir) -> None:
         self._lir = lir
-        self.regs: dict[int, WideValue] = {}  # wide register file (Verilog `regs`)
-        self.bregs: dict[int, bool] = {}  # boolean register file (Verilog `bregs`)
-        self.pc = 0
+        self._regs: dict[int, WideValue] = {}  # wide register file (Verilog `regs`)
+        self._bregs: dict[int, bool] = {}  # boolean register file (Verilog `bregs`)
+        self._pc = 0
         self._presented: list[ScalarValue] | None = None  # the input bus: latched into the lanes at the accept edge
         self._pending: dict[int, list[tuple[_Dst, ScalarValue]]] = {}  # landing PC -> in-flight (dest, value) writes
         self._op_events: dict[int, list[_OpEvent]] = {}  # read PC -> firings sampling their operands there
@@ -121,9 +120,9 @@ class NumericalSimulator(_Kernel):
 
     def reset(self) -> None:
         """Reload every persistent slot register with its reset snapshot and clear the in-flight state, as at rst."""
-        self.pc = 0
-        self.regs = {slot.reg.index: slot.reset_value for slot in self._lir.wide_state_slots}
-        self.bregs = {slot.reg.index: slot.reset_value for slot in self._lir.bool_state_slots}
+        self._pc = 0
+        self._regs = {slot.reg.index: slot.reset_value for slot in self._lir.wide_state_slots}
+        self._bregs = {slot.reg.index: slot.reset_value for slot in self._lir.bool_state_slots}
         self._pending = {}
 
     def set_inputs(self, *inputs: ScalarLike) -> None:
@@ -147,7 +146,7 @@ class NumericalSimulator(_Kernel):
         """
         arm = self._taken_arm()
         next_pc = self._next_pc(arm, in_valid, out_ready)
-        accepted = self.pc == 0 and in_valid  # in_ready && in_valid: the RTL parallel-loads the input lanes here
+        accepted = self._pc == 0 and in_valid  # in_ready && in_valid: the RTL parallel-loads the input lanes here
         if isinstance(arm, int):
             # A block whose terminator redirects earlier than its drained boundary (cross-block overlap) leaves
             # in-flight results still landing past its terminator PC; those landings belong to whichever arm the
@@ -156,18 +155,18 @@ class NumericalSimulator(_Kernel):
             # dynamic single-arm shift is the per-path instance of the static `successor_local_cycle` map that
             # `Lir.frame_pcs` / `Lir.write_landing_pcs` apply to every arm at once; that the two agree is locked by
             # `test_spilled_result_landings_match_the_numerical_model`.
-            shift = next_pc - (self.pc + 1)
+            shift = next_pc - (self._pc + 1)
             if shift:
-                self._pending = {(pc + shift if pc > self.pc else pc): writes for pc, writes in self._pending.items()}
+                self._pending = {(pc + shift if pc > self._pc else pc): writes for pc, writes in self._pending.items()}
         if isinstance(arm, Exit) and out_ready:  # accepted boundary edge: advance persistent state (read-first)
-            assert not self._pending, f"a write would land past the exit at PC {self.pc}"
+            assert not self._pending, f"a write would land past the exit at PC {self._pc}"
             installed = [(inst.dst, self._read(inst.source)) for inst in self._boundary]
             for dst, value in installed:
                 self._write(dst, value)
-        self.pc = next_pc
+        self._pc = next_pc
         if accepted and self._presented is not None:
             for load, value in zip(self._lir.inputs, self._presented, strict=True):
-                self._load(load.dst, value)
+                self._write(load.dst, value)
         self._apply(next_pc)
 
     def run(self, *inputs: ScalarLike, max_cycles: int = 1_000_000_000) -> list[ScalarValue]:
@@ -198,7 +197,7 @@ class NumericalSimulator(_Kernel):
     @property
     def in_ready(self) -> bool:
         """The fetch PC idles at 0 between transactions, so PC 0 is the accept-ready state."""
-        return self.pc == 0
+        return self._pc == 0
 
     @property
     def out_valid(self) -> bool:
@@ -216,7 +215,7 @@ class NumericalSimulator(_Kernel):
             base = lir.block_base[block.index]
             block_ops: list[ScheduledOp] = [*block.ops, *block.inline_ops]
             for op in block_ops:
-                read_pc = operand_read_cycle(op.primitive, base + op.issue_cycle, lir.fetch_lag)
+                read_pc = read_cycle(base + op.issue_cycle, lir.fetch_lag)
                 self._op_events.setdefault(read_pc, []).append(_OpEvent(op, base + op.commit_cycle))
             for copy in block.copies:
                 fire = base + copy.fire_step(lir.fetch_lag)
@@ -225,23 +224,23 @@ class NumericalSimulator(_Kernel):
 
     def _taken_arm(self) -> Arm | None:
         """The arm the terminator at the current PC takes, reading its condition; None where no terminator sits."""
-        match self._terminators.get(self.pc):
+        match self._terminators.get(self._pc):
             case None:
                 return None
             case Branch(cond=cond, if_true=if_true, if_false=if_false):
-                return if_true if self.bregs[cond.index] else if_false
+                return if_true if self._bregs[cond.index] else if_false
             case Jump(target=target):
                 return target
 
     def _next_pc(self, arm: Arm | None, in_valid: bool, out_ready: bool) -> int:
         """The RTL next-PC sequencer: hold at the accept and exit dwells, otherwise redirect or advance the fetch."""
-        if self.pc == 0:  # accept: hold until a transaction arrives
+        if self._pc == 0:  # accept: hold until a transaction arrives
             return 1 if in_valid else 0
         match arm:
             case None:
-                return self.pc + 1
+                return self._pc + 1
             case Exit():  # present: hold the result until it is taken
-                return 0 if out_ready else self.pc
+                return 0 if out_ready else self._pc
             case int() as target:
                 return self._lir.block_base[target]
 
@@ -253,11 +252,19 @@ class NumericalSimulator(_Kernel):
         for dst, value in landings:
             self._write(dst, value)
         for event in self._op_events.get(pc, ()):
-            results = event.op.primitive.evaluate(*[self._read(operand) for operand in event.op.operands])
+            op = event.op
+            operands = [self._read(operand) for operand in op.operands]
+            results: list[tuple[PortWrite, ScalarValue]]
+            if isinstance(op, PooledScheduledOp):
+                # On the block the instance renders, so a specialization that departs from the operator's block in what
+                # it computes departs from the MIR interpreter, which evaluates the operator's.
+                block = self._lir.instances[op.inst]
+                results = [(write, primitive.evaluate(*operands, block=block)) for primitive, write in op.taps.items()]
+            else:
+                results = [(op.write, op.primitive.evaluate(*operands))]
             # every result of this firing lands at the one bank-independent cycle
             landing = landing_cycle(event.commit_pc, self._lir.fetch_lag)
-            for write in event.op.writes:
-                value = results[write.result]
+            for write, value in results:
                 if write.inversion is not None:
                     value = apply_conditioner(write.inversion, value)
                 self._pending.setdefault(landing, []).append((write.dst, value))
@@ -274,27 +281,20 @@ class NumericalSimulator(_Kernel):
             base = (
                 self._lir.wide_consts[wide_source.index]
                 if isinstance(wide_source, WideConstRef)
-                else self.regs[wide_source.index]
+                else self._regs[wide_source.index]
             )
             return apply_conditioner(operand.conditioner, base)
         bool_source = operand.source
-        value = bool_source.value if isinstance(bool_source, BoolConstRef) else self.bregs[bool_source.index]
+        value = bool_source.value if isinstance(bool_source, BoolConstRef) else self._bregs[bool_source.index]
         return apply_conditioner(operand.inversion, value)
 
     def _write(self, dst: _Dst, value: ScalarValue) -> None:
-        """
-        The writeback datapath (landings and installs). The accept-edge input load is the RTL's own parallel-load
-        arm rather than a writeback, so it stores through _load directly.
-        """
-        self._load(dst, value)
-
-    def _load(self, dst: _Dst, value: ScalarValue) -> None:
         if isinstance(dst, RegRef):
             assert isinstance(value, (FloatValue, IntValue))
-            self.regs[dst.index] = value
+            self._regs[dst.index] = value
         else:
             assert isinstance(value, bool)
-            self.bregs[dst.index] = value
+            self._bregs[dst.index] = value
 
 
 class NumericalModel(_Kernel):

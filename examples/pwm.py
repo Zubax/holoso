@@ -39,7 +39,7 @@ class Pwm:
 
 def main() -> None:
     # The counter walks up to top and the duty compares against it, so a word that holds top, plus the sign bit.
-    options = holoso.Options(holoso.OperatorOptions(), wint_min=8)
+    options = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=8)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(Pwm().tick, options)
     for filename, path in result.write(out_dir).items():

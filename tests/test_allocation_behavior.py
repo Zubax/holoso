@@ -8,13 +8,17 @@ live in test_schedule.py; the tests here assert only build success and output/st
 deep refactor of the allocator, coalescer, and merge threading.
 """
 
+import dataclasses
 import itertools
 import math
 from collections.abc import Callable
 
+import pytest
+
 import holoso
 from holoso import FloatFormat
 
+from . import _options as lean
 from ._modelref import default_options
 
 FMT = FloatFormat(6, 18)
@@ -203,3 +207,26 @@ def test_bool_state_slot_carries_a_live_out_inversion() -> None:
     fresh = _InvertedState()
     for x in (5.0, 6.0, 7.0):
         assert float(simulator.run(x)[0]) == fresh.step(x)
+
+
+def _contending_cordic(y: float, x: float, a: float, b: float, c: float) -> tuple[float, float, float]:
+    t = math.atan2(y, x)
+    s = math.sin(a)
+    u = math.cos(b)
+    return t * math.sin(s + u + c), s, u
+
+
+@pytest.mark.parametrize("effort", [300, 1000, 3000])
+def test_firings_of_unequal_busy_windows_rebind_between_two_instances(effort: int) -> None:
+    # A rotation and a vectoring hold a CORDIC instance for windows of different length, and the allocator rebinds
+    # firings between the two instances as it anneals; reserving any window but the firing's own admits a rebinding into
+    # a window still busy, which the build refuses ("two firings busy on fcordic_0 at once").
+    base = default_options(FMT)
+    operator = dataclasses.replace(base.operator, fcordic=lean.fcordic(instances=2), fmul=lean.fmul(instances=2))
+    options = dataclasses.replace(base, operator=operator, regalloc_effort=effort)
+    simulator = holoso.synthesize(_contending_cordic, options, name="contending_cordic").numerical_model.elaborate()
+    for args in [(0.5, 1.0, 0.25, -0.125, 0.0), (-1.5, 2.0, 0.375, 0.0625, 0.5), (1.0, -1.0, -0.25, 0.125, -0.75)]:
+        got = [float(v) for v in simulator.run(*args)]
+        ref = [float(v) for v in _contending_cordic(*args)]
+        for g, r in zip(got, ref, strict=True):
+            assert abs(g - r) <= 1e-2 * max(1.0, abs(r)), f"{args}: {got} vs {ref}"

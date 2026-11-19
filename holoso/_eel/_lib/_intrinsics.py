@@ -254,7 +254,7 @@ def atan2(y: float, x: float) -> float:
     return math.atan2(y, x)
 
 
-@variadic(FloatHypot, math.hypot, minimum=1)
+@variadic(FloatHypot, math.hypot, minimum=0)
 def hypot(*coords: float) -> float:
     return math.hypot(*coords)
 

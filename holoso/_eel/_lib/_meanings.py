@@ -8,9 +8,9 @@ import operator
 
 import numpy as np
 
-from .._ir import BinaryOp, CompareOp, UnaryOp
+from .._ir import BinaryOp, CompareOp, ScalarType, UnaryOp
 from . import _intrinsics, _numpy, _pow
-from ._registry import meaning
+from ._registry import CastMethod, meaning
 
 # ARITHMETIC, BITWISE AND SHIFTS
 
@@ -124,6 +124,28 @@ meaning(_numpy.difference_of_products_int, _numpy.difference_of_products_float, 
 
 # CASTS
 
-meaning(_numpy.identity_int, _intrinsics.int_from_float, _intrinsics.int_from_bool, scalar=[int], protocol="__int__")
-meaning(_numpy.identity_float, _intrinsics.float_from_int, _intrinsics.float_from_bool, scalar=[float])
-meaning(_numpy.identity_bool, _intrinsics.bool_from_int, _intrinsics.bool_from_float, scalar=[bool])
+# Each names the one method a record or captured object answers it through. The host's fallbacks past that method --
+# `__index__` for a number, `__len__` and plain truth for a boolean -- are not followed, so an object without it is
+# refused where the host would still answer.
+# A bool answering `__int__` is taken, being an int, with a deprecation warning.
+meaning(
+    _numpy.identity_int,
+    _intrinsics.int_from_float,
+    _intrinsics.int_from_bool,
+    scalar=[int],
+    cast=CastMethod("__int__", (ScalarType.INT, ScalarType.BOOL)),
+)
+meaning(
+    _numpy.identity_float,
+    _intrinsics.float_from_int,
+    _intrinsics.float_from_bool,
+    scalar=[float],
+    cast=CastMethod("__float__", (ScalarType.FLOAT,)),
+)
+meaning(
+    _numpy.identity_bool,
+    _intrinsics.bool_from_int,
+    _intrinsics.bool_from_float,
+    scalar=[bool],
+    cast=CastMethod("__bool__", (ScalarType.BOOL,)),
+)

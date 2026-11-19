@@ -59,7 +59,7 @@ def rescale(hir: Hir, ops: OpConfig) -> Hir:
         if not ops.serves(FMulILog2Operator):
             # Past the format's reach the scaler does not help either, so it is not the remedy to name.
             remedy = _NO_SCALER if reaches else "widen wexp or rescale"
-            degraded = fmt.decode(fmt.encode(constant.value))
+            degraded = float(fmt.encode(constant.value))
             raise UnsupportedConstruct(f"constant {constant.value!r} degrades to {degraded!r} in {fmt}; {remedy}")
         return scaling if reaches else None
 

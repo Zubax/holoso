@@ -17,6 +17,11 @@ retry them until success.
 Given a trade-off between performance and simplicity, always choose simplicity.
 Clear designs are easier to verify, maintain, and refactor, and they are more likely to be correct.
 
+Optimal or refuse: Holoso builds the optimal kernel for the given configuration -- no wasted fabric, no wasted cycles,
+no padding cycles -- with the simplest compiler design, or it raises, naming the option and the reason.
+Any workaround that makes a bad configuration build to avoid a refusal (masking or shedding stages, clamping counts,
+padding cycles, falling back to a less specific build) is an anti-goal.
+
 Do not write any comments or docs unless they add something that is impossible to infer from the source code,
 such as design rationale, high-level context, non-obvious implications, etc.
 Comments that describe what the code does or restate what is inferrable from the type system are strictly prohibited.
@@ -106,17 +111,21 @@ comment string.
 
 It is encouraged to use rich formatting and emojis in the output of command-line utilities.
 
-### Verilog
+### Amaranth
 
-Verilog style: 4-space indentation, concise names, snake_case files and directories, uppercase `parameter`/`localparam`.
-Keep line length at or below 120 columns. Comment block lines should utilize the 120 column limit well, avoiding overly short lines.
+Amaranth code uses canonical public API only: no private names,
+and nothing that depends on an Amaranth or Yosys version or on how they print.
 
-Testbenches are written in Python using Cocotb or similar tools.
+### Constructed Verilog output
 
-Functions can be used in synthesizable Verilog but only if avoiding them is unduly burdensome.
+These rules apply to the Verilog Holoso writes as text: the kernel module.
+The operator modules generated from HCL/FHDL are exempt.
+
+Verilog style: 4-space indentation, uppercase `parameter`/`localparam`. Keep line length at or below 120 columns.
+
 In synthesizable code, prefer `case` statements over nested ternary operators unless there are contraindications.
 
-In complex modules, it is best to avoid a large number of named nets that are only used once; this does not help readability but rather the opposite.
+It is best to avoid a large number of named nets that are only used once; this does not help readability.
 
 Leave unused module outputs unconnected, like `.out_foo()`, instead of creating unused wires.
 
@@ -143,10 +152,10 @@ or "this is done like this -- no longer like so". Document only the current stat
 
 In all source code and documentation, units of measure are given in the correct SI-compliant capitalization
 regardless of any coding style. For example, `target_frequency_MHz` is correct as a lowercase snake_case name
-despite having capital letters because conventional unit spelling requires so; `_mhz` would be incorrect
-because it reads as millihertz. Same goes for `DELAY_us` instead of `DELAY_US` etc.
+despite having capital letters because conventional unit spelling requires so;
+`_mhz` would be incorrect because it reads as millihertz. Same goes for `DELAY_us` instead of `DELAY_US` etc.
 
-In Markdown, it is best to avoid bold `**` and italics `*` for emphasis; prefer plain text instead.
+In Markdown, it is best to avoid formatting for emphasis; prefer plain text instead.
 Prefer prose over lists, and avoid excessive formatting in general.
 These are not hard rules but rather soft suggestions.
 
@@ -156,8 +165,6 @@ and so on. Sensible use of emojis is also encouraged, especially in command-line
 
 Use logging extensively. Ensure that every significant action/decision/condition is logged.
 
-Generated reports must be written in rich and colorful human-friendly HTML format, not Markdown.
-
 No need to add tests nor update the design docs for report-generation-related changes (e.g., HTML backend).
 
 ## Timing closure
@@ -166,7 +173,8 @@ Timing closure is an iterative process of hunting the next bottleneck and adding
 
 - Set the desired frequency and synthesize the design.
 - If f_max > f_target, exit.
-- Locate the critical path and break it with a new register stage, e.g. configure `fadd.stage_decode=1`.
+- Locate the critical path and break it with a new register stage: the operator's stage that splits the path, or the
+  next step of an operator's staging level, whose order was measured.
 - Repeat.
 
 This process works regardless of whether the failure to meet timings is caused by too many logic levels or long routing.
@@ -179,10 +187,12 @@ Special things to look out for:
 - DO NOT GUESS WHERE THE CRITICAL PATH IS. The process is 100% FEEDBACK-DRIVEN.
   DO NOT PREDEFINE STAGE CONFIGURATIONS TO ITERATE THROUGH THEM BLINDLY, THIS WON'T WORK.
   The process CANNOT SUCCEED UNLESS you read the critical path report after every iteration.
-- DSP tiles must begin and end with a register stage. If retiming has moved a register away from a DSP tile,
-  it means that the adjacent hop is starving and needs a new register there, even if it's not on the critical path.
-- Splitting multiplication into parallel halves (e.g., `STAGE_PRODUCT=1`) is almost never a good idea unless the
-  multiplicand bitwidth exceeds the DSP slice input width.
+- DSP tiles should begin and end with a register stage: this is guidance for where to add a stage, enforced by nothing.
+  If retiming has moved a register away from a DSP tile, it means that the adjacent hop is starving and needs a new
+  register there, even if it's not on the critical path.
+- A product is cut into a grid of slices by the multiplier width option (the DSP slice operand width), and its register
+  count is bounded only by the registers of that grid.
+- Operator variants that trade area for latency, and synthesis attributes, are closure levers beside the stages.
 - Retiming is sneaky: a moved stage may cause a different path to become critical, so with retiming enabled one needs
   to evaluate the adjacent stages as well.
 - Route-dominated is not automatically unstageable: a register roughly halves routing distributed across a path's logic
@@ -197,8 +207,7 @@ free flip-flops at the same time.
 
 A robust closure procedure that accounts for this starts lean and adds back one stage at a time:
 
-- Disable every optional stage. Mind the load-bearing exceptions above: the DSP product keeps `STAGE_PRODUCT` once the
-  multiplicand exceeds the slice input width, and DSP tiles keep their bracketing registers.
+- Disable every optional stage.
 - Read the critical path and judge, from the logic and the physics, whether it is the true bottleneck or merely a
   retiming casualty -- a path that only looks critical because a register was retimed away from the real cone. A true
   bottleneck is a recognizable deep operation (a wide barrel shift, a long carry chain, a DSP cascade); a casualty is an

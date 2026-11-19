@@ -8,10 +8,10 @@ Verilog, and location-stripped `frontend_ir[-1]` text.
 """
 
 import dataclasses
+import functools
 import inspect
 import math
 import operator
-import re
 import types
 from collections.abc import Callable, Mapping, Sequence
 
@@ -21,15 +21,6 @@ from jaxtyping import Float64
 
 import holoso
 from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FExp2Options,
-    FFromIntOptions,
-    FLog2Options,
-    FMulILog2Options,
-    FMulOptions,
-    FRintOptions,
     OperatorOptions,
     Options,
     SynthesisError,
@@ -39,11 +30,12 @@ from holoso._eel import lower
 from holoso._eel._desugar import desugar
 from holoso._eel._pe import partial_evaluate
 
-from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import DEFAULT_UNROLL_MAX_TRIPS, instantiated_modules
 from holoso._eel._print import print_eel
 
 from ._eeloracle import assert_hir_matches_reference
 from ._public import strip_locations
+from . import _options as lean
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -51,33 +43,35 @@ _NEVER = False
 _ENABLED = True
 _SCALE = 4
 
-_INT_ONLY = Options(OperatorOptions())
-_FADD = Options(OperatorOptions(fadd=FAddOptions()))
-_FMUL = Options(OperatorOptions(fmul=FMulOptions()))
-_FADD_FMUL = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
-_FMUL_FDIVSQRT = Options(OperatorOptions(fmul=FMulOptions(), fdivsqrt=FDivsqrtOptions()))
+_INT_ONLY = Options(operator=OperatorOptions(), wmultiplier=18)
+_FADD = Options(operator=OperatorOptions(fadd=lean.fadd()), wmultiplier=18)
+_FMUL = Options(operator=OperatorOptions(fmul=lean.fmul()), wmultiplier=18)
+_FADD_FMUL = Options(operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul()), wmultiplier=18)
+_FMUL_FDIVSQRT = Options(operator=OperatorOptions(fmul=lean.fmul(), fdivsqrt=lean.fdivsqrt()), wmultiplier=18)
 _CONVERSIONS = Options(
-    OperatorOptions(
-        fadd=FAddOptions(),
-        fmul=FMulOptions(),
-        fdivsqrt=FDivsqrtOptions(),
-        fcmp=FCmpOptions(),
-        frint=FRintOptions(),
-        ffromint=FFromIntOptions(),
-    )
+    operator=OperatorOptions(
+        fadd=lean.fadd(),
+        fmul=lean.fmul(),
+        fdivsqrt=lean.fdivsqrt(),
+        fcmp=lean.fcmp(),
+        frint=lean.frint(),
+        ffromint=lean.ffromint(),
+    ),
+    wmultiplier=18,
 )
 _GENERAL_POW = Options(
-    OperatorOptions(
-        fadd=FAddOptions(),
-        fmul=FMulOptions(),
-        fdivsqrt=FDivsqrtOptions(),
-        fcmp=FCmpOptions(),
-        fexp2=FExp2Options(),
-        flog2=FLog2Options(),
-        fmul_ilog2=FMulILog2Options(),
-        frint=FRintOptions(),
-        ffromint=FFromIntOptions(),
-    )
+    operator=OperatorOptions(
+        fadd=lean.fadd(),
+        fmul=lean.fmul(),
+        fdivsqrt=lean.fdivsqrt(),
+        fcmp=lean.fcmp(),
+        fexp2=lean.fexp2(),
+        flog2=lean.flog2(),
+        fmul_ilog2=lean.fmul_ilog2(),
+        frint=lean.frint(),
+        ffromint=lean.ffromint(),
+    ),
+    wmultiplier=18,
 )
 _SANS_FLOG2 = dataclasses.replace(_GENERAL_POW, operator=dataclasses.replace(_GENERAL_POW.operator, flog2=None))
 
@@ -100,10 +94,6 @@ def _residual_text(fn: Callable[..., object]) -> str:
 
 def _residual(fn: Callable[..., object], options: Options) -> str:
     return strip_locations(holoso.synthesize(fn, options, name="k").frontend_ir[-1])
-
-
-def _pooled_modules(result: holoso.SynthesisResult) -> set[str]:
-    return set(re.findall(r"holoso_(\w+) #\(", result.verilog_output.verilog))
 
 
 def _line_of(fn: Callable[..., object], needle: str) -> int:
@@ -223,7 +213,11 @@ def test_a_rounding_answers_what_its_own_spelling_answers() -> None:
     _oracle(_numpy_roundings_of_a_float, vectors)
     # The cast costs nothing where a float consumes the result: it reduces back to the bare rounder, so even
     # with every conversion operator configured the machine instantiates nothing but the rounder.
-    assert _pooled_modules(holoso.synthesize(_floor_consumed_as_a_float, _CONVERSIONS, name="k")) == {"frint"}
+    assert instantiated_modules(holoso.synthesize(_floor_consumed_as_a_float, _CONVERSIONS, name="k")) == {"rint"}
+
+
+def _norm_of_a_static_int(x: float) -> float:
+    return float(np.linalg.norm(3)) + x
 
 
 def _dot_of_static_ints(x: float) -> float:
@@ -231,8 +225,9 @@ def _dot_of_static_ints(x: float) -> float:
 
 
 def test_an_array_composite_judges_scalars_by_its_own_rank_guard() -> None:
-    # Regression: a static-integer fold ran the host callee, so np.dot(2, 3) answered 6 where np.dot(2.0, 3.0) was refused.
-    _rejects(_dot_of_static_ints)
+    # Regression: a static-integer fold ran the host callee, which answers a scalar the composite's own guard refuses.
+    _rejects(_norm_of_a_static_int)
+    _oracle(_dot_of_static_ints, [{"x": 1.5}])  # the product numpy defines for two scalars, answered by the composite
 
 
 # ---------------------------------------------------------------------- module constants
@@ -367,13 +362,13 @@ def test_the_pow_table_selects_a_lowering_per_operand_position() -> None:
     assert "iadd(2, n)" in _residual(_pow_static_int_pair, _INT_ONLY)  # the fold stayed integral, so `//` accepted it
     _oracle(_pow_static_negative_exponent, [{"x": 0.0}, {"x": 1.5}])
     assert "0.5" in _residual(_pow_static_negative_exponent, _FADD)
-    assert _pooled_modules(holoso.synthesize(_pow_runtime_base_static_exponent, _FMUL, name="k")) == {"fmul"}
-    assert _pooled_modules(holoso.synthesize(_pow_runtime_base_negative_exponent, _FMUL_FDIVSQRT, name="k")) == {
-        "fmul",
-        "fdivsqrt",
+    assert instantiated_modules(holoso.synthesize(_pow_runtime_base_static_exponent, _FMUL, name="k")) == {"mul"}
+    assert instantiated_modules(holoso.synthesize(_pow_runtime_base_negative_exponent, _FMUL_FDIVSQRT, name="k")) == {
+        "mul",
+        "divsqrt",
     }
     holoso.synthesize(_pow_runtime_int_base, _INT_ONLY, name="k")  # a runtime int base stays integral, as in CPython
-    assert {"fexp2", "flog2"} <= _pooled_modules(holoso.synthesize(_pow_runtime_exponent, _GENERAL_POW, name="k"))
+    assert {"exp2", "log2"} <= instantiated_modules(holoso.synthesize(_pow_runtime_exponent, _GENERAL_POW, name="k"))
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(_pow_runtime_exponent, _SANS_FLOG2, name="k")
     _oracle(_pow_runtime_base_static_exponent, [{"x": 2.0}, {"x": -1.5}])
@@ -392,14 +387,15 @@ type _Bools = tuple[bool, bool, bool, bool, bool, bool, bool, bool, bool, bool]
 _WIDE_ROW = np.full(64, 0.5)
 
 _OPERATORS = Options(
-    OperatorOptions(
-        fadd=FAddOptions(),
-        fmul=FMulOptions(),
-        fdivsqrt=FDivsqrtOptions(),
-        fcmp=FCmpOptions(),
-        ffromint=FFromIntOptions(),
+    operator=OperatorOptions(
+        fadd=lean.fadd(),
+        fmul=lean.fmul(),
+        fdivsqrt=lean.fdivsqrt(),
+        fcmp=lean.fcmp(),
+        ffromint=lean.ffromint(),
     ),
     wint_min=32,
+    wmultiplier=18,
 )
 
 
@@ -1072,6 +1068,27 @@ def test_a_method_read_and_a_derived_result_both_share_the_receiver() -> None:
     _rejects(_ravel_result_derives_storage)
 
 
+def _flatten_copies(x: float) -> float:
+    m = np.array([[x, 1.0], [2.0, 3.0]])
+    flat = m.flatten()
+    flat[0] = flat[0] + 9.0  # numpy answers a copy, so neither store reaches `m`
+    other = np.ndarray.flatten(m)
+    other[3] = x
+    return float(flat[0] + other[3] + m[0, 0] + m[1, 1])
+
+
+def _ravel_free_function_derives_storage(x: float) -> float:
+    m = np.array([[x, 1.0], [2.0, 3.0]])
+    view = np.ravel(m)
+    view[0] = 9.0  # the host's `m` sees this store
+    return float(m[0, 0])
+
+
+def test_flatten_answers_a_copy_where_ravel_answers_a_view() -> None:
+    _oracle(_flatten_copies, [{"x": 7.0}, {"x": -0.5}])
+    _rejects(_ravel_free_function_derives_storage)
+
+
 def _method_arity_excess(x: float) -> float:
     m = np.asarray(((x, 1.0), (2.0, 3.0)))
     return float(m.flatten(1.0)[0])  # type: ignore[arg-type]
@@ -1209,3 +1226,213 @@ def test_state_discovery_does_not_probe_receiver_attributes_for_absent_names() -
     sim = holoso.synthesize(_HoldsRaisingAttrs().step, _FADD_FMUL, name="raising_attrs").numerical_model.elaborate()
     assert [port.name for port in sim.outputs] == ["state_acc"]
     assert float(sim.run(2.0)[0]) == 2.0
+
+
+def _scalar_ravel(x: float, n: int) -> tuple[float, int, int]:
+    wrapped = np.ravel(x)
+    wrapped[0] = wrapped[0] * 2.0  # a fresh one-element array: a scalar has no storage for it to share
+    return float(wrapped[0]), int(np.ravel(n)[0]), len(wrapped) + wrapped.ndim
+
+
+def _nullary_hypot(x: float) -> tuple[float, bool]:
+    none = ()
+    return x + math.hypot(), math.hypot(*none) == 0.0
+
+
+def test_the_library_answers_a_scalar_where_numpy_does() -> None:
+    _oracle(_scalar_ravel, [{"x": 3.0, "n": -4}, {"x": -2.5, "n": 7}])
+    _oracle(_nullary_hypot, [{"x": 3.0}, {"x": -2.5}])
+    assert "fhypot" not in _residual_text(_nullary_hypot)
+
+
+def _scalar_norm(x: float) -> float:
+    return float(np.linalg.norm(x))
+
+
+def _scalar_ravel_of_a_boolean(flag: bool) -> bool:
+    return bool(np.ravel(flag)[0])
+
+
+def _scalar_wrapped_as_an_array(x: float) -> float:
+    # A 0-D array is the one operand `np.ravel` answers with a view, so nothing may build one from a scalar.
+    return float(np.ravel(np.asarray(x))[0])
+
+
+def _scalar_transpose(x: float) -> float:
+    # numpy answers a mutable 0-D array here, so `moved += 1.0` would have to reach `alias`; a scalar cannot.
+    moved = np.transpose(x)
+    alias = moved
+    moved += 1.0
+    return float(alias)
+
+
+def _scalar_matrix_transpose(x: float) -> float:
+    return float(np.matrix_transpose(x))
+
+
+def test_scalar_library_rejections() -> None:
+    for fn in [
+        _scalar_norm,
+        _scalar_ravel_of_a_boolean,
+        _scalar_wrapped_as_an_array,
+        _scalar_transpose,
+        _scalar_matrix_transpose,
+    ]:
+        _rejects(fn)
+
+
+def _vector_matrix_transpose(v: Float64[np.ndarray, "2"]) -> float:
+    return float(np.matrix_transpose(v)[1])  # numpy: "Input array must be at least 2-dimensional"
+
+
+def _vector_linalg_matrix_transpose(v: Float64[np.ndarray, "2"]) -> float:
+    return float(np.linalg.matrix_transpose(v)[1])
+
+
+def _vector_matrix_transpose_attribute(v: Float64[np.ndarray, "2"]) -> float:
+    return float(v.mT[1])  # numpy: "matrix transpose with ndim < 2 is undefined"
+
+
+def test_the_matrix_transpose_of_a_vector_is_refused_as_numpy_refuses_it() -> None:
+    for fn in [_vector_matrix_transpose, _vector_linalg_matrix_transpose, _vector_matrix_transpose_attribute]:
+        _rejects(fn)
+
+
+# ---------------------------------------------------------------------- annotations an inlined helper leaves unchecked
+
+
+def _pair_sum(vs: list[float]) -> float:
+    return vs[0] + vs[1]
+
+
+def _ratio(vs: list[float]) -> float:
+    return vs[0] / vs[1]
+
+
+def _make_list(x: float) -> list[float]:
+    return [x, 2.0 * x, 3.0]
+
+
+def _mutates_a_list(vs: list[float], x: float) -> float:
+    vs[0] = x
+    return vs[0]
+
+
+def _declares_a_list_and_returns_nothing(x: float) -> list[float]:  # type: ignore[empty-body]
+    pass
+
+
+def _list_annotated_helpers(x: float, y: float) -> float:
+    made = _make_list(x)
+    _declares_a_list_and_returns_nothing(x)
+    # Unlike a tuple annotation, an unchecked one converts nothing: the int elements divide as ints do.
+    return _pair_sum([x, y]) + _pair_sum((1.0, y)) + made[1] * y + _ratio([7, 2])  # type: ignore[arg-type]
+
+
+def _list_annotated_helper_given_an_array(x: float, y: float) -> float:
+    return _mutates_a_list(np.array([x, y]), 3.0) + y  # type: ignore[arg-type]
+
+
+def _list_annotated_helper_mutating_a_sequence(x: float, y: float) -> float:
+    return _mutates_a_list([x, y], 3.0)
+
+
+def _root_list_parameter(vs: list[float]) -> float:
+    return vs[0]
+
+
+def _root_list_return(x: float, y: float) -> list[float]:
+    return [x, y]
+
+
+def test_a_list_annotation_on_an_inlined_helper_is_unchecked_like_any_unrecognized_one() -> None:
+    rows: list[_Row] = [{"x": 2.0, "y": -1.5}, {"x": 0.5, "y": 4.0}]
+    _oracle(_list_annotated_helpers, rows)
+    _oracle(_list_annotated_helper_given_an_array, rows)
+    _rejects(_list_annotated_helper_mutating_a_sequence)
+
+
+def test_a_list_annotation_at_the_module_boundary_is_still_refused() -> None:
+    _rejects(_root_list_parameter)
+    _rejects(_root_list_return)
+
+
+# ---------------------------------------------------------------------- a function is the code it holds
+
+
+def _adds_one(fn: Callable[[float], float]) -> Callable[[float], float]:
+    @functools.wraps(fn)
+    def wrapper(x: float) -> float:
+        return fn(x) + 1.0
+
+    return wrapper
+
+
+@_adds_one
+def _doubled_then_incremented(x: float) -> float:
+    return x * 2.0
+
+
+def _adds_an_operand(fn: Callable[[float], float]) -> Callable[[float, float], float]:
+    @functools.wraps(fn)
+    def wrapper(a: float, b: float) -> float:
+        return fn(a) + b
+
+    return wrapper
+
+
+@_adds_an_operand
+def _wrapped_under_other_parameters(x: float) -> float:
+    return x * 2.0
+
+
+def _calls_wrappers(x: float) -> float:
+    return _doubled_then_incremented(x) + _wrapped_under_other_parameters(x, 3.0)
+
+
+def _forwards_from_elsewhere(fn: Callable[[float], float]) -> Callable[[float], float]:
+    # A wrapper of a module that spells `_Sample` as int; `functools.wraps` copies the wrapped function's
+    # annotations, which are still those of the module that wrote them.
+    def wrapper(x):  # type: ignore[no-untyped-def]
+        return fn(x)
+
+    moved = types.FunctionType(wrapper.__code__, {"_Sample": int}, "wrapper", None, wrapper.__closure__)
+    return functools.update_wrapper(moved, fn)
+
+
+_Sample = float
+
+
+@_forwards_from_elsewhere
+def _tripled_sample(x: "_Sample") -> "_Sample":
+    return x * 3.0
+
+
+def test_a_quoted_annotation_resolves_in_the_module_that_wrote_it() -> None:
+    sim = holoso.synthesize(_tripled_sample, _FMUL, name="k").numerical_model.elaborate()
+    assert float(sim.run(0.75)[0]) == _tripled_sample(0.75)
+
+
+def _republished(x: float) -> float:
+    return x * 4.0
+
+
+_republished.__name__ = _republished.__qualname__ = "published"
+
+
+def test_a_wrapper_compiles_as_the_wrapper_it_is() -> None:
+    # `functools.wraps` copies the wrapped function's name and annotations and links it as `__wrapped__`; the body
+    # that runs is still the wrapper's own, as the compile root and as a callee binding the wrapper's own parameters.
+    vectors = [{"x": 1.5}, {"x": -2.0}]
+    _oracle(_doubled_then_incremented, vectors)
+    _oracle(_calls_wrappers, vectors)
+    # The copied annotations name the wrapped function's parameters, so at the module boundary this wrapper's own
+    # parameters are undeclared, exactly as `inspect.get_annotations` reports them.
+    with pytest.raises(UnsupportedConstruct, match="requires a type annotation") as info:
+        lower(_wrapped_under_other_parameters, DEFAULT_UNROLL_MAX_TRIPS)
+    assert info.value.location is not None and info.value.location.line is not None
+    assert "def wrapper(a: float, b: float)" in info.value.location.line
+
+
+def test_a_function_is_found_by_its_code_whatever_it_is_named() -> None:
+    _oracle(_republished, [{"x": 1.5}, {"x": -2.0}])

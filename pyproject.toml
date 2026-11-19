@@ -41,8 +41,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "amaranth[builtin-yosys]~=0.5",
     "numpy~=2.4",
-    "zkf~=0.10.0.dev0",
+    "zkf~=0.10.0.dev7",
 ]
 
 [project.optional-dependencies]
@@ -65,7 +66,7 @@ version = { attr = "holoso.__version__" }
 include = ["holoso*"]
 
 [tool.setuptools.package-data]
-"holoso._backend.verilog" = ["*.v", "*.vh"]
+"holoso._backend.verilog" = ["*.vh"]    # TODO goes away next
 "holoso._backend.html" = ["*.css", "*.js"]
 "holoso" = ["py.typed"]
 
@@ -93,5 +94,9 @@ files = ["holoso", "tests", "examples", "synth", "tools"]
 exclude = ["examples/build"]
 
 [[tool.mypy.overrides]]
-module = ["cocotb.*", "cocotb_tools.*"]
+module = ["cocotb.*", "cocotb_tools.*", "amaranth.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["holoso._operators._int.*"]
+disallow_subclassing_any = false

@@ -15,14 +15,12 @@ from ._copy import copy_node, rebuild, reverse_postorder
 from .._util import ValueId
 from ._ir import Hir, HirBuilder, Node, Operation, StateRead
 from ._operators import FloatAdd, FloatFma, FloatNeg
-from ._scaling import Rendering, fused_scaling, scaled_node, scaling_layer, scaling_of_ratio
+from ._scaling import Rendering, Scaling, fused_scaling, scaled_node, scaling_layer, scaling_of_ratio
 
 _logger = logging.getLogger(__name__)
 
-_MAX_TERMS = 64
-
 _MAX_BITS = 4096
-"""Term count alone bounds nothing: an unrolled `v = 2**100 * v + y` keeps one term whose numerator grows per trip."""
+"""An unrolled `v = 2**100 * v + y` keeps one term whose numerator grows per trip."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,107 +39,177 @@ class _Constant:
 type _Answer = _Scaled | _Constant
 
 
-@dataclass(frozen=True, slots=True)
-class _LinearForm:
+class _Form:
     """
-    Coefficients are exact rationals: `x + 1e-20*x - x` is `1e-20*x`, which a double coefficient, having absorbed the
-    small term into 1.0, would answer as zero.
+    `scale * (sum of coefficient * base + constant)`, with exact rational coefficients: `x + 1e-20*x - x` is `1e-20*x`,
+    which a double coefficient, having absorbed the small term into 1.0, would answer as zero.
+
+    A form is grown in place by its last reader and copied for any other, so a sum merges its smaller operand into its
+    larger one and a scaling multiplies one number: a chain of any length costs time and memory in proportion to its
+    terms, while a sum whose every prefix is read again costs in proportion to the square of its length. `bits` bounds
+    every stored coefficient's size, so the bit limit is checked without a walk.
     """
 
-    _terms: tuple[tuple[ValueId, Fraction], ...]
-    _constant: Fraction
+    __slots__ = ("terms", "constant", "scale", "bits")
 
-    def scaled(self, factor: Fraction) -> "_LinearForm":
+    def __init__(self, terms: dict[ValueId, Fraction], constant: Fraction) -> None:
+        self.terms = terms
+        self.constant = constant
+        self.scale = Fraction(1)
+        self.bits = max((_bits(c) for c in (*terms.values(), constant)), default=0)
+
+    def copy(self) -> "_Form":
+        copied = _Form(dict(self.terms), self.constant)
+        copied.scale, copied.bits = self.scale, self.bits
+        return copied
+
+    def scale_by(self, factor: Fraction) -> None:
         # A zero factor is an absorbing element, not a scaling: it would erase every term's identity.
         assert factor
-        return _LinearForm(tuple((base, c * factor) for base, c in self._terms), self._constant * factor)
+        self.scale *= factor
 
-    def plus(self, other: "_LinearForm") -> "_LinearForm":
-        merged: dict[ValueId, Fraction] = dict(self._terms)
-        for base, c in other._terms:
-            total = merged.get(base, Fraction(0)) + c
+    def absorb(self, other: "_Form") -> None:
+        """Add `other` into this form, carrying its terms over to this form's scale."""
+        ratio = other.scale / self.scale
+        for base, c in other.terms.items():
+            total = self.terms.get(base, Fraction(0)) + c * ratio
             if total:
-                merged[base] = total
+                self.terms[base] = total
+                self.bits = max(self.bits, _bits(total))
             else:
-                merged.pop(base, None)
-        return _LinearForm(tuple(sorted(merged.items())), self._constant + other._constant)
+                self.terms.pop(base, None)
+        self.constant += other.constant * ratio
+        self.bits = max(self.bits, _bits(self.constant))
 
-    @property
     def oversized(self) -> bool:
-        if len(self._terms) > _MAX_TERMS:
-            return True
-        return any(
-            c.numerator.bit_length() > _MAX_BITS or c.denominator.bit_length() > _MAX_BITS
-            for _, c in (*self._terms, (0, self._constant))
-        )
+        """
+        Whether a coefficient outgrows the bit limit. The cheap bound overestimates, so where it trips the scale is
+        carried into the coefficients and the size taken exactly.
+        """
+        if self.bits + (0 if self.scale == 1 else _bits(self.scale)) <= _MAX_BITS:
+            return False
+        self.terms = {base: c * self.scale for base, c in self.terms.items()}
+        self.constant *= self.scale
+        self.scale = Fraction(1)
+        self.bits = max((_bits(c) for c in (*self.terms.values(), self.constant)), default=0)
+        return self.bits > _MAX_BITS
 
     def collapsed(self, vid: ValueId) -> _Answer | None:
         """A form the pass gave up on reads as `1 * itself`, which `vid` is here to refuse."""
-        if not self._terms:
-            if not self._constant:
+        if not self.terms:
+            if not self.constant:
                 return _Constant(0.0)
             # A number the machine must hold, exponent or not, so this one path still asks for the host float.
-            named = scaling_of_ratio(self._constant)
+            named = scaling_of_ratio(self.scale * self.constant)
             value = None if named is None else named.coefficient()
             return None if value is None else _Constant(value)
-        if len(self._terms) == 1 and not self._constant:
-            base, coefficient = self._terms[0]
+        if len(self.terms) == 1 and not self.constant:
+            ((base, coefficient),) = self.terms.items()
             if base == vid:
                 return None
-            named = scaling_of_ratio(coefficient)
+            named = scaling_of_ratio(self.scale * coefficient)
             rendering = None if named is None else named.rendering()
             return None if rendering is None else _Scaled(base, rendering)
         return None
 
 
-def _opaque(vid: ValueId) -> _LinearForm:
-    return _LinearForm(((vid, Fraction(1)),), Fraction(0))
+def _bits(value: Fraction) -> int:
+    return max(value.numerator.bit_length(), value.denominator.bit_length())
 
 
-def _forms(hir: Hir) -> dict[ValueId, _LinearForm]:
-    """A non-finite constant is opaque wherever it appears: `Fraction` cannot name one, and `x + inf` folds nowhere."""
-    forms: dict[ValueId, _LinearForm] = {}
+def _opaque(vid: ValueId) -> _Form:
+    return _Form({vid: Fraction(1)}, Fraction(0))
 
-    def constant(vid: ValueId) -> float | None:
-        node = hir.nodes[vid]
+
+type _Reading = list[tuple[ValueId, Scaling | None]]
+"""The operands whose forms a node sums, each under the constant scaling the node gives it, if any."""
+
+
+def _reading(hir: Hir, vid: ValueId) -> _Reading:
+    """How a node reads its operands' forms; empty where it reads none and its own form is a leaf."""
+
+    def constant(operand: ValueId) -> float | None:
+        node = hir.nodes[operand]
         return node.value if isinstance(node, FloatConst) else None
 
-    def compute(vid: ValueId) -> _LinearForm:
+    node = hir.nodes[vid]
+    if not isinstance(node, Operation):
+        return []
+    if isinstance(node.operator, FloatAdd):
+        a, b = node.operands
+        return [(a, None), (b, None)]
+    # A surviving `inf * 0.0` names no number and is the refusal gate's to convict, not ours to erase, which the layer
+    # reader already declines.
+    if (layer := scaling_layer(hir, vid, constant)) is not None:
+        return [layer]
+    if (fused := fused_scaling(hir, vid, constant)) is not None:
+        return [(fused.addend, None), (fused.base, fused.scaling)]
+    return []
+
+
+def _answers(hir: Hir) -> dict[ValueId, _Answer]:
+    """
+    Each sum's answer, decided as its form is made, since its last reader then grows that form in place. A form read
+    more than once is copied for each reader but the last, and a form nothing reads is not kept. A non-finite
+    constant is opaque wherever it appears: `Fraction` cannot name one, and `x + inf` folds nowhere.
+    """
+    readings = {vid: _reading(hir, vid) for vid in hir.nodes}
+    pending: dict[ValueId, int] = {vid: 0 for vid in hir.nodes}
+    for reading in readings.values():
+        for operand, _ in reading:
+            pending[operand] += 1
+    forms: dict[ValueId, _Form] = {}
+    answers: dict[ValueId, _Answer] = {}
+
+    def take(vid: ValueId) -> _Form:
+        pending[vid] -= 1
+        return forms.pop(vid) if not pending[vid] else forms[vid].copy()
+
+    def sum_of(a: _Form, b: _Form) -> _Form:
+        large, small = (a, b) if len(a.terms) >= len(b.terms) else (b, a)
+        large.absorb(small)
+        return large
+
+    def compute(vid: ValueId) -> _Form:
         node = hir.nodes[vid]
-        if isinstance(node, FloatConst):
-            return _opaque(vid) if not math.isfinite(node.value) else _LinearForm((), Fraction(node.value))
-        if not isinstance(node, Operation):
+        if not readings[vid]:
+            if isinstance(node, FloatConst) and math.isfinite(node.value):
+                return _Form({}, Fraction(node.value))
             return _opaque(vid)
-        if isinstance(node.operator, FloatAdd):
-            a, b = node.operands
-            combined = forms[a].plus(forms[b])
-        # A surviving `inf * 0.0` names no number and is the refusal gate's to convict, not ours to erase, which the
-        # layer reader already declines.
-        elif (layer := scaling_layer(hir, vid, constant)) is not None:
-            base, scaling = layer
-            if abs(scaling.k) > _MAX_BITS:
-                return _opaque(vid)
-            combined = forms[base].scaled(scaling.ratio())
-        elif (fused := fused_scaling(hir, vid, constant)) is not None:
-            if abs(fused.scaling.k) > _MAX_BITS:
-                return _opaque(vid)
-            combined = forms[fused.addend].plus(forms[fused.base].scaled(fused.scaling.ratio()))
-        else:
-            return _opaque(vid)
-        return _opaque(vid) if combined.oversized else combined
+        combined: _Form | None = None
+        admitted = True
+        for operand, scaling in readings[vid]:
+            form = take(operand)
+            if scaling is not None:
+                admitted = admitted and abs(scaling.k) <= _MAX_BITS
+                if admitted:
+                    form.scale_by(scaling.ratio())
+            combined = form if combined is None else sum_of(combined, form)
+        assert combined is not None
+        return _opaque(vid) if not admitted or combined.oversized() else combined
+
+    def settle(vid: ValueId) -> None:
+        form = compute(vid)
+        node = hir.nodes[vid]
+        if isinstance(node, Operation) and isinstance(node.operator, (FloatAdd, FloatFma)):
+            answer = form.collapsed(vid)
+            if answer is not None:
+                answers[vid] = answer
+        if pending[vid]:
+            forms[vid] = form
 
     # Dominance order: every operand is defined before its user, so no walk nests; phis are opaque.
     blocks = {block.id: block for block in hir.blocks}
     for vid in hir.input_ids:
-        forms[vid] = compute(vid)
+        settle(vid)
     for vid, node in hir.nodes.items():
         if isinstance(node, (Const, StateRead)):
-            forms[vid] = compute(vid)
+            settle(vid)
     for bid in reverse_postorder(hir):
         for vid in blocks[bid].phis + blocks[bid].operations:
-            forms[vid] = compute(vid)
-    assert len(forms) == len(hir.nodes)
-    return forms
+            settle(vid)
+    assert not forms and not any(pending.values()), (len(forms), sum(pending.values()))
+    return answers
 
 
 def run(hir: Hir) -> Hir:
@@ -149,13 +217,7 @@ def run(hir: Hir) -> Hir:
     Every answer is taken: it replaces an addition, fused with a product or not, with at most one operation whatever
     else reads the terms, so no liveness is read to know it does not add work.
     """
-    forms = _forms(hir)
-    answers: dict[ValueId, _Answer] = {}
-    for vid, node in hir.nodes.items():
-        if isinstance(node, Operation) and isinstance(node.operator, (FloatAdd, FloatFma)):
-            answer = forms[vid].collapsed(vid)
-            if answer is not None:
-                answers[vid] = answer
+    answers = _answers(hir)
     if not answers:
         return hir
 

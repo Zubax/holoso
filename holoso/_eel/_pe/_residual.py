@@ -154,7 +154,7 @@ def prune(stmts: list[Stmt] | tuple[Stmt, ...], live_after: set[int] | None = No
                     live |= reads(atom)
                 kept_reversed.append(stmt)
             case _:
-                raise AssertionError(stmt)
+                assert False, stmt
     return list(reversed(kept_reversed)), live
 
 
@@ -195,7 +195,7 @@ def _loop_temps(stmts: tuple[Stmt, ...]) -> tuple[set[int], set[int]]:
                 defined |= inner_defined
                 read |= inner_read
             case _:
-                raise AssertionError(stmt)
+                assert False, stmt
     return defined, read
 
 
@@ -208,4 +208,4 @@ def reads(expr: Expr) -> set[int]:
         case SlotRead() | LocalRef() | Const():
             return set()
         case _:
-            raise AssertionError(expr)
+            assert False, expr

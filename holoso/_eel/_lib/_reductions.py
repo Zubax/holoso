@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from ._linalg import flatten, pairwise
+from ._linalg import ravel, pairwise
 from ._registry import array
 
 
@@ -21,33 +21,33 @@ from ._registry import array
 def sum_(a: np.ndarray) -> Any:
     if a.ndim == 0:
         return a + 0
-    return pairwise(flatten(a), operator.add)
+    return pairwise(ravel(a), operator.add)
 
 
 @array(np.prod, np.ndarray.prod)
 def prod(a: np.ndarray) -> Any:
     if a.ndim == 0:
         return a * 1
-    return pairwise(flatten(a), operator.mul)
+    return pairwise(ravel(a), operator.mul)
 
 
 @array(np.min, np.amin, np.ndarray.min)
 def amin(a: np.ndarray) -> Any:
     if a.ndim == 0:
         return a
-    return pairwise(flatten(a), min)
+    return pairwise(ravel(a), min)
 
 
 @array(np.max, np.amax, np.ndarray.max)
 def amax(a: np.ndarray) -> Any:
     if a.ndim == 0:
         return a
-    return pairwise(flatten(a), max)
+    return pairwise(ravel(a), max)
 
 
 @array(np.mean, np.ndarray.mean)
 def mean(a: np.ndarray) -> Any:
     if a.ndim == 0:
         return a + 0.0
-    v = flatten(a) + 0.0
+    v = ravel(a) + 0.0
     return pairwise(v, operator.add) / len(v)

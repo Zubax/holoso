@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from importlib import resources
 
 from ..._lir import *
+from ..._operators import InlinePrimitive
 
 # Interactive layer; `__DATA__` is replaced by the per-module payload in `_sched_script`.
 _SCHED_JS = resources.files(__package__).joinpath("html.js").read_text(encoding="utf-8")
@@ -27,7 +28,7 @@ _ARROW_KEY_MARKER = (
 
 
 def render_schedule(lir: Lir) -> str:
-    nreg, nbreg, nconst = lir.regfile.nreg, lir.bool_regfile.nreg, len(lir.wide_consts)
+    nreg, nbreg, nconst = lir.wide_register_count, lir.bool_register_count, len(lir.wide_consts)
     bool_consts = _bool_consts(lir)
     nbbool = len(bool_consts)
     columns = _columns_of(lir)
@@ -85,16 +86,12 @@ def render_schedule(lir: Lir) -> str:
         for op in block.ops:
             color = operator_colors[op.inst.operator.name]
             # Cycles come from the Lir definitions shared with the liveness.
-            issue_pc = base_pc + op.issue_cycle
-            read_cyc = operand_read_cycle(op.primitive, issue_pc, lir.fetch_lag)
+            read_cyc = read_cycle(base_pc + op.issue_cycle, lir.fetch_lag)
             operand_labels = [_operand_label(operand) for operand in op.operands]
             firing_tip = _esc(_op_text(op))
             landing_pcs = lir.write_landing_pcs(block, op)
-            for write in op.writes:
-                tip = _esc(
-                    f"{_col_label(write.dst)} 🠄 "
-                    + op.primitive.render_output(write.result, write.inversion, *operand_labels)
-                )
+            for primitive, write in op.taps.items():
+                tip = _esc(f"{_col_label(write.dst)} 🠄 " + primitive.render_output(write.inversion, *operand_labels))
                 dcol: ColKey = write.dst
                 dord = col_ord[dcol]
                 # The report is path-exact: a spilled result gets its own cell, edges and chip on every arm it lands in.
@@ -117,8 +114,8 @@ def render_schedule(lir: Lir) -> str:
             # window. Firings on one instance never share an issue row and their busy windows never overlap, so no two
             # claim one cell. Past an overlap-shrunk terminator the stages advance in every successor arm's frame, as
             # the landings do.
-            held = [(0, i) for i in range(1, op.primitive.initiation_interval)]
-            for k, i in [(k, k) for k in range(op.latency)] + held:
+            held = [(0, i) for i in range(1, op.initiation_interval)]
+            for k, i in [(k, k) for k in range(max(op.latency, 1))] + held:
                 for cyc in lir.frame_pcs(block, op.issue_cycle + i + lir.fetch_lag):
                     key = (base + k, cyc)
                     stage_fill[key] = (color, group)
@@ -129,8 +126,8 @@ def render_schedule(lir: Lir) -> str:
     for block in lir.blocks:
         base_pc = lir.block_base[block.index]
         for bop in block.inline_ops:
-            color = operator_colors[bop.primitive.mnemonic]
-            read_cyc = operand_read_cycle(bop.primitive, base_pc + bop.issue_cycle, lir.fetch_lag)
+            color = operator_colors[_inline_kind(bop.primitive)]
+            read_cyc = read_cycle(base_pc + bop.issue_cycle, lir.fetch_lag)
             landing_pcs = lir.write_landing_pcs(block, bop)
             tip = _esc(_inline_op_text(bop))
             dcol = bop.write.dst
@@ -273,9 +270,9 @@ def render_schedule(lir: Lir) -> str:
     # The row axis is the fetch PC, so out_valid rises on an exit row.
     in_cells: dict[ColKey, str] = {load.dst: _input_chip(f"in_{load.name}") for load in lir.inputs}
     for slot in lir.wide_state_slots:  # at cycle 0 the persistent registers hold their reset snapshot, not an input
-        in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value!r}")
+        in_cells[slot.reg] = _state_chip(f"{slot.name} = {slot.reset_value}")
     for bslot in lir.bool_state_slots:
-        in_cells[bslot.reg] = _state_chip(f"{bslot.name} = {bslot.reset_value!r}")
+        in_cells[bslot.reg] = _state_chip(f"{bslot.name} = {bslot.reset_value}")
     out.append(_bookend_row("in", in_cells, columns, live, 0, n_stage, dv))
 
     for cyc in compute_cycles:  # one row per compute cycle; idle cycles show only pipeline advance
@@ -318,8 +315,11 @@ def _col_label(col: ColKey) -> str:
 
 
 def _op_text(op: PooledScheduledOp) -> str:
-    body = op.primitive.render(*[_operand_label(o) for o in op.operands])
-    return f"{'/'.join(write.stable_label for write in op.writes)}={body}"
+    operands = [_operand_label(o) for o in op.operands]
+    return " & ".join(
+        f"{write.dst.stable_label}={primitive.render_output(write.inversion, *operands)}"
+        for primitive, write in op.taps.items()
+    )
 
 
 def _is_live(col: ColKey, row_id: int, live: dict[ColKey, set[int]]) -> bool:
@@ -398,13 +398,16 @@ def _operand_label(operand: WideOperand | BoolOperand) -> str:
 
 def _inline_op_text(op: InlineScheduledOp) -> str:
     operands = [_operand_label(o) for o in op.operands]
-    body = op.primitive.render_output(op.write.result, op.write.inversion, *operands)
+    body = op.primitive.render_output(op.write.inversion, *operands)
     return f"{_col_label(op.write.dst)} 🠄 {body}"
 
 
 def _stage_count(lir: Lir, inst: OperatorInstance) -> int:
-    """One column per pipeline stage of the deepest mode the instance runs, which every firing on it fits."""
-    return max(inst.operator.latency(mode) for mode in lir.instance_modes[inst])
+    """
+    One column per pipeline stage of the deepest firing the instance runs, which every firing on it fits; a
+    combinational instance gets one, holding each firing on its operand-read row.
+    """
+    return max(1, *(op.latency for block in lir.blocks for op in block.ops if op.inst == inst))
 
 
 def _stage_columns(lir: Lir) -> list[tuple[OperatorInstance, int]]:
@@ -609,7 +612,7 @@ def _sched_script(
     data = {
         "edges": edges,
         "columns": cols,
-        "constants": {f"c{i}": repr(value) for i, value in enumerate(lir.wide_consts)}
+        "constants": {f"c{i}": str(value) for i, value in enumerate(lir.wide_consts)}
         | {_col_label(BoolConstRef(value)): repr(value) for value in _bool_consts(lir)},
         "liveness": {_col_label(col): _live_intervals(rows) for col, rows in live.items()},
         "arrows": [
@@ -630,8 +633,8 @@ def _columns_of(lir: Lir) -> list[ColKey]:
     """
     The grid columns in exactly the order the table renders them, so a column ordinal indexes straight into this list.
     """
-    cols: list[ColKey] = [RegRef(i) for i in range(lir.regfile.nreg)]
-    cols += [BoolRegRef(i) for i in range(lir.bool_regfile.nreg)]
+    cols: list[ColKey] = [RegRef(i) for i in range(lir.wide_register_count)]
+    cols += [BoolRegRef(i) for i in range(lir.bool_register_count)]
     cols += [WideConstRef(i) for i in range(len(lir.wide_consts))]
     cols += [BoolConstRef(value) for value in _bool_consts(lir)]
     return cols
@@ -703,8 +706,7 @@ def _schedule_key(
     fetch_lag: int,
 ) -> str:
     items = [
-        f"<span class='wr' style='background:{color}'>{_esc(mnemonic)}</span>"
-        for mnemonic, color in operator_colors.items()
+        f"<span class='wr' style='background:{color}'>{_esc(kind)}</span>" for kind, color in operator_colors.items()
     ]
     items.extend(
         [
@@ -754,10 +756,15 @@ def _key_item(marker: str, text: str) -> str:
     return f"<span>{marker} {text}</span>"
 
 
+def _inline_kind(primitive: InlinePrimitive) -> str:
+    """An inline primitive as the legend names it: its rendering over placeholder operands, such as `(a)&(b)`."""
+    return primitive.render(*(chr(ord("a") + index) for index in range(primitive.signature.arity)))
+
+
 def _operator_colors(lir: Lir) -> dict[str, str]:
-    """One color per operator, keyed by its name, and per inline primitive, keyed by its mnemonic."""
+    """One color per operator, keyed by its name, and per inline primitive, keyed by its rendering."""
     kinds = {inst.operator.name for inst in lir.instances}
-    kinds |= {bop.primitive.mnemonic for block in lir.blocks for bop in block.inline_ops}
+    kinds |= {_inline_kind(bop.primitive) for block in lir.blocks for bop in block.inline_ops}
     ordered = sorted(kinds)
     return dict(zip(ordered, _html_palette(len(ordered)), strict=True))
 

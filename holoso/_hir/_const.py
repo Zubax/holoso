@@ -4,7 +4,6 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from .._errors import UnsupportedConstruct
 from ._types import BoolType, FloatType, IntType, Type
 
 
@@ -20,8 +19,7 @@ class FloatConst(Const):
     value: float
 
     def __post_init__(self) -> None:
-        if math.isnan(self.value):
-            raise UnsupportedConstruct("Holoso cannot represent a NaN constant. Only [in]finite numbers are supported.")
+        assert not math.isnan(self.value), "the front end refuses a NaN before any constant holds one"
         if self.value == 0.0:  # Normalize -0.0 to +0.0.
             object.__setattr__(self, "value", 0.0)
 

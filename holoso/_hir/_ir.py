@@ -342,16 +342,12 @@ class HirBuilder:
         self._blocks[self.current_block].phis.append(vid)
         return vid
 
-    def open_phi(self, type: Type, entry_arm: tuple[BlockId, ValueId]) -> ValueId:
-        """
-        Create a loop-header phi carrying only its entry (preheader) arm; the latch (back-edge) arm is supplied later
-        by set_phi_arms, once the loop body -- which references this phi as the loop-carried value -- has been
-        lowered. This is the one forward reference in HIR construction; `finish` validates that the phi was closed.
-        """
-        return self.phi(type, [entry_arm])
-
     def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId]]) -> None:
-        """Closes a loop-header phi opened by open_phi, once the latch (back-edge) arm is known."""
+        """
+        Close a loop-header phi created with the arms known when its header was lowered, once the loop body -- which
+        references it as the loop-carried value -- has been. This is the one forward reference in HIR construction;
+        `finish` validates that the phi was closed.
+        """
         node = self._nodes[phi]
         assert isinstance(node, Phi)
         assert all(self.type_of(arm) == node.type for _, arm in arms)

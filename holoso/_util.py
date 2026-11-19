@@ -49,7 +49,7 @@ class Relation(Enum):
     LE = "≤"
     GT = ">"
     GE = "≥"
-    EQ = "="
+    EQ = "=="
     NE = "≠"
 
     def __repr__(self) -> str:

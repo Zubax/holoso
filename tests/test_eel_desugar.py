@@ -15,17 +15,19 @@ import pytest
 from jaxtyping import Float64
 
 import holoso
-from holoso import FAddOptions, FCmpOptions, FMulILog2Options, FMulOptions, UnsupportedConstruct
+from holoso import UnsupportedConstruct
 from holoso._eel._desugar import desugar
 from holoso._eel._print import print_eel
 
 from ._public import strip_locations
+from . import _options as lean
 
 GAIN = 100.0
 RANGE_TABLE = (7.0, 8.0)
 
 _OPTIONS = holoso.Options(
-    holoso.OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(), fmul_ilog2=FMulILog2Options(), fcmp=FCmpOptions())
+    operator=holoso.OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul(), fmul_ilog2=lean.fmul_ilog2(), fcmp=lean.fcmp()),
+    wmultiplier=18,
 )
 
 
@@ -453,6 +455,29 @@ def test_multi_dimensional_subscripts_are_retained() -> None:
     assert "%1 = m[:, 2]" in lines
 
 
+def test_a_tuple_subscript_of_one_axis_or_none_prints_as_the_tuple_it_is() -> None:
+    def kernel(m: Float64[np.ndarray, "3 3"]) -> tuple[Float64[np.ndarray, "3"], Float64[np.ndarray, "3 3"], float]:
+        return m[1,], m[()], m[2][0]
+
+    # `m[1,]` is a multi-axis read and `m[1]` a plain one, so the printed forms must differ as the sources do.
+    lines = [line.strip() for line in _desugared_lines(kernel)]
+    assert "%0 = m[1,]" in lines
+    assert "%1 = m[()]" in lines
+    assert "%2 = m[2]" in lines
+
+
+def test_a_tuple_subscript_store_prints_as_the_tuple_it_is() -> None:
+    def kernel(x: float) -> float:
+        m = np.zeros((2, 2))
+        m[()][0, 1] = x
+        m[1,][0] = x
+        return float(m[0, 1] + m[1, 0])
+
+    lines = [line.strip() for line in _desugared_lines(kernel)]
+    assert any(line.startswith("m[()][") and line.endswith("] = x") for line in lines), lines
+    assert any(line.startswith("m[") and ",][" in line for line in lines), lines
+
+
 def test_display_splices_are_retained() -> None:
     def kernel(x: float) -> tuple[float, ...]:
         a = (x, 1.0)
@@ -469,3 +494,21 @@ def test_outer_genexp_rejection_precedes_walrus_collision() -> None:
 
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(kernel, _OPTIONS, name="k")
+
+
+_PRIVATE = types.SimpleNamespace(**{"__gain": 3.0})
+
+
+def _private_names_outside_a_class(__x: float) -> float:
+    __doubled_ = __x * 2.0
+    halves = [__doubled_ * __w for __w in (0.5, 0.25)]
+    return halves[0] + halves[1] + _PRIVATE.__gain  # type: ignore[no-any-return]
+
+
+def test_a_private_name_outside_a_class_body_means_what_it_spells() -> None:
+    # CPython mangles a `__name` only inside a class body; the rejection suite keeps the names it does mangle.
+    result = holoso.synthesize(_private_names_outside_a_class, _OPTIONS, name="k")
+    assert "__doubled_ = __x * 2.0" in strip_locations(result.frontend_ir[0])
+    sim = result.numerical_model.elaborate()
+    for x in (1.5, -4.0):
+        assert float(sim.run(x)[0]) == _private_names_outside_a_class(x)

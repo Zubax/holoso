@@ -36,31 +36,26 @@ class Operand:
     const: bool | int | float | None = None
 
 
-# The refinements: each admits a set of compile-time constants, and they are pairwise disjoint, which is what lets
-# the specificity order below compare them by identity alone. They erase to their argument for the type checker;
+# The refinements: each admits a set of compile-time constants. They erase to their argument for the type checker;
 # the alias object itself is the marker, read back through `typing.get_origin`.
 type StaticWholeNonNegative[T] = T
 type StaticWholeNegative[T] = T
 type StaticOneHalf[T] = T
 
-
-def _whole(const: bool | int | float) -> bool:
-    return not isinstance(const, float) or const.is_integer()
+_REFINEMENTS = frozenset({StaticWholeNonNegative, StaticWholeNegative, StaticOneHalf})
 
 
-_REFINEMENTS: dict[TypeAliasType, Callable[[bool | int | float], bool]] = {
-    StaticWholeNonNegative: lambda c: _whole(c) and c >= 0,
-    StaticWholeNegative: lambda c: _whole(c) and c < 0,
-    StaticOneHalf: lambda c: c == 0.5,
-}
-
-# A refinement overlapping another would make the identity comparisons below unsound.
-assert not any(
-    one is not other and admits(sample) and _REFINEMENTS[other](sample)
-    for one, admits in _REFINEMENTS.items()
-    for other in _REFINEMENTS
-    for sample in (-1e300, -2, -1, -0.5, 0, 0.5, 1, 2, 1e300)
-), "the refinements must be pairwise disjoint"
+def _refinement_of(const: bool | int | float) -> TypeAliasType | None:
+    """
+    The refinement a compile-time constant satisfies. One function answers for all of them and names at most one, so
+    no constant satisfies two: the refinements are disjoint by construction, which is what lets the specificity order
+    below compare them by identity alone.
+    """
+    if const == 0.5:
+        return StaticOneHalf
+    if isinstance(const, float) and not const.is_integer():
+        return None
+    return StaticWholeNonNegative if const >= 0 else StaticWholeNegative
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +68,7 @@ class Domain:
             return False
         if self.refinement is None:
             return True
-        return operand.const is not None and _REFINEMENTS[self.refinement](operand.const)
+        return operand.const is not None and _refinement_of(operand.const) is self.refinement
 
     def within(self, other: Domain) -> bool:
         """Whether every operand this domain accepts the other accepts too -- the specificity order."""
@@ -171,9 +166,9 @@ class VariadicFunction:
 class Array:
     """
     An inlined composite whose meaning is rank and shape, so it declares no scalar domain. `derives` marks a
-    non-copying derivation on the host (`.T`, `flatten`): the result carries the source's Allocation as its
-    storage-equivalence token. `sequences` names the argument positions whose gate admits a Python sequence
-    (np.polyval's coefficients); everywhere else the build-an-array advice stands.
+    non-copying derivation on the host (`.T`, `ravel`): the result carries the Allocation of the first argument, the
+    only array such an entry takes, as its storage-equivalence token. `sequences` names the argument positions whose
+    gate admits a Python sequence (np.polyval's coefficients); everywhere else the build-an-array advice stands.
     """
 
     stub: types.FunctionType
@@ -211,15 +206,23 @@ class Reshape:
 
 
 @dataclass(frozen=True, slots=True)
+class CastMethod:
+    """
+    The method a record or captured object answers a cast with before the cast's meaning applies, and the kinds of
+    answer Python takes from it: on any other, Python raises rather than converting the answer again.
+    """
+
+    name: str
+    answers: tuple[ScalarType, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Spelling:
-    """
-    Array capability is the spelling's, not the meaning's: `np.minimum` maps over an array where `min` does not.
-    `protocol` names the method a record or captured object answers the call with before the meaning applies.
-    """
+    """Array capability is the spelling's, not the meaning's: `np.minimum` maps over an array where `min` does not."""
 
     meaning: ScalarMeaning
     elementwise: bool = False
-    protocol: str | None = None
+    cast: CastMethod | None = None
 
 
 type Match = Spelling | VariadicFunction | Array | Factory | Conversion | Reshape
@@ -241,14 +244,14 @@ def _register(match: Match, keys: Iterable[object]) -> None:
 
 
 def meaning(
-    *stubs: object, scalar: Sequence[object] = (), elementwise: Sequence[object] = (), protocol: str | None = None
+    *stubs: object, scalar: Sequence[object] = (), elementwise: Sequence[object] = (), cast: CastMethod | None = None
 ) -> None:
     assert scalar or elementwise, "a meaning with no spelling"
     served = ScalarMeaning(tuple(_lowering_of(stub) for stub in stubs))
     if elementwise:
         _admit_elementwise(served)
-    _register(Spelling(served, elementwise=False, protocol=protocol), scalar)
-    _register(Spelling(served, elementwise=True, protocol=protocol), elementwise)
+    _register(Spelling(served, elementwise=False, cast=cast), scalar)
+    _register(Spelling(served, elementwise=True, cast=cast), elementwise)
 
 
 def _lowering_of(stub: object) -> ScalarLowering:
@@ -271,13 +274,11 @@ def _declared(stub: types.FunctionType, name: str) -> Domain:
 
 def _scalar_lowering(fn: object, operator: Operator | None) -> ScalarLowering:
     assert isinstance(fn, types.FunctionType)
-    assert not fn.__kwdefaults__, "a stub binds positionally"
     code = fn.__code__
+    starred = code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS)
+    assert not starred and not code.co_kwonlyargcount, "a stub binds positionally"
     operands = tuple(_declared(fn, name) for name in code.co_varnames[: code.co_argcount])
-    assert operands
     if operator is not None:
-        # A single HIR operation consumes whatever the datapath carries, so it cannot demand a binding time.
-        assert all(d.refinement is None for d in operands), "an intrinsic takes unrefined operands"
         signature = operator.signature
         assert isinstance(signature.result_type, _HIR_TYPES[_declared(fn, "return").stype])
         assert len(signature.operand_types) == len(operands)
@@ -301,7 +302,8 @@ def variadic[F: Callable[..., object]](
         code = fn.__code__
         assert code.co_argcount == 0 and code.co_flags & inspect.CO_VARARGS, "a variadic entry takes only *args"
         domain = _declared(fn, code.co_varnames[0])
-        assert domain.stype in (ScalarType.INT, ScalarType.FLOAT) and domain.refinement is None
+        # One domain serves every operand, so a refined one would leave the entry no runtime operand it could take.
+        assert domain.refinement is None
         result = _declared(fn, "return")
         for arity in (minimum, minimum + 1):  # arity-uniform, so two samples pin the shape
             signature = operator(arity).signature
@@ -327,7 +329,13 @@ def array[F: Callable[..., object]](
     def register(fn: F) -> F:
         assert isinstance(fn, types.FunctionType)
         assert not fn.__kwdefaults__, "a stub binds positionally"
-        assert not derives or fn.__code__.co_argcount == 1, "a derivation's result tracks its sole argument"
+        if derives:
+            # The result takes the storage token of the first argument, so a call must supply that argument and must
+            # bind no other array the result could be storage of: every further parameter declares a scalar.
+            code = fn.__code__
+            assert code.co_argcount > len(fn.__defaults__ or ()), "a call could omit the array a derivation tracks"
+            further = code.co_varnames[1 : code.co_argcount]
+            assert all(annotation_stype(fn.__annotations__.get(name)) is not None for name in further), further
         _register(Array(fn, derives, frozenset(sequences)), (fn, *substituted))
         return fn
 

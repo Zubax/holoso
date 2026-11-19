@@ -19,7 +19,7 @@ from typing import NoReturn
 
 from ..._errors import UnsupportedConstruct
 from .._ir import *
-from ._classify import Classifier, NameKind, build_classifier, mangles
+from ._classify import Classifier, NameKind, build_classifier
 from ._source import SourceUnit, load
 
 _BIN_OPS: dict[type[ast.operator], BinaryOp] = {
@@ -57,16 +57,10 @@ _UNARY_OPS: dict[type[ast.unaryop], UnaryOp] = {
 
 def desugar(fn: types.FunctionType) -> EelFunction:
     unit = load(fn)
-    if getattr(fn, "__wrapped__", None) is not None:
-        # inspect resolves __wrapped__ chains, so the retrieved source is the INNER function's while the live
-        # callable is the wrapper: compiling it would silently drop the wrapper's behavior.
-        raise UnsupportedConstruct(
-            "the target is wrapped by a decorator; pass the undecorated function", unit.location(unit.fndef)
-        )
     if fn.__code__.co_flags & inspect.CO_GENERATOR:
         # A yield can hide inside an ignored assert; the code object is the truth about the function's kind.
         raise UnsupportedConstruct("generators are not supported", unit.location(unit.fndef))
-    return _Transformer(unit, build_classifier(fn, unit.fndef)).function()
+    return _Transformer(unit, build_classifier(fn.__code__, unit.fndef)).function()
 
 
 class _Transformer:
@@ -121,6 +115,8 @@ class _Transformer:
             case ast.Expr(value=ast.Constant(value=str())):
                 pass  # a docstring or stray string constant: a no-op in CPython
             case ast.Expr(value=ast.Constant(value=v)) if v is Ellipsis:
+                # `...` marks a body left undefined, where `pass` defines one that does nothing; hardware built
+                # from an undefined body would be an invented meaning, so it must be refused.
                 self._reject(node, "an `...` statement has no effect (a stub body cannot be synthesized)")
             case ast.Expr(value=ast.Call() as call):
                 # A bare call runs for its effects (a void state-writing helper).
@@ -189,7 +185,7 @@ class _Transformer:
                 target = self._local_bind(node.target)
                 sink.append(AugAssign(self._origin(node), target=target, op=op, value=self._atom(node.value, sink)))
             case ast.Attribute() | ast.Subscript():
-                root, path = self._store_path(node.target, sink)
+                root, path = self._store_target(node.target, sink)
                 mark = self._fresh_mark()
                 sink.append(AugMark(self._origin(node), mark))
                 value = self._atom(node.value, sink)
@@ -286,12 +282,18 @@ class _Transformer:
                 for elt, temp in zip(elts, temps, strict=True):
                     self._bind_target(elt, TempRef(temp.origin, temp.index), sink)
             case ast.Attribute() | ast.Subscript():
-                root, path = self._store_path(target, sink)
+                root, path = self._store_target(target, sink)
                 sink.append(Store(self._origin(target), root=root, path=path, value=value))
             case ast.Starred():
                 self._reject(target, "starred assignment targets are not supported")
             case _:
                 self._reject(target, f"unsupported assignment target: {type(target).__name__}")
+
+    def _store_target(self, target: ast.expr, sink: list[Stmt]) -> tuple[LocalRef | EnvRead, tuple[Selector, ...]]:
+        # `v[()] = x` writes every element of an array in place, which only rebinding spells here.
+        if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Tuple) and not target.slice.elts:
+            self._reject(target.slice, "a store through an empty subscript is not supported; rebind the whole value")
+        return self._store_path(target, sink)
 
     def _store_path(self, target: ast.expr, sink: list[Stmt]) -> tuple[LocalRef | EnvRead, tuple[Selector, ...]]:
         match target:
@@ -308,14 +310,14 @@ class _Transformer:
                     self._reject(index, "slice assignment is not supported; rebind the whole value instead")
                 root, path = self._store_path(base, sink)
                 if isinstance(index, ast.Tuple):
-                    return root, (*path, *(IndexSel(self._atom(e, sink)) for e in index.elts))
+                    return root, (*path, AxesSel(tuple(self._atom(e, sink) for e in index.elts)))
                 return root, (*path, IndexSel(self._atom(index, sink)))
             case _:
                 self._reject(target, "a store target must be a plain name followed by attributes and indexes")
 
     def _demand_unmangled(self, node: ast.AST, name: str, kind: str = "name") -> None:
-        if mangles(name):
-            self._reject(node, f"the private {kind} {name!r} is subject to name mangling; rename it")
+        if self._classifier.mangled(name):
+            self._reject(node, f"the private {kind} {name!r} is mangled inside a class body; rename it")
 
     def _local_bind(self, node: ast.Name) -> LocalBind:
         self._demand_unmangled(node, node.id)

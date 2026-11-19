@@ -20,14 +20,15 @@ from holoso._eel import lower
 from ._eeloracle import InputRow, assert_hir_matches_reference
 from ._modelref import default_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_locations
+from . import _options as lean
 
 type _Row = InputRow
 
-_OPTIONS = holoso.Options(holoso.OperatorOptions())
+_OPTIONS = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18)
 _FMT = FloatFormat(8, 23)
 _SYNTH_OPTIONS = default_options(_FMT)
 _FFROMINT_OPTIONS = dataclasses.replace(
-    _SYNTH_OPTIONS, operator=dataclasses.replace(_SYNTH_OPTIONS.operator, ffromint=holoso.FFromIntOptions())
+    _SYNTH_OPTIONS, operator=dataclasses.replace(_SYNTH_OPTIONS.operator, ffromint=lean.ffromint())
 )
 # The wide format keeps the derived integer word at the binary64 boundary, so the no-exact-float-image
 # propositions below stay sharp (2**53+1 is the smallest integer without an image) instead of vacuous.
@@ -660,6 +661,101 @@ def test_an_unregistered_callable_is_not_mistaken_for_a_component_instance() -> 
         with pytest.raises(UnsupportedConstruct) as excinfo:
             holoso.synthesize(kernel, _OPTIONS, name="k")
         assert "component instance" not in excinfo.value.message
+
+
+class _CallableAccumulator:
+    def __init__(self) -> None:
+        self.total = 0.0
+        self.gain = 0.5
+
+    def __call__(self, x: float) -> float:
+        self.total = self.total + x
+        return self.total * self.gain
+
+
+class _StatelessCallable:
+    @staticmethod
+    def __call__(x: float) -> float:
+        return x * 3.0
+
+
+class _CallableClassmethod:
+    offset = 4.0
+
+    @classmethod
+    def __call__(cls, x: float) -> float:
+        return x + cls.offset
+
+    @classmethod
+    def scaled(cls, x: float) -> float:
+        return x * cls.offset
+
+
+def test_a_callable_instance_is_the_call_method_of_its_class() -> None:
+    # The instance and its bound `__call__` are one target, exactly as a callee spelled either way is one callee.
+    by_instance = holoso.synthesize(_CallableAccumulator(), _SYNTH_OPTIONS)
+    by_method = holoso.synthesize(_CallableAccumulator().__call__, _SYNTH_OPTIONS)
+    assert by_instance.module_name == by_method.module_name == "_CallableAccumulator"
+    assert by_instance.verilog_output.verilog == by_method.verilog_output.verilog
+    assert [port.name for port in by_instance.output_ports] == ["out_0", "state_total"]
+    sim, reference = by_instance.numerical_model.elaborate(), _CallableAccumulator()
+    for x in (1.5, -0.25, 4.0):
+        returned, total = (float(value) for value in sim.run(x))
+        assert returned == reference(x) and total == reference.total
+    stateless = holoso.synthesize(_StatelessCallable(), _SYNTH_OPTIONS).numerical_model.elaborate()
+    assert [float(value) for value in stateless.run(2.0)] == [_StatelessCallable()(2.0)]
+    by_class = holoso.synthesize(_CallableClassmethod(), _SYNTH_OPTIONS).numerical_model.elaborate()
+    assert [float(value) for value in by_class.run(2.0)] == [_CallableClassmethod()(2.0)]
+    # A classmethod's receiver is the class itself, so the kernel is named after it, not after `type`.
+    assert holoso.synthesize(_CallableClassmethod.scaled, _SYNTH_OPTIONS).module_name == "_CallableClassmethod_scaled"
+
+
+def _counting(fn: Callable[[_CountsItsCalls, float], float]) -> Callable[[_CountsItsCalls, float], float]:
+    @functools.wraps(fn)
+    def wrapper(self: _CountsItsCalls, x: float) -> float:
+        self.calls = self.calls + 1
+        return fn(self, x)
+
+    return wrapper
+
+
+class _CountsItsCalls:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.gain = 3.0
+
+    @_counting
+    def scaled(self, x: float) -> float:
+        return self.gain * x
+
+    def step(self, x: float) -> float:
+        return self.scaled(x) + float(self.calls)
+
+
+def test_a_wrapped_method_writes_state_from_the_wrapper_itself() -> None:
+    assert "state calls: int reset 0" in _residual(_CountsItsCalls().step, _FFROMINT_OPTIONS)
+    _oracle(_CountsItsCalls().step, [{"x": 1.0}, {"x": 2.5}, {"x": -1.0}])
+
+
+class _Gain(float):
+    def __mul__(self, other: float) -> float:
+        return 0.0
+
+
+class _ScalesItsLevel:
+    def __init__(self, level: float) -> None:
+        self.level = level
+
+    def step(self, x: float) -> float:
+        self.level = self.level * x
+        return self.level
+
+
+def test_a_float_subclass_is_no_more_a_reset_value_than_a_capture() -> None:
+    # Its class may redefine arithmetic, as this one does, and the hardware would compute the plain float's.
+    with pytest.raises(UnsupportedConstruct, match="a subclass of float that may redefine its arithmetic"):
+        lower(_ScalesItsLevel(_Gain(2.0)).step, DEFAULT_UNROLL_MAX_TRIPS)
+    _oracle(_ScalesItsLevel(np.float64(2.0)).step, [{"x": 1.5}, {"x": -0.5}])  # numpy's own float is modelled
 
 
 # ---------------------------------------------------------------------- the trim and its finality

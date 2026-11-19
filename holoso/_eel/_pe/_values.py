@@ -297,7 +297,18 @@ def tree_leaves(value: Value) -> list[Scalar | Opaque]:
         case StaticScalar() | ResidualScalar() | Opaque():
             return [value]
         case _:
-            raise AssertionError(value)
+            assert False, value
+
+
+def scalar_tree(value: Value) -> bool:
+    """Whether every leaf is a scalar or a captured object: the trees `tree_leaves` and `tree_rebuild` walk."""
+    match value:
+        case SequenceValue(items=children) | RecordValue(fields=children):
+            return all(scalar_tree(child) for child in children)
+        case TensorValue() | StaticScalar() | ResidualScalar() | Opaque():
+            return True
+        case _:
+            return False
 
 
 def tensor_occurrences(value: Value) -> list[Allocation]:
@@ -324,7 +335,7 @@ def tree_rebuild(value: Value, leaves: Iterator[Scalar | Opaque]) -> Value:
         case StaticScalar() | ResidualScalar() | Opaque():
             return next(leaves)
         case _:
-            raise AssertionError(value)
+            assert False, value
 
 
 def same_structure(a: Value, b: Value) -> bool:

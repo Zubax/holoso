@@ -3,7 +3,10 @@ Read-only structural and control-flow facts over MIR. They depend on nothing in 
 of the builder DAG, shared by construction, layout, and bank allocation without coupling those stages to one another.
 """
 
+from collections.abc import Iterable
+
 from .._mir import Mir, MirOperation, MirPhi
+from .._operators import PooledPrimitive
 from .._util import ValueId
 
 
@@ -11,6 +14,16 @@ def mir_operation(mir: Mir, vid: ValueId) -> MirOperation:
     node = mir.nodes[vid]
     assert isinstance(node, MirOperation)
     return node
+
+
+def pooled_primitives(mir: Mir, members: Iterable[ValueId]) -> dict[ValueId, PooledPrimitive]:
+    """The primitive each member operation of a pooled firing taps."""
+    primitives: dict[ValueId, PooledPrimitive] = {}
+    for member in members:
+        primitive = mir_operation(mir, member).primitive
+        assert isinstance(primitive, PooledPrimitive)
+        primitives[member] = primitive
+    return primitives
 
 
 def phi_arm_out(mir: Mir, phi_nodes: dict[ValueId, MirPhi], values: set[ValueId]) -> dict[int, frozenset[ValueId]]:

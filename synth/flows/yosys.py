@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
+from holoso import Options
+
 from .._detect import find_tool, require_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
 from .._flow_id import DeviceClass, FlowId
@@ -35,6 +37,9 @@ class YosysEcp5Flow(Flow):
 
     def available(self) -> bool:
         return find_tool("yosys") is not None and find_tool("nextpnr-ecp5") is not None
+
+    def attributed(self, options: Options) -> Options:
+        return options
 
     def prepare(self, design: OocDesign) -> SynthArtifact:
         top = design.top

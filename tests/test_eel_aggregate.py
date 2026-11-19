@@ -13,14 +13,15 @@ import pytest
 from jaxtyping import Float32, Float64, Int64
 
 import holoso
-from holoso import FAddOptions, OperatorOptions, Options
+from holoso import OperatorOptions, Options
 from holoso._eel import lower
 from holoso._errors import UnsupportedConstruct
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
+from . import _options as lean
 
-_MIN_OPTIONS = Options(OperatorOptions(fadd=FAddOptions()))
+_MIN_OPTIONS = Options(operator=OperatorOptions(fadd=lean.fadd()), wmultiplier=18)
 
 type _Row = Mapping[str, float | bool | int]
 
@@ -486,13 +487,6 @@ def test_a_dead_nan_element_does_not_reject() -> None:
 # ---------------------------------------------------------------------- instance attribute reads
 
 
-class _Config:
-    __slots__ = ("slotted",)
-
-    def __init__(self) -> None:
-        self.slotted = 1.0
-
-
 class _Base:
     gain = 2.0
     deep = False
@@ -518,7 +512,6 @@ class _Derived(_Base):
 
 
 _DERIVED = _Derived()
-_SLOTTED = _Config()
 _NAMESPACE = types.SimpleNamespace(value=3.0, table=(1.0, 2.0))
 
 
@@ -528,10 +521,6 @@ def _instance_reads(x: float) -> float:
 
 def test_instance_reads_resolve_through_the_mro_without_live_calls() -> None:
     _oracle(_instance_reads, [{"x": 2.0}])
-
-
-def _reads_slot_descriptor(x: float) -> float:
-    return _SLOTTED.slotted * x
 
 
 def _calls_instance_method(x: float) -> float:
@@ -555,11 +544,74 @@ def test_instance_and_class_methods_inline_like_helpers() -> None:
 
 
 def test_instance_read_rejections() -> None:
-    for fn in [
-        _reads_slot_descriptor,
-        _missing_attribute,
-    ]:
-        _rejects(fn)
+    _rejects(_missing_attribute)
+
+
+class _Slotted:
+    __slots__ = ("gain", "count", "table", "unset")
+
+    def __init__(self) -> None:
+        self.gain = 2.5
+        self.count = 3
+        self.table = (0.5, np.array([1.0, 2.0]))
+
+
+class _SlottedChild(_Slotted):
+    __slots__ = ("extra",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.extra = 4.0
+
+    @property
+    def doubled(self) -> float:
+        return 2.0 * self.gain + self.extra
+
+    def scaled(self, x: float) -> float:
+        return self.gain * x + self.extra
+
+
+_SLOTTED = _Slotted()
+_SLOTTED_CHILD = _SlottedChild()
+_COMPLEX = complex(1.5, -2.0)
+_SLICE = slice(1, 3)
+
+
+def _reads_slots(x: float) -> float:
+    y = _SLOTTED.gain * x + float(_SLOTTED.count) + _SLOTTED.table[0] + _SLOTTED.table[1][1]
+    return y + _SLOTTED_CHILD.extra + _SLOTTED_CHILD.doubled + _SLOTTED_CHILD.scaled(x)  # type: ignore[no-any-return]
+
+
+def _reads_builtin_members(x: float) -> float:
+    v = np.array([x, 2.0, 3.0, 4.0])
+    return _COMPLEX.real * x + _COMPLEX.imag + v[_SLICE.start] + v[_SLICE.stop]  # type: ignore[no-any-return]
+
+
+def _reads_an_unset_slot_in_a_dead_arm(x: float) -> float:
+    if _SLOTTED.count > 5:
+        return x * _SLOTTED.unset  # type: ignore[attr-defined, no-any-return]
+    return x * _SLOTTED.gain
+
+
+def _reads_an_unset_slot(x: float) -> float:
+    return x * _SLOTTED.unset  # type: ignore[attr-defined, no-any-return]
+
+
+def _stores_into_a_slot_held_array(x: float) -> float:
+    held = _SLOTTED.table[1]
+    held[0] = x
+    return held[0]  # type: ignore[no-any-return]
+
+
+def test_a_slot_reads_like_an_instance_dict_entry() -> None:
+    for fn in (_reads_slots, _reads_builtin_members, _reads_an_unset_slot_in_a_dead_arm):
+        _oracle(fn, [{"x": 2.0}, {"x": -1.5}])
+
+
+def test_slot_read_rejections() -> None:
+    # An empty slot raises AttributeError on the host; the compiler names the missing attribute instead.
+    _rejects(_reads_an_unset_slot)
+    _rejects(_stores_into_a_slot_held_array)
 
 
 # ---------------------------------------------------------------------- kinds are provenance
@@ -782,3 +834,145 @@ def test_a_bound_method_is_named_by_its_receiver_wherever_it_is_refused() -> Non
     """Both store sites report the kind; a scalar receiver must never be called an array method."""
     _rejects(_StoresABoundMethod().__call__)
     _rejects(_stores_a_bound_method_into_an_array)
+
+
+# ---------------------------------------------------------------------- subscripts naming fewer axes than the array has
+
+
+def _partial_subscripts(x: float) -> tuple[float, float, float, float, int]:
+    row = _ARRAY[1,]
+    whole = _ARRAY[()]
+    rows = _ARRAY[0:1,]
+    vector = _ARRAY[0][()]
+    return row[0] * x, whole[1, 1], rows[0][1], vector[1], len(_ARRAY[-1,])
+
+
+def test_a_subscript_takes_whole_every_axis_it_leaves_out() -> None:
+    _oracle(_partial_subscripts, [{"x": 2.0}, {"x": -0.5}])
+
+
+def _partial_row_is_a_view(x: float) -> float:
+    grid = np.array([[x, 1.0], [2.0, 3.0]])
+    row = grid[1,]
+    grid[1, 0] = x  # the host's `row` sees this store
+    return float(row[0])
+
+
+def _whole_subscript_is_a_view(x: float) -> float:
+    grid = np.array([[x, 1.0], [2.0, 3.0]])
+    alias = grid[()]
+    alias[0, 0] = 5.0  # and the host's `grid` sees this one
+    return float(grid[0, 0])
+
+
+def _one_axis_tuple_on_sequence(x: float) -> float:
+    return _TABLE[0,] * x  # type: ignore[call-overload]
+
+
+def _empty_tuple_on_scalar(x: float) -> float:
+    return x[()]  # type: ignore[index, no-any-return]
+
+
+def _too_many_axes_on_vector(x: float) -> float:
+    return float(_ARRAY[0][0, 0]) * x
+
+
+def test_partial_subscript_rejections() -> None:
+    for fn in [
+        _partial_row_is_a_view,
+        _whole_subscript_is_a_view,
+        _one_axis_tuple_on_sequence,
+        _empty_tuple_on_scalar,
+        _too_many_axes_on_vector,
+    ]:
+        _rejects(fn)
+
+
+def _empty_subscript_store(x: float) -> float:
+    grid = np.array([x, 1.0])
+    grid[()] = 5.0  # numpy fills the whole array
+    return float(grid[0])
+
+
+def _empty_subscript_store_on_scalar(x: float) -> float:
+    y = x
+    y[()] = 5.0  # type: ignore[index]
+    return y
+
+
+class _ScalarState:
+    def __init__(self) -> None:
+        self.level = 0.5
+
+    def step(self, x: float) -> float:
+        self.level[()] = x  # type: ignore[index]  # a TypeError on the host, not a rebind of the attribute
+        return self.level
+
+
+def test_a_store_through_an_empty_subscript_is_refused() -> None:
+    for fn in [_empty_subscript_store, _empty_subscript_store_on_scalar, _ScalarState().step]:
+        _rejects(fn)
+
+
+def _store_through_a_whole_array_view(x: float) -> float:
+    m = np.array([[x, 1.0], [2.0, 3.0]])
+    m[()][0, 1] = 9.0  # `m[()]` is a view of the whole array, so this writes m[0, 1]
+    return float(m[0, 1] + m[0, 0])
+
+
+def test_an_empty_subscript_before_an_index_selects_the_whole_array() -> None:
+    _oracle(_store_through_a_whole_array_view, [{"x": 1.5}, {"x": -0.25}])
+
+
+class _Holder:
+    def __init__(self) -> None:
+        self.level = 4.0
+
+
+class _IndexesItself:
+    def __init__(self) -> None:
+        self.level = 3.0
+        self.sample = _Holder()
+
+    def __getitem__(self, key: tuple[()]) -> _Holder:
+        return self.sample
+
+    def step(self, x: float) -> tuple[float, float]:
+        self[()].level = x  # Python writes the holder's field, not this one's
+        return self.sample.level, self.level
+
+
+def _store_through_an_empty_subscript_of_a_sequence(x: float) -> float:
+    rows = (np.array([x, 0.0]),)
+    rows[()][0] = 3.0  # type: ignore[call-overload]  # a TypeError on the host: a tuple takes no empty index
+    return float(rows[0][0])
+
+
+def _store_through_an_empty_list_index(x: float) -> float:
+    a = np.array([0.0, 1.0])
+    a[[]][0] = x  # an IndexError on the host: an empty list selects no elements, unlike the empty tuple
+    return float(a[0])
+
+
+def _store_through_an_empty_subscript_of_an_element(x: float) -> float:
+    a = np.array([0.0, 1.0])
+    index = ()
+    a[0][index] = x  # a TypeError on the host: an element is a scalar, which takes no item assignment
+    return float(a[0])
+
+
+def _store_through_a_tuple_subscript_of_a_sequence(x: float) -> float:
+    rows = (np.array([0.0, 1.0]),)
+    rows[0, 1] = x  # type: ignore[index]  # a TypeError on the host: a tuple's index is one int, not a pair
+    return float(rows[0][1])
+
+
+def test_a_tuple_subscript_stores_into_an_array_alone() -> None:
+    for fn in [
+        _IndexesItself().step,
+        _store_through_an_empty_subscript_of_a_sequence,
+        _store_through_an_empty_list_index,
+        _store_through_an_empty_subscript_of_an_element,
+        _store_through_a_tuple_subscript_of_a_sequence,
+    ]:
+        _rejects(fn)

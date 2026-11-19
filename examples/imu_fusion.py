@@ -173,26 +173,36 @@ def main() -> None:
     wide = holoso.FloatFormat(wexp=8, wman=36)
     configs = [
         holoso.Options(
-            holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(stage_input=1, stage_output=1),
-                fmul=holoso.FMulOptions(stage_input=1, stage_pack=1),
-                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1),
-                fmul_ilog2=holoso.FMulILog2Options(stage_input=1),
-                filog2=holoso.FILog2Options(),
-                fcmp=holoso.FCmpOptions(),
+            operator=holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
+                fdivsqrt=holoso.FDivsqrtOptions(
+                    stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                ),
+                fmul_ilog2=holoso.FMulILog2Options(
+                    stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+                ),
+                filog2=holoso.FILog2Options(stage_input=0, stage_output=1),
+                fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
             ),
             ffmt=narrow,
+            wmultiplier=18,
         ),
         holoso.Options(
-            holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(stage_input=1, stage_normalize=1, stage_output=1),
-                fmul=holoso.FMulOptions(stage_input=1, stage_product=2, stage_pack=1, stage_output=1),
-                fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_decode=1, stage_pack=1, stage_output=1),
-                fmul_ilog2=holoso.FMulILog2Options(stage_input=1, stage_decode=1),
-                filog2=holoso.FILog2Options(),
-                fcmp=holoso.FCmpOptions(stage_input=1),
+            operator=holoso.OperatorOptions(
+                fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
+                fdivsqrt=holoso.FDivsqrtOptions(
+                    stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                ),
+                fmul_ilog2=holoso.FMulILog2Options(
+                    stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+                ),
+                filog2=holoso.FILog2Options(stage_input=0, stage_output=1),
+                fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
             ),
             ffmt=wide,
+            wmultiplier=18,
         ),
     ]
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem

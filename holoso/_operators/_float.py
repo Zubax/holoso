@@ -1,29 +1,26 @@
 """
-The float operators and primitives. Every operator's timing and parameters come from the external ZKF library, and
-every primitive's reference arithmetic from its value model. An operator whose format parameterizes it is a float one
-whatever else it touches, so the casts across the type boundary live here too.
+The float operators and primitives. Every operator is a ZKF block configured from its options, which answers its
+timing and evaluates every primitive running on it. An operator whose format parameterizes it is a float one whatever
+else it touches, so the casts across the type boundary live here too.
 """
 
 from abc import ABC
-from collections.abc import Callable
-from dataclasses import dataclass, fields
-from enum import IntEnum
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import ClassVar, Self
 
 import zkf
 
-from .._util import Relation
 from .._value import FloatValue, IntValue, RoundMode, ScalarValue
-from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType
+from .._type import BoolType, FloatFormat, FloatType, IntFormat, IntType, ScalarType
 from ._common import (
     BaseOperatorOptions,
-    BoolInversion,
     ComparatorPrimitive,
     HardwareOperator,
     InlinePrimitive,
-    ModePort,
-    OperatorMode,
-    OperatorPort,
+    agreed,
+    float_operand,
+    int_operand,
     PooledPrimitive,
     ScalarSignature,
 )
@@ -37,182 +34,144 @@ _ROUND_LABEL: dict[RoundMode, str] = {
 """Rendered into the report and the ROM comments, so it is pinned here rather than taken from zkf's member names."""
 
 
-def _knobs(options: BaseOperatorOptions) -> dict[str, int]:
-    """Options name their knobs as the ZKF model does; the instance budget is the machine's, not the core's."""
-    return {f.name: getattr(options, f.name) for f in fields(options) if f.name != "instances"}
+def _floats(fmt: FloatFormat, *names: str) -> dict[str, ScalarType]:
+    return {name: FloatType(fmt) for name in names}
 
 
-def _floats(fmt: FloatFormat, *names: str) -> tuple[OperatorPort, ...]:
-    return tuple(OperatorPort(name, FloatType(fmt)) for name in names)
-
-
-def _timing(name: str, model: zkf.OperatorModel) -> zkf.Timing:
-    """
-    The model's single timing, which a mode port selecting only the arithmetic leaves undivided. ZKF reads a zero
-    `LATENCY` as "do not check", so a combinational core is refused rather than elaborated with its latency unverified.
-    """
-    timing = model.timing
-    assert isinstance(timing, zkf.Timing), model.module
-    assert timing.latency == model.params["LATENCY"], model.module
-    if timing.latency < 1:
-        raise ValueError(f"{name} needs at least one register stage (an operator must have latency >= 1)")
-    return timing
-
-
-def _zkf_operator[O: HardwareOperator](
-    cls: type[O],
-    model: zkf.OperatorModel,
-    options: BaseOperatorOptions,
-    operands: tuple[OperatorPort, ...],
-    outputs: tuple[OperatorPort, ...],
-) -> O:
-    """An operator with a single timing, taken from its model; reading the parameters loads a format's tables."""
-    interval = _timing(cls.name, model).initiation_interval
-    return cls.of_one_mode(model.params, options.instances, operands, outputs, interval)
-
-
-def _format(fmt: FloatFormat) -> zkf.ZkfFormat:
-    return zkf.ZkfFormat(fmt.wexp, fmt.wman)
-
-
-@dataclass(frozen=True, slots=True)
-class FloatPrimitive(PooledPrimitive, ABC):
-    """Float operands throughout, which is what makes the narrowed operand validator below sound."""
-
-    def _validated_operands(self, operands: tuple[ScalarValue, ...]) -> tuple[FloatValue, ...]:
-        validated: list[FloatValue] = []
-        for operand in super()._validated_operands(operands):
-            assert isinstance(operand, FloatValue)
-            validated.append(operand)
-        return tuple(validated)
-
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FAddOptions(BaseOperatorOptions):
-    stage_input: int = 0  # takes any count of input register stages (extra stages relieve routing congestion)
-    stage_decode: int = 0
-    stage_align: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    """The knobs of `zkf.Add`."""
+
+    CoreStages = zkf.Add.CoreStages
+
+    stage_input: int
+    stage_core: zkf.Add.CoreStages
+    stage_output: int
 
 
-class FAddOperator(HardwareOperator):
+class FAddOperator(HardwareOperator[zkf.Add]):
     __slots__ = ()
     name = "fadd"
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FAddOptions) -> Self:
-        model = zkf.AddModel(_format(fmt), **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b"), _floats(fmt, "y"))
+        block = zkf.Add(
+            fmt=fmt,
+            stage_input=options.stage_input,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+        )
+        return cls(block, options.instances, _floats(fmt, "a", "b"), _floats(fmt, "y"))
 
 
 @dataclass(frozen=True, slots=True)
-class FAddPrimitive(FloatPrimitive):
+class FAddPrimitive(PooledPrimitive[zkf.Add]):
     operator: FAddOperator
-    swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # signed sum: a+b == b+a bit-for-bit
+    _commutative: ClassVar[bool] = True  # signed sum: a+b == b+a bit-for-bit
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands)
-        return (a + b,)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Add)
+        a, b = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a, b)
 
     def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}+{b}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FMulOptions(BaseOperatorOptions):
-    stage_input: int = 0
-    stage_product: int = 0  # splitting the product is rarely useful unless wman exceeds the DSP slice input width
-    stage_pack: int = 0
-    stage_output: int = 0
+    """The knobs of `zkf.Mul`."""
+
+    stage_input: int
+    stage_core_mul: int
+    stage_output: int
+    mul_attrs: zkf.Attrs = field(default_factory=dict)
 
 
-class FMulOperator(HardwareOperator):
+class FMulOperator(HardwareOperator[zkf.Mul]):
     __slots__ = ()
     name = "fmul"
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FMulOptions, wmultiplier: int) -> Self:
-        model = zkf.MulModel(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b"), _floats(fmt, "y"))
+        block = zkf.Mul(
+            fmt=fmt,
+            wmultiplier=wmultiplier,
+            stage_input=options.stage_input,
+            stage_core_mul=options.stage_core_mul,
+            stage_output=options.stage_output,
+            mul_attrs=options.mul_attrs,
+        )
+        return cls(block, options.instances, _floats(fmt, "a", "b"), _floats(fmt, "y"))
 
 
 @dataclass(frozen=True, slots=True)
-class FMulPrimitive(FloatPrimitive):
+class FMulPrimitive(PooledPrimitive[zkf.Mul]):
     operator: FMulOperator
-    swap_output_permutation: ClassVar[tuple[int, ...]] = (0,)  # product: a*b == b*a bit-for-bit
+    _commutative: ClassVar[bool] = True  # product: a*b == b*a bit-for-bit
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands)
-        return (a * b,)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Mul)
+        a, b = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a, b)
 
     def render(self, *operands: str) -> str:
         a, b = operands
         return f"{a}×{b}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FDivsqrtOptions(BaseOperatorOptions):
-    stage_input: int = 0
-    stage_decode: int = 0  # takes effect at an even wman only
-    stage_pack: int = 0
-    stage_output: int = 0
+    """The knobs of `zkf.Divsqrt`."""
+
+    CoreStages = zkf.Divsqrt.CoreStages
+
+    stage_input: int
+    stage_core: zkf.Divsqrt.CoreStages
+    stage_output: int
+    fast: bool
 
 
-class DivsqrtMode(IntEnum):
-    """The value driven on `op_sqrt`, which is also the `MODE` elaborating the core for that operation alone."""
-
-    DIVISION = 0
-    SQRT = 1
-
-    @property
-    def operand_count(self) -> int:
-        return 2 if self is DivsqrtMode.DIVISION else 1
-
-
-class FDivsqrtOperator(HardwareOperator):
+class FDivsqrtOperator(HardwareOperator[zkf.Divsqrt]):
     """
     One digit-recurrence pipeline serving the quotient `a / b` and the square root of `a`, chosen per firing on
-    `op_sqrt`, at one latency. `error` reports a zero divisor in the first and a negative operand in the second.
+    `op_sqrt`, at one latency. `error` reports a zero divisor in the first and a negative operand in the second. An
+    instance running one of them alone is built for it alone, without the other's datapath.
     """
 
     __slots__ = ()
     name = "fdivsqrt"
-    mode_port = ModePort("op_sqrt", 1)
     error_ports = ("error",)
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FDivsqrtOptions) -> Self:
-        model = zkf.DivsqrtModel(_format(fmt), **_knobs(options))
-        timing = _timing(cls.name, model)
-        modes: list[OperatorMode] = []
-        single_mode_params: dict[OperatorMode, dict[str, int]] = {}
-        for mode in DivsqrtMode:
-            operator_mode = OperatorMode(int(mode), "LATENCY", timing.initiation_interval, mode.operand_count, (0,))
-            modes.append(operator_mode)
-            fixed = zkf.DivsqrtModel(_format(fmt), mode=int(mode), **_knobs(options))
-            assert fixed.timing == timing, "a fixed mode must keep its timing, which the schedule was built on"
-            single_mode_params[operator_mode] = fixed.params
-        ports = _floats(fmt, "a", "b"), _floats(fmt, "y")
-        return cls(model.params, options.instances, *ports, tuple(modes), single_mode_params)
+        block = zkf.Divsqrt(
+            fmt=fmt,
+            stage_input=options.stage_input,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+            fast=options.fast,
+        )
+        return cls(block, options.instances, _floats(fmt, "a", "b"), _floats(fmt, "y"))
 
-    def mode_of_divsqrt(self, mode: DivsqrtMode) -> OperatorMode:
-        return self.mode_of(int(mode))
+    def instance_block(self, primitives: frozenset[PooledPrimitive]) -> zkf.Divsqrt:
+        op_sqrt = agreed(primitives, "op_sqrt", bool)
+        return self.block if op_sqrt is None else self.block.specialized(op_sqrt=op_sqrt)
 
 
 @dataclass(frozen=True, slots=True)
-class FDivPrimitive(FloatPrimitive):
+class FDivPrimitive(PooledPrimitive[zkf.Divsqrt]):
     operator: FDivsqrtOperator
+    immediates: ClassVar[Mapping[str, int]] = {"op_sqrt": False}
 
-    @property
-    def mode(self) -> OperatorMode:
-        return self.operator.mode_of_divsqrt(DivsqrtMode.DIVISION)
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        a, b = self._validated_operands(operands)
-        return (a / b,)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Divsqrt)
+        a, b = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(self.immediates["op_sqrt"], a, b).y
 
     def render(self, *operands: str) -> str:
         a, b = operands
@@ -220,298 +179,310 @@ class FDivPrimitive(FloatPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class FSqrtPrimitive(FloatPrimitive):
+class FSqrtPrimitive(PooledPrimitive[zkf.Divsqrt]):
     """Correctly-rounded square root; a negative operand yields -inf and raises `error`."""
 
     operator: FDivsqrtOperator
+    immediates: ClassVar[Mapping[str, int]] = {"op_sqrt": True}
 
-    @property
-    def mode(self) -> OperatorMode:
-        return self.operator.mode_of_divsqrt(DivsqrtMode.SQRT)
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands)
-        return (a.sqrt(),)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Divsqrt)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(self.immediates["op_sqrt"], a, FloatValue(a.fmt, 0)).y
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"√{a}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FILog2Options(BaseOperatorOptions):
-    stage_input: int = 0
+    """The knobs of `zkf.Ilog2`."""
+
+    stage_input: int
+    stage_output: int
 
 
-class FILog2Operator(HardwareOperator):
+class FILog2Operator(HardwareOperator[zkf.Ilog2]):
     __slots__ = ()
     name = "filog2"
-    operands_without_sideband = frozenset({0})
 
     @classmethod
     def build(cls, fmt: FloatFormat, ifmt: IntFormat, options: FILog2Options) -> Self:
-        model = zkf.Ilog2Model(_format(fmt), wint=ifmt.width, **_knobs(options))
-        outputs = (OperatorPort("y", IntType(ifmt)),)
-        return _zkf_operator(cls, model, options, _floats(fmt, "a"), outputs)
+        block = zkf.Ilog2(
+            fmt=fmt,
+            wint=ifmt.width,
+            stage_input=options.stage_input,
+            stage_output=options.stage_output,
+        )
+        return cls(block, options.instances, _floats(fmt, "a"), {"y": IntType(ifmt)})
 
 
 @dataclass(frozen=True, slots=True)
-class FILog2Primitive(PooledPrimitive):
+class FILog2Primitive(PooledPrimitive[zkf.Ilog2]):
     """
     The extraction half of the exponent pair, `FMulILog2Primitive` being the scaling half: the two compose with no
-    arithmetic between them, sharing the binade convention `FloatValue.ilog2` states. Sign-invariant: the operand's
+    arithmetic between them, sharing ZKF's binade convention (the unbiased exponent, `-bias` for zero and `bias+1` for
+    an infinity, so an extremum over the answer needs no special case for them). Sign-invariant: the operand's
     conditioner reaches no logic at all, sign conditioning rewriting only the bit the exponent field does not read.
     """
 
     operator: FILog2Operator
     unconditioned_operands: ClassVar[frozenset[int]] = frozenset({0})
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[IntValue, ...]:
-        (a,) = self._validated_operands(operands)
-        assert isinstance(a, FloatValue)
-        (result,) = self.signature.result_types
-        assert isinstance(result, IntType)
-        return (IntValue.from_int(result.fmt, a.ilog2()),)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> IntValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Ilog2)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return self._int_result(block.evaluate(a).y)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"ilog2({a})"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FMulILog2Options(BaseOperatorOptions):
-    stage_input: int = 0
-    stage_decode: int = 0
+    """The knobs of `zkf.MulIlog2`."""
+
+    CoreStages = zkf.MulIlog2.CoreStages
+
+    stage_input: int
+    stage_core: zkf.MulIlog2.CoreStages
+    stage_output: int
 
 
-class FMulILog2Operator(HardwareOperator):
+class FMulILog2Operator(HardwareOperator[zkf.MulIlog2]):
     __slots__ = ()
     name = "fmul_ilog2"
 
     @classmethod
     def build(cls, fmt: FloatFormat, ifmt: IntFormat, options: FMulILog2Options) -> Self:
-        model = zkf.MulIlog2Model(_format(fmt), wk=ifmt.width, **_knobs(options))
-        # The wrapper sizes the exponent port by the machine's integer format, so it spells the core's WK as WINT.
-        params = {("WINT" if name == "WK" else name): value for name, value in model.params.items()}
-        operands = (OperatorPort("a", FloatType(fmt)), OperatorPort("k", IntType(ifmt)))
-        outputs = _floats(fmt, "y")
-        interval = _timing(cls.name, model).initiation_interval
-        return cls.of_one_mode(params, options.instances, operands, outputs, interval)
+        block = zkf.MulIlog2(
+            fmt=fmt,
+            wk=ifmt.width,
+            stage_input=options.stage_input,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+        )
+        return cls(block, options.instances, {"a": FloatType(fmt), "k": IntType(ifmt)}, _floats(fmt, "y"))
 
 
 @dataclass(frozen=True, slots=True)
-class FMulILog2Primitive(PooledPrimitive):
+class FMulILog2Primitive(PooledPrimitive[zkf.MulIlog2]):
     """Exact scaling by a power of two: `a * 2**k`; every `k` is legal."""
 
     operator: FMulILog2Operator
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.MulIlog2)
         a, k = self._validated_operands(operands)
-        assert isinstance(a, FloatValue) and isinstance(k, IntValue)
-        return (a.scale_pow2(k.value),)
+        return block.evaluate(float_operand(a), int_operand(k))
 
     def render(self, *operands: str) -> str:
         a, k = operands
         return f"{a}×2^{k}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FCmpOptions(BaseOperatorOptions):
     """
-    The comparator runs every float relation, min and max, one firing per cycle, so a kernel issuing several of them at
-    once shortens by raising `instances`. The zkf core is combinational, hence the nonzero default: an operator needs
-    latency >= 1.
+    The knobs of `zkf.Cmp`. The comparator runs every float relation, min and max, one firing per cycle, so a kernel
+    issuing several of them at once shortens by raising `instances`.
     """
 
-    stage_input: int = 0
-    stage_output: int = 1
+    stage_input: int
+    stage_output: int
 
 
-class FCmpOperator(HardwareOperator):
-    """
-    The comparator, which orders its operands on the flags and answers them sorted beside. A comparison reads the
-    flags alone; a sort reads the sorted pair and the flags, so a comparison of the operands a min or max already
-    orders taps that firing. Firings of both contend for the one comparator.
-    """
+class FCmpOperator(HardwareOperator[zkf.Cmp]):
+    """The comparator, which orders its operands on the flags and answers them sorted beside."""
 
     __slots__ = ()
     name = "fcmp"
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FCmpOptions) -> Self:
-        model = zkf.CmpModel(_format(fmt), **_knobs(options))
-        interval = _timing(cls.name, model).initiation_interval
-        flag = BoolType()
-        flags = (OperatorPort("a_gt_b", flag), OperatorPort("a_eq_b", flag), OperatorPort("a_lt_b", flag))
-        comparison = OperatorMode(None, "LATENCY", interval, 2, (0, 1, 2))
-        sorting = OperatorMode(None, "LATENCY", interval, 2, (3, 4, 0, 1, 2))
-        outputs = (*flags, *_floats(fmt, "min", "max"))
-        return cls(model.params, options.instances, _floats(fmt, "a", "b"), outputs, (comparison, sorting))
-
-    @property
-    def comparison(self) -> OperatorMode:
-        return self.modes[0]
-
-    @property
-    def sorting(self) -> OperatorMode:
-        return self.modes[1]
+        block = zkf.Cmp(fmt=fmt, stage_input=options.stage_input, stage_output=options.stage_output)
+        flags: dict[str, ScalarType] = {"a_gt_b": BoolType(), "a_eq_b": BoolType(), "a_lt_b": BoolType()}
+        return cls(block, options.instances, _floats(fmt, "a", "b"), {**flags, **_floats(fmt, "min", "max")})
 
 
 @dataclass(frozen=True, slots=True)
-class FCmpPrimitive(FloatPrimitive, ComparatorPrimitive):
-    """ZKF has no NaN, so the ordering is total."""
+class FCmpPrimitive(ComparatorPrimitive[zkf.Cmp]):
+    """
+    An ordering of the sign-conditioned operands, beside the comparator's ascending `min` and `max` of them. ZKF has
+    no NaN, so the ordering is total.
+    """
 
     operator: FCmpOperator
 
-    @property
-    def mode(self) -> OperatorMode:
-        return self.operator.comparison
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
-        a, b = self._validated_operands(operands)
-        ordering = a.compare(b)
-        return ordering > 0, ordering == 0, ordering < 0
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> bool:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Cmp)
+        a, b = map(float_operand, self._validated_operands(operands))
+        result = block.evaluate(a, b)
+        return self._flag(result.a_gt_b, result.a_eq_b, result.a_lt_b)
 
 
 @dataclass(frozen=True, slots=True)
-class FSortPrimitive(FloatPrimitive):
+class FMinPrimitive(PooledPrimitive[zkf.Cmp]):
     """
-    The ascending `(min, max)` of the sign-conditioned operands, `min(a,b)` result 0 and `max(a,b)` result 1, so a min
-    and a max over one operand pair fuse into a single firing. The order flags of the operands leave beside them, so a
-    comparison of the same two operands taps this firing instead of taking one of its own.
-    NOT commutative: min/max preserve the selected operand's exact bits, and on a tie the comparator answers the second
-    operand as the min and the first as the max, so swapping operands can flip the sign of a zero result (a -0
-    conditioned from a zero magnitude).
+    The comparator's `min`, which keeps the selected operand's exact bits: on a tie it answers the second operand, so
+    exchanging the operands can flip the sign of a zero, and it has no mirror.
     """
 
     operator: FCmpOperator
-    output_labels: ClassVar[tuple[str, ...]] = ("min", "max")
+    output_name: ClassVar[str] = "min"
 
-    @property
-    def mode(self) -> OperatorMode:
-        return self.operator.sorting
-
-    def flag_of(self, relation: Relation) -> tuple[int, BoolInversion]:
-        """The result carrying `relation`, and the inversion reading it: the comparison's tap, found by its port."""
-        tap, inversion = FCmpPrimitive.tap_of(relation)
-        return self.mode.outputs.index(self.operator.comparison.outputs[tap]), inversion
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue | bool, ...]:
-        a, b = self._validated_operands(operands)
-        ordering = a.compare(b)
-        return *FloatValue.sort(a, b), ordering > 0, ordering == 0, ordering < 0
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Cmp)
+        a, b = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a, b).min
 
     def render(self, *operands: str) -> str:
         a, b = operands
-        return f"sort({a},{b})"
-
-    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
-        if inversion is None:
-            return super().render_output(result, inversion, *operands)
-        tap = self.operator.comparison.outputs.index(self.mode.outputs[result])
-        return FCmpPrimitive(self.operator).render_output(tap, inversion, *operands)
+        return f"min({a},{b})"
 
 
 @dataclass(frozen=True, slots=True)
+class FMaxPrimitive(PooledPrimitive[zkf.Cmp]):
+    """The comparator's `max`, which answers the first operand on a tie; see `FMinPrimitive`."""
+
+    operator: FCmpOperator
+    output_name: ClassVar[str] = "max"
+
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Cmp)
+        a, b = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a, b).max
+
+    def render(self, *operands: str) -> str:
+        a, b = operands
+        return f"max({a},{b})"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FRintOptions(BaseOperatorOptions):
-    """The zkf core is combinational, hence the nonzero default: an operator needs latency >= 1."""
+    """The knobs of `zkf.Rint`."""
 
-    stage_input: int = 0
-    stage_shift: int = 1
-    stage_round: int = 0
-    stage_output: int = 0
+    CoreStages = zkf.Rint.CoreStages
+
+    stage_input: int
+    stage_core: zkf.Rint.CoreStages
+    stage_output: int
 
 
-class FRintOperator(HardwareOperator):
+class FRintOperator(HardwareOperator[zkf.Rint]):
     """
     Rounds a float to an integer and answers it twice at once, as a float of the same format and as a signed integer.
-    The rounding is one mode, selected on the `round_mode` port by its own encoding.
+    The rounding is selected on the `round_mode` port by its own encoding.
     """
 
     __slots__ = ()
     name = "frint"
-    mode_port = ModePort("round_mode", 2)
 
     @classmethod
     def build(cls, fmt: FloatFormat, ifmt: IntFormat, options: FRintOptions) -> Self:
-        model = zkf.RintModel(_format(fmt), wint=ifmt.width, **_knobs(options))
-        # Every rounding runs at one timing: the mode selects the arithmetic, not the pipeline.
-        interval = _timing(cls.name, model).initiation_interval
-        modes = tuple(OperatorMode(int(mode), "LATENCY", interval, 1, (0, 1)) for mode in RoundMode)
-        outputs = (OperatorPort("y_float", FloatType(fmt)), OperatorPort("y_int", IntType(ifmt)))
-        return cls(model.params, options.instances, _floats(fmt, "a"), outputs, modes)
+        block = zkf.Rint(
+            fmt=fmt,
+            wint=ifmt.width,
+            stage_input=options.stage_input,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+        )
+        return cls(block, options.instances, _floats(fmt, "a"), {"y_float": FloatType(fmt), "y_int": IntType(ifmt)})
 
-    def mode_of_rounding(self, rounding: RoundMode) -> OperatorMode:
-        return self.mode_of(int(rounding))
+    def instance_block(self, primitives: frozenset[PooledPrimitive]) -> zkf.Rint:
+        round_mode = agreed(primitives, "round_mode", RoundMode)
+        return self.block if round_mode is None else self.block.specialized(round_mode=round_mode)
 
 
 @dataclass(frozen=True, slots=True)
-class FRintPrimitive(FloatPrimitive):
+class FRintPrimitive(PooledPrimitive[zkf.Rint]):
     """
-    One rounding of a float (nearest-even, floor, ceil or trunc), answered as an integral-valued float (result 0) and
-    as a signed integer saturating at the rails, an infinity reaching one of them (result 1). A float use and an
-    integer use of one rounding of one operand therefore fuse into a single firing.
+    One rounding of a float (nearest-even, floor, ceil or trunc) as an integral-valued float. The rounder answers the
+    same rounding as a signed integer beside it (`FRintToIntPrimitive`), so a float use and an integer use of one
+    rounding of one operand are one firing.
     """
 
     operator: FRintOperator
     rounding: RoundMode
+    output_name: ClassVar[str] = "y_float"
 
     @property
-    def mode(self) -> OperatorMode:
-        return self.operator.mode_of_rounding(self.rounding)
+    def immediates(self) -> Mapping[str, int]:
+        return {"round_mode": self.rounding}
 
-    _EVAL: ClassVar[dict[RoundMode, Callable[[FloatValue], FloatValue]]] = {
-        RoundMode.NEAREST_EVEN: FloatValue.round,
-        RoundMode.FLOOR: FloatValue.floor,
-        RoundMode.CEIL: FloatValue.ceil,
-        RoundMode.TRUNC: FloatValue.trunc,
-    }
-    _EVAL_INT: ClassVar[dict[RoundMode, Callable[[FloatValue, IntFormat], IntValue]]] = {
-        RoundMode.NEAREST_EVEN: FloatValue.round_int,
-        RoundMode.FLOOR: FloatValue.floor_int,
-        RoundMode.CEIL: FloatValue.ceil_int,
-        RoundMode.TRUNC: FloatValue.trunc_int,
-    }
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, IntValue]:
-        (a,) = self._validated_operands(operands)
-        integer = self.signature.result_types[1]
-        assert isinstance(integer, IntType)
-        return self._EVAL[self.rounding](a), self._EVAL_INT[self.rounding](a, integer.fmt)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Rint)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a, self.rounding).y_float
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"{_ROUND_LABEL[self.rounding]}({a})"
 
-    def render_output(self, result: int, inversion: BoolInversion | None, *operands: str) -> str:
-        assert inversion is None
-        text = self.render(*operands)
-        return f"i{text}" if result == 1 else text
-
 
 @dataclass(frozen=True, slots=True)
+class FRintToIntPrimitive(PooledPrimitive[zkf.Rint]):
+    """One rounding of a float as a signed integer saturating at the rails, an infinity reaching one of them."""
+
+    operator: FRintOperator
+    rounding: RoundMode
+    output_name: ClassVar[str] = "y_int"
+
+    @property
+    def immediates(self) -> Mapping[str, int]:
+        return {"round_mode": self.rounding}
+
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> IntValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Rint)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return self._int_result(block.evaluate(a, self.rounding).y_int)
+
+    def render(self, *operands: str) -> str:
+        (a,) = operands
+        return f"i{_ROUND_LABEL[self.rounding]}({a})"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FFmaOptions(BaseOperatorOptions):
-    stage_input: int = 0
-    stage_product: int = 0
-    stage_decode: int = 0
-    stage_align: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    """The knobs of `zkf.Fma`; `stage_core_add` takes `FAddOptions.CoreStages`."""
+
+    stage_input: int
+    stage_core_mul: int
+    stage_core_add: zkf.Add.CoreStages
+    stage_output: int
+    mul_attrs: zkf.Attrs = field(default_factory=dict)
 
 
-class FFmaOperator(HardwareOperator):
+class FFmaOperator(HardwareOperator[zkf.Fma]):
     __slots__ = ()
     name = "ffma"
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FFmaOptions, wmultiplier: int) -> Self:
-        model = zkf.FmaModel(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a", "b", "c"), _floats(fmt, "y"))
+        block = zkf.Fma(
+            fmt=fmt,
+            wmultiplier=wmultiplier,
+            stage_input=options.stage_input,
+            stage_core_mul=options.stage_core_mul,
+            stage_core_add=options.stage_core_add,
+            stage_output=options.stage_output,
+            mul_attrs=options.mul_attrs,
+        )
+        return cls(block, options.instances, _floats(fmt, "a", "b", "c"), _floats(fmt, "y"))
 
 
 @dataclass(frozen=True, slots=True)
-class FFmaPrimitive(FloatPrimitive):
+class FFmaPrimitive(PooledPrimitive[zkf.Fma]):
     """
     Fused multiply-add `a*b + c`, single-rounded (full-width product rounded once with `c`). Not commutative under
     operand reversal (gives `c*b+a`).
@@ -519,190 +490,225 @@ class FFmaPrimitive(FloatPrimitive):
 
     operator: FFmaOperator
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        a, b, c = self._validated_operands(operands)
-        return (FloatValue.fma(a, b, c),)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Fma)
+        a, b, c = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a, b, c)
 
     def render(self, *operands: str) -> str:
         a, b, c = operands
         return f"{a}×{b}+{c}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FExp2Options(BaseOperatorOptions):
-    """
-    The four product knobs stage the parallel products of the table kernel, whose latency is that of its longest
-    branch: a stage on a shorter one costs no cycle. `zkf_exp2.v` says which product each stages.
-    """
+    """The knobs of `zkf.Exp2`."""
 
-    stage_input: int = 0
-    stage_reduce: int = 0
-    stage_product: int = 0
-    stage_product_square: int = 0
-    stage_product_odd: int = 0  # takes effect from a 27-bit significand up
-    stage_product_chain: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    CoreStages = zkf.Exp2.CoreStages
+
+    stage_input: int
+    stage_core_kernel_level: int
+    stage_core: zkf.Exp2.CoreStages
+    stage_output: int
+    fast: bool
+    rom_attrs: zkf.Attrs = field(default_factory=dict)
+    mul_attrs: zkf.Attrs = field(default_factory=dict)
 
 
-class FExp2Operator(HardwareOperator):
+class FExp2Operator(HardwareOperator[zkf.Exp2]):
     __slots__ = ()
     name = "fexp2"
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FExp2Options, wmultiplier: int) -> Self:
-        model = zkf.Exp2Model(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
-        return _zkf_operator(cls, model, options, _floats(fmt, "a"), _floats(fmt, "y"))
+        block = zkf.Exp2(
+            fmt=fmt,
+            wmultiplier=wmultiplier,
+            stage_input=options.stage_input,
+            stage_core_kernel_level=options.stage_core_kernel_level,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+            fast=options.fast,
+            rom_attrs=options.rom_attrs,
+            mul_attrs=options.mul_attrs,
+        )
+        return cls(block, options.instances, _floats(fmt, "x"), _floats(fmt, "y"))
 
 
 @dataclass(frozen=True, slots=True)
-class FExp2Primitive(FloatPrimitive):
+class FExp2Primitive(PooledPrimitive[zkf.Exp2]):
     operator: FExp2Operator
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands)
-        return (a.exp2(),)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Exp2)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a)
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"2^{a}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FLog2Options(BaseOperatorOptions):
-    """The product knobs are those of `FExp2Options`; `stage_product_final` stages the multiply after the kernel."""
+    """The knobs of `zkf.Log2`."""
 
-    stage_input: int = 0
-    stage_product: int = 0
-    stage_product_square: int = 0
-    stage_product_odd: int = 0  # takes effect from a 27-bit significand up
-    stage_product_chain: int = 0
-    stage_align: int = 0
-    stage_product_final: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    CoreStages = zkf.Log2.CoreStages
+
+    stage_input: int
+    stage_core_kernel_level: int
+    stage_core_mul: int
+    stage_core: zkf.Log2.CoreStages
+    stage_output: int
+    fast: bool
+    rom_attrs: zkf.Attrs = field(default_factory=dict)
+    mul_attrs: zkf.Attrs = field(default_factory=dict)
 
 
-class FLog2Operator(HardwareOperator):
+class FLog2Operator(HardwareOperator[zkf.Log2]):
     __slots__ = ()
     name = "flog2"
     error_ports = ("domain_error", "pole")
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FLog2Options, wmultiplier: int) -> Self:
-        model = zkf.Log2Model(_format(fmt), wmultiplier=wmultiplier, **_knobs(options))
-        ports = _floats(fmt, "a"), _floats(fmt, "y")
-        return _zkf_operator(cls, model, options, *ports)
+        block = zkf.Log2(
+            fmt=fmt,
+            wmultiplier=wmultiplier,
+            stage_input=options.stage_input,
+            stage_core_kernel_level=options.stage_core_kernel_level,
+            stage_core_mul=options.stage_core_mul,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+            fast=options.fast,
+            rom_attrs=options.rom_attrs,
+            mul_attrs=options.mul_attrs,
+        )
+        return cls(block, options.instances, _floats(fmt, "x"), _floats(fmt, "y"))
 
 
 @dataclass(frozen=True, slots=True)
-class FLog2Primitive(FloatPrimitive):
+class FLog2Primitive(PooledPrimitive[zkf.Log2]):
     operator: FLog2Operator
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands)
-        return (a.log2(),)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Log2)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(a).y
 
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"log2({a})"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FCordicOptions(BaseOperatorOptions):
-    """A nearby hypot over the operands of an atan2 folds into the vectoring magnitude for free."""
-
-    unroll100: int = 100
-    stage_input: int = 0
-    stage_product: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
-
-
-class CordicMode(IntEnum):
     """
-    The value driven on `vectoring`, which is also how ZKF keys each mode's timing; the member name spells the mode's
-    latency parameter.
+    The knobs of `zkf.Cordic`. A nearby hypot over the operands of an atan2 folds into the vectoring magnitude for free.
     """
 
-    ROTATION = 0
-    VECTORING = 1
+    CoreStages = zkf.Cordic.CoreStages
 
-    @property
-    def operand_count(self) -> int:
-        """Rotation reads the phase alone, vectoring `(y, x)`."""
-        return 1 if self is CordicMode.ROTATION else 2
+    stage_input: int
+    stage_core_mul: int
+    stage_core: zkf.Cordic.CoreStages
+    stage_output: int
+    fast: bool
+    rotation_seed: int = 2
+    rom_attrs: zkf.Attrs = field(default_factory=dict)
+    mul_attrs: zkf.Attrs = field(default_factory=dict)
 
 
-class FCordicOperator(HardwareOperator):
+class FCordicOperator(HardwareOperator[zkf.Cordic]):
     """
-    The CORDIC core, its mode chosen per firing on `vectoring`: rotation reads a phase in turns and yields its sine and
-    cosine, vectoring reads `(y, x)` and yields their angle in turns and their magnitude. NOT throughput-1: the core
-    holds one transaction in flight and re-accepts one cycle after retiring, as each mode's ZKF timing states.
+    The CORDIC core, rotating or vectoring as each firing drives `vectoring`: a rotation reads a phase in turns and
+    yields its sine and cosine, a vectoring reads `(y, x)` and yields their angle in turns, and their magnitude where a
+    primitive asks for it. ZKF times the two by the value of `vectoring`. NOT throughput-1: the core holds one
+    transaction in flight at either timing, which is also what keeps the results of the two, each at its own latency,
+    leaving an instance in issue order. An instance is built for the drives its primitives make, and with the magnitude
+    only where one of them asks for it.
     """
 
     __slots__ = ()
     name = "fcordic"
-    mode_port = ModePort("vectoring", 1)
 
     @classmethod
     def build(cls, fmt: FloatFormat, options: FCordicOptions, wmultiplier: int) -> Self:
-        knobs = _knobs(options)
-        model = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, **knobs)
-        timing = model.timing
-        assert not isinstance(timing, zkf.Timing) and set(timing) == set(CordicMode)
-        # The wrapper carries the knobs the options offer; one the core has beside them stays at the core's default.
-        unoffered = {f.name.upper() for f in fields(model)} - {name.upper() for name in knobs} - {"WMULTIPLIER", "MODE"}
-        modes: list[OperatorMode] = []
-        single_mode_params: dict[OperatorMode, dict[str, int]] = {}
-        for mode in CordicMode:
-            latency_param = f"LATENCY_{mode.name}"
-            assert timing[mode].latency == model.params[latency_param]
-            interval = timing[mode].initiation_interval
-            operator_mode = OperatorMode(int(mode), latency_param, interval, mode.operand_count, (0, 1))
-            modes.append(operator_mode)
-            fixed = zkf.CordicModel(_format(fmt), wmultiplier=wmultiplier, mode=int(mode), **knobs)
-            assert fixed.timing == timing[mode], "a fixed mode must keep its timing, which the schedule was built on"
-            single_mode_params[operator_mode] = {k: v for k, v in fixed.params.items() if k not in unoffered}
-        params = {k: v for k, v in model.params.items() if k not in unoffered}
-        ports = _floats(fmt, "a", "b"), _floats(fmt, "r0", "r1")
-        return cls(params, options.instances, *ports, tuple(modes), single_mode_params)
+        block = zkf.Cordic(
+            fmt=fmt,
+            wmultiplier=wmultiplier,
+            stage_input=options.stage_input,
+            stage_core_mul=options.stage_core_mul,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+            fast=options.fast,
+            rotation_seed=options.rotation_seed,
+            rom_attrs=options.rom_attrs,
+            mul_attrs=options.mul_attrs,
+        )
+        return cls(block, options.instances, _floats(fmt, "a", "b"), _floats(fmt, "r0", "r1"))
 
-    def mode_of_cordic(self, mode: CordicMode) -> OperatorMode:
-        return self.mode_of(int(mode))
+    def instance_block(self, primitives: frozenset[PooledPrimitive]) -> zkf.Cordic:
+        # ZKF's `specialized` starts from the default on every call, so the one call carries both knobs: the magnitude
+        # is built where some primitive answers it, rotating, vectoring or both.
+        length = any(isinstance(primitive, FHypotPrimitive) for primitive in primitives)
+        return self.block.specialized(vectoring=agreed(primitives, "vectoring", bool), length=length)
 
 
 @dataclass(frozen=True, slots=True)
-class FSincosPrimitive(FloatPrimitive):
+class FSinPrimitive(PooledPrimitive[zkf.Cordic]):
+    """The sine of a phase in turns, the rotation's `r0`."""
+
     operator: FCordicOperator
-    output_labels: ClassVar[tuple[str, ...]] = ("sin", "cos")
+    immediates: ClassVar[Mapping[str, int]] = {"vectoring": False}
+    output_name: ClassVar[str] = "r0"
 
-    @property
-    def mode(self) -> OperatorMode:
-        return self.operator.mode_of_cordic(CordicMode.ROTATION)
-
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands)
-        return a.sincos()
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Cordic)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(self.immediates["vectoring"], a, FloatValue(a.fmt, 0)).r0
 
     def render(self, *operands: str) -> str:
         (a,) = operands
-        return f"sincos({a})"
+        return f"sin({a})"
 
 
 @dataclass(frozen=True, slots=True)
-class FAtan2Primitive(FloatPrimitive):
+class FCosPrimitive(PooledPrimitive[zkf.Cordic]):
+    """The cosine of a phase in turns, the rotation's `r1`."""
+
     operator: FCordicOperator
-    output_labels: ClassVar[tuple[str, ...]] = ("theta", "mag")
+    immediates: ClassVar[Mapping[str, int]] = {"vectoring": False}
+    output_name: ClassVar[str] = "r1"
 
-    @property
-    def mode(self) -> OperatorMode:
-        return self.operator.mode_of_cordic(CordicMode.VECTORING)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Cordic)
+        (a,) = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(self.immediates["vectoring"], a, FloatValue(a.fmt, 0)).r1
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        y, x = self._validated_operands(operands)
-        return FloatValue.atan2(y, x)
+    def render(self, *operands: str) -> str:
+        (a,) = operands
+        return f"cos({a})"
+
+
+@dataclass(frozen=True, slots=True)
+class FAtan2Primitive(PooledPrimitive[zkf.Cordic]):
+    """The angle of `(y, x)` in turns, the vectoring's `r0`."""
+
+    operator: FCordicOperator
+    immediates: ClassVar[Mapping[str, int]] = {"vectoring": True}
+    output_name: ClassVar[str] = "r0"
+
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Cordic)
+        y, x = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(self.immediates["vectoring"], y, x).r0
 
     def render(self, *operands: str) -> str:
         y, x = operands
@@ -710,17 +716,38 @@ class FAtan2Primitive(FloatPrimitive):
 
 
 @dataclass(frozen=True, slots=True)
-class FloatClassificationPrimitive(InlinePrimitive, ABC):
+class FHypotPrimitive(PooledPrimitive[zkf.Cordic]):
+    """
+    The magnitude of `(y, x)`, the vectoring's `r1`, which an instance builds only where some primitive bound to it
+    answers it. Its operands' signs matter to the angle beside it, so it declines none of them.
+    """
+
+    operator: FCordicOperator
+    immediates: ClassVar[Mapping[str, int]] = {"vectoring": True}
+    output_name: ClassVar[str] = "r1"
+
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.Cordic)
+        y, x = map(float_operand, self._validated_operands(operands))
+        return block.evaluate(self.immediates["vectoring"], y, x).r1
+
+    def render(self, *operands: str) -> str:
+        y, x = operands
+        return f"hypot({y},{x})"
+
+
+@dataclass(frozen=True, slots=True)
+class _FloatClassificationPrimitive(InlinePrimitive, ABC):
     fmt: FloatFormat
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((FloatType(self.fmt),), (BoolType(),))
+        return ScalarSignature((FloatType(self.fmt),), BoolType())
 
 
 @dataclass(frozen=True, slots=True)
-class FloatIsFinitePrimitive(FloatClassificationPrimitive):
-    mnemonic: ClassVar[str] = "fisfinite"
+class FloatIsFinitePrimitive(_FloatClassificationPrimitive):
     # The exponent field alone decides finiteness; the directional classifiers below read the sign and so declare
     # nothing, which is why this sits here rather than on the shared base.
     unconditioned_operands: ClassVar[frozenset[int]] = frozenset({0})
@@ -733,16 +760,14 @@ class FloatIsFinitePrimitive(FloatClassificationPrimitive):
         (a,) = operand_nets
         return f"holoso_fisfinite({a})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> bool:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
-        return (a.fmt.is_finite(a.bits),)
+        return a.is_finite
 
 
 @dataclass(frozen=True, slots=True)
-class FloatIsPosInfPrimitive(FloatClassificationPrimitive):
-    mnemonic: ClassVar[str] = "fisposinf"
-
+class FloatIsPosInfPrimitive(_FloatClassificationPrimitive):
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"isposinf({a})"
@@ -751,16 +776,14 @@ class FloatIsPosInfPrimitive(FloatClassificationPrimitive):
         (a,) = operand_nets
         return f"holoso_fisposinf({a})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> bool:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
-        return (not a.fmt.is_finite(a.bits) and not a.negative,)
+        return a.is_inf and not a.negative
 
 
 @dataclass(frozen=True, slots=True)
-class FloatIsNegInfPrimitive(FloatClassificationPrimitive):
-    mnemonic: ClassVar[str] = "fisneginf"
-
+class FloatIsNegInfPrimitive(_FloatClassificationPrimitive):
     def render(self, *operands: str) -> str:
         (a,) = operands
         return f"isneginf({a})"
@@ -769,21 +792,20 @@ class FloatIsNegInfPrimitive(FloatClassificationPrimitive):
         (a,) = operand_nets
         return f"holoso_fisneginf({a})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> bool:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
-        return (not a.fmt.is_finite(a.bits) and a.negative,)
+        return a.is_inf and a.negative
 
 
 @dataclass(frozen=True, slots=True)
 class FloatToBoolPrimitive(InlinePrimitive):
-    mnemonic: ClassVar[str] = "ftobool"
     unconditioned_operands: ClassVar[frozenset[int]] = frozenset({0})  # a zero test reads the exponent alone
     fmt: FloatFormat
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((FloatType(self.fmt),), (BoolType(),))
+        return ScalarSignature((FloatType(self.fmt),), BoolType())
 
     def render(self, *operands: str) -> str:
         (a,) = operands
@@ -793,20 +815,19 @@ class FloatToBoolPrimitive(InlinePrimitive):
         (a,) = operand_nets
         return f"holoso_ftobool({a})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[bool, ...]:
+    def evaluate(self, *operands: ScalarValue) -> bool:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, FloatValue)
-        return (a.exponent != 0,)
+        return not a.is_zero
 
 
 @dataclass(frozen=True, slots=True)
 class BoolToFloatPrimitive(InlinePrimitive):
-    mnemonic: ClassVar[str] = "ffrombool"
     fmt: FloatFormat
 
     @property
     def signature(self) -> ScalarSignature:
-        return ScalarSignature((BoolType(),), (FloatType(self.fmt),))
+        return ScalarSignature((BoolType(),), FloatType(self.fmt))
 
     def render(self, *operands: str) -> str:
         (a,) = operands
@@ -816,42 +837,50 @@ class BoolToFloatPrimitive(InlinePrimitive):
         (a,) = operand_nets
         return f"holoso_ffrombool({a})"
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
+    def evaluate(self, *operands: ScalarValue) -> FloatValue:
         (a,) = self._validated_operands(operands)
         assert isinstance(a, bool)
-        return (FloatValue.from_float(self.fmt, 1.0 if a else 0.0),)
+        return self.fmt.encode(1.0 if a else 0.0)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FFromIntOptions(BaseOperatorOptions):
-    stage_input: int = 0
-    stage_normalize: int = 0
-    stage_pack: int = 0
-    stage_output: int = 0
+    """The knobs of `zkf.FromInt`."""
+
+    CoreStages = zkf.FromInt.CoreStages
+
+    stage_input: int
+    stage_core: zkf.FromInt.CoreStages
+    stage_output: int
 
 
-class FFromIntOperator(HardwareOperator):
+class FFromIntOperator(HardwareOperator[zkf.FromInt]):
     __slots__ = ()
     name = "ffromint"
 
     @classmethod
     def build(cls, fmt: FloatFormat, ifmt: IntFormat, options: FFromIntOptions) -> Self:
-        model = zkf.FromIntModel(_format(fmt), wint=ifmt.width, **_knobs(options))
-        return _zkf_operator(cls, model, options, (OperatorPort("a", IntType(ifmt)),), _floats(fmt, "y"))
+        block = zkf.FromInt(
+            fmt=fmt,
+            wint=ifmt.width,
+            stage_input=options.stage_input,
+            stage_core=options.stage_core,
+            stage_output=options.stage_output,
+        )
+        return cls(block, options.instances, {"a": IntType(ifmt)}, _floats(fmt, "y"))
 
 
 @dataclass(frozen=True, slots=True)
-class FFromIntPrimitive(PooledPrimitive):
+class FFromIntPrimitive(PooledPrimitive[zkf.FromInt]):
     """Signed integer to float, nearest with ties to even; a magnitude past the finite range becomes an infinity."""
 
     operator: FFromIntOperator
 
-    def evaluate(self, *operands: ScalarValue) -> tuple[FloatValue, ...]:
-        (a,) = self._validated_operands(operands)
-        assert isinstance(a, IntValue)
-        (result,) = self.signature.result_types
-        assert isinstance(result, FloatType)
-        return (a.to_float(result.fmt),)
+    def evaluate(self, *operands: ScalarValue, block: zkf.Block | None = None) -> FloatValue:
+        block = self.operator.block if block is None else block
+        assert isinstance(block, zkf.FromInt)
+        (a,) = map(int_operand, self._validated_operands(operands))
+        return block.evaluate(a)
 
     def render(self, *operands: str) -> str:
         (a,) = operands

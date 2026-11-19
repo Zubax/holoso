@@ -18,7 +18,8 @@ from holoso._operators import BoolInversion, FloatSignControl, IntIdentity, Sele
 from holoso._type import BoolType, IntType
 from holoso._value import IntValue
 
-from ._modelref import default_options
+from ._modelref import default_options, instantiated_modules
+from . import _options as lean
 
 FMT = FloatFormat(6, 18)
 
@@ -67,11 +68,11 @@ def test_select_carries_an_integer_scalar_type_through_its_signature(width: int)
     fmt = ty.fmt
     signature = SelectPrimitive(ty).signature
     assert signature.operand_types == (BoolType(), ty, ty)
-    assert signature.result_types == (ty,)
+    assert signature.result_type == ty
 
     arms = (IntValue.from_int(fmt, fmt.max), IntValue.from_int(fmt, fmt.min))
-    assert SelectPrimitive(ty).evaluate(True, *arms) == (arms[0],)
-    assert SelectPrimitive(ty).evaluate(False, *arms) == (arms[1],)
+    assert SelectPrimitive(ty).evaluate(True, *arms) == arms[0]
+    assert SelectPrimitive(ty).evaluate(False, *arms) == arms[1]
 
 
 @pytest.mark.parametrize("width", (2, 17, 33))
@@ -83,7 +84,7 @@ def test_integer_ports_condition_with_the_identity_and_nothing_else(width: int) 
     assert IntIdentity().is_identity
     assert IntIdentity().decorate("r3") == "r3"
 
-    operation = MirOperation(SelectPrimitive(ty), (0, 1, 2), (BoolInversion(), IntIdentity(), IntIdentity()), 0, None)
+    operation = MirOperation(SelectPrimitive(ty), (0, 1, 2), (BoolInversion(), IntIdentity(), IntIdentity()), None)
     assert operation.scalar_type == ty
 
     # The phi path matters separately: it is what the wide-bank allocator narrows when lowering a merge into
@@ -211,16 +212,14 @@ def test_the_second_derivation_reshapes_the_graph_under_the_word_it_settled_on()
     options = dataclasses.replace(default_options(FMT), wint_min=16)  # the count lies inside [16, 24)
     result = holoso.synthesize(_shift_past_the_narrow_word, options, name="ShiftFoldsLate")
     assert result.int_format == IntFormat(16)
-    assert "holoso_ishft" not in result.verilog_output.verilog, "the count is past the settled word, so it folded"
+    assert "ishft" not in instantiated_modules(result), "the count is past the settled word, so it folded"
     (out,) = result.numerical_model.elaborate().run(3)
     assert isinstance(out, IntValue) and int(out) == 0
 
 
 def test_a_narrowing_that_does_not_settle_keeps_the_widest_word() -> None:
     """No fixpoint need exist, so the loop is bounded and falls back rather than failing on a legal kernel."""
-    operator = dataclasses.replace(
-        default_options(FMT).operator, ffromint=holoso.FFromIntOptions(), frint=holoso.FRintOptions()
-    )
+    operator = dataclasses.replace(default_options(FMT).operator, ffromint=lean.ffromint(), frint=lean.frint())
     options = dataclasses.replace(default_options(FMT), operator=operator, wint_min=16)
     result = holoso.synthesize(_float_arm_behind_a_shift, options, name="Oscillates")
     assert result.int_format == IntFormat(24), "the widest word every family fits stands where narrowing will not"

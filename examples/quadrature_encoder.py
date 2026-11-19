@@ -35,7 +35,8 @@ class QuadratureEncoder:
 
 
 def main() -> None:
-    options = holoso.Options(holoso.OperatorOptions())  # purely boolean: no float operator, no float format
+    # Purely boolean: no float operator, no float format.
+    options = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(QuadratureEncoder().__call__, options)
     for filename, path in result.write(out_dir).items():

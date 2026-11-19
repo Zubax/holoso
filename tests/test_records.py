@@ -6,6 +6,7 @@ the one white-box test covers extraction sharing that field-read sharing masks f
 """
 
 import dataclasses
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
@@ -15,11 +16,12 @@ import pytest
 from jaxtyping import Float64
 
 import holoso
-from holoso import FFromIntOptions, FloatFormat, UnsupportedConstruct
+from holoso import FloatFormat, UnsupportedConstruct
 
 from holoso._eel import lower
 
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS, default_options
+from . import _options as lean
 
 _FMT = FloatFormat(11, 52)
 
@@ -148,7 +150,7 @@ def test_a_property_of_a_record_is_read_as_the_host_reads_it() -> None:
         return word.si * gain + word.doubled.si
 
     base = default_options(_FMT)
-    options = dataclasses.replace(base, operator=dataclasses.replace(base.operator, ffromint=FFromIntOptions()))
+    options = dataclasses.replace(base, operator=dataclasses.replace(base.operator, ffromint=lean.ffromint()))
     sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
     (got,) = sim.run(37, 0.5)
     assert float(got) == kernel(Word(37), 0.5)
@@ -159,7 +161,7 @@ def test_record_construction_conforms_int_into_a_float_field() -> None:
         return Kinematics(pos=n, vel=n + 1, accel=0.5)
 
     base = default_options(_FMT)
-    options = dataclasses.replace(base, operator=dataclasses.replace(base.operator, ffromint=FFromIntOptions()))
+    options = dataclasses.replace(base, operator=dataclasses.replace(base.operator, ffromint=lean.ffromint()))
     sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
     assert [float(v) for v in sim.run(3)] == [3.0, 4.0, 0.5]
 
@@ -570,3 +572,192 @@ def test_void_callee_with_a_record_annotation_is_refused() -> None:
 
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(Machine().step, default_options(_FMT), name="kernel")
+
+
+@dataclass(frozen=True)
+class _Level:
+    raw: float
+    scale: float
+
+    def __float__(self) -> float:
+        return self.raw * self.scale
+
+    def __bool__(self) -> bool:
+        return self.raw != 0.0
+
+
+class _Trim:
+    def __init__(self) -> None:
+        self.offset = 0.25
+
+    def __float__(self) -> float:
+        return self.offset * 2.0
+
+    def __bool__(self) -> bool:
+        return self.offset > 1.0
+
+
+_TRIM = _Trim()
+
+
+def test_a_record_and_a_captured_object_answer_every_cast_through_its_own_method() -> None:
+    def kernel(level: _Level, x: float) -> tuple[float, bool, float, bool]:
+        return float(level) * x, bool(level), float(_TRIM) + x, bool(_TRIM)
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    for raw, scale, x in ((3.0, 0.5, 2.0), (0.0, 4.0, -1.5), (-7.0, 0.125, 0.25)):
+        scaled, nonzero, trimmed, above = sim.run(raw, scale, x)
+        want = kernel(_Level(raw, scale), x)
+        assert (float(scaled), nonzero, float(trimmed), above) == want, (raw, scale, x)
+
+    def float_of_a_record_without_the_method(kin: Kinematics) -> float:
+        return float(kin)  # type: ignore[arg-type]
+
+    def bool_of_a_record_without_the_method(kin: Kinematics) -> bool:
+        return bool(kin)  # the host answers True; only the class's own `__bool__` is followed
+
+    _refused(float_of_a_record_without_the_method)
+    _refused(bool_of_a_record_without_the_method)
+
+
+@dataclass(frozen=True)
+class _Status:
+    flags: int
+
+    def __bool__(self):  # type: ignore[no-untyped-def]
+        return self.flags & 1  # an int: Python raises TypeError
+
+    def __float__(self):  # type: ignore[no-untyped-def]
+        return self.flags  # an int: Python raises TypeError
+
+
+@dataclass(frozen=True)
+class _Flag:
+    on: bool
+
+    def __int__(self):  # type: ignore[no-untyped-def]
+        return self.on  # a bool, which Python takes as an int
+
+
+def test_an_int_cast_method_may_answer_a_bool() -> None:
+    def count(flag: _Flag) -> int:
+        return int(flag)
+
+    sim = _synth(count).numerical_model.elaborate()
+    for on in (False, True):
+        assert int(sim.run(on)[0]) == int(on)  # what the host answers, without its deprecation warning
+
+
+def test_a_cast_method_answering_the_wrong_type_is_refused() -> None:
+    def ready(status: _Status) -> bool:
+        return bool(status)
+
+    def level(status: _Status) -> float:
+        return float(status)
+
+    _refused(ready)
+    _refused(level)
+
+
+@dataclass(frozen=True)
+class _Empty:
+    GAIN: ClassVar[float] = 2.5
+    bias = 0.5
+
+    @property
+    def twice(self) -> float:
+        return 2.0 * self.GAIN
+
+
+@dataclass(frozen=True)
+class _HoldsEmpties:
+    e: _Empty
+    k: float
+    u: tuple[()]
+
+
+def test_empty_tuple_and_field_less_record_parameters_decompose_to_no_ports() -> None:
+    def kernel(u: tuple[()], x: float, e: _Empty, h: _HoldsEmpties) -> float:
+        acc = x * e.GAIN + e.bias + e.twice + h.k + h.e.bias
+        for _ in (*u, *h.u):
+            acc = acc + 1.0
+        return acc + float(len(u) + len(h.u))
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    assert [p.name for p in sim.inputs] == ["x", "h_k"]
+    for x, k in ((2.0, 3.0), (-1.5, 0.25)):
+        (got,) = sim.run(x, k)
+        assert float(got) == kernel((), x, _Empty(), _HoldsEmpties(_Empty(), k, ()))
+
+
+def test_a_kernel_whose_parameters_are_all_empty_has_no_input_ports() -> None:
+    def kernel(u: tuple[()], e: _Empty) -> float:
+        return e.GAIN + float(len(u))
+
+    sim = _synth(kernel).numerical_model.elaborate()
+    assert sim.inputs == []
+    (got,) = sim.run()
+    assert float(got) == kernel((), _Empty())
+
+
+def test_an_empty_parameter_joins_and_is_still_not_returned() -> None:
+    def joined(u: tuple[()], e: _Empty, c: bool, x: float) -> float:
+        chosen = u if c else ()
+        record = e if c else _Empty()
+        return x * record.bias + float(len(chosen))
+
+    def returned_tuple(u: tuple[()], x: float) -> tuple[()]:
+        return u
+
+    def returned_record(e: _Empty, x: float) -> _Empty:
+        return e
+
+    def indexed(u: tuple[()], x: float) -> float:
+        return u[0] * x  # type: ignore[misc, no-any-return]
+
+    sim = _synth(joined).numerical_model.elaborate()
+    assert [p.name for p in sim.inputs] == ["c", "x"]
+    for c, x in ((True, 1.0), (False, 2.0)):
+        (got,) = sim.run(c, x)
+        assert float(got) == joined((), _Empty(), c, x)
+    for fn in (returned_tuple, returned_record, indexed):
+        _refused(fn)
+
+
+def test_a_bare_tuple_parameter_is_not_an_empty_one() -> None:
+    def kernel(values: typing.Tuple) -> int:  # type: ignore[type-arg]
+        return len(values)
+
+    _refused(kernel)
+
+
+@dataclass(frozen=True)
+class _ReadOverride:
+    x: float
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "x":
+            return 2.0 * object.__getattribute__(self, "x")
+        return object.__getattribute__(self, name)
+
+
+@dataclass(frozen=True)
+class _NewSetsState:
+    k: float
+    scale = 1.0
+
+    def __new__(cls, k: float) -> "_NewSetsState":
+        made = object.__new__(cls)
+        object.__setattr__(made, "scale", 3.0)
+        return made
+
+
+def test_a_record_class_running_host_code_on_reads_or_in_new_is_refused() -> None:
+    def read_override(r: _ReadOverride) -> float:
+        return r.x
+
+    def new_sets_state(r: _NewSetsState, x: float) -> float:
+        return r.scale * x + r.k
+
+    _refused(read_override)
+    _refused(new_sets_state)

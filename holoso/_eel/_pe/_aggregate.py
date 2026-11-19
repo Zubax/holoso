@@ -128,14 +128,13 @@ def index_read(origin: Origin, base: Value, axis: ResolvedAxis) -> Value:
 
 
 def multi_index_read(origin: Origin, base: Value, axes: tuple[ResolvedAxis, ...]) -> Value:
-    """The `m[i, j]` / `m[:, k]` / `m[a:b, c:d]` read, one resolved axis per dimension."""
+    """The `m[i, j]` / `m[:, k]` / `m[a:b, c:d]` read; a trailing axis the subscript leaves out is taken whole."""
     if not isinstance(base, TensorValue):
         reject(origin, f"too many indices: a multi-axis subscript works only on an array, not {a_kind(base)}")
-    if len(axes) != len(base.shape):
-        reject(
-            origin, f"a multi-axis subscript must name every axis: the array is {len(base.shape)}-D, got {len(axes)}"
-        )
-    return _tensor_read(origin, base, axes)
+    rank = len(base.shape)
+    if len(axes) > rank:
+        reject(origin, f"too many indices for an array: the array is {rank}-D, got {len(axes)}")
+    return _tensor_read(origin, base, (*axes, *[(None, None)] * (rank - len(axes))))
 
 
 def axis_position(origin: Origin, index: Value, dim: int) -> int:

@@ -157,7 +157,17 @@ class IndexSel:
     index: Atom
 
 
-type Selector = AttrSel | IndexSel
+@dataclass(frozen=True, slots=True)
+class AxesSel:
+    """
+    A tuple subscript `m[i, j]`: one index per array axis, in source order, so it subscripts an array alone. The empty
+    `m[()]` is the whole array, which the subscripts after it narrow.
+    """
+
+    indexes: tuple[Atom, ...]
+
+
+type Selector = AttrSel | IndexSel | AxesSel
 
 type SlotPath = tuple[str | int, ...]
 
@@ -235,9 +245,9 @@ class IndexRead:
 @dataclass(frozen=True, slots=True)
 class MultiIndexRead:
     """
-    A tuple subscript `m[i, j]` / `m[:, k]`: one selector per axis, in source order. Tensor-only — the
+    A tuple subscript `m[i, j]` / `m[:, k]` / `m[i,]`: one selector per named axis, in source order. Tensor-only — the
     partial evaluator rejects it on sequences. Stores never use this form: slice assignment is banned, and a
-    pure-index tuple store rides one IndexSel per axis.
+    tuple store rides one AxesSel.
     """
 
     origin: Origin

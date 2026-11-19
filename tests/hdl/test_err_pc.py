@@ -17,24 +17,14 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FMulILog2Options,
-    FMulOptions,
-    FloatFormat,
-    OperatorOptions,
-    Options,
-)
-from holoso._operators import FDivPrimitive
+from holoso import FloatFormat, OperatorOptions, Options
 from holoso._backend.verilog import generate
 from holoso._eel import lower
-from holoso._lir._ir import pooled_write_word
 from holoso._mir import MirOptions, lower as lower_to_mir
 
-from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
+from .hdl_float_oracle import REPO_ROOT, SIMULATORS, build_args, drive_reset, start_clock
 from .._modelref import build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from .. import _options as lean
 
 FMT = FloatFormat(6, 18)
 
@@ -42,14 +32,15 @@ FMT = FloatFormat(6, 18)
 def _ops(stage_output: int) -> MirOptions:
     return mir_options(
         Options(
-            OperatorOptions(
-                fadd=FAddOptions(),
-                fmul=FMulOptions(),
-                fdivsqrt=FDivsqrtOptions(stage_output=stage_output),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
+            operator=OperatorOptions(
+                fadd=lean.fadd(),
+                fmul=lean.fmul(),
+                fdivsqrt=lean.fdivsqrt(stage_output=stage_output),
+                fmul_ilog2=lean.fmul_ilog2(),
+                fcmp=lean.fcmp(),
             ),
             ffmt=FMT,
+            wmultiplier=18,
         )
     )
 
@@ -66,7 +57,7 @@ async def _settle(dut: Any) -> None:
 @cocotb.test()
 async def err_pc_latches_div0(dut: Any) -> None:
     err_step = int(json.loads(os.environ["HOLOSO_ERRCYC"])["err_step"])
-    a_bits = FMT.encode(1.0)
+    a_bits = FMT.encode(1.0).bits
 
     await start_clock(dut)
     await drive_reset(dut)
@@ -76,7 +67,7 @@ async def err_pc_latches_div0(dut: Any) -> None:
         while int(dut.in_ready.value) != 1:
             await _settle(dut)
         dut.in_a.value = a_bits
-        dut.in_b.value = FMT.encode(b)
+        dut.in_b.value = FMT.encode(b).bits
         dut.in_valid.value = 1
         await _settle(dut)
         dut.in_valid.value = 0
@@ -99,22 +90,20 @@ def test_err_pc(sim: str, stage_output: int) -> None:
         lower_to_mir(lower(_divide, DEFAULT_UNROLL_MAX_TRIPS).hir, _ops(stage_output)),
         "divide",
     )
-    # The divider asserts its error at its commit; err_pc latches the write word -- the commit step itself
-    # (pooled_write_word). A divider output stage pushes the commit later, and the err flag and the result still
-    # latch/land together: err_step is recomputed from this build's actual divider commit.
+    # The divider asserts its error at its commit; err_pc latches the write word -- the commit step itself. A divider
+    # output stage pushes the commit later, and the err flag and the result still latch/land together, so the expected
+    # step is read off this build's actual divider commit.
     (block,) = lir.blocks
-    commit_cycle = next(op.commit_cycle for op in block.ops if isinstance(op.primitive, FDivPrimitive))
-    err_step = pooled_write_word(commit_cycle)
+    commit_cycle = next(op.commit_cycle for op in block.ops if op.inst.operator.name == "fdivsqrt")
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"divide_w{FMT.wexp}_{FMT.wman}_s{stage_output}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "divide.v"
-    verilog_path.write_text(generate(lir).verilog)
+    verilog_path.write_text(generate(lir, {}).verilog)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"errcyc_divide_w{FMT.wexp}_{FMT.wman}_s{stage_output}"
 
     runner = get_runner(sim)
     runner.build(
-        sources=[verilog_path, *sources()],
-        includes=[HDL_DIR],
+        sources=[verilog_path],
         hdl_toplevel="divide",
         build_args=build_args(sim),
         build_dir=str(build_dir),
@@ -126,6 +115,6 @@ def test_err_pc(sim: str, stage_output: int) -> None:
         test_module="tests.hdl.test_err_pc",
         test_dir=str(REPO_ROOT),
         build_dir=str(build_dir),
-        extra_env={"HOLOSO_ERRCYC": json.dumps({"err_step": err_step})},
+        extra_env={"HOLOSO_ERRCYC": json.dumps({"err_step": commit_cycle})},
         results_xml=str(build_dir / "results.xml"),
     )

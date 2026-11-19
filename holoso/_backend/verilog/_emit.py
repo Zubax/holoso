@@ -1,13 +1,13 @@
 """
-Render a scheduled Lir into a synthesizable Verilog ZISC module that instantiates the shared support library
-(assembled by ._support).
+Render a scheduled Lir into one self-contained Verilog file: the synthesizable ZISC kernel module, written as text,
+followed by the private modules of the blocks its operator instances render, each converted by ZKF and named after the
+kernel so that several kernels, or one kernel under several configurations, coexist in a design.
 
 The controller is a microcode ROM (see ._microcode): one pre-decoded VLIW control word per step, written as a
 synchronous `case` over the fetch PC (the inferable-ROM form every backend recognizes) and read through a 3-stage
 fetch (PC latch, ROM read register, routing register). The executing step lags the fetch PC by FETCH_LAG,
 which the sequencer accounts for: out_valid asserts on a terminator PC whose taken arm exits. The ROM read register's
-declaration carries the `HOLOSO_ATTRIBUTE_ROM` macro only where the flow defines it, so a tool-specific mapping
-attribute can be attached without touching the generated RTL.
+declaration carries the synthesis attributes given for it, such as a tool-specific mapping attribute.
 
 Storage is a sparse, schedule-specific register file emitted inline instead of a general-purpose multiport file. Value
 routing is uniform: each operand port's read mux is a `case` over that port's read codebook (its registers and the
@@ -17,16 +17,20 @@ per-register opcode (code 0 == NOP hold). PC drives only the sequencer; it never
 
 import logging
 from dataclasses import dataclass
+from functools import cache
+from importlib import resources
 from textwrap import dedent
 from typing import assert_never
+
+import zkf
+from amaranth.lib import wiring
 
 from ..._lir import *
 from ..._operators import *
 from ..._type import FloatType, IntType, ScalarType
-from ..._value import FloatValue
+from ..._value import FloatValue, type_of
 from ..._legal import output_header
 from ._microcode import *
-from ._support import inline_support, support_files
 
 _logger = logging.getLogger(__name__)
 
@@ -34,11 +38,34 @@ _logger = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class VerilogOutput:
     verilog: str
-    support_files: dict[str, str]  # filename -> content
+    """The whole design in one file: the kernel module, then the private modules it instantiates."""
 
     def __str__(self) -> str:
-        sup = ",".join(f"{name!r}:{len(text.encode())}" for name, text in self.support_files.items())
-        return f"{type(self).__name__}(verilog_bytes={len(self.verilog.encode())}, support_bytes={{{sup}}})"
+        return f"{type(self).__name__}(verilog_bytes={len(self.verilog.encode())})"
+
+
+@cache
+def _inline_support() -> str:
+    """The helper functions spliced into the kernel module."""
+    return resources.files(__package__).joinpath("holoso_support_inline.vh").read_text(encoding="utf-8").strip()
+
+
+def _attributes(attrs: zkf.Attrs) -> str:
+    """A Verilog attribute instance, a string value quoted and an integer as is."""
+    assert attrs
+    items = ", ".join(
+        f"{name} = {int(value)}" if isinstance(value, int) else f'{name} = "{value}"' for name, value in attrs.items()
+    )
+    return f"(* {items} *)"
+
+
+def private_module(lir: Lir, block: zkf.Block) -> str:
+    """The name of a block's module in this kernel's file: the block's own, under the kernel's prefix."""
+    return f"{_private_prefix(lir)}{block.name}"
+
+
+def _private_prefix(lir: Lir) -> str:
+    return f"_{lir.module_name}_"
 
 
 class _Writer:
@@ -92,7 +119,7 @@ def _wide_width(scalar_type: ScalarType) -> str:
         case IntType():
             return "WINT"
         case _:
-            raise AssertionError(f"{scalar_type} is not a wide port type")
+            assert False, f"{scalar_type} is not a wide port type"
 
 
 def _source_net(source: RegRef | WideConstRef) -> str:
@@ -102,7 +129,7 @@ def _source_net(source: RegRef | WideConstRef) -> str:
 def _bool_operand_rhs(operand: BoolOperand) -> str:
     source = operand.source
     if isinstance(source, BoolConstRef):
-        return "1'b1" if source.value else "1'b0"  # an inverted immediate folded at construction
+        return "1'b1" if source.value else "1'b0"  # an inverted constant folded at construction
     net = f"bregs[{source.index}]"
     return f"~{net}" if operand.inversion.invert else net
 
@@ -114,8 +141,8 @@ class _WideRenderer:
     (an integer fills the register exactly, a boolean has its own bank), so a float view narrows to WFLT and a float
     write spells the high bits `1'bx` -- don't-care beats a materialized zero fill on Diamond LSE and is measured
     neutral on Vivado and Yosys, which sweep the dead bits under either spelling (DESIGN.md, Fabric-area exploration).
-    Engages only at gap > 0: a zero replication count would be illegal Verilog, and a kernel whose word is narrower
-    than the float format -- which one carrying no float may be -- has no float to render in the first place.
+    Engages only at gap > 0, where there are high bits to fill; a kernel whose word is narrower than the float format
+    -- which one carrying no float may be -- has no float to render in the first place.
     """
 
     gap: int
@@ -167,17 +194,16 @@ class _WideRenderer:
         """One write-codebook source as the RHS for `dst` -- the dual of the microcode's structured source key."""
         match source:
             case OpWriteSource(inst=inst, port=port, inversion=inversion):
-                net = f"{_sig(inst)}_y{port}"
+                net = f"{_sig(inst)}_{port}"
                 if inversion is not None:
                     return inversion.decorate(net)
-                result_type = inst.operator.output_ports[port].scalar_type
+                result_type = inst.operator.output_ports[port]
                 return self._fill_float(net) if isinstance(result_type, FloatType) else net
             case InlineWriteSource(primitive=primitive, operands=operands, inversion=inversion):
                 expr = self._inline_rhs(primitive, operands, inversion)
                 if isinstance(dst, BoolRegRef):
                     return expr
-                assert len(primitive.signature.result_types) == 1
-                result_type = primitive.signature.result_types[0]
+                result_type = primitive.signature.result_type
                 return self._fill_float(expr) if isinstance(result_type, FloatType) else expr
             case MoveWriteSource(operand=operand):
                 assert isinstance(operand, WideOperand) == isinstance(dst, RegRef)
@@ -203,11 +229,15 @@ class _WideRenderer:
     def reset_literal(self, slot: WideStateSlot) -> str:
         """The reset snapshot in the slot's own family width; a float image gets the don't-care high bits."""
         value = slot.reset_value
-        literal = f"{value.fmt.width}'h{value.bits:0{(value.fmt.width + 3) // 4}x}"
+        literal = _hex_literal(type_of(value).width, value.bits)
         return self._fill_float(literal) if isinstance(value, FloatValue) else literal
 
 
-def generate(lir: Lir) -> VerilogOutput:
+def _hex_literal(width: int, bits: int) -> str:
+    return f"{width}'h{bits:0{(width + 3) // 4}x}"
+
+
+def generate(lir: Lir, ucode_rom_attrs: zkf.Attrs) -> VerilogOutput:
     assert lir.fetch_lag == 2, "only the 3-stage control fetch is implemented"
     w = _Writer()
     cycw = lir.cyc_width
@@ -229,14 +259,14 @@ def generate(lir: Lir) -> VerilogOutput:
 
     depth = lir.last_pc + 1  # one microcode word per fetch PC (0..last_pc); inter-block drains and the tail pack to NOP
 
-    renderer = _WideRenderer(gap=lir.wide_register_width - lir.float_format.width)
+    renderer = _WideRenderer(gap=lir.wide_register_width - lir.float_format.wfull)
 
     _emit_header(w, lir)
     _emit_localparams(w, lir, cycw, pcw, ucw)
     _emit_inline_support(w)
     _emit_declarations(w, lir, tapped)
     _emit_consts(w, lir)
-    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle, landings)
+    _emit_microcode_rom(w, fields, ucw, depth, issues_by_cycle, commits_by_cycle, landings, ucode_rom_attrs)
     _emit_field_wires(w, fields)
     _emit_operators(w, lir, tapped)
     _emit_datapath_comb(w, lir, write_books)
@@ -244,7 +274,17 @@ def generate(lir: Lir) -> VerilogOutput:
     _emit_clocked(w, lir, write_books, renderer)
     _emit_outputs(w, lir, renderer)
     w("\nendmodule\n")
-    return VerilogOutput(verilog=w.render(), support_files=support_files())
+    return VerilogOutput(verilog=w.render() + _private_modules(lir))
+
+
+def _private_modules(lir: Lir) -> str:
+    """Every distinct block an instance renders, once, in the order the instances first name it."""
+    blocks = {block.name: block for block in lir.instances.values()}
+    texts: list[str] = []
+    for block in blocks.values():
+        _logger.info("Rendering %s", private_module(lir, block))
+        texts.append(block.compile(prefix=_private_prefix(lir)))
+    return "".join(f"\n{text.strip()}\n" for text in texts)
 
 
 def _emit_header(w: _Writer, lir: Lir) -> None:
@@ -259,7 +299,7 @@ def _emit_header(w: _Writer, lir: Lir) -> None:
         "",
     )
     w(f"""
-// Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.width} bits.
+// Float format: exponent {fmt.wexp} bits, significand {fmt.wman} bits, total {fmt.wfull} bits.
 module {lir.module_name} (
 """)
     w.push()
@@ -302,7 +342,7 @@ def _emit_port_group(w: _Writer, title: str, comment: str) -> None:
 
 def _emit_localparams(w: _Writer, lir: Lir, cycw: int, pcw: int, ucw: int) -> None:
     fmt, ifmt, wreg = lir.float_format, lir.int_format, lir.wide_register_width
-    nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
+    nreg, nbreg = lir.wide_register_count, lir.bool_register_count
     fetch_lag = lir.fetch_lag
     fetch_stages = fetch_lag + 1
     w(f"""
@@ -322,16 +362,16 @@ localparam           NBREG     ={nbreg:4};  // boolean register count
     # Cross-check the ZKF +1.0 formula against the codec at build time. This is the contract holoso_ffrombool's
     # concatenation implements (bias exponent at the fraction MSb, zero sign/fraction); a format whose codec disagreed
     # with it would be caught here rather than miscompiling.
-    assert (((1 << (fmt.wexp - 1)) - 1) << (fmt.wman - 1)) == fmt.encode(1.0)
+    assert (((1 << (fmt.wexp - 1)) - 1) << (fmt.wman - 1)) == fmt.encode(1.0).bits
     w("")
 
 
 def _emit_inline_support(w: _Writer) -> None:
-    w(inline_support())
+    w(_inline_support())
     w("")
 
 
-def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, int]]) -> None:
+def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, str]]) -> None:
     assert lir.fetch_lag >= 1, "transacting_q is [FETCH_LAG-1:0]; FETCH_LAG==0 needs an explicit leading NOP"
     w("""
     reg  [PCW-1:0]  pc;            // fetch program counter; the executing step lags it by FETCH_LAG
@@ -347,73 +387,81 @@ def _emit_declarations(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance,
     wire                transacting = transacting_q[FETCH_LAG-1]; // gates the executing word's effects
 """)
     w("")
-    if lir.regfile.nreg:
+    if lir.wide_register_count:
         w("reg  [WREG-1:0] regs  [0:NREG-1];   // read-first: a write is visible next step")
-    if lir.bool_regfile.nreg:
+    if lir.bool_register_count:
         w("reg             bregs [0:NBREG-1];")
     w("")
     for inst in lir.instances:
         sig = _sig(inst)
-        for pos, operand_type in enumerate(port.scalar_type for port in inst.operator.operand_ports):
-            letter = PORT_LETTERS[pos]
-            w(f"reg  [{_wide_width(operand_type)}-1:0] {sig}_{letter};")  # read-mux output, driven in its always @*
-        # One net per TAPPED output port, as wide as its own family or 1 bit for a boolean. The in_valid and
-        # sign-control ports bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
-        for q, result_type in enumerate(port.scalar_type for port in inst.operator.output_ports):
-            if (inst, q) not in tapped:
+        for name in operand_names(lir, inst):
+            # A read mux, driven in its always @*.
+            w(f"reg  [{_wide_width(inst.operator.operand_ports[name])}-1:0] {sig}_{name};")
+        # One net per TAPPED output port, as wide as its own family or 1 bit for a boolean. The in_valid, immediate and
+        # sign inputs bind directly to the decoded uc_* fields, so no s_* control net is declared for them.
+        for name, scalar_type in inst.operator.output_ports.items():
+            if (inst, name) not in tapped:
                 continue  # a never-tapped output port: no nets, the module port is left unconnected
-            if result_type.is_wide:
-                w(f"wire [{_wide_width(result_type)}-1:0] {sig}_y{q};")
+            if scalar_type.is_wide:
+                w(f"wire [{_wide_width(scalar_type)}-1:0] {sig}_{name};")
             else:
-                w(f"wire            {sig}_y{q};")
+                w(f"wire            {sig}_{name};")
         for port in inst.operator.error_ports:
             w(f"wire            {sig}_{port};")
+        if _HANDSHAKE_READY in lir.instances[inst].signature.members:
+            w(f"wire            {sig}_{_HANDSHAKE_READY};")
     w("")
 
 
 def _emit_consts(w: _Writer, lir: Lir) -> None:
     for index, value in enumerate(lir.wide_consts):
-        width = value.fmt.width
-        digits = (width + 3) // 4
-        w(f"wire [WREG-1:0] const_{index} = {width}'h{value.bits:0{digits}x};  // {value!r}")
+        w(f"wire [WREG-1:0] const_{index} = {_hex_literal(type_of(value).width, value.bits)};  // {value}")
     if lir.wide_consts:
         w("")
 
 
-def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, int]]) -> None:
-    for inst in lir.instances:
-        sig, base = _sig(inst), inst.name
-        operator = inst.operator
-        # The operator names its own ports; the nets and microcode fields they connect to stay positional.
-        operands = list(zip(operator.operand_ports, PORT_LETTERS))
-        elaboration = lir.elaboration(inst)
-        if elaboration != operator.params:
-            codes = sorted({str(mode.code) for mode in lir.instance_modes[inst]})
-            _logger.info("Instance %s is elaborated for the modes its firings run alone: %s", base, ", ".join(codes))
-        params = ", ".join(f".{name}({value})" for name, value in elaboration.items())
-        w(f"{operator.module_name} #(", f"    {params}", f") u_{base} (")
-        w.push()
-        w(f".clk(clk), .rst(rst), .in_valid({f_issue(base)}),")
-        if (mode_port := operator.mode_port) is not None:
-            w(f".{mode_port.name}({f_mode(base)}),")
-        for position, (port, letter) in enumerate(operands):
-            if operator.conditions_operand(position):
-                w(f".{port.name}_sgnop({f_osgn(base, letter)}),")
-        for port, letter in operands:
-            w(f".{port.name}({sig}_{letter}),")
-        # out_valid is left unconnected: the static schedule already knows when each result is ready.
-        w(".out_valid(),")
-        outputs = [
-            f".{port.name}({f'{sig}_y{q}' if (inst, q) in tapped else ''})"
-            for q, port in enumerate(operator.output_ports)
+def _emit_operators(w: _Writer, lir: Lir, tapped: set[tuple[OperatorInstance, str]]) -> None:
+    for inst, block in lir.instances.items():
+        connections = ["clk(clk)", "rst(rst)"] if block.clocked else []
+        connections += [
+            f"{name}({_connection(lir, inst, name, member, tapped)})"
+            for name, member in block.signature.members.items()
         ]
-        for line_index, line in enumerate(outputs):
-            last = line_index == len(outputs) - 1 and not operator.error_ports
-            w(line + ("" if last else ","))
-        for port_index, port_name in enumerate(operator.error_ports):
-            w(f".{port_name}({sig}_{port_name})" + ("," if port_index < len(operator.error_ports) - 1 else ""))
+        w(f"{private_module(lir, block)} u_{inst.name} (")
+        w.push()
+        for index, connection in enumerate(connections):
+            w(f".{connection}" + ("," if index < len(connections) - 1 else ""))
         w.pop()
         w(");", "")
+
+
+_HANDSHAKE_READY = "in_ready"
+"""The output a handshake operator drops while it is busy, which the static schedule never needs to read."""
+
+
+def _connection(
+    lir: Lir, inst: OperatorInstance, name: str, member: wiring.Member, tapped: set[tuple[OperatorInstance, str]]
+) -> str:
+    """
+    What drives an instance's input port, or what its output port drives: the operands through their read muxes and
+    sign fields, the issue strobe and the immediate fields off the microcode, a tapped output or an error flag to its
+    net. An output nothing reads, its `out_valid` among them since the schedule knows when each result lands, is
+    unconnected.
+    """
+    operator, sig, base = inst.operator, _sig(inst), inst.name
+    if name in operand_names(lir, inst):
+        net = f"{sig}_{name}"
+        return f"holoso_fsgnop({net}, {f_osgn(base, name)})" if has_sign_control(operator.operand_ports[name]) else net
+    if name in operator.output_ports:
+        return f"{sig}_{name}" if (inst, name) in tapped else ""
+    if name in operator.error_ports or name == _HANDSHAKE_READY:
+        return f"{sig}_{name}"
+    if name == "in_valid" or name in immediate_inputs(lir, inst):
+        return f_input(base, name)
+    if name == "out_ready":
+        return "1'b1"  # the result is captured on its landing step, so the operator is never held
+    assert member.flow == wiring.Out, f"{base}: no driver for input {name!r}"
+    return ""
 
 
 def _emit_microcode_rom(
@@ -424,15 +472,15 @@ def _emit_microcode_rom(
     issues_by_cycle: dict[int, list[PooledScheduledOp]],
     commits_by_cycle: dict[int, list[PooledScheduledOp]],
     landings: dict[int, list[str]],
+    attrs: zkf.Attrs,
 ) -> None:
     digits = (ucw + 3) // 4
     # The mapping attribute belongs on the read register: it is the declaration a synthesizer inspects when it infers
     # the ROM from the clocked `case`.
+    w("", "// Microcode VLIW ROM.")
+    if attrs:
+        w(_attributes(attrs))
     w("""
-// Microcode VLIW ROM.
-`ifdef HOLOSO_ATTRIBUTE_ROM
-`HOLOSO_ATTRIBUTE_ROM
-`endif
 reg [UCW-1:0] ucode_q;  // 2nd fetch stage
 reg [UCW-1:0] ucode_word;  // 3rd fetch stage""")
     packed = sorted((f for f in fields.values() if f.offset >= 0), key=lambda f: f.offset)
@@ -584,8 +632,8 @@ def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> 
     read opcode selecting a register or a constant directly. The last entry is the `default` arm so the case is full
     (no inferred latch on this combinational path); unused high codes fall there too and are don't-cares on idle steps.
     The mux carries no indexed part-select, so there is no offset multiply for synthesis to (mis)infer as a DSP.
-    A port that no firing on its instance reads -- every mode run there reading a shorter operand prefix -- is tied
-    off; its sign field, never written, lifts out of the ROM as the identity.
+    A port that no firing on its instance reads -- the instance's block keeps it, but no primitive run there reads it
+    -- is tied off; its sign field, never written, lifts out of the ROM as the identity.
     """
     if not book.sources:
         w(f"{target} = 0;")
@@ -606,23 +654,23 @@ def _emit_read_case(w: _Writer, target: str, field: str, book: ReadCodebook) -> 
 def _emit_read_muxes(
     w: _Writer,
     lir: Lir,
-    read_books: dict[tuple[OperatorInstance, int], ReadCodebook],
+    read_books: dict[tuple[OperatorInstance, str], ReadCodebook],
 ) -> None:
     """
-    Emit the combinational operand read muxes driving each wrapper directly, so regfile-read -> operator is
+    Emit the combinational operand read muxes driving each operator directly, so regfile-read -> operator is
     combinational and the operand is sampled FETCH_LAG after its read-opcode word. A pure-inline kernel has no pooled
     instances, so this would be empty -- skip it rather than emit a bare `always @* begin end`.
     """
     if not lir.instances:
         return
-    w("// Operand read muxes: a per-port case over the read codebook (registers and constants), driving the wrapper.")
+    w("// Operand read muxes: a per-port case over the read codebook (registers and constants), driving the operator.")
     w("always @* begin")
     w.push()
     for inst in lir.instances:
         sig = _sig(inst)
         base = inst.name
-        for pos in range(len(inst.operator.operand_ports)):
-            _emit_read_case(w, f"{sig}_{PORT_LETTERS[pos]}", f_rd(base, PORT_LETTERS[pos]), read_books[(inst, pos)])
+        for name in operand_names(lir, inst):
+            _emit_read_case(w, f"{sig}_{name}", f_rd(base, name), read_books[(inst, name)])
     w.pop()
     w("end")
     w("")
@@ -664,7 +712,7 @@ def _emit_clocked(
     w: _Writer, lir: Lir, write_books: dict[RegRef | BoolRegRef, WriteCodebook], renderer: _WideRenderer
 ) -> None:
     """Emit every sequential element in one always @(posedge clk): fetch, register writes, and control state."""
-    nreg, nbreg = lir.regfile.nreg, lir.bool_regfile.nreg
+    nreg, nbreg = lir.wide_register_count, lir.bool_register_count
     wide_slots = {slot.reg.index for slot in lir.wide_state_slots}
     bool_slots = {slot.reg.index for slot in lir.bool_state_slots}
     arms = handshake_arms(lir)
@@ -732,6 +780,15 @@ always @(posedge clk) begin
     slots: list[RegRef | BoolRegRef] = [*map(RegRef, sorted(wide_slots)), *map(BoolRegRef, sorted(bool_slots))]
     for dst in slots:
         _emit_reg_write(w, dst, write_books.get(dst), arms.get(dst), renderer)
+    handshaking = [inst for inst in lir.instances if _HANDSHAKE_READY in lir.instances[inst].signature.members]
+    if handshaking:
+        # The static schedule spaces a handshake operator's issues by its initiation interval; issuing while it is
+        # still busy would drop the transaction, and a stale result could still pass every value check.
+        w("`ifdef SIMULATION")
+        for inst in handshaking:
+            w(f"if ({f_input(inst.name, 'in_valid')} && !{_sig(inst)}_{_HANDSHAKE_READY})")
+            w(f'    $fatal(1, "u_{inst.name} over-issued: in_valid while busy");')
+        w("`endif")
     w.pop()
     w("end")
 

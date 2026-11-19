@@ -15,6 +15,7 @@ and operator configs are ordinary, type-checked Python rather than templated sou
 
 import math
 import os
+import re
 import subprocess
 import sys
 from dataclasses import replace
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from . import _options as lean
 
 if TYPE_CHECKING:
     from holoso import SynthesisResult
@@ -94,12 +96,12 @@ def _emit_ekf_two_multipliers() -> None:
     sys.path.insert(0, str(_REPO / "examples"))
     from ekf1_stateless import update_x_P
 
-    from holoso import FloatFormat, FMulOptions, synthesize
+    from holoso import FloatFormat, synthesize
 
     from ._modelref import default_options
 
     options = default_options(FloatFormat(6, 18))
-    options = replace(options, operator=replace(options.operator, fmul=FMulOptions(instances=2)))
+    options = replace(options, operator=replace(options.operator, fmul=lean.fmul(instances=2)))
     _dump(synthesize(update_x_P, options))
 
 
@@ -116,12 +118,12 @@ def _roundings(x: float, y: float) -> tuple[float, float, int, int]:
 
 
 def _emit_roundings_two_instances() -> None:
-    from holoso import FloatFormat, FRintOptions, synthesize
+    from holoso import FloatFormat, synthesize
 
     from ._modelref import default_options, with_instances
 
     options = default_options(FloatFormat(6, 18))
-    options = replace(options, operator=replace(options.operator, frint=FRintOptions()))
+    options = replace(options, operator=replace(options.operator, frint=lean.frint()))
     _dump(synthesize(_roundings, with_instances(options, 2)))
 
 
@@ -176,7 +178,10 @@ def _entry_output_under_seed(entry: str, seed: str) -> str:
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
 def test_verilog_is_byte_identical_across_hash_seeds(other_seed: str) -> None:
-    assert _entry_output_under_seed("_emit_cordic", "0") == _entry_output_under_seed("_emit_cordic", other_seed)
+    reference = _entry_output_under_seed("_emit_cordic", "0")
+    # The kernel's file carries the operators' modules too, so the claim covers the converted operator text.
+    assert re.search(r"^module _\w+_zkf_\w+_[0-9a-f]{12}\(", reference, re.MULTILINE)
+    assert reference == _entry_output_under_seed("_emit_cordic", other_seed)
 
 
 @pytest.mark.parametrize("other_seed", ["3", "31337"])
@@ -209,6 +214,6 @@ def test_counted_loop_lowering_is_byte_identical_across_hash_seeds(other_seed: s
 def test_instance_binding_is_byte_identical_across_hash_seeds(entry: str, other_seed: str) -> None:
     # The allocator's binding and orientation are decided by an annealer whose random number generator is seeded
     # and whose candidate lists are built from dicts and sorted sets, its keys hashing operators by name; a
-    # two-multiplier straight-line kernel, a multi-instance CFG kernel, and several modes of one operator over two
+    # two-multiplier straight-line kernel, a multi-instance CFG kernel, and several primitives of one operator over two
     # instances pin that no hash-ordered structure leaks into the emitted machine.
     assert _entry_output_under_seed(entry, "0") == _entry_output_under_seed(entry, other_seed)

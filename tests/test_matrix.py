@@ -17,23 +17,20 @@ from typing import Any
 
 import numpy as np
 import pytest
+import zkf
 from jaxtyping import Bool, Float, Float64, Int, Int64, Shaped
 
 import holoso
-from holoso import (
-    FFmaOptions,
-    FFromIntOptions,
-    FloatFormat,
-    FRintOptions,
-    UnsupportedConstruct,
-)
+from holoso import FAddOptions, FloatFormat, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._mir import MirOperation, MirOptions, lower as lower_to_mir
-from holoso._operators import FSortPrimitive
+from holoso._operators import FMaxPrimitive, FMinPrimitive
 
 from ._examples import _FUSION_ACCEL_CAL, _FUSION_GYRO_CAL, ImuFusion
 from ._modelref import default_mir, default_options, mir_options, hardware_name, unit_roundoff, DEFAULT_UNROLL_MAX_TRIPS
-from ._public import strip_inline_prelude, strip_locations
+from ._modelref import instantiated_modules
+from ._public import knob_table, strip_inline_prelude, strip_locations
+from . import _options as lean
 
 # Wide enough that the model's arithmetic coincides with float64 up to the final rounding, so kernels can be compared
 # against their own native numpy execution with a tight tolerance.
@@ -118,7 +115,22 @@ def _with_operators(options: holoso.Options, **replacements: Any) -> holoso.Opti
     return dataclasses.replace(options, operator=dataclasses.replace(options.operator, **replacements))
 
 
-_WITH_FFMA = _with_operators(default_options(_FMT), ffma=FFmaOptions())
+_WITH_FFMA = _with_operators(default_options(_FMT), ffma=lean.ffma())
+
+_ADD_STAGES = FAddOptions.CoreStages
+_DEEP = _with_operators(
+    default_options(_FMT),
+    fadd=lean.fadd(stage_core=_ADD_STAGES.DECODE | _ADD_STAGES.ALIGN | _ADD_STAGES.NORMALIZE),
+    fmul=lean.fmul(stage_core_mul=2),
+    iadds=holoso.IAddsOptions(stage_input=1, stage_output=1),
+)
+"""
+Operators several cycles deep, for the log-depth tests: a chain serializes on the latency, which a tree pays only once
+per level; at a latency of one cycle, a lone adder issuing every cycle finishes a chain about as soon as a tree.
+"""
+_DEEP_WITH_FFMA = _with_operators(
+    _DEEP, ffma=lean.ffma(stage_core_mul=2, stage_core_add=_ADD_STAGES.DECODE | _ADD_STAGES.NORMALIZE)
+)
 
 
 def _mnemonic_counts(fn: Callable[..., object], ops: MirOptions) -> dict[str, int]:
@@ -270,8 +282,12 @@ def test_a_dot_product_is_log_deep() -> None:
 
     # Two thirds, not the half a plain sum is held to: without the fused operator the sixteen products still leave
     # one multiplier a cycle apart, which the tree cannot shorten.
-    for options in (_WITH_FFMA, default_options(_FMT)):
-        tree_ii = holoso.synthesize(tree, options, name="tree").initiation_interval[0]
+    for options in (_DEEP_WITH_FFMA, _DEEP):
+        tree_result = holoso.synthesize(tree, options, name="tree")
+        assert "timing: Timing(latency=4, initiation_interval=1)" in knob_table(
+            tree_result.verilog_output.verilog, "u_fadd_0"
+        )
+        tree_ii = tree_result.initiation_interval[0]
         assert tree_ii < holoso.synthesize(chain, options, name="chain").initiation_interval[0] * 2 // 3
 
 
@@ -303,20 +319,18 @@ def test_a_degrading_coefficient_of_a_dot_product_takes_the_scaler_with_ffma() -
     # 1e-10 is below what this format holds, so its exponent moves onto the other factor through the scaler, which is
     # exact, and the product by its significand stays fused; left as one constant, the kernel would be refused.
     fmt = FloatFormat(6, 18)
-    options = _with_operators(default_options(fmt), ffma=FFmaOptions())
+    options = _with_operators(default_options(fmt), ffma=lean.ffma())
     assert _mnemonic_counts(dot, mir_options(options)) == {"fmul_ilog2": 1, "ffma": 2}
     built = holoso.synthesize(dot, options, name="degrading").numerical_model.elaborate()
 
-    def held(x: float) -> holoso.FloatValue:
-        return holoso.FloatValue.from_float(fmt, x)
-
+    fma = zkf.Fma(fmt=fmt, wmultiplier=lean.WMULTIPLIER)
     fraction, exponent = math.frexp(1e-10)
     for v0, v1, v2 in ((1.0, 2.0e9, 3.0), (-0.5, 7.0e10, 0.25)):
-        scaled = held(math.ldexp(float(held(v1)), exponent - 1))
-        inner = holoso.FloatValue.fma(held(2.0 * fraction), scaled, held(v0))
+        scaled = fmt.encode(math.ldexp(float(fmt.encode(v1)), exponent - 1))
+        inner = fma.evaluate(fmt.encode(2.0 * fraction), scaled, fmt.encode(v0))
         (got,) = built.run(v0, v1, v2)
         assert isinstance(got, holoso.FloatValue)
-        assert got.bits == holoso.FloatValue.fma(held(3.0), held(v2), inner).bits, (v0, v1, v2)
+        assert got.bits == fma.evaluate(fmt.encode(3.0), fmt.encode(v2), inner).bits, (v0, v1, v2)
 
 
 def test_a_term_cancels_across_a_constant_dot_product_with_ffma() -> None:
@@ -325,7 +339,7 @@ def test_a_term_cancels_across_a_constant_dot_product_with_ffma() -> None:
 
     # `x[0]` cancels across the dot product and the subtraction, leaving the one product. Left fused, the sum would
     # round `x[0] + 1e-3*x[1]` to the digits of `x[0]` and answer 0.0009765625 here.
-    binary32 = _with_operators(default_options(FloatFormat(8, 24)), ffma=FFmaOptions())
+    binary32 = _with_operators(default_options(FloatFormat(8, 24)), ffma=lean.ffma())
     assert _mnemonic_counts(cancelling, mir_options(binary32)) == {"fmul": 1}
     model = holoso.synthesize(cancelling, binary32, name="cancelling").numerical_model.elaborate()
     assert _run(model, np.array([1000.0, 1.0]))[0] == float(np.float32(1e-3))
@@ -937,7 +951,7 @@ def test_stateful_kalman_style_filter_matches_numpy_across_transactions() -> Non
 
 def _fusion_options(fmt: FloatFormat, ffma: bool) -> holoso.Options:
     options = default_options(fmt)
-    operator = dataclasses.replace(options.operator, ffma=FFmaOptions() if ffma else None)
+    operator = dataclasses.replace(options.operator, ffma=lean.ffma() if ffma else None)
     return dataclasses.replace(options, operator=operator)
 
 
@@ -967,10 +981,7 @@ def test_imu_fusion_example_matches_python(ffma: bool) -> None:
             accel = accel * 4.0  # decisively out of band: the reject arm must track too
         if age == 30:
             rate = np.array([40.0, 0.0, 0.0])  # trips the sticky clip latch for the rest of the run
-        row = [
-            float(fmt.decode(fmt.encode(float(v))))
-            for v in (*(inv_g @ (rate + temp_bias)), *(inv_a @ accel), *cal, 25.0, 0.05)
-        ]
+        row = [float(fmt.encode(float(v))) for v in (*(inv_g @ (rate + temp_bias)), *(inv_a @ accel), *cal, 25.0, 0.05)]
         got = _drive_fusion(model, row)
         want, want_valid = reference.update(
             np.array(row[:3]),
@@ -1124,8 +1135,7 @@ def test_np_trace_and_np_outer() -> None:
 
     result = _synth(tr)
     assert [p.name for p in result.output_ports] == ["out_0"]
-    verilog = result.verilog_output.verilog
-    assert "holoso_fadd #(" in verilog and "holoso_fmul #(" not in verilog  # a sum of the diagonal, no multiplies
+    assert instantiated_modules(result) == {"add"}  # a sum of the diagonal, no multiplies
     m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
     assert _run(result.numerical_model.elaborate(), m)[0] == np.trace(m)
 
@@ -1133,26 +1143,82 @@ def test_np_trace_and_np_outer() -> None:
         return np.outer(u, v)
 
     result_o = _synth(outer)
-    verilog_o = result_o.verilog_output.verilog
-    assert "holoso_fmul #(" in verilog_o and "holoso_fadd #(" not in verilog_o  # products only, no sums
+    assert instantiated_modules(result_o) == {"mul"}  # products only, no sums
     u, w = np.array([1.0, -2.0]), np.array([0.5, 3.0, -1.0])
     assert np.array_equal(_run(result_o.numerical_model.elaborate(), u, w), np.outer(u, w).flatten())
-
-    def rect_trace(m: Float64[np.ndarray, "2 3"]) -> float:
-        return np.trace(m)  # type: ignore[no-any-return]
-
-    # numpy walks the shorter diagonal; Holoso rejects rather than reinterpreting.
-    _refused(rect_trace)
 
     def vec_trace(v: Float64[np.ndarray, "3"]) -> float:
         return np.trace(v)  # type: ignore[no-any-return]
 
     _refused(vec_trace)
 
-    def outer_of_matrix(m: Float64[np.ndarray, "2 2"]) -> Float64[np.ndarray, "2 2"]:
-        return np.outer(m, m)
 
-    _refused(outer_of_matrix)
+def test_a_rectangular_trace_walks_the_diagonal_of_the_shorter_side() -> None:
+    def wide(m: Float64[np.ndarray, "2 3"]) -> float:
+        return np.trace(m) + np.linalg.trace(m)  # type: ignore[no-any-return]
+
+    def tall(m: Float64[np.ndarray, "3 2"]) -> float:
+        return m.trace()  # type: ignore[no-any-return]
+
+    m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    _assert_python_matches_holoso(wide, m)
+    _assert_python_matches_holoso(tall, m.T.copy())
+
+
+def test_np_outer_flattens_its_operands_and_linalg_outer_takes_vectors() -> None:
+    def of_a_matrix(m: Float64[np.ndarray, "2 2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "4 3"]:
+        return np.outer(m, v)
+
+    def into_a_matrix(m: Float64[np.ndarray, "2 2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3 4"]:
+        return np.outer(v, m)
+
+    def of_a_scalar(x: float, v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "1 3"]:
+        return np.outer(x, v)
+
+    def of_two_scalars(x: float, y: float) -> Float64[np.ndarray, "1 1"]:
+        return np.outer(x, y)
+
+    m, v = np.array([[1.0, -2.0], [0.5, 4.0]]), np.array([0.5, 3.0, -1.0])
+    _assert_python_matches_holoso(of_a_matrix, m, v)
+    _assert_python_matches_holoso(into_a_matrix, m, v)
+    _assert_python_matches_holoso(of_a_scalar, 2.5, v)
+    _assert_python_matches_holoso(of_two_scalars, 2.5, -4.0)
+
+    def linalg_of_a_matrix(m: Float64[np.ndarray, "2 2"], v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "4 3"]:
+        return np.linalg.outer(m, v)
+
+    def linalg_of_a_scalar(x: float, v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "1 3"]:
+        return np.linalg.outer(x, v)  # type: ignore[call-overload, no-any-return]
+
+    # The array-API spelling raises on anything but two vectors, on the host as here.
+    _refused(linalg_of_a_matrix)
+    _refused(linalg_of_a_scalar)
+
+
+def test_np_dot_multiplies_by_a_scalar_where_matmul_refuses_one() -> None:
+    def scaled(x: float, v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.dot(x, v) + v.dot(x)  # type: ignore[no-any-return]
+
+    def scaled_matrix(m: Float64[np.ndarray, "2 2"], x: float) -> Float64[np.ndarray, "2 2"]:
+        return np.dot(m, x)  # type: ignore[no-any-return]
+
+    def of_two_scalars(x: float, y: float) -> float:
+        return np.dot(x, y)  # type: ignore[no-any-return]
+
+    def of_two_arrays(m: Float64[np.ndarray, "2 2"], v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+        return np.dot(m, v) + m.dot(v) * np.dot(v, v)  # type: ignore[no-any-return]
+
+    m, v = np.array([[1.0, -2.0], [0.5, 4.0]]), np.array([0.5, 3.0, -1.0])
+    _assert_python_matches_holoso(scaled, 2.5, v)
+    _assert_python_matches_holoso(scaled_matrix, m, -1.5)
+    _assert_python_matches_holoso(of_two_scalars, 2.5, -4.0)
+    _assert_python_matches_holoso(of_two_arrays, m, v[:2].copy())
+    assert instantiated_modules(_synth(scaled)) == {"add", "mul"}  # one product per element, not a dot product
+
+    def matmul_by_a_scalar(x: float, v: Float64[np.ndarray, "3"]) -> Float64[np.ndarray, "3"]:
+        return np.matmul(x, v)  # type: ignore[no-any-return]
+
+    _refused(matmul_by_a_scalar)
 
 
 def test_trace_of_a_1x1_boolean_matrix_is_rejected_like_a_larger_one() -> None:
@@ -1201,7 +1267,8 @@ def test_float_extrema_reductions_across_spellings() -> None:
     # The extrema must reach the comparator's sort, not a compare/select fallback.
     mir = lower_to_mir(lower(extrema, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
     assert any(
-        isinstance(node, MirOperation) and isinstance(node.primitive, FSortPrimitive) for node in mir.nodes.values()
+        isinstance(node, MirOperation) and isinstance(node.primitive, (FMinPrimitive, FMaxPrimitive))
+        for node in mir.nodes.values()
     )
 
 
@@ -1238,7 +1305,7 @@ def test_integer_mean_promotes_before_accumulating() -> None:
     def kernel(a: int, b: int, c: int) -> tuple[float, float]:
         return float(np.mean(np.array([a, b, c]))), float(np.mean(a))
 
-    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    options = _with_operators(default_options(_FMT), ffromint=lean.ffromint())
     sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
     huge = 2**61  # in range of the settled 63-bit word, while 3*huge is not
     got = [float(value) for value in sim.run(huge, huge, huge)]
@@ -1253,7 +1320,8 @@ def test_zero_d_reductions_follow_numpy() -> None:
 
     sim = _synth(kernel).numerical_model.elaborate()
     got = sim.run(2.5, 7, True)
-    assert [float(got[0]), int(got[1]), float(got[2]), float(got[3]), got[4]] == [  # type: ignore[arg-type]
+    assert isinstance(got[1], holoso.IntValue)
+    assert [float(got[0]), int(got[1]), float(got[2]), float(got[3]), got[4]] == [
         2.5,
         7,
         2.5,
@@ -1326,8 +1394,10 @@ def test_reductions_are_log_deep() -> None:
         return float(acc)
 
     def min_ii(fn: Callable[..., object]) -> int:
-        return _synth(fn).initiation_interval[0]
+        return holoso.synthesize(fn, _DEEP, name="kernel").initiation_interval[0]
 
+    chain = holoso.synthesize(float_chain, _DEEP, name="kernel").verilog_output.verilog
+    assert "timing: Timing(latency=4, initiation_interval=1)" in knob_table(chain, "u_fadd_0")
     assert min_ii(int_tree) < min_ii(int_chain) // 2
     assert min_ii(float_tree) < min_ii(float_chain) // 2
     assert min_ii(trace_tree) < min_ii(trace_chain) * 2 // 3  # eight terms: three levels against seven steps
@@ -1453,7 +1523,7 @@ def test_dtype_int_truncates_like_numpy() -> None:
         v = np.asarray(np.array([x, -x]), int)  # the positional dtype spelling
         return v[0], v[1]
 
-    options = _with_operators(default_options(_FMT), frint=FRintOptions())
+    options = _with_operators(default_options(_FMT), frint=lean.frint())
     sim = holoso.synthesize(kernel, options, name="kernel").numerical_model.elaborate()
     for x in (1.9, 0.5, 2.0):
         got = [value for value in sim.run(x) if isinstance(value, holoso.IntValue)]
@@ -1469,10 +1539,11 @@ def test_dtype_changing_asarray_mints_a_fresh_array() -> None:
         src[0] = 7
         return float(out[0]), src[0]
 
-    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    options = _with_operators(default_options(_FMT), ffromint=lean.ffromint())
     sim = holoso.synthesize(fresh, options, name="kernel").numerical_model.elaborate()
     got = sim.run(3)
-    assert [float(got[0]), int(got[1])] == [3.0, 7]  # type: ignore[arg-type]
+    assert isinstance(got[1], holoso.IntValue)
+    assert [float(got[0]), int(got[1])] == [3.0, 7]
 
     class _TwoSlots:
         def __init__(self) -> None:
@@ -1559,7 +1630,7 @@ def test_polyval_preserves_the_integer_family_and_promotes_heterogeneous_coeffic
 
     # A mixed coefficient tuple converts to float BEFORE the fold, as numpy's asarray does; an integer
     # partial product would rail the 63-bit word here and answer 4x low.
-    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    options = _with_operators(default_options(_FMT), ffromint=lean.ffromint())
     sim2 = holoso.synthesize(hetero, options, name="kernel").numerical_model.elaborate()
     huge = 2**61
     assert float(sim2.run(huge, 4)[0]) == pytest.approx(float(np.polyval((huge, 0.5), 4)), rel=1e-12)
@@ -1683,7 +1754,7 @@ def test_joining_promotes_mixed_families_and_preserves_the_integer_family() -> N
     def mixed(v: Float64[np.ndarray, "2"], k: int) -> Float64[np.ndarray, "4"]:
         return np.concatenate((np.array([k]), v, np.array([3])))
 
-    options = _with_operators(default_options(_FMT), ffromint=FFromIntOptions())
+    options = _with_operators(default_options(_FMT), ffromint=lean.ffromint())
     sim = holoso.synthesize(mixed, options, name="kernel").numerical_model.elaborate()
     floats = [value for value in sim.run(1.5, 2.5, 5) if isinstance(value, holoso.FloatValue)]
     assert [float(value) for value in floats] == mixed(np.array([1.5, 2.5]), 5).tolist()
@@ -1778,10 +1849,10 @@ def test_np_cross_is_kahans_difference_of_products() -> None:
 
     # What fusing one product alone gets wrong: a vector's product with itself, and a nearly parallel pair.
     fused = holoso.synthesize(cross, _WITH_FFMA, name="kahan_cross").numerical_model.elaborate()
-    u = np.array([float(holoso.FloatValue.from_float(_FMT, x)) for x in (1.1, 0.3, 7.7)])
+    u = np.array([float(_FMT.encode(x)) for x in (1.1, 0.3, 7.7)])
     assert _run(fused, u, u).tolist() == [0.0, 0.0, 0.0]
     nearly_parallel = u * (1.0 + 2.0**-30) + np.array([2.0**-40, 0.0, -(2.0**-41)])
-    v = np.array([float(holoso.FloatValue.from_float(_FMT, float(x))) for x in nearly_parallel])
+    v = np.array([float(_FMT.encode(float(x))) for x in nearly_parallel])
     exact = [Fraction(u[i]) * Fraction(v[j]) - Fraction(u[j]) * Fraction(v[i]) for i, j in ((1, 2), (2, 0), (0, 1))]
     for got_component, want in zip(_run(fused, u, v).tolist(), exact):
         assert abs(Fraction(got_component) - want) <= 2 * Fraction(unit_roundoff(_FMT)) * abs(want), float(want)
@@ -1811,7 +1882,7 @@ def test_np_linalg_inv_eliminates_by_fused_multiply_adds() -> None:
         return np.linalg.inv(m)
 
     # Each elimination step is `row - factor*pivot_row`, one firing with the fused operator and two without.
-    shared = {"fcmp": 1, "select": 6, "fdivsqrt": 5}
+    shared = {"fcmp": 1, "SelectPrimitive": 6, "fdivsqrt": 5}
     assert _mnemonic_counts(inv2, mir_options(_WITH_FFMA)) == {**shared, "ffma": 5}
     assert _mnemonic_counts(inv2, default_mir(_FMT)) == {**shared, "fmul": 5, "fadd": 5}
     _assert_python_matches_holoso(inv2, np.array([[0.0, 1.0], [1.0, 0.0]]), options=_WITH_FFMA)
@@ -1837,8 +1908,7 @@ def test_np_linalg_inv_structure() -> None:
     def inv3(m: Float64[np.ndarray, "3 3"]) -> Float64[np.ndarray, "3 3"]:
         return np.linalg.inv(m)
 
-    verilog = _synth(inv3).verilog_output.verilog
-    assert "holoso_fdivsqrt #(" in verilog and "holoso_fcmp #(" in verilog  # pivot compares are not folded away
+    assert {"divsqrt", "cmp"} <= instantiated_modules(_synth(inv3))  # pivot compares are not folded away
 
 
 def test_np_linalg_inv_rejections() -> None:

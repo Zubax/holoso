@@ -23,13 +23,23 @@ def eccentric_anomaly(mean_anomaly: float, eccentricity: float) -> float:
 def main() -> None:
     fmt = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(stage_decode=1, stage_normalize=2, stage_pack=1),
-            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
-            fdivsqrt=holoso.FDivsqrtOptions(stage_decode=1, stage_output=1),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
-            fcordic=holoso.FCordicOptions(unroll100=50, stage_product=2, stage_normalize=1, stage_pack=1),
+        operator=holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
+            fdivsqrt=holoso.FDivsqrtOptions(
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+            ),
+            fmul_ilog2=holoso.FMulILog2Options(
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+            ),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
+            fcordic=holoso.FCordicOptions(
+                stage_input=0,
+                stage_core_mul=1,
+                stage_core=holoso.FCordicOptions.CoreStages.NONE,
+                stage_output=0,
+                fast=True,
+            ),
         ),
         ffmt=fmt,
         wmultiplier=18,

@@ -32,7 +32,7 @@ class Nco:
 
 def main() -> None:
     # A masked sum exists before its mask: a carry bit above the phase, then a sign bit.
-    options = holoso.Options(holoso.OperatorOptions(), wint_min=34)
+    options = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=34)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(Nco().tick, options)
     for filename, path in result.write(out_dir).items():

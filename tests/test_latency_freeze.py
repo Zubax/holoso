@@ -52,79 +52,79 @@ from ._modelref import (
 # Kernel label -> frozen (min initiation interval, last microcode PC). A spec listing two formats is frozen at both,
 # since the second exists precisely to exercise a different pipeline depth.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
-    "madd-e8m36": (14, 14),
+    "madd-e8m36": (9, 9),
     "signal_window-e8m36": (9, 9),
-    "poly3-e8m36": (23, 23),
-    "iir1_lpf-e8m36": (15, 15),
-    "iir1_hpf-e8m36": (20, 20),
-    "pid-e8m36": (36, 64),
+    "poly3-e8m36": (14, 14),
+    "iir1_lpf-e8m36": (9, 9),
+    "iir1_hpf-e8m36": (11, 11),
+    "pid-e8m36": (25, 44),
     "schmitt_trigger-e8m36": (6, 6),
     "quadrature_encoder-e8m36": (6, 6),
     "phase_frequency_detector-e8m36": (6, 6),
     "latching_fault_register-e8m36": (5, 5),
-    "majority_voter-e6m18": (14, 19),
+    "majority_voter-e6m18": (10, 15),
     # The turn-native trigonometric ABI lets the phase scaling meet the cores' own conversion and cancel, so the I/Q
     # oscillator's two general multiplies collapse to one exponent add.
-    "iq_oscillator-e8m36": (53, 53),
-    "nco-e6m18": (12, 12),
+    "iq_oscillator-e8m36": (37, 37),
+    "nco-e6m18": (8, 8),
     # The sixteen pixel lanes scale, clamp and round independently on the float operators while the
     # integer statistics reduce pairwise alongside, and the row and frame ends are real branches -- so the
     # shortest static path is a mid-row beat, and the last PC covers the frame end with its log2, three exp2 and
     # the actuator split.
-    "image_agc_streamed-e8m36": (33, 134),
-    "pwm-e6m18": (11, 11),
-    "debouncer-e6m18": (10, 10),
-    "priority_encoder-e6m18": (21, 21),
-    "crc32-e6m18": (45, 45),
-    "fixed_point_pi-e6m18": (37, 37),
-    "lfsr16-e6m18": (12, 12),
-    "tunable_lowpass-e6m18": (14, 14),
+    "image_agc_streamed-e8m36": (30, 100),
+    "pwm-e6m18": (8, 8),
+    "debouncer-e6m18": (6, 6),
+    "priority_encoder-e6m18": (19, 19),
+    "crc32-e6m18": (29, 29),
+    "fixed_point_pi-e6m18": (19, 19),
+    "lfsr16-e6m18": (8, 8),
+    "tunable_lowpass-e6m18": (6, 6),
     # Branchy kernels whose phi-arm installs have settled sources (boolean/float live-out constants, or an
     # input/state read) on the normal path -- no read-first push, so each lands within the work boundary,
     # shrinking every downstream block base.
-    "uart_tx-e6m18": (11, 37),
-    "uart_rx-e6m18": (5, 50),
+    "uart_tx-e6m18": (9, 29),
+    "uart_rx-e6m18": (5, 40),
     # The loop body's tail copy (y <- y_next) sources y_next, which is NOT the block's last work (delta = y_next - y
     # is), so the install fits at the work makespan instead of one past it -- shaving a cycle off every iteration.
     # The convergence test is statically true on entry (delta is seeded above the tolerance), so the first trip is
     # peeled at compile time and only trips 2..N remain residual: one body's worth of extra microcode, and a realized
     # transaction that is shorter, not longer (test_cycle_model).
-    "recip_newton-e8m36": (28, 45),
+    "recip_newton-e8m36": (19, 30),
     # The all-false early return and the break-terminated candidate scan survive as real branches, so the
     # frozen last PC covers the full active path with every scan trip taken. Its constant arms, like the copy-only
     # arms of remainder and octave_index, are threaded into the blocks that branch to them.
-    "finite_set_current_controller-e8m36": (157, 189),
-    "remainder-e8m36": (33, 47),
-    "octave_index-e6m18": (9, 27),
-    "octave_index-e8m36": (9, 36),
-    "equal_temperament-e8m36": (24, 24),
-    "cordic_sincos-e8m36": (104, 104),
-    "polar_to-e8m36": (63, 63),
-    "polar_from-e8m36": (39, 39),
+    "finite_set_current_controller-e8m36": (99, 128),
+    "remainder-e8m36": (28, 39),
+    "octave_index-e6m18": (9, 23),
+    "octave_index-e8m36": (9, 29),
+    "equal_temperament-e8m36": (15, 15),
+    "cordic_sincos-e8m36": (80, 80),
+    "polar_to-e8m36": (40, 40),
+    "polar_from-e8m36": (27, 27),
     # The three pivot-swap diamonds of the 3x3 Gauss-Jordan inversion if-convert into selects, so the whole
     # kernel is one straight-line block serialized on the pooled divider.
-    "rigid_body_scalar-e8m36": (114, 114),
-    "kepler-e8m36": (71, 143),
-    "integrator-e8m36": (16, 16),
+    "rigid_body_scalar-e8m36": (82, 82),
+    "kepler-e8m36": (47, 92),
+    "integrator-e8m36": (10, 10),
     "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
     # control flow at all), so their whole schedule is one block and min II equals last PC.
-    "fir-e8m36": (20, 20),
-    "biquad-e8m36": (21, 21),
+    "fir-e8m36": (11, 11),
+    "biquad-e8m36": (12, 12),
     # No sum is computed as a multiple of another, so the two covariance sums run side by side rather than in series.
     "ekf1_stateful-e8m36": (123, 123),
     # The clamped flux update is a short fadd/fmul/fcmp dataflow serialized behind the long CORDIC atan2 tail, and
     # the aligning first transaction is a real branch around the whole integrator -- so the shortest static path is
     # the one that adopts the prior, well under the last PC that covers the integrating arm.
-    "flux_observer-e8m36": (74, 97),
+    "flux_observer-e8m36": (51, 65),
     # The controller that embeds that observer: the same atan2 tail, then a sincos, a norm, and the divides of the
     # limiter and the modulator, with the alignment, the branch-cut correction and the anti-windup freeze all
     # surviving as real branches -- so the last PC covers arms the shortest static path does not.
-    "foc-e8m36": (289, 336),
+    "foc-e8m36": (188, 220),
     # The fusion capstone: three rsqrt sites, each a root and a division on one divider (a native rsqrt operator would
     # fold the division away too), the gate and first-sample diamonds as real branches, and the clamp on the comparator.
-    "imu_fusion-e8m36": (258, 435),
-    "imu_fusion-e6m18": (231, 372),
+    "imu_fusion-e8m36": (191, 316),
+    "imu_fusion-e6m18": (173, 274),
 }
 
 
@@ -259,8 +259,8 @@ def test_a_boundary_install_costs_what_an_output_does(
 @pytest.mark.parametrize(
     "label,frozen",
     [
-        ("spill_into_ret", {"default": (6, False), "staged": (10, True)}),
-        ("spill_into_ret_bool", {"default": (8, True), "staged": (13, True)}),
+        ("spill_into_ret", {"default": (6, False), "staged": (8, True), "combinational": (5, False)}),
+        ("spill_into_ret_bool", {"default": (8, True), "staged": (11, True), "combinational": (6, True)}),
     ],
 )
 @pytest.mark.parametrize("config", PIPELINE_OPTIONS_CASES, ids=lambda config: config.label)
@@ -285,7 +285,7 @@ def test_chained_copy_captures_old_values() -> None:
     fmodel = holoso.synthesize(_Delay3().__call__, default_options(fmt), name="delay3").numerical_model.elaborate()
     fref = _Delay3()
     for raw in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0):
-        x = fmt.decode(fmt.encode(raw))  # quantize so the model and the reference see the identical operand
+        x = float(fmt.encode(raw))  # quantize so the model and the reference see the identical operand
         assert float(fmodel.run(x)[0]) == fref(x)
 
     bmodel = holoso.synthesize(

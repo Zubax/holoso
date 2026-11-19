@@ -68,7 +68,7 @@ def _input_bits(port, rng):
             return rng.randint(0, 1)
         case holoso.FloatType(fmt=fmt):
             lo, hi = _DEFAULT_RANGE
-            return fmt.encode(rng.uniform(lo, hi))
+            return fmt.encode(rng.uniform(lo, hi)).bits
         case holoso.IntType(fmt=fmt):
             lo_i, hi_i = _DEFAULT_INT_RANGE
             while True:
@@ -76,7 +76,7 @@ def _input_bits(port, rng):
                 if value:
                     return fmt.encode(value)
         case other:
-            raise TypeError("unsupported input scalar type: %r" % (other,))
+            assert False, "unsupported input scalar type: %r" % (other,)
 
 
 def _input_value(port, bits):
@@ -84,11 +84,11 @@ def _input_value(port, bits):
         case holoso.BoolType():
             return bool(bits)
         case holoso.FloatType(fmt=fmt):
-            return holoso.FloatValue.from_bits(fmt, bits)
+            return holoso.FloatValue(fmt, bits)
         case holoso.IntType(fmt=fmt):
             return holoso.IntValue.from_bits(fmt, bits)
         case other:
-            raise TypeError("unsupported input scalar type: %r" % (other,))
+            assert False, "unsupported input scalar type: %r" % (other,)
 
 
 @cocotb.test()
@@ -180,8 +180,8 @@ def _embed_vectors(inputs: list[LogicalPort], vectors: Sequence[Mapping[str, Sca
         return "None"
     rows: list[list[int]] = []
     for index, vector in enumerate(vectors):
-        if missing := [port.name for port in inputs if port.name not in vector]:
-            raise ValueError(f"cosim vector {index} is missing inputs {missing}")
+        missing = [port.name for port in inputs if port.name not in vector]
+        assert not missing, f"cosim vector {index} is missing inputs {missing}"
         row: list[int] = []
         for port in inputs:
             value = coerce_scalar(port.scalar_type, vector[port.name], f"vector {index} input {port.name!r}")

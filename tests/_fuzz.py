@@ -2,7 +2,7 @@
 End-to-end blackbox differential fuzzing of the Holoso compiler.
 
 The campaign generates small kernels as Python *source text* -- rendered to linecache-backed modules under `build/` so
-the frontend's `inspect.getsourcelines` retrieval succeeds -- and drives each through the public-ish compiler pipeline
+the frontend finds each function's text by its code object -- and drives each through the public-ish compiler pipeline
 twice: once into the numerical model (downstream of LIR scheduling/binding/regalloc/overlap) and once into the MIR
 interpreter (the schedule-independent oracle, upstream of the LIR layer). The two share the front/mid-end and
 `primitive.evaluate` but NOT the LIR, so the primary check `interpreter == model` (bit-exact, exception-free on both
@@ -45,12 +45,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import zkf
 
 from holoso._backend.numerical import NumericalSimulator, generate
 from holoso._eel import lower as lower_frontend
-from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle
-from holoso._lir import operand_read_cycle
-from holoso import FFmaOptions, Options
+from holoso._lir import Branch, Lir, RegRef, ScheduledOp, landing_cycle, read_cycle
+from holoso import FAddOptions, FFmaOptions, Options
 from holoso._mir import MirOptions, Mir, MirBranch, MirJump, MirOperation, MirTerminator
 from holoso._mir._interpret import MirInterpreter
 from holoso._mir import lower as lower_to_mir
@@ -61,6 +61,7 @@ from holoso._value import FloatValue, IntValue, ScalarValue
 from ._modelref import (
     build_lir,
     DEFAULT_IFCONV_MAX_OPS,
+    default_ifmt,
     default_mir,
     default_options,
     default_tolerance,
@@ -74,6 +75,7 @@ from ._modelref import (
     Vector,
     within,
 )
+from . import _options as lean
 
 # `build/` is gitignored, so the fuzz corpus never pollutes the tree.
 _REPO = Path(__file__).resolve().parent.parent
@@ -85,12 +87,18 @@ def _with_ffma(options: Options, ffma: FFmaOptions) -> MirOptions:
 
 
 def _ffma_mir(fmt: FloatFormat) -> MirOptions:
-    return _with_ffma(default_options(fmt), FFmaOptions())
+    return _with_ffma(default_options(fmt), lean.ffma())
 
 
 def _ffma_staged_mir(fmt: FloatFormat) -> MirOptions:
-    deep = FFmaOptions(
-        stage_input=1, stage_product=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
+    deep = lean.ffma(
+        stage_input=1,
+        stage_core_mul=1,
+        stage_output=1,
+        stage_core_add=FAddOptions.CoreStages.DECODE
+        | FAddOptions.CoreStages.ALIGN
+        | FAddOptions.CoreStages.NORMALIZE
+        | FAddOptions.CoreStages.PACK,
     )
     return _with_ffma(staged_options(fmt), deep)
 
@@ -149,22 +157,44 @@ class FormatArithmetic:
     fused: bool  # whether the machine has the fused multiply-add operator
 
     def mul(self, a: float, b: float) -> float:
-        return float(self._value(a) * self._value(b))
+        return float(_blocks(self.fmt).mul.evaluate(self._value(a), self._value(b)))
 
     def add(self, a: float, b: float) -> float:
-        return float(self._value(a) + self._value(b))
+        return float(_blocks(self.fmt).add.evaluate(self._value(a), self._value(b)))
 
     def scale(self, a: float, k: int) -> float:
         """By `2**k` as the exponent scaler does it: exact, until the result leaves the format at either rail."""
-        return float(self._value(a).scale_pow2(k))
+        return float(_blocks(self.fmt).scale.evaluate(self._value(a), k))
 
     def fma(self, a: float, b: float, c: float) -> float:
         if self.fused:
-            return float(FloatValue.fma(self._value(a), self._value(b), self._value(c)))
+            return float(_blocks(self.fmt).fma.evaluate(self._value(a), self._value(b), self._value(c)))
         return self.add(c, self.mul(a, b))
 
     def _value(self, x: float) -> FloatValue:
-        return FloatValue.from_float(self.fmt, x)
+        return self.fmt.encode(x)
+
+
+@dataclass(frozen=True, slots=True)
+class _Blocks:
+    add: zkf.Add
+    mul: zkf.Mul
+    fma: zkf.Fma
+    scale: zkf.MulIlog2
+
+
+@functools.cache
+def _blocks(fmt: FloatFormat) -> _Blocks:
+    """
+    The operators a machine computes with, at their defaults: each rounds correctly, so its bits do not depend on its
+    stages, and the scaler is exact; every configuration a campaign sweeps computes as these do.
+    """
+    return _Blocks(
+        add=zkf.Add(fmt=fmt),
+        mul=zkf.Mul(fmt=fmt, wmultiplier=lean.WMULTIPLIER),
+        fma=zkf.Fma(fmt=fmt, wmultiplier=lean.WMULTIPLIER),
+        scale=zkf.MulIlog2(fmt=fmt, wk=default_ifmt(fmt).width),
+    )
 
 
 def reference_twin_name(kernel_name: str) -> str:
@@ -1240,9 +1270,9 @@ def _overlap_spill_depth(lir: Lir) -> int | None:
             [*block.ops, *block.inline_ops], key=lambda op: (op.issue_cycle, op.commit_cycle)
         )
         for op in block_ops:
-            read_cycle = operand_read_cycle(op.primitive, op.issue_cycle, lir.fetch_lag)
+            read = read_cycle(op.issue_cycle, lir.fetch_lag)
             operands = [
-                _depth_at(reg_depth.get(operand.source, []), read_cycle)
+                _depth_at(reg_depth.get(operand.source, []), read)
                 for operand in op.operands
                 if isinstance(operand.source, RegRef)
             ]
@@ -1362,7 +1392,7 @@ def _port_vector(model: NumericalSimulator, fmt: FloatFormat, values: dict[str, 
         if isinstance(port.scalar_type, BoolType):
             vector.append(bool(raw))
         else:
-            vector.append(FloatValue.from_float(fmt, float(raw)))
+            vector.append(fmt.encode(float(raw)))
     return vector
 
 
@@ -1373,7 +1403,7 @@ def _vector_from_bits(model: NumericalSimulator, fmt: FloatFormat, bits: dict[st
         if isinstance(port.scalar_type, BoolType):
             vector.append(bool(raw))
         else:
-            vector.append(FloatValue.from_bits(fmt, raw))
+            vector.append(FloatValue(fmt, raw))
     return vector
 
 

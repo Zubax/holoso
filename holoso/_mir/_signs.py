@@ -58,4 +58,4 @@ def collapse_conditioner(nodes: dict[ValueId, Node], vid: ValueId) -> tuple[Valu
             return collapse_signs(nodes, vid)
         case IntType():
             return vid, IntIdentity()
-    raise AssertionError(f"no conditioner for {ty!r}")
+    assert False, f"no conditioner for {ty!r}"

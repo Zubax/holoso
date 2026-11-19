@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from holoso import FloatFormat, FMulOptions, OperatorOptions
+from holoso import FloatFormat, OperatorOptions
 from holoso._eel import lower
 from holoso._lir import (
     BoolRegRef,
@@ -74,12 +74,13 @@ from biquad import Biquad  # noqa: E402
 from finite_set_current_controller import FiniteSetCurrentController  # noqa: E402
 from fir import Fir4  # noqa: E402
 from foc import FocController  # noqa: E402
+from . import _options as lean
 
 _FMT = FloatFormat(8, 36)
 
 # Kernels measured on other than the shared default operator set take their spec-style adjustment here.
 _EXTRA_OPERATORS: dict[str, Callable[[OperatorOptions], OperatorOptions]] = {
-    "ekf1_stateless_fmul2": lambda ops: dataclasses.replace(ops, fmul=FMulOptions(instances=2)),
+    "ekf1_stateless_fmul2": lambda ops: dataclasses.replace(ops, fmul=lean.fmul(instances=2)),
 }
 
 _EXAMPLES: dict[str, Callable[[], Callable[..., object]]] = {
@@ -165,10 +166,10 @@ def _measure(name: str) -> Metrics:
         and not lir.bool_state_slots
         and not any(b.inline_ops for b in lir.blocks)
         and copies == 0
-        and lir.bool_regfile.nreg == 0
+        and lir.bool_register_count == 0
     )
     reads, writes, arms = read_arms(lir), write_arms(lir), steering(lir)
-    nreg, bnreg = lir.regfile.nreg, lir.bool_regfile.nreg
+    nreg, bnreg = lir.wide_register_count, lir.bool_register_count
     return Metrics(
         straight_line=straight,
         nreg=nreg,
@@ -217,7 +218,7 @@ def _measure(name: str) -> Metrics:
 #   coalesced-install fixpoint -- a phi-arm predecessor whose every arm coalesces installs nothing, so its
 #   +1 install drain is dropped. The drained boundary is the latest value LANDING per op: every op -- inline (a
 #   select or a bool->float cast) or pooled -- lands at the same uniform per-op landing, and an install with a
-#   SETTLED source (`install_source_commit`) fires at the work makespan and drops its +1 install drain. last_pc tiles
+#   SETTLED source (`_install_source_commit`) fires at the work makespan and drops its +1 install drain. last_pc tiles
 #   every block's span (a per-block drain regression anywhere inflates it); max_block_span localizes it to one
 #   block. These timing rules move the schedule-length guards but not nreg/bnreg/steering/copies; signal_window's
 #   steering carries one write-select arm traded for one freed boolean register, not worth chasing since the timing
@@ -228,12 +229,12 @@ def _measure(name: str) -> Metrics:
 # fmt: off
 _BASELINE: dict[str, Metrics] = {
     "madd": Metrics(
-        True, nreg=3, bnreg=0, steering=5, max_read_port=2, max_write_select=4,
-        copies=0, min_ii=14, last_pc=14, max_block_span=14,
+        True, nreg=3, bnreg=0, steering=6, max_read_port=2, max_write_select=3,
+        copies=0, min_ii=9, last_pc=9, max_block_span=9,
     ),
     "poly3": Metrics(
         True, nreg=5, bnreg=0, steering=4, max_read_port=3, max_write_select=3,
-        copies=0, min_ii=23, last_pc=23, max_block_span=23,
+        copies=0, min_ii=14, last_pc=14, max_block_span=14,
     ),
     "signal_window": Metrics(
         False, nreg=4, bnreg=5, steering=8, max_read_port=2, max_write_select=2,
@@ -241,15 +242,15 @@ _BASELINE: dict[str, Metrics] = {
     ),
     "iir1_hpf": Metrics(
         False, nreg=3, bnreg=1, steering=2, max_read_port=2, max_write_select=2,
-        copies=0, min_ii=20, last_pc=20, max_block_span=20,
+        copies=0, min_ii=11, last_pc=11, max_block_span=11,
     ),
     "iir1_lpf": Metrics(
         False, nreg=3, bnreg=1, steering=2, max_read_port=2, max_write_select=2,
-        copies=0, min_ii=15, last_pc=15, max_block_span=15,
+        copies=0, min_ii=9, last_pc=9, max_block_span=9,
     ),
     "pid": Metrics(
         False, nreg=6, bnreg=2, steering=17, max_read_port=3, max_write_select=5,
-        copies=1, min_ii=36, last_pc=68, max_block_span=31,
+        copies=1, min_ii=25, last_pc=44, max_block_span=18,
     ),
     "schmitt_trigger": Metrics(
         False, nreg=1, bnreg=2, steering=2, max_read_port=1, max_write_select=1,
@@ -269,38 +270,38 @@ _BASELINE: dict[str, Metrics] = {
     ),
     "majority_voter": Metrics(
         False, nreg=5, bnreg=11, steering=15, max_read_port=1, max_write_select=4,
-        copies=0, min_ii=14, last_pc=19, max_block_span=11,
+        copies=0, min_ii=10, last_pc=15, max_block_span=9,
     ),
     # recip_newton's loop opens with a statically-true convergence test, so the partial evaluator peels the first
     # trip: one more live value across the loop entry (nreg, steering) and one body's worth of extra microcode, in
     # exchange for a shorter realized transaction (test_cycle_model).
     "recip_newton": Metrics(
         False, nreg=4, bnreg=1, steering=8, max_read_port=3, max_write_select=3,
-        copies=1, min_ii=28, last_pc=45, max_block_span=23,
+        copies=1, min_ii=19, last_pc=30, max_block_span=14,
     ),
     "remainder": Metrics(
-        False, nreg=5, bnreg=4, steering=16, max_read_port=3, max_write_select=3,
-        copies=2, min_ii=33, last_pc=47, max_block_span=17,
+        False, nreg=5, bnreg=3, steering=15, max_read_port=3, max_write_select=4,
+        copies=2, min_ii=28, last_pc=39, max_block_span=12,
     ),
     "octave_index": Metrics(
         False, nreg=3, bnreg=1, steering=5, max_read_port=2, max_write_select=3,
-        copies=3, min_ii=9, last_pc=40, max_block_span=24,
+        copies=3, min_ii=9, last_pc=29, max_block_span=14,
     ),
     "cordic_sincos": Metrics(
-        False, nreg=5, bnreg=1, steering=29, max_read_port=14, max_write_select=4,
-        copies=0, min_ii=104, last_pc=104, max_block_span=104,
+        False, nreg=8, bnreg=1, steering=34, max_read_port=15, max_write_select=5,
+        copies=0, min_ii=80, last_pc=80, max_block_span=80,
     ),
     "integrator": Metrics(
         True, nreg=4, bnreg=0, steering=5, max_read_port=2, max_write_select=2,
-        copies=0, min_ii=16, last_pc=16, max_block_span=16,
+        copies=0, min_ii=10, last_pc=10, max_block_span=10,
     ),
     # The capability-probe controller: records, reductions, reshape, dtype conversions, and a branchy scan in one
     # kernel, so it gates the whole front-end surface against fabric regressions. The pairwise extrema over the six
     # active drives hold two partial maxima live where a sequential fold would hold one, at no cost in latency: the dot
     # products bound that block, not the max.
     "finite_set_current_controller": Metrics(
-        False, nreg=16, bnreg=4, steering=67, max_read_port=9, max_write_select=5,
-        copies=12, min_ii=157, last_pc=189, max_block_span=109,
+        False, nreg=17, bnreg=4, steering=68, max_read_port=9, max_write_select=4,
+        copies=12, min_ii=99, last_pc=128, max_block_span=72,
     ),
     # The heaviest matrix-library user (matmul, cross, norm, elementwise clamp) composed with real control flow,
     # so it is the gate that would catch a linear-algebra stub expanding into more hardware than it replaced. Its
@@ -308,23 +309,23 @@ _BASELINE: dict[str, Metrics] = {
     # Its two copy-only arms are threaded into the blocks that branch to them; the arm this adds to one read port is the
     # price of the cycles threading saves, which the threading rule does not weigh.
     "imu_fusion": Metrics(
-        False, nreg=41, bnreg=5, steering=155, max_read_port=25, max_write_select=7,
-        copies=15, min_ii=258, last_pc=435, max_block_span=133,
+        False, nreg=42, bnreg=5, steering=159, max_read_port=25, max_write_select=6,
+        copies=15, min_ii=191, last_pc=316, max_block_span=93,
     ),
     # The two graduated filter examples: both straight-line, so every figure is one block's. fir's shifted-out tap is
     # never read, so it keeps no register.
     "fir": Metrics(
-        True, nreg=7, bnreg=0, steering=8, max_read_port=4, max_write_select=1,
-        copies=0, min_ii=20, last_pc=20, max_block_span=20,
+        True, nreg=7, bnreg=0, steering=8, max_read_port=4, max_write_select=2,
+        copies=0, min_ii=11, last_pc=11, max_block_span=11,
     ),
     "biquad": Metrics(
         True, nreg=5, bnreg=0, steering=6, max_read_port=3, max_write_select=2,
-        copies=0, min_ii=21, last_pc=21, max_block_span=21,
+        copies=0, min_ii=12, last_pc=12, max_block_span=12,
     ),
     # The two largest kernels carry the highest register pressure: the uniform landing keeps min_ii/last_pc tight, so a
     # result resides a cycle longer, and the allocator spends a few more registers still to cut their read muxes.
     "ekf1_stateless": Metrics(
-        True, nreg=44, bnreg=0, steering=92, max_read_port=27, max_write_select=3,
+        True, nreg=49, bnreg=0, steering=93, max_read_port=27, max_write_select=3,
         copies=0, min_ii=125, last_pc=125, max_block_span=125,
     ),
     # The EKF with a second multiplier, the knob this allocator was built for: the co-issued products shorten the
@@ -332,11 +333,11 @@ _BASELINE: dict[str, Metrics] = {
     # measured 140 arms here, the annealer 112). A monotonicity guard for the binding, not its proof -- the directed
     # kernels in test_regalloc.py are that.
     "ekf1_stateless_fmul2": Metrics(
-        True, nreg=50, bnreg=0, steering=112, max_read_port=19, max_write_select=3,
-        copies=0, min_ii=87, last_pc=87, max_block_span=87,
+        True, nreg=53, bnreg=0, steering=118, max_read_port=20, max_write_select=3,
+        copies=0, min_ii=78, last_pc=78, max_block_span=78,
     ),
     "ekf1_stateful": Metrics(
-        True, nreg=41, bnreg=0, steering=84, max_read_port=31, max_write_select=3,
+        True, nreg=46, bnreg=0, steering=84, max_read_port=31, max_write_select=3,
         copies=0, min_ii=125, last_pc=125, max_block_span=125,
     ),
     # A deep composition: a nested component instance (the flux observer) whose state joins the controller's own,
@@ -346,8 +347,8 @@ _BASELINE: dict[str, Metrics] = {
     # toward its other arm; the steering arms this costs are the price of the four cycles threading saves. One CORDIC
     # serves both the observer's atan2 and the Park rotation, so their results share its two output lanes.
     "foc": Metrics(
-        False, nreg=30, bnreg=3, steering=93, max_read_port=13, max_write_select=5,
-        copies=4, min_ii=289, last_pc=336, max_block_span=226,
+        False, nreg=29, bnreg=2, steering=96, max_read_port=14, max_write_select=6,
+        copies=4, min_ii=188, last_pc=220, max_block_span=142,
     ),
 }
 # fmt: on

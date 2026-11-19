@@ -27,6 +27,7 @@ from ._eeloracle import InputRow, assert_hir_matches_reference, instance_leaves
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from biquad import Biquad  # noqa: E402
 from fir import Fir4  # noqa: E402
+from . import _options as lean
 
 _UART_CASES = [case for case in INT_CASES if case[0].startswith("int_uart")]
 assert len(_UART_CASES) == 5
@@ -59,14 +60,15 @@ def test_corpus_oracle(name: str, make: Callable[[], Callable[..., object]], vec
 def _ops() -> holoso.Options:
     fmt = holoso.FloatFormat(wexp=8, wman=23)
     return holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
+        operator=holoso.OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            fcmp=lean.fcmp(),
         ),
         ffmt=fmt,
+        wmultiplier=18,
     )
 
 

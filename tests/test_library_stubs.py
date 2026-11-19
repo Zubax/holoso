@@ -1,32 +1,61 @@
 """
 Plain-Python numerical verification of the library stubs: each composite stub is executed directly (no compiler
 involved) and compared against the math/numpy function it substitutes at host binary64 precision. This checks the
-ALGORITHM (the identity the stub encodes) at rel~1e-12, which no public path can reach: the composite stubs cannot
-be configured at FloatFormat(11, 52) (no flog2 tables there), the synthesizable counterparts in
-test_extended_operators resolve only ~1e-4..1e-7, and the large-|x| inverse-hyperbolic branches overflow every
-synthesizable format. The lowering of the same stubs is checked end-to-end in test_extended_operators /
-test_matrix / test_cosim.
+ALGORITHM (the identity the stub encodes) at rel~1e-12, apart from the rounding of the operators every synthesized
+kernel composes it with, and without synthesizing anything: a kernel at FloatFormat(11, 52) resolves about as far,
+the large-|x| inverse-hyperbolic branches included, but spends seconds building its binary64-wide exp2/log2 tables,
+while the narrower formats of the synthesizable counterparts in test_extended_operators resolve only ~1e-4..1e-7. The
+lowering of the same stubs is checked end-to-end in test_extended_operators / test_matrix / test_cosim.
 """
 
 import builtins
 import math
 import warnings
 import operator
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, ClassVar, TypeAliasType
 
 import numpy as np
 import pytest
 from jaxtyping import Float64
 
 import holoso
-from holoso import FAddOptions, OperatorOptions, Options, UnsupportedConstruct
+from holoso import OperatorOptions, Options, UnsupportedConstruct
 from holoso._eel import lower
 from holoso._eel._lib import Array, Spelling, Reshape, VariadicFunction, resolve
-from holoso._eel._lib._registry import Domain, ScalarMeaning, StaticOneHalf, StaticWholeNonNegative
+from holoso._eel._lib._registry import (
+    _REFINEMENTS,
+    Domain,
+    Operand,
+    ScalarMeaning,
+    StaticOneHalf,
+    StaticWholeNegative,
+    StaticWholeNonNegative,
+    array,
+    intrinsic,
+    lib,
+    meaning,
+    variadic,
+)
 from holoso._eel._ir import BinaryOp, CompareOp, ScalarType, UnaryOp
 from holoso._eel._lib._join import column_stack, concatenate, hstack, stack, vstack
-from holoso._eel._lib._linalg import cross, inv, matmul, norm, transpose
+from holoso._eel._lib._linalg import (
+    cross,
+    dot,
+    flatten,
+    inv,
+    matmul,
+    matrix_transpose,
+    norm,
+    outer,
+    outer_of_vectors,
+    ravel,
+    transpose,
+)
 from holoso._eel._lib._reductions import amax, amin, mean, prod, sum_
+from holoso._hir import BoolType, Const, FloatConst, FloatHypot, FloatMul, Operator, const_value, make_const
+from holoso._hir._types import Signature
 
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS, spd_matrix
@@ -76,6 +105,7 @@ from holoso._eel._lib._numpy import (
     tan,
     tanh,
 )
+from . import _options as lean
 
 _INF = float("inf")
 
@@ -103,11 +133,18 @@ def test_registry_resolves_the_expected_externals() -> None:
     assert resolve(np.matmul) == Array(matmul) == resolve(BinaryOp.MATMUL)  # type: ignore[arg-type]
     # numpy 2's Array-API spellings are keys of the same entries as their classic aliases.
     assert resolve(np.linalg.matmul) == resolve(np.matmul)
-    assert resolve(np.linalg.outer) == resolve(np.outer)
     assert resolve(np.linalg.cross) == resolve(np.cross)
     assert resolve(np.linalg.trace) == resolve(np.trace)
-    assert resolve(np.linalg.matrix_transpose) == resolve(np.matrix_transpose) == resolve(np.transpose)
-    assert resolve(np.ndarray.mT) == resolve(np.ndarray.T)
+    # A spelling numpy gives a rule of its own is an entry of its own: `np.outer` flattens where the Array-API one
+    # takes vectors alone, `dot` multiplies by a scalar `matmul` refuses, the matrix transpose refuses a vector the
+    # plain one leaves alone, and `flatten` copies where `ravel` derives.
+    assert resolve(np.outer) == Array(outer)  # type: ignore[arg-type]
+    assert resolve(np.linalg.outer) == Array(outer_of_vectors)  # type: ignore[arg-type]
+    assert resolve(np.dot) == Array(dot) == resolve(np.ndarray.dot)  # type: ignore[arg-type]
+    held = Array(matrix_transpose, derives=True)  # type: ignore[arg-type]
+    assert resolve(np.linalg.matrix_transpose) == resolve(np.matrix_transpose) == resolve(np.ndarray.mT) == held
+    assert resolve(np.ravel) == Array(ravel, derives=True) == resolve(np.ndarray.ravel)  # type: ignore[arg-type]
+    assert resolve(np.ndarray.flatten) == Array(flatten)  # type: ignore[arg-type]
     assert resolve(np.sum) == Array(sum_) == resolve(np.ndarray.sum)  # type: ignore[arg-type]
     assert resolve(np.prod) == Array(prod) == resolve(np.ndarray.prod)  # type: ignore[arg-type]
     assert resolve(np.mean) == Array(mean) == resolve(np.ndarray.mean)  # type: ignore[arg-type]
@@ -122,8 +159,7 @@ def test_registry_resolves_the_expected_externals() -> None:
     assert resolve(np.column_stack) == Array(column_stack, sequences=joined)  # type: ignore[arg-type]
     assert resolve(np.stack) == Array(stack, sequences=joined)  # type: ignore[arg-type]
     # A transpose is a non-copying derivation on the host, so its match carries the storage-equivalence flag.
-    assert resolve(np.transpose) == Array(transpose, derives=True)  # type: ignore[arg-type]
-    assert resolve(np.dot) == Array(matmul)  # type: ignore[arg-type]
+    assert resolve(np.ndarray.T) == resolve(np.transpose) == Array(transpose, derives=True)  # type: ignore[arg-type]
     assert resolve(np.zeros(3)) is None  # an unhashable shadow does not crash the lookup
 
 
@@ -136,7 +172,9 @@ def test_unregistered_calls_refuse_through_public_synthesis() -> None:
 
     for kernel in (erf_kernel, inner_kernel):
         with pytest.raises(UnsupportedConstruct):
-            holoso.synthesize(kernel, Options(OperatorOptions(fadd=FAddOptions())), name="kernel")
+            holoso.synthesize(
+                kernel, Options(operator=OperatorOptions(fadd=lean.fadd()), wmultiplier=18), name="kernel"
+            )
 
 
 # Enumerated, so dropping a spelling or a domain fails here rather than going unnoticed.
@@ -730,7 +768,7 @@ def test_clip_inlining_matches_the_host() -> None:
         return np.clip(v, 0.0)  # type: ignore[no-any-return]
 
     with pytest.raises(UnsupportedConstruct):
-        holoso.synthesize(lone_bound, Options(OperatorOptions(fadd=FAddOptions())), name="k")
+        holoso.synthesize(lone_bound, Options(operator=OperatorOptions(fadd=lean.fadd()), wmultiplier=18), name="k")
 
 
 def test_composite_stub_inlining_matches_the_host_at_binary64() -> None:
@@ -748,3 +786,202 @@ def test_composite_stub_inlining_matches_the_host_at_binary64() -> None:
     assert assert_hir_matches_reference(
         lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, kernel, vectors, label="composite_inlining"
     ) == len(vectors)
+
+
+def test_the_stubs_answer_a_scalar_as_numpy_does() -> None:
+    for scalar in (np.float64(-3.0), np.float64(0.0), np.int64(-7)):
+        wrapped, want = ravel(scalar), np.ravel(scalar)  # type: ignore[arg-type]
+        assert wrapped.shape == want.shape == (1,) and wrapped.dtype == want.dtype and wrapped[0] == scalar
+    assert hypot() == math.hypot() == 0.0
+    entry = resolve(math.hypot)
+    assert isinstance(entry, VariadicFunction) and entry.minimum == 0
+    assert FloatHypot(0).evaluate([]) == FloatConst(0.0)
+
+
+# ---------------------------------------------------------------------- the shapes of entry the registry admits
+
+type _Row = Mapping[str, float | bool | int]
+
+
+def _oracle(fn: Callable[..., object], vectors: Sequence[_Row]) -> None:
+    compared = assert_hir_matches_reference(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, fn, vectors, label=fn.__name__)
+    assert compared == len(vectors)
+
+
+def _rejects(fn: object) -> None:
+    assert callable(fn)
+    with pytest.raises(UnsupportedConstruct):
+        lower(fn, DEFAULT_UNROLL_MAX_TRIPS)
+
+
+def _satisfied(const: bool | int | float) -> list[TypeAliasType]:
+    stype = {bool: ScalarType.BOOL, int: ScalarType.INT, float: ScalarType.FLOAT}[type(const)]
+    return [one for one in _REFINEMENTS if Domain(stype, one).accepts(Operand(stype, const))]
+
+
+def test_a_constant_satisfies_at_most_one_refinement() -> None:
+    # `Domain.apart` tells two refinements apart by identity, which holds only while no constant satisfies both. The
+    # whole constants past the square are where an overlap with a wholeness would hide.
+    whole = [0, 1, 2, 3, 5, 64, 128, 129, 10**400]
+    halves = [0.25, 0.5, 1.5, 2.5, 127.5]
+    floats = [float(c) for c in whole[:-1]] + halves + [5e-324, 2.0**60, 1e300, _INF, math.nan]
+    for const in [True, False, *whole, *[-c for c in whole], *floats, *[-c for c in floats]]:
+        assert len(_satisfied(const)) <= 1, const
+    assert _satisfied(3) == _satisfied(-0.0) == _satisfied(True) == _satisfied(10**400) == [StaticWholeNonNegative]
+    assert _satisfied(-1) == _satisfied(-1e300) == [StaticWholeNegative]
+    assert _satisfied(0.5) == [StaticOneHalf]
+    assert _satisfied(-0.5) == _satisfied(1.5) == _satisfied(_INF) == _satisfied(-_INF) == _satisfied(math.nan) == []
+
+
+# Stand-ins for library entries of the shapes the registry admits but the library does not use yet. Each `_host_*`
+# function is the callee a kernel spells, and CPython runs it as the reference.
+
+
+def _host_three_halves() -> float:
+    return 1.5
+
+
+@lib
+def _three_halves() -> float:
+    return 0.5 * 3.0
+
+
+meaning(_three_halves, scalar=[_host_three_halves])
+
+
+def _host_scale(x: Any, k: Any) -> Any:
+    return x * k
+
+
+@intrinsic(FloatMul())
+def _scale_by_whole(x: float, k: StaticWholeNonNegative[float]) -> float:
+    return x * k
+
+
+@intrinsic(FloatMul())
+def _scale(x: float, k: float) -> float:
+    return x * k
+
+
+meaning(_scale_by_whole, _scale, elementwise=[_host_scale])
+
+
+@dataclass(frozen=True, slots=True)
+class _Conjunction(Operator):
+    mnemonic: ClassVar[str] = "ball"
+    speculatable: ClassVar[bool] = True
+    arity: int
+
+    @property
+    def signature(self) -> Signature:
+        return Signature((BoolType(),) * self.arity, BoolType())
+
+    def evaluate(self, operands: list[Const]) -> Const:
+        return make_const(all(const_value(operand) for operand in operands))
+
+
+def _host_all(*flags: bool) -> bool:
+    return all(flags)
+
+
+@variadic(_Conjunction, _host_all, minimum=0)
+def _all(*flags: bool) -> bool:
+    return all(flags)
+
+
+def _host_swapped(a: Any, first: int, second: int) -> Any:
+    return np.swapaxes(a, first, second)
+
+
+@array(_host_swapped, derives=True)
+def _swapped(a: np.ndarray, first: int, second: int) -> Any:
+    if a.ndim != 2 or first < 0 or second < 0 or first + second != 1:
+        raise ValueError("this stand-in only swaps the two axes of a matrix")
+    return np.array([[a[i][j] for i in range(len(a))] for j in range(len(a[0]))])
+
+
+def _calls_a_nullary_spelling(x: float) -> float:
+    return x * _host_three_halves() + _three_halves()
+
+
+def _passes_a_nullary_spelling_an_argument(x: float) -> float:
+    return _host_three_halves(x)  # type: ignore[call-arg]
+
+
+def test_a_nullary_stub_lowers_a_call_without_arguments() -> None:
+    served = _meaning(_host_three_halves)
+    assert served.arity == 0 and served.select([]) is served.lowerings[0]
+    _oracle(_calls_a_nullary_spelling, [{"x": 3.0}, {"x": -2.5}])
+    _rejects(_passes_a_nullary_spelling_an_argument)
+
+
+def _scales(x: float, k: float, v: Float64[np.ndarray, "2"]) -> tuple[float, float, float]:
+    return _host_scale(x, 3), _host_scale(x, k), float(_host_scale(v, 2)[1])
+
+
+def _scales_by_an_array(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
+    return _host_scale(v, v)  # type: ignore[no-any-return]
+
+
+def test_a_refinement_selects_an_intrinsic_as_it_selects_a_composite() -> None:
+    served, real = _meaning(_host_scale), ScalarType.FLOAT
+    for exponent, stub in (
+        (Operand(ScalarType.INT, 3), _scale_by_whole),
+        (Operand(real, 2.0), _scale_by_whole),
+        (Operand(real, 0.5), _scale),
+        (Operand(real, -2.0), _scale),
+        (Operand(real), _scale),
+    ):
+        chosen = served.select([Operand(real), exponent])
+        assert chosen is not None and chosen.stub is stub, exponent
+    _oracle(_scales, [{"x": 3.0, "k": 0.5, "v_0": 1.0, "v_1": -4.0}, {"x": -2.5, "k": 7.0, "v_0": 0.0, "v_1": 0.25}])
+    _rejects(_scales_by_an_array)  # one selection serves every leaf, so the selecting operand is a scalar
+
+
+def _conjunction(a: bool, b: bool, x: float) -> tuple[bool, bool, bool]:
+    return _host_all(a, b), _host_all(a, x > 0.0, True), _host_all()
+
+
+def _conjunction_of_a_number(a: bool, n: int) -> bool:
+    return _host_all(a, n)  # type: ignore[arg-type]
+
+
+def test_a_variadic_entry_takes_booleans() -> None:
+    entry = resolve(_host_all)
+    assert isinstance(entry, VariadicFunction) and entry.domain == Domain(ScalarType.BOOL) and entry.minimum == 0
+    truth = [{"a": a, "b": b, "x": x} for a in (False, True) for b in (False, True) for x in (-1.0, 1.0)]
+    _oracle(_conjunction, truth)
+    _rejects(_conjunction_of_a_number)
+
+
+def _swapped_value(m: Float64[np.ndarray, "2 3"]) -> Float64[np.ndarray, "3 2"]:
+    return _host_swapped(m, 0, 1) * 2.0  # type: ignore[no-any-return]
+
+
+def _swapped_view_misses_a_store(m: Float64[np.ndarray, "2 3"]) -> float:
+    grid = m + 0.0
+    view = _host_swapped(grid, 1, 0)
+    grid[0, 1] = 9.0  # the host's view sees this store
+    return float(view[1, 0])
+
+
+class _SwappedState:
+    def __init__(self) -> None:
+        self.m = np.array([[1.0, 2.0], [3.0, 4.0]])
+        self.t = np.zeros((2, 2))
+
+    def step(self, x: float) -> float:
+        self.t = _host_swapped(self.m, 0, 1)  # two state trees over one storage
+        return float(self.t[0, 1]) + x
+
+
+def _swapped_by_an_array(m: Float64[np.ndarray, "2 3"]) -> float:
+    return float(_host_swapped(m, m, 1)[0, 0])  # type: ignore[arg-type]
+
+
+def test_a_derivation_with_further_parameters_shares_its_first_argument() -> None:
+    assert resolve(_host_swapped) == Array(_swapped, derives=True)  # type: ignore[arg-type]
+    _oracle(_swapped_value, [{f"m_{i}_{j}": float(1 + 3 * i + j) for i in range(2) for j in range(3)}])
+    _rejects(_swapped_view_misses_a_store)
+    _rejects(_SwappedState().step)
+    _rejects(_swapped_by_an_array)  # a further parameter declares a scalar, so the call binds no second array

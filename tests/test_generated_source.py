@@ -1,21 +1,29 @@
 """
 Kernels generated at runtime: a function `exec`'d from source text the host built, with no file behind it. Source
-retrieval goes through `inspect.getsourcelines`, which `linecache` satisfies without a filesystem entry, so a
+retrieval goes through `inspect.findsource`, which `linecache` satisfies without a filesystem entry, so a
 generated function synthesizes as the root and inlines as a callee -- including when it is reached through an
 instance attribute of a stateful root, the shape a SymPy-style lambdify held by a constructor produces.
+
+The text is read at synthesis, not when Python compiled the function, so text that changed in between is refused where
+it no longer declares the compiled function's parameters; a body-only edit is not detected.
 """
 
+import importlib.util
 import itertools
 import linecache
 import types
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
 import holoso
-from holoso import FAddOptions, FMulILog2Options, FMulOptions, OperatorOptions, Options, SourceUnavailable
+from holoso import OperatorOptions, Options, SourceUnavailable
+from . import _options as lean
 
-_OPTIONS = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(), fmul_ilog2=FMulILog2Options()))
+_OPTIONS = Options(
+    operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul(), fmul_ilog2=lean.fmul_ilog2()), wmultiplier=18
+)
 
 _counter = itertools.count()
 
@@ -84,3 +92,48 @@ def test_generated_units_are_kept_apart() -> None:
 def test_unregistered_generated_source_is_refused_with_the_retrieval_contract() -> None:
     with pytest.raises(SourceUnavailable):
         holoso.synthesize(_Accumulator("x + y", 1.0, register=False).step, _OPTIONS, name="gen_unregistered")
+
+
+_ORIGINAL = "LIMIT = 4.0\n\n\ndef kernel(x: float, y: float) -> float:\n    return (x + y) * 0.5\n"
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        "LIMIT = 4.0\n\n\ndef kernel(x: float, y: float, gain: float) -> float:\n    return (x + y) * gain\n",
+        "LIMIT = 4.0\n\n\ndef kernel(x: float) -> float:\n    return x * 0.5\n",
+        "LIMIT = 4.0\n\n\ndef kernel(y: float, x: float) -> float:\n    return (x + y) * 0.125\n",
+        "LIMIT = 4.0\n\n\ndef kernel(x: float, *, y: float) -> float:\n    return (x + y) * 0.25\n",
+        "LIMIT = 4.0\n\n\ndef another(x: float, y: float) -> float:\n    return (x + y) * 0.5\n",
+        "import math\nimport cmath\nimport operator\n" + _ORIGINAL,
+        "if LIMIT:\n    pass\n\n    return (x + y) * 0.5\n" + _ORIGINAL,
+        "LIMIT = 4.0\n\n\ngains = (0.5,\n",
+        "LIMIT = 4.0\n",
+    ],
+    ids=[
+        "parameter-added",
+        "parameter-removed",
+        "parameters-reordered",
+        "parameter-made-keyword-only",
+        "renamed",
+        "moved",
+        "indented",
+        "unparsable",
+        "truncated",
+    ],
+)
+def test_a_module_edited_after_import_is_refused(tmp_path: Path, edited: str) -> None:
+    path = tmp_path / "edited_after_import.py"
+    path.write_text(_ORIGINAL)
+    spec = importlib.util.spec_from_file_location(f"holoso_test_edited_{next(_counter)}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    kernel = module.kernel
+    assert isinstance(kernel, types.FunctionType)
+    sim = holoso.synthesize(kernel, _OPTIONS, name="edited").numerical_model.elaborate()
+    assert float(sim.run(0.5, 1.0)[0]) == kernel(0.5, 1.0)
+    assert len(edited) != len(_ORIGINAL), "linecache tells a changed file by its size when the timestamp ties"
+    path.write_text(edited)
+    with pytest.raises(SourceUnavailable, match="changed after the function was loaded"):
+        holoso.synthesize(kernel, _OPTIONS, name="edited")

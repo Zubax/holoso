@@ -1,9 +1,9 @@
 """
 End-to-end cosimulation of every catalogued scalar-drivable example: each is driven with hand-built sensible vectors, a
-frozen random sweep, and format edge cases, then checked bit-for-bit against its embedded model under a lean (no
-optional stages) and a deeply pipelined operator configuration at each spec's datapath formats -- e8m36 for most,
-e6m18 for the kernels that build no float operator at all (where the format is inert, this being the one their own
-scripts generate), and octave_index at both.
+frozen random sweep, and format edge cases, then checked bit-for-bit against its embedded model under the tests'
+default operator configuration, a deeply pipelined one and a combinational one, at each spec's datapath formats -- e8m36
+for most, e6m18 for the kernels that build no float operator at all (where the format is inert, this being the one
+their own scripts generate), and octave_index at both.
 
 This proves `RTL == embedded numerical model`; it does NOT prove `model == Python semantics` (both descend from the
 same lowering). `test_example_reference.py` covers that second half, driving the same example specs against a fresh
@@ -11,7 +11,7 @@ plain-Python instance of each kernel.
 
 `iir1_lpf` exercises real control flow: a boolean first-sample state and a data-dependent if/else, synthesized
 through the CFG/branch backend (the first sample takes `y = x`, every later sample the IIR update). `pid` and
-`schmitt_trigger` exercise float comparisons (`holoso_fcmp`) driving branches: a PID with three-way saturation +
+`schmitt_trigger` exercise float comparisons (the comparator) driving branches: a PID with three-way saturation +
 anti-windup, a derivative-on-error channel, and a boolean `_started` state that suppresses the first-update
 derivative spike; and two-threshold hysteresis (a state held untouched across the deadband).
 
@@ -39,8 +39,9 @@ from .hdl.hdl_float_oracle import SIMULATORS
 
 pytestmark = pytest.mark.cosim
 
-# Each example is exercised at the lean default schedule and a deeply pipelined one, to explore the schedule and
-# handshake at two latency points; both are bit-exact against the same model.
+# Each example is exercised at the lean default schedule, a deeply pipelined one, and one whose operators are
+# combinational wherever their blocks allow, to explore the schedule and handshake at three latency points; all are
+# bit-exact against the same model.
 _OP_CONFIGS = PIPELINE_OPTIONS_CASES
 
 # One case per (spec, datapath format), at each spec's declared formats.

@@ -77,7 +77,7 @@ def capture(out_path: str, flows: list[str]) -> None:
                 row["available"] = False
             else:
                 row["available"] = True
-                result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
+                result = holoso.synthesize(target.kernel(), flow.attributed(target.ops), name=target.name)
                 directory = REPO / "build" / "synth_compare" / target.label
                 shutil.rmtree(directory, ignore_errors=True)
                 report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)

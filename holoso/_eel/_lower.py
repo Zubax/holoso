@@ -1,6 +1,5 @@
 """The full Eel pipeline, desugar -> partial evaluation -> emission, behind one call."""
 
-import inspect
 import logging
 import types
 from dataclasses import dataclass
@@ -9,7 +8,7 @@ from .._errors import UnsupportedConstruct
 from .._hir import Hir
 from ._desugar import desugar
 from ._emit import emit
-from ._decorator import plain_function
+from ._decorator import resolve_callable
 from ._pe import partial_evaluate
 from ._print import print_eel
 
@@ -29,16 +28,14 @@ class FrontendOutput:
 
 
 def resolve_target(target: object) -> tuple[types.FunctionType, object | None]:
-    """A bound method contributes its receiver, bound as a frozen snapshot root by the partial evaluator."""
-    if inspect.ismethod(target):
-        fn = plain_function(target.__func__)
-        if fn is None:
-            raise UnsupportedConstruct(f"the target is a bound method of {target.__func__!r}, not of a function")
-        return fn, target.__self__
-    fn = plain_function(target)
-    if fn is None:
-        raise UnsupportedConstruct(f"the target {target!r} is not a plain function")
-    return fn, None
+    """A target called on an instance contributes it, bound as a frozen snapshot root by the partial evaluator."""
+    resolved = resolve_callable(target)
+    if resolved is None:
+        raise UnsupportedConstruct(
+            f"the target {target!r} is not a plain function, a bound method of one, or an instance whose class "
+            "defines `__call__` as one"
+        )
+    return resolved
 
 
 def lower(target: object, unroll_max_trips: int) -> FrontendOutput:

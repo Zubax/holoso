@@ -117,19 +117,33 @@ The full configuration might look as follows:
 import holoso
 
 options = holoso.Options(
-    # Define the numerical operators. This is where you can configure additional stages to close timings.
-    holoso.OperatorOptions(
-        fadd=holoso.FAddOptions(stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1),
-        fmul=holoso.FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-        fdivsqrt=holoso.FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
-        fmul_ilog2=holoso.FMulILog2Options(),
-        fcmp=holoso.FCmpOptions(),
+    # Define the numerical operators. This is where you configure the register stages that close timings.
+    operator=holoso.OperatorOptions(
+        fadd=holoso.FAddOptions(
+            stage_input=0,
+            stage_core=holoso.FAddOptions.CoreStages.ALIGN | holoso.FAddOptions.CoreStages.NORMALIZE,
+            stage_output=1,
+        ),
+        fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+        fdivsqrt=holoso.FDivsqrtOptions(
+            stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+        ),
+        fmul_ilog2=holoso.FMulILog2Options(
+            stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+        ),
+        fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
     ),
+    # The operand width of the FPGA multipliers (DSP tiles); used to synthesize efficient multiplication circuits.
+    # If no DSP tiles exist, you can specify an arbitrary sensible value that closes timings.
+    wmultiplier=18,
     # Select the floating-point format you wish to use.
     # Ideally, wman (mantissa width) should be a multiple of DSP tile operand width.
     ffmt=holoso.FloatFormat(wexp=6, wman=18),
 )
 ```
+
+The float operator options are the tuning knobs of the corresponding [ZKF](https://github.com/Zubax/zkf) operators.
+The integer operators default to no register stages.
 
 Every operator also takes `instances`, which caps how many physical copies of it the machine may emit; the
 default of one shares a single module across the whole kernel, and a higher cap lets independent work co-issue.
@@ -142,7 +156,7 @@ For example, the fused multiply-add operator (`ffma`) is entirely optional -- wi
 computed as a separate multiplication and an addition -- but `fadd` is not substitutable.
 
 How does one actually obtain the optimal staging configuration? Empirically.
-Start with the default configuration (no optional stages) and see if it achieves timing closure at the target frequency.
+Start with no optional stages and see if it achieves timing closure at the target frequency.
 If not, inspect the synthesis logs to see where the critical path is --
 it's going to be inside one of the arithmetic operators like fadd/fdivsqrt/etc. --
 and enable the operator stage that splits that path. Repeat until timings close.
@@ -150,14 +164,6 @@ and enable the operator stage that splits that path. Repeat until timings close.
 Pro tip: even small (local) LLMs can execute this loop very efficiently, no need to waste human time on this.
 With AI automation this approach is superior to automatic target-frequency-based pipelining (e.g., XLS, FloPoCo, etc)
 because it does not rely on heuristics, but instead utilizes feedback from final PnR, thus being truly closed-loop.
-
-Synthesis output depends not only on the kernel but also on the configured operators due to optimization.
-For example, if the fused multiply-add (FMA) operator is set up, `math.fma` uses it, and so do some library
-routines built on it, such as `@`, `np.linalg.inv`, `np.linalg.norm`, `np.cross`, `np.polyval`, etc.;
-a hypotenuse is folded into `atan2` when computed nearby, etc.
-Overall, Holoso pattern-matches heavily to reduce execution latency;
-e.g., nearby sin and cos are folded into a single CORDIC rotation.
-If the kernel cannot be lowered using the available operators, Holoso will raise an error.
 
 ### Construct the RTL
 
@@ -176,7 +182,7 @@ pid = PID(kp=0.5, ki=0.0625, kd=0.25, limit=4.0)
 
 # Run Holoso -- construct the machine and schedule the microcode.
 # The results are returned in-memory; you can write them to disk where you want.
-# They include the generated Verilog module, the fixed holoso_support.v, testbench, and the reports.
+# They include the single generated Verilog file, testbench, and the reports.
 result = holoso.synthesize(pid.update, options)
 
 # Write the files -- this is usually what you want.
@@ -187,17 +193,17 @@ for filename, path in out.items():
     print(f"{filename}: {path}")
 ```
 
-#### Per-flow customization macro hooks
+#### Synthesis attributes
 
-The generated RTL is tool-neutral with per-flow customization macro hooks in cases where flow-specific attributes may
-be useful.
+The generated RTL is tool-neutral; flow-specific synthesis attributes are given in the options when invoking Holoso.
+For example, `ucode_rom_attrs={"rom_style": "block"}` places the microcode ROM in block RAM on Vivado
+(typically a good idea), then there's `rom_attrs` etc.
 
-`HOLOSO_ATTRIBUTE_ROM` is placed on the microcode ROM and on the lookup tables in operator modules.
-For example, `` `define HOLOSO_ATTRIBUTE_ROM (* rom_style = "block" *) `` for Vivado to avoid LUT ROM.
+#### Simulation
 
-`HOLOSO_ATTRIBUTE_KEEP` is placed on nets that synthesis must not restructure.
-For example, under LSE enable resource sharing and set `` `define HOLOSO_ATTRIBUTE_KEEP (* syn_keep = 1 *) ``
-to prevent the synthesizer from sharing nets where it worsens the results.
+Holoso emits Verilog-2005.
+It is sometimes needed to explicitly select the Verilog-2005 standard to simulate it as such,
+depending on the simulator (e.g., Icarus needs `-g2005`).
 
 ### Inspect the results
 
@@ -221,13 +227,11 @@ This ZISC-based approach has a greater initiation interval (II) compared to pure
 (at most one transaction in flight at any moment), but it results in significant chip area savings in complex cores.
 From our experience, this choice is defensible in a large subset of practical control/DSP applications.
 
-Holoso outputs portable and purely vendor-agnostic Verilog that can be fed into thid-party synthesis tools as-is,
-along with its support library implementing various arithmetic operators. So far it has been tested at least with
-Yosys (ECP5), Diamond (ECP5), and Vivado (Artix-7).
+Holoso outputs portable and purely vendor-agnostic Verilog that can be fed into third-party synthesis tools as-is.
+So far it has been tested at least with Yosys (ECP5), Diamond (ECP5), and Vivado (Artix-7).
+If you used Holoso with other flows/chips, please submit a PR to add your experience to the list.
 
-By default, Holoso is tuned for the minimum cycle latency and minimum $f_\max$.
-If timing closure fails, one needs to locate the critical path and enable the staging knob that inserts a
-register stage into the offending path; then re-synthesize and repeat until timings close.
+The fewest enabled stages give the minimum cycle latency and the minimum $f_\max$.
 
 Along with the synthesized Verilog, Holoso produces a Cocotb co-simulation testbench and a detailed and beautiful HTML
 report that provides a human-friendly view of the processor and the microcode sequence constructed by the synthesizer.
@@ -334,6 +338,6 @@ container useful as it comes with all of the required tools out of the box.
 ## ⚖️ License
 
 Holoso is licensed under the [Apache License 2.0](LICENSE).
-What you produce with it is yours: the Verilog this tool generates, together with the bundled support RTL it stitches
-into every design, is unencumbered and carries no license obligations.
+What you produce with it is yours: the Verilog this tool generates, together with the operator RTL it brings into
+every design, is unencumbered and carries no license obligations.
 Use it in open-source or proprietary designs freely.

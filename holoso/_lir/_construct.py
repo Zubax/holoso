@@ -14,13 +14,13 @@ from .._operators import (
     WideConditioner,
 )
 from .._type import FloatType, IntType
-from .._value import FloatValue, IntValue, WideValue
+from .._value import IntValue, WideValue
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule
 from ._sources import BoolOperandTemplate, OperandTemplate, WideOperandTemplate
 from ._build_base import Allocation, ConstPool, PooledConst
-from ._mir_facts import mir_operation
+from ._mir_facts import mir_operation, pooled_primitives
 
 
 def wide_type(mir: Mir, vid: ValueId) -> FloatType | IntType:
@@ -41,7 +41,7 @@ def bool_operand_template(mir: Mir, vid: ValueId, inversion: PortConditioner) ->
 
 
 def bool_operand(mir: Mir, vid: ValueId, alloc: Allocation, inversion: PortConditioner) -> BoolOperand:
-    return bool_operand_template(mir, vid, inversion).resolve(alloc.bool.assign.__getitem__)
+    return bool_operand_template(mir, vid, inversion).resolve(alloc.bool.assign)
 
 
 def operand_templates(node: MirOperation, mir: Mir, pool: Mapping[ValueId, PooledConst]) -> list[OperandTemplate]:
@@ -71,19 +71,19 @@ def _operands_of(
 ) -> list[WideOperand | BoolOperand]:
     return [
         (
-            template.resolve(alloc.wide.assign.__getitem__)
+            template.resolve(alloc.wide.assign)
             if isinstance(template, WideOperandTemplate)
-            else template.resolve(alloc.bool.assign.__getitem__)
+            else template.resolve(alloc.bool.assign)
         )
         for template in operand_templates(node, mir, pool)
     ]
 
 
-def _port_write(mir: Mir, alloc: Allocation, vid: ValueId, result: int) -> PortWrite:
+def _port_write(mir: Mir, alloc: Allocation, vid: ValueId) -> PortWrite:
     inversion = mir_operation(mir, vid).output_inversion
     if inversion is None:
-        return PortWrite(result, RegRef(alloc.wide.assign[vid]), None)
-    return PortWrite(result, BoolRegRef(alloc.bool.assign[vid]), inversion)
+        return PortWrite(RegRef(alloc.wide.assign[vid]), None)
+    return PortWrite(BoolRegRef(alloc.bool.assign[vid]), inversion)
 
 
 def build_inline_op(
@@ -95,7 +95,7 @@ def build_inline_op(
     return InlineScheduledOp(
         primitive=node.primitive,
         operands=operands,
-        write=_port_write(mir, alloc, vid, node.result),
+        write=_port_write(mir, alloc, vid),
         issue_cycle=issue_cycle,
     )
 
@@ -108,35 +108,30 @@ def build_pooled_op(
     pool: dict[ValueId, PooledConst],
 ) -> PooledScheduledOp:
     """
-    Build one pooled firing: the members share the primitive, operands, and operand conditioners (the fusion key), so
-    the operands are resolved once from the leader; each member contributes one PortWrite tapping its output port
-    into its own bank's register.
+    Build one pooled firing: the members share the drive, operands, and operand conditioners (the fusion key), so the
+    operands are resolved once from the leader; each member contributes one tap, its primitive's output port landing
+    in its own bank's register.
     """
     leader = min(members)
     node = mir_operation(mir, leader)
     assert isinstance(node.primitive, PooledPrimitive)
     operands = _operands_of(node, mir, alloc, pool)
-    swapped = alloc.wide.swap[leader]
-    if swapped:  # commutative primitive: exchange operands (with their conditioners) to shrink read muxes
+    primitives = pooled_primitives(mir, members)
+    if alloc.wide.swap[leader]:
+        # An orientable firing reads its operands exchanged (with their conditioners) to shrink the read muxes, and
+        # each member becomes its mirror, which answers the member's value from them bit-exactly: the comparator's gt
+        # and lt exchange while eq stays.
         operands.reverse()
-    # A swapped firing's taps move with the operands: each member's result maps through the primitive's commutation
-    # permutation (the comparator's gt and lt exchange while eq is fixed), so cmp(b,a) tapped at the permuted result
-    # yields bit-exactly the member's original value.
-    permutation = node.primitive.swap_output_permutation
-
-    def tap(member: ValueId) -> int:
-        result = mir_operation(mir, member).result
-        if not swapped:
-            return result
-        assert permutation is not None
-        return permutation[result]
-
-    writes = [_port_write(mir, alloc, member, tap(member)) for member in sorted(members, key=tap)]
+        mirrors = flipped(primitives)
+        assert mirrors is not None
+        primitives = mirrors
+    taps = {primitive: _port_write(mir, alloc, member) for member, primitive in primitives.items()}
+    assert len(taps) == len(primitives), "the members of a firing tap distinct ports"
     return PooledScheduledOp(
-        primitive=node.primitive,
+        drive=node.primitive.drive,
         instance=alloc.wide.instance[leader],
         operands=operands,
-        writes=writes,
+        taps=taps,
         issue_cycle=sched.issue_cycle[leader],
     )
 
@@ -164,7 +159,7 @@ def wide_operand_template(
 def wide_operand(
     mir: Mir, vid: ValueId, conditioner: PortConditioner, alloc: Allocation, pool: dict[ValueId, PooledConst]
 ) -> WideOperand:
-    return wide_operand_template(mir, vid, conditioner, pool).resolve(alloc.wide.assign.__getitem__)
+    return wide_operand_template(mir, vid, conditioner, pool).resolve(alloc.wide.assign)
 
 
 def build_outputs(
@@ -192,7 +187,7 @@ def build_terminator(terminator: MirTerminator, alloc: Allocation) -> Terminator
 
 def build_const_pool(mir: Mir) -> ConstPool:
     """
-    Build the immediate/ROM pool shared by both wide families, interned by the typed encoded value, so
+    Build the constant pool shared by both wide families, interned by the typed encoded value, so
     encoding-equal float literals share a word and class-aware equality keeps `1` and `1.0` distinct where raw
     Python keys would collide. A FLOAT is stored as its nonnegative magnitude, the sign folded into the consumer's
     free sign-control sideband -- value-preserving because `encode(|c|)` with the sign bit set equals `encode(c)`,
@@ -237,7 +232,7 @@ def build_const_pool(mir: Mir) -> ConstPool:
             pool[vid] = PooledConst(intern(IntValue.from_int(mir.int_format, value)), IntIdentity())
             continue
         assert type(value) is float
-        magnitude = FloatValue.from_float(mir.float_format, abs(value))
+        magnitude = mir.float_format.encode(abs(value))
         negate = math.copysign(1.0, value) < 0.0
         pool[vid] = PooledConst(intern(magnitude), FloatSignControl(negate=negate))
     return ConstPool(values, pool)

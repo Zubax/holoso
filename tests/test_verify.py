@@ -15,11 +15,6 @@ import pytest
 import holoso
 from holoso import (
     BoolType,
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FMulILog2Options,
-    FMulOptions,
     FloatFormat,
     FloatType,
     FloatValue,
@@ -62,6 +57,7 @@ from ._examples import (
     polar,
     remainder,
 )
+from . import _options as lean
 
 F32 = FloatFormat(8, 24)
 FMT = FloatFormat(6, 18)
@@ -95,7 +91,7 @@ def test_equal_temperament_default_sweep_has_no_log2_sidebands() -> None:
     # the artifact aborts on a domain_error/pole.
     sim = _model(equal_temperament, "et_sweep", F32)
     for raw in np.linspace(-4.0, 4.0, 25):  # hertz is monotonic in note, so a coarse grid suffices
-        x = F32.decode(F32.encode(float(raw)))
+        x = float(F32.encode(float(raw)))
         out = sim.run(x)
         assert all(math.isfinite(float(v)) for v in out), f"log2 sideband at note={x}: {[float(v) for v in out]}"
 
@@ -323,7 +319,7 @@ def test_model_uses_exact_ilog2_for_wide_supported_shift() -> None:
 
     fmt = FloatFormat(3, 4)
     model = _model(f, "f", fmt)
-    assert model.run(FloatValue.from_float(fmt, 0.5))[0] == FloatValue.from_float(fmt, 8.0)
+    assert model.run(fmt.encode(0.5))[0] == fmt.encode(8.0)
 
 
 def test_model_rejects_ambiguous_int_and_mismatched_float_value_format() -> None:
@@ -331,12 +327,12 @@ def test_model_rejects_ambiguous_int_and_mismatched_float_value_format() -> None
         return a
 
     model = _model(f, "f")
-    assert model.run(1.0)[0] == FloatValue.from_float(FMT, 1.0)
+    assert model.run(1.0)[0] == FMT.encode(1.0)
 
     with pytest.raises(TypeError):
         model.run(1)
     with pytest.raises(ValueError):
-        model.run(FloatValue.from_float(F32, 1.0))
+        model.run(F32.encode(1.0))
 
 
 def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
@@ -346,8 +342,8 @@ def test_model_is_bit_exact_for_wide_zkf_multiply_regression() -> None:
     fmt = FloatFormat(8, 36)
     model = _model(f, "f", fmt)
     got = model.run(
-        FloatValue.from_bits(fmt, 0x42BF30E6505),
-        FloatValue.from_bits(fmt, 0xBD734F60F3A),
+        FloatValue(fmt, 0x42BF30E6505),
+        FloatValue(fmt, 0xBD734F60F3A),
     )
     assert isinstance(got[0], FloatValue)
     assert got[0].bits == 0xC0B5B6B31D9
@@ -446,7 +442,7 @@ def test_model_executes_first_sample_branch(iir1_lpf_result: SynthesisResult) ->
     for index, x in enumerate(stream):
         (got,) = model.run(x)
         if index == 0:
-            assert float(got) == FMT.decode(FMT.encode(x))  # first sample is exactly x (then-arm)
+            assert float(got) == float(FMT.encode(x))  # first sample is exactly x (then-arm)
         assert within(float(got), reference(x), rtol, atol)
 
 
@@ -456,7 +452,7 @@ def test_model_branch_reset_restarts_the_first_sample_arm(iir1_lpf_result: Synth
     second = float(model.run(5.0)[0])
     assert second != 5.0  # the second sample took the IIR arm, not y = x
     model.reset()
-    assert float(model.run(5.0)[0]) == FMT.decode(FMT.encode(5.0))  # first-sample arm again
+    assert float(model.run(5.0)[0]) == float(FMT.encode(5.0))  # first-sample arm again
 
 
 def test_model_pid_controller_all_arms_anti_windup_and_first_update() -> None:
@@ -1073,7 +1069,7 @@ def test_model_handle_round_trips_through_pickle(iir1_lpf_result: SynthesisResul
 def test_model_bool_cast_of_underflowing_constant_folds_at_host_precision() -> None:
     # bool(c) folds at host precision, where 2**-200 is nonzero, even though FMT(6,18) encodes that magnitude to zero
     # and the runtime cast would therefore read False. The optimizer does not model the format; the gate is taken.
-    assert FMT.encode(2.0**-200) == 0
+    assert FMT.encode(2.0**-200).is_zero
 
     def kernel(a: float) -> float:
         return a if bool(2.0**-200) else -a
@@ -1189,14 +1185,15 @@ def test_polar_example_round_trip_and_native_reference() -> None:
 
 OPS = mir_options(
     Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
+        operator=OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            fcmp=lean.fcmp(),
         ),
         ffmt=FMT,
+        wmultiplier=18,
     )
 )
 
@@ -1212,7 +1209,7 @@ def test_model_handles_unused_input_ports() -> None:
     model = build_model(build_lir(_run(f), "f"))
     assert [load.name for load in model._lir.wide_inputs] == ["a", "b"]
     assert [load.dst.index for load in model._lir.wide_inputs] == [0, 1]
-    assert model.run(1.0, 2.0)[0] == FloatValue.from_float(FMT, 2.0)
+    assert model.run(1.0, 2.0)[0] == FMT.encode(2.0)
 
 
 # --- In-place persistent-state commit: a state slot's live-out written directly into its slot register, no copy-back.
@@ -1529,7 +1526,7 @@ def test_slots_sharing_a_phi_live_out_build() -> None:
             return old + previous, self.x, w
 
     vectors: list[Vector] = [
-        [cond, FloatValue.from_float(FMT, k)]
+        [cond, FMT.encode(k)]
         for cond, k in [(True, 1.0), (False, 1.0), (True, 3.0), (True, -2.0), (False, 0.5), (False, 4.0), (True, 0.0)]
     ]
     for cls in (Forward, Reversed):

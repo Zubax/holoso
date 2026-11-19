@@ -1,5 +1,5 @@
 """
-Register allocation of one bank, jointly with the orientation of every commutative firing (which read port each
+Register allocation of one bank, jointly with the orientation of every orientable firing (which read port each
 operand takes) and, for an operator realized on several instances, with the instance each firing (one activation of
 an operator) binds, by one deterministic incremental annealer over an explicit interference graph.
 
@@ -12,7 +12,7 @@ price per register:
 
     sum over ports (|sources| - 1) + sum over registers (|writers| - 1) + register_price * open registers
 
-A read port is one `(operator, instance, operand position)`; its sources, the arms of its read mux, are the registers
+A read port is one `(operator, instance, operand port)`; its sources, the arms of its read mux, are the registers
 and the constant-pool words it reads (a constant is an arm like a register, an immovable pseudo-register). A register's
 writers are the output lanes `(operator, instance, output port)` landing in it and the fixed producers the emitter
 places beside them, keyed exactly as the emitter's write codebook keys them: an inline result by its primitive and
@@ -21,9 +21,10 @@ it moves, and the handshake-gated input load and slot install each by itself. Th
 value move re-keys every producer reading it. An open register is one above the pinned registers that holds at least one
 value.
 
-Orientation belongs to the same objective because a commutative firing may read its operands either way round:
-swapping moves each operand from one port's mux to the other's and permutes the firing's output taps through the
-primitive's `swap_output_permutation`, a pure relabeling at zero latency (Chen & Cong, ASP-DAC 2004). Binding
+Orientation belongs to the same objective because an orientable firing may read its operands either way round:
+swapping moves each operand from one port's mux to the other's and moves each output tap to its mirror's port, a pure
+relabeling at zero latency (Chen & Cong, ASP-DAC 2004). A firing is orientable when every primitive it taps has a
+mirror, so a comparator firing tapping only flags is, and one tapping a minimum is not. Binding
 belongs to it for the same reason: the instance a firing runs on decides which ports read its operands and which
 lanes write its results, and the scheduler's first-free choice is only the seed. A firing may move to any instance of
 its operator where the other firings of its block leave its busy window free, so neither the instance count nor the
@@ -45,12 +46,12 @@ import os
 import random
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import NamedTuple
 
-from .._operators import HardwareOperator, InlinePrimitive, PooledPrimitive
+from .._operators import Drive, HardwareOperator, InlinePrimitive
 from .._util import ValueId
 from ._ir import BoolOperand, WideConstRef
 from ._sources import InlineWriteSource, MoveWriteSource, OperandTemplate, WideOperandTemplate
@@ -77,7 +78,7 @@ _EPSILON = 1e-9
 @dataclass(frozen=True, slots=True)
 class RegallocTuning:
     """
-    `effort` is the search budget in proposals per decision (a movable value's register, a commutative firing's
+    `effort` is the search budget in proposals per decision (a movable value's register, an orientable firing's
     orientation, a bindable firing's instance); 0 keeps the greedy seed and its descent. `register_price` is what one
     freed register is worth in mux arms: the allocator minimizes `steering + register_price * registers`.
     """
@@ -104,7 +105,7 @@ class FixedProducer(ABC):
     def substitute(self, fn: Callable[[ValueId], ValueId]) -> "FixedProducer": ...
 
     @abstractmethod
-    def resolve(self, register_of: Callable[[ValueId], int]) -> "_WriterKey": ...
+    def resolve(self, register_of: Mapping[ValueId, int]) -> "_WriterKey": ...
 
 
 class _StaticWriter(FixedProducer):
@@ -120,7 +121,7 @@ class _StaticWriter(FixedProducer):
     def substitute(self, fn: Callable[[ValueId], ValueId]) -> "_StaticWriter":
         return self
 
-    def resolve(self, register_of: Callable[[ValueId], int]) -> "_StaticWriter":
+    def resolve(self, register_of: Mapping[ValueId, int]) -> "_StaticWriter":
         return self
 
 
@@ -155,7 +156,7 @@ class InlineWriter(FixedProducer):
         operands = tuple(t.substitute(fn) if isinstance(t, WideOperandTemplate) else t for t in self.operands)
         return InlineWriter(self.primitive, operands)
 
-    def resolve(self, register_of: Callable[[ValueId], int]) -> InlineWriteSource:
+    def resolve(self, register_of: Mapping[ValueId, int]) -> InlineWriteSource:
         operands = tuple(t.resolve(register_of) if isinstance(t, WideOperandTemplate) else t for t in self.operands)
         return InlineWriteSource(self.primitive, operands, inversion=None)
 
@@ -173,7 +174,7 @@ class MoveWriter(FixedProducer):
     def substitute(self, fn: Callable[[ValueId], ValueId]) -> "MoveWriter":
         return MoveWriter(self.source.substitute(fn))
 
-    def resolve(self, register_of: Callable[[ValueId], int]) -> MoveWriteSource:
+    def resolve(self, register_of: Mapping[ValueId, int]) -> MoveWriteSource:
         return MoveWriteSource(self.source.resolve(register_of))
 
 
@@ -191,16 +192,21 @@ class Firing:
     """
 
     leader: ValueId
-    primitive: PooledPrimitive
+    drive: Drive
     block: int
     issue: int
     seed_instance: int
     reads: list[_Source]
-    writes: list[tuple[int, ValueId]]
+    writes: dict[str, ValueId]
+    mirror: dict[str, str] | None
+    """
+    Each output port the firing taps, in either bank, to the port answering its value once the operands are exchanged;
+    None where some tap has no mirror, so the firing keeps its operand order.
+    """
 
     @property
     def window(self) -> range:
-        return range(self.issue, self.issue + self.primitive.initiation_interval)
+        return range(self.issue, self.issue + self.drive.timing.initiation_interval)
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,13 +254,13 @@ class Coloring:
 class _Port(NamedTuple):
     operator: HardwareOperator
     instance: int
-    position: int
+    port: str
 
 
 class _Lane(NamedTuple):
     operator: HardwareOperator
     instance: int
-    port: int
+    port: str
 
 
 class _InstanceSlot(NamedTuple):
@@ -281,57 +287,57 @@ class _State:
     The allocation under search with its incremental objective: per port the sources it reaches, per register its
     writers (both with multiplicity, so a source leaves a mux only when its last read or write moves away), the
     register membership, and per instance the cycles its firings occupy. A fixed producer's writer key is its
-    resolution under the current assignment, so a value move re-keys the producers reading it (`dependents`) as
+    resolution under the current assignment, so a value move re-keys the producers reading it (`_dependents`) as
     well as those writing it. Every move goes through the counters, so its cost delta is exact and the inverse move
     is its undo.
     """
 
     def __init__(self, problem: ColoringProblem, start: _Snapshot) -> None:
-        self.problem = problem
-        self.price = problem.tuning.register_price
+        self._problem = problem
+        self._price = problem.tuning.register_price
         self.flip = list(start.flip)
         self.instance = list(start.instance)
-        self.occupancy: dict[tuple[_InstanceSlot, int], int] = {}  # (slot, cycle) -> the firing busy there
+        self._occupancy: dict[tuple[_InstanceSlot, int], int] = {}  # (slot, cycle) -> the firing busy there
         self.assign: dict[ValueId, int] = {}
-        self.members: dict[int, set[ValueId]] = {}
-        self.port_sources: dict[_Port, Counter[_ReadSource]] = {}
-        self.reg_writers: dict[int, Counter[_Writer]] = {}
-        self.writer_regs: dict[_Writer, Counter[int]] = {}
+        self._members: dict[int, set[ValueId]] = {}
+        self._port_sources: dict[_Port, Counter[_ReadSource]] = {}
+        self._reg_writers: dict[int, Counter[_Writer]] = {}
+        self._writer_regs: dict[_Writer, Counter[int]] = {}
         self.read_arms = 0
         self.write_arms = 0
         self.open = 0
-        self.readers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, operand position)
-        self.producers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, result)
-        self.dependents: dict[ValueId, list[tuple[ValueId, FixedProducer]]] = {}  # hole -> (written value, producer)
+        self._readers: dict[ValueId, list[tuple[int, int]]] = {}  # value -> (firing index, operand position)
+        self._producers: dict[ValueId, list[tuple[int, str]]] = {}  # value -> (firing index, output port)
+        self._dependents: dict[ValueId, list[tuple[ValueId, FixedProducer]]] = {}  # hole -> (written value, producer)
         for i, firing in enumerate(problem.firings):
             for pos, source in enumerate(firing.reads):
                 if not isinstance(source, WideConstRef):
-                    self.readers.setdefault(source, []).append((i, pos))
-            for result, value in firing.writes:
-                self.producers.setdefault(value, []).append((i, result))
+                    self._readers.setdefault(source, []).append((i, pos))
+            for result, value in firing.writes.items():
+                self._producers.setdefault(value, []).append((i, result))
         for vid in sorted(problem.fixed_producers):
             producers = problem.fixed_producers[vid]
             assert len(set(producers)) == len(producers), f"value {vid} lists a producer twice"
             for producer in producers:
                 for hole in producer.holes:
                     assert hole in problem.interferes, f"producer of {vid} depends on {hole}, not of this bank"
-                    self.dependents.setdefault(hole, []).append((vid, producer))
+                    self._dependents.setdefault(hole, []).append((vid, producer))
         for vid, reg in start.assign.items():
             self._join(vid, reg)
         for vid in start.assign:
-            self._produce(vid, 1)
+            self._produce(vid)
         for i in range(len(problem.firings)):
             self._attach(i, 1)
 
     @property
     def cost(self) -> float:
-        return self.read_arms + self.write_arms + self.price * self.open
+        return self.read_arms + self.write_arms + self._price * self.open
 
     def snapshot(self) -> _Snapshot:
         return _Snapshot(dict(self.assign), list(self.flip), list(self.instance))
 
     def _read(self, port: _Port, source: _ReadSource, delta: int) -> None:
-        sources = self.port_sources.setdefault(port, Counter())
+        sources = self._port_sources.setdefault(port, Counter())
         before = len(sources)
         count = sources[source] + delta
         assert count >= 0
@@ -342,11 +348,11 @@ class _State:
         self.read_arms += max(0, len(sources) - 1) - max(0, before - 1)
 
     def _write(self, reg: int, writer: _Writer, delta: int) -> None:
-        writers = self.reg_writers.setdefault(reg, Counter())
+        writers = self._reg_writers.setdefault(reg, Counter())
         before = len(writers)
         count = writers[writer] + delta
         assert count >= 0
-        regs = self.writer_regs.setdefault(writer, Counter())
+        regs = self._writer_regs.setdefault(writer, Counter())
         if count:
             writers[writer] = count
             regs[reg] += delta
@@ -354,80 +360,79 @@ class _State:
             del writers[writer]
             del regs[reg]
             if not regs:
-                del self.writer_regs[writer]
+                del self._writer_regs[writer]
         self.write_arms += max(0, len(writers) - 1) - max(0, before - 1)
 
     def _port(self, i: int, pos: int) -> _Port:
-        firing = self.problem.firings[i]
-        if self.flip[i]:
-            pos = 1 - pos  # commutative firings have arity 2 (checked by `color`)
-        return _Port(firing.primitive.operator, self.instance[i], pos)
+        """The port operand `pos` reaches: a flipped firing reads its operands the other way round."""
+        firing = self._problem.firings[i]
+        ports = firing.drive.operand_ports
+        return _Port(firing.drive.operator, self.instance[i], (ports[::-1] if self.flip[i] else ports)[pos])
 
-    def _lane(self, i: int, result: int) -> _Lane:
-        firing = self.problem.firings[i]
+    def _lane(self, i: int, port: str) -> _Lane:
+        firing = self._problem.firings[i]
         if self.flip[i]:
-            permutation = firing.primitive.swap_output_permutation
-            assert permutation is not None
-            result = permutation[result]
-        return _Lane(firing.primitive.operator, self.instance[i], firing.primitive.physical_port(result))
+            assert firing.mirror is not None
+            port = firing.mirror[port]
+        return _Lane(firing.drive.operator, self.instance[i], port)
 
     def _slot(self, i: int, instance: int) -> _InstanceSlot:
-        firing = self.problem.firings[i]
-        return _InstanceSlot(firing.block, firing.primitive.operator, instance)
+        firing = self._problem.firings[i]
+        return _InstanceSlot(firing.block, firing.drive.operator, instance)
 
     def _read_source(self, source: _Source) -> _ReadSource:
         return source if isinstance(source, WideConstRef) else self.assign[source]
 
     def _attach(self, i: int, delta: int) -> None:
-        firing = self.problem.firings[i]
+        firing = self._problem.firings[i]
         for pos, source in enumerate(firing.reads):
             self._read(self._port(i, pos), self._read_source(source), delta)
-        for result, value in firing.writes:
+        for result, value in firing.writes.items():
             self._write(self.assign[value], self._lane(i, result), delta)
         slot = self._slot(i, self.instance[i])
         for cycle in firing.window:
             if delta > 0:
-                assert (slot, cycle) not in self.occupancy, "two firings busy on one instance of an operator"
-                self.occupancy[(slot, cycle)] = i
+                assert (slot, cycle) not in self._occupancy, "two firings busy on one instance of an operator"
+                self._occupancy[(slot, cycle)] = i
             else:
-                del self.occupancy[(slot, cycle)]
+                del self._occupancy[(slot, cycle)]
 
     def _join(self, vid: ValueId, reg: int) -> None:
         self.assign[vid] = reg
-        members = self.members.setdefault(reg, set())
-        if not members and reg >= self.problem.fresh_start:
+        members = self._members.setdefault(reg, set())
+        if not members and reg >= self._problem.fresh_start:
             self.open += 1
         members.add(vid)
 
     def _leave(self, vid: ValueId) -> None:
         reg = self.assign.pop(vid)
-        members = self.members[reg]
+        members = self._members[reg]
         members.discard(vid)
-        if not members and reg >= self.problem.fresh_start:
+        if not members and reg >= self._problem.fresh_start:
             self.open -= 1
 
     def _resolve(self, producer: FixedProducer) -> _Writer:
-        return producer.resolve(self.assign.__getitem__)
+        return producer.resolve(self.assign)
 
-    def _produce(self, vid: ValueId, delta: int) -> None:
-        for producer in self.problem.fixed_producers.get(vid, ()):
-            self._write(self.assign[vid], self._resolve(producer), delta)
+    def _produce(self, vid: ValueId) -> None:
+        for producer in self._problem.fixed_producers.get(vid, ()):
+            self._write(self.assign[vid], self._resolve(producer), 1)
 
     def _rekeyed(self, vid: ValueId) -> list[tuple[ValueId, FixedProducer]]:
         """The producers whose key changes when `vid` moves: those it writes with and those reading it, once each."""
-        own = [(vid, producer) for producer in self.problem.fixed_producers.get(vid, ())]
-        return list(dict.fromkeys([*own, *self.dependents.get(vid, ())]))
+        own = [(vid, producer) for producer in self._problem.fixed_producers.get(vid, ())]
+        return list(dict.fromkeys([*own, *self._dependents.get(vid, ())]))
 
     def _writers_of(self, vid: ValueId) -> list[_Writer]:
-        lanes: list[_Writer] = [self._lane(i, result) for i, result in self.producers.get(vid, ())]
-        return [*(self._resolve(p) for p in self.problem.fixed_producers.get(vid, ())), *lanes]
+        lanes: list[_Writer] = [self._lane(i, result) for i, result in self._producers.get(vid, ())]
+        return [*(self._resolve(p) for p in self._problem.fixed_producers.get(vid, ())), *lanes]
 
     def _touch(self, vid: ValueId, delta: int) -> None:
         """Count (or discount) every endpoint keyed by `vid`'s register: reads, lanes, the producers it re-keys."""
         reg = self.assign[vid]
-        for i, pos in self.readers.get(vid, ()):
+        for i, pos in self._readers.get(vid, ()):
             self._read(self._port(i, pos), reg, delta)
-        for i, result in self.producers.get(vid, ()):
+        for i, result in self._producers.get(vid, ()):
             self._write(reg, self._lane(i, result), delta)
         for dst, producer in self._rekeyed(vid):
             self._write(self.assign[dst], self._resolve(producer), delta)
@@ -444,9 +449,9 @@ class _State:
         self._attach(i, 1)
 
     def instance_free(self, i: int, instance: int) -> bool:
-        firing = self.problem.firings[i]
+        firing = self._problem.firings[i]
         slot = self._slot(i, instance)
-        return all(self.occupancy.get((slot, cycle), i) == i for cycle in firing.window)
+        return all(self._occupancy.get((slot, cycle), i) == i for cycle in firing.window)
 
     def move_instance(self, i: int, instance: int) -> None:
         self._attach(i, -1)
@@ -455,7 +460,7 @@ class _State:
 
     def swap_instances(self, i: int, j: int) -> bool:
         """Exchange two same-operator firings' instances if both windows are free after the exchange; else no change."""
-        assert self.problem.firings[i].primitive.operator == self.problem.firings[j].primitive.operator
+        assert self._problem.firings[i].drive.operator == self._problem.firings[j].drive.operator
         self._attach(i, -1)
         self._attach(j, -1)
         legal = self.instance_free(i, self.instance[j]) and self.instance_free(j, self.instance[i])
@@ -466,20 +471,20 @@ class _State:
         return legal
 
     def fits(self, vid: ValueId, reg: int) -> bool:
-        if reg in self.problem.reserved:
+        if reg in self._problem.reserved:
             return False
-        members = self.members.get(reg, set())
-        assert members or reg >= self.problem.fresh_start
-        return self.problem.interferes[vid].isdisjoint(members)
+        members = self._members.get(reg, set())
+        assert members or reg >= self._problem.fresh_start
+        return self._problem.interferes[vid].isdisjoint(members)
 
     def fresh(self) -> int:
-        reg = self.problem.fresh_start
-        while self.members.get(reg):
+        reg = self._problem.fresh_start
+        while self._members.get(reg):
             reg += 1
         return reg
 
     def occupied(self) -> list[int]:
-        return sorted(reg for reg, members in self.members.items() if members)
+        return sorted(reg for reg, members in self._members.items() if members)
 
     def propose_register(self, vid: ValueId, rng: random.Random) -> int | None:
         """
@@ -492,14 +497,14 @@ class _State:
         if draw < 0.45:
             candidates = [
                 source
-                for i, pos in self.readers.get(vid, ())
-                for source in self.port_sources.get(self._port(i, pos), ())
+                for i, pos in self._readers.get(vid, ())
+                for source in self._port_sources.get(self._port(i, pos), ())
                 if isinstance(source, int)
             ]
         elif draw < 0.65:
-            candidates = [reg for writer in self._writers_of(vid) for reg in self.writer_regs.get(writer, ())]
+            candidates = [reg for writer in self._writers_of(vid) for reg in self._writer_regs.get(writer, ())]
         elif draw < 0.9:
-            candidates = [reg for reg, members in self.members.items() if members]
+            candidates = [reg for reg, members in self._members.items() if members]
         else:
             candidates = [self.fresh()]
         old = self.assign[vid]
@@ -524,11 +529,9 @@ def _seed_incidence(
     for firing in problem.firings:
         for pos, source in enumerate(firing.reads):
             if not isinstance(source, WideConstRef):
-                ports[source].add(_Port(firing.primitive.operator, firing.seed_instance, pos))
-        for result, value in firing.writes:
-            writers[value].add(
-                _Lane(firing.primitive.operator, firing.seed_instance, firing.primitive.physical_port(result))
-            )
+                ports[source].add(_Port(firing.drive.operator, firing.seed_instance, firing.drive.operand_ports[pos]))
+        for result, value in firing.writes.items():
+            writers[value].add(_Lane(firing.drive.operator, firing.seed_instance, result))
     return ports, {vid: frozenset(w) for vid, w in writers.items()}
 
 
@@ -596,11 +599,11 @@ class _Decisions:
 
     @classmethod
     def of(cls, problem: ColoringProblem) -> "_Decisions":
-        flippable = [i for i, firing in enumerate(problem.firings) if firing.primitive.is_commutative]
-        bindable = [i for i, firing in enumerate(problem.firings) if problem.instances[firing.primitive.operator] > 1]
+        flippable = [i for i, firing in enumerate(problem.firings) if firing.mirror is not None]
+        bindable = [i for i, firing in enumerate(problem.firings) if problem.instances[firing.drive.operator] > 1]
         by_operator: dict[HardwareOperator, list[int]] = {}
         for i in bindable:
-            by_operator.setdefault(problem.firings[i].primitive.operator, []).append(i)
+            by_operator.setdefault(problem.firings[i].drive.operator, []).append(i)
         return cls(
             problem.movable, flippable, bindable, [members for members in by_operator.values() if len(members) > 1]
         )
@@ -615,13 +618,14 @@ def _unswap(state: _State, i: int, j: int) -> None:
     assert restored
 
 
-def _anneal(state: _State, rng: random.Random, proposals: int, decisions: _Decisions) -> _Snapshot:
+def _anneal(
+    problem: ColoringProblem, state: _State, rng: random.Random, proposals: int, decisions: _Decisions
+) -> _Snapshot:
     """
     Simulated annealing over the incremental state: each proposal is a value move drawn from the value's affinities,
     an instance move, a pair swap within a class, or an orientation flip, accepted by the Metropolis rule under
     geometric cooling; an infeasible draw spends its proposal. Returns the best allocation seen.
     """
-    problem = state.problem
     best_cost = state.cost
     best = state.snapshot()
     bind_share = _BIND_SHARE if decisions.bindable else 0.0
@@ -634,7 +638,7 @@ def _anneal(state: _State, rng: random.Random, proposals: int, decisions: _Decis
         draw = rng.random()
         if draw < bind_share:
             i = decisions.bindable[rng.randrange(len(decisions.bindable))]
-            target = rng.randrange(problem.instances[problem.firings[i].primitive.operator])
+            target = rng.randrange(problem.instances[problem.firings[i].drive.operator])
             if target == state.instance[i] or not state.instance_free(i, target):
                 continue
             undo = partial(state.move_instance, i, state.instance[i])
@@ -668,14 +672,13 @@ def _anneal(state: _State, rng: random.Random, proposals: int, decisions: _Decis
     return best
 
 
-def _descend(state: _State, decisions: _Decisions) -> int:
+def _descend(problem: ColoringProblem, state: _State, decisions: _Decisions) -> int:
     """
     First-improvement descent over the complete move set -- every movable value against every occupied non-reserved
     register and one fresh register, every bindable firing against every free instance of its class, every legal pair
     swap, every flip -- until no move improves, so the result is a local optimum of the annealer's neighborhood.
     Returns the number of sweeps.
     """
-    problem = state.problem
     sweeps = 0
     improved = True
     while improved:
@@ -697,7 +700,7 @@ def _descend(state: _State, decisions: _Decisions) -> int:
         for i in decisions.bindable:
             old = state.instance[i]
             best_instance, best_cost = None, state.cost
-            for instance in range(problem.instances[problem.firings[i].primitive.operator]):
+            for instance in range(problem.instances[problem.firings[i].drive.operator]):
                 if instance == old or not state.instance_free(i, instance):
                     continue
                 state.move_instance(i, instance)
@@ -755,12 +758,12 @@ def _canonical_instances(problem: ColoringProblem, instance: list[int]) -> dict[
     used: Counter[HardwareOperator] = Counter()
     order = sorted(range(len(problem.firings)), key=lambda i: (problem.firings[i].block, problem.firings[i].issue, i))
     for i in order:
-        key = (problem.firings[i].primitive.operator, instance[i])
+        key = (problem.firings[i].drive.operator, instance[i])
         if key not in labels:
             labels[key] = used[key[0]]
             used[key[0]] += 1
     assert all(used[operator] <= count for operator, count in problem.instances.items())
-    return {problem.firings[i].leader: labels[(problem.firings[i].primitive.operator, instance[i])] for i in order}
+    return {problem.firings[i].leader: labels[(problem.firings[i].drive.operator, instance[i])] for i in order}
 
 
 def color(problem: ColoringProblem) -> Coloring:
@@ -776,15 +779,15 @@ def color(problem: ColoringProblem) -> Coloring:
     decisions = _Decisions.of(problem)
     proposals = problem.tuning.effort * decisions.count
     if proposals > 0:
-        state = _State(problem, _anneal(state, random.Random(0), proposals, decisions))
-    sweeps = _descend(state, decisions)
+        state = _State(problem, _anneal(problem, state, random.Random(0), proposals, decisions))
+    sweeps = _descend(problem, state, decisions)
     assert state.cost <= seed_cost + _EPSILON
     # Window disjointness per instance is asserted by `_attach` on every move.
     assert all(state.instance_free(i, state.instance[i]) for i in range(len(problem.firings)))
     assert all(state.assign[vid] not in problem.reserved for vid in problem.movable)
     compacted, nreg = _compact(problem, state.assign)
     _logger.info(
-        "Register allocation: values=%d pinned=%d firings=%d commutative=%d bindable=%d proposals=%d; objective "
+        "Register allocation: values=%d pinned=%d firings=%d orientable=%d bindable=%d proposals=%d; objective "
         "%g -> %g (read arms %d, write arms %d, open registers %d) after %d descent sweeps",
         len(problem.interferes),
         len(problem.pinned),

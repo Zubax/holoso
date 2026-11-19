@@ -1,14 +1,7 @@
-EXHAUSTIVE_MAX_WIDTH = 9
 """
-At and below this width the integer HDL tests drive every operand combination, so they prove the operator at those
-widths instead of sampling it. The widest exhaustive case is a few hundred thousand vectors, which is seconds.
-"""
-
-TEST_WIDTHS = (2, 3, 4, 5, 6, 7, 8, 9, 24, 33, 44)
-"""
-Every width up to the exhaustive limit, then the two production formats and the default one. The exhaustive range
-holds both kinds of width the shifter tells apart: a power of two, whose count field spans exactly the word, and the
-others, where a count past the word still fits the field.
+A fixed-width reference for the integer operators, written on raw bit patterns independently of `IntValue`: the
+operators' `evaluate` is scored against it, and `tests/test_rtl.py` scores their RTL against `evaluate`. Each answer is
+keyed by the name of the output port that carries it.
 """
 
 
@@ -17,10 +10,15 @@ def signed(bits: int, width: int) -> int:
     return bits - (1 << width) if bits & sign else bits
 
 
+def _saturated(exact: int, width: int) -> int:
+    clamped = min(max(exact, -(1 << (width - 1))), (1 << (width - 1)) - 1)
+    return clamped & ((1 << width) - 1)
+
+
 def ishl(a_bits: int, b_bits: int, width: int) -> int:
     """
-    What `holoso_ishft` answers with `right` low: left for a positive count, right for a negative one. The shift is
-    raw, so a left shift lets the high bits fall off the word.
+    What the shifter answers shifting left: left for a positive count, right for a negative one. The shift is raw, so
+    a left shift lets the high bits fall off the word.
     """
     assert width >= 2
     mask = (1 << width) - 1
@@ -32,7 +30,7 @@ def ishl(a_bits: int, b_bits: int, width: int) -> int:
 
 
 def ishr(a_bits: int, b_bits: int, width: int) -> int:
-    """The mirror of `ishl`, `right` high: right for a positive count, left for a negative one, raw either way."""
+    """The mirror of `ishl`: right for a positive count, left for a negative one, raw either way."""
     assert width >= 2
     mask = (1 << width) - 1
     assert 0 <= a_bits <= mask and 0 <= b_bits <= mask
@@ -43,23 +41,12 @@ def ishr(a_bits: int, b_bits: int, width: int) -> int:
 
 
 def expected_iadds_add(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
-    """
-    What `holoso_iadds` answers when it adds, keyed by the output ports that mode drives and its saturation sideband.
-    Each mode of the adder has its own reference, the module's name selecting none of them.
-    """
-    minimum = -(1 << (width - 1))
-    maximum = (1 << (width - 1)) - 1
-    exact = signed(a_bits, width) + signed(b_bits, width)
-    clamped = min(max(exact, minimum), maximum)
-    return {"y": clamped & ((1 << width) - 1), "saturated": int(clamped != exact)}
+    """What the adder answers when it adds. Each operation of the adder has its own reference."""
+    return {"y": _saturated(signed(a_bits, width) + signed(b_bits, width), width)}
 
 
 def expected_iadds_sub(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
-    minimum = -(1 << (width - 1))
-    maximum = (1 << (width - 1)) - 1
-    exact = signed(a_bits, width) - signed(b_bits, width)
-    clamped = min(max(exact, minimum), maximum)
-    return {"y": clamped & ((1 << width) - 1), "saturated": int(clamped != exact)}
+    return {"y": _saturated(signed(a_bits, width) - signed(b_bits, width), width)}
 
 
 def expected_iadds_cmp(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
@@ -68,30 +55,24 @@ def expected_iadds_cmp(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
     return {"a_gt_b": int(a > b), "a_eq_b": int(a == b), "a_lt_b": int(a < b)}
 
 
-def expected_simple(module: str, a_bits: int, width: int) -> dict[str, int]:
-    """
-    What one of the single-operand modules taking neither a mode nor a parameter beyond the width answers, keyed by
-    its own output port names. This, the shift directions and the adder's modes above and the two configurable
-    siblings below are the reference the HDL benches score every module against, so they are also what the Python
-    operator model must reproduce.
-    """
+def expected_unary(operator: str, a_bits: int, width: int) -> dict[str, int]:
+    """What one of the single-operand operators, named as the operator is, answers."""
     a = signed(a_bits, width)
-    if module == "holoso_ipopcnt":
+    if operator == "ipopcnt":
         return {"y": abs(a).bit_count()}
-    assert module == "holoso_iabss"
-    clamped = min(abs(a), (1 << (width - 1)) - 1)
-    return {"y": clamped, "saturated": int(clamped != abs(a))}
+    assert operator == "iabss"
+    return {"y": min(abs(a), (1 << (width - 1)) - 1)}
 
 
 def expected_imuls(a_bits: int, b_bits: int, width: int) -> dict[str, int]:
-    minimum = -(1 << (width - 1))
-    maximum = (1 << (width - 1)) - 1
-    exact = signed(a_bits, width) * signed(b_bits, width)
-    clamped = min(max(exact, minimum), maximum)
-    return {"y": clamped & ((1 << width) - 1), "saturated": int(clamped != exact)}
+    return {"y": _saturated(signed(a_bits, width) * signed(b_bits, width), width)}
 
 
-def expected_idivs(num_bits: int, den_bits: int, width: int, quotient_floor: bool) -> dict[str, int]:
+def expected_idivs(num_bits: int, den_bits: int, width: int) -> dict[str, int]:
+    """
+    The floor division and its remainder. A zero divisor answers the rail of the numerator's sign and keeps the
+    numerator as the remainder; MIN // -1 saturates.
+    """
     mask = (1 << width) - 1
     minimum = -(1 << (width - 1))
     maximum = (1 << (width - 1)) - 1
@@ -100,29 +81,13 @@ def expected_idivs(num_bits: int, den_bits: int, width: int, quotient_floor: boo
     if den == 0:
         quotient = minimum if num < 0 else maximum
         remainder = num
-        saturated = 1
-        div0 = 1
     elif num == minimum and den == -1:
         quotient = maximum
         remainder = 0
-        saturated = 1
-        div0 = 0
     else:
-        if quotient_floor:
-            quotient = num // den
-        else:
-            quotient_magnitude = abs(num) // abs(den)
-            quotient = -quotient_magnitude if (num < 0) != (den < 0) else quotient_magnitude
+        quotient = num // den
         remainder = num - den * quotient
-        saturated = 0
-        div0 = 0
         assert num == den * quotient + remainder
         assert abs(remainder) < abs(den)
-        if remainder:
-            assert (remainder < 0) == ((den if quotient_floor else num) < 0)
-    return {
-        "quo": quotient & mask,
-        "rem": remainder & mask,
-        "saturated": saturated,
-        "div0": div0,
-    }
+        assert not remainder or (remainder < 0) == (den < 0)
+    return {"quo": quotient & mask, "rem": remainder & mask}

@@ -6,23 +6,13 @@ value coverage lives in `test_int_synthesis`.
 """
 
 import math
+import re
 from collections.abc import Callable
 
 import pytest
 
 import holoso
-from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FFromIntOptions,
-    FILog2Options,
-    FloatFormat,
-    FMulILog2Options,
-    FMulOptions,
-    FRintOptions,
-    OperatorOptions,
-    Options,
-)
+from holoso import FloatFormat, OperatorOptions, Options
 import holoso._operators as operators
 from holoso._backend.verilog._emit import generate
 from holoso._eel import lower as lower_frontend
@@ -32,7 +22,6 @@ from holoso._mir import Mir, MirConst, MirOperation, lower as lower_to_mir
 from holoso._mir._ir import MirBuilder
 from holoso._mir._interpret import MirInterpreter
 from holoso._operators import (
-    FILog2Operator,
     FILog2Primitive,
     FloatIsFinitePrimitive,
     FloatIsNegInfPrimitive,
@@ -42,14 +31,16 @@ from holoso._operators import (
     FMulILog2Operator,
     FMulILog2Primitive,
     FRintPrimitive,
+    FRintToIntPrimitive,
     IAddPrimitive,
-    ICmpPrimitive,
     IntIdentity,
+    ICmpPrimitive,
     ISubPrimitive,
     PooledPrimitive,
     Primitive,
     RoundMode,
 )
+from holoso._operators._float import FILog2Operator
 from holoso._type import FloatType, IntType
 from holoso._value import FloatValue, IntValue
 
@@ -70,16 +61,18 @@ from .test_int_synthesis import (
     times_eight,
     truncated_and_floored,
 )
+from . import _options as lean
 
 OPTIONS = Options(
-    OperatorOptions(
-        fadd=FAddOptions(),
-        fmul=FMulOptions(),
-        fcmp=FCmpOptions(),
-        frint=FRintOptions(),
-        ffromint=FFromIntOptions(),
+    operator=OperatorOptions(
+        fadd=lean.fadd(),
+        fmul=lean.fmul(),
+        fcmp=lean.fcmp(),
+        frint=lean.frint(),
+        ffromint=lean.ffromint(),
     ),
     ffmt=FloatFormat(5, 11),
+    wmultiplier=18,
 )
 
 
@@ -98,7 +91,7 @@ def _operations(mir: Mir, name: str) -> list[MirOperation]:
 
 
 def _rounding(operation: MirOperation) -> RoundMode:
-    assert isinstance(operation.primitive, FRintPrimitive)
+    assert isinstance(operation.primitive, FRintPrimitive | FRintToIntPrimitive)
     return operation.primitive.rounding
 
 
@@ -132,18 +125,18 @@ def countdown(n: int) -> int:
         (divmod_pair, ["idivs", "idivs"]),
         (three_relations, ["iadds", "iadds", "iadds"]),
         (sign_ops, ["iabss", "iadds"]),
-        (bitwise_ops, ["ibwand", "ibwnot", "ibwor", "ibwxor"]),
-        (mux_and_casts, ["iadds", "ifrombool", "itobool", "select"]),
-        (_min_max_of_ints, ["iadds", "iadds", "iadds", "imuls", "select", "select"]),
+        (bitwise_ops, ["IntBwAndPrimitive", "IntBwNotPrimitive", "IntBwOrPrimitive", "IntBwXorPrimitive"]),
+        (mux_and_casts, ["BoolToIntPrimitive", "IntToBoolPrimitive", "SelectPrimitive", "iadds"]),
+        (_min_max_of_ints, ["SelectPrimitive", "SelectPrimitive", "iadds", "iadds", "iadds", "imuls"]),
         (family_crossings, ["ffromint", "frint"]),
         (shift_pair, ["ishft", "ishft"]),
         (countdown, ["iadds", "iadds", "iadds"]),
         (times_eight, ["imuls"]),
-        (eighth, ["ishiftc"]),
-        (eighth_remainder, ["ibwand"]),
+        (eighth, ["IntShiftConstPrimitive"]),
+        (eighth_remainder, ["IntBwAndPrimitive"]),
         (negated_by_product, ["iadds"]),
         (popcount_of, ["ipopcnt"]),
-        (cross_boundary, ["ffromint", "frint", "ibwand"]),
+        (cross_boundary, ["IntBwAndPrimitive", "ffromint", "frint"]),
     ],
     ids=lambda value: getattr(value, "__name__", str(value)),
 )
@@ -153,7 +146,7 @@ def test_the_lowering_names_each_integer_operator_in_one_table(
     """
     Every primitive the lowering can choose, named in one place: `-x` selects the adder because there is no
     negation module, both shift directions select the one shifter, the strength rewrites pick the
-    inline `ishiftc`/`ibwand` no public artifact can name, and `min`/`max` become one compare-and-select
+    inline constant shift and bitwise AND no public artifact can name, and `min`/`max` become one compare-and-select
     pair each rather than branches.
     """
     assert _mnemonics(_select(target)) == selected
@@ -175,8 +168,8 @@ def test_the_lowering_selects_the_adder_primitive_each_use_means(
     target: Callable[..., object], primitives: list[type[PooledPrimitive]]
 ) -> None:
     """
-    The adder's name cannot tell an addition from a subtraction or a comparison, so the primitive each use selects is
-    the sentinel: a negation is the subtraction from zero, a relation the comparison, and a sum the addition.
+    The adder's name cannot tell an addition from a subtraction, so the primitive each use selects is the sentinel: a
+    negation is the subtraction from zero, a relation a flag of the subtraction, and a sum the addition.
     """
     selected = sorted(type(operation.primitive).__name__ for operation in _operations(_select(target), "iadds"))
     assert selected == [primitive.__name__ for primitive in primitives]
@@ -191,7 +184,7 @@ def test_the_quotient_and_the_remainder_share_one_divider_firing() -> None:
     lir = build_lir(_select(divmod_pair), "divmod_pair")
     (firing,) = _wide_firings(lir)
     assert [instance.operator.name for instance in lir.instances] == ["idivs"]
-    assert sorted(write.result for write in firing.writes) == [0, 1]
+    assert {primitive.output_name for primitive in firing.taps} == {"quo", "rem"}
 
 
 def test_relations_fuse_into_one_firing_and_opposite_inversions_split() -> None:
@@ -203,10 +196,10 @@ def test_relations_fuse_into_one_firing_and_opposite_inversions_split() -> None:
     fused = build_lir(_select(three_relations), "three_relations")
     (firing,) = _wide_firings(fused)
     assert [instance.operator.name for instance in fused.instances] == ["iadds"]
-    assert isinstance(firing.primitive, ICmpPrimitive) and len(firing.writes) == 3
+    assert all(isinstance(primitive, ICmpPrimitive) for primitive in firing.taps) and len(firing.taps) == 3
     split = build_lir(_select(four_relations), "four_relations")
     assert [instance.operator.name for instance in split.instances] == ["iadds"]
-    assert [type(firing.primitive) for firing in _wide_firings(split)] == [ICmpPrimitive, ICmpPrimitive]
+    assert len(_wide_firings(split)) == 2
 
 
 def strength_mix(x: int, n: int) -> tuple[int, int, int, int]:
@@ -217,10 +210,11 @@ def test_strength_selection_keeps_the_multiplier_the_shifter_and_the_divider() -
     """
     One graph holding every strength decision: a power-of-two product is a multiplication like any other (it rails
     where a shift would wrap), the runtime shift takes the shifter, the non-power-of-two quotient still pays the
-    divider, and the constant count `3` is an `ishiftc` immediate -- neither a module nor a pooled constant.
+    divider, and the constant count `3` is a parameter of the inline constant shift -- neither a module nor a pooled
+    constant.
     """
     mir = _select(strength_mix)
-    assert _mnemonics(mir) == ["idivs", "imuls", "ishft", "ishiftc"]
+    assert _mnemonics(mir) == ["IntShiftConstPrimitive", "idivs", "imuls", "ishft"]
     lir = build_lir(mir, "strength_mix")
     assert sorted(instance.operator.name for instance in lir.instances) == ["idivs", "imuls", "ishft"]
     assert 3 not in {
@@ -244,15 +238,16 @@ def test_a_runtime_exponent_scaling_carries_mixed_conditioner_lists() -> None:
     builder.output(
         "scaled",
         builder.operation(
-            FMulILog2Primitive(FMulILog2Operator.build(fmt, ifmt, FMulILog2Options())),
+            FMulILog2Primitive(FMulILog2Operator.build(fmt, ifmt, lean.fmul_ilog2())),
             [builder.const(1.5, FloatType(fmt)), k],
             [FloatSignControl(), IntIdentity()],
         ),
+        FloatSignControl(),
     )
     builder.ret()
     interpreter = MirInterpreter(builder.finish())
     for exponent in (2, -3, 0):
-        assert interpreter.run(exponent) == [FloatValue.from_float(fmt, 1.5 * 2.0**exponent)], exponent
+        assert interpreter.run(exponent) == [fmt.encode(1.5 * 2.0**exponent)], exponent
 
 
 def test_exponent_extraction_places_the_limit_cases_outside_the_finite_span() -> None:
@@ -271,16 +266,17 @@ def test_exponent_extraction_places_the_limit_cases_outside_the_finite_span() ->
     builder.output(
         "exponent",
         builder.operation(
-            FILog2Primitive(FILog2Operator.build(fmt, ifmt, FILog2Options())),
+            FILog2Primitive(FILog2Operator.build(fmt, ifmt, lean.filog2())),
             [builder.input("x", FloatType(fmt))],
             [FloatSignControl()],
         ),
+        IntIdentity(),
     )
     builder.ret()
     interpreter = MirInterpreter(builder.finish())
 
     def extracted(value: float) -> int:
-        (answer,) = interpreter.run(FloatValue.from_float(fmt, value))
+        (answer,) = interpreter.run(fmt.encode(value))
         assert isinstance(answer, IntValue)  # the extraction crosses into the integer family
         return answer.value
 
@@ -299,13 +295,13 @@ def test_a_rounding_and_its_conversion_are_two_taps_of_one_firing() -> None:
     """
     mir = _select(floored_for_two_readers)
     assert _mnemonics(mir) == ["fadd", "frint", "frint"]
-    rounding, conversion = sorted(_operations(mir, "frint"), key=lambda operation: operation.result)
-    assert (rounding.result, conversion.result) == (0, 1)
+    (rounding,) = [op for op in _operations(mir, "frint") if isinstance(op.primitive, FRintPrimitive)]
+    (conversion,) = [op for op in _operations(mir, "frint") if isinstance(op.primitive, FRintToIntPrimitive)]
     assert conversion.operands == rounding.operands, "the conversion reads the value, not the rounding's result"
     assert _rounding(conversion) == _rounding(rounding) == RoundMode.FLOOR
     lir = build_lir(mir, "floored_for_two_readers")
     (firing,) = [op for op in _wide_firings(lir) if op.inst.operator.name == "frint"]
-    assert sorted(write.result for write in firing.writes) == [0, 1], "the float and the integer leave one firing"
+    assert {primitive.output_name for primitive in firing.taps} == {"y_float", "y_int"}, "one firing, two results"
 
 
 def test_two_roundings_of_one_value_share_the_instance_but_not_a_firing() -> None:
@@ -368,16 +364,16 @@ def test_a_slot_fed_by_an_integer_input_installs_ahead_of_the_boundary() -> None
     assert early_install(lir, slot)[1].issue_cycle == 0
 
 
-def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering() -> None:
+def test_an_unconditioned_operand_keeps_the_identity_conditioner_through_lowering() -> None:
     """
     `filog2` reads the exponent field alone, so its operand is declared unconditioned: no conditioner may reach it
-    and the wrapper binds no sign port. The NEGATIVE constant is the case that matters -- the pool stores a float as
-    its magnitude and folds the sign onto whoever reads it, below the normalization in the builder, so it is the one
-    way a sign could reappear on a port that has none.
+    and the kernel conditions its port by a constant identity, which folds away. The NEGATIVE constant is the case
+    that matters -- the pool stores a float as its magnitude and folds the sign onto whoever reads it, below the
+    normalization in the builder, so it is the one way a sign could reappear on a port that has none.
     """
     fmt = OPTIONS.ffmt
     ifmt = default_ifmt(fmt)
-    primitive = FILog2Primitive(FILog2Operator.build(fmt, ifmt, FILog2Options()))
+    primitive = FILog2Primitive(FILog2Operator.build(fmt, ifmt, lean.filog2()))
 
     for value, expected in ((3.5, 1), (-3.5, 1)):
         builder = MirBuilder(fmt, ifmt)
@@ -385,6 +381,7 @@ def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering(
         builder.output(
             "exponent",
             builder.operation(primitive, [builder.const(value, FloatType(fmt))], [FloatSignControl()]),
+            IntIdentity(),
         )
         builder.ret()
         mir = builder.finish()
@@ -395,7 +392,7 @@ def test_an_unconditioned_operand_binds_no_port_and_keeps_none_through_lowering(
         for operand in firing.operands:
             assert isinstance(operand, WideOperand)  # a float port, so the wide bank
             assert operand.conditioner.is_identity, value
-        assert ".a_sgnop(" not in generate(lir).verilog, value
+        assert re.search(r"\buc_filog2_0_a_sgn\s*=\s*2'd0;", generate(lir, {}).verilog), value
 
 
 def test_a_sign_that_cannot_be_observed_costs_no_conditioner() -> None:
@@ -439,7 +436,7 @@ def test_every_unconditioned_declaration_holds_over_every_result() -> None:
     ifmt = default_ifmt(fmt)
     bias = (1 << (fmt.wexp - 1)) - 1
     declaring = [
-        FILog2Primitive(FILog2Operator.build(fmt, ifmt, FILog2Options())),
+        FILog2Primitive(FILog2Operator.build(fmt, ifmt, lean.filog2())),
         FloatToBoolPrimitive(fmt),
         FloatIsFinitePrimitive(fmt),
     ]
@@ -455,9 +452,9 @@ def test_every_unconditioned_declaration_holds_over_every_result() -> None:
     magnitudes = [0.0, 1.0, 3.5, 2.0 ** (1 - bias), 2.0**bias, math.inf]
     for primitive in declaring:
         for magnitude in magnitudes:
-            base = FloatValue.from_float(fmt, magnitude)
+            base = fmt.encode(magnitude)
             answers = {
-                primitive.evaluate(base.apply_sign(negate=negate, absolute=absolute))
+                primitive.evaluate(FloatSignControl(negate=negate, absolute=absolute).apply_value(base))
                 for negate in (False, True)
                 for absolute in (False, True)
             }

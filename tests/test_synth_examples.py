@@ -6,8 +6,7 @@ deterministic scheduling guard in `test_latency_freeze`; this layer owns the phy
 
 The bundled example scripts are held to the same standard on one flow: each is run as shipped with `holoso.synthesize`
 observed, and every circuit it synthesizes must close on Yosys/nextpnr for ECP5 at 100 MHz. The options an example
-shows are therefore the options that are placed and routed, not a restatement of them kept elsewhere. They are closed
-with about 2 percent of f_max to spare where the circuit allows it; the test itself asks only for the bar.
+shows are therefore the options that are placed and routed, not a restatement of them kept elsewhere.
 
 The whole module is `synth`-marked (it needs an FPGA toolchain): `nox -s synth_examples` runs it and the normal
 suite skips it. A target whose flow's tool is absent skips individually, so a Yosys-only CI still exercises every Yosys
@@ -54,7 +53,7 @@ def test_target_closes_timing(target: SynthTarget) -> None:
     if not flow.available():
         pytest.skip(f"{target.flow.value} tool not available")
 
-    result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
+    result = holoso.synthesize(target.kernel(), flow.attributed(target.ops), name=target.name)
     directory = BUILD_ROOT / "examples" / target.label
     shutil.rmtree(directory, ignore_errors=True)
     report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
@@ -64,8 +63,8 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
     )
     if target.flow == FlowId.VIVADO_ARTIX7:
-        # The flow's ROM attribute hook is what keeps the microcode ROM out of LUT logic (5-10 percent of a large
-        # machine, DESIGN.md's fabric-area exploration).
+        # The flow's ROM attribute is what keeps the microcode ROM out of LUT logic (5-10 percent of a large machine,
+        # DESIGN.md's fabric-area exploration).
         block_rams = report.resources["RAMB36/FIFO*"].used + report.resources["RAMB18"].used
         assert block_rams >= 1, f"{target.label}: the microcode ROM is not in block RAM"
     if target.flow == FlowId.DIAMOND_ECP5:
@@ -73,10 +72,13 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         # still close at a narrow format, so timing alone would not notice the flow losing them (DESIGN.md's
         # fabric-area exploration). A total cannot tell a table from the microcode ROM, hence the owners. This sees a
         # table that is not mapped at all, not one mapped in part.
-        tables = len(re.findall(r"^holoso_f(?:exp2|log2) #\(", result.verilog_output.verilog, re.MULTILINE))
+        pattern = r"\bu_(f(?:exp2|log2)_\d+) \("
+        tables = set(re.findall(pattern, result.verilog_output.verilog))
         owners = report.block_ram_owners.items()
-        owning = [path for path, n in owners if n and re.search(r"/u_f(?:exp2|log2)_\d+$", path)]
-        assert len(owning) == tables, f"{target.label}: a lookup table is not in block RAM: {owning}"
+        owning = {match[1] for path, n in owners if n and (match := re.search(r"/u_(f(?:exp2|log2)_\d+)(?:/|$)", path))}
+        assert (
+            owning == tables
+        ), f"{target.label}: a lookup table is not in block RAM: {sorted(owning)} of {sorted(tables)}"
 
 
 _EXAMPLE_SCRIPTS = sorted((REPO_ROOT / "examples").glob("*.py"))
@@ -99,7 +101,7 @@ def test_example_script_closes_timing(script: Path, monkeypatch: pytest.MonkeyPa
     def observed(
         target: Callable[..., Any], /, options: holoso.Options, *, name: str | None = None
     ) -> holoso.SynthesisResult:
-        result = synthesize(target, options, name=name)
+        result = synthesize(target, flow.attributed(options), name=name)
         results.append((result, options.ffmt))
         return result
 

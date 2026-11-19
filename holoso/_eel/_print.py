@@ -5,6 +5,7 @@ runs means a transform changed. Locations off by default, on for logs and for th
 
 import dataclasses
 import math
+from typing import assert_never
 
 from ._ir import *
 from ._names import access_path
@@ -120,7 +121,7 @@ def _statement(stmt: Stmt, depth: int, lines: list[str], locations: bool) -> Non
             rendered = " ".join(repr(p) if isinstance(p, str) else _atom(p) for p in parts)
             put(f"raise {exc_type}" + (f" {rendered}" if rendered else ""), origin)
         case _:
-            raise AssertionError(stmt)
+            assert_never(stmt)
 
 
 def _expr(expr: Expr) -> str:
@@ -145,7 +146,7 @@ def _expr(expr: Expr) -> str:
         case IndexRead(base=base, index=index):
             return f"{_atom(base)}[{_axis(index)}]"
         case MultiIndexRead(base=base, axes=axes):
-            return f"{_atom(base)}[{', '.join(_axis(a) for a in axes)}]"
+            return _atom(base) + _tuple_subscript([_axis(a) for a in axes])
         case TupleExpr(items=items):
             if len(items) == 1:
                 return f"({_item(items[0])},)"
@@ -159,9 +160,9 @@ def _expr(expr: Expr) -> str:
         case SlotRead(slot=slot):
             return f"slot {_slot(slot)}"
         case Comp():
-            raise AssertionError("a comprehension prints only as the value of an assignment")
+            assert False, "a comprehension prints only as the value of an assignment"
         case _:
-            raise AssertionError(expr)
+            assert_never(expr)
 
 
 def _operator(operator: object) -> str:
@@ -229,7 +230,14 @@ def _store_path(root: LocalRef | EnvRead, path: tuple[Selector, ...]) -> str:
                 text += f".{name}"
             case IndexSel(index=index):
                 text += f"[{_atom(index)}]"
+            case AxesSel(indexes=indexes):
+                text += _tuple_subscript([_atom(index) for index in indexes])
     return text
+
+
+def _tuple_subscript(indexes: list[str]) -> str:
+    """Spelled as the source spells it, so a tuple of one or none stays apart from a plain subscript."""
+    return f"[{', '.join(indexes) + ',' * (len(indexes) == 1) or '()'}]"
 
 
 def _loc_suffix(origin: Origin) -> str:

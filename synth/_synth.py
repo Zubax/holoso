@@ -90,8 +90,7 @@ class SourceFile:
     content: str
 
     def __post_init__(self) -> None:
-        if self.path.is_absolute() or not self.path.parts or ".." in self.path.parts:
-            raise ValueError(f"source path must stay relative to the artifact directory: {self.path}")
+        assert not self.path.is_absolute() and self.path.parts and ".." not in self.path.parts, self.path
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,12 +99,10 @@ class OocDesign:
     files: Sequence[SourceFile]
 
     def __post_init__(self) -> None:
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.top) is None:
-            raise ValueError(f"invalid OOC top name: {self.top!r}")
+        assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.top) is not None, self.top
         files = tuple(self.files)
         _validate_unique_source_paths(files)
-        if not files or any(source.path.suffix != ".v" for source in files):
-            raise ValueError("OOC designs require at least one Verilog-2005 .v source file")
+        assert files and all(source.path.suffix == ".v" for source in files), files
         object.__setattr__(self, "files", files)
 
 
@@ -134,8 +131,7 @@ class SynthArtifact:
         root = directory.resolve()
         for source in self.files:
             target = (directory / source.path).resolve()
-            if not target.is_relative_to(root):
-                raise ValueError(f"source path escapes artifact directory: {source.path}")
+            assert target.is_relative_to(root), source.path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(source.content, encoding="utf-8")
 
@@ -147,18 +143,16 @@ class SynthArtifact:
 
 def _validate_unique_source_paths(files: Sequence[SourceFile]) -> None:
     paths = [source.path for source in files]
-    if len(paths) != len(set(paths)):
-        raise ValueError("OOC source paths must be unique")
+    assert len(paths) == len(set(paths)), paths
 
 
 def build_compiler_ooc_design(result: SynthesisResult) -> OocDesign:
     """
-    A generated module instantiates only support-library modules, all of which live inside the single bundled
-    `holoso_support.v`; nothing else is needed. Everything is bundled in memory so a recipe directory is
-    self-contained.
+    A generated design is one self-contained file, the kernel module and the private modules it instantiates; the
+    out-of-context wrapper is the other. Everything is bundled in memory so a recipe directory is self-contained.
     """
     wrapper = build_ooc_wrapper(result)
-    files = [SourceFile(Path(name), content) for name, content in result.verilog_output.support_files.items()] + [
+    files = [
         SourceFile(Path(f"{result.module_name}.v"), result.verilog_output.verilog),
         SourceFile(Path(f"{wrapper.top}.v"), wrapper.verilog),
     ]
