@@ -216,6 +216,12 @@ A robust closure procedure that accounts for this starts lean and adds back one 
   this way logic-balances a routing-dominated design without over-populating it with flip-flops.
 - Repeat until f_max clears the target.
 
+By default, closure must be achieved at the lowest speed grade.
+In wide numeric formats (where the float mantissa is wider than 23 bits, or where integers are wider than 32 bits),
+where it is proven to be impossible to close timings by adding stages alone,
+it is permitted to switch to a target chip with a higher speed grade.
+If a test is switched to a higher speed grade, the user must be explicitly notified.
+
 ## Verification
 
 Entirely driven by `nox`; read the `noxfile.py` for details and follow its recommendations.

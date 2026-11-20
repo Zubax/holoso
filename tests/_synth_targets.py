@@ -11,11 +11,10 @@ SynthTarget records with example=None.
 The bundled example scripts are themselves synthesized on yosys-ecp5 (test_synth_examples runs each one and synthesizes
 what it produces), so a kernel has no yosys-ecp5 row here at the format and word width its script ships.
 
-The bar (all at minimum speed grade): yosys-ecp5 and diamond-ecp5 at 100 MHz, vivado-artix7 at 150 MHz. Every row
-sits at the lean start (`_options`) until its timing is re-closed from there; stage knobs are row-local and appear only
-where measured closure or its margin needs them. A closed row is then trimmed: each stage is taken out in turn, and one
-the row closes without stays out. Vivado's result does not reproduce from one machine to the next, so a Vivado row
-closing with less than about 0.15 ns to spare takes one more stage where one helps.
+The bar is 100 MHz on yosys-ecp5 and diamond-ecp5 and 150 MHz on vivado-artix7, on the slowest speed grade. Every row
+was closed from the lean start (every optional stage off), one register stage per iteration at the critical path its
+flow reported, and then trimmed: each stage was taken out in turn, and one the row closed without stayed out. A row
+that departs from this says why.
 """
 
 import math
@@ -36,12 +35,13 @@ from holoso import (
     FMulILog2Options,
     FMulOptions,
     FRintOptions,
+    IAddsOptions,
+    IShftOptions,
     OperatorOptions,
     Options,
 )
 from synth.flows import DeviceClass, FlowId
 
-from . import _options as lean
 from ._examples import SPECS, ekf1_stateful, imu_fusion, polar, rigid_body_rates
 
 _F_e6m18 = FloatFormat(6, 18)
@@ -52,40 +52,48 @@ _F_e4m8 = FloatFormat(4, 8)  # the narrowest datapath; the float-free UART ignor
 def _op_config(
     fmt: FloatFormat,
     *,
-    fadd: FAddOptions | None = None,
-    fmul: FMulOptions | None = None,
-    fdivsqrt: FDivsqrtOptions | None = None,
-    fmul_ilog2: FMulILog2Options | None = None,
-    filog2: FILog2Options | None = None,
-    fcmp: FCmpOptions | None = None,
+    fadd: FAddOptions = FAddOptions(stage_input=0, stage_core=FAddOptions.CoreStages.NONE, stage_output=0),
+    fmul: FMulOptions = FMulOptions(stage_input=0, stage_core_mul=0, stage_output=0),
+    fdivsqrt: FDivsqrtOptions = FDivsqrtOptions(
+        stage_input=0, stage_core=FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+    ),
+    fmul_ilog2: FMulILog2Options = FMulILog2Options(
+        stage_input=0, stage_core=FMulILog2Options.CoreStages.NONE, stage_output=0
+    ),
+    filog2: FILog2Options = FILog2Options(stage_input=0, stage_output=0),
+    fcmp: FCmpOptions = FCmpOptions(stage_input=0, stage_output=0),
     ffma: FFmaOptions | None = None,
     fexp2: FExp2Options | None = None,
     flog2: FLog2Options | None = None,
     fcordic: FCordicOptions | None = None,
     frint: FRintOptions | None = None,
     ffromint: FFromIntOptions | None = None,
+    iadds: IAddsOptions = IAddsOptions(),
+    ishft: IShftOptions = IShftOptions(),
     wmultiplier: int,
-    wint_min: int = Options(operator=OperatorOptions(), wmultiplier=lean.WMULTIPLIER).wint_min,
+    wint_min: int = Options(operator=OperatorOptions(), wmultiplier=18).wint_min,
 ) -> Options:
     """
-    The Options for fmt; pass an options object to give a float operator stage knobs, else that operator is lean, as
-    every integer operator is. ffma/fexp2/flog2/fcordic/frint/ffromint are absent unless supplied, so a kernel that
-    uses no fused multiply-add, transcendental, rounding or integer conversion needs no such module.
+    The Options for fmt, every operator lean (every optional stage off) unless the row passes its own options for it.
+    ffma/fexp2/flog2/fcordic/frint/ffromint are absent unless supplied, so a kernel that uses no fused multiply-add,
+    transcendental, rounding or integer conversion needs no such module.
     """
     return Options(
         operator=OperatorOptions(
-            fadd=fadd or lean.fadd(),
-            fmul=fmul or lean.fmul(),
-            fdivsqrt=fdivsqrt or lean.fdivsqrt(),
-            fmul_ilog2=fmul_ilog2 or lean.fmul_ilog2(),
-            filog2=filog2 or lean.filog2(),
-            fcmp=fcmp or lean.fcmp(),
+            fadd=fadd,
+            fmul=fmul,
+            fdivsqrt=fdivsqrt,
+            fmul_ilog2=fmul_ilog2,
+            filog2=filog2,
+            fcmp=fcmp,
             ffma=ffma,
             fexp2=fexp2,
             flog2=flog2,
             fcordic=fcordic,
             frint=frint,
             ffromint=ffromint,
+            iadds=iadds,
+            ishft=ishft,
         ),
         ffmt=fmt,
         wmultiplier=wmultiplier,
@@ -185,22 +193,246 @@ def _root_only_kernel() -> Callable[..., object]:
 TARGETS: list[SynthTarget] = [
     # One explicit row per (example, flow), less the yosys-ecp5 rows the example scripts stand in for; duplication is
     # intentional.
-    _for_example("madd", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("madd", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("poly3", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("poly3", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("signal_window", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("signal_window", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("signal_window", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("iir1_hpf", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("iir1_hpf", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("iir1_hpf", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("iir1_lpf", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("iir1_lpf", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("iir1_lpf", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("pid", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("pid", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("pid", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
+    _for_example(
+        "madd",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "madd",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "poly3",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "poly3",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "signal_window",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(_F_e6m18, fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0), wmultiplier=18),
+    ),
+    _for_example(
+        "signal_window",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(_F_e6m18, fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0), wmultiplier=18),
+    ),
+    _for_example(
+        "signal_window",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(_F_e6m18, fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0), wmultiplier=18),
+    ),
+    _for_example(
+        "iir1_hpf",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "iir1_hpf",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "iir1_hpf",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "iir1_lpf",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "iir1_lpf",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "iir1_lpf",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "pid",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=0, stage_core=FMulILog2Options.CoreStages.DECODE, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "pid",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "pid",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
     _for_example("schmitt_trigger", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
     _for_example("schmitt_trigger", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
     _for_example("schmitt_trigger", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
@@ -213,19 +445,217 @@ TARGETS: list[SynthTarget] = [
     _for_example("majority_voter", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
     _for_example("majority_voter", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
     _for_example("majority_voter", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("recip_newton", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("recip_newton", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("recip_newton", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("integrator", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("integrator", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("integrator", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
+    _for_example(
+        "recip_newton",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "recip_newton",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "recip_newton",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "integrator",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "integrator",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "integrator",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
     # Straight-line multiply-accumulate chains.
-    _for_example("fir", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("fir", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("fir", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("biquad", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("biquad", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("biquad", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
+    _for_example(
+        "fir",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "fir",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "fir",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "biquad",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "biquad",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "biquad",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
     _for_example("uart_tx", FlowId.YOSYS_ECP5, 100, _op_config(_F_e4m8, wmultiplier=18)),
     _for_example("uart_tx", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e4m8, wmultiplier=18)),
     _for_example("uart_tx", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e4m8, wmultiplier=18)),
@@ -234,27 +664,165 @@ TARGETS: list[SynthTarget] = [
     _for_example("uart_rx", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e4m8, wmultiplier=18)),
     # tunable_lowpass: the one bundled kernel whose shift counts are run-time operands, hence the one that builds the
     # barrel shifter; at the 32-bit word its script ships.
-    _for_example("tunable_lowpass", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18, wint_min=32)),
-    _for_example("tunable_lowpass", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18, wint_min=32)),
-    _for_example("ekf1_stateless", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("ekf1_stateless", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
+    _for_example(
+        "tunable_lowpass",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(_F_e6m18, ishft=IShftOptions(stage_input=1), wmultiplier=18, wint_min=32),
+    ),
+    _for_example(
+        "tunable_lowpass",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(_F_e6m18, iadds=IAddsOptions(stage_output=1), wmultiplier=18, wint_min=32),
+    ),
+    _for_example(
+        "ekf1_stateless",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "ekf1_stateless",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=1, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
     # The same EKF with a second multiplier: the allocator binds the co-issued products across the two instances.
     _for_example(
         "ekf1_stateless",
         FlowId.VIVADO_ARTIX7,
         150,
-        _op_config(_F_e6m18, fmul=lean.fmul(instances=2), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(instances=2, stage_input=1, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
         name="ekf1_stateless_e6m18_fmul2",
     ),
     _for_example(
-        "ekf1_stateful", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18), kernel=_ekf1_stateful_kernel
+        "ekf1_stateful",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=1, stage_core_mul=1, stage_output=1),
+            wmultiplier=18,
+        ),
+        kernel=_ekf1_stateful_kernel,
     ),
     _for_example(
-        "ekf1_stateful", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18), kernel=_ekf1_stateful_kernel
+        "ekf1_stateful",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=1, stage_core_mul=1, stage_output=0),
+            wmultiplier=18,
+        ),
+        kernel=_ekf1_stateful_kernel,
     ),
-    _for_example("cordic_sincos", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("cordic_sincos", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("cordic_sincos", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
+    _for_example(
+        "cordic_sincos",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul_ilog2=FMulILog2Options(stage_input=0, stage_core=FMulILog2Options.CoreStages.DECODE, stage_output=0),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "cordic_sincos",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "cordic_sincos",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
     _for_example("octave_index", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
     _for_example("octave_index", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
     _for_example("octave_index", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
@@ -264,30 +832,229 @@ TARGETS: list[SynthTarget] = [
         "equal_temperament",
         FlowId.YOSYS_ECP5,
         100,
-        _op_config(_F_e6m18, fexp2=lean.fexp2(), flog2=lean.flog2(), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fexp2=FExp2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core=FExp2Options.CoreStages.NONE,
+                stage_output=0,
+                fast=True,
+            ),
+            flog2=FLog2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core_mul=2,
+                stage_core=FLog2Options.CoreStages.ALIGN | FLog2Options.CoreStages.SELECT,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
     ),
     _for_example(
         "equal_temperament",
         FlowId.DIAMOND_ECP5,
         100,
-        _op_config(_F_e6m18, fexp2=lean.fexp2(), flog2=lean.flog2(), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fexp2=FExp2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core=FExp2Options.CoreStages.SUM,
+                stage_output=0,
+                fast=True,
+            ),
+            flog2=FLog2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core_mul=2,
+                stage_core=FLog2Options.CoreStages.NONE,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
     ),
     _for_example(
         "equal_temperament",
         FlowId.VIVADO_ARTIX7,
         150,
-        _op_config(_F_e6m18, fexp2=lean.fexp2(), flog2=lean.flog2(), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fexp2=FExp2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core=FExp2Options.CoreStages.SUM,
+                stage_output=0,
+                fast=True,
+            ),
+            flog2=FLog2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core_mul=2,
+                stage_core=FLog2Options.CoreStages.ALIGN,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
     ),
-    _for_example("remainder", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("remainder", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("remainder", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18)),
-    _for_example("ekf1_stateless", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e8m36, wmultiplier=18)),
-    _for_example("ekf1_stateless", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e8m36, wmultiplier=18)),
     _for_example(
-        "ekf1_stateful", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e8m36, wmultiplier=18), kernel=_ekf1_stateful_kernel
+        "remainder",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
     ),
     _for_example(
-        "ekf1_stateful", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e8m36, wmultiplier=18), kernel=_ekf1_stateful_kernel
+        "remainder",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "remainder",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.SUM,
+                stage_output=0,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "ekf1_stateless",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e8m36,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=1, stage_core_mul=3, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=0, stage_core=FMulILog2Options.CoreStages.NONE, stage_output=1),
+            wmultiplier=18,
+        ),
+    ),
+    # Found from its Diamond sibling's stages rather than the lean start, whose build outruns Vivado's one-hour limit.
+    _for_example(
+        "ekf1_stateless",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e8m36,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "ekf1_stateful",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e8m36,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=1, stage_core_mul=3, stage_output=1),
+            wmultiplier=18,
+        ),
+        kernel=_ekf1_stateful_kernel,
+    ),
+    # Found from its Diamond sibling's stages rather than the lean start, whose build outruns Vivado's one-hour limit.
+    _for_example(
+        "ekf1_stateful",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e8m36,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            wmultiplier=18,
+        ),
+        kernel=_ekf1_stateful_kernel,
     ),
     # polar: two off-catalogue 2-vector CORDIC kernels (no scalar-lane SPEC). to_polar fuses atan2+hypot into one
     # vectoring; from_polar coalesces sin+cos into one rotation. A rotation takes one product register, a kernel that
@@ -297,28 +1064,86 @@ TARGETS: list[SynthTarget] = [
         kernel=_to_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=_op_config(_F_e6m18, fcordic=lean.fcordic(stage_core_mul=0), wmultiplier=18),
+        ops=_op_config(
+            _F_e6m18,
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.TAKEN
+                | FCordicOptions.CoreStages.ORDERED
+                | FCordicOptions.CoreStages.ANGLE
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
         name="to_polar_e6m18",
     ),
     SynthTarget(
         kernel=_to_polar_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=_op_config(_F_e6m18, fcordic=lean.fcordic(stage_core_mul=0), wmultiplier=18),
+        ops=_op_config(
+            _F_e6m18,
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.TAKEN
+                | FCordicOptions.CoreStages.ORDERED
+                | FCordicOptions.CoreStages.NORMALIZE_INPUT
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
         name="to_polar_e6m18",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=_op_config(_F_e6m18, fcordic=lean.fcordic(), wmultiplier=18),
+        ops=_op_config(
+            _F_e6m18,
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
         name="from_polar_e6m18",
     ),
     SynthTarget(
         kernel=_from_polar_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=_op_config(_F_e6m18, fcordic=lean.fcordic(), wmultiplier=18),
+        ops=_op_config(
+            _F_e6m18,
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=2,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
         name="from_polar_e6m18",
     ),
     # rigid_body_rates: the pivoted 3x3 Gauss-Jordan inversion -- conditional-swap select networks feeding one pooled
@@ -327,14 +1152,45 @@ TARGETS: list[SynthTarget] = [
         kernel=_rigid_body_rates_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=_op_config(_F_e6m18, wmultiplier=18),
+        ops=_op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=0, stage_core=FDivsqrtOptions.CoreStages.NONE, stage_output=1, fast=True
+            ),
+            wmultiplier=18,
+        ),
         name="rigid_body_rates_e6m18",
     ),
     SynthTarget(
         kernel=_rigid_body_rates_kernel,
         flow=FlowId.VIVADO_ARTIX7,
         target_frequency_MHz=150,
-        ops=_op_config(_F_e6m18, wmultiplier=18),
+        ops=_op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=0),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=1, stage_core=FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+            ),
+            wmultiplier=18,
+        ),
         name="rigid_body_rates_e6m18",
     ),
     # flux_observer: a short stateful clamped fadd/fmul/fcmp integrator feeding the same CORDIC vectoring as to_polar.
@@ -342,40 +1198,218 @@ TARGETS: list[SynthTarget] = [
         "flux_observer",
         FlowId.YOSYS_ECP5,
         100,
-        _op_config(_F_e6m18, fcordic=lean.fcordic(stage_core_mul=0), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=0,
+                stage_core=FCordicOptions.CoreStages.TAKEN
+                | FCordicOptions.CoreStages.ORDERED
+                | FCordicOptions.CoreStages.NORMALIZE_INPUT
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
     ),
     _for_example(
         "flux_observer",
         FlowId.DIAMOND_ECP5,
         100,
-        _op_config(_F_e6m18, fcordic=lean.fcordic(stage_core_mul=0), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=0,
+                stage_core=FCordicOptions.CoreStages.TAKEN
+                | FCordicOptions.CoreStages.ORDERED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
     ),
     _for_example(
         "flux_observer",
         FlowId.VIVADO_ARTIX7,
         150,
-        _op_config(_F_e6m18, fcordic=lean.fcordic(stage_core_mul=0), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcmp=FCmpOptions(stage_input=0, stage_output=1),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=0,
+                stage_core=FCordicOptions.CoreStages.TAKEN
+                | FCordicOptions.CoreStages.ORDERED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
     ),
     # foc: that observer embedded in a full current controller -- one CORDIC serving the observer's atan2 and the Park
     # rotation, the clamp on the comparator, and the divides of the limiter and the modulator, over the widest
     # microcode word in the matrix. Only the Vivado flow has a row here; a Diamond row is absent rather than guessed,
     # since closure is only ever established by running the flow.
-    _for_example("foc", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fcordic=lean.fcordic(), wmultiplier=18)),
+    _for_example(
+        "foc",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=0, stage_core=FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=1, fast=True
+            ),
+            fmul_ilog2=FMulILog2Options(stage_input=0, stage_core=FMulILog2Options.CoreStages.DECODE, stage_output=0),
+            fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.TAKEN
+                | FCordicOptions.CoreStages.ORDERED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
+    ),
     # imu_fusion: the fusion capstone -- three norm/rsqrt chains (a root and a division each on the one divider, one
     # feeding the coarse alignment), the comparator-backed clamp, and real gate branches over the heaviest register
     # pressure in the matrix, in the plain and the ffma datapaths. The Euclidean norms expand by exact exponent
     # scaling, a `filog2` per leg and its scalings.
     _for_example(
-        "imu_fusion", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, wmultiplier=18), kernel=_imu_fusion_kernel
+        "imu_fusion",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_core=FMulILog2Options.CoreStages.NONE, stage_output=0),
+            fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            wmultiplier=18,
+        ),
+        kernel=_imu_fusion_kernel,
     ),
     _for_example(
-        "imu_fusion", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, wmultiplier=18), kernel=_imu_fusion_kernel
+        "imu_fusion",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=0),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=0, stage_core=FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=0, fast=True
+            ),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_core=FMulILog2Options.CoreStages.NONE, stage_output=0),
+            fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            iadds=IAddsOptions(stage_input=1),
+            wmultiplier=18,
+        ),
+        kernel=_imu_fusion_kernel,
     ),
     _for_example(
         "imu_fusion",
         FlowId.YOSYS_ECP5,
         100,
-        _op_config(_F_e6m18, ffma=lean.ffma(), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=1, stage_core=FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=0, fast=True
+            ),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_core=FMulILog2Options.CoreStages.DECODE, stage_output=0),
+            filog2=FILog2Options(stage_input=1, stage_output=0),
+            fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            ffma=FFmaOptions(
+                stage_input=1,
+                stage_core_mul=2,
+                stage_core_add=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.NORMALIZED
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            iadds=IAddsOptions(stage_output=1),
+            wmultiplier=18,
+        ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
     ),
@@ -383,7 +1417,37 @@ TARGETS: list[SynthTarget] = [
         "imu_fusion",
         FlowId.DIAMOND_ECP5,
         100,
-        _op_config(_F_e6m18, ffma=lean.ffma(), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=1,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=0, stage_core=FDivsqrtOptions.CoreStages.NONE, stage_output=1, fast=True
+            ),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_core=FMulILog2Options.CoreStages.DECODE, stage_output=0),
+            filog2=FILog2Options(stage_input=1, stage_output=0),
+            fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            ffma=FFmaOptions(
+                stage_input=1,
+                stage_core_mul=2,
+                stage_core_add=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            iadds=IAddsOptions(stage_input=1),
+            wmultiplier=18,
+        ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
     ),
@@ -391,15 +1455,125 @@ TARGETS: list[SynthTarget] = [
         "imu_fusion",
         FlowId.VIVADO_ARTIX7,
         150,
-        _op_config(_F_e6m18, ffma=lean.ffma(), wmultiplier=18),
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=1, stage_core=FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=0, fast=True
+            ),
+            fmul_ilog2=FMulILog2Options(stage_input=1, stage_core=FMulILog2Options.CoreStages.NONE, stage_output=0),
+            fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            ffma=FFmaOptions(
+                stage_input=0,
+                stage_core_mul=2,
+                stage_core_add=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            iadds=IAddsOptions(stage_input=1),
+            wmultiplier=18,
+        ),
         kernel=_imu_fusion_kernel,
         name="imu_fusion_e6m18_fma",
     ),
     # kepler: a CORDIC rotation inside a data-dependent Newton back-edge loop -- the only II>1 operator in a loop in the
     # matrix.
-    _for_example("kepler", FlowId.YOSYS_ECP5, 100, _op_config(_F_e6m18, fcordic=lean.fcordic(), wmultiplier=18)),
-    _for_example("kepler", FlowId.DIAMOND_ECP5, 100, _op_config(_F_e6m18, fcordic=lean.fcordic(), wmultiplier=18)),
-    _for_example("kepler", FlowId.VIVADO_ARTIX7, 150, _op_config(_F_e6m18, fcordic=lean.fcordic(), wmultiplier=18)),
+    _for_example(
+        "kepler",
+        FlowId.YOSYS_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=0, stage_core=FDivsqrtOptions.CoreStages.NONE, stage_output=1, fast=True
+            ),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "kepler",
+        FlowId.DIAMOND_ECP5,
+        100,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
+    ),
+    _for_example(
+        "kepler",
+        FlowId.VIVADO_ARTIX7,
+        150,
+        _op_config(
+            _F_e6m18,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.DECODE
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=1,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.NORMALIZE,
+                stage_output=1,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
+    ),
     # iq_oscillator: the phase accumulator's float-to-integer conversion on the rounder, beside a CORDIC rotation.
     _for_example(
         "iq_oscillator",
@@ -407,9 +1581,25 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(
             _F_e6m18,
-            fcordic=lean.fcordic(),
-            frint=lean.frint(),
-            ffromint=lean.ffromint(),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            frint=FRintOptions(stage_input=0, stage_core=FRintOptions.CoreStages.MASK, stage_output=0),
+            ffromint=FFromIntOptions(
+                stage_input=0,
+                stage_core=FFromIntOptions.CoreStages.ABS
+                | FFromIntOptions.CoreStages.NORMALIZE
+                | FFromIntOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
             wmultiplier=18,
             wint_min=34,
         ),
@@ -420,9 +1610,23 @@ TARGETS: list[SynthTarget] = [
         100,
         _op_config(
             _F_e6m18,
-            fcordic=lean.fcordic(),
-            frint=lean.frint(),
-            ffromint=lean.ffromint(),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=3,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            frint=FRintOptions(stage_input=0, stage_core=FRintOptions.CoreStages.MASK, stage_output=1),
+            ffromint=FFromIntOptions(
+                stage_input=0,
+                stage_core=FFromIntOptions.CoreStages.ABS | FFromIntOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
             wmultiplier=18,
             wint_min=34,
         ),
@@ -433,9 +1637,20 @@ TARGETS: list[SynthTarget] = [
         150,
         _op_config(
             _F_e6m18,
-            fcordic=lean.fcordic(),
-            frint=lean.frint(),
-            ffromint=lean.ffromint(),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fcordic=FCordicOptions(
+                stage_input=0,
+                stage_core_mul=2,
+                stage_core=FCordicOptions.CoreStages.REDUCED
+                | FCordicOptions.CoreStages.FOLDED
+                | FCordicOptions.CoreStages.CORRECTIONS
+                | FCordicOptions.CoreStages.NORMALIZE
+                | FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
+            frint=FRintOptions(stage_input=0, stage_core=FRintOptions.CoreStages.MASK, stage_output=0),
+            ffromint=FFromIntOptions(stage_input=0, stage_core=FFromIntOptions.CoreStages.NORMALIZE, stage_output=0),
             wmultiplier=18,
             wint_min=34,
         ),
@@ -453,7 +1668,13 @@ TARGETS: list[SynthTarget] = [
         kernel=_root_only_kernel,
         flow=FlowId.DIAMOND_ECP5,
         target_frequency_MHz=100,
-        ops=_op_config(_F_e8m36, wmultiplier=18),
+        ops=_op_config(
+            _F_e8m36,
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=0, stage_core=FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=0, fast=True
+            ),
+            wmultiplier=18,
+        ),
         name="root_only_e8m36",
     ),
     SynthTarget(
@@ -470,7 +1691,35 @@ TARGETS: list[SynthTarget] = [
         "equal_temperament",
         FlowId.DIAMOND_ECP5,
         100,
-        _op_config(_F_e8m36, fexp2=lean.fexp2(), flog2=lean.flog2(), wmultiplier=18),
+        _op_config(
+            _F_e8m36,
+            fadd=FAddOptions(
+                stage_input=0,
+                stage_core=FAddOptions.CoreStages.OPERANDS
+                | FAddOptions.CoreStages.ALIGN
+                | FAddOptions.CoreStages.SUM
+                | FAddOptions.CoreStages.NORMALIZE
+                | FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            fexp2=FExp2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core=FExp2Options.CoreStages.SUM,
+                stage_output=0,
+                fast=True,
+            ),
+            flog2=FLog2Options(
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core_mul=3,
+                stage_core=FLog2Options.CoreStages.ALIGN,
+                stage_output=0,
+                fast=True,
+            ),
+            wmultiplier=18,
+        ),
         device_class=DeviceClass.LARGE,
     ),
 ]

@@ -130,12 +130,19 @@ class UartRx(_UartFrame):
 
 
 def main() -> None:
-    # The widest value on the lane is the 8-bit character, plus the sign bit for the total of nine.
-    options = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=9)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    for label, target in (
-        ("uart_tx", UartTx(parity=False).tick),  # 8E1: even parity
-        ("uart_rx", UartRx(parity=False).tick),
+    # The widest value on either lane is the 8-bit character, plus the sign bit for the total of nine.
+    for label, target, options in (
+        (  # 8E1: even parity
+            "uart_tx",
+            UartTx(parity=False).tick,
+            holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=9),
+        ),
+        (
+            "uart_rx",
+            UartRx(parity=False).tick,
+            holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=9),
+        ),
     ):
         result = holoso.synthesize(target, options, name=label)
         for filename, path in result.write(out_dir / label).items():

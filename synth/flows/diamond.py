@@ -11,7 +11,7 @@ from holoso import Options
 
 from .._detect import find_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
-from .._flow_id import DeviceClass, FlowId
+from .._flow_id import DeviceClass, FlowId, SpeedGrade
 from ._flow import Flow
 
 _TCL = "run_diamond.tcl"
@@ -25,8 +25,10 @@ class DiamondEcp5Device:
     device: str = "LFE5U-25F-6BG381C"
 
     @classmethod
-    def of(cls, device_class: DeviceClass) -> Self:
-        return cls("LFE5U-45F-6BG381C") if device_class is DeviceClass.LARGE else cls()
+    def of(cls, device_class: DeviceClass, speed_grade: SpeedGrade) -> Self:
+        size = 45 if device_class is DeviceClass.LARGE else 25
+        grade = {SpeedGrade.SLOWEST: 6, SpeedGrade.MIDDLE: 7, SpeedGrade.FASTEST: 8}[speed_grade]
+        return cls(f"LFE5U-{size}F-{grade}BG381C")
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,7 +7,7 @@ from holoso import Options
 
 from .._detect import find_tool, require_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
-from .._flow_id import DeviceClass, FlowId
+from .._flow_id import DeviceClass, FlowId, SpeedGrade
 from ._flow import Flow
 
 _SCRIPT = "synth.ys"
@@ -25,8 +25,9 @@ class Ecp5Device:
     speed_grade: int = 6
 
     @classmethod
-    def of(cls, device_class: DeviceClass) -> Self:
-        return cls(size="45k") if device_class is DeviceClass.LARGE else cls()
+    def of(cls, device_class: DeviceClass, speed_grade: SpeedGrade) -> Self:
+        grade = {SpeedGrade.SLOWEST: 6, SpeedGrade.MIDDLE: 7, SpeedGrade.FASTEST: 8}[speed_grade]
+        return cls(size="45k" if device_class is DeviceClass.LARGE else "25k", speed_grade=grade)
 
 
 @dataclass(frozen=True, slots=True)

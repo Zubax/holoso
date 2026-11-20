@@ -30,12 +30,12 @@ def main() -> None:
     options = holoso.Options(
         operator=holoso.OperatorOptions(
             fdivsqrt=holoso.FDivsqrtOptions(
-                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=0, fast=True
             ),
             fmul_ilog2=holoso.FMulILog2Options(
-                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
             ),
-            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
         ),
         ffmt=float_format,
         wmultiplier=18,

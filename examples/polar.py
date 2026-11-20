@@ -25,58 +25,130 @@ def from_polar(v: Float64[np.ndarray, "2"]) -> Float64[np.ndarray, "2"]:
 
 def main() -> None:
     base = Path(__file__).resolve().parent / "build" / Path(__file__).stem
-    # Each configuration serves both kernels, so its CORDIC keeps the product register that the rotation in
-    # `from_polar` takes.
+    narrow = holoso.FloatFormat(wexp=6, wman=18)
+    wide = holoso.FloatFormat(wexp=8, wman=36)
+    # Each kernel takes its own configuration at each format: the stages that close its timing.
     configs = [
-        holoso.Options(
-            operator=holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
-                fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
-                fdivsqrt=holoso.FDivsqrtOptions(
-                    stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+        (
+            holoso.Options(
+                operator=holoso.OperatorOptions(
+                    fadd=holoso.FAddOptions(
+                        stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=0
+                    ),
+                    fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+                    fdivsqrt=holoso.FDivsqrtOptions(
+                        stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                    ),
+                    fmul_ilog2=holoso.FMulILog2Options(
+                        stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+                    ),
+                    fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
+                    fcordic=holoso.FCordicOptions(
+                        stage_input=0,
+                        stage_core_mul=3,
+                        stage_core=holoso.FCordicOptions.CoreStages.TAKEN
+                        | holoso.FCordicOptions.CoreStages.ORDERED
+                        | holoso.FCordicOptions.CoreStages.ANGLE
+                        | holoso.FCordicOptions.CoreStages.NORMALIZE
+                        | holoso.FCordicOptions.CoreStages.PACK,
+                        stage_output=0,
+                        fast=True,
+                    ),
                 ),
-                fmul_ilog2=holoso.FMulILog2Options(
-                    stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
-                ),
-                fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
-                fcordic=holoso.FCordicOptions(
-                    stage_input=0,
-                    stage_core_mul=1,
-                    stage_core=holoso.FCordicOptions.CoreStages.NONE,
-                    stage_output=0,
-                    fast=True,
-                ),
+                ffmt=narrow,
+                wmultiplier=18,
             ),
-            ffmt=holoso.FloatFormat(wexp=6, wman=18),
-            wmultiplier=18,
+            holoso.Options(
+                operator=holoso.OperatorOptions(
+                    fadd=holoso.FAddOptions(
+                        stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=0
+                    ),
+                    fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+                    fdivsqrt=holoso.FDivsqrtOptions(
+                        stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                    ),
+                    fmul_ilog2=holoso.FMulILog2Options(
+                        stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+                    ),
+                    fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
+                    fcordic=holoso.FCordicOptions(
+                        stage_input=0,
+                        stage_core_mul=3,
+                        stage_core=holoso.FCordicOptions.CoreStages.REDUCED
+                        | holoso.FCordicOptions.CoreStages.FOLDED
+                        | holoso.FCordicOptions.CoreStages.NORMALIZE
+                        | holoso.FCordicOptions.CoreStages.PACK,
+                        stage_output=0,
+                        fast=True,
+                    ),
+                ),
+                ffmt=narrow,
+                wmultiplier=18,
+            ),
         ),
-        holoso.Options(
-            operator=holoso.OperatorOptions(
-                fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
-                fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
-                fdivsqrt=holoso.FDivsqrtOptions(
-                    stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+        (
+            holoso.Options(
+                operator=holoso.OperatorOptions(
+                    fadd=holoso.FAddOptions(
+                        stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=0
+                    ),
+                    fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+                    fdivsqrt=holoso.FDivsqrtOptions(
+                        stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                    ),
+                    fmul_ilog2=holoso.FMulILog2Options(
+                        stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+                    ),
+                    fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
+                    fcordic=holoso.FCordicOptions(
+                        stage_input=0,
+                        stage_core_mul=3,
+                        stage_core=holoso.FCordicOptions.CoreStages.TAKEN
+                        | holoso.FCordicOptions.CoreStages.ORDERED
+                        | holoso.FCordicOptions.CoreStages.ANGLE
+                        | holoso.FCordicOptions.CoreStages.NORMALIZE
+                        | holoso.FCordicOptions.CoreStages.PACK,
+                        stage_output=0,
+                        fast=True,
+                    ),
                 ),
-                fmul_ilog2=holoso.FMulILog2Options(
-                    stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
-                ),
-                fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
-                fcordic=holoso.FCordicOptions(
-                    stage_input=0,
-                    stage_core_mul=1,
-                    stage_core=holoso.FCordicOptions.CoreStages.NONE,
-                    stage_output=0,
-                    fast=True,
-                ),
+                ffmt=wide,
+                wmultiplier=18,
             ),
-            ffmt=holoso.FloatFormat(wexp=8, wman=36),
-            wmultiplier=18,
+            holoso.Options(
+                operator=holoso.OperatorOptions(
+                    fadd=holoso.FAddOptions(
+                        stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=0
+                    ),
+                    fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+                    fdivsqrt=holoso.FDivsqrtOptions(
+                        stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                    ),
+                    fmul_ilog2=holoso.FMulILog2Options(
+                        stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+                    ),
+                    fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
+                    fcordic=holoso.FCordicOptions(
+                        stage_input=0,
+                        stage_core_mul=3,
+                        stage_core=holoso.FCordicOptions.CoreStages.REDUCED
+                        | holoso.FCordicOptions.CoreStages.FOLDED
+                        | holoso.FCordicOptions.CoreStages.NORMALIZE_INPUT
+                        | holoso.FCordicOptions.CoreStages.NORMALIZE
+                        | holoso.FCordicOptions.CoreStages.PACK,
+                        stage_output=0,
+                        fast=True,
+                    ),
+                ),
+                ffmt=wide,
+                wmultiplier=18,
+            ),
         ),
     ]
-    for options in configs:
-        label = f"e{options.ffmt.wexp}m{options.ffmt.wman}"
+    for to_options, from_options in configs:
+        label = f"e{to_options.ffmt.wexp}m{to_options.ffmt.wman}"
         models = {}
-        for fn in (to_polar, from_polar):
+        for fn, options in ((to_polar, to_options), (from_polar, from_options)):
             result = holoso.synthesize(fn, options)
             models[fn.__name__] = result.numerical_model.elaborate()
             for filename, path in result.write(base / label / fn.__name__).items():

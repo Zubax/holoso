@@ -211,23 +211,38 @@ def main() -> None:
 
     options = holoso.Options(
         operator=holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
-            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
+            fadd=holoso.FAddOptions(
+                stage_input=1,
+                stage_core=holoso.FAddOptions.CoreStages.DECODE
+                | holoso.FAddOptions.CoreStages.OPERANDS
+                | holoso.FAddOptions.CoreStages.ALIGNED
+                | holoso.FAddOptions.CoreStages.NORMALIZE
+                | holoso.FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
             fdivsqrt=holoso.FDivsqrtOptions(
-                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=1, fast=True
             ),
             fcordic=holoso.FCordicOptions(
                 stage_input=0,
-                stage_core_mul=1,
-                stage_core=holoso.FCordicOptions.CoreStages.NONE,
+                stage_core_mul=3,
+                stage_core=holoso.FCordicOptions.CoreStages.SHIFT
+                | holoso.FCordicOptions.CoreStages.REDUCED
+                | holoso.FCordicOptions.CoreStages.FOLDED
+                | holoso.FCordicOptions.CoreStages.TAKEN
+                | holoso.FCordicOptions.CoreStages.ORDERED
+                | holoso.FCordicOptions.CoreStages.NORMALIZE_INPUT
+                | holoso.FCordicOptions.CoreStages.NORMALIZE
+                | holoso.FCordicOptions.CoreStages.PACK,
                 stage_output=0,
                 fast=True,
             ),
-            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
+            fcmp=holoso.FCmpOptions(stage_input=1, stage_output=0),
             fmul_ilog2=holoso.FMulILog2Options(
-                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.DECODE, stage_output=0
             ),
-            filog2=holoso.FILog2Options(stage_input=0, stage_output=1),
+            filog2=holoso.FILog2Options(stage_input=0, stage_output=0),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=24),
         wmultiplier=18,

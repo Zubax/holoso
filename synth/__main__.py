@@ -2,7 +2,7 @@
 Command-line entry point for the OOC synthesis-evaluation harness.
 Usage:
 
-    python -m synth <kernel.py> <expression> --options OPTIONS --flow FLOW:freq=MHz[,device=CLASS]
+    python -m synth <kernel.py> <expression> --options OPTIONS --flow FLOW:freq=MHz[,device=CLASS][,grade=GRADE]
 
 `OPTIONS` is a Python expression giving the `holoso.Options`, evaluated in the kernel module's namespace (with
 `holoso` in scope) like the target expression, e.g.
@@ -27,7 +27,7 @@ import holoso
 from holoso import Options, synthesize
 
 from ._synth import BUILD_ROOT, SynthReport, build_compiler_ooc_design
-from .flows import DeviceClass, Flow, FlowId, make_flow
+from .flows import DeviceClass, Flow, FlowId, SpeedGrade, make_flow
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +42,7 @@ class _FlowRequest:
     flow_id: FlowId
     target_frequency_MHz: float
     device_class: DeviceClass
+    speed_grade: SpeedGrade
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,11 +73,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         dest="flow_specs",
         required=True,
-        metavar="FLOW:freq=MHz[,device=CLASS]",
+        metavar="FLOW:freq=MHz[,device=CLASS][,grade=GRADE]",
         help=(
             f"synthesis flow to run; repeatable; supported flows: {', '.join(FlowId)}; "
             f"CLASS picks the device ({', '.join(DeviceClass)}; the larger one is for a design that outgrows the "
-            "default)"
+            f"default); GRADE picks the speed grade ({', '.join(SpeedGrade)})"
         ),
     )
     args = parser.parse_args(argv)
@@ -98,7 +99,7 @@ def _parse_flow_requests(parser: argparse.ArgumentParser, specs: list[str]) -> l
 
 def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest:
     if ":" not in spec:
-        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,device=CLASS]")
+        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,device=CLASS][,grade=GRADE]")
     flow_id, raw_fields = (part.strip() for part in spec.split(":", 1))
     if flow_id not in FlowId:
         parser.error(f"unknown flow {flow_id!r}; supported flows: {', '.join(FlowId)}")
@@ -107,6 +108,7 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
 
     raw_frequency: str | None = None
     device_class: DeviceClass | None = None
+    speed_grade: SpeedGrade | None = None
     for item in raw_fields.split(","):
         if "=" not in item:
             parser.error(f"flow field {item!r} in {spec!r} must be written as key=value")
@@ -123,6 +125,13 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
                 parser.error(f"unknown device class {value!r} in {spec!r}; supported: {', '.join(DeviceClass)}")
             device_class = DeviceClass(value)
             continue
+        if key == "grade":
+            if speed_grade is not None:
+                parser.error(f"flow field {key!r} is duplicated in {spec!r}")
+            if value not in SpeedGrade:
+                parser.error(f"unknown speed grade {value!r} in {spec!r}; supported: {', '.join(SpeedGrade)}")
+            speed_grade = SpeedGrade(value)
+            continue
         parser.error(f"unknown flow field {key!r} in {spec!r}")
     if raw_frequency is None:
         parser.error(f"flow spec {spec!r} is missing required field freq=MHz")
@@ -136,6 +145,7 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
         flow_id=FlowId(flow_id),
         target_frequency_MHz=target_frequency_MHz,
         device_class=device_class or DeviceClass.DEFAULT,
+        speed_grade=speed_grade or SpeedGrade.SLOWEST,
     )
 
 
@@ -165,7 +175,7 @@ def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], li
     flows: list[_SelectedFlow] = []
     skipped: list[FlowId] = []
     for request in requests:
-        flow: Flow = make_flow(request.flow_id, request.target_frequency_MHz, request.device_class)
+        flow: Flow = make_flow(request.flow_id, request.target_frequency_MHz, request.device_class, request.speed_grade)
         if flow.available():
             flows.append(_SelectedFlow(request, flow))
         else:

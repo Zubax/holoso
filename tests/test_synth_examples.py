@@ -6,7 +6,8 @@ deterministic scheduling guard in `test_latency_freeze`; this layer owns the phy
 
 The bundled example scripts are held to the same standard on one flow: each is run as shipped with `holoso.synthesize`
 observed, and every circuit it synthesizes must close on Yosys/nextpnr for ECP5 at 100 MHz. The options an example
-shows are therefore the options that are placed and routed, not a restatement of them kept elsewhere.
+shows are therefore the options that are placed and routed, not a restatement of them kept elsewhere; the device, its
+size and speed grade, is the test's choice, since the examples themselves say nothing about devices.
 
 The whole module is `synth`-marked (it needs an FPGA toolchain): `nox -s synth_examples` runs it and the normal
 suite skips it. A target whose flow's tool is absent skips individually, so a Yosys-only CI still exercises every Yosys
@@ -26,7 +27,7 @@ import pytest
 import holoso
 from holoso import FloatFormat
 from synth._synth import BUILD_ROOT, REPO_ROOT, build_compiler_ooc_design
-from synth.flows import DeviceClass, FlowId, make_flow
+from synth.flows import DeviceClass, FlowId, SpeedGrade, make_flow
 
 from ._synth_targets import TARGETS, SynthTarget
 
@@ -85,13 +86,26 @@ _EXAMPLE_SCRIPTS = sorted((REPO_ROOT / "examples").glob("*.py"))
 _EXAMPLE_FREQUENCY_MHz = 100.0
 # An example whose circuits outgrow the default device; the examples themselves say nothing about devices.
 _EXAMPLE_DEVICE_CLASS: dict[str, DeviceClass] = {"equal_temperament": DeviceClass.LARGE}
+# A script's circuits at one wide format that close only on a faster part: the stage loop ended on the slower one on a
+# path no register stage splits.
+_EXAMPLE_SPEED_GRADE: dict[tuple[str, FloatFormat], SpeedGrade] = {
+    ("equal_temperament", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("finite_set_current_controller", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("flux_observer", FloatFormat(8, 24)): SpeedGrade.MIDDLE,
+    ("foc", FloatFormat(8, 24)): SpeedGrade.MIDDLE,
+    ("image_agc_streamed", FloatFormat(8, 24)): SpeedGrade.MIDDLE,
+    ("imu_fusion", FloatFormat(8, 36)): SpeedGrade.FASTEST,
+    ("iq_oscillator", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("kepler", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("polar", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("recip_newton", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+}
 
 
 @pytest.mark.parametrize("script", _EXAMPLE_SCRIPTS, ids=lambda p: p.stem)
 def test_example_script_closes_timing(script: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    flow = make_flow(
-        FlowId.YOSYS_ECP5, _EXAMPLE_FREQUENCY_MHz, _EXAMPLE_DEVICE_CLASS.get(script.stem, DeviceClass.DEFAULT)
-    )
+    device_class = _EXAMPLE_DEVICE_CLASS.get(script.stem, DeviceClass.DEFAULT)
+    flow = make_flow(FlowId.YOSYS_ECP5, _EXAMPLE_FREQUENCY_MHz, device_class)
     if not flow.available():
         pytest.skip(f"{FlowId.YOSYS_ECP5.value} tool not available")
 
@@ -111,12 +125,16 @@ def test_example_script_closes_timing(script: Path, monkeypatch: pytest.MonkeyPa
         monkeypatch.setattr(module, "synthesize", observed)
     module.main()
     assert results, f"{script.name} synthesized nothing"
+    graded = {fmt for stem, fmt in _EXAMPLE_SPEED_GRADE if stem == script.stem}
+    assert graded <= {fmt for _, fmt in results}, f"{script.name}: a speed grade names a format it does not build"
 
     failures = []
     for index, (result, fmt) in enumerate(results):
         directory = BUILD_ROOT / "examples" / f"{script.stem}.{index}-{FlowId.YOSYS_ECP5.value}"
         shutil.rmtree(directory, ignore_errors=True)
-        report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
+        grade = _EXAMPLE_SPEED_GRADE.get((script.stem, fmt), SpeedGrade.SLOWEST)
+        placed = make_flow(FlowId.YOSYS_ECP5, _EXAMPLE_FREQUENCY_MHz, device_class, grade)
+        report = placed.prepare(build_compiler_ooc_design(result)).synthesize(directory)
         if report.fmax_MHz < _EXAMPLE_FREQUENCY_MHz:
             failures.append(
                 f"synthesize() call {index} ({result.module_name}, e{fmt.wexp}m{fmt.wman}): "

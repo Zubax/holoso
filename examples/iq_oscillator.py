@@ -37,22 +37,29 @@ class IqOscillator:
 def main() -> None:
     options = holoso.Options(
         operator=holoso.OperatorOptions(
-            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
             # Scaling a turn fraction by a power of two is an exponent add.
             fmul_ilog2=holoso.FMulILog2Options(
-                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
             ),
             fcordic=holoso.FCordicOptions(
                 stage_input=0,
-                stage_core_mul=1,
-                stage_core=holoso.FCordicOptions.CoreStages.NONE,
+                stage_core_mul=3,
+                stage_core=holoso.FCordicOptions.CoreStages.REDUCED
+                | holoso.FCordicOptions.CoreStages.FOLDED
+                | holoso.FCordicOptions.CoreStages.NORMALIZE_INPUT
+                | holoso.FCordicOptions.CoreStages.NORMALIZE
+                | holoso.FCordicOptions.CoreStages.PACK,
                 stage_output=0,
                 fast=True,
             ),
             ffromint=holoso.FFromIntOptions(
-                stage_input=0, stage_core=holoso.FFromIntOptions.CoreStages.NONE, stage_output=1
+                stage_input=0,
+                stage_core=holoso.FFromIntOptions.CoreStages.NORMALIZE | holoso.FFromIntOptions.CoreStages.PACK,
+                stage_output=0,
             ),
-            frint=holoso.FRintOptions(stage_input=0, stage_core=holoso.FRintOptions.CoreStages.NONE, stage_output=1),
+            frint=holoso.FRintOptions(stage_input=0, stage_core=holoso.FRintOptions.CoreStages.MASK, stage_output=0),
+            iadds=holoso.IAddsOptions(stage_output=1),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=36),
         wmultiplier=18,

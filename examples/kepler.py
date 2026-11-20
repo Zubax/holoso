@@ -24,19 +24,31 @@ def main() -> None:
     fmt = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
         operator=holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=1),
-            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=0, stage_output=1),
+            fadd=holoso.FAddOptions(
+                stage_input=0,
+                stage_core=holoso.FAddOptions.CoreStages.OPERANDS
+                | holoso.FAddOptions.CoreStages.ALIGNED
+                | holoso.FAddOptions.CoreStages.SUM
+                | holoso.FAddOptions.CoreStages.NORMALIZE
+                | holoso.FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
             fdivsqrt=holoso.FDivsqrtOptions(
-                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=1, fast=True
             ),
             fmul_ilog2=holoso.FMulILog2Options(
-                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=1
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
             ),
-            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
             fcordic=holoso.FCordicOptions(
                 stage_input=0,
-                stage_core_mul=1,
-                stage_core=holoso.FCordicOptions.CoreStages.NONE,
+                stage_core_mul=4,
+                stage_core=holoso.FCordicOptions.CoreStages.REDUCED
+                | holoso.FCordicOptions.CoreStages.FOLDED
+                | holoso.FCordicOptions.CoreStages.CORRECTIONS
+                | holoso.FCordicOptions.CoreStages.NORMALIZE
+                | holoso.FCordicOptions.CoreStages.PACK,
                 stage_output=0,
                 fast=True,
             ),
