@@ -863,9 +863,7 @@ the exp2/log2 lookup tables stay in LUT logic, which at a 36-bit significand is 
 The microcode ROM moves to block RAM too, saving its LUTs;
 a path from it into an operator then calls for that operator's input stage. The price is the longer path through each
 shared adder, and a keep pins the nets where that lost closures: the integer divider's floor correction (100 MHz
-without the keep against 115 with it, at 44 bits), and ZKF 0.9's float divider built for the root alone (81 MHz against
-135 at a 36-bit significand), for which ZKF 0.10 has no keep attribute yet. Where sharing costs f_max and the design
-still closes -- the popcount of the small integer kernels, the rounder -- nothing is pinned.
+without the keep against 115 with it, at 44 bits).
 
 The register price. The allocator trades registers for mux arms at `regalloc_register_price` (2.0), and across the
 example kernels the trades go both ways: the EKF kernels spend registers to remove arms, foc and imu_fusion spend arms
