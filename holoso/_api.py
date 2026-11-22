@@ -57,7 +57,15 @@ class SynthesisResult:
     Defines the range of the (saturating) integer arithmetics.
     """
 
-    initiation_interval: tuple[int, int | None]  # (min II, max II or None when not statically determined)
+    latency: tuple[int, int | None]
+    """
+    Input-output cycle latency: (min, max or None when statically undecidable).
+    Specifically, cycles from `in_valid && in_ready` (transaction accepted) to `out_valid` (transaction completed).
+    """
+
+    initiation_interval: tuple[int, int | None]
+    """Cycles between consecutive transactions: (min, max or None when statically undecidable). See `latency`."""
+
     verilog_output: VerilogOutput
     numerical_model: NumericalModel
     cocotb_output: CocotbOutput
@@ -206,9 +214,10 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
     model = generate_model(lir)
     cocotb_output = generate_testbench(model)
 
-    latency_is_exact = not any(isinstance(block.terminator, Branch) for block in lir.blocks)
-    ii = (lir.min_initiation_interval, lir.min_initiation_interval if latency_is_exact else None)
-    _logger.info("Generated Verilog: %s; II [min,max]: %s cycles", verilog_output, ii)
+    exact = not any(isinstance(block.terminator, Branch) for block in lir.blocks)
+    latency = (lir.min_latency, lir.min_latency if exact else None)
+    ii = (lir.min_initiation_interval, lir.min_initiation_interval if exact else None)
+    _logger.info("Generated Verilog: %s; latency [min,max]: %s; II [min,max]: %s cycles", verilog_output, latency, ii)
     return SynthesisResult(
         module_name=module_name,
         ports=lir.ports,
@@ -216,6 +225,7 @@ def synthesize(target: Target, /, options: Options, *, name: str | None = None) 
         output_ports=lir.output_ports,
         control_ports=lir.control_ports,
         int_format=lir.int_format,
+        latency=latency,
         initiation_interval=ii,
         verilog_output=verilog_output,
         numerical_model=model,

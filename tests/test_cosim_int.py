@@ -246,7 +246,7 @@ def test_int_two_drives_issued_together_take_an_instance_each_cosim(
 def test_int_comparison_on_a_reversed_subtraction_cosim(sim: str) -> None:
     """The relations tap the flags of `b - a` mirrored, which only the RTL's port wiring can get wrong."""
     result = holoso.synthesize(order_beside_reversed_difference, _OPTIONS, name="reversed_difference_int")
-    assert result.initiation_interval == (3, 3), "the premise of this test"
+    assert result.latency == (3, 3), "the premise of this test"
     run_cosim(sim, result, vectors=_ADDER_VECTORS)
 
 

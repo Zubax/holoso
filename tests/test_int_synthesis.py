@@ -329,7 +329,7 @@ def swap_loop(x: int, y: int, n: int) -> tuple[int, int]:
 
 def test_integer_phis_swap_in_parallel_across_a_back_edge() -> None:
     result = holoso.synthesize(swap_loop, _INT16, name="SwapLoop")
-    assert result.initiation_interval[1] is None, "the swap must survive as a real data-dependent loop"
+    assert result.latency[1] is None, "the swap must survive as a real data-dependent loop"
     sim = result.numerical_model.elaborate()
     for trips in (0, 1, 2, 3, 7, 20, -4):
         swapped = max(trips, 0) % 2 == 1  # a non-positive count never enters the body
@@ -475,12 +475,12 @@ def test_independent_sums_and_orders_contend_for_the_adder_until_a_second_one_is
     """
     shared = holoso.synthesize(sums_beside_orders, _INT16, name="SumsBesideOrdersShared")
     assert _modules(shared) == ["iadds"] and instance_count(shared.verilog_output.verilog, "iadds") == 1
-    assert shared.initiation_interval == (6, 6)
+    assert shared.latency == (6, 6)
     operators = dataclasses.replace(_INT16.operator, iadds=holoso.IAddsOptions(instances=2))
     options = dataclasses.replace(_INT16, operator=operators)
     split = holoso.synthesize(sums_beside_orders, options, name="SumsBesideOrdersSplit")
     assert _modules(split) == ["iadds"] and instance_count(split.verilog_output.verilog, "iadds") == 2
-    assert split.initiation_interval == (4, 4)
+    assert split.latency == (4, 4)
     for result in (shared, split):
         sim = result.numerical_model.elaborate()
         for a, b, c, d in [(1, 2, 3, 4), (4, 3, 2, 1), (-7, 7, -7, 7), (MAX, 1, MIN, -1), (MIN, MAX, MAX, MIN)]:
@@ -504,12 +504,12 @@ def test_a_comparison_rides_the_subtraction_of_its_own_operands() -> None:
     A subtraction orders its operands as a side effect, so the relations of that pair cost no firing in either
     operand order: the kernel is as long as the subtraction alone, where a comparison of another pair adds a cycle.
     """
-    assert holoso.synthesize(difference_only, _INT16, name="DifferenceAlone").initiation_interval == (3, 3)
+    assert holoso.synthesize(difference_only, _INT16, name="DifferenceAlone").latency == (3, 3)
     fused = holoso.synthesize(difference_and_order, _INT16, name="DifferenceAndOrder")
     mirrored = holoso.synthesize(order_beside_reversed_difference, _INT16, name="ReversedDifference")
     apart = holoso.synthesize(order_beside_unrelated_difference, _INT16, name="UnrelatedDifference")
-    assert fused.initiation_interval == mirrored.initiation_interval == (3, 3)
-    assert apart.initiation_interval == (4, 4)
+    assert fused.latency == mirrored.latency == (3, 3)
+    assert apart.latency == (4, 4)
     fused_sim, mirrored_sim, apart_sim = (result.numerical_model.elaborate() for result in (fused, mirrored, apart))
     for a, b in [*_ADDER_PAIRS, *(pair for pair, _ in _ADDER_RAILS)]:
         assert _run(fused_sim, a, b) == [_clamp(a - b), a < b, a == b, a > b], (a, b)
@@ -524,7 +524,7 @@ def test_every_relation_reads_a_reversed_subtraction_mirrored() -> None:
     """
     result = holoso.synthesize(every_relation_beside_reversed_difference, _INT16, name="EveryRelationReversed")
     assert _modules(result) == ["iadds"] and instance_count(result.verilog_output.verilog, "iadds") == 1
-    assert result.initiation_interval == (4, 4)
+    assert result.latency == (4, 4)
     sim = result.numerical_model.elaborate()
     for a, b in [*_ADDER_PAIRS, *(pair for pair, _ in _ADDER_RAILS)]:
         assert _run(sim, a, b) == [_clamp(b - a), a < b, a <= b, a > b, a >= b, a == b, a != b], (a, b)
@@ -608,11 +608,11 @@ def test_both_directions_of_one_operand_pair_time_share_one_shifter() -> None:
     """
     shared = holoso.synthesize(shift_pair, _INT16, name="ShiftPairShared")
     assert _modules(shared) == ["ishft"] and instance_count(shared.verilog_output.verilog, "ishft") == 1
-    assert shared.initiation_interval == (4, 4)
+    assert shared.latency == (4, 4)
     operators = dataclasses.replace(_INT16.operator, ishft=holoso.IShftOptions(instances=2))
     split = holoso.synthesize(shift_pair, dataclasses.replace(_INT16, operator=operators), name="ShiftPairSplit")
     assert _modules(split) == ["ishft"] and instance_count(split.verilog_output.verilog, "ishft") == 2
-    assert split.initiation_interval == (3, 3)
+    assert split.latency == (3, 3)
     for result in (shared, split):
         sim = result.numerical_model.elaborate()
         for x in _SHIFT_OPERANDS:
@@ -850,7 +850,7 @@ def test_a_shift_by_nothing_is_not_charged_against_the_if_conversion_budget(budg
     options = dataclasses.replace(_INT16, ifconv_max_ops=budget)
     zero_shifts = holoso.synthesize(diamond_over_zero_shifts, options, name="ZeroShiftDiamond")
     bare = holoso.synthesize(diamond_over_bare_operands, options, name="BareDiamond")
-    assert zero_shifts.initiation_interval == bare.initiation_interval
+    assert zero_shifts.latency == bare.latency
     zero_sim, bare_sim = zero_shifts.numerical_model.elaborate(), bare.numerical_model.elaborate()
     for x, y, c in [(3, -4, True), (3, -4, False), (MIN, MAX, True), (MIN, MAX, False)]:
         assert _run(zero_sim, x, y, c) == _run(bare_sim, x, y, c) == [x if c else y], (x, y, c)
@@ -874,7 +874,7 @@ def test_a_shift_in_one_direction_alone_builds_the_one_shifter() -> None:
     right = holoso.synthesize(shift_right_only, _INT16, name="RightOnly")
     for result in (left, right):
         assert _modules(result) == ["ishft"] and instance_count(result.verilog_output.verilog, "ishft") == 1
-    assert left.initiation_interval == right.initiation_interval == (3, 3)
+    assert left.latency == right.latency == (3, 3)
     left_sim, right_sim = left.numerical_model.elaborate(), right.numerical_model.elaborate()
     for x in _SHIFT_OPERANDS:
         for n in _SHIFT_COUNTS:
@@ -1072,7 +1072,7 @@ def test_a_rounding_answers_as_float_and_as_integer_in_one_firing() -> None:
     both = holoso.synthesize(every_rounding_both_ways, _INT16, name="BothWays")
     integers = holoso.synthesize(every_rounding_as_integer, _INT16, name="IntegersOnly")
     assert _modules(both) == _modules(integers) == ["rint"]
-    assert both.initiation_interval == integers.initiation_interval
+    assert both.latency == integers.latency
     sim = both.numerical_model.elaborate()
     for x in _ROUNDINGS:
         assert _run(sim, x) == _expected(every_rounding_both_ways, x), x
@@ -1087,7 +1087,7 @@ def test_converting_an_integer_back_is_the_float_result_of_the_same_firing() -> 
     result = holoso.synthesize(truncated_and_converted_back, _INT16, name="TruncatedBack")
     alone = holoso.synthesize(truncated_to_int, _INT16, name="TruncatedAlone")
     assert _modules(result) == ["rint"]
-    assert result.initiation_interval == alone.initiation_interval
+    assert result.latency == alone.latency
     sim = result.numerical_model.elaborate()
     for x in _ROUNDINGS:
         assert _run(sim, x) == _expected(truncated_and_converted_back, x), x

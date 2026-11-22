@@ -1,6 +1,6 @@
 """
 The white-box integer selection sentinels: fabric, latency and resource contracts that no public artifact names.
-Values, typed ports and the public initiation interval cannot tell one shared firing from two, an inline primitive
+Values, typed ports and the public latency cannot tell one shared firing from two, an inline primitive
 from a module, or a conditioner fold from a survived sign chain -- these few tests pin them directly, while all
 value coverage lives in `test_int_synthesis`.
 """
@@ -356,7 +356,7 @@ class InputLatch:
 
 def test_a_slot_fed_by_an_integer_input_installs_ahead_of_the_boundary() -> None:
     """
-    A register-pressure claim with no public spelling (values and II are unchanged); it belongs beside the
+    A register-pressure claim with no public spelling (values and latency are unchanged); it belongs beside the
     schedule allocation contracts.
     """
     lir = build_lir(_select(InputLatch().step), "input_latch")

@@ -237,10 +237,11 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     emitted = steering(lir)
     assert (alloc.wide.read_arms, alloc.wide.write_arms) == (emitted.read, emitted.wide_write)
     _logger.info(
-        "LIR: %d blocks, last PC %d, exits %s, min II %d, %d instances",
+        "LIR: %d blocks, last PC %d, exits %s, min latency %d, min II %d, %d instances",
         len(lir.blocks),
         lir.last_pc,
         lir.exit_pcs,
+        lir.min_latency,
         lir.min_initiation_interval,
         len(lir.instances),
     )

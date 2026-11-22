@@ -1,16 +1,16 @@
 """
 Golden schedule-length freeze over the WHOLE example matrix -- a committed regression guard on scheduling
-efficiency, standing in for the deferred makespan/II optimization work. Every spec is frozen at every format it
+efficiency, standing in for the deferred makespan optimization work. Every spec is frozen at every format it
 declares, and the table is checked against the matrix, so a newly added example cannot escape the guard by
 omission.
 
 The differential fuzzer and the example-reference suite compare output VALUES only; they are structurally blind
 to cycle count, so a schedule that still computes the right result but takes longer -- a wasted cycle, a lost
 cross-block overlap, an over-pipelining congestion regression -- passes them silently. This test pins each
-kernel's (min initiation interval, last microcode PC). The min II is the throughput of the shortest path; the
-last PC is the last microcode address -- the end of the static schedule across every block (a zero-based PC, not a
-word count) -- so the full schedule is pinned even for a data-dependent branch/loop kernel whose public max II is
-reported as None (its loop body would otherwise be unguarded). Both are fixed by the scheduler before register-
+kernel's (min latency, last microcode PC). The min latency is the cost of the shortest path; the last PC is the
+last microcode address -- the end of the static schedule across every block (a zero-based PC, not a word count) --
+so the full schedule is pinned even for a data-dependent branch/loop kernel whose public max latency is reported as
+None (its loop body would otherwise be unguarded). Both are fixed by the scheduler before register-
 allocation annealing, so they are independent of `HOLOSO_REGALLOC_EFFORT`. A deliberate schedule change is
 expected to update the frozen value in the same commit.
 
@@ -49,7 +49,7 @@ from ._modelref import (
     PIPELINE_OPTIONS_CASES,
 )
 
-# Kernel label -> frozen (min initiation interval, last microcode PC). A spec listing two formats is frozen at both,
+# Kernel label -> frozen (min latency, last microcode PC). A spec listing two formats is frozen at both,
 # since the second exists precisely to exercise a different pipeline depth.
 _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "madd-e8m36": (9, 9),
@@ -108,7 +108,7 @@ _FROZEN_SCHEDULE: dict[str, tuple[int, int]] = {
     "integrator-e8m36": (10, 10),
     "ekf1_stateless-e8m36": (125, 125),
     # The two graduated filter examples: both are straight-line (the FIR's static tap loop unrolls, the biquad has no
-    # control flow at all), so their whole schedule is one block and min II equals last PC.
+    # control flow at all), so their whole schedule is one block and min latency equals last PC.
     "fir-e8m36": (11, 11),
     "biquad-e8m36": (12, 12),
     # No sum is computed as a multiple of another, so the two covariance sums run side by side rather than in series.
@@ -142,22 +142,22 @@ def test_every_example_is_frozen() -> None:
 
 @pytest.mark.parametrize("spec,fmt", [pytest.param(s, f, id=_label(s, f)) for s, f in _CASES])
 def test_schedule_length_is_frozen(spec: ExampleSpec, fmt: FloatFormat) -> None:
-    # The min II column is the public `SynthesisResult.initiation_interval[0]`; the last PC has no public spelling
+    # The min latency column is the public `SynthesisResult.latency[0]`; the last PC has no public spelling
     # (the public tuple reports None past a surviving branch), so it stays pinned on the LIR. Each spec is driven at
     # its OWN configuration, since an integer-heavy kernel needs a word the shared default does not supply.
     label = _label(spec, fmt)
-    frozen_ii, frozen_last_pc = _FROZEN_SCHEDULE[label]
+    frozen_latency, frozen_last_pc = _FROZEN_SCHEDULE[label]
     options = spec.options(fmt)
     result = holoso.synthesize(spec.make_kernel(), options, name=spec.name)
-    assert result.initiation_interval[0] == frozen_ii, (
-        f"{label}: scheduling efficiency changed -- min II {result.initiation_interval[0]} differs from the frozen "
-        f"{frozen_ii}. If this is a deliberate schedule improvement, update the frozen value."
+    assert result.latency[0] == frozen_latency, (
+        f"{label}: scheduling efficiency changed -- min latency {result.latency[0]} differs from the frozen "
+        f"{frozen_latency}. If this is a deliberate schedule improvement, update the frozen value."
     )
     lir = build_lir(
         lower_to_mir(lower_frontend(spec.make_kernel(), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), spec.name
     )
-    assert (lir.min_initiation_interval, lir.last_pc) == (frozen_ii, frozen_last_pc), (
-        f"{label}: scheduling efficiency changed -- (min II, last PC) differs from the frozen "
+    assert (lir.min_latency, lir.last_pc) == (frozen_latency, frozen_last_pc), (
+        f"{label}: scheduling efficiency changed -- (min latency, last PC) differs from the frozen "
         f"{_FROZEN_SCHEDULE[label]}. If this is a deliberate schedule improvement, update the frozen value."
     )
 
@@ -190,7 +190,7 @@ class _BoolShift3:
         return out
 
 
-# Chained-copy kernels and their frozen (min II, last PC). _Delay3 exercises the wide bank's tapped_by_other path,
+# Chained-copy kernels and their frozen (min latency, last PC). _Delay3 exercises the wide bank's tapped_by_other path,
 # _BoolShift3 the boolean bank's. _FMT is the wide e8m36 datapath the example matrix uses.
 _FMT = FloatFormat(8, 36)
 _CHAINED_COPY: list[tuple[str, type[_Delay3] | type[_BoolShift3], tuple[int, int]]] = [
@@ -204,16 +204,16 @@ def test_chained_copy_schedule_is_frozen(
     name: str, kernel_cls: type[_Delay3] | type[_BoolShift3], frozen: tuple[int, int]
 ) -> None:
     result = holoso.synthesize(kernel_cls().__call__, default_options(_FMT), name=name)
-    assert result.initiation_interval[0] == frozen[0]
+    assert result.latency[0] == frozen[0]
     lir = build_lir(
         lower_to_mir(lower_frontend(kernel_cls().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)), name
     )
     assert all(
         not isinstance(slot.install, InPlace) for slot in lir.state_slots
     ), f"{name}: a chained-copy slot unexpectedly coalesced; the tapped_by_other path is no longer exercised"
-    got = (lir.min_initiation_interval, lir.last_pc)
+    got = (lir.min_latency, lir.last_pc)
     assert got == frozen, (
-        f"{name}: scheduling efficiency changed -- (min II, last PC) {got} differs from the frozen {frozen}. "
+        f"{name}: scheduling efficiency changed -- (min latency, last PC) {got} differs from the frozen {frozen}. "
         f"If this is a deliberate schedule improvement, update the frozen value."
     )
 
@@ -252,8 +252,8 @@ def test_a_boundary_install_costs_what_an_output_does(
     assert not next(block for block in mir.blocks if block.id == mir.ret_block).operations and all(
         isinstance(slot.install, Boundary) for slot in lir.state_slots
     )
-    installed = holoso.synthesize(stateful(), options, name="installed").initiation_interval
-    assert installed == holoso.synthesize(stateless, options, name="returned").initiation_interval
+    installed = holoso.synthesize(stateful(), options, name="installed").latency
+    assert installed == holoso.synthesize(stateless, options, name="returned").latency
 
 
 @pytest.mark.parametrize(
@@ -270,8 +270,8 @@ def test_a_spill_into_an_empty_ret_schedule_is_frozen(
     # A live-out computed in the loop header that lands in the Ret block keeps the Ret's PC and has no stateless twin
     # to compare against; the second column pins where it does.
     options = config.make_options(_FMT)
-    min_ii, ret_takes_pc = frozen[config.label]
-    assert holoso.synthesize(EMPTY_RET_KERNELS[label](), options, name="spill").initiation_interval[0] == min_ii
+    min_latency, ret_takes_pc = frozen[config.label]
+    assert holoso.synthesize(EMPTY_RET_KERNELS[label](), options, name="spill").latency[0] == min_latency
     mir = lower_to_mir(lower_frontend(EMPTY_RET_KERNELS[label](), DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
     assert (mir.ret_block in build_lir(mir, "spill").block_base) == ret_takes_pc
 

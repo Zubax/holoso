@@ -53,14 +53,14 @@ def _drive(model: NumericalSimulator, inputs: list[ScalarLike]) -> tuple[list[Sc
     model.set_inputs(*inputs)
     while not model.in_ready:
         model.tick(in_valid=False, out_ready=True)
-    model.tick(in_valid=True, out_ready=False)  # accept: pc 0 -> 1 (the accept edge itself is not part of waited)
-    waited = 0
+    model.tick(in_valid=True, out_ready=False)  # accept: pc 0 -> 1
+    latency = 1
     while not model.out_valid:
         model.tick(in_valid=False, out_ready=False)
-        waited += 1
+        latency += 1
     outputs = model.output_values
     model.tick(in_valid=False, out_ready=True)  # accept the output, advancing the persistent state
-    return outputs, waited
+    return outputs, latency
 
 
 @pytest.mark.parametrize("name,factory", [("madd", lambda: madd.madd), ("poly3", lambda: poly3.poly3)])
@@ -79,9 +79,9 @@ def test_tick_and_call_agree(name: str, factory: Callable[[], Callable[..., obje
 
 
 @pytest.mark.parametrize("name", ["madd", "poly3", "cordic_sincos", "ekf1_stateless"])
-def test_single_path_latency_is_the_static_initiation_interval(name: str) -> None:
-    # A kernel with one forward path takes exactly `initiation_interval - 1` cycles from the accept edge (pc==1) to
-    # out_valid at the exit PC -- the cycle count a caller recovers by counting ticks, here the static lower bound.
+def test_single_path_latency_is_the_static_latency(name: str) -> None:
+    # A kernel with one forward path realizes exactly its static latency -- the cycle count a caller recovers by
+    # counting ticks.
     factories: dict[str, Callable[[], Callable[..., object]]] = {
         "madd": lambda: madd.madd,
         "poly3": lambda: poly3.poly3,
@@ -89,23 +89,62 @@ def test_single_path_latency_is_the_static_initiation_interval(name: str) -> Non
         "ekf1_stateless": lambda: update_x_P,
     }
     result = _synthesize(factories[name], name)
-    ii_min, ii_max = result.initiation_interval
-    assert ii_max == ii_min, "a single forward path has an exact public latency"
+    latency_min, latency_max = result.latency
+    assert latency_max == latency_min, "a single forward path has an exact public latency"
     model = result.numerical_model.elaborate()
     rng = random.Random(7)
     for _ in range(8):
         _outputs, cycles = _drive(model, _random_inputs(model, rng))
-        assert cycles == ii_min - 1
+        assert cycles == latency_min
+
+
+def _accept_periods(model: NumericalSimulator, vectors: list[list[ScalarLike]]) -> list[int]:
+    # With in_valid and out_ready held high, each transaction is accepted on the first cycle the kernel can take it and
+    # its result is taken on the cycle it is presented, so the gap between consecutive accepts is one transaction's
+    # accept-to-accept period. The trailing repeat of the first vector closes the last period.
+    accepts: list[int] = []
+    cycle = 0
+    for vector in [*vectors, vectors[0]]:
+        model.set_inputs(*vector)
+        while not model.in_ready:
+            model.tick(in_valid=True, out_ready=True)
+            cycle += 1
+        accepts.append(cycle)
+        model.tick(in_valid=True, out_ready=True)
+        cycle += 1
+    return [later - earlier for earlier, later in zip(accepts, accepts[1:])]
+
+
+@pytest.mark.parametrize("name", ["madd", "poly3", "iir1_lpf"])
+def test_back_to_back_transactions_start_every_initiation_interval(name: str) -> None:
+    factories: dict[str, Callable[[], Callable[..., object]]] = {
+        "madd": lambda: madd.madd,
+        "poly3": lambda: poly3.poly3,
+        "iir1_lpf": lambda: IIR1LPF().__call__,
+    }
+    result = _synthesize(factories[name], name)
+    ii_min, ii_max = result.initiation_interval
+    assert ii_max == ii_min, "a single forward path has an exact public initiation interval"
+    model = result.numerical_model.elaborate()
+    rng = random.Random(11)
+    assert _accept_periods(model, [_random_inputs(model, rng) for _ in range(6)]) == [ii_min] * 6
+
+
+@pytest.mark.parametrize("label", list(EXIT_ARM_KERNELS))
+def test_the_shortest_back_to_back_period_is_the_static_initiation_interval(label: str) -> None:
+    result = _synthesize(lambda: EXIT_ARM_KERNELS[label], label)
+    periods = _accept_periods(result.numerical_model.elaborate(), [list(vector) for vector in EXIT_ARM_VECTORS])
+    assert min(periods) == result.initiation_interval[0] and len(set(periods)) > 1
 
 
 def test_loop_latency_grows_with_the_trip_count() -> None:
     # Newton's reciprocal iterates until convergence, so a harder input runs more loop trips and a strictly longer
-    # transaction -- the data-dependent latency a fixed `initiation_interval` cannot express.
+    # transaction -- the data-dependent latency a single static figure cannot express.
     result = _synthesize(lambda: NewtonReciprocal().__call__, "recip")
     model = result.numerical_model.elaborate()
     latencies = {_drive(model, [x])[1] for x in (0.5, 0.9, 1.3, 1.7, 2.5, 3.5, 6.0, 12.0)}
     assert len(latencies) >= 3, f"loop latency should vary with the trip count, saw {sorted(latencies)}"
-    assert min(latencies) > result.initiation_interval[0], "every realized latency exceeds the not-taken lower bound"
+    assert min(latencies) > result.latency[0], "every realized latency exceeds the not-taken lower bound"
 
 
 def test_inputs_latch_at_the_accept_edge() -> None:
@@ -160,53 +199,55 @@ def _count_down(n: float) -> float:
 # This is the regression guard for the project's true goal -- realized per-transaction latency in multi-
 # block kernels -- which the static last_pc gate alone cannot express: a per-iteration drain regression is amplified by
 # the loop trip count (recip_newton, remainder), and a branchy kernel's worst arm may not be its longest static path.
-# Each tuple is (factory, input vectors, frozen worst-case waited). The vectors are chosen to hit the draining/long
+# Each tuple is (factory, input vectors, frozen worst-case latency). The vectors are chosen to hit the draining/long
 # paths (schmitt's deadband, quadrature's simultaneous-change fault, pfd's both-pending, the loops' high-trip inputs).
 # The bound is `<=` so a future optimization may lower it; a regression that re-inflates a per-block drain trips it.
 # If-conversion collapsed schmitt, pfd, and iir1_lpf to a single block (a fixed-latency transaction, down from tens of
 # cycles of branch-block drain); quadrature/recip/remainder stay multi-block and data-dependent. iir1_lpf is the
-# canonical "if-conversion RAISES min_ii but LOWERS realized latency" case (its rare cheap first-sample path is unified
-# away, yet every realized transaction is the steady-state one, which only this guard pins -- the static metrics gate
-# sees only the raised min_ii).
+# canonical "if-conversion RAISES the static min latency but LOWERS the realized one" case (its rare cheap first-sample
+# path is unified away, yet every realized transaction is the steady-state one, which only this guard pins -- the
+# static metrics gate sees only the raised static min latency).
 _T, _F = True, False
 _WORST_CASE_LATENCY: dict[str, tuple[Callable[[], Callable[..., object]], list[list[ScalarLike]], int]] = {
-    "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 5),
-    "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 8),
+    "schmitt_trigger": (lambda: SchmittTrigger().__call__, [[2.0], [-2.0], [0.0], [0.5], [-0.5], [3.0]], 6),
+    "iir1_lpf": (lambda: IIR1LPF().__call__, [[1.0], [-2.0], [0.5], [3.0], [-1.5], [0.0]], 9),
     "quadrature_encoder": (
         lambda: QuadratureEncoder().__call__,
         [[_T, _F], [_T, _T], [_F, _F], [_F, _T], [_T, _T], [_F, _F]],
-        5,
+        6,
     ),
     "phase_frequency_detector": (
         lambda: PhaseFrequencyDetector().__call__,
         [[_T, _F, _F], [_F, _T, _F], [_T, _T, _F], [_F, _F, _T], [_T, _F, _F], [_F, _F, _T]],
-        5,
+        6,
     ),
     "majority_voter": (
         lambda: MajorityVoter().__call__,
         [[_T, _T, _T, _F, _F, _F], [_T, _T, _T, _T, _T, _T], [_T, _F, _T, _F, _T, _F], [_F, _T, _T, _T, _T, _T]],
-        15,
+        16,
     ),
-    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 114),
+    "recip_newton": (lambda: NewtonReciprocal().__call__, [[0.5], [1.0], [2.0], [1.7], [2.9], [0.35]], 115),
     "remainder": (
         lambda: remainder,
         [[1.0, 1.0], [7.0, 3.0], [1000.0, 1.0], [123.0, 4.0], [50.0, 7.0], [2.5, 2.5]],
-        234,
+        235,
     ),
-    "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 89),
+    "octave_index": (lambda: octave_index, [[8.0], [0.1], [1.0], [32.0], [0.03], [-3.0]], 90),
 }
 
 
 @pytest.mark.parametrize("name", list(_WORST_CASE_LATENCY))
 def test_realized_worst_case_latency_does_not_regress(name: str) -> None:
-    # The realized per-transaction latency (the cosim bench's `waited`) over a fixed adversarial input set must not
-    # exceed its frozen worst case. This is the teeth behind the latency-reduction work: a per-block drain regression
-    # re-inflates the count, amplified across loop trips. Freezing the post-optimization figure makes the gate fail on
+    # The realized per-transaction latency over a fixed adversarial input set must not exceed its frozen worst case.
+    # This is the teeth behind the latency-reduction work: a per-block drain regression re-inflates the count,
+    # amplified across loop trips. Freezing the post-optimization figure makes the gate fail on
     # any future change that lengthens a transaction, while still allowing a genuine improvement (the bound is `<=`).
     factory, vectors, worst = _WORST_CASE_LATENCY[name]
     model = _synthesize(factory, name).numerical_model.elaborate()
-    waited = [_drive(model, inputs)[1] for inputs in vectors]
-    assert max(waited) <= worst, f"{name}: realized worst-case latency regressed {worst} -> {max(waited)} ({waited})"
+    realized = [_drive(model, inputs)[1] for inputs in vectors]
+    assert (
+        max(realized) <= worst
+    ), f"{name}: realized worst-case latency regressed {worst} -> {max(realized)} ({realized})"
 
 
 @pytest.mark.parametrize("name", list(_WORST_CASE_LATENCY))
@@ -214,17 +255,17 @@ def test_every_realized_latency_is_at_least_the_static_lower_bound(name: str) ->
     factory, vectors, _worst = _WORST_CASE_LATENCY[name]
     result = _synthesize(factory, name)
     model = result.numerical_model.elaborate()
-    assert all(_drive(model, inputs)[1] + 1 >= result.initiation_interval[0] for inputs in vectors)
+    assert all(_drive(model, inputs)[1] >= result.latency[0] for inputs in vectors)
 
 
 @pytest.mark.parametrize("label", list(EXIT_ARM_KERNELS))
 def test_the_shortest_realized_latency_is_the_static_lower_bound(label: str) -> None:
-    # The static min II is a lower bound over CFG paths; on these kernels the shortest CFG path is executable, so the
-    # vectors realize it exactly.
+    # The static min latency is a lower bound over CFG paths; on these kernels the shortest CFG path is executable, so
+    # the vectors realize it exactly.
     result = _synthesize(lambda: EXIT_ARM_KERNELS[label], label)
     model = result.numerical_model.elaborate()
-    realized = [_drive(model, list(vector))[1] + 1 for vector in EXIT_ARM_VECTORS]
-    assert min(realized) == result.initiation_interval[0] and len(set(realized)) > 1
+    realized = [_drive(model, list(vector))[1] for vector in EXIT_ARM_VECTORS]
+    assert min(realized) == result.latency[0] and len(set(realized)) > 1
 
 
 def test_a_conditional_exit_holds_its_outputs_under_backpressure() -> None:
@@ -268,7 +309,7 @@ def test_branches_left_without_work_take_no_cycles() -> None:
         return x
 
     result = holoso.synthesize(passthrough, default_options(_FMT), name="passthrough")
-    assert result.initiation_interval == (1, 1)
+    assert result.latency == (1, 1)
     model = result.numerical_model.elaborate()
     for skip in (False, True):
         for enabled in (False, True):

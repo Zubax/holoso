@@ -549,7 +549,7 @@ def test_residual_whiles_match_cpython() -> None:
 def test_the_public_artifacts_discriminate_unrolling_from_residualization() -> None:
     """
     The unroll-vs-residualize decision is itself public: a residual while keeps loop-carried phis in the
-    location-stripped `frontend_ir[-1]` and makes the transaction latency data-dependent (max II `None`),
+    location-stripped `frontend_ir[-1]` and makes the transaction latency data-dependent (max latency `None`),
     while an unrolled loop leaves neither.
     """
     unrolled = holoso.synthesize(
@@ -558,8 +558,8 @@ def test_the_public_artifacts_discriminate_unrolling_from_residualization() -> N
     residual = holoso.synthesize(
         _countdown, Options(operator=OperatorOptions(fadd=lean.fadd(), fcmp=lean.fcmp()), wmultiplier=18), name="k"
     )
-    assert unrolled.initiation_interval[1] is not None
-    assert residual.initiation_interval[1] is None
+    assert unrolled.latency[1] is not None
+    assert residual.latency[1] is None
     unrolled_lines = strip_locations(unrolled.frontend_ir[-1]).splitlines()
     residual_lines = strip_locations(residual.frontend_ir[-1]).splitlines()
     assert not any(line.lstrip().startswith("phi %") for line in unrolled_lines)
@@ -1393,7 +1393,7 @@ def test_a_discarded_promote_pass_does_not_charge_the_budget() -> None:
     options = Options(operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul()), wmultiplier=18)
     fits = holoso.synthesize(_float_carry_fits, options, name="k")
     promotes = holoso.synthesize(_int_carry_promotes_then_fits, options, name="k")
-    assert promotes.initiation_interval == fits.initiation_interval
+    assert promotes.latency == fits.latency
     assert promotes.verilog_output.verilog == fits.verilog_output.verilog
 
 
@@ -1615,8 +1615,8 @@ def _static_counted_sum() -> int:
 
 def test_the_unroll_threshold_selects_the_lowering_of_a_pure_kernel() -> None:
     """
-    The same kernel unrolls at or below the threshold (exact II, no phis) and residualizes above it
-    (open-ended II, loop phis), with identical values either way; the branch-free body keeps the II
+    The same kernel unrolls at or below the threshold (exact latency, no phis) and residualizes above it
+    (open-ended latency, loop phis), with identical values either way; the branch-free body keeps the latency
     discriminator sound. Only the lowering is claimed: a counted body is a data-dependent region, so it
     refuses what any residual loop refuses -- an aggregate state install, a runtime-int subscript.
     """
@@ -1626,8 +1626,8 @@ def test_the_unroll_threshold_selects_the_lowering_of_a_pure_kernel() -> None:
     counted = holoso.synthesize(
         _static_counted_sum, Options(operator=OperatorOptions(), unroll_max_trips=3, wmultiplier=18), name="k"
     )
-    assert unrolled.initiation_interval[1] is not None
-    assert counted.initiation_interval[1] is None
+    assert unrolled.latency[1] is not None
+    assert counted.latency[1] is None
     assert not any(line.lstrip().startswith("phi %") for line in strip_locations(unrolled.frontend_ir[-1]).splitlines())
     assert any(line.lstrip().startswith("phi %") for line in strip_locations(counted.frontend_ir[-1]).splitlines())
     assert [_as_int(v) for v in unrolled.numerical_model.elaborate().run()] == [6]

@@ -43,6 +43,10 @@ from ._ports import ControlInputPort, ControlOutputPort, ControlPort, DataInputP
 # A firing's own LATENCY is the orthogonal pipeline depth (its primitive's L stages when pooled, none when inline).
 READ_FIRST_EDGE = 1
 
+# The release of a result returns the PC to the accept dwell (pc 0), and only there is the next transaction accepted, so
+# consecutive accepts are one step further apart than an accept and its result.
+RESTART_STEPS = 1
+
 
 def landing_cycle(commit_cycle: int, fetch_lag: int) -> int:
     """
@@ -795,11 +799,12 @@ class Lir:
         return self.blocks[0].index
 
     @property
-    def min_initiation_interval(self) -> int:
+    def min_latency(self) -> int:
         """
-        The shortest path latency (traversed fetch steps) from the entry to an exit, exact for a branch-free kernel.
-        Back-edges, which target a lower address, are skipped: the minimum is the path exiting each loop on its first
-        header test, a true lower bound (the model is the authority on the realized, data-dependent count).
+        The shortest path latency (traversed fetch steps) from the cycle accepting the inputs to the first cycle of
+        `out_valid`, exact for a branch-free kernel. Back-edges, which target a lower address, are skipped, so the
+        minimum takes no loop trip: a true lower bound (the model is the authority on the realized, data-dependent
+        count).
         """
         dist = {self.entry: 0}
         for block in self.blocks:  # layout order is reverse-postorder, so a forward edge reaches every block
@@ -808,6 +813,14 @@ class Lir:
                 if self.block_base[successor] > self.block_base[block.index]:
                     dist[successor] = min(dist.get(successor, reach), reach)
         return min(dist[block.index] + block.term_offset for block in self.blocks if exits(block.terminator))
+
+    @property
+    def min_initiation_interval(self) -> int:
+        """
+        The shortest period between consecutive accepts with `in_valid` and `out_ready` held high, a lower bound in the
+        same sense as `min_latency`.
+        """
+        return self.min_latency + RESTART_STEPS
 
     @property
     def last_pc(self) -> int:

@@ -112,6 +112,7 @@ def _metrics(lir: Lir) -> str:
         ("steering mux arms", f"{arms.read} read + {arms.wide_write} write = {arms.read + arms.wide_write}"),
         ("bool write select arms", arms.bool_write),
         ("inline select muxes", sum(_select_muxes(lir).values())),
+        ("latency min [cycles]", lir.min_latency),
         ("II min [cycles]", lir.min_initiation_interval),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)

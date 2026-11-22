@@ -76,7 +76,7 @@ def main() -> None:
         ),
     ):
         result = holoso.synthesize(poly3, options, name=label)
-        print(f"{label}: II {result.initiation_interval}")
+        print(f"{label}: latency {result.latency}, II {result.initiation_interval}")
         for filename, path in result.write(out_dir).items():
             print(f"    {filename}: {path}")
 

@@ -664,7 +664,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
     # An arm whose ONLY constraint on its consumer is the spilled operand reads it as early as the latch-free wide read
     # allows: read == landing when the spill lands late enough, or landing+1 when it lands so early that the fetch_lag
     # read offset (issue + fetch_lag, issue >= 0) caps how early the consumer can read it (the consumer still issues
-    # optimally, so no II is lost). So tightness here is read_pc in {landing, landing+1}; a real coordinate-frame
+    # optimally, so no latency is lost). So tightness here is read_pc in {landing, landing+1}; a real coordinate-frame
     # regression (the historical land - term_offset +1 bug) would push every read to landing+2.
     for kernel, name in [(overlap_spill_kernel, "overlap_spill"), (overlap_dead_arm_spill_kernel, "dead_arm_spill")]:
         lir = build_lir(_run(kernel, config.make_mir(FMT)), f"{name}_{config.label}")
@@ -2137,7 +2137,7 @@ def test_a_second_multiplier_shortens_an_independent_product_chain() -> None:
     two = build_lir(_run(_four_products, _multiplier_ops(2)), "products_two")
     assert _instance_counts(one)["fmul"] == 1 and _instance_counts(two)["fmul"] == 2
     assert len(_firings(two, "fmul")) == len(_firings(one, "fmul")) == 4
-    assert two.min_initiation_interval < one.min_initiation_interval
+    assert two.min_latency < one.min_latency
 
 
 def test_a_dependent_product_chain_leaves_the_second_multiplier_uninstantiated() -> None:

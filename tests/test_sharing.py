@@ -71,7 +71,7 @@ def _mnemonics(fn: Callable[..., object], options: Options) -> collections.Count
 def _schedule(fn: Callable[..., object], options: Options, name: str) -> tuple[int, int]:
     """The shipped program's schedule."""
     lir = build_lir(lower_to_mir(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name)
-    return lir.min_initiation_interval, lir.last_pc
+    return lir.min_latency, lir.last_pc
 
 
 def _run(fn: Callable[..., object], options: Options, name: str, *args: float) -> tuple[float, ...]:

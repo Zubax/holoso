@@ -56,7 +56,7 @@ def unguarded(x: float, y: float) -> float:
 
 
 def test_a_settled_guard_costs_no_cycle() -> None:
-    assert _synthesize(guarded).initiation_interval == _synthesize(unguarded).initiation_interval
+    assert _synthesize(guarded).latency == _synthesize(unguarded).latency
     assert _cycles(guarded, [(1.5, 2.0), (-3.0, 0.5)]) == _cycles(unguarded, [(1.5, 2.0), (-3.0, 0.5)])
 
 
@@ -77,9 +77,9 @@ def unguarded_unrolled(x: float, y: float) -> float:
 
 
 def test_a_settled_guard_costs_no_cycle_in_each_unrolled_trip() -> None:
-    guarded_ii = _synthesize(guarded_unrolled).initiation_interval
-    assert guarded_ii == _synthesize(unguarded_unrolled).initiation_interval
-    assert _cycles(guarded_unrolled, [(1.5, 1.0), (-2.0, -1.0)]) == [guarded_ii[0]] * 2
+    guarded_latency = _synthesize(guarded_unrolled).latency
+    assert guarded_latency == _synthesize(unguarded_unrolled).latency
+    assert _cycles(guarded_unrolled, [(1.5, 1.0), (-2.0, -1.0)]) == [guarded_latency[0]] * 2
 
 
 def guarded_while(x: float, y: float, n: int) -> float:
@@ -272,7 +272,7 @@ def unguarded_arm(a: float, b: float) -> float:
 
 def test_a_settled_guard_leaves_its_diamond_convertible() -> None:
     # The guard's chain inside the arm is one block again, so the diamond collapses into a select.
-    assert _synthesize(guarded_arm).initiation_interval == _synthesize(unguarded_arm).initiation_interval
+    assert _synthesize(guarded_arm).latency == _synthesize(unguarded_arm).latency
     assert _cycles(guarded_arm, [(1.5, 0.5), (0.5, 1.5)]) == _cycles(unguarded_arm, [(1.5, 0.5), (0.5, 1.5)])
 
 

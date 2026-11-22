@@ -379,9 +379,8 @@ class PooledPrimitive[B: zkf.Block = Any](Primitive, ABC):
     def drive(self) -> Drive:
         """
         What the block an instance running this primitive alone renders says of it: its timing, whose initiation
-        interval is the cycles until the instance accepts its next firing, of any primitive (1 = fully pipelined) --
-        the per-firing sense of II, distinct from the module-level `Lir.min_initiation_interval`, the whole-transaction
-        cost, which is this project's deliberate usage (see DESIGN.md, Direction) -- and the operand ports it keeps.
+        interval is the cycles until the instance accepts its next firing, of any primitive (1 = fully pipelined),
+        and the operand ports it keeps.
         Derived once, since ZKF computes timing and ports on every read and the allocator asks in its inner loop.
         """
         operator = self.operator

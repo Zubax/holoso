@@ -898,7 +898,7 @@ def test_a_negation_between_two_scalings_is_not_opaque() -> None:
 
     result = holoso.synthesize(outside, _ops(), name="neg_outside")
     assert _modules(result) == {"cordic"}
-    assert result.initiation_interval == holoso.synthesize(inside, _ops(), name="neg_inside").initiation_interval
+    assert result.latency == holoso.synthesize(inside, _ops(), name="neg_inside").latency
     sim = result.numerical_model.elaborate()
     for x in (0.7, 1.3, 0.25, -0.5, 2.0):
         assert _bits(sim.run(x)[0]) == _sincos(_v(-x))[0].bits, f"sin of a negated whole turn x={x}"

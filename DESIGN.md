@@ -18,9 +18,9 @@ pipeline-oriented optimizer we don't want. We delegate only to lightweight Pytho
 
 The target is a specialized program, not a pipeline. We synthesize a sequential FSM (a zero-instruction-set computer,
 ZISC) that time-multiplexes a few shared operators over a register file. We do not pursue a constant or near-1
-initiation interval like a streaming pipeline: the II is whatever the scheduled program costs -- for a fixed control
-path an exact, statically known cycle count from the per-operator latency model. This is a compiler problem more than
-a circuit-design one.
+initiation interval like a streaming pipeline: the latency is whatever the scheduled program costs -- for a fixed
+control path an exact, statically known cycle count from the per-operator latency model -- and the II follows from it.
+This is a compiler problem more than a circuit-design one.
 
 Compilation is deterministic and reproducible for fixed inputs and dependency versions: identical input produces
 byte-identical output (except diagnostics and reports), achieved by sorted iteration over name-keyed merge points and
@@ -169,8 +169,12 @@ the slow HDL-emission/simulation iteration begins.
   install at release. A handshake arm is that write seen as a mux arm: one input of the register's write select,
   chosen by the handshake edge rather than by the register's write opcode, and priced by the register allocator
   alongside the opcode-selected arms. A register carries at most one.
-- Makespan / II -- a block's schedule length in cycles; the initiation interval (II) is the whole executed path's
-  exact cycle count.
+- Makespan -- a block's schedule length in cycles.
+- Latency -- the whole executed path's exact cycle count, from the cycle in which the inputs are accepted to the
+  first cycle of `out_valid`.
+- Initiation interval (II) -- the cycles between consecutive accepts with `in_valid` and `out_ready` held high. The
+  release returns the PC to the accept dwell, where the next transaction is accepted a step later, so the II is the
+  latency plus one; the two are reported separately because that relation belongs to the controller, not to the API.
 - Firing -- one issue of one drive: the operation, or the fused group of operations tapping distinct output ports of
   the drive over the same operands, that a single issue computes; a pooled firing's members share the issue cycle, the
   drive and the operator instance.
@@ -478,7 +482,7 @@ neither burn cycles nor record a spurious error. `select` (a mux, both inputs li
 cheap diamonds that if-conversion collapses into straight-line code so the region pipelines and reuses registers;
 conversion is gated on every arm operation being speculatable, since both arms will execute and an untaken arm must
 not fire an error sideband.
-Running both arms can RAISE the static lower-bound II while LOWERING the realized per-transaction latency, which is
+Running both arms can RAISE the static lower-bound latency while LOWERING the realized per-transaction one, which is
 the goal -- the regression guard is realized latency, not the static bound. The conversion budget counts HIR
 operations as they stand, including some a later lowering collapses; overcharging costs an arm its conversion and
 never a wrong answer, so the budget stays a count of operations present rather than a prediction of what the machine
@@ -488,8 +492,8 @@ Loops with a static trip count unroll fully, below the unroll threshold (`unroll
 runtime trip count, a `for` over `range` becomes a counted back-edge loop: a hidden counter phi, bounds captured by
 value, the static step's sign fixing the exit test. Only `for` consults the threshold; a lazy `range` reaching any
 other consumer materializes if static and refuses if runtime. A `while` becomes a genuine back-edge loop that fully
-drains before iterating, so no overlap crosses a back-edge; its static II counts the back-edge as not-taken -- a true
-lower bound, with the numerical model the authority on realized counts. The `do`-`while` spelling -- a statically
+drains before iterating, so no overlap crosses a back-edge; its static latency counts the back-edge as not-taken -- a
+true lower bound, with the numerical model the authority on realized counts. The `do`-`while` spelling -- a statically
 decidable first test -- is peeled, costing microcode and no datapath.
 
 ### HIR optimization
@@ -688,8 +692,8 @@ allocator, and the handshake-gated writes are enumerated once.
 
 ### Control flow
 
-`branch` is the real control transfer: the PC jumps, untaken ops never run, and the II is whatever the executed path
-costs.
+`branch` is the real control transfer: the PC jumps, untaken ops never run, and the latency is whatever the executed
+path costs.
 
 A block's terminator offset is the latest cycle a value still lands in its frame -- it must cover every landing the
 block does not forward to a successor, tail installs included. An install's source is classified exactly: a source
@@ -741,7 +745,7 @@ that dedicated form is what triggers the inference. The RTL stays tool-neutral: 
 attribute on the ROM read register or a keep on a net a synthesizer must not restructure, are given in the options,
 and the synthesis flows supply their own. The ROM is read through a short multi-stage fetch
 (PC latch, ROM read register, routing register) so the controller is short register-to-register paths rather than a wide
-combinational cone; the fetch leads the executing step, which under static scheduling only adds to the makespan/II. For
+combinational cone; the fetch leads the executing step, which under static scheduling only adds to the latency. For
 the same reason `in_ready` is a register the sequencer sets beside the next PC, so the input loads' wide write-enable
 fanout starts at a flip-flop rather than behind a PC decode.
 

@@ -1,6 +1,6 @@
 """
 HIR optimization and MIR selection: public synthesize-level behavior (values against CPython or independent
-literals, operator-module instantiation presence, the initiation-interval branch discriminator, verbatim refusal
+literals, operator-module instantiation presence, the latency branch discriminator, verbatim refusal
 diagnostics) plus the white-box contracts that have no public spelling.
 """
 
@@ -288,7 +288,7 @@ def test_adjacent_constant_scalings_compose_into_one() -> None:
 
     for composed, collapsed in ((factors, one_factor), (exponents, one_exponent), (mixed, one_mixed)):
         result, reference = _synth(composed), _synth(collapsed)
-        assert result.initiation_interval == reference.initiation_interval, composed.__name__
+        assert result.latency == reference.latency, composed.__name__
         assert _instantiated(result) == _instantiated(reference), composed.__name__
         sim = result.numerical_model.elaborate()
         for a in (1.0, -0.5, 0.0, 6.0):
@@ -404,7 +404,7 @@ def test_a_composed_scaling_declines_where_the_host_arithmetic_collapses() -> No
 
     result = _synth(f, _WIDE_OPTIONS, name="collapsed_pair")
     assert _instantiated(result) == {"mul"}
-    assert result.initiation_interval == _synth(_two_chained_multiplies, _WIDE_OPTIONS).initiation_interval
+    assert result.latency == _synth(_two_chained_multiplies, _WIDE_OPTIONS).latency
     got = float(result.numerical_model.elaborate().run(1e100)[0])
     assert within(got, 1e-300, *default_tolerance(FloatFormat(12, 24), 2, magnitude=1e-300))
 
@@ -418,7 +418,7 @@ def test_a_composed_scaling_declines_where_the_product_is_subnormal() -> None:
 
     result = _synth(f, _WIDE_OPTIONS, name="subnormal_product")
     assert _instantiated(result) == {"mul"}
-    assert result.initiation_interval == _synth(_two_chained_multiplies, _WIDE_OPTIONS).initiation_interval
+    assert result.latency == _synth(_two_chained_multiplies, _WIDE_OPTIONS).latency
     # 1e-320 is a host subnormal carrying ~13 significand bits; folding it lands ~185 ulp off the true product.
     got = float(result.numerical_model.elaborate().run(1.0)[0])
     assert within(got, 1e-200 * 1e-120, *default_tolerance(_WIDE_OPTIONS.ffmt, 2, magnitude=1e-320))
@@ -623,8 +623,8 @@ def _hir_of(target: object, ifconv_max_ops: int = DEFAULT_IFCONV_MAX_OPS) -> Hir
     return optimize(lower(target, DEFAULT_UNROLL_MAX_TRIPS).hir, ifconv_max_ops)
 
 
-# A converted diamond leaves straight-line code whose latency is exact, so initiation_interval[1] is a number;
-# a surviving real branch makes the latency data-dependent and initiation_interval[1] is None.
+# A converted diamond leaves straight-line code whose latency is exact, so latency[1] is a number;
+# a surviving real branch makes the latency data-dependent and latency[1] is None.
 
 
 def test_if_conversion_collapses_a_pure_diamond() -> None:
@@ -636,7 +636,7 @@ def test_if_conversion_collapses_a_pure_diamond() -> None:
         return y
 
     result = _synth(f, name="pure_diamond")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     sim = result.numerical_model.elaborate()
     for a, b in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)]:
         assert float(sim.run(a, b)[0]) == f(a, b)
@@ -652,7 +652,7 @@ def test_if_conversion_refuses_an_unspeculatable_arm() -> None:
         return y
 
     result = _synth(f, name="unspec_arm")
-    assert result.initiation_interval[1] is None  # the diamond survives as a real branch
+    assert result.latency[1] is None  # the diamond survives as a real branch
     assert "divsqrt" in _instantiated(result)
     sim = result.numerical_model.elaborate()
     for a, b in [(3.0, 1.0), (1.0, 2.0), (1.0, 4.0)]:
@@ -674,7 +674,7 @@ def test_if_conversion_speculates_a_hypotenuse() -> None:
         operator=dataclasses.replace(OPTIONS.operator, filog2=lean.filog2()),
     )
     result = _synth(f, options, name="spec_hypot")
-    assert result.initiation_interval[1] is not None  # the diamond collapsed rather than surviving as a branch
+    assert result.latency[1] is not None  # the diamond collapsed rather than surviving as a branch
     sim = result.numerical_model.elaborate()
     for a, b in [(3.0, 1.0), (3.0, 4.0), (5.0, 12.0)]:  # exact in the format on both arms
         assert float(sim.run(a, b)[0]) == f(a, b)
@@ -690,8 +690,8 @@ def test_if_conversion_respects_the_arm_size_budget() -> None:
 
     over = _synth(f, dataclasses.replace(OPTIONS, ifconv_max_ops=2), name="budget_over")
     within_budget = _synth(f, dataclasses.replace(OPTIONS, ifconv_max_ops=3), name="budget_within")
-    assert over.initiation_interval[1] is None
-    assert within_budget.initiation_interval[1] is not None
+    assert over.latency[1] is None
+    assert within_budget.latency[1] is not None
     for result in (over, within_budget):
         sim = result.numerical_model.elaborate()
         for a, b in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)]:
@@ -716,8 +716,8 @@ def test_zero_budget_still_converts_the_operation_free_diamond() -> None:
     zero_budget = dataclasses.replace(OPTIONS, ifconv_max_ops=0)
     converted = _synth(constant_arms, zero_budget, name="const_arms")
     refused = _synth(one_op_arm, zero_budget, name="one_op_arm")
-    assert converted.initiation_interval[1] is not None
-    assert refused.initiation_interval[1] is None
+    assert converted.latency[1] is not None
+    assert refused.latency[1] is None
     for result, kernel in ((converted, constant_arms), (refused, one_op_arm)):
         sim = result.numerical_model.elaborate()
         for a, b in [(2.0, 0.5), (0.5, 2.0), (1.0, 1.0)]:
@@ -732,17 +732,18 @@ def test_synthesize_honors_the_ifconv_option() -> None:
             y = a - b
         return y
 
-    # A converted diamond leaves one straight-line block, so the II is exact; a surviving branch makes it data-dependent.
+    # A converted diamond leaves one straight-line block, so the latency is exact; a surviving branch makes it
+    # data-dependent.
     options = Options(
         operator=OperatorOptions(fadd=lean.fadd(), fcmp=lean.fcmp()), ffmt=FMT, ifconv_max_ops=2, wmultiplier=18
     )
-    assert holoso.synthesize(f, options, name="ifconv_on").initiation_interval[1] is not None
+    assert holoso.synthesize(f, options, name="ifconv_on").latency[1] is not None
     disabled = dataclasses.replace(options, ifconv_max_ops=0)
-    assert holoso.synthesize(f, disabled, name="ifconv_off").initiation_interval[1] is None
+    assert holoso.synthesize(f, disabled, name="ifconv_off").latency[1] is None
 
 
 def test_ifconv_budget_changes_the_schedule_but_never_the_result() -> None:
-    # The knob's whole contract. The II inequality is what keeps it honest: without it the comparison would still
+    # The knob's whole contract. The latency inequality is what keeps it honest: without it the comparison would still
     # pass if the budget stopped having any effect at all.
     def f(a: float, b: float, c: float) -> float:
         if a > b:
@@ -760,7 +761,7 @@ def test_ifconv_budget_changes_the_schedule_but_never_the_result() -> None:
     )
     branchy = holoso.synthesize(f, dataclasses.replace(options, ifconv_max_ops=0), name="ifconv_branchy")
     converted = holoso.synthesize(f, dataclasses.replace(options, ifconv_max_ops=64), name="ifconv_converted")
-    assert branchy.initiation_interval != converted.initiation_interval, "the budget no longer moves the schedule"
+    assert branchy.latency != converted.latency, "the budget no longer moves the schedule"
     left, right = branchy.numerical_model.elaborate(), converted.numerical_model.elaborate()
     for a, b, c in [(1.0, 0.5, 2.0), (0.5, 1.0, -2.0), (-3.0, -4.0, 0.25), (0.0, 0.0, 1.0), (2.0, 2.0, -1.0)]:
         want = f(a, b, c)  # exact at these vectors, so both configurations answer the CPython value
@@ -779,7 +780,7 @@ def test_if_conversion_converts_a_boolean_phi_merge() -> None:
         return float(flag)
 
     result = _synth(f, name="bool_phi_merge")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     sim = result.numerical_model.elaborate()
     for a, b, c in [(3.0, 2.0, 1.0), (3.0, 2.0, 2.5), (1.0, 2.0, 0.5), (1.0, 2.0, 1.5)]:
         assert float(sim.run(a, b, c)[0]) == f(a, b, c)
@@ -795,7 +796,7 @@ def test_if_conversion_converts_an_integer_phi_merge() -> None:
         return y
 
     result = _synth(f, INT_OPTIONS, name="int_phi_merge")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     sim = result.numerical_model.elaborate()
     for a, b in [(3, 1), (1, 3), (2, 2), (-5, -9)]:
         assert _ints(sim.run(a, b)) == [f(a, b)]
@@ -811,7 +812,7 @@ def test_an_error_bearing_integer_arm_stays_behind_its_guard() -> None:
         return y
 
     result = _synth(f, INT_OPTIONS, name="int_guarded_div")
-    assert result.initiation_interval[1] is None
+    assert result.latency[1] is None
     assert "idivs" in _instantiated(result)
     sim = result.numerical_model.elaborate()
     for a, b in [(3, 1), (1, 3), (-7, 2)]:
@@ -829,7 +830,7 @@ def test_if_conversion_reduces_constant_armed_boolean_select() -> None:
         return float(flag)
 
     result = _synth(f, name="const_armed_select")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     hir = _hir_of(f)  # the collapse itself is invisible publicly (inline selects produce no branch): white-box
     assert len(hir.blocks) == 1
     assert not any(
@@ -881,7 +882,7 @@ def test_bselect_reductions_are_truth_table_correct() -> None:
         return y0, y1, y2, y3, y4, y5, y6, y7
 
     result = _synth(shapes, name="bselect_shapes")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     sim = result.numerical_model.elaborate()
     for combo in itertools.product([False, True], repeat=3):
         assert list(sim.run(*combo)) == list(shapes(*combo)), combo
@@ -914,7 +915,7 @@ def test_identical_mux_arms_collapse_whatever_the_selector() -> None:
             isinstance(n, Operation) and isinstance(n.operator, (BoolSelect, FloatSelect)) for n in hir.nodes.values()
         ), f"{kernel.__name__}: a mux over identical arms survived"
         result = _synth(kernel)
-        assert result.initiation_interval[1] is not None, kernel.__name__
+        assert result.latency[1] is not None, kernel.__name__
         sim = result.numerical_model.elaborate()
         for x in (-8.0, -1.0, 0.0, 0.5, 3.0):
             got, want = read(sim.run(x)[0]), read(kernel(x))
@@ -934,7 +935,7 @@ def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
         return b
 
     result = _synth(f, name="nested_chain")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     sim = result.numerical_model.elaborate()
     for x, y in [(1.0, 2.0), (-1.0, 2.0), (1.0, -2.0), (-1.5, -0.5)]:
         assert float(sim.run(x, y)[0]) == f(x, y)
@@ -943,7 +944,7 @@ def test_if_conversion_collapses_nested_chains_to_one_block() -> None:
 def test_if_conversion_repoints_loop_header_phi_arms() -> None:
     # A diamond inside a while body: the dissolved merge block fed the loop-header phis, whose arms must repoint to
     # the spliced block (the localized pin for the repoint path; the examples exercise it only end-to-end). The outer
-    # runtime loop keeps the public II data-dependent either way, so the discriminator is blind here: white-box.
+    # runtime loop keeps the public latency data-dependent either way, so the discriminator is blind here: white-box.
     def f(x: float) -> float:
         w = x
         while w > 0.0:
@@ -984,7 +985,7 @@ def test_dead_diamond_frees_its_condition_cone() -> None:
         return x
 
     result = _synth(f, name="dead_diamond")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     assert _instantiated(result) == set(), "the unused condition cone (division included) is dead code"
     sim = result.numerical_model.elaborate()
     for a, b, x in [(1.0, 0.0, 2.5), (0.0, 1.0, -3.0)]:  # the dead division never runs, so b == 0 is inert
@@ -1613,7 +1614,7 @@ def test_an_arm_a_proven_guard_excludes_is_deleted_rather_than_merely_unconvicte
         return r
 
     result = _synth(excluded_by_a_guard)
-    assert result.initiation_interval[1] is not None, "the guard itself survived"
+    assert result.latency[1] is not None, "the guard itself survived"
     assert _instantiated(result) == set(), "the excluded arm's quotient survived the pruning that proves its guard"
     sim = result.numerical_model.elaborate()
     for x in (3.0, -1.0, 0.0):
@@ -1629,7 +1630,7 @@ def test_a_loop_whose_test_is_proven_false_dissolves_entirely() -> None:
         return y
 
     result = _synth(never_enters)
-    assert result.initiation_interval[1] is not None, "the loop test survived"
+    assert result.latency[1] is not None, "the loop test survived"
     assert _instantiated(result) == set(), "the body's addition survived a loop that is never entered"
     sim = result.numerical_model.elaborate()
     for x in (3.0, -1.0, 0.0):
@@ -1648,7 +1649,7 @@ def test_pruning_one_guard_settles_the_next() -> None:
         return 4.0
 
     result = _synth(cascade)
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     sim = result.numerical_model.elaborate()
     for x in (3.0, -1.0, 0.0):
         assert float(sim.run(x)[0]) == cascade(x) == 4.0
@@ -1667,7 +1668,7 @@ def test_a_state_slot_live_out_follows_a_merge_pruning_collapses() -> None:
             return self.s
 
     result = _synth(HeldByADeadGuard().__call__, name="held_by_dead_guard")
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     assert [(port.name, port.scalar_type) for port in result.output_ports] == [("state_s", FloatType(FMT))]
     sim = result.numerical_model.elaborate()
     reference = HeldByADeadGuard()
@@ -1677,8 +1678,8 @@ def test_a_state_slot_live_out_follows_a_merge_pruning_collapses() -> None:
 
 def test_a_proven_break_kills_the_back_edge_and_collapses_the_carried_merges() -> None:
     # The latch becomes unreachable, so the header's loop-carried phis lose their latch arm and collapse. Distinct
-    # from a loop deleted whole, where no merge has to be repaired at all. The outer runtime loop keeps the public II
-    # data-dependent whether or not the break is decided, so the discriminator is blind here: white-box.
+    # from a loop deleted whole, where no merge has to be repaired at all. The outer runtime loop keeps the public
+    # latency data-dependent whether or not the break is decided, so the discriminator is blind here: white-box.
     def breaks_on_the_first_trip(x: float, n: float) -> float:
         y = x
         t = n
@@ -1937,7 +1938,7 @@ def test_a_bselect_repeating_its_condition_reduces_to_a_gate() -> None:
         return r1, r2
 
     result = _synth(gate_shapes)
-    assert result.initiation_interval[1] is not None
+    assert result.latency[1] is not None
     operators = [node.operator for node in _hir_of(gate_shapes).nodes.values() if isinstance(node, Operation)]
     assert not any(isinstance(op, BoolSelect) for op in operators), "a condition-repeating bselect survived"
     assert any(isinstance(op, BoolAnd) for op in operators) and any(isinstance(op, BoolOr) for op in operators)
@@ -1956,7 +1957,7 @@ def test_a_boolean_contradiction_settles_the_guard_it_forms() -> None:
         return x
 
     result = _synth(contradiction)
-    assert result.initiation_interval[1] is not None, "the guard survived"
+    assert result.latency[1] is not None, "the guard survived"
     assert _instantiated(result) == set(), "the arm a contradiction guards survived"
     sim = result.numerical_model.elaborate()
     for x, y in ((3.0, 1.0), (-1.0, 2.0), (0.0, 0.0)):

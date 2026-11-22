@@ -664,7 +664,7 @@ def test_model_unrolled_for_loop_newton_reciprocal() -> None:
         return y
 
     result = _synth(reciprocal, "newton")
-    assert result.initiation_interval[1] == result.initiation_interval[0]  # fully unrolled: no surviving branch
+    assert result.latency[1] == result.latency[0]  # fully unrolled: no surviving branch
     model = result.numerical_model.elaborate()
     for x in [0.5, 0.75, 1.0, 1.3, 1.7, 2.0]:  # the restricted domain where this 4-step Newton seed converges
         assert math.isclose(float(model.run(x)[0]), 1.0 / x, rel_tol=1e-5)
@@ -1032,13 +1032,15 @@ def test_model_loop_counter_does_not_leak_across_branch_arms_in_scan() -> None:
 
 
 def test_synthesis_result_reports_latency_metric() -> None:
-    # The public latency metric is (min II, max II or None): a straight-line kernel is exact (min == max), while any
+    # The public latency metric is (min, max or None): a straight-line kernel is exact (min == max), while any
     # branch makes the path data-dependent, so its max is reported as None.
     def straight_line(a: float, b: float) -> float:
         return a * b + a
 
-    flat_min, flat_max = _synth(straight_line, "straight_line").initiation_interval
+    flat = _synth(straight_line, "straight_line")
+    flat_min, flat_max = flat.latency
     assert flat_min > 0 and flat_max == flat_min
+    assert flat.initiation_interval[1] == flat.initiation_interval[0] >= flat_min
 
     def looping(x: float) -> float:
         w = x
@@ -1046,8 +1048,10 @@ def test_synthesis_result_reports_latency_metric() -> None:
             w = w - 1.0
         return w
 
-    branching_min, branching_max = _synth(looping, "looping").initiation_interval
+    branching = _synth(looping, "looping")
+    branching_min, branching_max = branching.latency
     assert branching_min > 0 and branching_max is None  # inexact: a data-dependent loop has unbounded max
+    assert branching.initiation_interval[1] is None
 
 
 def test_model_handle_round_trips_through_pickle(iir1_lpf_result: SynthesisResult) -> None:
@@ -1098,7 +1102,7 @@ def test_statically_folded_branch_does_not_create_a_phantom_state_slot() -> None
 
     result = _synth(K().__call__, "phantom_if")
     assert _state_slots(result) == {"x"}
-    assert result.initiation_interval[1] == result.initiation_interval[0]  # the guard folded; no branch
+    assert result.latency[1] == result.latency[0]  # the guard folded; no branch
     model = result.numerical_model.elaborate()
     assert float(model.run(2.0)[0]) == 2.0
     assert float(model.run(3.0)[0]) == 5.0  # the accumulation is exact in this format

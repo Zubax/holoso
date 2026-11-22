@@ -1,7 +1,7 @@
 """
 Statically-shaped matrix/vector support: the `@` operator, elementwise aggregate arithmetic, transpose, numpy-style
 subscripts, jaxtyping-annotated parameters/returns, matrix state, and ndarray module constants. Diagnostics and
-structure are checked through the public synthesis artifacts (ports, initiation interval, emitted Verilog, residual
+structure are checked through the public synthesis artifacts (ports, latency, emitted Verilog, residual
 `frontend_ir`); numerical behavior is checked black-box through the public API against numpy executing the very
 same kernel. The binding-time tests pinning what folds statically stay on the lowered HIR, and the FMA tests keep
 a compact MIR population sentinel for the exact operation count that module pooling erases from the Verilog.
@@ -287,8 +287,8 @@ def test_a_dot_product_is_log_deep() -> None:
         assert "timing: Timing(latency=4, initiation_interval=1)" in knob_table(
             tree_result.verilog_output.verilog, "u_fadd_0"
         )
-        tree_ii = tree_result.initiation_interval[0]
-        assert tree_ii < holoso.synthesize(chain, options, name="chain").initiation_interval[0] * 2 // 3
+        tree_latency = tree_result.latency[0]
+        assert tree_latency < holoso.synthesize(chain, options, name="chain").latency[0] * 2 // 3
 
 
 def test_a_dot_product_is_fused_where_the_same_sum_written_apart_is_not() -> None:
@@ -434,8 +434,8 @@ def test_transpose_structure() -> None:
     result = _synth(t)
     assert [p.name for p in result.output_ports] == ["out_0_0", "out_0_1", "out_1_0", "out_1_1", "out_2_0", "out_2_1"]
     # A pure reindexing: no hardware at all -- no operator instantiations and no inline call sites remain after
-    # stripping the unconditional support prelude -- at the combinational II.
-    assert result.initiation_interval == (1, 1)
+    # stripping the unconditional support prelude -- at the combinational latency.
+    assert result.latency == (1, 1)
     assert "holoso_" not in strip_inline_prelude(result.verilog_output.verilog)
     m = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     assert np.array_equal(_run(result.numerical_model.elaborate(), m), m.T.flatten())
@@ -1393,14 +1393,14 @@ def test_reductions_are_log_deep() -> None:
             acc = acc + m[i, i]
         return float(acc)
 
-    def min_ii(fn: Callable[..., object]) -> int:
-        return holoso.synthesize(fn, _DEEP, name="kernel").initiation_interval[0]
+    def min_latency(fn: Callable[..., object]) -> int:
+        return holoso.synthesize(fn, _DEEP, name="kernel").latency[0]
 
     chain = holoso.synthesize(float_chain, _DEEP, name="kernel").verilog_output.verilog
     assert "timing: Timing(latency=4, initiation_interval=1)" in knob_table(chain, "u_fadd_0")
-    assert min_ii(int_tree) < min_ii(int_chain) // 2
-    assert min_ii(float_tree) < min_ii(float_chain) // 2
-    assert min_ii(trace_tree) < min_ii(trace_chain) * 2 // 3  # eight terms: three levels against seven steps
+    assert min_latency(int_tree) < min_latency(int_chain) // 2
+    assert min_latency(float_tree) < min_latency(float_chain) // 2
+    assert min_latency(trace_tree) < min_latency(trace_chain) * 2 // 3  # eight terms: three levels against seven steps
 
 
 # ---------------------------------------------------------------- reshape and dtype conversions

@@ -75,7 +75,7 @@ def test_synthesize_threads_pipeline_stages() -> None:
         ),
     )
     # Both additions lie on the critical path, so the schedule pays for the stages.
-    assert staged.initiation_interval[0] > base.initiation_interval[0]
+    assert staged.latency[0] > base.latency[0]
     base_v, staged_v = base.verilog_output.verilog, staged.verilog_output.verilog
     assert "stage_core: CoreStages.NONE" in knob_table(base_v, "u_fadd_0")
     assert "stage_core_mul: 0" in knob_table(base_v, "u_fmul_0")
