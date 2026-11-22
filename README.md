@@ -161,6 +161,10 @@ If not, inspect the synthesis logs to see where the critical path is --
 it's going to be inside one of the arithmetic operators like fadd/fdivsqrt/etc. --
 and enable the operator stage that splits that path. Repeat until timings close.
 
+On large kernels it often pays to enable an operator's input and output stages first, before hunting the critical path
+inside it: they draw a clear register boundary between the ZISC kernel and the operator circuits.
+This usually helps when the operator modules sit far enough from the kernel in the fabric.
+
 Pro tip: even small (local) LLMs can execute this loop very efficiently, no need to waste human time on this.
 With AI automation this approach is superior to automatic target-frequency-based pipelining (e.g., XLS, FloPoCo, etc)
 because it does not rely on heuristics, but instead utilizes feedback from final PnR, thus being truly closed-loop.

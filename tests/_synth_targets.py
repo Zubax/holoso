@@ -526,11 +526,10 @@ TARGETS: list[SynthTarget] = [
                 stage_input=0,
                 stage_core=FAddOptions.CoreStages.OPERANDS
                 | FAddOptions.CoreStages.ALIGNED
-                | FAddOptions.CoreStages.NORMALIZE
-                | FAddOptions.CoreStages.PACK,
+                | FAddOptions.CoreStages.NORMALIZE,
                 stage_output=0,
             ),
-            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fmul=FMulOptions(stage_input=1, stage_core_mul=1, stage_output=0),
             wmultiplier=18,
         ),
     ),
@@ -870,16 +869,15 @@ TARGETS: list[SynthTarget] = [
             fadd=FAddOptions(
                 stage_input=0,
                 stage_core=FAddOptions.CoreStages.OPERANDS
-                | FAddOptions.CoreStages.ALIGN
-                | FAddOptions.CoreStages.SUM
-                | FAddOptions.CoreStages.NORMALIZED,
-                stage_output=0,
+                | FAddOptions.CoreStages.ALIGNED
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=1,
             ),
             fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
             fexp2=FExp2Options(
                 stage_input=0,
                 stage_core_kernel_level=6,
-                stage_core=FExp2Options.CoreStages.SUM,
+                stage_core=FExp2Options.CoreStages.NONE,
                 stage_output=0,
                 fast=True,
             ),
@@ -1334,16 +1332,18 @@ TARGETS: list[SynthTarget] = [
             _F_e6m18,
             fadd=FAddOptions(
                 stage_input=1,
-                stage_core=FAddOptions.CoreStages.DECODE
-                | FAddOptions.CoreStages.OPERANDS
+                stage_core=FAddOptions.CoreStages.OPERANDS
                 | FAddOptions.CoreStages.ALIGNED
-                | FAddOptions.CoreStages.NORMALIZE
-                | FAddOptions.CoreStages.PACK,
-                stage_output=0,
+                | FAddOptions.CoreStages.NORMALIZE,
+                stage_output=1,
             ),
-            fmul=FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
+            fdivsqrt=FDivsqrtOptions(
+                stage_input=1, stage_core=FDivsqrtOptions.CoreStages.NONE, stage_output=1, fast=True
+            ),
             fmul_ilog2=FMulILog2Options(stage_input=1, stage_core=FMulILog2Options.CoreStages.NONE, stage_output=0),
             fcmp=FCmpOptions(stage_input=1, stage_output=0),
+            iadds=IAddsOptions(stage_input=1),
             wmultiplier=18,
         ),
         kernel=_imu_fusion_kernel,
@@ -1556,15 +1556,15 @@ TARGETS: list[SynthTarget] = [
             _F_e6m18,
             fadd=FAddOptions(
                 stage_input=0,
-                stage_core=FAddOptions.CoreStages.DECODE
+                stage_core=FAddOptions.CoreStages.OPERANDS
                 | FAddOptions.CoreStages.ALIGNED
                 | FAddOptions.CoreStages.NORMALIZE,
-                stage_output=1,
+                stage_output=0,
             ),
             fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
             fcordic=FCordicOptions(
-                stage_input=0,
-                stage_core_mul=3,
+                stage_input=1,
+                stage_core_mul=2,
                 stage_core=FCordicOptions.CoreStages.REDUCED
                 | FCordicOptions.CoreStages.FOLDED
                 | FCordicOptions.CoreStages.NORMALIZE,
@@ -1637,19 +1637,17 @@ TARGETS: list[SynthTarget] = [
         150,
         _op_config(
             _F_e6m18,
-            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=0),
+            fmul=FMulOptions(stage_input=0, stage_core_mul=1, stage_output=1),
             fcordic=FCordicOptions(
                 stage_input=0,
                 stage_core_mul=2,
                 stage_core=FCordicOptions.CoreStages.REDUCED
                 | FCordicOptions.CoreStages.FOLDED
-                | FCordicOptions.CoreStages.CORRECTIONS
-                | FCordicOptions.CoreStages.NORMALIZE
-                | FCordicOptions.CoreStages.PACK,
-                stage_output=0,
+                | FCordicOptions.CoreStages.NORMALIZE,
+                stage_output=1,
                 fast=True,
             ),
-            frint=FRintOptions(stage_input=0, stage_core=FRintOptions.CoreStages.MASK, stage_output=0),
+            frint=FRintOptions(stage_input=0, stage_core=FRintOptions.CoreStages.NONE, stage_output=0),
             ffromint=FFromIntOptions(stage_input=0, stage_core=FFromIntOptions.CoreStages.NORMALIZE, stage_output=0),
             wmultiplier=18,
             wint_min=34,

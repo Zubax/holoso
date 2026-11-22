@@ -213,22 +213,19 @@ def main() -> None:
         operator=holoso.OperatorOptions(
             fadd=holoso.FAddOptions(
                 stage_input=1,
-                stage_core=holoso.FAddOptions.CoreStages.DECODE
-                | holoso.FAddOptions.CoreStages.OPERANDS
+                stage_core=holoso.FAddOptions.CoreStages.OPERANDS
                 | holoso.FAddOptions.CoreStages.ALIGNED
-                | holoso.FAddOptions.CoreStages.NORMALIZE
-                | holoso.FAddOptions.CoreStages.PACK,
-                stage_output=0,
+                | holoso.FAddOptions.CoreStages.NORMALIZE,
+                stage_output=1,
             ),
-            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            fmul=holoso.FMulOptions(stage_input=1, stage_core_mul=3, stage_output=1),
             fdivsqrt=holoso.FDivsqrtOptions(
                 stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=1, fast=True
             ),
             fcordic=holoso.FCordicOptions(
-                stage_input=0,
+                stage_input=1,
                 stage_core_mul=3,
-                stage_core=holoso.FCordicOptions.CoreStages.SHIFT
-                | holoso.FCordicOptions.CoreStages.REDUCED
+                stage_core=holoso.FCordicOptions.CoreStages.REDUCED
                 | holoso.FCordicOptions.CoreStages.FOLDED
                 | holoso.FCordicOptions.CoreStages.TAKEN
                 | holoso.FCordicOptions.CoreStages.ORDERED
@@ -240,7 +237,7 @@ def main() -> None:
             ),
             fcmp=holoso.FCmpOptions(stage_input=1, stage_output=0),
             fmul_ilog2=holoso.FMulILog2Options(
-                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.DECODE, stage_output=0
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
             ),
             filog2=holoso.FILog2Options(stage_input=0, stage_output=0),
         ),

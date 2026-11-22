@@ -28,7 +28,6 @@ def main() -> None:
                 stage_input=0,
                 stage_core=holoso.FAddOptions.CoreStages.OPERANDS
                 | holoso.FAddOptions.CoreStages.ALIGNED
-                | holoso.FAddOptions.CoreStages.SUM
                 | holoso.FAddOptions.CoreStages.NORMALIZE
                 | holoso.FAddOptions.CoreStages.NORMALIZED,
                 stage_output=0,
@@ -46,7 +45,7 @@ def main() -> None:
                 stage_core_mul=4,
                 stage_core=holoso.FCordicOptions.CoreStages.REDUCED
                 | holoso.FCordicOptions.CoreStages.FOLDED
-                | holoso.FCordicOptions.CoreStages.CORRECTIONS
+                | holoso.FCordicOptions.CoreStages.NORMALIZE_INPUT
                 | holoso.FCordicOptions.CoreStages.NORMALIZE
                 | holoso.FCordicOptions.CoreStages.PACK,
                 stage_output=0,

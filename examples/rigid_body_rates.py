@@ -55,7 +55,7 @@ def main() -> None:
                     | holoso.FAddOptions.CoreStages.PACK,
                     stage_output=0,
                 ),
-                fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_core_mul=1, stage_output=0),
                 fdivsqrt=holoso.FDivsqrtOptions(
                     stage_input=1, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=1, fast=True
                 ),

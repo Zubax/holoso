@@ -197,6 +197,9 @@ Special things to look out for:
   to evaluate the adjacent stages as well.
 - Route-dominated is not automatically unstageable: a register roughly halves routing distributed across a path's logic
   levels (one shared `fadd` normalize stage can lift a cluster of rows), but cannot shorten a single high-fanout net.
+- On large kernels it is often useful to enable an operator's input and output stages first, before hunting the critical
+  path inside it: they draw a clear register boundary between the ZISC kernel and the operator circuits.
+  This usually pays off if the operator modules sit far enough from the kernel in the fabric.
 
 More pipeline stages do not necessarily improve f_max, and can cost both timing and area. Every optional stage spreads
 that operator's flip-flops across more slices; on a wide, register-pressure-heavy datapath this adds routing congestion,

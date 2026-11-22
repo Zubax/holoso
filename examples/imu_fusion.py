@@ -176,24 +176,22 @@ def main() -> None:
             operator=holoso.OperatorOptions(
                 fadd=holoso.FAddOptions(
                     stage_input=1,
-                    stage_core=holoso.FAddOptions.CoreStages.DECODE
-                    | holoso.FAddOptions.CoreStages.OPERANDS
-                    | holoso.FAddOptions.CoreStages.ALIGN
-                    | holoso.FAddOptions.CoreStages.SUM
+                    stage_core=holoso.FAddOptions.CoreStages.OPERANDS
+                    | holoso.FAddOptions.CoreStages.ALIGNED
                     | holoso.FAddOptions.CoreStages.NORMALIZE
-                    | holoso.FAddOptions.CoreStages.PACK,
-                    stage_output=0,
+                    | holoso.FAddOptions.CoreStages.NORMALIZED,
+                    stage_output=1,
                 ),
-                fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=2, stage_output=1),
+                fmul=holoso.FMulOptions(stage_input=1, stage_core_mul=1, stage_output=1),
                 fdivsqrt=holoso.FDivsqrtOptions(
-                    stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=1, fast=True
+                    stage_input=1, stage_core=holoso.FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=1, fast=True
                 ),
                 fmul_ilog2=holoso.FMulILog2Options(
                     stage_input=1, stage_core=holoso.FMulILog2Options.CoreStages.DECODE, stage_output=0
                 ),
                 filog2=holoso.FILog2Options(stage_input=1, stage_output=0),
-                fcmp=holoso.FCmpOptions(stage_input=1, stage_output=0),
-                iadds=holoso.IAddsOptions(stage_input=1, stage_output=1),
+                fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
+                iadds=holoso.IAddsOptions(stage_input=1),
             ),
             ffmt=narrow,
             wmultiplier=18,
@@ -201,12 +199,11 @@ def main() -> None:
         holoso.Options(
             operator=holoso.OperatorOptions(
                 fadd=holoso.FAddOptions(
-                    stage_input=0,
-                    stage_core=holoso.FAddOptions.CoreStages.DECODE
-                    | holoso.FAddOptions.CoreStages.ALIGN
+                    stage_input=1,
+                    stage_core=holoso.FAddOptions.CoreStages.OPERANDS
                     | holoso.FAddOptions.CoreStages.SUM
                     | holoso.FAddOptions.CoreStages.NORMALIZE
-                    | holoso.FAddOptions.CoreStages.PACK,
+                    | holoso.FAddOptions.CoreStages.NORMALIZED,
                     stage_output=0,
                 ),
                 fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
@@ -214,11 +211,10 @@ def main() -> None:
                     stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=1, fast=True
                 ),
                 fmul_ilog2=holoso.FMulILog2Options(
-                    stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.DECODE, stage_output=0
+                    stage_input=1, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
                 ),
-                filog2=holoso.FILog2Options(stage_input=1, stage_output=0),
-                fcmp=holoso.FCmpOptions(stage_input=1, stage_output=0),
-                iadds=holoso.IAddsOptions(stage_input=1),
+                filog2=holoso.FILog2Options(stage_input=0, stage_output=1),
+                fcmp=holoso.FCmpOptions(stage_input=0, stage_output=1),
             ),
             ffmt=wide,
             wmultiplier=18,
