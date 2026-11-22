@@ -92,6 +92,10 @@ from .._operators import (
     FAddPrimitive,
     FAtan2Primitive,
     FCmpPrimitive,
+    FCosPrimitive,
+    FHypotPrimitive,
+    FMaxPrimitive,
+    FMinPrimitive,
     FDivPrimitive,
     FExp2Primitive,
     FFmaPrimitive,
@@ -105,13 +109,13 @@ from .._operators import (
     FMulILog2Primitive,
     FMulPrimitive,
     FRintPrimitive,
-    FSincosPrimitive,
-    FSortPrimitive,
+    FRintToIntPrimitive,
+    FSinPrimitive,
     FSqrtPrimitive,
     IAbsPrimitive,
     IAddPrimitive,
-    ICmpPrimitive,
-    IDivPrimitive,
+    IFloorDivPrimitive,
+    IModPrimitive,
     IMulPrimitive,
     IntBwAndPrimitive,
     IntBwNotPrimitive,
@@ -123,6 +127,7 @@ from .._operators import (
     IPopcntPrimitive,
     IShlPrimitive,
     IShrPrimitive,
+    ICmpPrimitive,
     ISubPrimitive,
     OpConfig,
     PooledPrimitive,
@@ -138,7 +143,7 @@ from .._type import (
     ScalarType,
 )
 from ._ir import Mir, MirBuilder, MirOperation
-from ._ordering import plan_comparison_fusions
+from ._mirrored_comparisons import plan_mirrored_comparisons
 from ._hypot import count as hypot_count, expand_unfused, plan_magnitude_fusions
 from ._options import MirOptions
 from ._fma import expand_fmas
@@ -157,8 +162,8 @@ _ROUND_MODE_OF: dict[Rounding, RoundMode] = {
 def _folded_shift_counts(hir: Hir) -> set[ValueId]:
     """
     Decided before any block, because constants are lowered entry-globally. A count the shift below answers from is
-    consumed as an immediate, not held as a value -- and a count something ELSE reads is an ordinary value, which is
-    where one too wide for the machine is still refused.
+    consumed as the shift primitive's parameter, not held as a value -- and a count something ELSE reads is an ordinary
+    value, which is where one too wide for the machine is still refused.
     """
     folds = Counter(
         node.operands[1]
@@ -173,68 +178,67 @@ def _folded_shift_counts(hir: Hir) -> set[ValueId]:
 
 class _LoweringContext:
     def __init__(self, hir: Hir, ops: OpConfig) -> None:
-        self.hir = hir
-        self.ops = ops
-        self.builder = MirBuilder(ops.float_format, ops.int_format)
-        self.remap: dict[ValueId, ValueId] = {}
-        self.fused_hypots = plan_magnitude_fusions(hir, ops)
+        self._hir = hir
+        self._ops = ops
+        self._builder = MirBuilder(ops.float_format, ops.int_format)
+        self._remap: dict[ValueId, ValueId] = {}
+        fused_hypots = plan_magnitude_fusions(hir, ops)
         # The derivation expanded every unfused magnitude, so the survivors all ride an atan2's magnitude port.
-        assert hypot_count(hir) == len(self.fused_hypots)
-        self.fused_comparisons = plan_comparison_fusions(hir)
+        assert hypot_count(hir) == len(fused_hypots)
         # Values their readers consume whole, so no MIR value stands for them: a sign or NOT chain folds into every
-        # reader's conditioner, a constant shift count into an immediate.
-        self.absorbed = {
+        # reader's conditioner, a constant shift count into its shift primitive's parameter.
+        self._absorbed = {
             *(vid for vid, node in hir.nodes.items() if isinstance(node, Operation) and _is_sideband(node)),
             *_folded_shift_counts(hir),
         }
-        self.lowerers: dict[type[HirType], _FamilyLowerer] = {
-            HirFloatType: _FloatLowerer(self),
-            HirIntType: _IntLowerer(self),
-            HirBoolType: _BoolLowerer(self),
+        self._lowerers: dict[type[HirType], _FamilyLowerer] = {
+            HirFloatType: _FloatLowerer(hir, ops, self._builder, self._remap, fused_hypots),
+            HirIntType: _IntLowerer(hir, ops, self._builder, self._remap),
+            HirBoolType: _BoolLowerer(hir, ops, self._builder, self._remap, plan_mirrored_comparisons(hir)),
         }
 
-    def scalar_type(self, hir_type: HirType) -> ScalarType:
+    def _scalar_type(self, hir_type: HirType) -> ScalarType:
         match hir_type:
             case HirFloatType():
-                return ScalarFloatType(self.ops.float_format)
+                return ScalarFloatType(self._ops.float_format)
             case HirIntType():
-                return ScalarIntType(self.ops.int_format)
+                return ScalarIntType(self._ops.int_format)
             case HirBoolType():
                 return ScalarBoolType()
-        raise AssertionError(f"no scalar type for {hir_type!r}")
+        assert False, f"no scalar type for {hir_type!r}"
 
     def run(self) -> Mir:
-        for _ in self.hir.blocks:
-            self.builder.block()  # preserve block ids 0..n-1
-        self.builder.position_at(self.hir.entry)
-        for vid in self.hir.input_ids:
-            self._lower_node(vid, self.hir.nodes[vid])
-        for vid in sorted(self.hir.nodes):
-            if isinstance(self.hir.nodes[vid], (Const, StateRead)):
-                self._lower_node(vid, self.hir.nodes[vid])
+        for _ in self._hir.blocks:
+            self._builder.block()  # preserve block ids 0..n-1
+        self._builder.position_at(self._hir.entry)
+        for vid in self._hir.input_ids:
+            self._lower_node(vid, self._hir.nodes[vid])
+        for vid in sorted(self._hir.nodes):
+            if isinstance(self._hir.nodes[vid], (Const, StateRead)):
+                self._lower_node(vid, self._hir.nodes[vid])
         # Reverse postorder, so every operand and phi arm is remapped before use even when branches nest.
-        blocks_by_id = {block.id: block for block in self.hir.blocks}
+        blocks_by_id = {block.id: block for block in self._hir.blocks}
         deferred: list[ValueId] = []  # loop-header phis whose latch arm is a body value lowered later; closed below
-        for bid in reverse_postorder(self.hir):
+        for bid in reverse_postorder(self._hir):
             block = blocks_by_id[bid]
-            self.builder.position_at(bid)
+            self._builder.position_at(bid)
             for vid in block.phis:
-                self._lower_phi(vid, self.hir.nodes[vid], deferred)
+                self._lower_phi(vid, self._hir.nodes[vid], deferred)
             for vid in block.operations:
-                self._lower_node(vid, self.hir.nodes[vid])
+                self._lower_node(vid, self._hir.nodes[vid])
             self._seal(block.terminator)
         for vid in deferred:
-            self._close_phi(vid, self.hir.nodes[vid])
-        for out in self.hir.outputs:
-            base, conditioner = collapse_conditioner(self.hir.nodes, out.value)
-            self.builder.output(out.name, self.remap[base], conditioner)
-        for slot in self.hir.state_slots:
-            base, conditioner = collapse_conditioner(self.hir.nodes, slot.live_out)
-            self.builder.state_slot(slot.name, const_value(slot.reset_value), self.remap[base], conditioner)
-        mir = self.builder.finish()
-        for vid, node in self.hir.nodes.items():
+            self._close_phi(vid, self._hir.nodes[vid])
+        for out in self._hir.outputs:
+            base, conditioner = collapse_conditioner(self._hir.nodes, out.value)
+            self._builder.output(out.name, self._remap[base], conditioner)
+        for slot in self._hir.state_slots:
+            base, conditioner = collapse_conditioner(self._hir.nodes, slot.live_out)
+            self._builder.state_slot(slot.name, const_value(slot.reset_value), self._remap[base], conditioner)
+        mir = self._builder.finish()
+        for vid, node in self._hir.nodes.items():
             if isinstance(node, Operation):
-                selected = mir.nodes[self.remap[vid]] if vid in self.remap else None
+                selected = mir.nodes[self._remap[vid]] if vid in self._remap else None
                 if isinstance(selected, MirOperation) and isinstance(selected.primitive, PooledPrimitive):
                     assert not (node.operator.speculatable and selected.primitive.operator.error_ports)
         return mir
@@ -242,15 +246,15 @@ class _LoweringContext:
     def _seal(self, terminator: Terminator) -> None:
         match terminator:
             case Jump(target=target):
-                self.builder.jump(target)
+                self._builder.jump(target)
             case Branch(cond=cond, if_true=if_true, if_false=if_false):
                 # A NOT on the condition is free: take the complementary target instead of inverting the register.
-                base, inversion = collapse_bool_inversions(self.hir.nodes, cond)
+                base, inversion = collapse_bool_inversions(self._hir.nodes, cond)
                 if inversion.invert:
                     if_true, if_false = if_false, if_true
-                self.builder.branch(self.remap[base], if_true, if_false)
+                self._builder.branch(self._remap[base], if_true, if_false)
             case Ret():
-                self.builder.ret()
+                self._builder.ret()
 
     def _lower_phi(self, old_id: ValueId, node: Node, deferred: list[ValueId]) -> None:
         # Each arm folds its type's OWN sideband chain into the arm conditioner, applied by the merge install: a sign
@@ -258,37 +262,34 @@ class _LoweringContext:
         # A loop-header phi's latch arm is a body value lowered after the header: open the phi with its available arms
         # now (so the body can reference it) and close it once every block is lowered.
         assert isinstance(node, Phi)
-        bases = [(pred, collapse_conditioner(self.hir.nodes, value)) for pred, value in node.arms]
-        scalar_type = self.scalar_type(node.type)
-        if all(base in self.remap for _, (base, _) in bases):
-            arms = [(pred, self.remap[base], conditioner) for pred, (base, conditioner) in bases]
-            self.remap[old_id] = self.builder.phi(scalar_type, arms)
-        else:
-            known = [(pred, self.remap[base], conditioner) for pred, (base, conditioner) in bases if base in self.remap]
-            self.remap[old_id] = self.builder.open_phi(scalar_type, known[0])
+        bases = [(pred, collapse_conditioner(self._hir.nodes, value)) for pred, value in node.arms]
+        scalar_type = self._scalar_type(node.type)
+        known = [(pred, self._remap[base], conditioner) for pred, (base, conditioner) in bases if base in self._remap]
+        self._remap[old_id] = self._builder.phi(scalar_type, known)
+        if len(known) < len(bases):
             deferred.append(old_id)
 
     def _close_phi(self, old_id: ValueId, node: Node) -> None:
         assert isinstance(node, Phi)
         arms = [
-            (pred, self.remap[base], conditioner)
+            (pred, self._remap[base], conditioner)
             for pred, value in node.arms
-            for base, conditioner in [collapse_conditioner(self.hir.nodes, value)]
+            for base, conditioner in [collapse_conditioner(self._hir.nodes, value)]
         ]
-        self.builder.set_phi_arms(self.remap[old_id], arms)
+        self._builder.set_phi_arms(self._remap[old_id], arms)
 
     def _lower_node(self, old_id: ValueId, node: Node) -> None:
-        if old_id in self.absorbed:
+        if old_id in self._absorbed:
             return
         match node:
             case InPort(name=name, type=hir_type):
-                self.remap[old_id] = self.builder.input(name, self.scalar_type(hir_type))
+                self._remap[old_id] = self._builder.input(name, self._scalar_type(hir_type))
             case StateRead(slot=slot, type=hir_type):
-                self.remap[old_id] = self.builder.state_read(slot, self.scalar_type(hir_type))
+                self._remap[old_id] = self._builder.state_read(slot, self._scalar_type(hir_type))
             case Const():
-                self.remap[old_id] = self.builder.const(const_value(node), self.scalar_type(node.type))
+                self._remap[old_id] = self._builder.const(const_value(node), self._scalar_type(node.type))
             case Operation():
-                self.remap[old_id] = self.lowerers[type(node.type)].lower_operation(old_id, node)
+                self._remap[old_id] = self._lowerers[type(node.type)].lower_operation(old_id, node)
 
 
 def _is_sideband(node: Operation) -> bool:
@@ -302,94 +303,102 @@ class _FamilyLowerer(ABC):
     `band(~a, b)` is one gate, and an integer operand folds nothing.
     """
 
-    def __init__(self, context: _LoweringContext) -> None:
-        self.context = context
-        self.hir = context.hir
-        self.ops = context.ops
-        self.builder = context.builder
-        self.remap = context.remap
+    def __init__(self, hir: Hir, ops: OpConfig, builder: MirBuilder, remap: dict[ValueId, ValueId]) -> None:
+        self._hir = hir
+        self._ops = ops
+        self._builder = builder
+        self._remap = remap
 
     @abstractmethod
     def lower_operation(self, old_id: ValueId, node: Operation) -> ValueId: ...
 
-    def emit(
+    def _emit(
         self,
         primitive: Primitive,
         operands: Sequence[ValueId],
-        result: int = 0,
         output_inversion: BoolInversion = BoolInversion(),
     ) -> ValueId:
-        bases = [collapse_conditioner(self.hir.nodes, operand) for operand in operands]
-        return self.builder.operation(
+        bases = [collapse_conditioner(self._hir.nodes, operand) for operand in operands]
+        return self._builder.operation(
             primitive,
-            [self.remap[base] for base, _ in bases],
+            [self._remap[base] for base, _ in bases],
             [conditioner for _, conditioner in bases],
-            result,
             output_inversion,
         )
 
 
 class _FloatLowerer(_FamilyLowerer):
+    def __init__(
+        self,
+        hir: Hir,
+        ops: OpConfig,
+        builder: MirBuilder,
+        remap: dict[ValueId, ValueId],
+        fused_hypots: dict[ValueId, ValueId],
+    ) -> None:
+        super().__init__(hir, ops, builder, remap)
+        self._fused_hypots = fused_hypots
+
     def lower_operation(self, old_id: ValueId, node: Operation) -> ValueId:
-        atan2_id = self.context.fused_hypots.get(old_id)
+        atan2_id = self._fused_hypots.get(old_id)
         if atan2_id is not None:
             # The atan2's own operands make the two collapse into one CORDIC firing; the magnitude is symmetric and
             # sign-invariant, so the hypot's own operand order and signs are immaterial.
-            atan2 = self.hir.nodes[atan2_id]
+            atan2 = self._hir.nodes[atan2_id]
             assert isinstance(atan2, Operation)
-            return self.emit(FAtan2Primitive(self.ops.fcordic), atan2.operands, result=1)
-        ops, fmt = self.ops, self.ops.float_format
+            return self._emit(FHypotPrimitive(self._ops.fcordic), atan2.operands)
+        ops, fmt = self._ops, self._ops.float_format
         match node:
             case Operation(operator=FloatAdd(), operands=operands):
-                return self.emit(FAddPrimitive(ops.fadd), operands)
+                return self._emit(FAddPrimitive(ops.fadd), operands)
             case Operation(operator=FloatMul(), operands=operands):
-                return self.emit(FMulPrimitive(ops.fmul), operands)
+                return self._emit(FMulPrimitive(ops.fmul), operands)
             case Operation(operator=FloatDiv(), operands=operands):
-                return self.emit(FDivPrimitive(ops.fdivsqrt), operands)
+                return self._emit(FDivPrimitive(ops.fdivsqrt), operands)
             case Operation(operator=FloatMulPow2(k=k), operands=(a,)):
                 # The exponent rides as a materialized integer constant, clamped rather than refused: any count past
                 # the int format already lies far beyond the float's dynamic range, where the scaler rails or flushes
                 # identically.
-                base, sign = collapse_signs(self.hir.nodes, a)
-                exponent = self.builder.const(ops.int_format.saturate(k), ScalarIntType(ops.int_format))
-                return self.builder.operation(
-                    FMulILog2Primitive(ops.fmul_ilog2), [self.remap[base], exponent], [sign, IntIdentity()]
+                base, sign = collapse_signs(self._hir.nodes, a)
+                exponent = self._builder.const(ops.int_format.saturate(k), ScalarIntType(ops.int_format))
+                return self._builder.operation(
+                    FMulILog2Primitive(ops.fmul_ilog2), [self._remap[base], exponent], [sign, IntIdentity()]
                 )
             case Operation(operator=FloatMulPow2Dynamic(), operands=operands):
-                return self.emit(FMulILog2Primitive(ops.fmul_ilog2), operands)
+                return self._emit(FMulILog2Primitive(ops.fmul_ilog2), operands)
             case Operation(operator=FloatRounding(rounding=rounding), operands=operands):
-                # The float tap of the rounder; the conversion of the same rounding of the same operand is its integer
-                # tap, and the two fuse into one firing.
-                return self.emit(FRintPrimitive(ops.frint, _ROUND_MODE_OF[rounding]), operands, result=0)
+                # The float result of the rounder; the conversion of the same rounding of the same operand is its
+                # integer result, and the two fuse into one firing.
+                return self._emit(FRintPrimitive(ops.frint, _ROUND_MODE_OF[rounding]), operands)
             case Operation(operator=FloatExp2(), operands=operands):
-                return self.emit(FExp2Primitive(ops.fexp2), operands)
+                return self._emit(FExp2Primitive(ops.fexp2), operands)
             case Operation(operator=FloatLog2(), operands=operands):
-                return self.emit(FLog2Primitive(ops.flog2), operands)
+                return self._emit(FLog2Primitive(ops.flog2), operands)
             case Operation(operator=(FloatSinTurns() | FloatCosTurns()) as semantic, operands=operands):
                 # The CORDIC already counts in turns, so whatever conversion the kernel's angle wanted was stated in HIR
                 # and folded there. The sign rides the core's own operand, so one value serves sin(-x)/cos(-x) and a
                 # sin+cos over one argument fuse into one firing.
-                port = 0 if isinstance(semantic, FloatSinTurns) else 1
-                return self.emit(FSincosPrimitive(ops.fcordic), operands, result=port)
+                rotation = FSinPrimitive if isinstance(semantic, FloatSinTurns) else FCosPrimitive
+                return self._emit(rotation(ops.fcordic), operands)
             case Operation(operator=FloatSqrt(), operands=operands):
-                return self.emit(FSqrtPrimitive(ops.fdivsqrt), operands)
+                return self._emit(FSqrtPrimitive(ops.fdivsqrt), operands)
             case Operation(operator=FloatAtan2Turns(), operands=operands):
-                # Vectoring returns theta in turns, which is what the operator means; its magnitude port is tapped only
-                # by a fused hypot (above).
-                return self.emit(FAtan2Primitive(ops.fcordic), operands)
+                # Vectoring returns theta in turns, which is what the operator means.
+                return self._emit(FAtan2Primitive(ops.fcordic), operands)
             case Operation(operator=(FloatMin() | FloatMax()) as semantic, operands=operands):
-                # min taps the low output port, max the high one; a min and a max over one pair fuse into one firing.
-                return self.emit(FSortPrimitive(ops.fcmp), operands, result=int(isinstance(semantic, FloatMax)))
+                # A min and a max over one pair, and the relations over it, fuse into one comparator firing.
+                extreme = FMaxPrimitive if isinstance(semantic, FloatMax) else FMinPrimitive
+                return self._emit(extreme(ops.fcmp), operands)
             case Operation(operator=FloatFma(), operands=operands):
-                return self.emit(FFmaPrimitive(ops.ffma), operands)
+                return self._emit(FFmaPrimitive(ops.ffma), operands)
             case Operation(operator=BoolToFloat(), operands=operands):
-                return self.emit(BoolToFloatPrimitive(fmt), operands)
+                return self._emit(BoolToFloatPrimitive(fmt), operands)
             case Operation(operator=IntToFloat(), operands=operands):
-                return self.emit(FFromIntPrimitive(ops.ffromint), operands)
+                return self._emit(FFromIntPrimitive(ops.ffromint), operands)
             case Operation(operator=FloatSelect(), operands=operands):
-                return self.emit(SelectPrimitive(ScalarFloatType(fmt)), operands)
+                return self._emit(SelectPrimitive(ScalarFloatType(fmt)), operands)
             case _:
-                raise AssertionError(f"no float lowering for {node.operator.mnemonic!r}")
+                assert False, f"no float lowering for {node.operator.mnemonic!r}"
 
 
 class _IntLowerer(_FamilyLowerer):
@@ -399,73 +408,76 @@ class _IntLowerer(_FamilyLowerer):
     """
 
     def lower_operation(self, old_id: ValueId, node: Operation) -> ValueId:
-        ops, fmt = self.ops, self.ops.int_format
+        ops, fmt = self._ops, self._ops.int_format
         match node:
             case Operation(operator=IntAdd(), operands=operands):
-                return self.emit(IAddPrimitive(ops.iadds), operands)
+                return self._emit(IAddPrimitive(ops.iadds), operands)
             case Operation(operator=IntSub(), operands=operands):
-                return self.emit(ISubPrimitive(ops.iadds), operands)
+                return self._emit(ISubPrimitive(ops.iadds), operands)
             case Operation(operator=IntMul(), operands=operands):
-                return self.emit(IMulPrimitive(ops.imuls), operands)
+                return self._emit(IMulPrimitive(ops.imuls), operands)
             case Operation(operator=IntMulPow2(k=k), operands=(a,)):
-                # An ordinary multiplication by the power of two: the product rails where a left shift would drop
-                # what leaves the word, and the shifter has no such reading. The factor is therefore a number the
-                # word must hold, and a scaling whose factor it cannot is refused.
-                return self.builder.operation(
-                    IMulPrimitive(ops.imuls), [self.remap[a], self._const(1 << k)], [IntIdentity()] * 2
+                # HIR extracts a scaling by a power of two as an operation of its own, which a dedicated operator may
+                # serve one day; today it is an ordinary multiplication by the power of two: the product rails where a
+                # left shift would drop what leaves the word, and the shifter has no such reading. The factor is
+                # therefore a number the word must hold, and a scaling whose factor it cannot is refused.
+                return self._builder.operation(
+                    IMulPrimitive(ops.imuls), [self._remap[a], self._const(1 << k)], [IntIdentity()] * 2
                 )
             case Operation(operator=IntNeg(), operands=(a,)):
                 # `0 - x`: there is no negation module, and the subtraction saturates `-MIN` correctly.
-                return self.builder.operation(
-                    ISubPrimitive(ops.iadds), [self._const(0), self.remap[a]], [IntIdentity()] * 2
+                return self._builder.operation(
+                    ISubPrimitive(ops.iadds), [self._const(0), self._remap[a]], [IntIdentity()] * 2
                 )
             case Operation(operator=IntAbs(), operands=operands):
-                return self.emit(IAbsPrimitive(ops.iabss), operands)
+                return self._emit(IAbsPrimitive(ops.iabss), operands)
             case Operation(operator=IntPopcount(), operands=operands):
-                return self.emit(IPopcntPrimitive(ops.ipopcnt), operands)
-            # The quotient and the remainder are two taps of one divider: written from the same operands, they share
-            # a MIR intern key up to the port and fuse into a single firing at LIR build.
+                return self._emit(IPopcntPrimitive(ops.ipopcnt), operands)
+            # The quotient and the remainder are two results of one drive of the divider: written from the same
+            # operands, they fuse into a single firing at LIR build.
             case Operation(operator=IntDivFloor(), operands=operands):
-                return self.emit(IDivPrimitive(ops.idivs), operands, result=0)
+                return self._emit(IFloorDivPrimitive(ops.idivs), operands)
             case Operation(operator=IntMod(), operands=operands):
-                return self.emit(IDivPrimitive(ops.idivs), operands, result=1)
+                return self._emit(IModPrimitive(ops.idivs), operands)
             case Operation(operator=(IntShiftLeft() | IntShiftRight()) as semantic, operands=(a, count)):
                 return self._lower_shift(semantic, a, count)
             case Operation(operator=IntBwAnd(), operands=operands):
-                return self.emit(IntBwAndPrimitive(fmt), operands)
+                return self._emit(IntBwAndPrimitive(fmt), operands)
             case Operation(operator=IntBwOr(), operands=operands):
-                return self.emit(IntBwOrPrimitive(fmt), operands)
+                return self._emit(IntBwOrPrimitive(fmt), operands)
             case Operation(operator=IntBwXor(), operands=operands):
-                return self.emit(IntBwXorPrimitive(fmt), operands)
+                return self._emit(IntBwXorPrimitive(fmt), operands)
             case Operation(operator=IntBwNot(), operands=operands):
-                return self.emit(IntBwNotPrimitive(fmt), operands)
+                return self._emit(IntBwNotPrimitive(fmt), operands)
             case Operation(operator=IntSelect(), operands=operands):
-                return self.emit(SelectPrimitive(ScalarIntType(fmt)), operands)
+                return self._emit(SelectPrimitive(ScalarIntType(fmt)), operands)
             case Operation(operator=BoolToInt(), operands=operands):
-                return self.emit(BoolToIntPrimitive(fmt), operands)
+                return self._emit(BoolToIntPrimitive(fmt), operands)
             case Operation(operator=FloatToInt(rounding=rounding), operands=operands):
-                return self.emit(FRintPrimitive(ops.frint, _ROUND_MODE_OF[rounding]), operands, result=1)
+                return self._emit(FRintToIntPrimitive(ops.frint, _ROUND_MODE_OF[rounding]), operands)
             case Operation(operator=FloatILog2(), operands=operands):
-                return self.emit(FILog2Primitive(ops.filog2), operands)
+                return self._emit(FILog2Primitive(ops.filog2), operands)
             case _:
-                raise AssertionError(f"no integer lowering for {node.operator.mnemonic!r}")
+                assert False, f"no integer lowering for {node.operator.mnemonic!r}"
 
     def _lower_shift(self, semantic: IntShiftLeft | IntShiftRight, a: ValueId, count: ValueId) -> ValueId:
         """
-        Each direction is a mode of the one shifter, so neither negates its count to reach the other. The shifter
+        Each direction is a primitive of the one shifter, so neither negates its count to reach the other. The shifter
         clamps the amount at the word, which is where the two readings of an unbounded count meet -- a left shift
         past the word answers zero and a right shift past it answers the sign fill, as Python's own unbounded shift
         does once the word truncates it.
 
         A constant count needs no module and is never materialized.
         """
-        constant = constant_shift_count(self.hir, count)
+        constant = constant_shift_count(self._hir, count)
         if constant is None:
             shifter = (
-                IShrPrimitive(self.ops.ishft) if isinstance(semantic, IntShiftRight) else IShlPrimitive(self.ops.ishft)
+                IShrPrimitive(self._ops.ishft)
+                if isinstance(semantic, IntShiftRight)
+                else IShlPrimitive(self._ops.ishft)
             )
-            return self.emit(shifter, [a, count])
-        width = self.ops.int_format.width
+            return self._emit(shifter, [a, count])
+        width = self._ops.int_format.width
         assert constant > 0, "strength reduction elides a zero-count shift and the gate owns a negative one"
         if isinstance(semantic, IntShiftLeft):
             assert constant < width, "specialization owns a left shift past the word, whose answer is zero regardless"
@@ -474,64 +486,68 @@ class _IntLowerer(_FamilyLowerer):
             # Clamped here and not in HIR: past the top bit a right shift repeats the sign fill only for a value the
             # word already holds, and this operand is one where an HIR constant need not have been.
             shamt = -min(constant, width - 1)
-        return self.emit(IntShiftConstPrimitive(self.ops.int_format, shamt), [a])
+        return self._emit(IntShiftConstPrimitive(self._ops.int_format, shamt), [a])
 
     def _const(self, value: int) -> ValueId:
-        return self.builder.const(value, ScalarIntType(self.ops.int_format))
+        return self._builder.const(value, ScalarIntType(self._ops.int_format))
 
 
 class _BoolLowerer(_FamilyLowerer):
+    def __init__(
+        self,
+        hir: Hir,
+        ops: OpConfig,
+        builder: MirBuilder,
+        remap: dict[ValueId, ValueId],
+        mirrored_comparisons: dict[ValueId, ValueId],
+    ) -> None:
+        super().__init__(hir, ops, builder, remap)
+        self._mirrored_comparisons = mirrored_comparisons
+
     def lower_operation(self, old_id: ValueId, node: Operation) -> ValueId:
-        fused = self.context.fused_comparisons.get(old_id)
-        if fused is not None:
-            # The host's own operands make the two collapse into one firing, whose flags order them; a comparison
-            # reading them the other way round asks for the mirrored relation.
-            host = self.hir.nodes[fused.host]
-            assert isinstance(host, Operation) and isinstance(node.operator, FloatComparison | IntComparison)
-            relation = node.operator.relation.mirror if fused.mirrored else node.operator.relation
-            primitive: FSortPrimitive | ISubPrimitive = (
-                FSortPrimitive(self.ops.fcmp)
-                if isinstance(node.operator, FloatComparison)
-                else ISubPrimitive(self.ops.iadds)
-            )
-            port, inversion = primitive.flag_of(relation)
-            return self.emit(primitive, host.operands, result=port, output_inversion=inversion)
         match node:
             case Operation(operator=FloatComparison() | IntComparison() as semantic, operands=operands):
-                # A relation is one comparator output port with an optional inversion (both orderings are total and
-                # the flags one-hot), so every relation over one operand pair selects the same comparator and fuses
-                # into one firing.
-                comparator: FCmpPrimitive | ICmpPrimitive = (
-                    FCmpPrimitive(self.ops.fcmp)
+                # A relation is one order flag with an optional inversion (both orderings are total and the flags
+                # one-hot), so the relations over one operand pair tap the firing that orders it, beside a min, a max
+                # or a difference of the pair. A comparison reading a sort's or a difference's operands the other
+                # way round takes their order and asks for the mirrored relation.
+                relation, host = semantic.relation, self._mirrored_comparisons.get(old_id)
+                if host is not None:
+                    host_node = self._hir.nodes[host]
+                    assert isinstance(host_node, Operation)
+                    relation, operands = relation.mirror, host_node.operands
+                flag, inversion = (
+                    FCmpPrimitive.of(self._ops.fcmp, relation)
                     if isinstance(semantic, FloatComparison)
-                    else ICmpPrimitive(self.ops.iadds)
+                    else ICmpPrimitive.of(self._ops.iadds, relation)
                 )
-                port, inversion = comparator.tap_of(semantic.relation)
-                return self.emit(comparator, operands, result=port, output_inversion=inversion)
+                return self._emit(flag, operands, output_inversion=inversion)
             case Operation(operator=IntToBool(), operands=operands):
-                return self.emit(IntToBoolPrimitive(self.ops.int_format), operands)
+                return self._emit(IntToBoolPrimitive(self._ops.int_format), operands)
             case Operation(operator=FloatIsFinite(), operands=operands):
-                return self.emit(FloatIsFinitePrimitive(self.ops.float_format), operands)
+                return self._emit(FloatIsFinitePrimitive(self._ops.float_format), operands)
             case Operation(operator=FloatIsInf(), operands=operands):
-                return self.emit(
-                    FloatIsFinitePrimitive(self.ops.float_format), operands, output_inversion=BoolInversion(invert=True)
+                return self._emit(
+                    FloatIsFinitePrimitive(self._ops.float_format),
+                    operands,
+                    output_inversion=BoolInversion(invert=True),
                 )
             case Operation(operator=FloatIsPosInf(), operands=operands):
-                return self.emit(FloatIsPosInfPrimitive(self.ops.float_format), operands)
+                return self._emit(FloatIsPosInfPrimitive(self._ops.float_format), operands)
             case Operation(operator=FloatIsNegInf(), operands=operands):
-                return self.emit(FloatIsNegInfPrimitive(self.ops.float_format), operands)
+                return self._emit(FloatIsNegInfPrimitive(self._ops.float_format), operands)
             case Operation(operator=BoolAnd(), operands=operands):
-                return self.emit(BoolAndPrimitive(), operands)
+                return self._emit(BoolAndPrimitive(), operands)
             case Operation(operator=BoolOr(), operands=operands):
-                return self.emit(BoolOrPrimitive(), operands)
+                return self._emit(BoolOrPrimitive(), operands)
             case Operation(operator=BoolXor(), operands=operands):
-                return self.emit(BoolXorPrimitive(), operands)
+                return self._emit(BoolXorPrimitive(), operands)
             case Operation(operator=BoolSelect(), operands=operands):
-                return self.emit(SelectPrimitive(ScalarBoolType()), operands)
+                return self._emit(SelectPrimitive(ScalarBoolType()), operands)
             case Operation(operator=FloatToBool(), operands=operands):
-                return self.emit(FloatToBoolPrimitive(self.ops.float_format), operands)
+                return self._emit(FloatToBoolPrimitive(self._ops.float_format), operands)
             case _:
-                raise AssertionError(f"no boolean lowering for {node.operator.mnemonic!r}")
+                assert False, f"no boolean lowering for {node.operator.mnemonic!r}"
 
 
 def _derive(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Hir:
@@ -556,7 +572,7 @@ def _derive(hir: Hir, ops: OpConfig, ifconv_max_ops: int) -> Hir:
 
 
 def _widest_word(options: MirOptions) -> int:
-    return max(options.wint_min, options.float_format.width)
+    return max(options.wint_min, options.float_format.wfull)
 
 
 def _word(hir: Hir, options: MirOptions) -> int:

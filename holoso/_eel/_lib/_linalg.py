@@ -46,15 +46,7 @@ def _dot(u: np.ndarray, v: np.ndarray) -> Any:
     return pairwise(pairs, operator.add)
 
 
-@array(
-    np.transpose,
-    np.ndarray.T,
-    np.ndarray.transpose,
-    np.matrix_transpose,
-    np.linalg.matrix_transpose,
-    np.ndarray.mT,
-    derives=True,
-)
+@array(np.transpose, np.ndarray.T, np.ndarray.transpose, derives=True)
 def transpose(a: np.ndarray) -> Any:
     if a.ndim == 0:
         raise ValueError("cannot transpose a scalar value")
@@ -65,25 +57,39 @@ def transpose(a: np.ndarray) -> Any:
     return np.array([[a[i][j] for i in range(len(a))] for j in range(len(a[0]))])
 
 
-@array(np.ravel, np.ndarray.flatten, np.ndarray.ravel, derives=True)
-def flatten(a: np.ndarray) -> Any:
+@array(np.matrix_transpose, np.linalg.matrix_transpose, np.ndarray.mT, derives=True)
+def matrix_transpose(a: np.ndarray) -> Any:
+    """numpy defines this one for a matrix alone, where the plain transpose leaves a vector as it is."""
+    if a.ndim != 2:
+        raise ValueError(f"the matrix transpose requires a matrix, got a {a.ndim}-D value")
+    return transpose(a)
+
+
+@array(np.ravel, np.ndarray.ravel, derives=True)
+def ravel(a: np.ndarray) -> Any:
     if a.ndim == 0:
-        raise ValueError("cannot flatten a scalar value")
+        return np.array([a])
     if a.ndim > 2:
-        raise ValueError(f"flatten of a {a.ndim}-D value is not supported")
+        raise ValueError(f"ravel of a {a.ndim}-D value is not supported")
     return a.reshape(-1)
 
 
-@array(np.dot, np.ndarray.dot, np.matmul, np.linalg.matmul, operator.matmul, BinaryOp.MATMUL)
+@array(np.ndarray.flatten)
+def flatten(a: np.ndarray) -> Any:
+    """numpy answers a copy here, where `ravel` answers the same elements over the array's own storage."""
+    return np.array(ravel(a))
+
+
+@array(np.matmul, np.linalg.matmul, operator.matmul, BinaryOp.MATMUL)
 def matmul(a: np.ndarray, b: np.ndarray) -> Any:
     """
     numpy's shape rules for 1-D and 2-D operands: inner dimensions must agree, a 1-D left operand is promoted to a row
     and a 1-D right operand to a column, and each promoted axis is dropped from the result -- so vector @ vector is a
     scalar dot product. Rows iterate outermost and the contraction innermost, one dot product per output element.
-    FIXME Scalars are currently not supported.
+    A scalar operand is refused as numpy refuses it; `dot` is the spelling that takes one.
     """
     if a.ndim == 0 or b.ndim == 0:
-        raise ValueError("FIXME matmul does not accept scalar operands")
+        raise ValueError("matmul does not accept scalar operands; multiply by a scalar with `*`")
     if a.ndim > 2 or b.ndim > 2:
         raise ValueError(f"matmul operands must be 1-D or 2-D, got {a.ndim}-D @ {b.ndim}-D")
     if a.shape[-1] != len(b):
@@ -98,22 +104,36 @@ def matmul(a: np.ndarray, b: np.ndarray) -> Any:
     return np.array([[_dot(a[i], bt[j]) for j in range(len(bt))] for i in range(len(a))])
 
 
+@array(np.dot, np.ndarray.dot)
+def dot(a: np.ndarray, b: np.ndarray) -> Any:
+    """The matrix product of two arrays, and plain multiplication where either operand is a scalar."""
+    if a.ndim == 0 or b.ndim == 0:
+        return a * b
+    return matmul(a, b)
+
+
 @array(np.trace, np.ndarray.trace, np.linalg.trace)
 def trace(a: np.ndarray) -> Any:
-    """FIXME Support non-square matrices by running the shorter diagonal."""
+    """The main diagonal of a rectangular matrix ends where its shorter side does."""
     if a.ndim != 2:
         raise ValueError(f"trace requires a matrix, got a {a.ndim}-D value")
-    if len(a) != len(a[0]):
-        raise ValueError(f"trace requires a square matrix, got {len(a)}×{len(a[0])}")
-    return pairwise([a[i][i] for i in range(len(a))], operator.add)
+    return pairwise([a[i][i] for i in range(min(len(a), len(a[0])))], operator.add)
 
 
-@array(np.outer, np.linalg.outer)
+@array(np.outer)
 def outer(u: np.ndarray, v: np.ndarray) -> Any:
-    """FIXME Currently does not flatten its operands."""
-    if u.ndim != 1 or v.ndim != 1:
-        raise ValueError(f"outer requires 1-D operands, got {u.ndim}-D and {v.ndim}-D")
+    """numpy flattens whatever it is given, so a scalar is a vector of one element here."""
+    u = ravel(u)
+    v = ravel(v)
     return np.array([[u[i] * v[j] for j in range(len(v))] for i in range(len(u))])
+
+
+@array(np.linalg.outer)
+def outer_of_vectors(u: np.ndarray, v: np.ndarray) -> Any:
+    """The array-API spelling takes vectors alone, where `np.outer` flattens whatever it is given."""
+    if u.ndim != 1 or v.ndim != 1:
+        raise ValueError(f"linalg.outer requires 1-D operands, got {u.ndim}-D and {v.ndim}-D")
+    return outer(u, v)
 
 
 @array(np.cross, np.linalg.cross)
@@ -150,7 +170,7 @@ def norm(x: np.ndarray, order: Any = None) -> Any:
     if x.ndim == 2:
         if order is not None:
             raise ValueError(f"unsupported matrix norm order {order}")
-        return math.hypot(*flatten(x))
+        return math.hypot(*ravel(x))
     if x.ndim != 1:
         raise ValueError(f"norm requires a 1-D or 2-D operand, got a {x.ndim}-D value")
     if order is None:

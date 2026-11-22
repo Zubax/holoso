@@ -2,10 +2,12 @@
 Command-line entry point for the OOC synthesis-evaluation harness.
 Usage:
 
-    python -m synth <kernel.py> <expression> --wexp W --wman M --flow FLOW:freq=MHz[,device=CLASS][,OP.KNOB=VALUE...]
+    python -m synth <kernel.py> <expression> --options OPTIONS --flow FLOW:freq=MHz[,device=CLASS][,grade=GRADE]
 
-Repeat `--flow` to run multiple flows, each with its own target frequency.
-Each flow may override operator knobs using fields such as `fadd.stage_decode=1`.
+`OPTIONS` is a Python expression giving the `holoso.Options`, evaluated in the kernel module's namespace (with
+`holoso` in scope) like the target expression, e.g.
+`holoso.Options(operator=holoso.OperatorOptions(fadd=...), wmultiplier=18, ffmt=holoso.FloatFormat(6, 18))`.
+Repeat `--flow` to run multiple flows, each with its own target frequency; each flow adds its own synthesis attributes.
 Synthesis failure is recorded as a failure without stopping other tools.
 """
 
@@ -18,14 +20,14 @@ import os
 import re
 import shutil
 import sys
-import types
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from holoso import FloatFormat, OperatorOptions, Options, synthesize
+import holoso
+from holoso import Options, synthesize
 
 from ._synth import BUILD_ROOT, SynthReport, build_compiler_ooc_design
-from .flows import DeviceClass, Flow, FlowId, make_flow
+from .flows import DeviceClass, Flow, FlowId, SpeedGrade, make_flow
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,18 +38,11 @@ class _Failure:
 
 
 @dataclass(frozen=True, slots=True)
-class _OperatorKnob:
-    operator_name: str
-    field_name: str
-    value: object
-
-
-@dataclass(frozen=True, slots=True)
 class _FlowRequest:
     flow_id: FlowId
     target_frequency_MHz: float
     device_class: DeviceClass
-    op_knobs: list[_OperatorKnob]
+    speed_grade: SpeedGrade
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,20 +61,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Python expression evaluated in the kernel module to obtain the target;"
         " e.g., `Ekf1(Q_diag=np.array([...])).update`. Must be a function or a method.",
     )
-    parser.add_argument("--wexp", type=int, default=6, help="float exponent bits")
-    parser.add_argument("--wman", type=int, default=18, help="float significand bits")
+    parser.add_argument(
+        "--options",
+        required=True,
+        metavar="OPTIONS",
+        help="Python expression evaluated in the kernel module, with `holoso` in scope, giving the holoso.Options",
+    )
     parser.add_argument("--name", default=None, help="generated module name (automatic by default)")
     parser.add_argument(
         "--flow",
         action="append",
         dest="flow_specs",
         required=True,
-        metavar="FLOW:freq=MHz[,device=CLASS][,OP.KNOB=VALUE...]",
+        metavar="FLOW:freq=MHz[,device=CLASS][,grade=GRADE]",
         help=(
             f"synthesis flow to run; repeatable; supported flows: {', '.join(FlowId)}; "
             f"CLASS picks the device ({', '.join(DeviceClass)}; the larger one is for a design that outgrows the "
-            "default); "
-            "optional operator knob fields are OP.KNOB, where OP is an OperatorOptions field"
+            f"default); GRADE picks the speed grade ({', '.join(SpeedGrade)})"
         ),
     )
     args = parser.parse_args(argv)
@@ -101,7 +99,7 @@ def _parse_flow_requests(parser: argparse.ArgumentParser, specs: list[str]) -> l
 
 def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest:
     if ":" not in spec:
-        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,device=CLASS][,OP.KNOB=VALUE...]")
+        parser.error(f"flow spec {spec!r} must be written as FLOW:freq=MHz[,device=CLASS][,grade=GRADE]")
     flow_id, raw_fields = (part.strip() for part in spec.split(":", 1))
     if flow_id not in FlowId:
         parser.error(f"unknown flow {flow_id!r}; supported flows: {', '.join(FlowId)}")
@@ -110,8 +108,7 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
 
     raw_frequency: str | None = None
     device_class: DeviceClass | None = None
-    op_knobs: list[_OperatorKnob] = []
-    knob_keys: set[tuple[str, str]] = set()
+    speed_grade: SpeedGrade | None = None
     for item in raw_fields.split(","):
         if "=" not in item:
             parser.error(f"flow field {item!r} in {spec!r} must be written as key=value")
@@ -128,12 +125,12 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
                 parser.error(f"unknown device class {value!r} in {spec!r}; supported: {', '.join(DeviceClass)}")
             device_class = DeviceClass(value)
             continue
-        if op_knob := _parse_op_knob(parser, spec, key, value):
-            knob_key = (op_knob.operator_name, op_knob.field_name)
-            if knob_key in knob_keys:
-                parser.error(f"knob {op_knob.operator_name}.{op_knob.field_name} is duplicated in {spec!r}")
-            knob_keys.add(knob_key)
-            op_knobs.append(op_knob)
+        if key == "grade":
+            if speed_grade is not None:
+                parser.error(f"flow field {key!r} is duplicated in {spec!r}")
+            if value not in SpeedGrade:
+                parser.error(f"unknown speed grade {value!r} in {spec!r}; supported: {', '.join(SpeedGrade)}")
+            speed_grade = SpeedGrade(value)
             continue
         parser.error(f"unknown flow field {key!r} in {spec!r}")
     if raw_frequency is None:
@@ -148,66 +145,37 @@ def _parse_flow_spec(parser: argparse.ArgumentParser, spec: str) -> _FlowRequest
         flow_id=FlowId(flow_id),
         target_frequency_MHz=target_frequency_MHz,
         device_class=device_class or DeviceClass.DEFAULT,
-        op_knobs=op_knobs,
+        speed_grade=speed_grade or SpeedGrade.SLOWEST,
     )
 
 
-def _parse_op_knob(parser: argparse.ArgumentParser, spec: str, key: str, raw_value: str) -> _OperatorKnob | None:
-    operator_name, separator, knob_name = key.partition(".")
-    operator_classes = _operator_options_classes()
-    if not separator or operator_name not in operator_classes:
-        return None
-    if not knob_name:
-        parser.error(f"knob {key!r} in {spec!r} is missing a name")
-    flds = {item.name: item for item in fields(operator_classes[operator_name])}
-    if knob_name not in flds:
-        parser.error(f"unknown knob {operator_name}.{knob_name} in {spec!r}")
-    try:
-        value = int(raw_value)
-    except ValueError:
-        parser.error(f"knob {knob_name!r} in {spec!r} value not understood: {raw_value!r}")
-    return _OperatorKnob(operator_name=operator_name, field_name=knob_name, value=value)
+def _namespace(kernel: Path) -> dict[str, Any]:
+    """The kernel module's namespace, where the target and the options are evaluated, with `holoso` in scope."""
+    sys.path.insert(0, str(kernel.resolve().parent))
+    module = importlib.import_module(kernel.stem)
+    return {"holoso": holoso, **vars(module)}
 
 
-def _operator_options_classes() -> dict[str, type]:
-    classes: dict[str, type] = {}
-    for item in fields(OperatorOptions):
-        annotation = item.type
-        if isinstance(annotation, types.UnionType):
-            (annotation,) = [arg for arg in annotation.__args__ if arg is not type(None)]
-        if not isinstance(annotation, type):
-            raise TypeError(f"OperatorOptions field {item.name!r} has unsupported annotation {item.type!r}")
-        classes[item.name] = annotation
-    return classes
-
-
-def _load_target(kernel: Path, expression: str) -> object:
+def _load_target(namespace: dict[str, Any], expression: str) -> object:
     """
     `expression` is evaluated in the kernel module's namespace, e.g. `Ekf1(Q_diag=np.array([...])).update`;
     for a bound method the `__self__` snapshot seeds the reset values.
     """
-    sys.path.insert(0, str(kernel.resolve().parent))
-    module = importlib.import_module(kernel.stem)
-    return eval(expression, dict(vars(module)))
+    return eval(expression, dict(namespace))
 
 
-def _options(fmt: FloatFormat, op_knobs: list[_OperatorKnob]) -> Options:
-    grouped_overrides: dict[str, dict[str, object]] = {}
-    for override in op_knobs:
-        grouped_overrides.setdefault(override.operator_name, {})[override.field_name] = override.value
-    operators: dict[str, object] = {}
-    for name, options_cls in _operator_options_classes().items():
-        if name == "ffma" and name not in grouped_overrides:
-            continue
-        operators[name] = options_cls(**grouped_overrides.get(name, {}))
-    return Options(OperatorOptions(**operators), ffmt=fmt)  # type: ignore
+def _load_options(namespace: dict[str, Any], expression: str) -> Options:
+    options = eval(expression, dict(namespace))
+    if not isinstance(options, Options):
+        raise TypeError(f"--options gives {type(options).__name__}, not holoso.Options")
+    return options
 
 
 def _select_flows(requests: list[_FlowRequest]) -> tuple[list[_SelectedFlow], list[FlowId]]:
     flows: list[_SelectedFlow] = []
     skipped: list[FlowId] = []
     for request in requests:
-        flow: Flow = make_flow(request.flow_id, request.target_frequency_MHz, request.device_class)
+        flow: Flow = make_flow(request.flow_id, request.target_frequency_MHz, request.device_class, request.speed_grade)
         if flow.available():
             flows.append(_SelectedFlow(request, flow))
         else:
@@ -257,9 +225,10 @@ def main() -> int:
         print("No requested synthesis flows are available; nothing to run.")
         return 10
 
-    fmt = FloatFormat(wexp=args.wexp, wman=args.wman)
     name = args.name or re.sub(r"\W+", "_", args.expression).strip("_")
-    target = _load_target(Path(args.kernel), args.expression)
+    namespace = _namespace(Path(args.kernel))
+    target = _load_target(namespace, args.expression)
+    given = _load_options(namespace, args.options)
 
     out_dir = BUILD_ROOT / name
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -272,7 +241,7 @@ def main() -> int:
         for selected in flows:
             flow = selected.flow
             directory = out_dir / type(flow).__name__
-            options = _options(fmt, selected.request.op_knobs)
+            options = flow.attributed(given)
             print(
                 f"🛠️ Synthesizing {args.kernel}::{args.expression} as {name} "
                 f"using {flow.__class__.__name__} in {directory}"

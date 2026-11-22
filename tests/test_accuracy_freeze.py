@@ -27,10 +27,11 @@ import math
 import pytest
 
 import holoso
-from holoso import FFmaOptions, FloatFormat, Options
+from holoso import FloatFormat, Options
 from ._examples import DEFAULT_RANDOM_COUNT, SPECS, ExampleSpec
 from ._modelref import unit_roundoff
 from ._refdrive import FloatLane, drive
+from . import _options as lean
 
 # Kernel label -> lane -> the (maximum, RMS) it may not exceed, each an upper bound taken on the build that froze
 # it, as in `test_metrics.py`. A lane absent from a row was exact over the whole sequence, so its bound is zero.
@@ -281,7 +282,7 @@ def _options(spec: ExampleSpec, fmt: FloatFormat, fma: bool) -> Options:
     the two rows one configuration measured twice.
     """
     options = spec.options(fmt)
-    ffma = FFmaOptions() if fma else None
+    ffma = lean.ffma() if fma else None
     return dataclasses.replace(options, operator=dataclasses.replace(options.operator, ffma=ffma))
 
 

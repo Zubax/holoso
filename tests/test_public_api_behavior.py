@@ -15,37 +15,33 @@ constant folding).
 
 from collections.abc import Callable
 
-import pytest
 
 import holoso
 from holoso import (
     BoolType,
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FMulILog2Options,
-    FMulOptions,
     FloatFormat,
     FloatType,
     OperatorOptions,
     Options,
 )
 
-from ._modelref import default_tolerance, within
+from ._modelref import combinational_options, default_tolerance, within
+from . import _options as lean
 
 FMT = FloatFormat(6, 18)
 
 
 def _ops() -> Options:
     return Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
+        operator=OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            fcmp=lean.fcmp(),
         ),
         ffmt=FMT,
+        wmultiplier=18,
     )
 
 
@@ -450,12 +446,28 @@ def test_commuted_comparisons_agree_bool_exact() -> None:
                 assert a is want and b is want, f"xy={xy}: lt={a} gt={b} want={want}"
 
 
-def test_out_of_range_operator_stage_knob_is_rejected_at_synthesis() -> None:
-    # Stage knobs are public, documented configuration, so an out-of-range value must surface as a diagnostic through
-    # `synthesize` itself rather than deep in operator construction.
-    def add(a: float, b: float) -> float:
-        return a + b
+class _CombinationalLeakyMean:
+    def __init__(self) -> None:
+        self.mean = 0.0
+        self.count = 0
 
-    options = Options(OperatorOptions(fadd=FAddOptions(stage_decode=7)), ffmt=FMT)
-    with pytest.raises(ValueError):
-        holoso.synthesize(add, options, name="bad_stage_knob")
+    def __call__(self, x: float, n: int) -> tuple[float, int]:
+        for _ in range(n):
+            if x > self.mean:
+                self.mean = self.mean + (x - self.mean) * 0.5
+            else:
+                self.mean = self.mean - 0.25
+            self.count = self.count + 1
+        return self.mean, self.count
+
+
+def test_combinational_operators_build_and_compute() -> None:
+    # Every operator here has no register stage, so each firing reads and commits on one step, from the entry block's
+    # first step through a loop and both arms of a branch, beside persistent float and integer state.
+    result = holoso.synthesize(_CombinationalLeakyMean().__call__, combinational_options(FMT), name="comb_leaky_mean")
+    model = result.numerical_model.elaborate()
+    reference = _CombinationalLeakyMean()
+    for x, n in [(1.0, 3), (-2.0, 1), (0.5, 0), (4.0, 2), (-0.5, 4)]:
+        want_mean, want_count = reference(x, n)
+        got = {port.name: value for port, value in zip(model.outputs, model.run(x, n), strict=True)}
+        assert float(got["state_mean"]) == want_mean and int(got["state_count"]) == want_count

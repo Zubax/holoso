@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 import holoso
-from holoso import FAddOptions, FloatFormat, OperatorOptions, Options
+from holoso import FloatFormat, OperatorOptions, Options
 from holoso._eel import lower
 from holoso._hir import (
     FloatRounding,
@@ -47,6 +47,7 @@ from holoso._hir._evaluate import HirEvaluator
 from ._eeloracle import assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 from ._importguard import forbidden_imports
+from . import _options as lean
 
 
 def test_evaluator_layering() -> None:
@@ -114,9 +115,9 @@ def test_swap_loop_phis_resolve_in_parallel() -> None:
     builder.position_at(entry)
     builder.jump(header)
     builder.position_at(header)
-    i = builder.open_phi(FloatType(), (entry, n))
-    a = builder.open_phi(FloatType(), (entry, first))
-    b = builder.open_phi(FloatType(), (entry, second))
+    i = builder.phi(FloatType(), [(entry, n)])
+    a = builder.phi(FloatType(), [(entry, first)])
+    b = builder.phi(FloatType(), [(entry, second)])
     builder.branch(builder.operation(FloatComparison(Relation.GT), [i, builder.float_const(0.0)]), body, exit_)
     builder.position_at(body)
     dec = builder.operation(FloatAdd(), [i, builder.float_const(-1.0)])
@@ -498,7 +499,7 @@ def test_nan_in_untouched_attribute_is_not_a_discard() -> None:
 
 
 def test_nan_in_untouched_attribute_is_accepted_by_public_synthesis() -> None:
-    options = Options(OperatorOptions(fadd=FAddOptions()), ffmt=FloatFormat(8, 23))
+    options = Options(operator=OperatorOptions(fadd=lean.fadd()), ffmt=FloatFormat(8, 23), wmultiplier=18)
     model = holoso.synthesize(_NanConfig().step, options, name="nan_config").numerical_model.elaborate()
     assert [float(v) for v in model.run(1.5)] == [1.5]
     assert [float(v) for v in model.run(-2.0)] == [-2.0]

@@ -15,16 +15,18 @@ from holoso import UnsupportedConstruct
 from holoso._eel import lower
 from ._eeloracle import InputRow, assert_hir_matches_reference
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
+from . import _options as lean
 
 _OPTIONS = holoso.Options(
-    holoso.OperatorOptions(
-        fadd=holoso.FAddOptions(),
-        fmul=holoso.FMulOptions(),
-        fdivsqrt=holoso.FDivsqrtOptions(),
-        fmul_ilog2=holoso.FMulILog2Options(),
-        fcmp=holoso.FCmpOptions(),
+    operator=holoso.OperatorOptions(
+        fadd=lean.fadd(),
+        fmul=lean.fmul(),
+        fdivsqrt=lean.fdivsqrt(),
+        fmul_ilog2=lean.fmul_ilog2(),
+        fcmp=lean.fcmp(),
     ),
     ffmt=holoso.FloatFormat(wexp=8, wman=36),
+    wmultiplier=18,
 )
 
 
@@ -179,8 +181,81 @@ class _TwoPathShared:
         return self.a.bump(x)
 
 
+class _SlotAndDictPaths:
+    # The public handle lives in a slot, the other in the instance dict: both are paths to one stateful component.
+    __slots__ = ("cell", "__dict__")
+
+    def __init__(self) -> None:
+        self._cell = _Cell()
+        self.cell = self._cell
+
+    def step(self, x: float) -> float:
+        return self.cell.bump(x)
+
+
+class _UnreadSlotAlias:
+    # The slot holds the stateful component too, but the kernel never reads it, so it is no path the kernel takes.
+    __slots__ = ("cell_alias", "__dict__")
+
+    def __init__(self) -> None:
+        self.cell = _Cell()
+        self.cell_alias = self.cell
+
+    def step(self, x: float) -> float:
+        return self.cell.bump(x)
+
+
 def test_a_multiply_referenced_stateful_component_is_rejected() -> None:
     _rejects(_TwoPathShared().step)
+    _rejects(_SlotAndDictPaths().step)
+
+
+class _SlottedHelper:
+    # No instance dict, so not a component: a slot of it is no more a path than a container's item.
+    __slots__ = ("owner", "scale")
+
+    def __init__(self, owner: object) -> None:
+        self.owner = owner
+        self.scale = 3.0
+
+
+class _RootBehindAHelper:
+    def __init__(self) -> None:
+        self.gain = 2.0
+        self.acc = 0.0
+        self.helper = _SlottedHelper(self)
+
+    def step(self, x: float) -> float:
+        self.acc = self.acc + self.helper.owner.gain * self.helper.scale * x  # type: ignore[attr-defined]
+        return self.acc
+
+
+class _StageBehindAHelper:
+    def __init__(self) -> None:
+        self.gain = 2.0
+        self.total = 0.0
+        self.helper = _SlottedHelper(self)
+
+    def bump(self, x: float) -> float:
+        self.total = self.total + self.helper.owner.gain * x  # type: ignore[attr-defined]
+        return self.total
+
+
+class _ChainOfStages:
+    def __init__(self) -> None:
+        self.stage = _StageBehindAHelper()
+
+    def step(self, x: float) -> float:
+        return self.stage.bump(x)
+
+
+def test_a_helper_slot_pointing_back_at_its_owner_reads_the_owner() -> None:
+    for target in (_RootBehindAHelper().step, _ChainOfStages().step):
+        _oracle(target, [{"x": 1.5}, {"x": -0.25}, {"x": 2.0}])
+
+
+def test_a_slot_alias_the_kernel_never_reads_is_no_second_path() -> None:
+    _oracle(_UnreadSlotAlias().step, [{"x": 1.0}, {"x": 2.5}])
 
 
 def _free_bump(cell: _Cell, x: float) -> float:
@@ -508,7 +583,7 @@ def test_the_stateful_residual_loop_schedule_is_frozen() -> None:
     # No catalogued example combines persistent state with a residual back edge, so this directed row guards the
     # lean carry design (an untouched slot must not grow phis) permanently.
     result = holoso.synthesize(_LoopCalls().step, _OPTIONS, name="loop_calls")
-    assert result.initiation_interval == (9, None), result.initiation_interval
+    assert result.latency == (7, None), result.latency
 
 
 class _NestedPromotion:
@@ -773,3 +848,103 @@ def test_an_item_store_on_a_component_names_the_right_mistake() -> None:
     # Whatever the spelling, the refusal must name the item-assignment mistake, never mislabel it as a
     # state-representation problem.
     _rejects(_ItemStoreOnComponent().step)
+
+
+# ---------------------------------------------------------------------- attributes held in slots
+
+
+class _SlottedReceiver:
+    __slots__ = ("gain", "bias")
+
+    def __init__(self) -> None:
+        self.gain = 3.0
+        self.bias = 0.25
+
+    def helper(self, x: float) -> float:
+        return self.gain * x
+
+    def step(self, x: float) -> float:
+        return self.helper(x) + self.bias
+
+
+def test_a_slotted_receiver_reads_its_slots_as_frozen_attributes() -> None:
+    # The oracle walks vars(), which a __dict__-less receiver lacks, so this one goes through the public model.
+    sim = holoso.synthesize(_SlottedReceiver().step, _OPTIONS, name="kernel").numerical_model.elaborate()
+    assert [p.name for p in sim.outputs] == ["out_0"]
+    for x in (2.0, -1.5):
+        (got,) = sim.run(x)
+        assert float(got) == _SlottedReceiver().step(x)
+
+
+class _Leaf:
+    def __init__(self) -> None:
+        self.total = 0.0
+        self.k = 2.0
+
+    def bump(self, x: float) -> float:
+        self.total = self.total + self.k * x
+        return self.total
+
+
+class _Hybrid:
+    """A slot beside the instance dict: dict attributes may be state, a slot is storage the kernel only reads."""
+
+    __slots__ = ("gain", "child_in_slot", "alias", "__dict__")
+
+    def __init__(self) -> None:
+        self.gain = 1.5
+        self.acc = 0.0
+        self.w = np.zeros(2)
+        self.child = _Leaf()
+        self.child_in_slot = self.child
+        self.alias = self.w
+
+
+class _HybridState(_Hybrid):
+    def step(self, x: float) -> float:
+        self.acc = self.acc + self.gain * x
+        before = self.child_in_slot.total
+        self.child_in_slot.bump(x)
+        return self.acc + before + 10.0 * self.child.total
+
+
+class _HybridWritesItsSlot(_Hybrid):
+    def step(self, x: float) -> float:
+        self.gain = x
+        return self.gain
+
+
+class _HybridStoresThroughASlotEdge(_Hybrid):
+    def step(self, x: float) -> float:
+        self.child_in_slot.total = x
+        return self.child.total
+
+
+class _HybridReadsASlotAliasOfState(_Hybrid):
+    def step(self, x: float) -> float:
+        self.w[0] = self.w[0] + x
+        return self.alias[0]  # type: ignore[no-any-return]
+
+
+class _SlotHeldLeaf:
+    __slots__ = ("leaf", "__dict__")
+
+    def __init__(self) -> None:
+        self.leaf = _Leaf()
+        self.acc = 0.0
+
+    def step(self, x: float) -> float:
+        self.acc = self.acc + self.leaf.k * x
+        return self.acc
+
+
+def test_a_component_held_only_in_a_slot_is_read_as_captured() -> None:
+    _oracle(_SlotHeldLeaf().step, [{"x": 2.0}, {"x": -1.5}, {"x": 0.5}])
+
+
+def test_a_slot_never_holds_state() -> None:
+    _rejects(_HybridWritesItsSlot().step)
+    _rejects(_HybridStoresThroughASlotEdge().step)
+    _rejects(_HybridReadsASlotAliasOfState().step)
+    # A slot holding the stateful component the dict path also reaches is a second path to it.
+    _rejects(_HybridState().step)

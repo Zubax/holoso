@@ -16,11 +16,6 @@ import pytest
 
 import holoso
 from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FMulILog2Options,
-    FMulOptions,
     OperatorOptions,
     Options,
     SynthesisError,
@@ -37,16 +32,17 @@ from holoso._hir._evaluate import HirEvaluator
 
 from ._eeloracle import assert_hir_matches_reference
 from ._public import strip_locations
+from . import _options as lean
 
 type _Row = Mapping[str, float | bool | int]
 
-_INT_ONLY = Options(OperatorOptions())
-_FADD = Options(OperatorOptions(fadd=FAddOptions()))
-_FMUL = Options(OperatorOptions(fmul=FMulOptions()))
-_FCMP = Options(OperatorOptions(fcmp=FCmpOptions()))
-_FADD_FMUL = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()))
-_FADD_FDIVSQRT = Options(OperatorOptions(fadd=FAddOptions(), fdivsqrt=FDivsqrtOptions()))
-_FMUL_ILOG2 = Options(OperatorOptions(fmul_ilog2=FMulILog2Options()))
+_INT_ONLY = Options(operator=OperatorOptions(), wmultiplier=18)
+_FADD = Options(operator=OperatorOptions(fadd=lean.fadd()), wmultiplier=18)
+_FMUL = Options(operator=OperatorOptions(fmul=lean.fmul()), wmultiplier=18)
+_FCMP = Options(operator=OperatorOptions(fcmp=lean.fcmp()), wmultiplier=18)
+_FADD_FMUL = Options(operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul()), wmultiplier=18)
+_FADD_FDIVSQRT = Options(operator=OperatorOptions(fadd=lean.fadd(), fdivsqrt=lean.fdivsqrt()), wmultiplier=18)
+_FMUL_ILOG2 = Options(operator=OperatorOptions(fmul_ilog2=lean.fmul_ilog2()), wmultiplier=18)
 
 _NEVER = False
 _ENABLED = True
@@ -383,11 +379,11 @@ def _exponent_within_the_chain(x: float) -> float:
 def test_a_whole_exponent_past_the_bound_takes_the_general_rung() -> None:
     # The chain spends a trip per exponent bit, so past the bound the exp2/log2 rung takes over, needing hardware
     # the chain does not. Selection gets there without putting an unbounded int through binary64 to judge it.
-    lean = Options(OperatorOptions(fmul=FMulOptions(), fcmp=FCmpOptions()))
-    holoso.synthesize(_exponent_within_the_chain, lean, name="k")
+    chain_only = Options(operator=OperatorOptions(fmul=lean.fmul(), fcmp=lean.fcmp()), wmultiplier=18)
+    holoso.synthesize(_exponent_within_the_chain, chain_only, name="k")
     for kernel in (_exponent_past_the_chain, _int_exponent_past_the_chain):  # either spelling of the same value
         with pytest.raises(UnsupportedConstruct):
-            holoso.synthesize(kernel, lean, name="k")
+            holoso.synthesize(kernel, chain_only, name="k")
     with pytest.raises(SynthesisError):  # past the float range the general rung cannot take it either
         holoso.synthesize(_exponent_past_the_float_range, _FADD_FMUL, name="k")
 

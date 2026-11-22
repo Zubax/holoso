@@ -60,7 +60,7 @@ def _report(name: str) -> str:
         lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
-    return generate_report(lir, generate_verilog(lir)).html
+    return generate_report(lir, generate_verilog(lir, {})).html
 
 
 @pytest.mark.parametrize("name", list(_EXAMPLES))
@@ -69,14 +69,14 @@ def test_report_renders_for_each_example(name: str) -> None:
         lower_to_mir(lower(_EXAMPLES[name](), DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(_FMT)),
         name,
     )
-    html = generate_report(lir, generate_verilog(lir)).html
+    html = generate_report(lir, generate_verilog(lir, {})).html
     assert html.lstrip().startswith("<!")
     assert "<h2>Schedule</h2>" in html
     assert "class='gridkey'" in html
     assert "register holds a live value" in html
     # The wide-register column appears only when the kernel uses the wide bank; a purely-boolean kernel (no wide
     # registers) shows the boolean bank instead.
-    if lir.regfile.nreg:
+    if lir.wide_register_count:
         assert "title='registers'>registers" in html
         assert "r0" in html
     else:
@@ -89,8 +89,8 @@ def test_report_reveals_boolean_operators_and_casts() -> None:
     # signal_window uses boolean connectives (and/or), a chained comparison, and both float<->bool casts -- all of
     # which the schedule must now render (operator legend colors and the per-op chips), not just comparisons.
     html = _report("signal_window")
-    for mnemonic in ("fcmp", "band", "bor", "ftobool", "ffrombool"):
-        assert f">{mnemonic}<" in html, f"the legend should list the {mnemonic} operator"
+    for kind in ("fcmp", "(a)&amp;(b)", "(a)|(b)", "bool(a)", "float(a)"):
+        assert f">{kind}<" in html, f"the legend should list {kind}"
     assert "bool(" in html  # a float->bool cast chip
     assert "&amp;" in html  # a boolean-AND chip
 

@@ -63,3 +63,9 @@ def test_backends_import_only_lir_and_below() -> None:
     allowed: tuple[str, ...] = ("holoso._backend", "holoso._lir", "holoso._mir", "holoso._operators", "holoso._type")
     allowed += ("holoso._value", "holoso._util", "holoso._errors", "holoso._legal")
     assert not _offending("_backend", allowed)
+
+
+def test_operators_import_only_the_value_model_and_below() -> None:
+    allowed: tuple[str, ...] = ("holoso._operators", "holoso._type", "holoso._value", "holoso._util")
+    allowed += ("holoso._errors",)
+    assert not _offending("_operators", allowed)

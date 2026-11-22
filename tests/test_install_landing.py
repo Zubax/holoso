@@ -14,13 +14,14 @@ import dataclasses
 import pytest
 
 import holoso
-from holoso import FloatFormat, FloatValue
+from holoso import FloatFormat
 from holoso._eel import lower as lower_frontend
 from holoso._lir import BoolConstRef, InlineScheduledOp, Lir, LirBlock, PooledScheduledOp, RegRef, WideConstRef
 from holoso._lir import landing_cycle
-from holoso._lir._ir import BoolCopy, WideCopy, boundary_step
+from holoso._lir._ir import BoolCopy, WideCopy
 from holoso._mir import lower as lower_to_mir
 
+from ._cosim import run_cosim
 from ._examples import SPECS, ExampleSpec
 from ._modelref import (
     assert_model_equals_interpreter,
@@ -34,6 +35,7 @@ from ._modelref import (
     Vector,
     block_makespan,
 )
+from .hdl.hdl_float_oracle import SIMULATORS
 
 
 def _build(spec: ExampleSpec) -> Lir:
@@ -233,7 +235,7 @@ def test_cross_block_source_install_read_gates_on_the_spilled_landing() -> None:
     install issues at the makespan and its fire strictly follows the landing here; the fire == landing equality
     boundary has its own shape elsewhere).
     Value correctness rides the schedule-independent model-vs-interpreter differential below; the interference
-    residence shares the same single `install_source_commit`, so the placement pinned here is also the residence's
+    residence shares the same single `_install_source_commit`, so the placement pinned here is also the residence's
     frame.
     """
     fmt = FloatFormat(8, 36)
@@ -264,7 +266,7 @@ def test_cross_block_source_install_read_gates_on_the_spilled_landing() -> None:
 
     model, interpreter = build_model_and_interpreter(kernel, ops, "live_through_arm", fmt)
     vectors: list[Vector] = [
-        [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
+        [c, fmt.encode(a), fmt.encode(b)]
         for c in (True, False)
         for a in (2.0, 5.0, 0.5, 9.0, 1.5)
         for b in (3.0, 1.5, 4.0, 0.25)
@@ -318,14 +320,14 @@ def test_computed_copy_at_last_work_takes_the_terminator_cycle() -> None:
     assert pushed, "the last-work copy is gone; the kernel shape changed"
     for blk in pushed:
         assert block_makespan(blk) == _work_makespan(blk) + 1, "a last-work copy source must push the makespan by one"
-        assert blk.term_offset == boundary_step(block_makespan(blk), lir.fetch_lag), "the push drains one step later"
+        assert blk.term_offset == landing_cycle(block_makespan(blk), lir.fetch_lag), "the push drains one step later"
     for blk in lir.blocks:
         assert all(c.landing(lir.fetch_lag) <= blk.term_offset for c in blk.copies)
 
     fmt = FloatFormat(8, 36)
     model, interpreter = build_model_and_interpreter(kernel, ops, "last_work_arm", fmt)
     vectors: list[Vector] = [
-        [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
+        [c, fmt.encode(a), fmt.encode(b)]
         for c in (True, False)
         for a in (2.0, 5.0, 0.5, 9.0, 1.5)
         for b in (3.0, 1.5, 4.0, 0.25)
@@ -375,10 +377,7 @@ def test_drained_foreign_source_install_is_settled() -> None:
 
     model, interpreter = build_model_and_interpreter(kernel, ops, "drained_foreign_arm", fmt)
     vectors: list[Vector] = [
-        [c, FloatValue.from_float(fmt, a), FloatValue.from_float(fmt, b)]
-        for c in (True, False)
-        for a in (2.0, -1.5, 0.5)
-        for b in (3.0, 1.5, 0.25)
+        [c, fmt.encode(a), fmt.encode(b)] for c in (True, False) for a in (2.0, -1.5, 0.5) for b in (3.0, 1.5, 0.25)
     ]
     assert_model_equals_interpreter(model, interpreter, vectors, "drained_foreign_arm")
 
@@ -401,19 +400,14 @@ class _InflightEquality:
 
 
 @pytest.mark.cosim
-def test_inflight_equality_cosim() -> None:
+@pytest.mark.parametrize("sim", SIMULATORS)
+def test_inflight_equality_cosim(sim: str) -> None:
     """
     RTL == model at the in-flight equality boundary in lockstep: an install firing exactly at its source's landing
     must read the just-landed value within that cycle in both backends -- a within-cycle write-then-read agreement
     no value-only comparison isolates.
     """
-    from ._cosim import run_cosim  # noqa: PLC0415
-    from .hdl.hdl_float_oracle import SIMULATORS  # noqa: PLC0415
-
     fmt = FloatFormat(8, 36)
     eq_vectors = [{"c": c, "a": a, "b": b} for c in (True, False) for a, b in [(2.0, 4.0), (3.0, 1.5), (-1.0, 2.0)]]
-    run_cosim(
-        SIMULATORS[0],
-        holoso.synthesize(_InflightEquality().__call__, staged_fadd_options(fmt), name="inflight_equality_seam"),
-        eq_vectors,
-    )
+    result = holoso.synthesize(_InflightEquality().__call__, staged_fadd_options(fmt), name="inflight_equality_seam")
+    run_cosim(sim, result, eq_vectors)

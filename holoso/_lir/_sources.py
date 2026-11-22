@@ -8,7 +8,7 @@ objective resolves them into the write sources the codebooks deduplicate, so it 
 builds.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from .._operators import BoolInversion, InlinePrimitive, WideConditioner
@@ -27,7 +27,6 @@ from ._ir import (
     WideInputLoad,
     WideOperand,
     WideStateSlot,
-    pooled_write_word,
 )
 
 type ReadSource = RegRef | WideConstRef
@@ -47,8 +46,8 @@ class WideOperandTemplate:
     def substitute(self, fn: Callable[[ValueId], ValueId]) -> "WideOperandTemplate":
         return self if self.hole is None else WideOperandTemplate(fn(self.hole), self.conditioner)
 
-    def resolve(self, register_of: Callable[[ValueId], int]) -> WideOperand:
-        source = self.source if isinstance(self.source, WideConstRef) else RegRef(register_of(self.source))
+    def resolve(self, register_of: Mapping[ValueId, int]) -> WideOperand:
+        source = self.source if isinstance(self.source, WideConstRef) else RegRef(register_of[self.source])
         return WideOperand(source, self.conditioner)
 
 
@@ -66,8 +65,8 @@ class BoolOperandTemplate:
     def substitute(self, fn: Callable[[ValueId], ValueId]) -> "BoolOperandTemplate":
         return self if self.hole is None else BoolOperandTemplate(fn(self.hole), self.inversion)
 
-    def resolve(self, register_of: Callable[[ValueId], int]) -> BoolOperand:
-        source = BoolRegRef(register_of(self.source)) if isinstance(self.source, int) else self.source
+    def resolve(self, register_of: Mapping[ValueId, int]) -> BoolOperand:
+        source = BoolRegRef(register_of[self.source]) if isinstance(self.source, int) else self.source
         return BoolOperand(source, self.inversion)
 
 
@@ -79,7 +78,7 @@ class OpWriteSource:
     """An operator output lane, a boolean one through its `inversion`."""
 
     inst: OperatorInstance
-    port: int
+    port: str
     inversion: BoolInversion | None
 
 
@@ -120,22 +119,22 @@ class WriteEvent:
 
 def read_sources_per_port(lir: Lir) -> dict[ReadPort, list[ReadSource]]:
     """
-    Per operand port `(instance, position)` of every instance, the distinct sources it reads across the schedule:
+    Per operand port `(instance, port name)` of every instance, the distinct sources it reads across the schedule:
     the registers in ascending index order, then each constant in first-appearance order. A constant is an arm of the
     port's mux exactly like a register. A port reading one source drives it directly and needs no mux.
     """
     regs: dict[ReadPort, set[int]] = {}
     consts: dict[ReadPort, list[WideConstRef]] = {}
     for op in (op for block in lir.blocks for op in block.ops):
-        for pos, operand in enumerate(op.operands):
+        for name, operand in zip(op.drive.operand_ports, op.operands, strict=True):
             source = operand.source
             if isinstance(source, RegRef):
-                regs.setdefault((op.inst, pos), set()).add(source.index)
+                regs.setdefault((op.inst, name), set()).add(source.index)
             elif isinstance(source, WideConstRef):
-                book = consts.setdefault((op.inst, pos), [])
+                book = consts.setdefault((op.inst, name), [])
                 if source not in book:
                     book.append(source)
-    ports = [(inst, pos) for inst in lir.instances for pos in range(len(inst.operator.operand_ports))]
+    ports = [(inst, name) for inst in lir.instances for name in inst.operator.operand_ports]
     assert set(regs) | set(consts) <= set(ports)
     return {port: [*(RegRef(index) for index in sorted(regs.get(port, ()))), *consts.get(port, [])] for port in ports}
 
@@ -152,9 +151,9 @@ def write_events(lir: Lir) -> list[WriteEvent]:
     for block in lir.blocks:
         base = lir.block_base[block.index]
         for op in block.ops:
-            for write in op.writes:
-                lane = OpWriteSource(op.inst, op.primitive.physical_port(write.result), write.inversion)
-                events.append(WriteEvent(write.dst, lane, pooled_write_word(base + op.commit_cycle)))
+            for primitive, write in op.taps.items():
+                lane = OpWriteSource(op.inst, primitive.output_name, write.inversion)
+                events.append(WriteEvent(write.dst, lane, base + op.commit_cycle))
     for block in lir.blocks:
         base = lir.block_base[block.index]
         for inline_op in block.inline_ops:

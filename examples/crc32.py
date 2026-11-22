@@ -36,7 +36,7 @@ class Crc32:
 
 def main() -> None:
     # The register holds 32 unsigned bits, which a signed word must carry one bit above.
-    options = holoso.Options(holoso.OperatorOptions(), wint_min=33)
+    options = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=33)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(Crc32(POLY_IEEE8023).__call__, options)
     for filename, path in result.write(out_dir).items():

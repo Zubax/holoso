@@ -54,7 +54,7 @@ declared family, so a reader narrows by matching rather than by asking a tag and
 
 def _quantize(value: float | bool | int, fmt: FloatFormat) -> float | bool | int:
     """A float rounded into `fmt`, so the model and the float64 reference get one operand; a bool/int is exact."""
-    return value if isinstance(value, (bool, int)) else fmt.decode(fmt.encode(value))
+    return value if isinstance(value, (bool, int)) else float(fmt.encode(value))
 
 
 def _lane(where: str, scalar_type: object, age: int, port: str, got: object, want: object) -> Comparison:

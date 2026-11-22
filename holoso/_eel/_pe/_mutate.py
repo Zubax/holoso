@@ -2,7 +2,7 @@
 
 import dataclasses
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from .._ir import *
 from . import _aggregate, _express
@@ -102,7 +102,7 @@ def _state_store(
         shadow = shadowed_edge(obj, head.name)
         if shadow is not None:
             reject(origin, shadow)
-        protocol = overridden_protocol(obj, READ_PROTOCOLS)
+        protocol = overridden_protocol(type(obj), READ_PROTOCOLS)
         if protocol is not None:
             # Structural descent past a read override would diverge; refuse, as instance_attr does for reads.
             reject(
@@ -131,9 +131,9 @@ def _state_store(
             reject(origin, poison)
         reject(
             origin,
-            f"the write to {spell_state(key)} was not statically visible when state was seeded; "
-            "spell it in a plain method of the component that owns the attribute (a property getter is "
-            "not scanned), or through the component's own attribute path",
+            f"the write to {spell_state(key)} was not statically visible when state was seeded: only the "
+            "methods of the component's class are scanned, not a function one of them wraps or calls, nor a "
+            "property getter; spell it in such a method, or through the component's own attribute path",
         )
     interp.written_attrs.add(key)
     interp.carry_gate(key)
@@ -320,31 +320,40 @@ def _store_site(
         match selector:
             case AttrSel():
                 reject(origin, "an attribute cannot be stored on a sequence or array")
+            case AxesSel(indexes=atoms):
+                # The empty tuple is never last, so the selector after it refuses where the view is one element.
+                assert atoms or step < len(path) - 1
+                if tensor is None:
+                    if not isinstance(current, TensorValue):
+                        reject(origin, f"{_aggregate.a_kind(current)} is not subscriptable by a tuple")
+                    tensor = current
+                indexes = [interp.expr(atom, frame, sink) for atom in atoms]
             case IndexSel(index=atom):
                 index_value = interp.expr(atom, frame, sink)
-        if tensor is None:
-            match current:
-                case SequenceValue(items=items):
+                if tensor is None and isinstance(current, SequenceValue):
                     position = _aggregate.static_index(origin, index_value, "a subscript index")
-                    resolved = _aggregate.resolved_index(origin, position, len(items), _aggregate.a_kind(current))
+                    kind = _aggregate.a_kind(current)
+                    resolved = _aggregate.resolved_index(origin, position, len(current.items), kind)
                     spelled += f"[{position}]"
                     if step == len(path) - 1:
                         reject(
-                            origin,
-                            f"cannot store into {spelled}: sequences are immutable; build a numpy array instead",
+                            origin, f"cannot store into {spelled}: sequences are immutable; build a numpy array instead"
                         )
                     spine.append((current, resolved))
-                    current = items[resolved]
+                    current = current.items[resolved]
                     continue
-                case TensorValue():
+                if tensor is None:
+                    if not isinstance(current, TensorValue):
+                        reject(origin, f"{_aggregate.a_kind(current)} is not subscriptable")
                     tensor = current
-                case _:
-                    reject(origin, f"{_aggregate.a_kind(current)} is not subscriptable")
+                indexes = [index_value]
+        assert tensor is not None
         rank = len(tensor.shape)
-        if len(axes) >= rank:
-            reject(origin, f"a {rank}-D array store takes at most {rank} {'index' if rank == 1 else 'indices'}")
-        axes.append(_aggregate.axis_position(origin, index_value, tensor.shape[len(axes)]))
-        spelled += f"[{axes[-1]}]"
+        for index_value in indexes:
+            if len(axes) >= rank:
+                reject(origin, f"a {rank}-D array store takes at most {rank} {'index' if rank == 1 else 'indices'}")
+            axes.append(_aggregate.axis_position(origin, index_value, tensor.shape[len(axes)]))
+            spelled += f"[{axes[-1]}]"
     assert tensor is not None, "a terminal sequence step rejects"
     rank = len(tensor.shape)
     if len(axes) < rank:
@@ -385,4 +394,4 @@ def aug_aggregate(
                 )
             return TensorValue(current.shape, current.family, computed.leaves, current.allocation)
         case _:
-            raise AssertionError(current)
+            assert_never(current)

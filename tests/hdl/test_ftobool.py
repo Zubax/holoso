@@ -21,7 +21,6 @@ from .hdl_float_oracle import (
     REPO_ROOT,
     SIMULATORS,
     build_args,
-    sources,
 )
 
 
@@ -46,7 +45,7 @@ def test_holoso_ftobool(sim: str) -> None:
     runner = get_runner(sim)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "ftobool"
     runner.build(
-        sources=[*sources(), Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
+        sources=[Path(__file__).resolve().parent / "holoso_support_fn_tb.v"],
         includes=[HDL_DIR],
         hdl_toplevel="holoso_ftobool_tb",
         parameters={"WEXP": 8, "WMAN": 24},

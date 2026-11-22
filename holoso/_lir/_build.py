@@ -1,10 +1,13 @@
 import logging
 
+import zkf
+
 from .._errors import UnsupportedConstruct
 from .._mir import (
     Mir,
     MirBranch,
     MirConst,
+    MirOperation,
     MirStateRead,
     predecessors,
     reverse_postorder,
@@ -12,7 +15,7 @@ from .._mir import (
     thread_arm,
     threadable_arms,
 )
-from .._operators import InlinePrimitive
+from .._operators import InlinePrimitive, PooledPrimitive
 from .._type import BoolType, FloatType, IntType
 from .._util import BlockId
 from .._value import FloatValue, IntValue, WideValue, coerce_scalar
@@ -48,12 +51,31 @@ def build(mir: Mir, module_name: str, fetch_stages: int, tuning: RegallocTuning)
         raise ValueError(f"only the 3-stage control fetch is implemented, got {fetch_stages}")
     if not mir.outputs:
         raise UnsupportedConstruct("Synthesized kernel must produce at least one output value")
+    _check_drives(mir)
     lir = _build_program(mir, module_name, fetch_stages - 1, tuning)
     names = [port.name for port in lir.ports]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise UnsupportedConstruct(f"duplicate port names in the module interface: {', '.join(duplicates)}")
     return lir
+
+
+def _check_drives(mir: Mir) -> None:
+    """
+    Every primitive is timed by the block an instance running it alone renders, while an instance runs the block its
+    whole set of primitives needs. Scheduling rests on both answering alike: primitives of one operator and immediates
+    derive one drive, even across separate firings no fusion ever compares, and the drives one operator serves keep one
+    timing or each holds a single transaction in flight, which is what keeps results leaving an instance in issue order.
+    """
+    used = {
+        node.primitive.drive
+        for node in mir.nodes.values()
+        if isinstance(node, MirOperation) and isinstance(node.primitive, PooledPrimitive)
+    }
+    assert len({(drive.operator, drive.immediates) for drive in used}) == len(used), "one drive per immediate values"
+    for operator in {drive.operator for drive in used}:
+        timings = {drive.timing for drive in used if drive.operator == operator}
+        assert len(timings) == 1 or all(t.initiation_interval >= t.latency >= 1 for t in timings), operator.name
 
 
 def _prepare(mir: Mir, fetch_lag: int) -> BuildContext:
@@ -75,7 +97,7 @@ def _prepare(mir: Mir, fetch_lag: int) -> BuildContext:
             assert not isinstance(mir.nodes[mir_block.terminator.cond], MirConst), f"block {mir_block.id}"
             assert all(position[succ] > position[mir_block.id] for succ in successors(mir_block) if by_id[succ].phis)
     # The phi-residency premise -- a phi's register settles before any frame that reads it begins, so a phi source
-    # is always settled (`install_source_commit`) -- rests on every phi-bearing block being multi-predecessor, which
+    # is always settled (`_install_source_commit`) -- rests on every phi-bearing block being multi-predecessor, which
     # is what keeps overlap spills out of phi registers; a future pass emitting a phi into a single-predecessor block
     # would silently void that argument (the copy-ordering check in `Lir._check_block` does not read-gate installs
     # against in-flight landings), so the reliance is machine-checked here. It is also what keeps the schedules
@@ -134,7 +156,6 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     alloc = allocate(coalesced, tuning)
     offsets = coalesced.offsets
     block_sched = ctx.schedules.block_sched
-    instances = alloc.instances
     consts, const_pool = ctx.const_pool.values, ctx.const_pool.entries
 
     blocks: list[LirBlock] = []
@@ -199,16 +220,16 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     outputs = build_outputs(mir, alloc, const_pool)
     lir = Lir(
         module_name=module_name,
-        instances=instances,
+        instances=_specialized_blocks(alloc.instances, laid_out),
         wide_consts=consts,
         float_format=mir.float_format,
         int_format=mir.int_format,
-        regfile=RegFileLayout(nreg=alloc.wide.nreg),
+        wide_register_count=alloc.wide.nreg,
         inputs=build_inputs(mir, alloc),
         outputs=outputs,
         wide_state_slots=wide_state_slots,
         blocks=laid_out,
-        bool_regfile=RegFileLayout(nreg=alloc.bool.nreg),
+        bool_register_count=alloc.bool.nreg,
         bool_state_slots=bool_state_slots,
         fetch_lag=fetch_lag,
     )
@@ -216,11 +237,31 @@ def _build_program(mir: Mir, module_name: str, fetch_lag: int, tuning: RegallocT
     emitted = steering(lir)
     assert (alloc.wide.read_arms, alloc.wide.write_arms) == (emitted.read, emitted.wide_write)
     _logger.info(
-        "LIR: %d blocks, last PC %d, exits %s, min II %d, %d instances",
+        "LIR: %d blocks, last PC %d, exits %s, min latency %d, min II %d, %d instances",
         len(lir.blocks),
         lir.last_pc,
         lir.exit_pcs,
+        lir.min_latency,
         lir.min_initiation_interval,
-        len(instances),
+        len(lir.instances),
     )
     return lir
+
+
+def _specialized_blocks(instances: list[OperatorInstance], blocks: list[LirBlock]) -> dict[OperatorInstance, zkf.Block]:
+    """Each instance's block, chosen by its operator from the primitives bound to it, which only allocation settles."""
+    primitives: dict[OperatorInstance, set[PooledPrimitive]] = {inst: set() for inst in instances}
+    for op in (op for block in blocks for op in block.ops):
+        primitives[op.inst].update(op.taps)
+    chosen: dict[OperatorInstance, zkf.Block] = {}
+    for inst in instances:
+        block = inst.operator.instance_block(frozenset(primitives[inst]))
+        kinds = ", ".join(sorted({type(primitive).__name__ for primitive in primitives[inst]}))
+        unfrozen = inst.operator.block.config
+        knobs = {name: value for name, value in block.config.items() if unfrozen.get(name) != value}
+        if knobs:
+            _logger.info("Instance %s renders its operator's block with %s for %s", inst.name, knobs, kinds)
+        else:
+            _logger.info("Instance %s renders its operator's block for %s", inst.name, kinds)
+        chosen[inst] = block
+    return chosen

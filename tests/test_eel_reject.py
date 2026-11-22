@@ -3,7 +3,6 @@ The rejection suite: one located refusal per banned family — the specification
 diagnostic class and the presence of a source location.
 """
 
-import functools
 from collections.abc import Callable
 
 import pytest
@@ -14,7 +13,7 @@ from holoso._eel import lower
 
 from ._modelref import DEFAULT_UNROLL_MAX_TRIPS
 
-_OPTIONS = holoso.Options(holoso.OperatorOptions())
+_OPTIONS = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18)
 
 
 def _reject(target: object) -> None:
@@ -195,19 +194,35 @@ def _k_in(x: float, vs: tuple[float, ...]) -> bool:
     return x in vs
 
 
-def _k_mangled_local(x: float) -> float:
-    __y = x
-    return __y
-
-
-def _k_mangled_trailing(x: float) -> float:
-    __y_ = x
-    return __y_
+_k_mangled_global_definition: Callable[[float], float]
 
 
 class _Mangled:
     def step(self, x: float) -> float:
         return self.__v * x  # type: ignore[attr-defined, no-any-return]
+
+    @staticmethod
+    def nested() -> Callable[[float], float]:
+        def k_mangled_local(x: float) -> float:
+            __y = x
+            return __y
+
+        return k_mangled_local
+
+    @staticmethod
+    def trailing() -> Callable[[float], float]:
+        def k_mangled_trailing(x: float) -> float:
+            __y_ = x
+            return __y_
+
+        return k_mangled_trailing
+
+    # The definition binds a module global, so nothing in the function's own names tells that a class encloses it.
+    global _k_mangled_global_definition
+
+    def _k_mangled_global_definition(x: float) -> float:  # type: ignore[misc]
+        __y = x
+        return __y
 
 
 def _k_string(x: float) -> str:
@@ -289,19 +304,6 @@ def _k_walrus_while(x: float) -> float:
     return d
 
 
-def _wrapping(fn: Callable[[float], float]) -> Callable[[float], float]:
-    @functools.wraps(fn)
-    def wrapper(x: float) -> float:
-        return fn(x) + 1.0
-
-    return wrapper
-
-
-@_wrapping
-def _k_wrapped(x: float) -> float:
-    return x * 2.0
-
-
 def _k_assert_yield() -> object:
     assert (yield 1)  # a yield anywhere, even in an ignored assert, makes this a generator in CPython
     return 2
@@ -332,6 +334,14 @@ class _MangledRaise:
 
 
 def _k_stub_body(x: float) -> float: ...  # type: ignore[empty-body]
+
+
+class _NoReceiver:
+    def nullary() -> float:  # type: ignore[misc]
+        return 1.0
+
+    def keyword_only(*, x: float = 2.0) -> float:  # type: ignore[misc]
+        return 1.0
 
 
 _CASES: list[object] = [
@@ -367,9 +377,10 @@ _CASES: list[object] = [
     _k_kwargs,
     _k_is,
     _k_in,
-    _k_mangled_local,
-    _k_mangled_trailing,
     _Mangled().step,
+    _Mangled.nested(),
+    _Mangled.trailing(),
+    _k_mangled_global_definition,
     _k_string,
     _k_none,
     _k_fstring,
@@ -388,7 +399,6 @@ _CASES: list[object] = [
     _k_walrus_index_store,
     _k_walrus_index_aug,
     _k_walrus_while,
-    _k_wrapped,
     _k_assert_yield,
     _k_generic,
     _k_bare_ann_subscript,
@@ -396,6 +406,8 @@ _CASES: list[object] = [
     _k_lambda_target,
     _MangledRaise().kernel,
     _k_stub_body,
+    _NoReceiver().nullary,  # type: ignore[misc]
+    _NoReceiver().keyword_only,  # type: ignore[misc]
 ]
 
 

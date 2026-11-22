@@ -15,6 +15,7 @@ from . import _pow as _pow
 from . import _reductions as _reductions
 from ._registry import (
     Array as Array,
+    CastMethod as CastMethod,
     Conversion as Conversion,
     Factory as Factory,
     Operand as Operand,

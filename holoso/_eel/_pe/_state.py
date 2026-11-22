@@ -35,11 +35,11 @@ import numpy as np
 from ..._errors import SynthesisError
 from .._desugar import desugar
 from .._ir import Block, EelFunction, Origin, ScalarType, SlotDecl, SlotPath
-from .._decorator import is_wrapper, plain_function
+from .._decorator import is_wrapper, mro_attr, plain_function
 from .._names import access_path, element_index, slot_name
 from ._reject import reject
 from ._residual import assigned_names
-from ._snapshot import CAPTURED_AGGREGATES, dtype_family, nan_payload
+from ._snapshot import CAPTURED_AGGREGATES, dtype_family, float_subclass_advice, host_float, nan_payload
 
 type Reset = bool | int | float
 
@@ -91,6 +91,13 @@ def _is_component(raw: object) -> bool:
     if is_wrapper(raw):
         return False
     return isinstance(getattr(raw, "__dict__", None), dict)
+
+
+def _second_path(component: StateKey, key: StateKey, other: str) -> str:
+    return (
+        f"the component {spell_state(component)} holding the state attribute {spell_state(key)} is also reachable "
+        f"through {other}; a multiply-referenced component cannot hold state -- give each reference its own instance"
+    )
 
 
 @dataclass(slots=True)
@@ -206,14 +213,9 @@ READ_PROTOCOLS = ("__getattribute__", "__getattr__")
 """Overriding one of these hides the value from the structural resolution, so a read through it cannot be lowered."""
 
 
-def mro_attr(klass: type, name: str, default: object = None) -> object:
-    """The undescriptored class attribute -- what a structural walk must judge."""
-    return next((k.__dict__[name] for k in klass.__mro__ if name in k.__dict__), default)
-
-
-def overridden_protocol(instance: object, protocols: tuple[str, ...]) -> str | None:
-    """The first of `protocols` the instance's class overrides, or None when it inherits all of them."""
-    return next((p for p in protocols if getattr(type(instance), p, None) is not getattr(object, p, None)), None)
+def overridden_protocol(klass: type, protocols: tuple[str, ...]) -> str | None:
+    """The first of `protocols` the class overrides, or None when it inherits all of them."""
+    return next((p for p in protocols if getattr(klass, p, None) is not getattr(object, p, None)), None)
 
 
 def shadowed_edge(holder: object, attr: str) -> str | None:
@@ -245,6 +247,19 @@ class StateModel:
         self._raw_ids: dict[int, StateKey] = {}
         self._arrays: list[tuple[StateKey, np.ndarray]] = []
 
+    def demand_one_path(self, slotted: object, holder: object, spelled: str, origin: Origin) -> None:
+        """
+        A slot of a component is no address of its own, so a stateful component read through one is a second path to
+        it, one the tree never named; a back-reference to an ancestor is the same component, not another path. A slot
+        of anything but a component is no more tracked than a container holding one.
+        """
+        prefix, holder_prefix = self.tree.prefix_of(slotted), self.tree.prefix_of(holder)
+        if prefix is None or holder_prefix is None or holder_prefix[: len(prefix)] == prefix:
+            return
+        held = sorted(key for key in self.assumed if key[: len(prefix)] == prefix)
+        if held:
+            reject(origin, _second_path(prefix, held[0], f"the slot {spelled}"))
+
     def prepare(self) -> dict[StateKey, Spec]:
         self._specs = {}
         self._raw_ids = {}
@@ -266,13 +281,8 @@ class StateModel:
             for step in range(1, len(key)):  # the root stays on the walk stack, so it never gains a second address
                 holder = self.tree.objects.get(key[:step])
                 if holder is not None and id(holder) in self.tree.second_paths:
-                    reject(
-                        self.assumed[key],
-                        f"the component {spell_state(key[:step])} holding the state attribute "
-                        f"{spell_state(key)} is also reachable as "
-                        f"{spell_state(self.tree.second_paths[id(holder)])}; a multiply-referenced component "
-                        "cannot hold state -- give each reference its own instance",
-                    )
+                    other = spell_state(self.tree.second_paths[id(holder)])
+                    reject(self.assumed[key], _second_path(key[:step], key, other))
         self._sweep_frozen()
         for name, raw in self._environment:
             owner = self._overlap_owner(raw)
@@ -294,18 +304,17 @@ class StateModel:
         holder = self.tree.objects.get(key[:-1])
         if holder is None:
             return f"the holder of {spell_state(key)} is not part of the receiver's component tree"
+        if isinstance(holder, type):
+            return f"the class {holder.__name__} is itself the receiver, and a class attribute cannot hold state"
         if not isinstance(getattr(holder, "__dict__", None), dict):
-            return (
-                f"the class {type(holder).__name__} has no instance __dict__ (it uses __slots__), "
-                "which is not supported yet for stateful kernels"
-            )
+            return f"the class {type(holder).__name__} keeps its attributes in __slots__, and a slot cannot hold state"
         # EVERY component along the path, root included: a store chain descends structurally, so an overridden
         # protocol or a shadowing descriptor anywhere on it would diverge from the host's routing.
         for step in range(len(key)):
             component = self.tree.objects.get(key[:step])
             if component is None:
                 continue
-            protocol = overridden_protocol(component, _WRITE_PROTOCOLS + READ_PROTOCOLS)
+            protocol = overridden_protocol(type(component), _WRITE_PROTOCOLS + READ_PROTOCOLS)
             if protocol is not None:
                 return (
                     f"the class {type(component).__name__} overrides {protocol}, so attribute access runs host "
@@ -315,6 +324,8 @@ class StateModel:
                 fault = shadowed_edge(component, key[step])
                 if fault is not None:
                     return fault
+        if isinstance(mro_attr(type(holder), key[-1]), types.MemberDescriptorType):
+            return f"the state attribute {spell_state(key)} is held in a slot, and a slot cannot hold state"
         if key[-1] not in attribute_dict(holder):
             return (
                 f"the state attribute {spell_state(key)} has no value on the instance at synthesis time; "
@@ -431,8 +442,10 @@ class StateModel:
             if path in self._promoted:
                 return ScalarSpec(path, ScalarType.FLOAT, self._float_image(int(raw), path, origin))
             return ScalarSpec(path, ScalarType.INT, int(raw))
-        if isinstance(raw, (float, np.floating)):
+        if host_float(raw):
             return ScalarSpec(path, ScalarType.FLOAT, float(raw))
+        if isinstance(raw, float):
+            reject(origin, f"the state attribute {spell_state(path)} holds {float_subclass_advice(raw)}")
         return None
 
     def _tensor_spec(self, key: StateKey, raw: np.ndarray, path: SlotPath, origin: Origin) -> TensorSpec:

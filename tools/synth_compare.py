@@ -70,14 +70,14 @@ def capture(out_path: str, flows: list[str]) -> None:
                 target.ops.ucode_fetch_stages,
                 RegallocTuning(effort=target.ops.regalloc_effort, register_price=target.ops.regalloc_register_price),
             )
-            row["min_ii"] = lir.min_initiation_interval
+            row["min_latency"] = lir.min_latency
             row["last_pc"] = lir.last_pc
             flow = make_flow(target.flow, target.target_frequency_MHz, target.device_class)
             if not flow.available():
                 row["available"] = False
             else:
                 row["available"] = True
-                result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
+                result = holoso.synthesize(target.kernel(), flow.attributed(target.ops), name=target.name)
                 directory = REPO / "build" / "synth_compare" / target.label
                 shutil.rmtree(directory, ignore_errors=True)
                 report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
@@ -89,7 +89,7 @@ def capture(out_path: str, flows: list[str]) -> None:
         except Exception as exc:  # noqa: BLE001 -- a single target's failure must not abort the whole sweep
             row["error"] = f"{type(exc).__name__}: {exc}"
         marker = f"{row.get('fmax_MHz'):.2f} MHz" if "fmax_MHz" in row else row.get("error", "skipped (tool absent)")
-        print(f"  {target.label:42} II={row.get('min_ii','?'):>4}  {marker}", flush=True)
+        print(f"  {target.label:42} latency={row.get('min_latency','?'):>4}  {marker}", flush=True)
         rows.append(row)
         payload = {"commit": commit, "dirty": dirty, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "rows": rows}
         Path(out_path).write_text(json.dumps(payload, indent=2))  # incremental: crash-safe over a long sweep
@@ -178,9 +178,9 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
         b = before.get(label, {})
         device_b, device_a = b.get("device_class", "default"), a.get("device_class", "default")
         retuned = b.get("ops") is not None and (b.get("ops") != a.get("ops") or device_b != device_a)
-        ii_b, ii_a = b.get("min_ii"), a.get("min_ii")
-        if ii_b is not None and ii_a is not None:
-            cycles_saved += ii_b - ii_a
+        latency_b, latency_a = b.get("min_latency"), a.get("min_latency")
+        if latency_b is not None and latency_a is not None:
+            cycles_saved += latency_b - latency_a
         fmb, fma = b.get("fmax_MHz"), a.get("fmax_MHz")
         if fmb is not None and fma is not None:
             fmax_deltas.append(fma - fmb)
@@ -199,7 +199,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
         cells = [
             f"<td class='name'>{a.get('example') or a['name']}{retune_tag}<br><span class='flow'>{a['flow']}"
             f" @ {a['target_MHz']:.0f} MHz{'' if device_a == 'default' else f', {device_a} device'}</span></td>",
-            _delta_cell(ii_b, ii_a, lower_is_better=True, fmt="{:.0f}"),
+            _delta_cell(latency_b, latency_a, lower_is_better=True, fmt="{:.0f}"),
             _delta_cell(b.get("last_pc"), a.get("last_pc"), lower_is_better=True, fmt="{:.0f}"),
             _delta_cell(fmb, fma, lower_is_better=False, unit="", fmt="{:.1f}"),
             f"<td>{badge}</td>",
@@ -210,9 +210,9 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
             )
         cells.append(f"<td class='err'>{html.escape(a.get('error', ''))}</td>")
         body.append("<tr>" + "".join(cells) + "</tr>")
-        ii_up = ii_b is not None and ii_a is not None and ii_a > ii_b
+        latency_up = latency_b is not None and latency_a is not None and latency_a > latency_b
         fmax_down = fmb is not None and fma is not None and fma < fmb - 1.0
-        if retuned or ii_up or fmax_down or a_failed:
+        if retuned or latency_up or fmax_down or a_failed:
             regressed.append(label)
 
     cp_blocks = []
@@ -225,7 +225,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
         cp_a = html.escape(a.get("critical_path") or "(not captured)")
         cp_blocks.append(
             f"<details><summary><b>{label}</b> &nbsp;·&nbsp; f_max {fm_b}→{fm_a} MHz &nbsp;·&nbsp; "
-            f"II {b.get('min_ii')}→{a.get('min_ii')}</summary>"
+            f"latency {b.get('min_latency')}→{a.get('min_latency')}</summary>"
             f"<div class='cp'><div><div class='cphdr'>before <code>{before_doc.get('commit','?')}</code></div>"
             f"<pre>{cp_b}</pre></div><div><div class='cphdr'>after <code>{after_doc.get('commit','?')}</code></div>"
             f"<pre>{cp_a}</pre></div></div></details>"
@@ -239,7 +239,7 @@ def render(before_path: str, after_path: str, out_path: str) -> None:
         else "n/a"
     )
     headline = (
-        f"<b>{cycles_saved}</b> total II cycles reclaimed across {len(labels)} targets &nbsp;·&nbsp; "
+        f"<b>{cycles_saved}</b> total latency cycles reclaimed across {len(labels)} targets &nbsp;·&nbsp; "
         f"f_max Δ: {fmax_summary} &nbsp;·&nbsp; pass↔fail flips: "
         f"<span class='good'>{flips_to_pass}→pass</span>, <span class='bad'>{flips_to_fail}→fail</span>"
     )
@@ -284,16 +284,16 @@ _PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Holoso synthe
 <div class="sub">before <code>{before_commit}</code> ({before_ts}) &nbsp;→&nbsp; after <code>{after_commit}</code> ({after_ts})</div>
 <div class="headline">{headline}</div>
 <table><thead><tr>
- <th>kernel / flow</th><th>min II</th><th>last PC</th><th>f_max (MHz)</th><th>closure</th>
+ <th>kernel / flow</th><th>min latency</th><th>last PC</th><th>f_max (MHz)</th><th>closure</th>
  <th>LUT</th><th>FF</th><th>DSP</th><th>BRAM</th><th>note</th>
 </tr></thead><tbody>
 {rows}
 </tbody></table>
-<p class="sub" style="margin-top:1rem">Lower is better for II / last PC / area (green Δ); higher is better for f_max.
-A <span class="retune">retuned</span> tag marks a target whose operator stage knobs changed, so its f_max/area delta
-reflects the change <em>and</em> the retune, not an isolated comparison.</p>
+<p class="sub" style="margin-top:1rem">Lower is better for latency / last PC / area (green Δ); higher is better for
+f_max. A <span class="retune">retuned</span> tag marks a target whose operator stage knobs changed, so its
+f_max/area delta reflects the change <em>and</em> the retune, not an isolated comparison.</p>
 <h2 style="font-size:1.1rem;margin:1.8rem 0 .3rem">Critical-path reports — timing-regressed / retuned modules</h2>
-<p class="sub">Every module the change pushed off its closure target, or whose latency (II) or f_max regressed, with the
+<p class="sub">Every module the change pushed off its closure target, or whose latency or f_max regressed, with the
 place-and-route worst path <em>before</em> and <em>after</em>. The bottleneck shift shows what the added register
 stages addressed (or why a routing-dominated path needed placement effort instead of pipelining).</p>
 {critical_paths}

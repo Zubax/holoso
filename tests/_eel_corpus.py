@@ -16,6 +16,7 @@ from ._eeloracle import InputRow
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from uart import OVERSAMPLE, UartRx, UartTx  # noqa: E402
+from . import _options as lean
 
 
 class Crc8:
@@ -187,15 +188,16 @@ def int_corpus_options() -> holoso.Options:
     arithmetic becomes a comparison against the rails.
     """
     return holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(),
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
-            ffromint=holoso.FFromIntOptions(),
-            frint=holoso.FRintOptions(),
+        operator=holoso.OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            fcmp=lean.fcmp(),
+            ffromint=lean.ffromint(),
+            frint=lean.frint(),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=23),
         wint_min=34,
+        wmultiplier=18,
     )

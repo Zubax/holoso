@@ -25,8 +25,11 @@ Run two reviewers in parallel per round:
   ROBUSTNESS first, then SIMPLIFICATION opportunities, ARCHITECTURAL CLEANLINESS and CODE QUALITY,
   and POLICY/STYLE compliance with the project's own docs.
 
-- Codex running the *most advanced model* at *maximum reasoning effort* focusing on CORRECTNESS only, to maximize perspective
-  diversity and minimize blind spots.
+- Codex running the *most advanced model* at *maximum reasoning effort* focusing on CORRECTNESS only,
+  to maximize perspective diversity and minimize blind spots.
+
+All reviewers must run WITHOUT the sandbox nor any other restrictions to ensure there are no impediments
+to full in-depth diligent review.
 
 ## Reviewers are read-only
 

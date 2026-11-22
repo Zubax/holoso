@@ -12,11 +12,11 @@ All events that create a second handle move the state forward:
   does not share by reading `C[i]` on the way to the store);
 - embedding: an aggregate flowing into a literal shares its descendants with the result; sequence slices
   COPY the top level (a fresh allocation) and share extracted aggregate descendants;
-- derivation: ANY tensor derived from an existing one (a tensor slice, `.T`, `.flatten()`, `reshape`, a
+- derivation: a tensor derived from an existing one (a tensor slice, `.T`, `ravel`, `reshape`, a
   family-preserving `asarray`) is shared with its source -- the compiler deliberately models no copy-vs-view
-  or dtype-width distinction, so even a same-family host copy (float32 to float) shares. A family-CHANGING
-  dtype conversion copies on the host and mints fresh. A sequence converted to a tensor is a leaf copy, not
-  a derivation: the scalar leaves are values, so no handle relates the two;
+  or dtype-width distinction for these, so even a same-family host copy (float32 to float) shares. `flatten`,
+  which always copies on the host, and a family-CHANGING dtype conversion mint fresh. A sequence converted to a
+  tensor is a leaf copy, not a derivation: the scalar leaves are values, so no handle relates the two;
 - escape: returning from the kernel, installing into a state path, or being stored as an element; aggregate
   ROOTS originating outside the kernel's own construction (module globals, closure cells, captured defaults,
   and the kernel's own array parameters) enter ESCAPED -- CPython would make a mutation observable outside
@@ -88,7 +88,7 @@ def blame(allocation: Allocation) -> str:
                 "escaped through a return or a state install, so the change would be observable elsewhere"
             )
         case AllocationState.UNIQUE:
-            raise AssertionError("a unique allocation draws no blame")
+            assert False, "a unique allocation draws no blame"
 
 
 def allocations(value: Value) -> list[Allocation]:

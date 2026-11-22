@@ -55,7 +55,7 @@ from ..._errors import HolosoError, SynthesisError
 from .._annotations import accepted_stypes, annotation_stype, unaliased
 from .._desugar import desugar
 from .._ir import *
-from .._decorator import plain_function
+from .._decorator import mro_attr, plain_function
 from .._names import hardware_name, indexed_names, port_name, public_slot
 from . import _aggregate, _express, _mutate
 from ._ownership import allocations, borrow, escape, release, share
@@ -72,7 +72,6 @@ from ._state import (
     TensorSpec,
     build_component_tree,
     environment_aggregates,
-    mro_attr,
     overridden_protocol,
     resolve_chain,
     seed_state,
@@ -99,6 +98,7 @@ from ._values import (
     allocations_match,
     same,
     same_structure,
+    scalar_tree,
     tree_leaves,
     tree_rebuild,
 )
@@ -353,7 +353,8 @@ def partial_evaluate(
     """
     if instance is None:
         return Interpreter(fn, None, unroll_max_trips).run(eel)
-    assert eel.params, "a bound method always has a receiver parameter"
+    if not eel.params or eel.params[0].kind is ParamKind.KEYWORD_ONLY:
+        reject(eel.origin, f"{eel.name}() is called on an instance, but has no positional parameter to receive it")
     tree = build_component_tree(instance)
     model = StateModel(tree, seed_state(tree, eel), environment_aggregates(fn))
     extra_carries: dict[LoopPass, frozenset[StateKey]] = {}
@@ -558,8 +559,9 @@ class Interpreter:
             args = typing.get_args(annotation)
             if len(args) == 2 and args[1] is Ellipsis:
                 reject(param.origin, f"{what}: a variadic tuple[X, ...] has no fixed arity to decompose into ports")
-            if not args:
-                reject(param.origin, f"{what}: an empty annotation decomposes to no ports")
+            # A bare `typing.Tuple` names no items at all, unlike `tuple[()]`, which names none.
+            if getattr(annotation, "__args__", None) is None:
+                reject(param.origin, f"{what}: a bare tuple annotation has no fixed arity to decompose into ports")
             params: list[Param] = []
             items: list[Value] = []
             for position, arg in enumerate(args):
@@ -576,8 +578,6 @@ class Interpreter:
             if any(annotation is seen for seen in stack):
                 reject(param.origin, f"{what}: the record annotation {annotation.__name__} is recursive")
             annotations = self.record_annotations(annotation, param.origin)
-            if not annotations:
-                reject(param.origin, f"{what}: an empty annotation decomposes to no ports")
             params = []
             fields: list[Value] = []
             for field_name, field_annotation in annotations.items():
@@ -688,7 +688,7 @@ class Interpreter:
                 case Store() | AugStore():
                     _mutate.store(self, stmt, frame, piece, here)
                 case _:
-                    raise AssertionError(stmt)
+                    assert False, stmt
             self._spread(current, piece)
         return _Flow(exits, current)
 
@@ -1181,7 +1181,8 @@ class Interpreter:
     def _residual_while(self, stmt: While, frame: Frame, sink: Sink) -> list[_Exit]:
         """
         The carried set is the syntactic assigned-name set of header+body, restricted to names bound at entry
-        -- each becomes a scalar phi. One symbolic header+body pass computes the back-edge values; the stype
+        -- each becomes a scalar phi, an aggregate of scalars one per leaf, which is why it must meet the back edge
+        as the same object. One symbolic header+body pass computes the back-edge values; the stype
         assumptions join per the one rule (a FLOAT phi converts an INT back value in place; an INT assumption
         meeting a FLOAT back value promotes and re-runs, monotone and bounded by the carried count).
 
@@ -1209,11 +1210,14 @@ class Interpreter:
                 if name in assigned.rebound:
                     carried_locals.append(name)
                 continue
+            if isinstance(value, AGGREGATES) and scalar_tree(value):
+                carried_locals.append(name)
+                continue
             if name in assigned.rebound or isinstance(value, AGGREGATES):
                 reject(
                     origin,
-                    f"{name!r} is {_aggregate.a_kind(value)}; only bool, int, and float values can be "
-                    "carried across the iterations of a data-dependent loop",
+                    f"{name!r} is {_aggregate.a_kind(value)}; only bool, int, and float values, and aggregates "
+                    "of them, can be carried across the iterations of a data-dependent loop",
                 )
             # A store through a non-aggregate root can never be admitted; the body pass draws the precise
             # rejection at the store itself (an attribute store on a snapshot, an item store on a scalar).
@@ -1347,22 +1351,26 @@ class Interpreter:
         return returns
 
     def _back_leaves(self, key: _EnvKey, back_value: Value, frame: Frame, origin: Origin) -> list[Scalar]:
-        """The per-leaf back-edge values of one carried key; a slot tree must keep its structure and identity."""
-        if isinstance(key, str):
+        """The per-leaf back-edge values of one carried key; a carried tree must keep its structure and identity."""
+        entry = self.readable(frame.env[key], origin)
+        if isinstance(key, str) and isinstance(entry, (StaticScalar, ResidualScalar)):
             if not isinstance(back_value, (StaticScalar, ResidualScalar)):
                 reject(
                     origin,
-                    f"{key!r} is rebound to {_aggregate.a_kind(back_value)} inside a data-dependent loop; "
-                    "only bool, int, and float values can be carried across its iterations",
+                    f"{key!r} is rebound from a scalar to {_aggregate.a_kind(back_value)} inside a data-dependent "
+                    "loop; a name carried across its iterations keeps its kind",
                 )
             return [back_value]
-        assert isinstance(key, tuple)
-        entry_tree = self.readable(frame.env[key], origin)
-        if not same_structure(entry_tree, back_value):
+        if not same_structure(entry, back_value):
+            advice = (
+                "store its elements instead"
+                if isinstance(back_value, TensorValue)
+                else "carry its elements in names of their own instead"
+            )
             reject(
                 origin,
-                f"installing a new aggregate into {self._describe_key(key)} inside a data-dependent loop "
-                "is not supported yet; store its elements instead",
+                f"{self._describe_key(key)} is rebound to another value inside a data-dependent loop; an aggregate "
+                f"is carried across its iterations only as the same object -- {advice}",
             )
         return _scalar_leaves(back_value, origin)
 
@@ -1428,7 +1436,7 @@ class Interpreter:
                 escape(conformed)
                 self._commit_site(stmt.origin, frame, sink, _aggregate.flatten(stmt.origin, conformed))
             case _:
-                raise AssertionError(conformed)
+                assert False, conformed
 
     def _root_annotation(self, origin: Origin, frame: Frame) -> object:
         annotation = frame.annotations.get("return", _MISSING)
@@ -1518,8 +1526,6 @@ class Interpreter:
                 for item, arg in zip(value.items, args, strict=True)
             )
             return dataclasses.replace(value, items=items)
-        if shaped is list:
-            reject(origin, "list annotations are not supported; annotate a tuple")
         if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
             reason = inadmissible_reason(annotation)
             if reason is not None:
@@ -1644,7 +1650,7 @@ class Interpreter:
             case Comp():
                 return self._comp(expr, frame, sink)
             case _:
-                raise AssertionError(expr)
+                assert False, expr
 
     def _axis(self, axis: Atom | SliceSel, frame: Frame, sink: Sink) -> _aggregate.ResolvedAxis:
         if isinstance(axis, SliceSel):
@@ -1700,12 +1706,13 @@ class Interpreter:
     def instance_attr(self, origin: Origin, base: Opaque, attr: str, frame: Frame, sink: Sink) -> Value:
         """
         CPython's attribute precedence over class metadata, never calling into the object: a state attribute
-        of the entry receiver reads its current slot binding, then a data descriptor wins (only a plain
-        property is readable -- its getter is inlined as ordinary code), then the instance dict, then
-        non-data class attributes. Structural resolution is faithful only while the attribute protocol is
-        CPython's, so an overridden one is a rejection rather than a value read past it.
+        of the entry receiver reads its current slot binding, then a data descriptor wins (a plain property is
+        readable -- its getter is inlined as ordinary code -- and so is a `__slots__` member, which is storage
+        rather than code), then the instance dict, then non-data class attributes. Structural resolution is
+        faithful only while the attribute protocol is CPython's, so an overridden one is a rejection rather than
+        a value read past it.
         """
-        protocol = overridden_protocol(base.value, READ_PROTOCOLS)
+        protocol = overridden_protocol(type(base.value), READ_PROTOCOLS)
         if protocol is not None:
             reject(
                 origin,
@@ -1721,15 +1728,14 @@ class Interpreter:
         if isinstance(found, property) and (fget := plain_function(found.fget)) is not None:
             return self.inline(origin, f"{base.name}.{attr}", fget, [base], {}, frame, sink, stub=False)
         if isinstance(found, types.MemberDescriptorType):
-            if dataclasses.is_dataclass(type(base.value)) and inadmissible_reason(type(base.value)) is None:
-                return self.snapshot.admit(f"{base.name}.{attr}", getattr(base.value, attr), origin)
-            # Named apart from the general descriptor refusal: __slots__ made an ordinary attribute a descriptor
-            # behind the user's back, so the generic message would name nothing they wrote.
-            reject(
-                origin,
-                f"the class {type(base.value).__name__} defines __slots__, so {attr!r} has no instance "
-                "__dict__ entry to read; __slots__ is not supported yet",
-            )
+            # A slot is storage, not code: its descriptor outranks the instance dict and reads the slot directly.
+            try:
+                slotted = found.__get__(base.value, type(base.value))
+            except AttributeError:
+                reject(origin, f"{base.name!r} has no attribute {attr!r}")
+            if self.state is not None:
+                self.state.demand_one_path(slotted, base.value, f"{base.name}.{attr}", origin)
+            return self.snapshot.admit(f"{base.name}.{attr}", slotted, origin)
         if found is not _MISSING and inspect.isdatadescriptor(found):
             reject(origin, f"the attribute {attr!r} is a descriptor the compiler cannot read")
         instance_dict = getattr(base.value, "__dict__", None)
@@ -1831,7 +1837,7 @@ class Interpreter:
             return
         recognized = (
             annotation_stype(declared) is not None
-            or typing.get_origin(declared) in (tuple, list)
+            or typing.get_origin(declared) is tuple
             or (
                 isinstance(declared, type)
                 and dataclasses.is_dataclass(declared)

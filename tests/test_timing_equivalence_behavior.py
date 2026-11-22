@@ -10,7 +10,7 @@ one, and the divergence is caught here without any reference model at all.
 
 Every test drives the compiler ONLY through the public API (`holoso.synthesize(fn, ops).numerical_model.elaborate()`
 and the resulting simulator's `run` / `set_inputs` / `tick` / handshake surface) and asserts on observable output
-BITS and on publicly observable timing (`SynthesisResult.initiation_interval` and handshake cycle counts) -- never on
+BITS and on publicly observable timing (`SynthesisResult.latency` and handshake cycle counts) -- never on
 any internal schedule, register, or cycle structure. The two configurations are the no-optional-
 stage baseline and a deeply-pipelined fixture (both shared from `_modelref` so they track the operator-knob surface):
 `default_options` leaves every operator at its own defaults; `staged_options` enables the `stage_*` knobs across fadd /
@@ -227,8 +227,8 @@ def test_overlap_spill_timing_invariant() -> None:
 
 # --------------------------------------------------------------------------------------------------------------------
 # Shape 5: a straight-line kernel touching every default operator kind -- fadd, fmul, fdivsqrt, and the 2^-2 strength-
-# reduced fmul_ilog2 -- proving that optional stages raise the PUBLIC initiation interval without changing the value.
-# The kernel is branch-free, so the public min II is exact (initiation_interval[1] is not None) and the latency growth
+# reduced fmul_ilog2 -- proving that optional stages raise the PUBLIC latency without changing the value.
+# The kernel is branch-free, so the public min latency is exact (latency[1] is not None) and the latency growth
 # is directly observable; the vectors are chosen so every intermediate is exactly representable (power-of-two divisors
 # and exact products), making the CPython float64 reference an exact independent oracle for BOTH configurations.
 # --------------------------------------------------------------------------------------------------------------------
@@ -242,10 +242,8 @@ def test_optional_stages_raise_latency_without_changing_numerics() -> None:
     fmt = FloatFormat(8, 36)
     short = holoso.synthesize(_four_operator_kernel, default_options(fmt), name="stages_short")
     long = holoso.synthesize(_four_operator_kernel, staged_options(fmt), name="stages_long")
-    assert short.initiation_interval[1] is not None and long.initiation_interval[1] is not None  # branch-free: exact
-    assert (
-        short.initiation_interval[0] < long.initiation_interval[0]
-    ), f"staged II {long.initiation_interval[0]} not above default {short.initiation_interval[0]}"
+    assert short.latency[1] is not None and long.latency[1] is not None  # branch-free: exact
+    assert short.latency[0] < long.latency[0], f"staged latency {long.latency[0]} not above default {short.latency[0]}"
     short_sim = short.numerical_model.elaborate()
     long_sim = long.numerical_model.elaborate()
     for values in [(1.5, -0.5, 2.0), (3.25, 1.0, -4.0), (0.0, 2.5, 0.125), (-1.0, -1.0, 1e3)]:

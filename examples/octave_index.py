@@ -28,12 +28,17 @@ def octave_index(x: float) -> int:
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
-        holoso.OperatorOptions(
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
+        operator=holoso.OperatorOptions(
+            fdivsqrt=holoso.FDivsqrtOptions(
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.FIRST_DIGIT, stage_output=0, fast=True
+            ),
+            fmul_ilog2=holoso.FMulILog2Options(
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+            ),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
         ),
         ffmt=float_format,
+        wmultiplier=18,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(octave_index, options)

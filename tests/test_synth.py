@@ -9,14 +9,12 @@ import pytest
 import holoso
 from holoso import (
     FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FMulILog2Options,
-    FMulOptions,
     FloatFormat,
     OperatorOptions,
     Options,
 )
+from . import _options as lean
+from ._public import knob_table, module_of
 
 
 def _kernel(a: float, b: float) -> float:  # module-level so inspect.getsource works
@@ -29,14 +27,15 @@ _NAN = float("nan")
 
 def _ops(fmt: FloatFormat = FMT32) -> Options:
     return Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
+        operator=OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            fcmp=lean.fcmp(),
         ),
         ffmt=fmt,
+        wmultiplier=18,
     )
 
 
@@ -56,7 +55,7 @@ def test_constant_only_module_keeps_operator_configured_format() -> None:
     assert result.numerical_model.float_format == fmt
     assert _has_localparam(result.verilog_output.verilog, "WEXP", 6)
     assert _has_localparam(result.verilog_output.verilog, "WMAN", 18)
-    assert all(p.width == fmt.width for p in result.output_ports)
+    assert all(p.width == fmt.wfull for p in result.output_ports)
 
 
 def test_synthesize_threads_pipeline_stages() -> None:
@@ -64,22 +63,31 @@ def test_synthesize_threads_pipeline_stages() -> None:
     staged = holoso.synthesize(
         _kernel,
         Options(
-            OperatorOptions(
-                fadd=FAddOptions(stage_decode=1),
-                fmul=FMulOptions(stage_product=2),
-                fdivsqrt=FDivsqrtOptions(),
-                fmul_ilog2=FMulILog2Options(),
-                fcmp=FCmpOptions(),
+            operator=OperatorOptions(
+                fadd=lean.fadd(stage_core=FAddOptions.CoreStages.DECODE),
+                fmul=lean.fmul(stage_core_mul=2),
+                fdivsqrt=lean.fdivsqrt(),
+                fmul_ilog2=lean.fmul_ilog2(),
+                fcmp=lean.fcmp(),
             ),
             ffmt=FMT32,
+            wmultiplier=18,
         ),
     )
-    # Every STAGE_* is emitted explicitly (defaults as 0), so the instantiation is self-describing and configured
-    # values are visible.
-    assert ".STAGE_DECODE(0)" in base.verilog_output.verilog
-    assert ".STAGE_DECODE(1)" in staged.verilog_output.verilog and ".STAGE_PRODUCT(2)" in staged.verilog_output.verilog
-    assert ".LATENCY(4)" in base.verilog_output.verilog and ".LATENCY(1)" in base.verilog_output.verilog
-    assert ".LATENCY(5)" in staged.verilog_output.verilog and ".LATENCY(3)" in staged.verilog_output.verilog
+    # Both additions lie on the critical path, so the schedule pays for the stages.
+    assert staged.latency[0] > base.latency[0]
+    base_v, staged_v = base.verilog_output.verilog, staged.verilog_output.verilog
+    assert "stage_core: CoreStages.NONE" in knob_table(base_v, "u_fadd_0")
+    assert "stage_core_mul: 0" in knob_table(base_v, "u_fmul_0")
+    assert {"stage_core: CoreStages.DECODE", "timing: Timing(latency=2, initiation_interval=1)"} <= set(
+        knob_table(staged_v, "u_fadd_0")
+    )
+    assert {"stage_core_mul: 2", "timing: Timing(latency=3, initiation_interval=1)"} <= set(
+        knob_table(staged_v, "u_fmul_0")
+    )
+    # A configuration is a module of its own; the scaler the user left alone renders the same module in both.
+    assert module_of(base_v, "u_fadd_0") != module_of(staged_v, "u_fadd_0")
+    assert module_of(base_v, "u_fmul_ilog2_0") == module_of(staged_v, "u_fmul_ilog2_0")
 
 
 def test_rejects_nan_constant_data_and_nan_producing_folds_alike() -> None:
@@ -118,7 +126,6 @@ def test_write_artifacts(tmp_path: Path) -> None:
     paths = result.write(tmp_path)
     assert set(paths) == {
         "_kernel.v",
-        "holoso_support.v",
         "test__kernel.py",
         "_kernel.html",
         "_kernel.pass0.fir",
@@ -143,13 +150,11 @@ def test_frontend_ir_records_the_passes(tmp_path: Path) -> None:
     assert (tmp_path / "_kernel.pass1.fir").read_text(encoding="utf-8") == refined
 
 
-def test_rejects_invalid_and_reserved_module_names() -> None:
+def test_rejects_invalid_module_names() -> None:
     # One representative per validation class. An empty name is falsy, so it is not "invalid" -- it just falls back
     # to the target-derived default.
     with pytest.raises(ValueError):
         holoso.synthesize(_kernel, _ops(), name="1bad")
-    with pytest.raises(ValueError):
-        holoso.synthesize(_kernel, _ops(), name="Holoso_x")
     # A reserved word would emit unparsable RTL (`module module (`); a same-spelled non-keyword is still fine.
     with pytest.raises(ValueError):
         holoso.synthesize(_kernel, _ops(), name="module")

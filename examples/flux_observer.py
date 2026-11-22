@@ -74,11 +74,29 @@ class FluxObserver:
 
 def main() -> None:
     options = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(stage_input=1, stage_output=1),
-            fmul=holoso.FMulOptions(stage_product=2, stage_output=1),
-            fcmp=holoso.FCmpOptions(),
-            fcordic=holoso.FCordicOptions(stage_product=2, stage_normalize=2, stage_pack=1),
+        operator=holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(
+                stage_input=0,
+                stage_core=holoso.FAddOptions.CoreStages.DECODE
+                | holoso.FAddOptions.CoreStages.ALIGN
+                | holoso.FAddOptions.CoreStages.ALIGNED
+                | holoso.FAddOptions.CoreStages.NORMALIZE
+                | holoso.FAddOptions.CoreStages.PACK,
+                stage_output=0,
+            ),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
+            fcordic=holoso.FCordicOptions(
+                stage_input=0,
+                stage_core_mul=0,
+                stage_core=holoso.FCordicOptions.CoreStages.TAKEN
+                | holoso.FCordicOptions.CoreStages.ORDERED
+                | holoso.FCordicOptions.CoreStages.NORMALIZE_INPUT
+                | holoso.FCordicOptions.CoreStages.NORMALIZE
+                | holoso.FCordicOptions.CoreStages.PACK,
+                stage_output=0,
+                fast=True,
+            ),
         ),
         ffmt=holoso.FloatFormat(wexp=8, wman=24),
         wmultiplier=18,

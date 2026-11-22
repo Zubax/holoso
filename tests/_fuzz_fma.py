@@ -126,8 +126,8 @@ class _FmaEmitter(_Emitter):
         from the number written. One that encodes to zero or to an infinity is carried instead as a significand and an
         exponent, the exponent an exact scaling of the other factor, and the product by the significand stays fused.
         """
-        bits = self._fmt.encode(constant)
-        if bits != 0 and self._fmt.is_finite(bits):
+        value = self._fmt.encode(constant)
+        if not value.is_zero and value.is_finite:
             return f"machine.fma({x}, {constant!r}, {z})"
         mantissa, exponent = math.frexp(constant)
         return f"machine.fma(machine.scale({x}, {exponent - 1}), {2.0 * mantissa!r}, {z})"

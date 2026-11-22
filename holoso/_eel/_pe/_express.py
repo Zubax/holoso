@@ -5,15 +5,16 @@ import inspect
 import math
 import types
 from collections.abc import Callable
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, assert_never
 
 import numpy as np
 
 from .._annotations import annotation_stype, host_type
 from .._ir import *
-from .._decorator import plain_function
+from .._decorator import mro_attr, plain_function, resolve_callable
 from .._lib import (
     Array,
+    CastMethod,
     Conversion,
     Factory,
     Operand,
@@ -28,7 +29,6 @@ from ._ownership import share
 from ._record import inadmissible_reason as record_inadmissible
 from ._reject import reject
 from ._snapshot import describe_opaque as _describe_opaque, dtype_family, nan_payload, tensor_of
-from ._state import mro_attr
 from ._values import (
     AGGREGATES,
     VALUE_KINDS,
@@ -131,7 +131,7 @@ def attr_read(interp: Interpreter, origin: Origin, base_value: Value, attr: str,
         case Opaque():
             return interp.instance_attr(origin, base_value, attr, frame, sink)
         case _:
-            raise AssertionError(base_value)
+            assert_never(base_value)
 
 
 def _tensor_attr(
@@ -213,8 +213,8 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     match resolve(raw) if callable(raw) else None:
         case Spelling() as match:
             values = _positional_arguments(interp, node, display, frame, sink, shares=False)
-            if match.protocol is not None:
-                values = [_answer(interp, node.origin, match.protocol, value, frame, sink) for value in values]
+            if match.cast is not None:
+                values = [_answer(interp, node.origin, match.cast, value, frame, sink) for value in values]
             return _spelling_call(interp, node.origin, display, match, values, frame, sink)
         case VariadicFunction() as match:
             values = _positional_arguments(interp, node, display, frame, sink, shares=False)
@@ -249,9 +249,11 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
         return _rebuild_sequence(interp, node, display, frame, sink)
     if isinstance(raw, type) and dataclasses.is_dataclass(raw):
         return _construct_record(interp, node, display, raw, frame, sink)
-    resolved = _inlinable(interp, node.origin, callee.name, raw)
+    resolved = resolve_callable(raw)
     if resolved is not None:
-        fn, leading = resolved
+        fn, receiver = resolved
+        # An admitted receiver's frozen attributes fold, and its state reads see the current slots.
+        leading = [] if receiver is None else [interp.snapshot.admit(callee.name, receiver, node.origin)]
         positional, keywords = _arguments(interp, node, frame, sink, shares=True)
         return interp.inline(node.origin, display, fn, [*leading, *positional], keywords, frame, sink, stub=False)
     if callable(raw):
@@ -259,7 +261,7 @@ def call(interp: Interpreter, node: Call, frame: Frame, sink: Sink) -> Value:
     reject(node.origin, f"the captured object {callee.name!r} is not callable")
 
 
-def _answer(interp: Interpreter, origin: Origin, method: str, value: Value, frame: Frame, sink: Sink) -> Value:
+def _answer(interp: Interpreter, origin: Origin, cast: CastMethod, value: Value, frame: Frame, sink: Sink) -> Value:
     """A record or captured object answers through its class's own method; the meaning then applies to the answer."""
     if isinstance(value, RecordValue):
         cls = value.cls
@@ -267,33 +269,13 @@ def _answer(interp: Interpreter, origin: Origin, method: str, value: Value, fram
         cls = type(value.value)
     else:
         return value
-    fn = plain_function(mro_attr(cls, method))
+    fn = plain_function(mro_attr(cls, cast.name))
     if fn is None:
         return value
-    return interp.inline(origin, f"{cls.__name__}.{method}", fn, [value], {}, frame, sink, stub=False)
-
-
-def _inlinable(
-    interp: Interpreter, origin: Origin, display: str, raw: object
-) -> tuple[types.FunctionType, list[Value]] | None:
-    """
-    The plain-Python callee behind any calling spelling, with the receiver arguments CPython's descriptor
-    protocol would prepend; an admitted receiver's frozen attributes fold and its state reads see the current
-    slots. A C-level callable (a numpy dispatcher or ufunc, a partial) resolves to None: a callee the
-    registry does not carry, save for a wrapper the compiler reads through.
-    """
-    if (fn := plain_function(raw)) is not None:
-        return fn, []
-    if inspect.ismethod(raw):
-        fn = plain_function(raw.__func__)
-        return None if fn is None else (fn, [interp.snapshot.admit(display, raw.__self__, origin)])
-    if callable(raw):
-        call_attr = mro_attr(type(raw), "__call__")
-        if isinstance(call_attr, staticmethod) and (fn := plain_function(call_attr.__func__)) is not None:
-            return fn, []
-        if (fn := plain_function(call_attr)) is not None:
-            return fn, [interp.snapshot.admit(display, raw, origin)]
-    return None
+    answer = interp.inline(origin, f"{cls.__name__}.{cast.name}", fn, [value], {}, frame, sink, stub=False)
+    if not (isinstance(answer, (StaticScalar, ResidualScalar)) and answer.stype in cast.answers):
+        reject(origin, f"{cls.__name__}.{cast.name} must return {cast.answers[0].value}, as Python requires of it")
+    return answer
 
 
 def _arguments(
@@ -518,6 +500,7 @@ def _bound_method(interp: Interpreter, node: Call, method: BoundMethod, frame: F
         case Spelling() as found:
             values = _positional_arguments(interp, node, display, frame, sink, shares=False)
             arity = found.meaning.arity - 1
+            assert arity >= 0, "a method spelling's meaning takes its receiver"
             if len(values) != arity:
                 reject(node.origin, f"{display} takes {arity} argument(s), got {len(values)}")
             return _spelling_call(interp, node.origin, display, found, [method.receiver, *values], frame, sink)
@@ -605,7 +588,8 @@ def bind_signature(
 ) -> dict[str, Value]:
     """An injected default is a plain Python object, admitted under `prefix` and its parameter's name."""
     try:
-        bound = inspect.signature(target).bind(*positional, **keywords)
+        # A wrapper binds its own parameters, which are the ones its body names.
+        bound = inspect.signature(target, follow_wrapped=False).bind(*positional, **keywords)
     except TypeError as error:
         reject(site, f"the arguments do not bind: {error}")
     bound.apply_defaults()

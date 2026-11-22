@@ -1,48 +1,65 @@
 """The user's operator selection, once it has become hardware."""
 
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 
-import zkf
-
 from .._errors import UnsupportedConstruct
 from .._type import FloatFormat, FloatType, IntFormat, IntType
-from ._common import HardwareOperator
+from ._common import BaseOperatorOptions, HardwareOperator
 from ._float import *
 from ._int import *
 
 _logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class OperatorOptions:
     """
-    Every kind of operator appears here with its own options, in a field named after the operator's mnemonic. A float
-    one may be absent, and a kernel needing it is refused by name; an integer one is never optional, only tuned, so it
-    carries its options rather than `None`.
+    Every kind of operator appears here with its own options, in a field named after the operator's mnemonic.
+    A float one may be absent, and a kernel needing it is refused; an integer one is never optional, only tuned.
     """
 
     fadd: FAddOptions | None = None
+    """float `y=a+b`"""
     fmul: FMulOptions | None = None
+    """float `y=a*b`"""
     fdivsqrt: FDivsqrtOptions | None = None
+    """float `y=a/b` and `y=sqrt(a)`"""
     fmul_ilog2: FMulILog2Options | None = None
+    """float `y=a*2**k` (ldexp) for a signed integer `k`"""
     filog2: FILog2Options | None = None
+    """
+    `y = ⌊log2(|(-1)^s * 1.fraction * 2^(exp-bias)|)⌋ = exp-bias`,
+    `bias = 2^(wexp-1)-1`, fraction is discarded; like C `ilogb(a)`, or `frexp(a).exp-1`.
+    """
     fcmp: FCmpOptions | None = None
+    """float comparison `y=a<b` and sorting."""
     frint: FRintOptions | None = None
+    """float `y=round(a)`, `y=ceil(a)`, `y=floor(a)`, `y=trunc(a)`; integer and float output"""
     ffma: FFmaOptions | None = None
+    """float `y=a*b+c`"""
     fexp2: FExp2Options | None = None
+    """float `y=2**a`"""
     flog2: FLog2Options | None = None
+    """float `y=log2(a)`"""
     fcordic: FCordicOptions | None = None
+    """float `y=sin(a)`, `y=cos(a)`, `y=atan2(y,x)`, `y=sqrt(a^2+b^2)`"""
     ffromint: FFromIntOptions | None = None
+    """float `y=float(a)` for an integer `a`"""
 
     iadds: IAddsOptions = IAddsOptions()
+    """saturated signed integer `y=a+b`"""
     imuls: IMulsOptions = IMulsOptions()
+    """saturated signed integer `y=a*b`"""
     idivs: IDivsOptions = IDivsOptions()
+    """saturated signed integer `y=a/b` and `y=a%b`"""
     iabss: IAbssOptions = IAbssOptions()
+    """saturated signed integer `y=abs(a)`"""
     ishft: IShftOptions = IShftOptions()
+    """integer `y=a<<b` (non-saturated) and `y=a>>b` (sign-extended)"""
     ipopcnt: IPopcntOptions = IPopcntOptions()
+    """count of nonzero bits in an integer"""
 
 
 @dataclass(frozen=True)
@@ -64,108 +81,132 @@ class OpConfig:
 
     @cached_property
     def fadd(self) -> FAddOperator:
-        return self._built(FAddOperator.build, self.float_format, self._configured(self.options.fadd, "fadd"))
+        return self._checked(FAddOperator.build(self.float_format, self._configured(self.options.fadd, "fadd")))
 
     @cached_property
     def fmul(self) -> FMulOperator:
-        return self._built(
-            FMulOperator.build, self.float_format, self._configured(self.options.fmul, "fmul"), self.wmultiplier
+        return self._checked(
+            FMulOperator.build(self.float_format, self._configured(self.options.fmul, "fmul"), self.wmultiplier)
         )
 
     @cached_property
     def fdivsqrt(self) -> FDivsqrtOperator:
-        return self._built(
-            FDivsqrtOperator.build, self.float_format, self._configured(self.options.fdivsqrt, "fdivsqrt")
+        return self._checked(
+            FDivsqrtOperator.build(self.float_format, self._configured(self.options.fdivsqrt, "fdivsqrt"))
         )
 
     @cached_property
     def fmul_ilog2(self) -> FMulILog2Operator:
-        return self._built(
-            FMulILog2Operator.build,
-            self.float_format,
-            self.int_format,
-            self._configured(self.options.fmul_ilog2, "fmul_ilog2"),
+        return self._checked(
+            FMulILog2Operator.build(
+                self.float_format,
+                self.int_format,
+                self._configured(self.options.fmul_ilog2, "fmul_ilog2"),
+            )
         )
 
     @cached_property
     def filog2(self) -> FILog2Operator:
-        return self._built(
-            FILog2Operator.build, self.float_format, self.int_format, self._configured(self.options.filog2, "filog2")
+        return self._checked(
+            FILog2Operator.build(self.float_format, self.int_format, self._configured(self.options.filog2, "filog2"))
         )
 
     @cached_property
     def fcmp(self) -> FCmpOperator:
-        return self._built(FCmpOperator.build, self.float_format, self._configured(self.options.fcmp, "fcmp"))
+        return self._checked(FCmpOperator.build(self.float_format, self._configured(self.options.fcmp, "fcmp")))
 
     @cached_property
     def frint(self) -> FRintOperator:
-        return self._built(
-            FRintOperator.build, self.float_format, self.int_format, self._configured(self.options.frint, "frint")
+        return self._checked(
+            FRintOperator.build(self.float_format, self.int_format, self._configured(self.options.frint, "frint"))
         )
 
     @cached_property
     def ffma(self) -> FFmaOperator:
-        return self._built(
-            FFmaOperator.build, self.float_format, self._configured(self.options.ffma, "ffma"), self.wmultiplier
+        return self._checked(
+            FFmaOperator.build(self.float_format, self._configured(self.options.ffma, "ffma"), self.wmultiplier)
         )
 
     @cached_property
     def fexp2(self) -> FExp2Operator:
-        return self._built(
-            FExp2Operator.build, self.float_format, self._configured(self.options.fexp2, "fexp2"), self.wmultiplier
+        return self._checked(
+            FExp2Operator.build(self.float_format, self._configured(self.options.fexp2, "fexp2"), self.wmultiplier)
         )
 
     @cached_property
     def flog2(self) -> FLog2Operator:
-        return self._built(
-            FLog2Operator.build, self.float_format, self._configured(self.options.flog2, "flog2"), self.wmultiplier
+        return self._checked(
+            FLog2Operator.build(self.float_format, self._configured(self.options.flog2, "flog2"), self.wmultiplier)
         )
 
     @cached_property
     def fcordic(self) -> FCordicOperator:
-        return self._built(
-            FCordicOperator.build,
-            self.float_format,
-            self._configured(self.options.fcordic, "fcordic"),
-            self.wmultiplier,
+        return self._checked(
+            FCordicOperator.build(
+                self.float_format,
+                self._configured(self.options.fcordic, "fcordic"),
+                self.wmultiplier,
+            )
         )
 
     @cached_property
     def ffromint(self) -> FFromIntOperator:
-        return self._built(
-            FFromIntOperator.build,
-            self.float_format,
-            self.int_format,
-            self._configured(self.options.ffromint, "ffromint"),
+        return self._checked(
+            FFromIntOperator.build(
+                self.float_format,
+                self.int_format,
+                self._configured(self.options.ffromint, "ffromint"),
+            )
         )
 
     @cached_property
     def iadds(self) -> IAddOperator:
-        return self._built(IAddOperator.build, self.int_format, self.options.iadds)
+        return self._checked(IAddOperator.build(self.int_format, self.options.iadds))
 
     @cached_property
     def imuls(self) -> IMulOperator:
-        return self._built(IMulOperator.build, self.int_format, self.options.imuls)
+        return self._checked(IMulOperator.build(self.int_format, self.options.imuls, self.wmultiplier))
 
     @cached_property
     def idivs(self) -> IDivOperator:
-        return self._built(IDivOperator.build, self.int_format, self.options.idivs)
+        return self._checked(IDivOperator.build(self.int_format, self.options.idivs))
 
     @cached_property
     def iabss(self) -> IAbsOperator:
-        return self._built(IAbsOperator.build, self.int_format, self.options.iabss)
+        return self._checked(IAbsOperator.build(self.int_format, self.options.iabss))
 
     @cached_property
     def ishft(self) -> IShftOperator:
-        return self._built(IShftOperator.build, self.int_format, self.options.ishft)
+        return self._checked(IShftOperator.build(self.int_format, self.options.ishft))
 
     @cached_property
     def ipopcnt(self) -> IPopcntOperator:
-        return self._built(IPopcntOperator.build, self.int_format, self.options.ipopcnt)
+        return self._checked(IPopcntOperator.build(self.int_format, self.options.ipopcnt))
 
     def serves(self, kind: type[HardwareOperator]) -> bool:
         """Whether this machine is configured with operators of `kind`, answered without building one."""
-        return getattr(self.options, kind.name) is not None
+        options = self.options
+        configured: dict[type[HardwareOperator], BaseOperatorOptions | None] = {
+            FAddOperator: options.fadd,
+            FMulOperator: options.fmul,
+            FDivsqrtOperator: options.fdivsqrt,
+            FMulILog2Operator: options.fmul_ilog2,
+            FILog2Operator: options.filog2,
+            FCmpOperator: options.fcmp,
+            FRintOperator: options.frint,
+            FFmaOperator: options.ffma,
+            FExp2Operator: options.fexp2,
+            FLog2Operator: options.flog2,
+            FCordicOperator: options.fcordic,
+            FFromIntOperator: options.ffromint,
+            IAddOperator: options.iadds,
+            IMulOperator: options.imuls,
+            IDivOperator: options.idivs,
+            IAbsOperator: options.iabss,
+            IShftOperator: options.ishft,
+            IPopcntOperator: options.ipopcnt,
+        }
+        return configured[kind] is not None
 
     @staticmethod
     def _configured[T](options: T | None, name: str) -> T:
@@ -174,30 +215,15 @@ class OpConfig:
             raise UnsupportedConstruct(f"the kernel needs the {name!r} operator, which is not configured")
         return options
 
-    def _built[O: HardwareOperator, **P](self, build: Callable[P, O], *args: P.args, **kwargs: P.kwargs) -> O:
+    def _checked[O: HardwareOperator](self, operator: O) -> O:
         """
         Read off the ports rather than off a format argument: a conversion operator carries one format per side, and
         asking a format which family it belongs to can only confirm that it matches its own kind.
         """
-        try:
-            operator = build(*args, **kwargs)
-        except zkf.UnsupportedFormat as ex:
-            raise UnsupportedConstruct(f"a needed operator cannot be built for this machine's formats: {ex}") from ex
         assert all(
-            (port.scalar_type.fmt == self.float_format if isinstance(port.scalar_type, FloatType) else True)
-            and (port.scalar_type.fmt == self.int_format if isinstance(port.scalar_type, IntType) else True)
-            for port in operator.operand_ports + operator.output_ports
+            (ty.fmt == self.float_format if isinstance(ty, FloatType) else True)
+            and (ty.fmt == self.int_format if isinstance(ty, IntType) else True)
+            for ty in [*operator.operand_ports.values(), *operator.output_ports.values()]
         ), f"the configured {operator.name!r} is not built for the machine's formats of every family its ports name"
-        _logger.info(
-            "Operator %s: %d instance(s), %s",
-            operator.name,
-            operator.instances,
-            ", ".join(
-                dict.fromkeys(
-                    ("" if mode.code is None else f"mode {mode.code} ")
-                    + f"latency {operator.latency(mode)} II {mode.initiation_interval}"
-                    for mode in operator.modes
-                )
-            ),
-        )
+        _logger.info("Operator %s: %d instance(s), %s", operator.name, operator.instances, operator.block.timing)
         return operator

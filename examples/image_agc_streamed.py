@@ -10,8 +10,8 @@ exposure time first, then analog gain, digital gain last; the two sensor-side co
 and forwarded to the sensor by the host. Metering is centre-weighted, and a frame that saturates more than a small
 fraction of its pixels refuses any further increase, so highlights are not traded for the mean.
 
-A beat that ends no frame takes 33 cycles, or 165 ns at 200 MHz, and a frame is 1920*1200/16 = 144000 beats, so
-23.8 ms and 42 FPS max. A wider beat buys frame rate at the cost of kernel area, which is often a better trade than a
+A beat that ends no frame takes 34 cycles, or 170 ns at 200 MHz, and a frame is 1920*1200/16 = 144000 beats, so
+24.5 ms and 40 FPS max. A wider beat buys frame rate at the cost of kernel area, which is often a better trade than a
 conventional II=1 pipeline because time-sharing one set of operators utilizes the fabric better.
 """
 
@@ -113,25 +113,49 @@ class ImageAgc:
 
 def main() -> None:
     options = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(stage_normalize=1, stage_output=1),
-            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
-            fdivsqrt=holoso.FDivsqrtOptions(stage_input=1),
-            fmul_ilog2=holoso.FMulILog2Options(stage_decode=1),
-            fcmp=holoso.FCmpOptions(stage_input=1),
+        operator=holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(
+                stage_input=0,
+                stage_core=holoso.FAddOptions.CoreStages.OPERANDS
+                | holoso.FAddOptions.CoreStages.ALIGNED
+                | holoso.FAddOptions.CoreStages.NORMALIZE
+                | holoso.FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            fdivsqrt=holoso.FDivsqrtOptions(
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+            ),
+            fmul_ilog2=holoso.FMulILog2Options(
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+            ),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
             fexp2=holoso.FExp2Options(
-                stage_input=1, stage_reduce=1, stage_product=2, stage_product_chain=1, stage_pack=1
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core=holoso.FExp2Options.CoreStages.REDUCE,
+                stage_output=0,
+                fast=True,
             ),
             flog2=holoso.FLog2Options(
-                stage_product=1, stage_product_chain=1, stage_align=1, stage_product_final=2, stage_pack=1
+                stage_input=0,
+                stage_core_kernel_level=3,
+                stage_core_mul=3,
+                stage_core=holoso.FLog2Options.CoreStages.ALIGN,
+                stage_output=0,
+                fast=True,
             ),
-            ffromint=holoso.FFromIntOptions(stage_input=1, stage_normalize=1),
-            frint=holoso.FRintOptions(stage_input=1, stage_round=1),
+            ffromint=holoso.FFromIntOptions(
+                stage_input=1,
+                stage_core=holoso.FFromIntOptions.CoreStages.ABS | holoso.FFromIntOptions.CoreStages.NORMALIZE,
+                stage_output=0,
+            ),
+            frint=holoso.FRintOptions(stage_input=0, stage_core=holoso.FRintOptions.CoreStages.MASK, stage_output=1),
             # A beat's statistics are dozens of independent sums and comparisons, which a single adder would issue
             # one after another, nearly doubling the beat.
-            iadds=holoso.IAddsOptions(instances=2),
+            iadds=holoso.IAddsOptions(instances=2, stage_input=1, stage_output=1),
         ),
-        ffmt=holoso.FloatFormat(wexp=8, wman=24),  # a wider significand does not close at 100 MHz on an ECP5
+        ffmt=holoso.FloatFormat(wexp=8, wman=24),
         wmultiplier=18,
         wint_min=31,  # the frame sum reaches 1920*1200*255, plus the sign bit
     )

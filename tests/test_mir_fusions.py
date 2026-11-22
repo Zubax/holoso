@@ -9,16 +9,17 @@ import math
 from collections.abc import Callable
 
 import holoso
-from holoso import FCmpOptions, FloatFormat, OperatorOptions, Options
+from holoso import FloatFormat, OperatorOptions, Options
 from holoso._eel import lower
 from holoso._operators import BoolAndPrimitive
 from holoso._mir import MirOperation
 from holoso._mir import lower as lower_to_mir
 
-from ._modelref import mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from ._modelref import instantiated_modules, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 from ._public import strip_inline_prelude
+from . import _options as lean
 
-_OPTIONS = Options(OperatorOptions(fcmp=FCmpOptions()), ffmt=FloatFormat(6, 18))
+_OPTIONS = Options(operator=OperatorOptions(fcmp=lean.fcmp()), ffmt=FloatFormat(6, 18), wmultiplier=18)
 
 
 def _directional(a: float, b: float, c: float, d: float) -> tuple[bool, ...]:
@@ -58,21 +59,21 @@ def _sweep(result: holoso.SynthesisResult, kernel: Callable[..., tuple[bool, ...
 def test_directional_inf_composites_lower_to_one_classifier() -> None:
     result, classifiers = _classified(_directional, "directional_inf")
     assert classifiers == {"fisposinf": 2, "fisneginf": 2, "fisfinite": 0}
-    assert "holoso_fcmp #(" not in result.verilog_output.verilog
+    assert "cmp" not in instantiated_modules(result)
     _sweep(result, _directional, (math.inf, -math.inf, 1.0, -1.0, 0.0))
 
 
 def test_directional_inf_fusion_preserves_reused_predicates() -> None:
     result, classifiers = _classified(_reused, "directional_inf_reused")
     assert classifiers == {"fisposinf": 0, "fisneginf": 0, "fisfinite": 1}
-    assert "holoso_fcmp #(" in result.verilog_output.verilog
+    assert "cmp" in instantiated_modules(result)
     _sweep(result, _reused, (math.inf, -math.inf, 1.0, -1.0))
 
 
 def test_directional_inf_fusion_suppresses_predicate_shared_only_by_fused_ands() -> None:
     result, classifiers = _classified(_shared, "directional_inf_shared")
     assert classifiers == {"fisposinf": 1, "fisneginf": 1, "fisfinite": 0}
-    assert "holoso_fcmp #(" not in result.verilog_output.verilog
+    assert "cmp" not in instantiated_modules(result)
     _sweep(result, _shared, (math.inf, -math.inf, 1.0, -1.0))
 
 

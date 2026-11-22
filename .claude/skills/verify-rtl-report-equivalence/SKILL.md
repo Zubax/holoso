@@ -38,7 +38,7 @@ exist, the verification agents touch nothing but the files.
 For each design, the two artifacts must describe the same set of operations. Match operations across the
 two by their CONTENT, not their position:
 
-- primitive kind (select, bor, bxor, fadd, fmul, fcmp, …);
+- primitive kind (a select, a boolean gate, fadd, fmul, fcmp, …);
 - destination register;
 - source operands — including any sign/negation/inversion decoration and any constants.
 
@@ -58,6 +58,9 @@ discover it, never presume it):
 
 A finding is any operation present in one artifact but absent from the other, or any matched operation
 whose kind, destination, operands, issue, or landing disagree.
+
+An operator instance with an `in_valid` port issues on its `uc_<instance>_in_valid` strobe;
+an integer instance has none, so its issues show through its read opcodes and the microcode ROM's per-step comments.
 
 ## Two independent agents, opposite directions
 

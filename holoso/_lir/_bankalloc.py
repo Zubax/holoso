@@ -17,7 +17,7 @@ from .._operators import (
 )
 from .._util import ValueId
 from ._ir import *
-from ._mir_facts import mir_operation, phi_arm_out
+from ._mir_facts import mir_operation, phi_arm_out, pooled_primitives
 from ._liveness import BankLiveness, compute_interference
 from ._schedule import Schedule
 from ._regalloc import (
@@ -47,7 +47,7 @@ _logger = logging.getLogger(__name__)
 
 class _Bank[D: _Placement | Boundary](ABC):
     """
-    What differs between the two physical register banks; `prepare_bank`, `_coalesce_bank` and `_color_bank` are
+    What differs between the two physical register banks; `_prepare_bank`, `_coalesce_bank` and `_color_bank` are
     shared.
     """
 
@@ -135,7 +135,7 @@ class _BankFacts[D: _Placement | Boundary]:
         and only the converged round's placements are emitted.
         """
         installs = {
-            block: {vid: inline_fire_cycle(self.placement[(block, vid)].issue, self.fetch_lag) for vid in vids}
+            block: {vid: read_cycle(self.placement[(block, vid)].issue, self.fetch_lag) for vid in vids}
             for block, vids in residual.items()
         }
         return compute_interference(
@@ -226,7 +226,7 @@ class _WideBank(_Bank[_Placement | Boundary]):
                 continue
             assert isinstance(node.primitive, InlinePrimitive)
             operands = tuple(
-                t.resolve(bool_reg.__getitem__) if isinstance(t, BoolOperandTemplate) else t
+                t.resolve(bool_reg) if isinstance(t, BoolOperandTemplate) else t
                 for t in operand_templates(node, ctx.mir, ctx.const_pool.entries)
             )
             producers[vid] = [InlineWriter(node.primitive, operands)]
@@ -239,7 +239,7 @@ class _WideBank(_Bank[_Placement | Boundary]):
         # Every pooled firing reads wide operands, so every one is listed, a comparator whose taps are all boolean
         # included.
         ctx, facts = layout.ctx, coalesced.facts
-        values, op_nodes = facts.values, facts.op_nodes
+        values = facts.values
         block_sched = ctx.schedules.block_sched
         firings: list[Firing] = []
         for bid in sorted(block_sched):
@@ -254,9 +254,15 @@ class _WideBank(_Bank[_Placement | Boundary]):
                         template.hole is None or template.hole in values
                     )
                     reads.append(template.source)
-                writes = [(op_nodes[m].result, m) for m in sched.firings[leader] if m in values]
+                taps = pooled_primitives(ctx.mir, sched.firings[leader])
+                writes = {primitive.output_name: member for member, primitive in taps.items() if member in values}
                 seed = sched.inst_of[leader].index
-                firings.append(Firing(leader, primitive, bid, sched.issue_cycle[leader], seed, reads, writes))
+                # Every tap decides the orientation, a boolean one included, though only this bank's taps are written.
+                mirrors = flipped(taps)
+                mirror = None if mirrors is None else {taps[m].output_name: mirrors[m].output_name for m in taps}
+                firings.append(
+                    Firing(leader, primitive.drive, bid, sched.issue_cycle[leader], seed, reads, writes, mirror)
+                )
         return firings
 
     def install_policy(
@@ -273,7 +279,7 @@ class _WideBank(_Bank[_Placement | Boundary]):
             if ready is None:
                 install[name] = Boundary()
                 continue
-            cycle = max(ready, facts.last_read_in_ret.get(r_in, 0) - inline_fire_cycle(0, facts.fetch_lag))
+            cycle = max(ready, facts.last_read_in_ret.get(r_in, 0) - read_cycle(0, facts.fetch_lag))
             early = (
                 facts.ret_makespan is not None
                 and cycle <= facts.ret_makespan
@@ -312,7 +318,7 @@ _WIDE = _WideBank()
 _BOOL = _BoolBank()
 
 
-def install_source_commit(
+def _install_source_commit(
     sched: Schedule, source: ValueId, inflight: Mapping[ValueId, int], fetch_lag: int
 ) -> int | None:
     """
@@ -364,7 +370,7 @@ def _movable_order(
     return sorted(candidates, key=lambda vid: (rpo_pos[block_of[vid]], op_commit.get(vid, -3), vid))
 
 
-def prepare_bank[D: _Placement | Boundary](bank: _Bank[D], ctx: BuildContext) -> _BankFacts[D]:
+def _prepare_bank[D: _Placement | Boundary](bank: _Bank[D], ctx: BuildContext) -> _BankFacts[D]:
     """
     One bank's facts for the whole graph (see `_BankFacts`): everything coalescing it needs except the round's
     terminator offsets, which enter through the interference builder.
@@ -389,7 +395,7 @@ def prepare_bank[D: _Placement | Boundary](bank: _Bank[D], ctx: BuildContext) ->
     for block in mir.blocks:
         for vid, issue in block_sched[block.id].issue_cycle.items():
             operation = mir_operation(mir, vid)
-            rc = operand_read_cycle(operation.primitive, issue, fetch_lag)
+            rc = read_cycle(issue, fetch_lag)
             reads[block.id].extend((operand, rc) for operand in operation.operands if operand in values)
     # The spills this bank receives, reserving a spilled value's register across every successor frame it lands in
     # even where the value is dataflow-dead.
@@ -403,7 +409,7 @@ def prepare_bank[D: _Placement | Boundary](bank: _Bank[D], ctx: BuildContext) ->
     placement: dict[tuple[int, ValueId], _Placement] = {}
     for vid, phi in phi_nodes.items():
         for pred, value, _conditioner in phi.arms:
-            commit = install_source_commit(block_sched[pred], value, inflight[pred], fetch_lag)
+            commit = _install_source_commit(block_sched[pred], value, inflight[pred], fetch_lag)
             issue = install_issue_cycle(block_sched[pred].makespan, commit)
             placement[(pred, vid)] = _Placement(issue)
     liveness = BankLiveness(
@@ -439,7 +445,7 @@ def prepare_bank[D: _Placement | Boundary](bank: _Bank[D], ctx: BuildContext) ->
     ret_install_ready: dict[ValueId, int] = {}
     for slot in slots:
         if slot.live_out in block_sched[ret_block].issue_cycle or slot.live_out in input_ids:
-            commit = install_source_commit(block_sched[ret_block], slot.live_out, inflight[ret_block], fetch_lag)
+            commit = _install_source_commit(block_sched[ret_block], slot.live_out, inflight[ret_block], fetch_lag)
             ret_install_ready[slot.live_out] = install_ready_cycle(commit)
     return _BankFacts(
         bank=bank,
@@ -476,7 +482,7 @@ def converge(ctx: BuildContext) -> CoalescedLayout:
     count, and the round that adds nothing is laid out with room for every install it keeps.
     """
     mir = ctx.mir
-    wide_facts, bool_facts = prepare_bank(_WIDE, ctx), prepare_bank(_BOOL, ctx)
+    wide_facts, bool_facts = _prepare_bank(_WIDE, ctx), _prepare_bank(_BOOL, ctx)
     has_install_blocks: dict[int, bool] = {}
     for round_index in range(2 * len(mir.blocks) + 1):
         offsets = layout_offsets(mir, ctx.schedules, has_install_blocks, ctx.fetch_lag)
@@ -493,7 +499,7 @@ def converge(ctx: BuildContext) -> CoalescedLayout:
             )
             return layout
         has_install_blocks = grown
-    raise AssertionError("install fixpoint did not converge")
+    assert False, "install fixpoint did not converge"
 
 
 def _coalesce_bank[D: _Placement | Boundary](facts: _BankFacts[D], offsets: BlockOffsets) -> _CoalescedBank[D]:
@@ -557,7 +563,7 @@ def _coalesce_bank[D: _Placement | Boundary](facts: _BankFacts[D], offsets: Bloc
                 continue
             match install[name]:
                 case _Placement(issue=issue):
-                    early_reads.append((live_out, inline_fire_cycle(issue, fetch_lag)))
+                    early_reads.append((live_out, read_cycle(issue, fetch_lag)))
                 case Boundary():
                     boundary_final[ret_block].add(live_out)
                 case _:
@@ -662,7 +668,7 @@ def _color_quotient[D: _Placement | Boundary](
         replace(
             firing,
             reads=[source if isinstance(source, WideConstRef) else lead(source) for source in firing.reads],
-            writes=[(port, lead(value)) for port, value in firing.writes],
+            writes={port: lead(value) for port, value in firing.writes.items()},
         )
         for firing in firings
     ]
@@ -743,11 +749,11 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
     for pred, vid, value, conditioner in layout.wide_bank.residual_arms():
         placement = layout.wide_bank.facts.placement[(pred, vid)]
         source = wide_operand_template(ctx.mir, value, conditioner, ctx.const_pool.entries)
-        copy = WideCopy(RegRef(wide.assign[vid]), source.resolve(wide.assign.__getitem__), placement.issue)
+        copy = WideCopy(RegRef(wide.assign[vid]), source.resolve(wide.assign), placement.issue)
         copies.setdefault(pred, []).append(copy)
     for pred, vid, value, inversion in layout.bool_bank.residual_arms():
         placement = layout.bool_bank.facts.placement[(pred, vid)]
-        bool_source = bool_operand_template(ctx.mir, value, inversion).resolve(bool_coloring.assign.__getitem__)
+        bool_source = bool_operand_template(ctx.mir, value, inversion).resolve(bool_coloring.assign)
         bool_copy = BoolCopy(BoolRegRef(bool_coloring.assign[vid]), bool_source, placement.issue)
         copies.setdefault(pred, []).append(bool_copy)
     wide_facts = layout.wide_bank.facts
@@ -757,7 +763,7 @@ def allocate(layout: CoalescedLayout, tuning: RegallocTuning) -> Allocation:
             case _Placement(issue=issue):
                 source = wide_operand_template(ctx.mir, slot.live_out, slot.conditioner, ctx.const_pool.entries)
                 reg = RegRef(wide_facts.slot_reg[slot.name])
-                early = WideCopy(reg, source.resolve(wide.assign.__getitem__), issue)
+                early = WideCopy(reg, source.resolve(wide.assign), issue)
                 copies.setdefault(wide_facts.ret_block, []).append(early)
                 wide_install[slot.name] = Early()
             case InPlace() | Boundary():

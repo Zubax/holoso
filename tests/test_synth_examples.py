@@ -6,8 +6,8 @@ deterministic scheduling guard in `test_latency_freeze`; this layer owns the phy
 
 The bundled example scripts are held to the same standard on one flow: each is run as shipped with `holoso.synthesize`
 observed, and every circuit it synthesizes must close on Yosys/nextpnr for ECP5 at 100 MHz. The options an example
-shows are therefore the options that are placed and routed, not a restatement of them kept elsewhere. They are closed
-with about 2 percent of f_max to spare where the circuit allows it; the test itself asks only for the bar.
+shows are therefore the options that are placed and routed, not a restatement of them kept elsewhere; the device, its
+size and speed grade, is the test's choice, since the examples themselves say nothing about devices.
 
 The whole module is `synth`-marked (it needs an FPGA toolchain): `nox -s synth_examples` runs it and the normal
 suite skips it. A target whose flow's tool is absent skips individually, so a Yosys-only CI still exercises every Yosys
@@ -27,7 +27,7 @@ import pytest
 import holoso
 from holoso import FloatFormat
 from synth._synth import BUILD_ROOT, REPO_ROOT, build_compiler_ooc_design
-from synth.flows import DeviceClass, FlowId, make_flow
+from synth.flows import DeviceClass, FlowId, SpeedGrade, make_flow
 
 from ._synth_targets import TARGETS, SynthTarget
 
@@ -54,7 +54,7 @@ def test_target_closes_timing(target: SynthTarget) -> None:
     if not flow.available():
         pytest.skip(f"{target.flow.value} tool not available")
 
-    result = holoso.synthesize(target.kernel(), target.ops, name=target.name)
+    result = holoso.synthesize(target.kernel(), flow.attributed(target.ops), name=target.name)
     directory = BUILD_ROOT / "examples" / target.label
     shutil.rmtree(directory, ignore_errors=True)
     report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
@@ -64,8 +64,8 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         f"(slack {report.slack_ns:+.3f} ns); logs in {report.artifact_dir}"
     )
     if target.flow == FlowId.VIVADO_ARTIX7:
-        # The flow's ROM attribute hook is what keeps the microcode ROM out of LUT logic (5-10 percent of a large
-        # machine, DESIGN.md's fabric-area exploration).
+        # The flow's ROM attribute is what keeps the microcode ROM out of LUT logic (5-10 percent of a large machine,
+        # DESIGN.md's fabric-area exploration).
         block_rams = report.resources["RAMB36/FIFO*"].used + report.resources["RAMB18"].used
         assert block_rams >= 1, f"{target.label}: the microcode ROM is not in block RAM"
     if target.flow == FlowId.DIAMOND_ECP5:
@@ -73,23 +73,39 @@ def test_target_closes_timing(target: SynthTarget) -> None:
         # still close at a narrow format, so timing alone would not notice the flow losing them (DESIGN.md's
         # fabric-area exploration). A total cannot tell a table from the microcode ROM, hence the owners. This sees a
         # table that is not mapped at all, not one mapped in part.
-        tables = len(re.findall(r"^holoso_f(?:exp2|log2) #\(", result.verilog_output.verilog, re.MULTILINE))
+        pattern = r"\bu_(f(?:exp2|log2)_\d+) \("
+        tables = set(re.findall(pattern, result.verilog_output.verilog))
         owners = report.block_ram_owners.items()
-        owning = [path for path, n in owners if n and re.search(r"/u_f(?:exp2|log2)_\d+$", path)]
-        assert len(owning) == tables, f"{target.label}: a lookup table is not in block RAM: {owning}"
+        owning = {match[1] for path, n in owners if n and (match := re.search(r"/u_(f(?:exp2|log2)_\d+)(?:/|$)", path))}
+        assert (
+            owning == tables
+        ), f"{target.label}: a lookup table is not in block RAM: {sorted(owning)} of {sorted(tables)}"
 
 
 _EXAMPLE_SCRIPTS = sorted((REPO_ROOT / "examples").glob("*.py"))
 _EXAMPLE_FREQUENCY_MHz = 100.0
 # An example whose circuits outgrow the default device; the examples themselves say nothing about devices.
 _EXAMPLE_DEVICE_CLASS: dict[str, DeviceClass] = {"equal_temperament": DeviceClass.LARGE}
+# A script's circuits at one wide format that close only on a faster part: the stage loop ended on the slower one on a
+# path no register stage splits.
+_EXAMPLE_SPEED_GRADE: dict[tuple[str, FloatFormat], SpeedGrade] = {
+    ("equal_temperament", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("finite_set_current_controller", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("flux_observer", FloatFormat(8, 24)): SpeedGrade.MIDDLE,
+    ("foc", FloatFormat(8, 24)): SpeedGrade.MIDDLE,
+    ("image_agc_streamed", FloatFormat(8, 24)): SpeedGrade.MIDDLE,
+    ("imu_fusion", FloatFormat(8, 36)): SpeedGrade.FASTEST,
+    ("iq_oscillator", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("kepler", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("polar", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+    ("recip_newton", FloatFormat(8, 36)): SpeedGrade.MIDDLE,
+}
 
 
 @pytest.mark.parametrize("script", _EXAMPLE_SCRIPTS, ids=lambda p: p.stem)
 def test_example_script_closes_timing(script: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    flow = make_flow(
-        FlowId.YOSYS_ECP5, _EXAMPLE_FREQUENCY_MHz, _EXAMPLE_DEVICE_CLASS.get(script.stem, DeviceClass.DEFAULT)
-    )
+    device_class = _EXAMPLE_DEVICE_CLASS.get(script.stem, DeviceClass.DEFAULT)
+    flow = make_flow(FlowId.YOSYS_ECP5, _EXAMPLE_FREQUENCY_MHz, device_class)
     if not flow.available():
         pytest.skip(f"{FlowId.YOSYS_ECP5.value} tool not available")
 
@@ -99,7 +115,7 @@ def test_example_script_closes_timing(script: Path, monkeypatch: pytest.MonkeyPa
     def observed(
         target: Callable[..., Any], /, options: holoso.Options, *, name: str | None = None
     ) -> holoso.SynthesisResult:
-        result = synthesize(target, options, name=name)
+        result = synthesize(target, flow.attributed(options), name=name)
         results.append((result, options.ffmt))
         return result
 
@@ -109,12 +125,16 @@ def test_example_script_closes_timing(script: Path, monkeypatch: pytest.MonkeyPa
         monkeypatch.setattr(module, "synthesize", observed)
     module.main()
     assert results, f"{script.name} synthesized nothing"
+    graded = {fmt for stem, fmt in _EXAMPLE_SPEED_GRADE if stem == script.stem}
+    assert graded <= {fmt for _, fmt in results}, f"{script.name}: a speed grade names a format it does not build"
 
     failures = []
     for index, (result, fmt) in enumerate(results):
         directory = BUILD_ROOT / "examples" / f"{script.stem}.{index}-{FlowId.YOSYS_ECP5.value}"
         shutil.rmtree(directory, ignore_errors=True)
-        report = flow.prepare(build_compiler_ooc_design(result)).synthesize(directory)
+        grade = _EXAMPLE_SPEED_GRADE.get((script.stem, fmt), SpeedGrade.SLOWEST)
+        placed = make_flow(FlowId.YOSYS_ECP5, _EXAMPLE_FREQUENCY_MHz, device_class, grade)
+        report = placed.prepare(build_compiler_ooc_design(result)).synthesize(directory)
         if report.fmax_MHz < _EXAMPLE_FREQUENCY_MHz:
             failures.append(
                 f"synthesize() call {index} ({result.module_name}, e{fmt.wexp}m{fmt.wman}): "

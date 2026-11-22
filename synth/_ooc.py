@@ -73,10 +73,8 @@ def _zext(reg: str, width: int, target: int) -> str:
 
 
 def _find_err_pc(result: SynthesisResult) -> Port:
-    for port in result.control_ports:
-        if port.name == _ERR_PC:
-            return port
-    raise ValueError(f"module {result.module_name!r} has no err_pc port; cannot build an OOC wrapper")
+    (port,) = (port for port in result.control_ports if port.name == _ERR_PC)
+    return port
 
 
 def build_ooc_wrapper(result: SynthesisResult, *, top_suffix: str = "_ooc") -> OocWrapper:

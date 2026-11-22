@@ -86,20 +86,21 @@ def _cases(fmt: IntFormat) -> list[_Case]:
         # The production signature is checked against the case's own literal shape, never consulted for it: a
         # signature defect must fail here, not be coerced through the numeric compare downstream.
         expected_operands = tuple(BoolType() if net == "c" else IntType(fmt) for net in operands)
-        assert primitive.signature.operand_types == expected_operands, primitive.mnemonic
-        expected_result = (IntType(fmt),) if wide_result else (BoolType(),)
-        assert primitive.signature.result_types == expected_result, primitive.mnemonic
+        assert primitive.signature.operand_types == expected_operands, type(primitive).__name__
+        expected_result = IntType(fmt) if wide_result else BoolType()
+        assert primitive.signature.result_type == expected_result, type(primitive).__name__
         polarities = (False, True) if "c" in operands else (False,)
         cases.extend(_Case(primitive, invert, operands, wide_result) for invert in polarities)
     return cases
 
 
 def _port(index: int, case: _Case) -> str:
-    return f"y{index}_{case.primitive.mnemonic}"  # the index disambiguates the several shift counts and both polarities
+    # The index disambiguates the several shift counts and both polarities.
+    return f"y{index}_{type(case.primitive).__name__}"
 
 
 def _nested_port(index: int, case: _Case) -> str:
-    return f"n{index}_{case.primitive.mnemonic}"
+    return f"n{index}_{type(case.primitive).__name__}"
 
 
 def _harness(width: int, cases: Sequence[_Case]) -> str:

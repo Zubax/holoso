@@ -38,6 +38,7 @@ def mangles(name: str) -> bool:
 class Classifier:
     local_names: frozenset[str]
     free_names: frozenset[str]
+    stored_names: frozenset[str]
 
     def classify(self, name: str) -> NameKind:
         if name in self.local_names:
@@ -46,23 +47,32 @@ class Classifier:
             return NameKind.FREE
         return NameKind.GLOBAL
 
+    def mangled(self, name: str) -> bool:
+        """
+        CPython mangles a private name only where it occurs inside a class body, and the code object holds every
+        name the function spells exactly as it was stored -- unreachable code included. A private name it does not
+        hold verbatim was therefore stored mangled, which no reading of the surrounding source could tell as surely.
+        """
+        return mangles(name) and name not in self.stored_names
 
-def build_classifier(fn: types.FunctionType, fndef: ast.FunctionDef) -> Classifier:
+
+def build_classifier(code: types.CodeType, fndef: ast.FunctionDef) -> Classifier:
     scan = _BindingScan()
     for stmt in fndef.body:
         scan.visit(stmt)
     args = fndef.args
     params = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
-    code = fn.__code__
     code_names = set(code.co_varnames) | set(code.co_cellvars)
     comp_target_only = {
-        _code_name(name, fn.__qualname__, code_names) for name in scan.comp_targets - scan.bindings - params
+        _code_name(name, code.co_qualname, code_names) for name in scan.comp_targets - scan.bindings - params
     }
     local_names = code_names - comp_target_only
-    # Mangling-eligible params appear mangled in the code object; the transformer rejects them with a located
-    # diagnostic, which this consistency assert must not preempt.
-    assert {p for p in params if not mangles(p)} <= local_names
-    return Classifier(frozenset(local_names), frozenset(code.co_freevars))
+    stored_names = code_names | set(code.co_names) | set(code.co_freevars)
+    classifier = Classifier(frozenset(local_names), frozenset(code.co_freevars), frozenset(stored_names))
+    # A private parameter of a method is stored mangled; the transformer rejects it with a located diagnostic,
+    # which this consistency assert must not preempt.
+    assert {p for p in params if not classifier.mangled(p)} <= local_names
+    return classifier
 
 
 def _code_name(name: str, qualname: str, code_names: set[str]) -> str:

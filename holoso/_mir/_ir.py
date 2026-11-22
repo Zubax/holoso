@@ -6,7 +6,6 @@ from typing import assert_never
 
 from .._operators import (
     BoolInversion,
-    InlinePrimitive,
     PortConditioner,
     Primitive,
     identity_conditioner,
@@ -32,13 +31,13 @@ class MirStateRead:
 
 def degrades(value: float, fmt: FloatFormat) -> bool:
     """
-    Whether a literal encodes to zero or infinity and so is not the number written. Asked of the encoded bits: a coarse
-    mantissa can round a magnitude up past the double range, so `decode` saturates for a target value that is finite.
+    Whether a literal encodes to zero or infinity and so is not the number written. Asked of the encoding: a coarse
+    mantissa can round a magnitude up past the double range, where its value would not say it.
     """
     if not math.isfinite(value) or value == 0.0:
         return False
-    bits = fmt.encode(value)
-    return bits == 0 or not fmt.is_finite(bits)
+    encoded = fmt.encode(value)
+    return encoded.is_zero or encoded.is_inf
 
 
 def _refuse_unholdable(value: float | int | bool, scalar_type: ScalarType, what: str) -> None:
@@ -50,7 +49,7 @@ def _refuse_unholdable(value: float | int | bool, scalar_type: ScalarType, what:
         case FloatType(fmt=fmt):
             assert type(value) is float
             if degrades(value, fmt):
-                degraded = fmt.decode(fmt.encode(value))
+                degraded = float(fmt.encode(value))
                 raise UnsupportedConstruct(f"{what} {value!r} degrades to {degraded!r} in {fmt}; widen wexp or rescale")
         case IntType(fmt=fmt):
             assert type(value) is int
@@ -80,23 +79,21 @@ def _check_conditioner(conditioner: PortConditioner, port_type: ScalarType) -> N
 @dataclass(frozen=True, slots=True)
 class MirOperation:
     """
-    One use of a selected primitive, producing ONE value: its `result`-th result, a boolean one through its
-    `output_inversion`. A wide result is never conditioned at its producer -- its sign folds into whatever reads it --
-    so the inversion is present exactly for a boolean result. Operations sharing one block, primitive, operands, and
-    operand conditioners while tapping DISTINCT output ports fuse into a single firing at LIR build -- a multi-output
-    module computes all its results at once.
+    One use of a selected primitive, producing its one value, a boolean one through its `output_inversion`. A wide
+    result is never conditioned at its producer -- its sign folds into whatever reads it -- so the inversion is present
+    exactly for a boolean result. Operations sharing one block, drive, operands, and operand conditioners while tapping
+    DISTINCT output ports fuse into a single firing at LIR build -- a multi-output module computes all its results at
+    once.
     """
 
     primitive: Primitive
     operands: tuple[ValueId, ...]
     operand_conditioners: tuple[PortConditioner, ...]
-    result: int
     output_inversion: BoolInversion | None
     scalar_type: ScalarType = field(init=False, compare=False)
 
     def __post_init__(self) -> None:
         signature = self.primitive.signature
-        assert not isinstance(self.primitive, InlinePrimitive) or len(signature.result_types) == 1
         assert len(self.operands) == signature.arity
         assert len(self.operand_conditioners) == signature.arity
         for position, (conditioner, operand_type) in enumerate(
@@ -106,8 +103,7 @@ class MirOperation:
             # What the declaration licenses: an operand whose sign the primitive cannot observe carries the identity,
             # so every conditioned view of one value names one node.
             assert position not in self.primitive.unconditioned_operands or conditioner.is_identity
-        assert 0 <= self.result < len(signature.result_types)
-        result_type = signature.result_types[self.result]
+        result_type = signature.result_type
         assert (self.output_inversion is None) == result_type.is_wide
         object.__setattr__(self, "scalar_type", result_type)
 
@@ -279,7 +275,7 @@ def thread_arm(mir: Mir, arm: BlockId) -> Mir:
         case MirBranch(cond=cond, if_true=if_true, if_false=if_false):
             terminator = MirBranch(cond, retarget(if_true), retarget(if_false))
         case unexpected:
-            raise AssertionError(unexpected)
+            assert False, unexpected
     nodes = dict(mir.nodes)
     for vid in by_id[merge].phis:
         phi = nodes[vid]
@@ -326,22 +322,22 @@ class MirBuilder:
         self._cur = block
 
     @property
-    def current_block(self) -> BlockId:
+    def _current_block(self) -> BlockId:
         assert self._cur is not None
         return self._cur
 
-    def set_terminator(self, block: BlockId, terminator: MirTerminator) -> None:
+    def _set_terminator(self, block: BlockId, terminator: MirTerminator) -> None:
         self._blocks[block].terminator = terminator
 
     def jump(self, target: BlockId) -> None:
-        self.set_terminator(self.current_block, MirJump(target))
+        self._set_terminator(self._current_block, MirJump(target))
 
     def branch(self, cond: ValueId, if_true: BlockId, if_false: BlockId) -> None:
         assert isinstance(self._type_of(cond), BoolType)
-        self.set_terminator(self.current_block, MirBranch(cond, if_true, if_false))
+        self._set_terminator(self._current_block, MirBranch(cond, if_true, if_false))
 
     def ret(self) -> None:
-        self.set_terminator(self.current_block, MirRet())
+        self._set_terminator(self._current_block, MirRet())
 
     def _fresh(self, node: MirNode) -> ValueId:
         vid = len(self._nodes)
@@ -374,13 +370,12 @@ class MirBuilder:
         primitive: Primitive,
         operands: list[ValueId],
         operand_conditioners: list[PortConditioner],
-        result: int = 0,
         output_inversion: BoolInversion = BoolInversion(),
     ) -> ValueId:
         """
-        Append a use of a primitive producing its `result`-th result, a boolean one through `output_inversion`,
-        interned by the whole node within the current block, so two relations over one comparator firing -- or two
-        rounding modes over one operand -- stay distinct values while identical taps collapse.
+        Append a use of a primitive producing its value, a boolean one through `output_inversion`, interned by the whole
+        node within the current block, so two relations over one comparator firing -- or two rounding modes over one
+        operand -- stay distinct values while identical taps collapse.
         """
         signature = primitive.signature
         assert len(operands) == signature.arity
@@ -397,16 +392,16 @@ class MirBuilder:
                 zip(operand_conditioners, signature.operand_types, strict=True)
             )
         ]
-        wide = signature.result_types[result].is_wide
+        wide = signature.result_type.is_wide
         assert not (wide and output_inversion.invert), "a wide result is never conditioned at its producer"
         inversion = None if wide else output_inversion
-        node = MirOperation(primitive, tuple(operands), tuple(operand_conditioners), result, inversion)
-        key = (self.current_block, node)
+        node = MirOperation(primitive, tuple(operands), tuple(operand_conditioners), inversion)
+        key = (self._current_block, node)
         vid = self._block_intern.get(key)
         if vid is None:
             vid = self._fresh(node)
             self._block_intern[key] = vid
-            self._blocks[self.current_block].operations.append(vid)
+            self._blocks[self._current_block].operations.append(vid)
         return vid
 
     def _check_phi_arms(self, scalar_type: ScalarType, arms: list[tuple[BlockId, ValueId, PortConditioner]]) -> None:
@@ -416,34 +411,28 @@ class MirBuilder:
     def phi(self, scalar_type: ScalarType, arms: list[tuple[BlockId, ValueId, PortConditioner]]) -> ValueId:
         self._check_phi_arms(scalar_type, arms)
         vid = self._fresh(MirPhi(scalar_type=scalar_type, arms=tuple(arms)))
-        self._blocks[self.current_block].phis.append(vid)
+        self._blocks[self._current_block].phis.append(vid)
         return vid
 
-    def open_phi(self, scalar_type: ScalarType, entry_arm: tuple[BlockId, ValueId, PortConditioner]) -> ValueId:
-        """
-        Create a loop-header phi with only its entry arm; the latch arm is supplied later by set_phi_arms (the back
-        edge references a body value defined after the header in the lowering order).
-        """
-        return self.phi(scalar_type, [entry_arm])
-
     def set_phi_arms(self, phi: ValueId, arms: list[tuple[BlockId, ValueId, PortConditioner]]) -> None:
-        """Replace a phi's arms (closes a loop-header phi opened by open_phi once the latch value is lowered)."""
+        """
+        Replace a phi's arms: closes a loop-header phi created with the arms lowered so far, once the latch value is (a
+        back edge references a body value defined after the header in the lowering order).
+        """
         node = self._nodes[phi]
         assert isinstance(node, MirPhi)
         self._check_phi_arms(node.scalar_type, arms)
         self._nodes[phi] = MirPhi(scalar_type=node.scalar_type, arms=tuple(arms))
 
-    def output(self, name: str, value: ValueId, conditioner: PortConditioner | None = None) -> None:
+    def output(self, name: str, value: ValueId, conditioner: PortConditioner) -> None:
         scalar_type = self._type_of(value)
-        conditioner = identity_conditioner(scalar_type) if conditioner is None else conditioner
         _check_conditioner(conditioner, scalar_type)
         self._outputs.append(MirOutput(name, value, conditioner))
 
     def state_slot(
-        self, name: str, reset_value: float | int | bool, live_out: ValueId, conditioner: PortConditioner | None = None
+        self, name: str, reset_value: float | int | bool, live_out: ValueId, conditioner: PortConditioner
     ) -> None:
         scalar_type = self._type_of(live_out)
-        conditioner = identity_conditioner(scalar_type) if conditioner is None else conditioner
         _check_conditioner(conditioner, scalar_type)
         _refuse_unholdable(reset_value, scalar_type, f"state slot {name!r} reset")
         self._state_slots.append(MirStateSlot(name, reset_value, live_out, conditioner))

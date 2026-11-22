@@ -1,3 +1,4 @@
+import dataclasses
 import html
 import re
 import shlex
@@ -6,13 +7,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
+from holoso import Options
+
 from .._detect import find_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
-from .._flow_id import DeviceClass, FlowId
+from .._flow_id import DeviceClass, FlowId, SpeedGrade
 from ._flow import Flow
 
 _TCL = "run_diamond.tcl"
-_DEFINES = "holoso_defines.v"
 _LOG = "diamond.log"
 _FAILED_LOG = "diamond_failed.log"
 _CLOCK_NET = "clk_c"  # Diamond names the net driven by the `clk` input port `clk_c`.
@@ -23,8 +25,10 @@ class DiamondEcp5Device:
     device: str = "LFE5U-25F-6BG381C"
 
     @classmethod
-    def of(cls, device_class: DeviceClass) -> Self:
-        return cls("LFE5U-45F-6BG381C") if device_class is DeviceClass.LARGE else cls()
+    def of(cls, device_class: DeviceClass, speed_grade: SpeedGrade) -> Self:
+        size = 45 if device_class is DeviceClass.LARGE else 25
+        grade = {SpeedGrade.SLOWEST: 6, SpeedGrade.MIDDLE: 7, SpeedGrade.FASTEST: 8}[speed_grade]
+        return cls(f"LFE5U-{size}F-{grade}BG381C")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,13 +43,19 @@ class DiamondEcp5Flow(Flow):
             return False
         return (diamond.resolve().parent / "diamond_env").is_file() or find_tool("pnmainc") is not None
 
+    def attributed(self, options: Options) -> Options:
+        # LSE maps a ROM into block RAM only with resource sharing enabled, and sharing folds mutually exclusive
+        # arithmetic onto shared adders. The keep pins the integer divider's floor correction, where that was measured
+        # to cost closure (DESIGN.md's fabric-area exploration).
+        idivs = options.operator.idivs
+        if idivs.keep_attrs:
+            return options
+        keep = dataclasses.replace(idivs, keep_attrs={"syn_keep": 1})
+        return dataclasses.replace(options, operator=dataclasses.replace(options.operator, idivs=keep))
+
     def prepare(self, design: OocDesign) -> SynthArtifact:
         top = design.top
-        # LSE maps a ROM into block RAM only with resource sharing enabled, and sharing folds mutually exclusive
-        # arithmetic onto shared adders. The keep hook pins the nets where that was measured to cost closure, in both
-        # dividers (DESIGN.md's fabric-area exploration).
-        defines = SourceFile(Path(_DEFINES), "`define HOLOSO_ATTRIBUTE_KEEP (* syn_keep = 1 *)\n")
-        src = [defines, *design.files]
+        src = design.files
         verilog_paths = [source.path for source in src]
 
         lpf = SourceFile(Path(f"{top}.lpf"), _lpf(self.target_frequency_MHz))

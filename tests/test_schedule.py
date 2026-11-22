@@ -10,11 +10,6 @@ from pathlib import Path
 import pytest
 
 from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FMulILog2Options,
-    FMulOptions,
     FloatFormat,
     FloatValue,
     OperatorOptions,
@@ -36,7 +31,7 @@ from holoso._lir import (
     WideConstRef,
     WideOperand,
     landing_cycle,
-    operand_read_cycle,
+    read_cycle,
     read_sources_per_port,
 )
 from holoso._lir._ir import (
@@ -45,10 +40,8 @@ from holoso._lir._ir import (
     Early,
     InPlace,
     WideCopy,
-    boundary_step,
-    dependency_edge,
     exits,
-    pooled_write_word,
+    flipped,
     successor_blocks,
     successor_local_cycle,
 )
@@ -59,17 +52,19 @@ from holoso._operators import (
     BoolAndPrimitive,
     BoolInversion,
     BoolOrPrimitive,
-    FAddOperator,
+    BoolToFloatPrimitive,
     FAddPrimitive,
     FCmpPrimitive,
-    FDivsqrtOperator,
+    FCordicOperator,
     FDivPrimitive,
     FloatSignControl,
     FMulILog2Primitive,
-    FMulOperator,
+    FMinPrimitive,
     FMulPrimitive,
+    FSinPrimitive,
     SelectPrimitive,
 )
+from holoso._operators._float import FAddOperator, FCmpOperator, FDivsqrtOperator, FMulOperator
 from ._modelref import default_ifmt, block_makespan, build_lir, build_model, FROZEN_TUNING
 from holoso._lir._schedule import Schedule, schedule_ops
 from holoso._type import BoolType, FloatType
@@ -98,6 +93,7 @@ from ._modelref import (
     then_exit,
     SelectHold,
 )
+from . import _options as lean
 
 FMT = FloatFormat(6, 18)
 
@@ -113,14 +109,15 @@ def _examples_on_path() -> Iterator[None]:
 
 OPS = mir_options(
     Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
+        operator=OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            fcmp=lean.fcmp(),
         ),
         ffmt=FMT,
+        wmultiplier=18,
     )
 )
 _FETCH_LAG = 2  # the datapath lag the tests schedule against: one less than the 3-stage control fetch they build
@@ -139,7 +136,7 @@ def _wide_operations(mir: Mir) -> set[int]:
 
 
 def _schedule(mir: Mir) -> Schedule:
-    return schedule_ops(mir.nodes, _wide_operations(mir), _FETCH_LAG)
+    return schedule_ops(mir.nodes, _wide_operations(mir), _FETCH_LAG, {})
 
 
 def _muls(mir: Mir) -> list[int]:
@@ -164,10 +161,7 @@ def test_schedule_respects_dependencies() -> None:
         for operand in op.operands:
             node = mir.nodes[operand]
             if isinstance(node, MirOperation):
-                # A consumer issues no earlier than the producer's commit plus the pair's dependency edge (derived
-                # from the producer's result landing and the consumer's operand-read mechanism).
-                edge = dependency_edge(node.primitive, node.result, op.primitive, _FETCH_LAG)
-                assert cycle >= sched.issue_cycle[operand] + node.primitive.latency + edge
+                assert cycle >= sched.issue_cycle[operand] + node.primitive.latency + READ_FIRST_EDGE
 
 
 def test_pipelined_issue_overlaps_a_slow_op() -> None:
@@ -192,7 +186,7 @@ def test_pipelined_issue_overlaps_a_slow_op() -> None:
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: OperatorCase) -> None:
     # Regression: a chained comparison (here `lo < x < hi`) puts two comparator firings with distinct operand
-    # pairs in one block. The single pooled holoso_fcmp instance serves one firing per initiation interval, so the
+    # pairs in one block. The single pooled comparator instance serves one firing per initiation interval, so the
     # two must issue on distinct cycles. Before the contention rule the scheduler let both issue on the same cycle
     # -> they collided on the single comparator (one read the other's operands), corrupting the result in the RTL
     # while the model still passed.
@@ -204,7 +198,7 @@ def test_two_comparisons_in_a_block_serialize_on_the_shared_comparator(config: O
         lir.block_base[block.index] + op.issue_cycle
         for block in lir.blocks
         for op in block.ops
-        if isinstance(op.primitive, FCmpPrimitive)
+        if op.inst.operator.name == "fcmp"
     ]
     assert len(in_valid_pcs) >= 2
     assert len(set(in_valid_pcs)) == len(in_valid_pcs)  # instance contention spaces them: no comparator collision
@@ -221,7 +215,7 @@ def test_branch_comparison_commits_at_block_makespan(config: OperatorCase) -> No
     branch_blocks = [block for block in lir.blocks if isinstance(block.terminator, Branch)]
     assert len(branch_blocks) == 1
     (block,) = branch_blocks
-    comparisons = [op for op in block.ops if isinstance(op.primitive, FCmpPrimitive)]
+    comparisons = [op for op in block.ops if op.inst.operator.name == "fcmp"]
     assert len(comparisons) == 1
     (cmp_op,) = comparisons
     assert cmp_op.latency == config.fcmp_latency
@@ -231,7 +225,7 @@ def test_branch_comparison_commits_at_block_makespan(config: OperatorCase) -> No
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
 def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: OperatorCase) -> None:
     # Cross-block software pipelining: a branch block whose every successor is single-predecessor shrinks its
-    # terminator offset below the conservative drain boundary_step(makespan), so its in-flight results spill into the
+    # terminator offset below the conservative drain landing_cycle(makespan), so its in-flight results spill into the
     # successor frame instead of fully draining. Pins that the overlap actually engages. The overlap_spill_kernel
     # carries this shrink: a condition committing early gates a much later wide chain, so the block shrinks to
     # that chain's write word while the result lands in the single-pred arm frames. (recip_newton's loop header
@@ -242,7 +236,7 @@ def test_overlap_shrinks_branch_terminator_below_drained_boundary(config: Operat
         block
         for block in lir.blocks
         if isinstance(block.terminator, Branch)
-        and block.term_offset < boundary_step(block_makespan(block), lir.fetch_lag)
+        and block.term_offset < landing_cycle(block_makespan(block), lir.fetch_lag)
     ]
     assert shrunk, "no branch block shrank its terminator: cross-block overlap did not engage"
 
@@ -273,7 +267,7 @@ def test_entry_branch_on_resident_condition_skips_the_drained_boundary() -> None
     # the ENTRY needs that floor: the sequencer's accept hold (pc==0) precedes the branch redirect, so an entry branch
     # cannot settle at PC 0 (the non-entry dual is the next test).
     assert entry.term_offset == 1
-    assert entry.term_offset < boundary_step(block_makespan(entry), lir.fetch_lag)
+    assert entry.term_offset < landing_cycle(block_makespan(entry), lir.fetch_lag)
 
 
 def test_non_entry_branch_on_resident_condition_redirects_at_its_base() -> None:
@@ -352,7 +346,7 @@ def test_overlap_spilled_result_lands_in_successor_frame(config: OperatorCase) -
         (block, op, write)
         for block in lir.blocks
         if isinstance(block.terminator, Branch)
-        and block.term_offset < boundary_step(block_makespan(block), lir.fetch_lag)
+        and block.term_offset < landing_cycle(block_makespan(block), lir.fetch_lag)
         for op in block.ops
         for write in op.writes
         if isinstance(write.dst, RegRef) and landing_cycle(op.commit_cycle, lir.fetch_lag) > block.term_offset
@@ -360,9 +354,9 @@ def test_overlap_spilled_result_lands_in_successor_frame(config: OperatorCase) -
     assert spilled, "no wide result spilled past a shrunk terminator: the overlap corner did not trigger"
     # The spilling write's control WORD stays in the block (only the read-first landing tail crosses the terminator) --
     # so the emitter places it normally and the single-writer microcode validator never sees a replica. The word sits at
-    # the commit step itself (`pooled_write_word`), and the shrunk terminator must still clear it.
+    # the commit step itself, and the shrunk terminator must still clear it.
     for block, op, _write in spilled:
-        assert pooled_write_word(op.commit_cycle) <= block.term_offset
+        assert op.commit_cycle <= block.term_offset
 
 
 @pytest.mark.parametrize("config", COMPARATOR_OP_CASES, ids=lambda config: config.label)
@@ -380,9 +374,9 @@ def test_overlap_keeps_error_op_diagnostic_latch_in_frame(config: OperatorCase) 
             continue
         for op in block.ops:
             # The division: its err diagnostic latch must not cross the terminator.
-            if op.primitive.operator.error_ports:
-                assert block.term_offset < boundary_step(block_makespan(block), lir.fetch_lag)  # corner: block shrinks
-                assert block.term_offset >= pooled_write_word(op.commit_cycle) + lir.fetch_lag
+            if op.inst.operator.error_ports:
+                assert block.term_offset < landing_cycle(block_makespan(block), lir.fetch_lag)  # corner: block shrinks
+                assert block.term_offset >= op.commit_cycle + lir.fetch_lag
                 checked = True
     assert checked, "the error-bearing division did not land in a shrinkable branch block: corner not exercised"
 
@@ -395,7 +389,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
     # reproduce those PCs on every path, not the linear fall-through frame alone. Crash-before: the old stamping omitted
     # the non-fall-through arm's landing, so the predicted set was a strict subset of the model's actual writes (the
     # report drew the spilled value's residence on the wrong arm). Tied directly to the cosim oracle: every register the
-    # model writes (inputs bypass the writeback) is an op result here, so predicted landings must match it exactly.
+    # model writes is an op result here or an input, which lands on PC 1, so predicted landings must match it exactly.
     from holoso._backend.numerical import NumericalSimulator
 
     class _Recorder(NumericalSimulator):
@@ -405,7 +399,7 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
 
         def _write(self, dst: object, value: object) -> None:
             key = (type(dst).__name__, dst.index)  # type: ignore[attr-defined]
-            self.writes.setdefault(key, set()).add(self.pc)
+            self.writes.setdefault(key, set()).add(self._pc)
             super()._write(dst, value)  # type: ignore[arg-type]
 
     vectors = [(0.5, 2.0, 1.5), (2.0, 0.5, 1.5), (1.0, 1.0, 1.0), (0.5, 0.0, 1.5), (3.0, 1.0, 2.0), (1.0, 3.0, 0.0)]
@@ -415,11 +409,13 @@ def test_spilled_result_landings_match_the_numerical_model(config: OperatorCase)
         (overlap_div_err_kernel, "overlap_div_err"),
     ]:
         lir = build_lir(_run(kernel, config.make_mir(FMT)), f"{name}_{config.label}")
-        # These kernels write every register through an operation (no copies/installs/state), so the model's writeback
-        # set is exactly the op-result landings -- the cleanest tie to write_landing_pcs.
+        # These kernels write every register through an operation or an input load (no copies/installs/state), so the
+        # model's writes are exactly the op-result landings beside the inputs -- the cleanest tie to write_landing_pcs.
         assert not any(block.copies for block in lir.blocks)
         assert not lir.wide_state_slots and not lir.bool_state_slots
-        predicted: dict[tuple[str, int], set[int]] = {}
+        predicted: dict[tuple[str, int], set[int]] = {
+            (type(load.dst).__name__, load.dst.index): {1} for load in lir.inputs
+        }
         multi_arm = 0
         for block in lir.blocks:
             for op in _block_ops(block):
@@ -458,13 +454,13 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
 
         def _write(self, dst: object, value: object) -> None:
             if isinstance(dst, RegRef):
-                self.writes.setdefault(dst.index, set()).add(self.pc)
+                self.writes.setdefault(dst.index, set()).add(self._pc)
             super()._write(dst, value)  # type: ignore[arg-type]
 
     lir = build_lir(_run(NewtonReciprocal().__call__, config.make_mir(FMT)), f"recip_newton_{config.label}")
     assert any(
         isinstance(block.terminator, Branch)
-        and block.term_offset == boundary_step(block_makespan(block), lir.fetch_lag)
+        and block.term_offset == landing_cycle(block_makespan(block), lir.fetch_lag)
         for block in lir.blocks
     ), "recip_newton's header branch did not drain at the tight boundary: the real-kernel layout changed"
     predicted: dict[int, set[int]] = {}
@@ -488,7 +484,7 @@ def test_overlapping_loop_kernel_landings_are_real_model_writes(config: Operator
 
 
 def test_bool_only_block_drains_at_the_work_boundary() -> None:
-    # A drained block that does WORK carrying only boolean values at its boundary lands at boundary_step(makespan) (the
+    # A drained block that does WORK carrying only boolean values at its boundary lands at landing_cycle(makespan) (the
     # one bank-independent drain). The drain distinction that remains is the install's SOURCE, not its bank: a tail
     # INSTALL whose source is the block's own LAST work reads-first one step past the work makespan (its
     # block_makespan absorbs the +1), so it drains one step LATER than a settled-source install that fires
@@ -510,13 +506,13 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     assert (
         is_bool_only(pfd_ret) and not pfd_ret.copies and block_makespan(pfd_ret) > 0
     ), "pfd Ret: bool work, no install"
-    assert pfd_ret.term_offset == boundary_step(block_makespan(pfd_ret), pfd.fetch_lag)
+    assert pfd_ret.term_offset == landing_cycle(block_makespan(pfd_ret), pfd.fetch_lag)
 
     # An install-bearing bool-only block's drain tracks its install's SOURCE. A copy whose source is the block's own
     # LAST work reads-first one step past the work makespan, so its block_makespan absorbs the +1 and the block
     # drains one step LATER -- shrinking it would read the copy one PC before it lands. A source SETTLED at block
     # entry (here an input) needs no read-first sampling: the install fires at the work makespan and the block drains
-    # at boundary_step(makespan). Both residual installs are forced by `return r, <arm>` keeping the c-false arm live
+    # at landing_cycle(makespan). Both residual installs are forced by `return r, <arm>` keeping the c-false arm live
     # past the merge so it cannot coalesce onto the phi register; if-conversion is disabled so each diamond stays a
     # real branch rather than collapsing to a select.
 
@@ -545,7 +541,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     for block in computed:
         work = max(op.commit_cycle for op in _block_ops(block))
         assert block_makespan(block) == work + 1, "a last-work copy source must push the block makespan by one"
-        assert block.term_offset == boundary_step(
+        assert block.term_offset == landing_cycle(
             block_makespan(block), _FETCH_LAG
         ), "a last-work bool install reads-first past the work makespan, draining where its block_makespan lands"
 
@@ -563,7 +559,7 @@ def test_bool_only_block_drains_at_the_work_boundary() -> None:
     ), "no input-sourced bool install to exercise the unpushed drain"
     for block in resident:
         assert block_makespan(block) == 0, "a settled source must not push the empty block's makespan"
-        assert block.term_offset == boundary_step(block_makespan(block), _FETCH_LAG), (
+        assert block.term_offset == landing_cycle(block_makespan(block), _FETCH_LAG), (
             "a settled-source bool install fires at the work makespan and drains at its read-first landing, "
             "one step under a last-work one"
         )
@@ -579,7 +575,7 @@ def test_entry_block_reclaims_its_first_control_word() -> None:
     entry = next(block for block in lir.blocks if lir.block_base[block.index] == 0)
     first = min(entry.inline_ops, key=lambda op: op.issue_cycle)
     assert first.issue_cycle == 0, "entry block's first inline op did not reclaim ucode[0]"
-    fire_pc = operand_read_cycle(first.primitive, lir.block_base[entry.index] + first.issue_cycle, lir.fetch_lag)
+    fire_pc = read_cycle(lir.block_base[entry.index] + first.issue_cycle, lir.fetch_lag)
     assert fire_pc - lir.fetch_lag == 0, "the first boolean op does not fire on executing step 0"
 
 
@@ -668,7 +664,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
     # An arm whose ONLY constraint on its consumer is the spilled operand reads it as early as the latch-free wide read
     # allows: read == landing when the spill lands late enough, or landing+1 when it lands so early that the fetch_lag
     # read offset (issue + fetch_lag, issue >= 0) caps how early the consumer can read it (the consumer still issues
-    # optimally, so no II is lost). So tightness here is read_pc in {landing, landing+1}; a real coordinate-frame
+    # optimally, so no latency is lost). So tightness here is read_pc in {landing, landing+1}; a real coordinate-frame
     # regression (the historical land - term_offset +1 bug) would push every read to landing+2.
     for kernel, name in [(overlap_spill_kernel, "overlap_spill"), (overlap_dead_arm_spill_kernel, "dead_arm_spill")]:
         lir = build_lir(_run(kernel, config.make_mir(FMT)), f"{name}_{config.label}")
@@ -676,7 +672,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
         spilled_any = False
         tight = 0
         for block in lir.blocks:
-            if not isinstance(block.terminator, Branch) or block.term_offset >= boundary_step(
+            if not isinstance(block.terminator, Branch) or block.term_offset >= landing_cycle(
                 block_makespan(block), lir.fetch_lag
             ):
                 continue
@@ -703,9 +699,7 @@ def test_spill_carry_reads_at_the_model_landing_pc_not_one_cycle_late(config: Op
                             for operand in consumer.operands:
                                 if not (isinstance(operand.source, RegRef) and operand.source.index == write.dst.index):
                                     continue
-                                read_pc = base + operand_read_cycle(
-                                    consumer.primitive, consumer.issue_cycle, lir.fetch_lag
-                                )
+                                read_pc = read_cycle(base + consumer.issue_cycle, lir.fetch_lag)
                                 # SAFETY: never read the in-flight value before it physically lands -- an under-
                                 # reservation reads stale data, a miscompile the model shares (cosim cannot catch it).
                                 assert (
@@ -786,8 +780,8 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
         def tick(self, in_valid: bool, out_ready: bool) -> None:
             # The redirect samples a Branch condition directly out of bregs in _next_pc (not via _read), at the
             # terminator PC before the PC advances; capture it so the oracle counts that read at term_pc.
-            terminator = self._terminators.get(self.pc)
-            self.branch_read = (self.pc, terminator.cond.index) if isinstance(terminator, Branch) else None
+            terminator = self._terminators.get(self._pc)
+            self.branch_read = (self._pc, terminator.cond.index) if isinstance(terminator, Branch) else None
             super().tick(in_valid, out_ready)
 
         def _read(self, operand: WideOperand | BoolOperand) -> ScalarValue:
@@ -822,7 +816,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
                     steps.append((term_pc, frozenset(), frozenset(), frozenset({cond}), frozenset()))
                 steps.append(
                     (
-                        sim.pc,
+                        sim._pc,
                         frozenset(sim.reads),
                         frozenset(sim.writes),
                         frozenset(sim.bool_reads),
@@ -837,7 +831,7 @@ def test_residence_tint_is_path_exact_across_a_merge() -> None:
                 guard += 1
             sim.reads, sim.bool_reads = set(), set()
             _ = sim.output_values  # the output taps read their registers at the boundary PC
-            exit_terminator = sim._terminators.get(sim.pc)
+            exit_terminator = sim._terminators.get(sim._pc)
             if isinstance(exit_terminator, Branch):  # out_valid itself reads a conditional exit's condition
                 sim.bool_reads.add(exit_terminator.cond.index)
             pc, rd, wr, brd, bwr = steps[-1]
@@ -1032,24 +1026,24 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             self.branch: tuple[int, int] | None = None
 
         def tick(self, in_valid: bool, out_ready: bool) -> None:
-            term = self._terminators.get(self.pc)
-            self.branch = (self.pc, term.cond.index) if isinstance(term, Branch) else None
+            term = self._terminators.get(self._pc)
+            self.branch = (self._pc, term.cond.index) if isinstance(term, Branch) else None
             super().tick(in_valid, out_ready)
 
         def _read(self, operand: WideOperand | BoolOperand) -> ScalarValue:
             source = operand.source
             if isinstance(operand, WideOperand):
                 if isinstance(source, RegRef):
-                    self.events.append((self.pc, "r", "f", source.index))
+                    self.events.append((self._pc, "r", "f", source.index))
             elif isinstance(source, BoolRegRef):
-                self.events.append((self.pc, "r", "b", source.index))
+                self.events.append((self._pc, "r", "b", source.index))
             return super()._read(operand)
 
         def _write(self, dst: object, value: object) -> None:
             if isinstance(dst, RegRef):
-                self.events.append((self.pc, "w", "f", dst.index))
+                self.events.append((self._pc, "w", "f", dst.index))
             if isinstance(dst, BoolRegRef):
-                self.events.append((self.pc, "w", "b", dst.index))
+                self.events.append((self._pc, "w", "b", dst.index))
             super()._write(dst, value)  # type: ignore[arg-type]
 
     # A step is (pc, float reads, float writes, bool reads, bool writes, read_first). read_first marks the boundary
@@ -1100,7 +1094,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
                 if sim.branch is not None:  # the redirect samples the condition at term_pc, before this tick's _apply
                     events.append((sim.branch[0], "r", "b", sim.branch[1]))
                 events.extend(sim.events)
-                events.append((sim.pc, None, None, None))  # mark the landed PC visited even if it had no event
+                events.append((sim._pc, None, None, None))  # mark the landed PC visited even if it had no event
 
             run(True, False)
             guard = 0
@@ -1110,7 +1104,7 @@ def test_state_slot_residence_matches_the_model_under_carry() -> None:
             sim.events = []
             _ = sim.output_values  # the output taps read their registers at the exit PC (write-then-read with them)
             events.extend(sim.events)
-            exit_pc, exit_terminator = sim.pc, sim._terminators[sim.pc]
+            exit_pc, exit_terminator = sim._pc, sim._terminators[sim._pc]
             if isinstance(exit_terminator, Branch):  # out_valid itself reads a conditional exit's condition
                 events.append((exit_pc, "r", "b", exit_terminator.cond.index))
             steps = substeps(events, False)  # everything up to the accept edge is write-then-read
@@ -1221,7 +1215,7 @@ def test_a_result_respills_past_a_one_step_branching_block() -> None:
     for a in (False, True):
         for b in (False, True):
             for x, y in ((1.5, 2.5), (-3.0, 0.25)):
-                vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, y), a, b]
+                vector = [fmt.encode(x), fmt.encode(y), a, b]
                 assert model.run(*vector) == interpreter.run(*vector), (x, y, a, b)
 
 
@@ -1245,7 +1239,7 @@ def test_phi_install_does_not_clobber_the_branch_condition() -> None:
     builder.jump(merge)
     builder.position_at(merge)
     merged = builder.phi(BoolType(), [(entry, other, BoolInversion()), (then, inverted, BoolInversion())])
-    builder.output("out", merged)
+    builder.output("out", merged, BoolInversion())
     builder.ret()
     model = build_model(build_lir(builder.finish(), "phi_cond_clobber"))
     for flag_value in (False, True):
@@ -1334,7 +1328,7 @@ def test_state_writeback_installs_early_and_is_first_class() -> None:
     # restatement of them.
     op = lir.blocks[0].ops[0]
     assert landing_cycle(op.commit_cycle, _FETCH_LAG) == op.commit_cycle + _FETCH_LAG + READ_FIRST_EDGE
-    assert operand_read_cycle(op.primitive, op.issue_cycle, _FETCH_LAG) == op.issue_cycle + _FETCH_LAG
+    assert read_cycle(op.issue_cycle, _FETCH_LAG) == op.issue_cycle + _FETCH_LAG
 
 
 def test_cfg_phi_merge_register_shows_residence() -> None:
@@ -1418,9 +1412,9 @@ def test_cfg_branch_conditions_reuse_boolean_registers() -> None:
         return a
 
     lir = build_lir(_run(f, replace(OPS, ifconv_max_ops=0)), "branches", FROZEN_TUNING)
-    comparisons = sum(1 for b in lir.blocks for op in b.ops if isinstance(op.primitive, FCmpPrimitive))
+    comparisons = sum(1 for b in lir.blocks for op in b.ops if op.inst.operator.name == "fcmp")
     assert comparisons >= 3
-    assert lir.bool_regfile.nreg < comparisons
+    assert lir.bool_register_count < comparisons
     model = build_model(lir)
     assert abs(float(model.run(1.0, -1.0, 1.0)[0]) - 6.0) < 1e-3  # a=1; +1 (x>0); skip (y<=0); +4 (z>0) = 6
 
@@ -1554,9 +1548,7 @@ def test_sign_paired_constants_collapse_to_one_magnitude() -> None:
         return a + 1000.0, b + (-1000.0)
 
     lir = build_lir(_run(f), "f")
-    assert [c for c in lir.wide_consts if c == FloatValue.from_float(FMT, 1000.0)] == [
-        FloatValue.from_float(FMT, 1000.0)
-    ]
+    assert [c for c in lir.wide_consts if c == FMT.encode(1000.0)] == [FMT.encode(1000.0)]
     operands = [
         opnd
         for block in lir.blocks
@@ -1581,7 +1573,7 @@ def test_negative_constant_operand_is_stored_as_magnitude_with_negate() -> None:
         for opnd in op.operands
         if isinstance(opnd.source, WideConstRef)
     ]
-    assert lir.wide_consts[operand.source.index] == FloatValue.from_float(FMT, 1000.0)
+    assert lir.wide_consts[operand.source.index] == FMT.encode(1000.0)
     assert operand.conditioner == FloatSignControl(negate=True)
 
 
@@ -1617,10 +1609,10 @@ def test_stateful_slot_register_gaps_are_reused() -> None:
         Q_diag=np.array([1e-3, 1e9, 1e-9]),
     )
     lir = build_lir(_run(filt.update), "ekf1_stateful", FROZEN_TUNING)
-    # Gap reuse sheds the fully-reserved 45 down to the count the frozen tuning settles on, pinned here as a ceiling
+    # Gap reuse sheds the fully-reserved 53 down to the count the frozen tuning settles on, pinned here as a ceiling
     # (the allocator trades registers for mux arms at the configured price, so the count is a property of the
     # tuning).
-    assert lir.regfile.nreg <= 42
+    assert lir.wide_register_count <= 47
 
 
 type _Producer = tuple[str, int]
@@ -1683,7 +1675,7 @@ def test_register_sharing_is_hardware_disjoint() -> None:
     (block,) = lir.blocks
     for op in block.ops:
         for operand in op.operands:
-            note(operand.source, operand_read_cycle(op.primitive, op.issue_cycle, lir.fetch_lag))
+            note(operand.source, read_cycle(op.issue_cycle, lir.fetch_lag))
     for exit_pc in lir.exit_pcs:
         for wire in lir.outputs:
             note(wire.tap.source, exit_pc)
@@ -1710,13 +1702,18 @@ def test_register_sharing_is_hardware_disjoint() -> None:
     assert shared > 0  # the kernel does pack multiple values per register, so the invariant is actually exercised
 
 
-def test_is_commutative_marks_only_the_symmetric_operators() -> None:
-    # The allocator's orientation move below swaps a commutative primitive's operands, which is only sound if the
-    # primitive is exactly symmetric. This pins the metadata; the bit-exact symmetry itself is pinned publicly by
-    # test_arithmetic_behavior.py's commuted-edge sweeps.
-    assert FAddPrimitive(FAddOperator.build(FMT, FAddOptions())).is_commutative
-    assert FMulPrimitive(FMulOperator.build(FMT, FMulOptions(), 0)).is_commutative
-    assert not FDivPrimitive(FDivsqrtOperator.build(FMT, FDivsqrtOptions())).is_commutative
+def test_mirrors_mark_only_the_symmetric_taps() -> None:
+    # The allocator's orientation move below swaps an orientable firing's operands, which is only sound if every tapped
+    # result has a mirror answering it bit-exactly under the exchange. This pins the metadata; the bit-exact symmetry
+    # itself is pinned publicly by test_arithmetic_behavior.py's commuted-edge sweeps.
+    adder = FAddPrimitive(FAddOperator.build(FMT, lean.fadd()))
+    multiplier = FMulPrimitive(FMulOperator.build(FMT, lean.fmul(), lean.WMULTIPLIER))
+    assert adder.mirrored == adder and multiplier.mirrored == multiplier
+    assert FDivPrimitive(FDivsqrtOperator.build(FMT, lean.fdivsqrt())).mirrored is None
+    comparator = FCmpOperator.build(FMT, lean.fcmp())
+    gt, eq, lt = (FCmpPrimitive.of(comparator, relation)[0] for relation in (Relation.GT, Relation.EQ, Relation.LT))
+    assert flipped({"gt": gt, "eq": eq, "lt": lt}) == {"gt": lt, "eq": eq, "lt": gt}
+    assert flipped({"gt": gt, "min": FMinPrimitive(comparator)}) is None
 
 
 def test_orientation_reclaims_multiplier_reach() -> None:
@@ -1727,7 +1724,7 @@ def test_orientation_reclaims_multiplier_reach() -> None:
         return a * b + c * a
 
     lir = build_lir(_run(f), "oriented_products", FROZEN_TUNING)
-    products = [op for block in lir.blocks for op in block.ops if isinstance(op.primitive, FMulPrimitive)]
+    products = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fmul"]
     assert len(products) == 2, "the premise needs both products to survive HIR as multiplies"
     books = read_sources_per_port(lir)
     assert sum(max(0, len(book) - 1) for (inst, _), book in books.items() if inst.operator.name == "fmul") == 1
@@ -1762,8 +1759,7 @@ def test_bool_to_float_cast_result_is_live_on_its_landing_cycle() -> None:
     for fblock in lir.blocks:
         for fop, operand in ((fop, operand) for fop in fblock.ops for operand in fop.operands):
             if operand.source in cast_regs:
-                issue = lir.block_base[fblock.index] + fop.issue_cycle
-                read = operand_read_cycle(fop.primitive, issue, lir.fetch_lag)
+                read = read_cycle(lir.block_base[fblock.index] + fop.issue_cycle, lir.fetch_lag)
                 assert isinstance(operand.source, RegRef)
                 assert read in lir.liveness[operand.source]
 
@@ -1778,10 +1774,10 @@ def test_two_relations_over_one_operand_pair_fuse_into_one_firing() -> None:
         return float(below), float(same)
 
     lir = build_lir(_run(f), "fused_relations")
-    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive)]
+    firings = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fcmp"]
     assert len(firings) == 1, "lt and eq taps of one operand pair must fuse into one comparator firing"
     (firing,) = firings
-    assert [write.result for write in firing.writes] == sorted(write.result for write in firing.writes)
+    assert len(firing.taps) == 2
     assert len(firing.writes) == 2
     assert len({write.dst for write in firing.writes}) == 2  # simultaneous landings get distinct registers
     model = build_model(lir)
@@ -1799,7 +1795,7 @@ def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
         return float(below), float(not_below)
 
     lir = build_lir(_run(f), "split_inversions")
-    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive)]
+    firings = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fcmp"]
     assert len(firings) == 2, "same-port taps cannot share a firing"
     assert len({op.issue_cycle for op in firings}) == 2
     model = build_model(lir)
@@ -1808,29 +1804,25 @@ def test_same_port_taps_with_different_inversions_do_not_fuse() -> None:
         assert below == float(a < b) and not_below == float(a >= b), f"a={a} b={b}"
 
 
-def _throttled_add() -> FAddPrimitive:
-    operator = FAddOperator.build(FMT, FAddOptions())
-    (mode,) = operator.modes
-    return FAddPrimitive(replace(operator, modes=(replace(mode, initiation_interval=3),)))
-
-
 def test_initiation_interval_spaces_firings_on_one_instance() -> None:
-    # Two independent additions contend for the single throttled instance: the second may not issue until the
-    # first's busy window elapses, so their issues are at least II cycles apart.
+    # Two independent rotations contend for the single CORDIC instance, which accepts one transaction per initiation
+    # interval: the second may not issue until the first's busy window elapses.
     builder = MirBuilder(FMT, default_ifmt(FMT))
     builder.block()
     a = builder.input("a", FloatType(FMT))
     b = builder.input("b", FloatType(FMT))
-    slow = _throttled_add()
-    first = builder.operation(slow, [a, b], [FloatSignControl(), FloatSignControl()])
-    second = builder.operation(slow, [b, a], [FloatSignControl(), FloatSignControl()])
-    builder.output("out_0", first)
-    builder.output("out_1", second)
+    slow = FSinPrimitive(FCordicOperator.build(FMT, lean.fcordic(), lean.WMULTIPLIER))
+    interval = slow.drive.timing.initiation_interval
+    assert interval > 1
+    first = builder.operation(slow, [a], [FloatSignControl()])
+    second = builder.operation(slow, [b], [FloatSignControl()])
+    builder.output("out_0", first, FloatSignControl())
+    builder.output("out_1", second, FloatSignControl())
     builder.ret()
     mir = builder.finish()
-    sched = schedule_ops(mir.nodes, {first, second}, _FETCH_LAG)
+    sched = schedule_ops(mir.nodes, {first, second}, _FETCH_LAG, {})
     spacing = abs(sched.issue_cycle[second] - sched.issue_cycle[first])
-    assert spacing >= 3, f"II=3 must space same-instance firings by at least 3 cycles, got {spacing}"
+    assert spacing >= interval, f"II={interval} must space same-instance firings by as much, got {spacing}"
     assert sched.inst_of[first] == sched.inst_of[second]
 
 
@@ -1846,13 +1838,12 @@ def test_commutative_comparator_swap_permutes_output_taps(config: OperatorCase) 
         return float(below), float(above)
 
     lir = build_lir(_run(f, config.make_mir(FMT)), f"mirrored_{config.label}")
-    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive)]
+    firings = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fcmp"]
     assert len(firings) == 2
     sources = [tuple(operand.source for operand in op.operands) for op in firings]
     assert sources[0] == sources[1], "the allocator must orient both firings to read the same registers per port"
-    gt_port, lt_port = (FCmpPrimitive.tap_of(rel)[0] for rel in (Relation.GT, Relation.LT))
-    ports = sorted(write.result for op in firings for write in op.writes)
-    assert ports == sorted((gt_port, lt_port)), "exactly one firing's lt tap must move to gt under the swap"
+    ports = sorted(primitive.output_name for op in firings for primitive in op.taps)
+    assert ports == ["a_gt_b", "a_lt_b"], "exactly one firing's lt tap must move to gt under the swap"
     # The public value twin is test_public_api_behavior.py test_commuted_comparisons_agree_bool_exact.
 
 
@@ -1894,7 +1885,7 @@ def test_select_folds_arm_signs_into_operand_conditioners() -> None:
     cond, arm_true, arm_false = select.operands
     assert isinstance(arm_true, WideOperand) and arm_true.conditioner == FloatSignControl()
     assert isinstance(arm_false, WideOperand) and arm_false.conditioner == FloatSignControl(negate=True)
-    assert not [op for block in lir.blocks for op in block.ops if not isinstance(op.primitive, FCmpPrimitive)]
+    assert not [op for block in lir.blocks for op in block.ops if op.inst.operator.name != "fcmp"]
     # The public value twin is test_public_api_behavior.py test_sign_folds_into_select_both_orientations.
 
 
@@ -1914,9 +1905,7 @@ def test_state_early_install_respects_a_select_reader(config: OperatorCase) -> N
     assert len(selects) == 1
     ((block, select),) = selects
     (slot,) = lir.wide_state_slots
-    select_read_pc = lir.block_base[block.index] + operand_read_cycle(
-        select.primitive, select.issue_cycle, lir.fetch_lag
-    )
+    select_read_pc = lir.block_base[block.index] + read_cycle(select.issue_cycle, lir.fetch_lag)
     assert isinstance(slot.install, Early), "the premise needs an early install"
     early_block, copy = early_install(lir, slot)
     fire = lir.block_base[early_block.index] + copy.fire_step(lir.fetch_lag)
@@ -1933,7 +1922,7 @@ def test_an_input_latched_by_a_working_ret_block_installs_on_its_first_cycle() -
     lir = build_lir(_run(InputLatchSelect().__call__), "input_latch_select")
     (slot,) = lir.wide_state_slots
     assert early_install(lir, slot)[1].issue_cycle == 0
-    assert lir.regfile.nreg == 2, "the input's register must be free for the select's result"
+    assert lir.wide_register_count == 2, "the input's register must be free for the select's result"
     reference = InputLatchSelect()
     model = build_model(lir)
     for x, b in [(2.5, True), (-1.0, False), (4.0, True), (0.5, True), (3.0, False), (6.0, True)]:
@@ -1950,9 +1939,9 @@ def test_not_folds_into_every_sink_position() -> None:
         return float(flag), float(out_logic)
 
     lir = build_lir(_run(f), "not_sinks")
-    inline_mnemonics = sorted(op.primitive.mnemonic for block in lir.blocks for op in block.inline_ops)
-    assert inline_mnemonics == ["band", "ffrombool", "ffrombool"], inline_mnemonics
-    band = next(op for block in lir.blocks for op in block.inline_ops if op.primitive.mnemonic == "band")
+    inline_kinds = sorted(type(op.primitive).__name__ for block in lir.blocks for op in block.inline_ops)
+    assert inline_kinds == ["BoolAndPrimitive", "BoolToFloatPrimitive", "BoolToFloatPrimitive"], inline_kinds
+    band = next(op for block in lir.blocks for op in block.inline_ops if isinstance(op.primitive, BoolAndPrimitive))
     flag_operand, _ = band.operands
     assert isinstance(flag_operand, BoolOperand) and flag_operand.inversion == BoolInversion(True)
     # The public value twins are test_public_api_behavior.py's per-position NOT tests (logic operand, bool output).
@@ -1979,7 +1968,7 @@ def test_double_negation_cancels() -> None:
         return float(flag)
 
     lir = build_lir(_run(f), "double_not")
-    casts = [op for block in lir.blocks for op in block.inline_ops if op.primitive.mnemonic == "ffrombool"]
+    casts = [op for block in lir.blocks for op in block.inline_ops if isinstance(op.primitive, BoolToFloatPrimitive)]
     (cast,) = casts
     (operand,) = cast.operands
     assert isinstance(operand, BoolOperand) and operand.inversion == BoolInversion()
@@ -1993,7 +1982,7 @@ def test_value_consumed_in_both_polarities_shares_one_producer() -> None:
         return float(flag), float(not flag)
 
     lir = build_lir(_run(f), "both_polarities")
-    comparisons = [op for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive)]
+    comparisons = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fcmp"]
     assert len(comparisons) == 1 and len(comparisons[0].writes) == 1, "one tap serves both polarities"
     # The public value twin is test_public_api_behavior.py test_comparison_in_both_polarities.
 
@@ -2038,9 +2027,11 @@ def test_boolean_registers_are_reused_within_a_block() -> None:
         return x
 
     lir = build_lir(_run(f), "breg_reuse", FROZEN_TUNING)
-    conditions = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive))
+    conditions = sum(1 for block in lir.blocks for op in block.ops if op.inst.operator.name == "fcmp")
     assert conditions == 6, "the unrolled chain carries six comparisons"
-    assert lir.bool_regfile.nreg <= 2, f"disjoint condition lifetimes must share registers, got {lir.bool_regfile.nreg}"
+    assert (
+        lir.bool_register_count <= 2
+    ), f"disjoint condition lifetimes must share registers, got {lir.bool_register_count}"
     model = build_model(lir)
     for x in (0.0, 3.5, -2.0):
         want = x
@@ -2059,10 +2050,10 @@ def test_boolean_logic_chain_reuses_registers_on_the_tight_same_bank_edge() -> N
         return 1.0 if (a > b and c > d and e > g and a > d and b > e) else 0.0
 
     lir = build_lir(_run(f), "bool_chain", FROZEN_TUNING)
-    comparisons = sum(1 for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive))
-    ands = sum(1 for block in lir.blocks for op in block.inline_ops if op.primitive.mnemonic == "band")
+    comparisons = sum(1 for block in lir.blocks for op in block.ops if op.inst.operator.name == "fcmp")
+    ands = sum(1 for block in lir.blocks for op in block.inline_ops if isinstance(op.primitive, BoolAndPrimitive))
     assert comparisons == 5 and ands >= 4, (comparisons, ands)
-    assert lir.bool_regfile.nreg <= 3, f"the chained flags must reuse registers, got {lir.bool_regfile.nreg}"
+    assert lir.bool_register_count <= 3, f"the chained flags must reuse registers, got {lir.bool_register_count}"
     # The public value twin for the tight same-bank edge is test_overlap_behavior.py
     # test_cross_bank_chain_edges_match_reference.
 
@@ -2107,8 +2098,8 @@ def test_unread_public_state_keeps_only_its_port() -> None:
     from phase_frequency_detector import PhaseFrequencyDetector  # noqa: PLC0415
 
     pfd = build_lir(_run(PhaseFrequencyDetector().__call__), "pfd_ports", FROZEN_TUNING)
-    assert pfd.bool_regfile.nreg == 5
-    assert pfd.regfile.nreg == 0  # purely boolean: the wide bank is unused
+    assert pfd.bool_register_count == 5
+    assert pfd.wide_register_count == 0  # purely boolean: the wide bank is unused
     assert len(pfd.bool_state_slots) == 2  # `up` and `down` keep no slot
     assert all(isinstance(slot.install, InPlace) for slot in pfd.bool_state_slots)
 
@@ -2130,7 +2121,9 @@ def _firings(lir: Lir, mnemonic: str) -> list[PooledScheduledOp]:
 def _multiplier_ops(instances: int) -> MirOptions:
     return mir_options(
         Options(
-            OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(instances=instances), fcmp=FCmpOptions()), ffmt=FMT
+            operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul(instances=instances), fcmp=lean.fcmp()),
+            ffmt=FMT,
+            wmultiplier=18,
         )
     )
 
@@ -2144,7 +2137,7 @@ def test_a_second_multiplier_shortens_an_independent_product_chain() -> None:
     two = build_lir(_run(_four_products, _multiplier_ops(2)), "products_two")
     assert _instance_counts(one)["fmul"] == 1 and _instance_counts(two)["fmul"] == 2
     assert len(_firings(two, "fmul")) == len(_firings(one, "fmul")) == 4
-    assert two.min_initiation_interval < one.min_initiation_interval
+    assert two.min_latency < one.min_latency
 
 
 def test_a_dependent_product_chain_leaves_the_second_multiplier_uninstantiated() -> None:
@@ -2231,7 +2224,7 @@ def test_lone_hypot_decomposes_without_spinning_up_a_cordic() -> None:
     # that cannot overflow.
     assert counts.get("fdivsqrt") == 1 and counts.get("filog2") == 1
     assert "fcmp" not in counts
-    assert not any(isinstance(op.primitive, FDivPrimitive) for op in _firings(lir, "fdivsqrt"))
+    assert not any(isinstance(primitive, FDivPrimitive) for op in _firings(lir, "fdivsqrt") for primitive in op.taps)
     # Both legs are extracted on the one instance and all three scalings ride one scaler.
     assert len(_firings(lir, "filog2")) == 2 and len(_firings(lir, "fmul_ilog2")) == 3
 
@@ -2293,11 +2286,11 @@ def _assert_two_firings_at_minimal_ii(lir: Lir, mnemonic: str) -> None:
     assert _instance_counts(lir).get(mnemonic) == 1
     firings = sorted(_firings(lir, mnemonic), key=lambda op: op.issue_cycle)
     assert len(firings) == 2
-    primitive = firings[0].primitive
-    assert primitive.initiation_interval == primitive.latency + 1
+    interval = firings[0].initiation_interval
+    assert interval > 1
     # Spacing must be EXACTLY the II: under-spacing drops a transaction, over-spacing means the scheduler failed to
     # pack the second issue at the re-accept boundary -- both are regressions.
-    assert firings[1].issue_cycle - firings[0].issue_cycle == primitive.initiation_interval
+    assert firings[1].issue_cycle - firings[0].issue_cycle == interval
 
 
 def test_inflight_source_install_fires_exactly_at_the_spilled_landing() -> None:

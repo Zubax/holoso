@@ -19,30 +19,27 @@ from jaxtyping import Float64
 
 import holoso
 from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FMulILog2Options,
-    FMulOptions,
     FloatFormat,
     OperatorOptions,
     Options,
     UnsupportedConstruct,
 )
+from . import _options as lean
 
 _FMT = FloatFormat(4, 8)
 
 
 def _ops() -> Options:
     return Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            fcmp=FCmpOptions(),
+        operator=OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            fcmp=lean.fcmp(),
         ),
         ffmt=_FMT,
+        wmultiplier=18,
     )
 
 

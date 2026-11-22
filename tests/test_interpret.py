@@ -12,6 +12,8 @@ The independence guard asserts the interpreter's TRANSITIVE import closure exclu
 exists to verify -- so the oracle can never silently re-couple to the artifact under test, even through an intermediary.
 """
 
+import dataclasses
+import math
 from collections.abc import Callable
 
 import numpy as np
@@ -24,6 +26,7 @@ from holoso._mir._interpret import MirInterpreter
 from holoso._type import BoolType, FloatFormat, IntType
 from holoso._value import FloatValue, coerce_scalar
 
+from . import _options as lean
 from ._eel_corpus import INT_CASES, int_corpus_options
 from ._eeloracle import InputRow
 from ._examples import SPECS, ExampleSpec
@@ -34,7 +37,11 @@ from ._modelref import (
     bool_phi_swap_computed_loop,
     branch_boundary_kernel,
     branchy_swap_mixed_arm_loop,
+    build_lir,
+    build_model,
     build_model_and_interpreter,
+    combinational_options,
+    default_options,
     with_instances,
     mir_options,
     ChainedSlots,
@@ -81,6 +88,17 @@ def test_interpreter_matches_model_on_examples(spec: ExampleSpec, fmt: FloatForm
     assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
 
 
+@pytest.mark.parametrize(
+    "spec,fmt",
+    [pytest.param(spec, fmt, id=f"{spec.name}-e{fmt.wexp}m{fmt.wman}") for spec in SPECS for fmt in spec.formats],
+)
+def test_interpreter_matches_model_on_combinational_examples(spec: ExampleSpec, fmt: FloatFormat) -> None:
+    options = spec.configured(combinational_options(fmt))
+    model, interpreter = build_model_and_interpreter(spec.make_kernel(), mir_options(options), f"{spec.name}_comb", fmt)
+    vectors = [_spec_vector(model, row) for row in spec.raw_vectors()]
+    assert_model_equals_interpreter(model, interpreter, vectors, spec.name)
+
+
 # The scheduling corner kernels, driven with bounded random inputs (magnitudes kept modest so the data-dependent
 # diamond-then-loop trip count stays small and no operation overflows the coarse format). Each is exercised at both the
 # minimum-latency and the deeply-pipelined operator configs, since the model's timing -- but never the interpreter's --
@@ -107,7 +125,7 @@ def _bounded_vectors(model: NumericalSimulator, fmt: FloatFormat, rng: np.random
             if isinstance(port.scalar_type, BoolType):
                 vector.append(bool(rng.integers(0, 2)))
             else:
-                vector.append(FloatValue.from_float(fmt, float(rng.uniform(0.5, 3.5))))
+                vector.append(fmt.encode(float(rng.uniform(0.5, 3.5))))
         vectors.append(vector)
     return vectors
 
@@ -128,9 +146,7 @@ def test_interpreter_matches_model_on_edge_bits() -> None:
     fmt = FloatFormat(6, 18)
     model, interpreter = build_model_and_interpreter(branch_boundary_kernel, default_mir(fmt), "branch_boundary", fmt)
     rng = np.random.default_rng(0x5EED)
-    vectors: list[Vector] = [
-        [FloatValue.from_bits(fmt, random_legal_bits(fmt, rng)) for _ in model.inputs] for _ in range(256)
-    ]
+    vectors: list[Vector] = [[FloatValue(fmt, random_legal_bits(fmt, rng)) for _ in model.inputs] for _ in range(256)]
     assert_model_equals_interpreter(model, interpreter, vectors, "branch_boundary-edgebits")
 
 
@@ -144,7 +160,7 @@ def test_loop_header_phi_swap_resolves_in_parallel() -> None:
     model, interpreter = build_model_and_interpreter(phi_swap_loop, default_mir(fmt), "phi_swap_loop", fmt)
     for x in (2.0, -3.0, 0.5, 5.0):
         for n in (1.0, 2.0, 3.0, 4.0):
-            vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
+            vector = [fmt.encode(x), fmt.encode(n)]
             model_out = model.run(*vector)
             interp_out = interpreter.run(*vector)
             assert model_out == interp_out, f"interp != model at x={x} n={n}"
@@ -165,7 +181,7 @@ def test_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> None:
     model, interpreter = build_model_and_interpreter(phi_swap_computed_loop, default_mir(fmt), "phi_swap_computed", fmt)
     for x in (1.0, 2.0, -1.5):
         for n in (1.0, 2.0, 3.0, 4.0):
-            vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, n)]
+            vector = [fmt.encode(x), fmt.encode(n)]
             model_out = model.run(*vector)
             interp_out = interpreter.run(*vector)
             reference = phi_swap_computed_loop(x, n)
@@ -183,7 +199,7 @@ def test_bool_loop_header_phi_swap_with_computed_arm_resolves_in_parallel() -> N
     )
     for x in (False, True):
         for n in (1.0, 2.0, 3.0, 4.0):
-            vector: Vector = [x, FloatValue.from_float(fmt, n)]
+            vector: Vector = [x, fmt.encode(n)]
             model_out = model.run(*vector)
             interp_out = interpreter.run(*vector)
             reference = bool_phi_swap_computed_loop(x, n)
@@ -206,7 +222,7 @@ def test_mixed_arm_swap_diamond_builds_and_matches_python() -> None:
     )
     for x in (1.0, -1.0):
         for n in (1.0, 2.0, 3.0):
-            vector = [FloatValue.from_float(fmt, x), FloatValue.from_float(fmt, 4.0), FloatValue.from_float(fmt, n)]
+            vector = [fmt.encode(x), fmt.encode(4.0), fmt.encode(n)]
             model_out = model.run(*vector)
             interp_out = interpreter.run(*vector)
             reference = branchy_swap_mixed_arm_loop(x, 4.0, n)
@@ -225,7 +241,7 @@ def test_state_slot_swap_writeback_is_parallel() -> None:
     model, interpreter = build_model_and_interpreter(SlotSwap().step, default_mir(fmt), "slot_swap", fmt)
     reference = SlotSwap()
     for x in (0.0, 1.0, -2.0, 3.0, -4.0, 5.0):
-        vector = [FloatValue.from_float(fmt, x)]
+        vector = [fmt.encode(x)]
         model_out = model.run(*vector)
         interp_out = interpreter.run(*vector)
         assert model_out == interp_out, f"interp != model at x={x}"
@@ -267,3 +283,61 @@ def test_interpreter_imports_nothing_from_lir() -> None:
     """
     offenders = forbidden_imports(MirInterpreter.__module__, "holoso._lir")
     assert not offenders, f"interpreter transitively imports the LIR layer it verifies: {offenders}"
+
+
+def _rotate_vector_and_measure(a: float, y: float, x: float) -> tuple[float, float, float]:
+    return math.sin(a), math.atan2(y, x), math.hypot(y, x)
+
+
+def _angle(y: float, x: float) -> float:
+    return math.atan2(y, x)
+
+
+def _phase(a: float) -> float:
+    return math.cos(a)
+
+
+def _root(x: float) -> float:
+    return math.sqrt(x)
+
+
+def _quotient(a: float, b: float) -> float:
+    return a / b
+
+
+@pytest.mark.parametrize(
+    "kernel,instances,specialized",
+    [
+        (_rotate_vector_and_measure, 1, False),
+        (_rotate_vector_and_measure, 2, True),
+        (_angle, 1, True),
+        (_phase, 1, True),
+        (_root, 1, True),
+        (_quotient, 1, True),
+    ],
+)
+def test_the_model_computes_on_the_block_each_instance_renders(
+    kernel: Callable[..., float], instances: int, specialized: bool
+) -> None:
+    # The model evaluates every firing on its instance's own block and the interpreter on the operator's, so a
+    # specialization computing other than the operator does -- a magnitude dropped where a vectoring writes it, a
+    # divider built for the other operation -- parts the two. The one instance both rotating and vectoring with the
+    # magnitude must keep the operator's block.
+    fmt = FloatFormat(6, 18)
+    options = with_instances(
+        dataclasses.replace(
+            default_options(fmt),
+            operator=dataclasses.replace(default_options(fmt).operator, frint=lean.frint(), ffromint=lean.ffromint()),
+        ),
+        instances,
+    )
+    mir = lower_to_mir(lower_frontend(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
+    lir = build_lir(mir, kernel.__name__.strip("_"))
+    assert any(block != inst.operator.block for inst, block in lir.instances.items()) == specialized, "the premise"
+    model, interpreter = build_model(lir), MirInterpreter(mir)
+    rng = np.random.default_rng(7)
+    rows = [[rng.uniform(-3.0, 3.0) for _ in model.inputs] for _ in range(24)]
+    vectors = [
+        [coerce_scalar(port.scalar_type, value, port.name) for port, value in zip(model.inputs, row)] for row in rows
+    ]
+    assert_model_equals_interpreter(model, interpreter, vectors, kernel.__name__)

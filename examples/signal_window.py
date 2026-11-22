@@ -29,14 +29,19 @@ def signal_window(x: float, lo: float, hi: float) -> tuple[float, bool, bool, bo
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(),
-            fmul=holoso.FMulOptions(stage_product=2),
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
+        operator=holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(stage_input=0, stage_core=holoso.FAddOptions.CoreStages.NONE, stage_output=0),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            fdivsqrt=holoso.FDivsqrtOptions(
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+            ),
+            fmul_ilog2=holoso.FMulILog2Options(
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+            ),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
         ),
         ffmt=float_format,
+        wmultiplier=18,
     )
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(signal_window, options)

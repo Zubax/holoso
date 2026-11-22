@@ -13,17 +13,12 @@ from collections.abc import Callable
 
 import numpy as np
 import pytest
+import zkf
 
 import holoso
 from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FFmaOptions,
     FloatFormat,
     FloatValue,
-    FMulILog2Options,
-    FMulOptions,
     OperatorOptions,
     Options,
     UnsupportedConstruct,
@@ -40,21 +35,24 @@ from ._modelref import (
     mir_options,
     within,
 )
+from . import _options as lean
 
 FMT = FloatFormat(8, 18)
+_FMA = zkf.Fma(fmt=FMT, wmultiplier=lean.WMULTIPLIER)
 
 
 def _options(*, fma: bool) -> Options:
     return Options(
-        OperatorOptions(
-            fcmp=FCmpOptions(),
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            ffma=FFmaOptions() if fma else None,
+        operator=OperatorOptions(
+            fcmp=lean.fcmp(),
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            ffma=lean.ffma() if fma else None,
         ),
         ffmt=FMT,
+        wmultiplier=lean.WMULTIPLIER,
     )
 
 
@@ -73,7 +71,7 @@ def _mnemonics(fn: Callable[..., object], options: Options) -> collections.Count
 def _schedule(fn: Callable[..., object], options: Options, name: str) -> tuple[int, int]:
     """The shipped program's schedule."""
     lir = build_lir(lower_to_mir(lower(fn, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name)
-    return lir.min_initiation_interval, lir.last_pc
+    return lir.min_latency, lir.last_pc
 
 
 def _run(fn: Callable[..., object], options: Options, name: str, *args: float) -> tuple[float, ...]:
@@ -82,7 +80,7 @@ def _run(fn: Callable[..., object], options: Options, name: str, *args: float) -
 
 
 def _fused_bits(a: float, b: float, c: float) -> int:
-    return FloatValue.fma(*(FloatValue.from_float(FMT, value) for value in (a, b, c))).bits
+    return _FMA.evaluate(*(FMT.encode(value) for value in (a, b, c))).bits
 
 
 def _fused_model(fn: Callable[..., object], name: str) -> holoso.NumericalSimulator:
@@ -211,7 +209,7 @@ def test_the_sharing_passes_do_not_strand_a_reciprocal_between_them() -> None:
         same = (a + reciprocal) - reciprocal
         return same, x / y
 
-    options = Options(OperatorOptions(fadd=FAddOptions(), fdivsqrt=FDivsqrtOptions()), ffmt=FMT)
+    options = Options(operator=OperatorOptions(fadd=lean.fadd(), fdivsqrt=lean.fdivsqrt()), ffmt=FMT, wmultiplier=18)
     model = holoso.synthesize(kernel, options, name="sharing_order").numerical_model.elaborate()
     assert tuple(float(v) for v in model.run(2.0, 6.0, 3.0)) == (2.0, 2.0)
 
@@ -296,11 +294,11 @@ def test_factoring_leaves_an_addend_the_fold_already_answered() -> None:
         known = x * 0.0 + 0.52
         return known * 0.52 + y * 0.52
 
-    options = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()), ffmt=narrow)
+    options = Options(operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul()), ffmt=narrow, wmultiplier=18)
     model = holoso.synthesize(kernel, options, name="folded_addend").numerical_model.elaborate()
     (got,) = model.run(3.0, 0.0)
     assert isinstance(got, FloatValue)
-    assert got.bits == FloatValue.from_float(narrow, 0.52 * 0.52).bits
+    assert got.bits == narrow.encode(0.52 * 0.52).bits
 
 
 def test_a_deeply_nested_product_divisor_builds_its_reciprocal() -> None:
@@ -358,17 +356,46 @@ def test_a_sum_that_cancels_entirely_needs_no_operation() -> None:
 
 
 def test_a_form_the_pass_gave_up_on_is_not_read_as_a_scaling_of_itself() -> None:
-    # An oversized form reads as `1 * itself`; answering it would multiply by a value defined nowhere.
-    def kernel(x: float, y: float) -> float:
+    # The fused decay outgrows the bit limit, and the form given up on at the fused node reads as `1 * itself`;
+    # answering it would multiply by a value defined nowhere.
+    def decay(x: float, y: float) -> float:
         p = x
-        total = x
-        for _ in range(70):  # past the term limit, so the form gives up and stands for itself
-            p = p * y
+        for _ in range(120):
+            p = math.fma(0.9, p, y)
+        return p
+
+    (got,) = _run(decay, _options(fma=True), "decay", 1.0, 0.5)
+    assert got == pytest.approx(decay(1.0, 0.5), rel=1e-4)
+
+
+def test_a_cancellation_holds_with_coefficients_near_the_bit_limit() -> None:
+    # Fifty trips of a 0.9 decay give coefficients of some two thousand bits, half the limit; an estimate of their
+    # size that ran past it would give the forms up and keep the difference.
+    def kernel(x: float, y: float) -> float:
+        perturbed, nominal = x, 0.0
+        for _ in range(50):
+            perturbed = 0.9 * perturbed + y
+            nominal = 0.9 * nominal + y
+        return perturbed - nominal
+
+    assert _mnemonics(kernel, _options(fma=False)) == collections.Counter({"fmul": 1})
+
+
+def test_a_sum_cancels_however_many_terms_it_carries() -> None:
+    def kernel(x: float, y: float) -> float:
+        total = y
+        p = x
+        for _ in range(100):
+            p = p * x
             total = total + p
+        p = x
+        for _ in range(100):
+            p = p * x
+            total = total - p
         return total
 
-    model = holoso.synthesize(kernel, _options(fma=False), name="opaque_form").numerical_model.elaborate()
-    assert float(model.run(1.0, 1.0)[0]) == 71.0
+    assert _mnemonics(kernel, _options(fma=False)) == collections.Counter()
+    assert _run(kernel, _options(fma=False), "hundred_terms", 1.5, 2.0) == (2.0,)
 
 
 def _relations_over_one_pair(x: float) -> tuple[bool, bool]:
@@ -448,7 +475,7 @@ def _summed_through_a_merge(x: float, y: float, c: bool) -> float:
 def test_a_merge_carries_the_arm_it_reads() -> None:
     # Liveness reaches through a merge to what an answered arm reads, or the arm's addition would stand.
     options = dataclasses.replace(_options(fma=False), ifconv_max_ops=0)  # keep the branch, so the merge is a phi
-    assert _mnemonics(_summed_through_a_merge, options) == collections.Counter({"select": 1})
+    assert _mnemonics(_summed_through_a_merge, options) == collections.Counter({"SelectPrimitive": 1})
     model = holoso.synthesize(_summed_through_a_merge, options, name="merged_arm").numerical_model.elaborate()
     for c in (True, False):
         assert float(model.run(2.0, 3.0, c)[0]) == _summed_through_a_merge(2.0, 3.0, c), f"c={c}"
@@ -487,8 +514,9 @@ def test_a_sign_operand_is_not_credited_as_retired() -> None:
 
 
 _WIDE = Options(
-    OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(), fmul_ilog2=FMulILog2Options()),
+    operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul(), fmul_ilog2=lean.fmul_ilog2()),
     ffmt=FloatFormat(12, 36),
+    wmultiplier=18,
 )
 """
 A format whose exponent span far outreaches the host's, so a coefficient the host cannot name is one the
@@ -545,7 +573,9 @@ def test_a_sum_that_cancels_to_a_number_no_host_float_names_stands() -> None:
     scaled, got = model.run(0.0)
     assert isinstance(got, FloatValue) and got == scaled
     fmt = _WIDE.ffmt
-    assert got.bits == fmt.encode(2.0**600) + (600 << (fmt.wman - 1)), "2**1200: the exponent field of 2**600 stepped"
+    assert got.bits == fmt.encode(2.0**600).bits + (
+        600 << (fmt.wman - 1)
+    ), "2**1200: the exponent field of 2**600 stepped"
 
 
 def _collapse_retires_nothing(x: float) -> tuple[float, float]:
@@ -571,10 +601,14 @@ def test_a_collapse_asks_for_the_operator_its_answer_needs() -> None:
     def five_minus_two(x: float) -> float:
         return 5.0 * x - 2.0 * x
 
-    no_scaler = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()), ffmt=FMT)
-    no_multiplier = Options(OperatorOptions(fadd=FAddOptions(), fmul_ilog2=FMulILog2Options()), ffmt=FMT)
+    no_scaler = Options(operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul()), ffmt=FMT, wmultiplier=18)
+    no_multiplier = Options(
+        operator=OperatorOptions(fadd=lean.fadd(), fmul_ilog2=lean.fmul_ilog2()), ffmt=FMT, wmultiplier=18
+    )
     fma_for_the_multiplier = Options(
-        OperatorOptions(fadd=FAddOptions(), ffma=FFmaOptions(), fmul_ilog2=FMulILog2Options()), ffmt=FMT
+        operator=OperatorOptions(fadd=lean.fadd(), ffma=lean.ffma(), fmul_ilog2=lean.fmul_ilog2()),
+        ffmt=FMT,
+        wmultiplier=18,
     )
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(doubled, no_scaler, name="no_scaler")
@@ -641,7 +675,11 @@ def test_a_written_subnormal_literal_keeps_its_magnitude() -> None:
         return x * -3e-310
 
     fmt = FloatFormat(11, 36)
-    options = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions(), fmul_ilog2=FMulILog2Options()), ffmt=fmt)
+    options = Options(
+        operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul(), fmul_ilog2=lean.fmul_ilog2()),
+        ffmt=fmt,
+        wmultiplier=18,
+    )
     assert _mnemonics(kernel, options) == collections.Counter({"fmul": 1, "fmul_ilog2": 1})
     (got,) = _run(kernel, options, "subnormal_literal", 1e300)
     assert within(got, -3e-10, *default_tolerance(fmt, 2, magnitude=3e-10))
@@ -653,7 +691,11 @@ def test_a_fused_product_by_a_written_subnormal_literal_peels_its_sign_too() -> 
         return math.fma(x, -3e-310, c)
 
     fmt = FloatFormat(11, 36)
-    options = Options(OperatorOptions(fadd=FAddOptions(), ffma=FFmaOptions(), fmul_ilog2=FMulILog2Options()), ffmt=fmt)
+    options = Options(
+        operator=OperatorOptions(fadd=lean.fadd(), ffma=lean.ffma(), fmul_ilog2=lean.fmul_ilog2()),
+        ffmt=fmt,
+        wmultiplier=18,
+    )
     assert _mnemonics(kernel, options) == collections.Counter({"ffma": 1, "fmul_ilog2": 1})
     (got,) = _run(kernel, options, "fused_subnormal_literal", 1e300, 1.0)
     assert within(got, 1.0 - 3e-10, *default_tolerance(fmt, 2, magnitude=1.0))
@@ -699,7 +741,7 @@ def test_a_constant_past_the_formats_reach_does_not_name_the_scaler_as_the_remed
         return x * 1e-40
 
     narrow = FloatFormat(6, 18)
-    without = Options(OperatorOptions(fadd=FAddOptions(), fmul=FMulOptions()), ffmt=narrow)
+    without = Options(operator=OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul()), ffmt=narrow, wmultiplier=18)
     with pytest.raises(UnsupportedConstruct):
         holoso.synthesize(kernel, without, name="past_the_reach")
     with pytest.raises(UnsupportedConstruct):
@@ -707,4 +749,4 @@ def test_a_constant_past_the_formats_reach_does_not_name_the_scaler_as_the_remed
 
 
 def _with_scaler(ops: OperatorOptions) -> OperatorOptions:
-    return dataclasses.replace(ops, fmul_ilog2=FMulILog2Options())
+    return dataclasses.replace(ops, fmul_ilog2=lean.fmul_ilog2())

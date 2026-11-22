@@ -96,9 +96,9 @@ def rebuild(hir: Hir, build_value: BuildValue | None = None, keep: Set[ValueId] 
             assert isinstance(node, Phi)
             if all(arm in remap for _, arm in node.arms):
                 emit(vid)
-            else:  # a loop-header phi: open it with the preheader arm now, close the latch arm after all blocks
+            else:  # a loop-header phi: create it with the arms known now, close the latch arm after all blocks
                 known = [(pred, remap[arm]) for pred, arm in node.arms if arm in remap]
-                remap[vid] = builder.open_phi(node.type, known[0])
+                remap[vid] = builder.phi(node.type, known)
                 deferred.append(vid)
         for vid in block.operations:
             if keep is None or vid in keep:

@@ -1,10 +1,12 @@
 """Scalar data types."""
 
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-import zkf
+from zkf import ZkfFormat
+
+FloatFormat = ZkfFormat
+"""A float format is ZKF's own: `wexp` exponent bits and `wman` significand bits, the hidden one included."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,60 +19,6 @@ class ScalarType(ABC):
     def is_wide(self) -> bool:
         """In the wide data register bank, not the 1-bit boolean bank."""
         return self.width > 1
-
-
-@dataclass(frozen=True, slots=True)
-class FloatFormat:
-    """
-    A Zubax Kulibin float (ZKF) format: `wexp` exponent bits and `wman` significand bits.
-
-    `wman` counts the significand *including* the hidden leading bit, matching the `WMAN` convention of
-    `holoso_support.v`. The total port width is `wexp + wman` (a sign bit, `wexp` exponent bits, and
-    `wman - 1` stored significand bits).
-
-    Engine-agnostic float facade: the codec delegates to the bit-exact ZKF model, which is the single source
-    of numeric truth. `exp == 0` is zero and the all-ones exponent is infinity; ZKF has no subnormals.
-    """
-
-    wexp: int
-    wman: int
-
-    @property
-    def _zfmt(self) -> zkf.ZkfFormat:
-        return zkf.ZkfFormat(self.wexp, self.wman)
-
-    def encode(self, value: float) -> int:
-        """NaN is rejected; ZKF has no NaN."""
-        return self._zfmt.encode(value).bits
-
-    def decode(self, bits: int) -> float:
-        """
-        The value as the nearest Python double, correctly rounded in a single step. Formats wider than IEEE double
-        (`wman > 53`, reaching the double-subnormal range) round up to 1 ULP tighter than a naive `ldexp` decode
-        that double-rounds; no float32/float64-class ZKF format reaches that regime, so this is invisible in practice.
-        A finite value past the double range saturates to an infinity, which is what correct rounding means there.
-        """
-        value = self._zfmt.wrap(bits)
-        try:
-            return float(value)
-        except OverflowError:
-            return -math.inf if value.negative else math.inf
-
-    def round(self, value: float) -> float:
-        """Rounds exactly as the hardware packer does after each operator. NaN is rejected (ZKF has no NaN)."""
-        return self.decode(self.encode(value))
-
-    def is_legal(self, bits: int) -> bool:
-        """Rejects subnormals and negative zero."""
-        value = self._zfmt.wrap(bits)
-        return (value.frac == 0 and not value.negative) if value.is_zero else True
-
-    def is_finite(self, bits: int) -> bool:
-        return self._zfmt.wrap(bits).is_finite
-
-    @property
-    def width(self) -> int:
-        return self.wexp + self.wman
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,10 +72,10 @@ class FloatType(ScalarType):
 
     @property
     def width(self) -> int:
-        return self.fmt.width
+        return self.fmt.wfull
 
     def __str__(self) -> str:
-        return f"float{self.fmt.width}"
+        return f"float{self.fmt.wfull}"
 
 
 @dataclass(frozen=True, slots=True)

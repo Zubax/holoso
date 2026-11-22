@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import holoso._lir._regalloc as regalloc_module
-from holoso import FAddOptions, FCmpOptions, FDivsqrtOptions, FloatFormat, FMulOptions
+from holoso import FloatFormat
 from holoso._eel import lower
 from holoso._lir import (
     BoolOperand,
@@ -50,8 +50,8 @@ from holoso._lir._regalloc import (
     color,
 )
 from holoso._mir import lower as lower_to_mir
-from holoso._operators import FAddPrimitive, FCmpPrimitive, FDivPrimitive, FMulPrimitive, SelectPrimitive
-from holoso._operators import FAddOperator, FDivsqrtOperator, FMulOperator
+from holoso._operators import FAddPrimitive, FDivPrimitive, FMulPrimitive, PooledPrimitive, SelectPrimitive
+from holoso._operators._float import FAddOperator, FDivsqrtOperator, FMulOperator
 from holoso._operators import BoolInversion, FloatSignControl
 from holoso._type import FloatType
 from holoso._value import coerce_scalar
@@ -72,11 +72,12 @@ from ._modelref import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from cordic_sincos import CordicSinCos  # noqa: E402
+from . import _options as lean
 
 _FMT = FloatFormat(8, 36)
-_FADD = FAddPrimitive(FAddOperator.build(_FMT, FAddOptions()))
-_FMUL = FMulPrimitive(FMulOperator.build(_FMT, FMulOptions(), 0))
-_FDIV = FDivPrimitive(FDivsqrtOperator.build(_FMT, FDivsqrtOptions()))
+_FADD = FAddPrimitive(FAddOperator.build(_FMT, lean.fadd()))
+_FMUL = FMulPrimitive(FMulOperator.build(_FMT, lean.fmul(), lean.WMULTIPLIER))
+_FDIV = FDivPrimitive(FDivsqrtOperator.build(_FMT, lean.fdivsqrt()))
 _SELECT = SelectPrimitive(FloatType(_FMT))
 _SIGN = FloatSignControl()
 
@@ -112,7 +113,8 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
     firings: list[Firing] = []
     written: set[int] = set()
     for i in range(18):
-        primitive = rng.choice([_FADD, _FMUL, _FDIV])
+        kinds: list[PooledPrimitive] = [_FADD, _FMUL, _FDIV]
+        primitive = rng.choice(kinds)
         reads = [rng.choice(values) if rng.random() < 0.8 else WideConstRef(rng.randrange(3)) for _ in range(2)]
         unwritten = [v for v in movable if v not in written]
         target = rng.choice(unwritten) if unwritten and rng.random() < 0.85 else rng.choice(movable)
@@ -120,12 +122,13 @@ def _synthetic(rng: random.Random, effort: int) -> ColoringProblem:
         firings.append(
             Firing(
                 leader=1000 + i,
-                primitive=primitive,
+                drive=primitive.drive,
                 block=0,
                 issue=i,
                 seed_instance=rng.randrange(2),
                 reads=reads,
-                writes=[(0, target)],
+                writes={"y": target},
+                mirror=None if primitive.mirrored is None else {"y": "y"},
             )
         )
     producers: dict[int, list[FixedProducer]] = {v: [] for v in values}
@@ -156,11 +159,11 @@ def _seed_state(problem: ColoringProblem) -> _State:
 
 
 def _flippable(problem: ColoringProblem) -> list[int]:
-    return [i for i, firing in enumerate(problem.firings) if firing.primitive.is_commutative]
+    return [i for i, firing in enumerate(problem.firings) if firing.mirror is not None]
 
 
 def _bindable(problem: ColoringProblem) -> list[int]:
-    return [i for i, firing in enumerate(problem.firings) if problem.instances[firing.primitive.operator] > 1]
+    return [i for i, firing in enumerate(problem.firings) if problem.instances[firing.drive.operator] > 1]
 
 
 def test_incremental_objective_matches_a_full_recomputation() -> None:
@@ -189,7 +192,7 @@ def test_incremental_objective_matches_a_full_recomputation() -> None:
             state.move_instance(i, target)
         elif draw < 0.4:
             i, j = rng.sample(bindable, 2)
-            same_operator = problem.firings[i].primitive.operator == problem.firings[j].primitive.operator
+            same_operator = problem.firings[i].drive.operator == problem.firings[j].drive.operator
             if not same_operator or state.instance[i] == state.instance[j] or not state.swap_instances(i, j):
                 continue
             assert state.swap_instances(i, j) and state.cost == before
@@ -240,7 +243,7 @@ def test_the_descent_leaves_no_improving_move(effort: int) -> None:
         for j in bindable:
             if (
                 i < j
-                and problem.firings[i].primitive.operator == problem.firings[j].primitive.operator
+                and problem.firings[i].drive.operator == problem.firings[j].drive.operator
                 and state.instance[i] != state.instance[j]
             ):
                 if state.swap_instances(i, j):
@@ -262,10 +265,24 @@ def test_two_singly_written_values_share_a_register_at_the_configured_price() ->
         fresh_start=0,
         firings=[
             Firing(
-                100, _FDIV, block=0, issue=0, seed_instance=0, reads=[WideConstRef(0), WideConstRef(1)], writes=[(0, 0)]
+                100,
+                _FDIV.drive,
+                block=0,
+                issue=0,
+                seed_instance=0,
+                reads=[WideConstRef(0), WideConstRef(1)],
+                writes={"y": 0},
+                mirror=None,
             ),
             Firing(
-                101, _FMUL, block=0, issue=1, seed_instance=0, reads=[WideConstRef(0), WideConstRef(1)], writes=[(0, 1)]
+                101,
+                _FMUL.drive,
+                block=0,
+                issue=1,
+                seed_instance=0,
+                reads=[WideConstRef(0), WideConstRef(1)],
+                writes={"y": 1},
+                mirror={"y": "y"},
             ),
         ],
         instances={_FDIV.operator: 1, _FMUL.operator: 1},
@@ -280,7 +297,7 @@ def test_effort_zero_is_the_descended_greedy_seed(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(regalloc_module, "_anneal", lambda *args: pytest.fail("effort 0 must not anneal"))
     coloring = color(problem)
     state = _seed_state(problem)
-    _descend(state, regalloc_module._Decisions.of(problem))
+    _descend(problem, state, regalloc_module._Decisions.of(problem))
     assign, nreg = _compact(problem, state.assign)
     assert (coloring.assign, coloring.nreg) == (assign, nreg)
     assert coloring.swap == {firing.leader: state.flip[i] for i, firing in enumerate(problem.firings)}
@@ -308,7 +325,7 @@ def test_repeated_residual_arms_are_one_writer() -> None:
     mir = lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options))
     lir = build_lir(mir, "piecewise", FROZEN_TUNING)
     assert len(lir.blocks) > 1, "the premise needs the arms as residual installs, not a select"
-    assert lir.regfile.nreg == 1
+    assert lir.wide_register_count == 1
 
 
 class _SharedLiveOutResets:
@@ -474,7 +491,7 @@ def test_a_swapped_comparator_keeps_every_relation() -> None:
     lir = build_lir(
         lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, default_mir(fmt)), "relations", FROZEN_TUNING
     )
-    firings = [op for block in lir.blocks for op in block.ops if isinstance(op.primitive, FCmpPrimitive)]
+    firings = [op for block in lir.blocks for op in block.ops if op.inst.operator.name == "fcmp"]
     assert len(firings) == 3, "the premise needs the mirrored comparison as its own firing"
     assert len({tuple(operand.source for operand in op.operands) for op in firings}) == 1, "one firing must be swapped"
     model, interpreter = build_model_and_interpreter(kernel, default_mir(fmt), "relations", fmt, FROZEN_TUNING)
@@ -526,7 +543,7 @@ def test_rebinding_beats_the_first_free_seed(
     name: str, kernel: Callable[..., object], instances: int, expected: int
 ) -> None:
     options = default_options(_FMT)
-    options = replace(options, operator=replace(options.operator, fmul=FMulOptions(instances=instances)))
+    options = replace(options, operator=replace(options.operator, fmul=lean.fmul(instances=instances)))
     lir = build_lir(
         lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), name, FROZEN_TUNING
     )
@@ -544,7 +561,7 @@ def test_comparators_swap_and_rebind_together() -> None:
         return float(d < c), float(a < b), float(a < e), float(c < f), float(h < c), float(a < g)
 
     options = default_options(_FMT)
-    options = replace(options, operator=replace(options.operator, fcmp=FCmpOptions(instances=2)))
+    options = replace(options, operator=replace(options.operator, fcmp=lean.fcmp(instances=2)))
     lir = build_lir(
         lower_to_mir(lower(kernel, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)), "cmp_shared", FROZEN_TUNING
     )
@@ -564,11 +581,12 @@ def test_a_rejected_swap_is_undone_without_assertions() -> None:
         "resource.setrlimit(resource.RLIMIT_CPU, (120, resource.getrlimit(resource.RLIMIT_CPU)[1]))\n"
         "from dataclasses import replace\n"
         "import holoso\n"
+        "from tests import _options as lean\n"
         "from tests._modelref import default_options\n"
         "from tests.test_regalloc import _k_chain\n"
         "options = default_options(holoso.FloatFormat(6, 18))\n"
         "options = replace(options, regalloc_effort=0, "
-        "operator=replace(options.operator, fmul=holoso.FMulOptions(instances=2)))\n"
+        "operator=replace(options.operator, fmul=lean.fmul(instances=2)))\n"
         "holoso.synthesize(_k_chain, options)\n"
     )
     done = subprocess.run(

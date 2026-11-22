@@ -8,6 +8,7 @@ beyond the web font.
 Do not define any styles or colors here, do that in CSS.
 """
 
+import enum
 import html
 import re
 from collections import Counter
@@ -15,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 from typing import assert_never
+
+import zkf
 
 from ..._lir import (
     BoolOperand,
@@ -37,7 +40,7 @@ from ..._lir import (
 )
 from ..._operators import SelectPrimitive
 from ..._legal import output_header
-from ..verilog import VerilogOutput
+from ..verilog import VerilogOutput, private_module
 from ._schedule import render_schedule
 
 
@@ -101,14 +104,15 @@ def _metrics(lir: Lir) -> str:
     for inst in lir.instances:
         op_counts[inst.operator.name] = op_counts.get(inst.operator.name, 0) + 1
     rows: list[tuple[str, object]] = [
-        ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.width}-bit"),
+        ("ZKF format", f"e{fmt.wexp}+m{fmt.wman} = {fmt.wfull}-bit"),
         ("integer format", str(lir.int_format)),
         ("operator instances", " ".join(f"{count}×{kind}" for kind, count in op_counts.items())),
-        ("wide registers", f"{lir.regfile.nreg} × {lir.wide_register_width}-bit"),
+        ("wide registers", f"{lir.wide_register_count} × {lir.wide_register_width}-bit"),
         ("wide regfile R/W ports", f"{read_ports} / {len(write_lanes)}"),
         ("steering mux arms", f"{arms.read} read + {arms.wide_write} write = {arms.read + arms.wide_write}"),
         ("bool write select arms", arms.bool_write),
         ("inline select muxes", sum(_select_muxes(lir).values())),
+        ("latency min [cycles]", lir.min_latency),
         ("II min [cycles]", lir.min_initiation_interval),
     ]
     body = "".join(f"<tr><th>{_esc(label)}</th><td>{_esc(str(value))}</td></tr>" for label, value in rows)
@@ -117,32 +121,49 @@ def _metrics(lir: Lir) -> str:
 
 def _operator_params(lir: Lir) -> str:
     """
-    Most parameters (the float format above all) are shared, so the matrix is far shorter than one row per pair: one
-    column per distinct elaboration, headed by its operator, or by its instances where the operator's instances are
-    elaborated differently.
+    Most knobs (the float format above all) are shared, so the matrix is far shorter than one row per pair: one column
+    per distinct block an instance renders, headed by its operator, or by its instances where the operator's instances
+    render different blocks; the private module's name heads the rows.
     """
-    columns: dict[tuple[str, tuple[tuple[str, int], ...]], list[str]] = {}  # in instance order
+    columns: dict[str, tuple[str, zkf.Block, list[str]]] = {}  # by module, in instance order
     for inst in lir.instances:
-        elaboration = tuple(lir.elaboration(inst).items())
-        columns.setdefault((inst.operator.name, elaboration), []).append(inst.name)
-    names = sorted({name for _, elaboration in columns for name, _ in elaboration})
-    if not names:
-        return "<h2>Operator Params</h2><table class='metrics cfg'><tr><td>(defaults)</td></tr></table>"
-    elaborations_of = Counter(operator_name for operator_name, _ in columns)
+        block = lir.instances[inst]
+        columns.setdefault(block.name, (inst.operator.name, block, []))[2].append(inst.name)
+    if not columns:
+        return "<h2>Operators</h2><table class='metrics cfg'><tr><td>(none)</td></tr></table>"
+    blocks_of = Counter(operator_name for operator_name, _, _ in columns.values())
     head = "".join(
-        f"<th class='v'>{_esc(operator_name if elaborations_of[operator_name] == 1 else ' '.join(insts))}</th>"
-        for (operator_name, _), insts in columns.items()
+        f"<th class='v'>{_esc(operator_name if blocks_of[operator_name] == 1 else ' '.join(insts))}</th>"
+        for operator_name, _, insts in columns.values()
     )
+    knobs = list(dict.fromkeys(name for _, block, _ in columns.values() for name in block.config))
+    table: list[tuple[str, list[str]]] = [
+        ("module", [private_module(lir, block) for _, block, _ in columns.values()]),
+        ("timing", [str(block.timing) for _, block, _ in columns.values()]),
+        *(
+            (
+                knob.lstrip("_"),
+                [_knob(block.config[knob]) if knob in block.config else "" for _, block, _ in columns.values()],
+            )
+            for knob in knobs
+        ),
+    ]
     rows = "".join(
-        f"<tr><th>{_esc(name)}</th>"
-        + "".join(f"<td class='v'>{dict(elaboration).get(name, '')}</td>" for _, elaboration in columns)
-        + "</tr>"
-        for name in names
+        f"<tr><th>{_esc(name)}</th>" + "".join(f"<td class='v'>{_esc(value)}</td>" for value in values) + "</tr>"
+        for name, values in table
     )
     return (
-        "<h2>Operator Params</h2><div class='hscroll'><table class='metrics cfg'>"
-        f"<tr><th>HDL param</th>{head}</tr>{rows}</table></div>"
+        "<h2>Operators</h2><div class='hscroll'><table class='metrics cfg'>"
+        f"<tr><th>knob</th>{head}</tr>{rows}</table></div>"
     )
+
+
+def _knob(value: object) -> str:
+    if isinstance(value, enum.Flag):
+        return " | ".join(member.name or "" for member in value) or "NONE"
+    if isinstance(value, enum.Enum):
+        return value.name
+    return str(value)
 
 
 def _interface(lir: Lir) -> str:
@@ -171,8 +192,7 @@ def _module_header(module_verilog: str) -> str:
 
 def _extract_module_header(module_verilog: str) -> str:
     match = _MODULE_HEADER_RE.search(module_verilog)
-    if match is None:
-        raise RuntimeError("cannot find generated Verilog module header")
+    assert match is not None, "the emitter always writes a module header"
     return match.group(0)
 
 
@@ -205,7 +225,7 @@ def _constants(lir: Lir) -> str:
     if not lir.wide_consts:
         return ""
     chips = "".join(
-        f"<span class='const'>c{index} = {_esc(repr(value))}</span>" for index, value in enumerate(lir.wide_consts)
+        f"<span class='const'>c{index} = {_esc(str(value))}</span>" for index, value in enumerate(lir.wide_consts)
     )
     return f"<h2>Constants</h2><div>{chips}</div>"
 
@@ -309,8 +329,8 @@ def _register_muxes(lir: Lir) -> str:
     direct = _direct_reads(lir)
     selects = _select_muxes(lir)
     writes = write_arms(lir)
-    wide = [RegRef(index) for index in range(lir.regfile.nreg)]
-    boolean = [BoolRegRef(index) for index in range(lir.bool_regfile.nreg)]
+    wide = [RegRef(index) for index in range(lir.wide_register_count)]
+    boolean = [BoolRegRef(index) for index in range(lir.bool_register_count)]
     tables = [
         _MuxTable(
             title="Wide bank reach",

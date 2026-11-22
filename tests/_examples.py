@@ -15,8 +15,17 @@ from pathlib import Path
 
 import numpy as np
 
-from holoso import FFromIntOptions, FloatFormat, FRintOptions, IAddsOptions, OperatorOptions, Options
-from ._modelref import bounded, default_options, format_edge_bits, log_uniform_positive, spd_matrix, unit_roundoff
+from holoso import FloatFormat, FloatValue, IAddsOptions, OperatorOptions, Options
+from . import _options as lean
+from ._modelref import (
+    DEFAULT_WINT_MIN,
+    bounded,
+    default_options,
+    format_edge_bits,
+    log_uniform_positive,
+    spd_matrix,
+    unit_roundoff,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 import ekf1_stateful as ekf1_stateful  # noqa: E402
@@ -76,7 +85,7 @@ _SEED = 0x05EED
 
 # Canonical format edges (zero, ±0.5, ±1, ±smallest-normal, ±largest-finite); the EKF variants stay finite and keep the
 # divisor anchored, so they swap the ±largest-finite extreme for a large but non-overflowing magnitude.
-_WIDE_EDGES = tuple(_FMT.decode(bits) for bits in format_edge_bits(_FMT))
+_WIDE_EDGES = tuple(float(FloatValue(_FMT, bits)) for bits in format_edge_bits(_FMT))
 _MIN_NORMAL = _WIDE_EDGES[5]
 _EKF_EDGES = (*_WIDE_EDGES[:7], 1e6, -1e6)
 _POSITIVE_DIVISOR_EDGES = (0.5, 1.0, _MIN_NORMAL, 1e6)
@@ -276,7 +285,7 @@ class ExampleSpec:
     formats: tuple[FloatFormat, ...] = (_FMT,)
     # The native integer width the kernel needs, which for a float-free kernel is exactly the word it gets: an
     # accumulator that must wrap at a given modulus needs the word to hold it without saturating on the way.
-    wint_min: int = Options(OperatorOptions()).wint_min
+    wint_min: int = DEFAULT_WINT_MIN
     # How this kernel's operator set differs from the one the catalogue shares: a datapath crossing between the
     # families needs the conversions, which no float-only kernel builds.
     operators: Callable[[OperatorOptions], OperatorOptions] = lambda ops: ops
@@ -1179,7 +1188,7 @@ SPECS = [
         edge_values=_WIDE_EDGES,
         formats=(_FMT,),  # wman >= 32: a shallower format would quantize the grid and measure itself, not the compiler
         wint_min=34,  # a carry bit above the phase, then a sign bit
-        operators=lambda ops: dataclasses.replace(ops, ffromint=FFromIntOptions(), frint=FRintOptions()),
+        operators=lambda ops: dataclasses.replace(ops, ffromint=lean.ffromint(), frint=lean.frint()),
     ),
     ExampleSpec(
         name="nco",
@@ -1221,7 +1230,7 @@ SPECS = [
         edge_values=(0, 1, 128, PIXEL_MAX, -1, 1 << 42),
         # The second adder is the example's own: a beat's statistics are dozens of independent sums and orders.
         operators=lambda ops: dataclasses.replace(
-            ops, ffromint=FFromIntOptions(), frint=FRintOptions(), iadds=IAddsOptions(instances=2)
+            ops, ffromint=lean.ffromint(), frint=lean.frint(), iadds=IAddsOptions(instances=2)
         ),
     ),
     ExampleSpec(

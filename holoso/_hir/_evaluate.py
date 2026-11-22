@@ -24,6 +24,7 @@ poisoned unselected arm -- which is sound within this evaluator's charter: the f
 branches, and if-conversion runs only in the optimizer, downstream of the graphs evaluated here.
 """
 
+import math
 from dataclasses import dataclass
 from typing import assert_never
 
@@ -45,9 +46,10 @@ type _Value = Const | _Poison
 
 
 def _coerce(value: Scalar, ty: Type, index: int) -> Const:
-    if type(value) in (bool, int, float) and (const := make_const(value)).type == ty:
-        return const
-    raise TypeError(f"input {index} expects {ty}, got {type(value).__name__} {value!r}")
+    assert type(value) in (bool, int, float) and not (isinstance(value, float) and math.isnan(value)), (index, value)
+    const = make_const(value)
+    assert const.type == ty, f"input {index} expects {ty}, got {type(value).__name__} {value!r}"
+    return const
 
 
 def _evaluate(operation: Operation, operands: list[_Value]) -> _Value:
@@ -134,8 +136,7 @@ class HirEvaluator:
         return outputs
 
     def _initial_env(self, inputs: tuple[Scalar, ...]) -> dict[ValueId, _Value]:
-        if len(inputs) != len(self._hir.input_ids):
-            raise ValueError(f"expected {len(self._hir.input_ids)} inputs, got {len(inputs)}")
+        assert len(inputs) == len(self._hir.input_ids), (len(inputs), len(self._hir.input_ids))
         env: dict[ValueId, _Value] = {}
         for index, (vid, raw) in enumerate(zip(self._hir.input_ids, inputs, strict=True)):
             port = self._hir.nodes[vid]

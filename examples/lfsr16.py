@@ -30,7 +30,7 @@ class Lfsr16:
 
 def main() -> None:
     # The taps and the register are 16 unsigned bits, which a signed word must carry one bit above.
-    options = holoso.Options(holoso.OperatorOptions(), wint_min=17)
+    options = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=17)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(Lfsr16().__call__, options)
     for filename, path in result.write(out_dir).items():

@@ -28,7 +28,7 @@ class PriorityEncoder:
 
 def main() -> None:
     # The request bus is `width` lines and the port carries them signed (extra sign bit).
-    options = holoso.Options(holoso.OperatorOptions(), wint_min=9)
+    options = holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18, wint_min=9)
     out_dir = Path(__file__).resolve().parent / "build" / Path(__file__).stem
     result = holoso.synthesize(PriorityEncoder().__call__, options)
     for filename, path in result.write(out_dir).items():

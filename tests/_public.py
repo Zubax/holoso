@@ -33,9 +33,38 @@ def strip_inline_prelude(verilog: str) -> str:
     return "".join(lines[: begins[0]] + lines[ends[0] + 1 :])
 
 
-def divsqrt_modes(verilog: str) -> list[int]:
+def module_of(verilog: str, instance: str) -> str:
+    """The module the kernel instantiates as the named instance (`u_fadd_0`, ...)."""
+    modules: list[str] = re.findall(rf"^(\S+) {instance} \($", verilog, re.MULTILINE)
+    (module,) = modules
+    return module
+
+
+def knob_table(verilog: str, instance: str) -> list[str]:
     """
-    The `MODE` each `holoso_fdivsqrt` instance of an emitted module is elaborated for: 0 divides only, 1 takes roots
-    only, 2 does both. One operator serves both operations, so its mere presence says nothing of which a kernel kept.
+    The configuration lines (`stage_core: CoreStages.DECODE`, `timing: Timing(latency=2, initiation_interval=1)`, ...)
+    of the comment table that heads the module of the named instance.
     """
-    return [int(mode) for mode in re.findall(r"holoso_fdivsqrt #\([^;]*?\.MODE\((\d)\)", verilog)]
+    module = module_of(verilog, instance)
+    (table,) = re.findall(rf"((?:^//   .*\n)+)module {re.escape(module)}\(", verilog, re.MULTILINE)
+    return [line.removeprefix("//   ") for line in table.splitlines()]
+
+
+def instance_count(verilog: str, operator: str) -> int:
+    """The number of instances of the named Holoso operator (`fadd`, `fdivsqrt`, ...) the kernel module drives."""
+    return len(re.findall(rf"^\S+ u_{operator}_\d+ \($", verilog, re.MULTILINE))
+
+
+def divsqrt_builds(verilog: str) -> list[int]:
+    """
+    What each `fdivsqrt` instance of an emitted design is built for, read off its module's ports: 0 divides only (no
+    operation select), 1 takes roots only (no divisor either), 2 does both. One operator serves both operations, so its
+    mere presence says nothing of which a kernel kept.
+    """
+    builds: list[int] = []
+    for module in re.findall(r"^(\S+) u_fdivsqrt_\d+ \($", verilog, re.MULTILINE):
+        (ports,) = re.findall(rf"^module {re.escape(module)}\(([^)]*)\);$", verilog, re.MULTILINE)
+        names = set(ports.split(", "))
+        assert {"a", "y"} <= names
+        builds.append(2 if "op_sqrt" in names else 0 if "b" in names else 1)
+    return builds

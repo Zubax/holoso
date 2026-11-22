@@ -12,13 +12,14 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import FAddOptions, FCmpOptions, FMulILog2Options, FMulOptions, FloatFormat, OperatorOptions, Options
+from holoso import FloatFormat, OperatorOptions, Options
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from holoso._mir import lower as lower_to_mir
 
-from .hdl_float_oracle import HDL_DIR, REPO_ROOT, build_args, drive_reset, sources, start_clock
+from .hdl_float_oracle import REPO_ROOT, build_args, drive_reset, start_clock
 from .._modelref import build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
+from .. import _options as lean
 
 FMT = FloatFormat(6, 18)
 WINT_MIN = 33
@@ -36,10 +37,8 @@ class _Accumulate:
 
 
 def _options() -> Options:
-    operators = OperatorOptions(
-        fadd=FAddOptions(), fmul=FMulOptions(), fmul_ilog2=FMulILog2Options(), fcmp=FCmpOptions()
-    )
-    return Options(operators, ffmt=FMT, wint_min=WINT_MIN)
+    operators = OperatorOptions(fadd=lean.fadd(), fmul=lean.fmul(), fmul_ilog2=lean.fmul_ilog2(), fcmp=lean.fcmp())
+    return Options(operator=operators, ffmt=FMT, wint_min=WINT_MIN, wmultiplier=18)
 
 
 async def _settle(dut: Any) -> None:
@@ -50,14 +49,14 @@ async def _settle(dut: Any) -> None:
 @cocotb.test()
 async def float_leaves_the_upper_carrier_bits_clear(dut: Any) -> None:
     nreg = int(os.environ["HOLOSO_NREG"])
-    assert len(str(dut.regs[0].value)) == WINT_MIN > FMT.width, "the premise: the register outsizes the float in it"
+    assert len(str(dut.regs[0].value)) == WINT_MIN > FMT.wfull, "the premise: the register outsizes the float in it"
 
     def check(where: str) -> None:
         # A pure datapath register is deliberately outside the reset cone, so an unwritten one reads X; what must
         # never happen is a float write SETTING a bit above WFLT.
         for index in range(nreg):
             bits = str(dut.regs[index].value)
-            assert "1" not in bits[: len(bits) - FMT.width], f"{where}: regs[{index}]={bits} sets a bit above WFLT"
+            assert "1" not in bits[: len(bits) - FMT.wfull], f"{where}: regs[{index}]={bits} sets a bit above WFLT"
 
     await start_clock(dut)
     await drive_reset(dut)
@@ -67,8 +66,8 @@ async def float_leaves_the_upper_carrier_bits_clear(dut: Any) -> None:
         while int(dut.in_ready.value) != 1:
             await _settle(dut)
             check("idle")
-        dut.in_x.value = FMT.encode(x)
-        dut.in_y.value = FMT.encode(y)
+        dut.in_x.value = FMT.encode(x).bits
+        dut.in_y.value = FMT.encode(y).bits
         dut.in_valid.value = 1
         await _settle(dut)
         dut.in_valid.value = 0
@@ -86,17 +85,16 @@ def test_float_leaves_the_upper_carrier_bits_clear(sim: str) -> None:
         lower_to_mir(lower(_Accumulate().__call__, DEFAULT_UNROLL_MAX_TRIPS).hir, mir_options(options)),
         "carrier",
     )
-    assert lir.int_format.width == WINT_MIN > options.ffmt.width
+    assert lir.int_format.width == WINT_MIN > options.ffmt.wfull
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / "carrier"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / "carrier.v"
-    verilog_path.write_text(generate(lir).verilog)
+    verilog_path.write_text(generate(lir, {}).verilog)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / "carrier"
 
     runner = get_runner(sim)
     runner.build(
-        sources=[verilog_path, *sources()],
-        includes=[HDL_DIR],
+        sources=[verilog_path],
         hdl_toplevel="carrier",
         build_args=build_args(sim),
         build_dir=str(build_dir),
@@ -108,6 +106,6 @@ def test_float_leaves_the_upper_carrier_bits_clear(sim: str) -> None:
         test_module="tests.hdl.test_carrier",
         test_dir=str(REPO_ROOT),
         build_dir=str(build_dir),
-        extra_env={"HOLOSO_NREG": str(lir.regfile.nreg)},
+        extra_env={"HOLOSO_NREG": str(lir.wide_register_count)},
         results_xml=str(build_dir / "results.xml"),
     )

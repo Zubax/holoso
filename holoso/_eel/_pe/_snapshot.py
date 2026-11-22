@@ -11,6 +11,7 @@ direction establishes the disjointness invariant.
 
 import math
 from collections.abc import Callable
+from typing import Any, TypeGuard
 
 import numpy as np
 
@@ -30,10 +31,27 @@ def nan_payload(raw: object) -> bool:
     return isinstance(raw, (float, np.floating)) and math.isnan(float(raw))
 
 
+def host_float(raw: object) -> TypeGuard[float | np.floating[Any]]:
+    """
+    A subclass of `float` may redefine its arithmetic, and the compiler would compute the plain float's instead, so
+    only `float` itself is one. numpy's floats are the subclasses whose arithmetic it does model.
+    """
+    return type(raw) is float or isinstance(raw, np.floating)
+
+
+def float_subclass_advice(raw: object) -> str:
+    return (
+        f"an instance of {type(raw).__name__}, a subclass of float that may redefine its arithmetic; "
+        "convert it with float(...) before the kernel reads it"
+    )
+
+
 def describe_opaque(value: Opaque) -> str:
-    # An Opaque never carries an admissible float, so a float-typed payload here is necessarily a NaN.
+    # An Opaque never carries an admissible float, so a float-typed payload here is a NaN or of a subclass.
     if nan_payload(value.value):
         return f"the captured value of {value.name!r} is NaN, which the compiler cannot represent"
+    if isinstance(value.value, float):
+        return f"the captured value of {value.name!r} is {float_subclass_advice(value.value)}"
     return f"the captured value of {value.name!r} is not a bool, int, or float scalar"
 
 
@@ -42,7 +60,7 @@ def scalar_of(raw: object, name: str) -> StaticScalar | Opaque | None:
         return StaticScalar.of(bool(raw))
     if isinstance(raw, (int, np.integer)):
         return StaticScalar.of(int(raw))
-    if type(raw) is float or isinstance(raw, np.floating):
+    if host_float(raw):
         if nan_payload(raw):
             return Opaque(name, raw)
         return StaticScalar.of(float(raw))

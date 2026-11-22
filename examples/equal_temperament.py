@@ -24,23 +24,37 @@ def equal_temperament(note: float) -> tuple[float, float]:
 def main() -> None:
     float_format = holoso.FloatFormat(wexp=8, wman=36)
     options = holoso.Options(
-        holoso.OperatorOptions(
-            fadd=holoso.FAddOptions(stage_normalize=1, stage_output=1),
-            fmul=holoso.FMulOptions(stage_product=2, stage_pack=1),
-            fdivsqrt=holoso.FDivsqrtOptions(),
-            fmul_ilog2=holoso.FMulILog2Options(),
-            fcmp=holoso.FCmpOptions(),
+        operator=holoso.OperatorOptions(
+            fadd=holoso.FAddOptions(
+                stage_input=0,
+                stage_core=holoso.FAddOptions.CoreStages.DECODE
+                | holoso.FAddOptions.CoreStages.ALIGN
+                | holoso.FAddOptions.CoreStages.SUM
+                | holoso.FAddOptions.CoreStages.NORMALIZED,
+                stage_output=0,
+            ),
+            fmul=holoso.FMulOptions(stage_input=0, stage_core_mul=3, stage_output=1),
+            fdivsqrt=holoso.FDivsqrtOptions(
+                stage_input=0, stage_core=holoso.FDivsqrtOptions.CoreStages.NONE, stage_output=0, fast=True
+            ),
+            fmul_ilog2=holoso.FMulILog2Options(
+                stage_input=0, stage_core=holoso.FMulILog2Options.CoreStages.NONE, stage_output=0
+            ),
+            fcmp=holoso.FCmpOptions(stage_input=0, stage_output=0),
             fexp2=holoso.FExp2Options(
-                stage_product=2, stage_product_square=1, stage_product_odd=2, stage_product_chain=2, stage_pack=1
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core=holoso.FExp2Options.CoreStages.NONE,
+                stage_output=0,
+                fast=True,
             ),
             flog2=holoso.FLog2Options(
-                stage_product=2,
-                stage_product_square=1,
-                stage_product_odd=2,
-                stage_product_chain=2,
-                stage_align=1,
-                stage_product_final=2,
-                stage_pack=1,
+                stage_input=0,
+                stage_core_kernel_level=6,
+                stage_core_mul=3,
+                stage_core=holoso.FLog2Options.CoreStages.SELECT,
+                stage_output=0,
+                fast=True,
             ),
         ),
         ffmt=float_format,

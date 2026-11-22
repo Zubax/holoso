@@ -10,24 +10,15 @@ from typing import Any
 import numpy as np
 
 import holoso
-from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FCordicOptions,
-    FDivsqrtOptions,
-    FExp2Options,
-    FILog2Options,
-    FLog2Options,
-    FMulILog2Options,
-    FMulOptions,
-    OperatorOptions,
-    Options,
-)
+from holoso import FAddOptions, FCordicOptions, FExp2Options, FLog2Options, FMulILog2Options
+from holoso import OperatorOptions, Options
+from holoso import IAbssOptions, IAddsOptions, IDivsOptions, IMulsOptions, IPopcntOptions, IShftOptions
 from holoso._api import _mir_options
 from holoso._mir import MirOptions
 from holoso._lir import Lir, LirBlock, RegallocTuning, WideStateSlot, build
 from holoso._lir._ir import Early, WideCopy
-from holoso._operators import BaseOperatorOptions, InlinePrimitive, OpConfig, PooledPrimitive, Primitive
+from holoso._operators import InlinePrimitive, OpConfig, PooledPrimitive, Primitive
+from holoso._operators._common import BaseOperatorOptions
 from holoso._backend.numerical import NumericalSimulator, generate as generate
 from holoso._eel import lower as lower_frontend
 from holoso._mir import Mir, lower as lower_to_mir
@@ -36,14 +27,17 @@ from holoso._type import FloatFormat, IntFormat
 from holoso._value import FloatValue, ScalarValue
 from holoso._eel._names import port_name as port_name
 
+from . import _options as lean
+
 type Path = tuple[int | str, ...]
 """A leaf path into a returned value: indices for sequence elements, names for dataclass fields."""
 
 type Vector = list[ScalarValue]
 
 # What a default-constructed Options asks for, so a white-box build matches what synthesize would do.
-_DEFAULTS = Options(OperatorOptions())
+_DEFAULTS = Options(operator=OperatorOptions(), wmultiplier=lean.WMULTIPLIER)
 DEFAULT_IFCONV_MAX_OPS: int = _DEFAULTS.ifconv_max_ops
+DEFAULT_WINT_MIN: int = _DEFAULTS.wint_min
 DEFAULT_UNROLL_MAX_TRIPS: int = _DEFAULTS.unroll_max_trips
 
 
@@ -53,7 +47,7 @@ mir_options = _mir_options
 
 def default_ifmt(ffmt: FloatFormat) -> IntFormat:
     """The word a float-carrying kernel takes at the default floor; a hand-built MIR names it rather than derives it."""
-    return IntFormat(max(Options(OperatorOptions()).wint_min, ffmt.width))
+    return IntFormat(max(_DEFAULTS.wint_min, ffmt.wfull))
 
 
 _DEFAULT_TUNING = RegallocTuning(effort=_DEFAULTS.regalloc_effort, register_price=_DEFAULTS.regalloc_register_price)
@@ -177,17 +171,12 @@ def within(actual: float, expected: float, rtol: float, atol: float) -> bool:
 
 
 def instantiated_modules(result: holoso.SynthesisResult) -> set[str]:
-    """Operator modules the top module instantiates; the always-present support functions do not match."""
-    return set(re.findall(r"\b(holoso_\w+)\s+#\(", result.verilog_output.verilog))
-
-
-def adder_modes(result: holoso.SynthesisResult) -> list[int]:
     """
-    The `MODE` each instance of the adder is elaborated for, in instance order: 0 for one that only adds, 1 for one
-    that only subtracts or compares, 2 for one taking `sub` with every firing. The module name tells none of them apart.
+    The kinds of block the kernel module instantiates, by ZKF operator name (`add`, `divsqrt`, `iadds`, ...), read off
+    the private module names `_<kernel>_zkf_<operator>_<digest>`.
     """
-    elaborations = re.findall(r"\bholoso_iadds\s+#\(\s*\.W\(\d+\), \.MODE\((\d+)\)", result.verilog_output.verilog)
-    return [int(mode) for mode in elaborations]
+    pattern = rf"^_{result.module_name}_zkf_(\w+)_[0-9a-f]{{12}} u_\w+ \("
+    return set(re.findall(pattern, result.verilog_output.verilog, re.MULTILINE))
 
 
 def bounded(rng: np.random.Generator, lo: float, hi: float) -> float:
@@ -200,11 +189,11 @@ def log_uniform_positive(rng: np.random.Generator, lo: float, hi: float) -> floa
 
 def random_legal_bits(fmt: FloatFormat, rng: np.random.Generator) -> int:
     """A uniformly random finite, legal ZKF bit pattern (normals and +0; no inf/subnormal/negative zero)."""
-    span = 1 << fmt.width
+    span = 1 << fmt.wfull
     while True:
-        bits = int(rng.integers(0, span, dtype=np.uint64))
-        if fmt.is_legal(bits) and fmt.is_finite(bits):
-            return bits
+        value = FloatValue(fmt, int(rng.integers(0, span, dtype=np.uint64)))
+        if value.is_finite and value.canonicalize() == value:
+            return value.bits
 
 
 def spd_matrix(rng: np.random.Generator, n: int, diag_lo: float = 0.5, diag_hi: float = 2.0) -> np.ndarray:
@@ -221,12 +210,12 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
     Built directly from the bit layout so the extremes stay exact even where they would overflow a Python float.
     """
     frac_bits = fmt.wman - 1
-    sign_bit = 1 << (fmt.width - 1)
+    sign_bit = 1 << (fmt.wfull - 1)
     max_exp = (1 << fmt.wexp) - 2  # the all-ones exponent is infinity, so the largest finite exponent is one below it
     magnitudes = [
         0,  # canonical zero (ZKF has no negative zero, so it has no signed counterpart)
-        fmt.encode(0.5),
-        fmt.encode(1.0),
+        fmt.encode(0.5).bits,
+        fmt.encode(1.0).bits,
         1 << frac_bits,  # smallest normal: exponent 1, zero fraction
         (max_exp << frac_bits) | ((1 << frac_bits) - 1),  # largest finite: max exponent, all-ones fraction
     ]
@@ -240,15 +229,15 @@ def format_edge_bits(fmt: FloatFormat) -> list[int]:
 
 def build_ops(options: Options, width: int) -> OpConfig:
     """For the few tests that inspect a built machine with no kernel to settle its word, so they name the width."""
-    return OpConfig(options.operator, options.ffmt, IntFormat(width), options.wmultiplier or 0)
+    return OpConfig(options.operator, options.ffmt, IntFormat(width), options.wmultiplier)
 
 
 def hardware_name(primitive: Primitive) -> str:
-    """The hardware a primitive runs as: its operator for a pooled one, its own mnemonic for an inline one."""
+    """The hardware a primitive runs as: its operator for a pooled one, its own class for an inline one."""
     if isinstance(primitive, PooledPrimitive):
         return primitive.operator.name
     assert isinstance(primitive, InlinePrimitive)
-    return primitive.mnemonic
+    return type(primitive).__name__
 
 
 DEFAULT_FETCH_STAGES = 3
@@ -285,19 +274,20 @@ def with_instances(options: Options, instances: int) -> Options:
 
 def default_options(fmt: FloatFormat) -> Options:
     return Options(
-        OperatorOptions(
-            fadd=FAddOptions(),
-            fmul=FMulOptions(),
-            fdivsqrt=FDivsqrtOptions(),
-            fmul_ilog2=FMulILog2Options(),
-            filog2=FILog2Options(),
-            fcmp=FCmpOptions(),
+        operator=OperatorOptions(
+            fadd=lean.fadd(),
+            fmul=lean.fmul(),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(),
+            filog2=lean.filog2(),
+            fcmp=lean.fcmp(),
             # Configured at every format: ZKF alone knows which it supports, and refuses as the operator is built.
-            fexp2=FExp2Options(),
-            flog2=FLog2Options(),
-            fcordic=FCordicOptions(),
+            fexp2=lean.fexp2(),
+            flog2=lean.flog2(),
+            fcordic=lean.fcordic(),
         ),
         ffmt=fmt,
+        wmultiplier=lean.WMULTIPLIER,
     )
 
 
@@ -308,14 +298,14 @@ def default_mir(fmt: FloatFormat) -> MirOptions:
 def _fcmp_s1_options(fmt: FloatFormat) -> Options:
     """The default config with only the comparator's stage knob raised (latency 2)."""
     options = default_options(fmt)
-    operator = dataclasses.replace(options.operator, fcmp=FCmpOptions(stage_input=1))
+    operator = dataclasses.replace(options.operator, fcmp=lean.fcmp(stage_input=1))
     return dataclasses.replace(options, operator=operator)
 
 
 def staged_fadd_options(fmt: FloatFormat) -> Options:
     """The default config with only the adder's decode stage raised, guaranteeing an fadd latency of at least 2."""
     options = default_options(fmt)
-    operator = dataclasses.replace(options.operator, fadd=FAddOptions(stage_decode=1))
+    operator = dataclasses.replace(options.operator, fadd=lean.fadd(stage_core=FAddOptions.CoreStages.DECODE))
     return dataclasses.replace(options, operator=operator)
 
 
@@ -434,29 +424,57 @@ def staged_options(fmt: FloatFormat) -> Options:
     and handshake at a longer latency. Deliberately hardcoded -- it is a test fixture chosen for coverage, not a
     derived enumeration of operator knobs, so it stays valid as new (not necessarily stage-shaped) knobs are added.
     """
+    add = FAddOptions.CoreStages
     return Options(
-        OperatorOptions(
-            fadd=FAddOptions(
-                stage_input=1, stage_decode=1, stage_align=1, stage_normalize=1, stage_pack=1, stage_output=1
-            ),
-            fmul=FMulOptions(stage_input=1, stage_product=1, stage_pack=1, stage_output=1),
-            fdivsqrt=FDivsqrtOptions(stage_input=1, stage_pack=1, stage_output=1),
-            fmul_ilog2=FMulILog2Options(stage_input=1, stage_decode=1),
-            filog2=FILog2Options(stage_input=1),
-            fcmp=FCmpOptions(stage_input=1),
-            fexp2=FExp2Options(stage_input=1, stage_reduce=1, stage_product=1, stage_pack=1, stage_output=1),
-            flog2=FLog2Options(
-                stage_input=1, stage_product=1, stage_align=1, stage_product_final=1, stage_pack=1, stage_output=1
-            ),
-            # A stage combination tests/hdl/test_fcordic.py verifies both switching modes and fixed to either.
-            fcordic=FCordicOptions(stage_product=1, stage_normalize=1, stage_pack=1),
+        operator=OperatorOptions(
+            fadd=lean.fadd(stage_input=1, stage_core=add.DECODE | add.ALIGN | add.NORMALIZE | add.PACK),
+            fmul=lean.fmul(stage_input=1, stage_core_mul=1),
+            fdivsqrt=lean.fdivsqrt(stage_input=1, stage_output=1),
+            fmul_ilog2=lean.fmul_ilog2(stage_input=1, stage_core=FMulILog2Options.CoreStages.DECODE),
+            filog2=lean.filog2(stage_input=1),
+            fcmp=lean.fcmp(stage_input=1),
+            fexp2=lean.fexp2(stage_input=1, stage_core=FExp2Options.CoreStages.REDUCE, stage_output=1),
+            flog2=lean.flog2(stage_input=1, stage_core=FLog2Options.CoreStages.ALIGN, stage_output=1),
+            fcordic=lean.fcordic(stage_core=FCordicOptions.CoreStages.NORMALIZE | FCordicOptions.CoreStages.PACK),
+            iadds=IAddsOptions(stage_input=1, stage_output=1),
+            imuls=IMulsOptions(stage_input=1, stage_output=1),
+            idivs=IDivsOptions(stage_input=1, stage_output=1),
+            iabss=IAbssOptions(stage_input=1, stage_output=1),
+            ishft=IShftOptions(stage_input=1, stage_output=1),
+            ipopcnt=IPopcntOptions(stage_input=1, stage_output=1),
         ),
         ffmt=fmt,
+        wmultiplier=lean.WMULTIPLIER,
     )
 
 
 def staged_mir(fmt: FloatFormat) -> MirOptions:
     return mir_options(staged_options(fmt))
+
+
+def combinational_options(fmt: FloatFormat) -> Options:
+    """
+    No register anywhere a block can do without one, so every such operator is combinational: a firing reads its
+    operands and commits its result on one step, as an inline primitive does.
+    """
+    return Options(
+        operator=OperatorOptions(
+            fadd=lean.fadd(stage_output=0),
+            fmul=lean.fmul(stage_output=0),
+            fdivsqrt=lean.fdivsqrt(),
+            fmul_ilog2=lean.fmul_ilog2(stage_output=0),
+            filog2=lean.filog2(stage_output=0),
+            fcmp=lean.fcmp(stage_output=0),
+            frint=lean.frint(stage_output=0),
+            ffma=lean.ffma(stage_output=0),
+            fexp2=lean.fexp2(),
+            flog2=lean.flog2(),
+            fcordic=lean.fcordic(),
+            ffromint=lean.ffromint(stage_output=0),
+        ),
+        ffmt=fmt,
+        wmultiplier=lean.WMULTIPLIER,
+    )
 
 
 PIPELINE_OP_CASES = (
@@ -473,12 +491,14 @@ COMPARATOR_OP_CASES = (
 PIPELINE_OPTIONS_CASES = (
     OptionsCase("default", default_options),
     OptionsCase("staged", staged_options),
+    OptionsCase("combinational", combinational_options),
 )
 
 COMPARATOR_OPTIONS_CASES = (
     OptionsCase("default", default_options),
     OptionsCase("fcmp_s1", _fcmp_s1_options),
     OptionsCase("staged", staged_options),
+    OptionsCase("combinational", combinational_options),
 )
 
 

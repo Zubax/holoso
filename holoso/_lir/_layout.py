@@ -4,7 +4,7 @@ from dataclasses import replace
 from typing import assert_never
 
 from .._mir import Mir, MirBlock, MirBranch, MirRet, predecessors, reverse_postorder, successors
-from .._operators import HardwareOperator, PooledPrimitive, Primitive
+from .._operators import HardwareOperator, PooledPrimitive
 from .._util import ValueId
 from ._ir import *
 from ._schedule import Schedule, schedule_ops
@@ -12,21 +12,6 @@ from ._build_base import BlockOffsets, BlockSchedules
 from ._mir_facts import mir_operation
 
 _logger = logging.getLogger(__name__)
-
-
-def _control_word(mir: Mir, sched: Schedule, vid: ValueId, fetch_lag: int) -> tuple[int, Primitive]:
-    """
-    For a scheduled value, the last in-block control WORD in its block-local frame: the latest fetch step the op
-    still drives -- a pooled lane's write opcode on its commit step, or an inline op's combinational fire step one
-    fetch lag later. The result LANDS later still, uniformly for both classes, after the fetch pipeline; cross-block
-    overlap may place the terminator between the two, the word staying in the block and the landing spilling into
-    the single-predecessor successor frame.
-    """
-    primitive = mir_operation(mir, vid).primitive
-    commit = sched.commit_cycle(vid)
-    if isinstance(primitive, PooledPrimitive):
-        return pooled_write_word(commit), primitive
-    return inline_fire_cycle(commit, fetch_lag), primitive
 
 
 def _terminator_floor(mir: Mir, bid: int) -> int:
@@ -43,19 +28,21 @@ def _issue_side_envelope(
 ) -> int:
     """
     The issue-side floor an OVERLAPPING block's terminator may not precede: the latest control word still driven in the
-    block (a pooled write-enable or an inline fire step), the operand-read cycle of any firing (a latch-free wide read
-    samples one step past a latency-1 pooled op's control word), padded by the error-latch slack for any err-port op,
-    and the branch condition's read floor. The branch condition is the SINGLE owner of that read floor here, derived
-    from where the condition becomes readable: a PRODUCED condition lands inside the block at its landing; a SPILLED-IN
-    live-in condition (carried past an overlapped predecessor's shrunk terminator) lands at its carried landing cycle
-    (`livein_landing`); a RESIDENT live-in condition (an input, persistent state, or a fully-drained prior-block
-    result) is available from the block's first cycle and adds nothing.
+    block (a pooled write opcode on its commit step), the operand-read cycle of any firing (an inline op's fire step,
+    and a latch-free wide read one step past a latency-1 pooled op's write opcode), padded by the error-latch slack for
+    any err-port op, and the branch condition's read floor. A result lands later still, after the fetch pipeline; the
+    landing may spill past the terminator into the single-predecessor successor frame, but a control word may not. The
+    branch condition is the SINGLE owner of that read floor here, derived from where the condition becomes readable: a
+    PRODUCED condition lands inside the block at its landing; a SPILLED-IN live-in condition (carried past an overlapped
+    predecessor's shrunk terminator) lands at its carried landing cycle (`livein_landing`); a RESIDENT live-in condition
+    (an input, persistent state, or a fully-drained prior-block result) is available from the block's first cycle and
+    adds nothing.
     """
     floor = _terminator_floor(mir, block.id)
     for vid, issue in sched.issue_cycle.items():
-        word, primitive = _control_word(mir, sched, vid, fetch_lag)
+        primitive, word = mir_operation(mir, vid).primitive, sched.commit_cycle(vid)
         # Without the operand-read floor the op would fire past the shrunk terminator and never execute.
-        floor = max(floor, word, operand_read_cycle(primitive, issue, fetch_lag))
+        floor = max(floor, word, read_cycle(issue, fetch_lag))
         if isinstance(primitive, PooledPrimitive) and primitive.operator.error_ports:
             # The err_pc diagnostic latches `pc - fetch_lag` when this op's write-enable executes, which is
             # fetch_lag fetch steps after its write word. If the terminator redirected by then, err_pc would
@@ -174,9 +161,9 @@ def layout_offsets(
             term_offset = schedules.overlap_term_offset[bid]
         else:
             drains = bool(sched.issue_cycle) or bid in has_install_blocks
-            drain = boundary_step(makespan, fetch_lag) if drains else _terminator_floor(mir, bid)
+            drain = landing_cycle(makespan, fetch_lag) if drains else _terminator_floor(mir, bid)
             term_offset = max([drain, *schedules.block_inflight[bid].values()])
-        assert term_offset <= boundary_step(
+        assert term_offset <= landing_cycle(
             makespan, fetch_lag
         ), f"block {bid}: term_offset {term_offset} past the drain"
         block_term_offset[bid] = term_offset

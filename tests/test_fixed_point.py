@@ -32,7 +32,9 @@ class Monitor:
 
 
 def test_enumerations_and_records_cross_the_boundary_as_integers() -> None:
-    result = holoso.synthesize(Monitor().__call__, holoso.Options(holoso.OperatorOptions()), name="monitor")
+    result = holoso.synthesize(
+        Monitor().__call__, holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18), name="monitor"
+    )
     assert [p.name for p in result.input_ports] == ["in_sample_current_word", "in_sample_mode", "in_mask"]
     sim = result.numerical_model.elaborate()
     for word, mode, mask in ((100, Mode.RUN, Fault(0)), (-2048, Mode.RUN, Fault.SATURATED), (7, Mode.IDLE, Fault(0))):
@@ -64,7 +66,9 @@ def test_a_base_class_annotation_admits_a_subclass_record() -> None:
     def kernel(word: int) -> int:
         return _doubled(_Offset(word, 3))
 
-    result = holoso.synthesize(kernel, holoso.Options(holoso.OperatorOptions()), name="doubled")
+    result = holoso.synthesize(
+        kernel, holoso.Options(operator=holoso.OperatorOptions(), wmultiplier=18), name="doubled"
+    )
     sim = result.numerical_model.elaborate()
     for word in (0, 5, -2048):
         got = sim.run(word)[0]

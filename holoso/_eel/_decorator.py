@@ -1,10 +1,12 @@
 """
-Wrappers the compiler reads through to the function inside.
+Callables the compiler reads through to the function inside, as the compile root and as a callee alike.
 
-A JIT dispatcher is read through to the function it merely accelerates, as a target and as a callee, and is never
-state; one that declares types of its own converts rather than accelerates, so it is refused.
+A JIT dispatcher is read through to the function it merely accelerates, and is never state; one that declares types
+of its own converts rather than accelerates, so it is refused. A bound method and an instance called through its
+class's `__call__` are read through to the function, which then takes their receiver.
 """
 
+import inspect
 import sys
 import types
 
@@ -24,3 +26,29 @@ def plain_function(raw: object) -> types.FunctionType | None:
         return None
     inner = getattr(raw, "py_func", None)
     return inner if isinstance(inner, types.FunctionType) else None
+
+
+def mro_attr(klass: type, name: str, default: object = None) -> object:
+    """The undescriptored class attribute -- what a structural walk must judge."""
+    return next((k.__dict__[name] for k in klass.__mro__ if name in k.__dict__), default)
+
+
+def resolve_callable(raw: object) -> tuple[types.FunctionType, object | None] | None:
+    """
+    The plain-Python function behind any calling spelling, with the receiver CPython's descriptor protocol would
+    prepend to the arguments, if any. A C-level callable (a numpy dispatcher or ufunc, a partial) resolves to None.
+    """
+    if (fn := plain_function(raw)) is not None:
+        return fn, None
+    if inspect.ismethod(raw):
+        fn = plain_function(raw.__func__)
+        return None if fn is None else (fn, raw.__self__)
+    if callable(raw):
+        call_attr = mro_attr(type(raw), "__call__")
+        if isinstance(call_attr, staticmethod) and (fn := plain_function(call_attr.__func__)) is not None:
+            return fn, None
+        if isinstance(call_attr, classmethod) and (fn := plain_function(call_attr.__func__)) is not None:
+            return fn, type(raw)
+        if (fn := plain_function(call_attr)) is not None:
+            return fn, raw
+    return None

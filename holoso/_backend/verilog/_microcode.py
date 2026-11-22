@@ -16,7 +16,8 @@ emitter owns the Verilog text and renders each source key. The source lists them
 """
 
 from dataclasses import dataclass
-from string import ascii_letters
+
+from amaranth.hdl import Shape
 
 from ..._lir import (
     BoolRegRef,
@@ -34,9 +35,27 @@ from ..._lir import (
     read_sources_per_port,
     write_sources_per_register,
 )
-from ..._operators import FloatSignControl
+from ..._operators import FloatSignControl, has_sign_control
 
-PORT_LETTERS = ascii_letters  # operand position -> wrapper port letter (a, b, ...)
+
+def _has_issue_strobe(lir: Lir, inst: OperatorInstance) -> bool:
+    """Whether the instance's block takes `in_valid`: a block without it runs every cycle, its issues being implicit."""
+    return "in_valid" in lir.instances[inst].signature.members
+
+
+def immediate_inputs(lir: Lir, inst: OperatorInstance) -> list[str]:
+    """
+    The immediates of the instance's block, which each firing drives with a constant. A block specialized to one value
+    of an immediate no longer has it.
+    """
+    members = lir.instances[inst].signature.members
+    return [name for name in inst.operator.immediate_ports if name in members]
+
+
+def operand_names(lir: Lir, inst: OperatorInstance) -> list[str]:
+    """The operand ports the instance's block has: one built for fewer primitives lacks those only the others read."""
+    members = lir.instances[inst].signature.members
+    return [name for name in inst.operator.operand_ports if name in members]
 
 
 @dataclass
@@ -112,33 +131,31 @@ class WriteCodebook:
         return [(index + 1, source) for index, source in enumerate(self.sources)]
 
 
-# Microcode field names. Signal names (`s_<base>_*`) and field names (`uc_*`) live in disjoint namespaces.
-def f_issue(base: str) -> str:
-    return f"uc_issue_{base}"
+# Microcode field names, after the block ports they serve. Signal names (`s_<base>_*`) and field names (`uc_*`) live in
+# disjoint namespaces.
+def f_input(base: str, port: str) -> str:
+    """The field driving the block input `port` itself: the issue strobe, an immediate."""
+    return f"uc_{base}_{port}"
 
 
-def f_mode(base: str) -> str:
-    return f"uc_{base}_mode"
+def f_osgn(base: str, port: str) -> str:
+    return f"uc_{base}_{port}_sgn"
 
 
-def f_osgn(base: str, letter: str) -> str:
-    return f"uc_{base}_{letter}sgn"
-
-
-def f_rd(base: str, letter: str) -> str:
-    return f"uc_{base}_{letter}rd"
+def f_rd(base: str, port: str) -> str:
+    return f"uc_{base}_{port}_rd"
 
 
 def f_op(dst: RegRef | BoolRegRef) -> str:
     return f"uc_op_{dst.stable_label}"
 
 
-def tapped_lanes(events: list[WriteEvent]) -> set[tuple[OperatorInstance, int]]:
+def tapped_lanes(events: list[WriteEvent]) -> set[tuple[OperatorInstance, str]]:
     """The operator output ports some firing writes -- an untapped port gets no nets and is left unconnected."""
     return {(event.source.inst, event.source.port) for event in events if isinstance(event.source, OpWriteSource)}
 
 
-def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, int], ReadCodebook]:
+def read_codebook(lir: Lir) -> dict[tuple[OperatorInstance, str], ReadCodebook]:
     return {port: ReadCodebook(tuple(sources)) for port, sources in read_sources_per_port(lir).items()}
 
 
@@ -148,7 +165,7 @@ def write_codebook(events: list[WriteEvent]) -> dict[RegRef | BoolRegRef, WriteC
 
 def build_microcode(
     lir: Lir,
-    read_books: dict[tuple[OperatorInstance, int], ReadCodebook],
+    read_books: dict[tuple[OperatorInstance, str], ReadCodebook],
     write_books: dict[RegRef | BoolRegRef, WriteCodebook],
     events: list[WriteEvent],
 ) -> dict[str, Field]:
@@ -164,6 +181,7 @@ def build_microcode(
     fields: dict[str, Field] = {}
 
     def add(name: str, width: int, gated: bool = False) -> None:
+        assert name not in fields, f"two microcode fields named {name!r}"
         fields[name] = Field(name, width, [0 if gated else None] * depth, gated=gated)
 
     def put(name: str, step: int, value: int) -> None:
@@ -178,39 +196,39 @@ def build_microcode(
         field.values[step] = value
 
     for inst in lir.instances:
-        base = inst.name
-        add(f_issue(base), 1, gated=True)
-        if (port := inst.operator.mode_port) is not None:
-            add(f_mode(base), port.width)
-        for pos in range(len(inst.operator.operand_ports)):
-            if inst.operator.conditions_operand(pos):
-                add(f_osgn(base, PORT_LETTERS[pos]), 2)
-            read_book = read_books[(inst, pos)]
+        base, operator = inst.name, inst.operator
+        if _has_issue_strobe(lir, inst):
+            add(f_input(base, "in_valid"), 1, gated=True)
+        members = lir.instances[inst].signature.members
+        for port in immediate_inputs(lir, inst):
+            add(f_input(base, port), Shape.cast(members[port].shape).width)
+        for port in operand_names(lir, inst):
+            if has_sign_control(operator.operand_ports[port]):
+                add(f_osgn(base, port), 2)
+            read_book = read_books[(inst, port)]
             if len(read_book.sources) > 1:
-                add(f_rd(base, PORT_LETTERS[pos]), read_book.opcode_width)
+                add(f_rd(base, port), read_book.opcode_width)
     for dst, book in write_books.items():
         add(f_op(dst), book.opcode_width, gated=True)
 
     for op, block in ((op, block) for block in lir.blocks for op in block.ops):
         ci = lir.block_base[block.index] + op.issue_cycle
-        base = op.inst.name
+        base, operator = op.inst.name, op.inst.operator
         assert 0 <= ci < depth, f"microcode read/issue step out of range: ci={ci}, depth={depth}"
-        put(f_issue(base), ci, 1)
-        if (port := op.inst.operator.mode_port) is not None:
-            code = op.primitive.mode.code
-            assert code is not None
-            put(f_mode(base), ci, code)
-        for pos, operand in enumerate(op.operands):
+        if _has_issue_strobe(lir, op.inst):
+            put(f_input(base, "in_valid"), ci, 1)
+        for port in immediate_inputs(lir, op.inst):
+            put(f_input(base, port), ci, int(dict(op.drive.immediates)[port]))
+        for port, operand in zip(op.drive.operand_ports, op.operands, strict=True):
             assert isinstance(operand, WideOperand), "operators read only wide operands (no read lane)"
-            if op.inst.operator.conditions_operand(pos):
+            if has_sign_control(operator.operand_ports[port]):
                 assert isinstance(operand.conditioner, FloatSignControl)
-                put(f_osgn(base, PORT_LETTERS[pos]), ci, operand.conditioner.encoded)
+                put(f_osgn(base, port), ci, operand.conditioner.encoded)
             else:
-                # No sideband to drive: an integer port, or a float one its operator leaves without one.
-                assert operand.conditioner.is_identity
-            field = f_rd(base, PORT_LETTERS[pos])
+                assert operand.conditioner.is_identity, "an integer port has no sign field"
+            field = f_rd(base, port)
             if field in fields:
-                put(field, ci, read_books[(op.inst, pos)].code(operand.source))
+                put(field, ci, read_books[(op.inst, port)].code(operand.source))
 
     for event in events:
         assert 0 <= event.step < depth, f"microcode write step out of range: {event.step}, depth={depth}"
@@ -244,9 +262,11 @@ def pack(fields: dict[str, Field], step: int) -> int:
 
 
 def _op_expr(op: PooledScheduledOp) -> str:
-    dsts = "/".join(write.stable_label for write in op.writes)
     operands = [operand.stable_label for operand in op.operands]
-    return f"{dsts}={op.primitive.render(*operands)}"
+    return " & ".join(
+        f"{write.dst.stable_label}={primitive.render_output(write.inversion, *operands)}"
+        for primitive, write in op.taps.items()
+    )
 
 
 def _landing_label(dst: RegRef | BoolRegRef, source: WriteSource) -> str:

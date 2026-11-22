@@ -41,7 +41,6 @@ def specialize(hir: Hir, int_format: IntFormat) -> Hir | None:
     already holds -- so that clamp stays at lowering. A negative count and `imul_pow2` settle nothing here either.
     """
     width = int_format.width
-    assert width >= 2
     settled: set[ValueId] = set()
     for vid, node in hir.nodes.items():
         match node:

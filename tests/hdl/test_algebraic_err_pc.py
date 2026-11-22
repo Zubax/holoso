@@ -10,23 +10,14 @@ import pytest
 from cocotb.triggers import RisingEdge, Timer
 from cocotb_tools.runner import get_runner
 
-from holoso import (
-    FAddOptions,
-    FCmpOptions,
-    FDivsqrtOptions,
-    FILog2Options,
-    FMulILog2Options,
-    FMulOptions,
-    FloatFormat,
-    OperatorOptions,
-    Options,
-)
+from holoso import FloatFormat, OperatorOptions, Options
 from holoso._backend.verilog import generate
 from holoso._eel import lower
 from .._modelref import build_lir, mir_options, DEFAULT_UNROLL_MAX_TRIPS
 from holoso._mir import MirOptions, lower as lower_to_mir
 
-from .hdl_float_oracle import HDL_DIR, REPO_ROOT, SIMULATORS, build_args, drive_reset, sources, start_clock
+from .hdl_float_oracle import REPO_ROOT, SIMULATORS, build_args, drive_reset, start_clock
+from .. import _options as lean
 
 FMT = FloatFormat(6, 18)
 
@@ -34,15 +25,16 @@ FMT = FloatFormat(6, 18)
 def _ops() -> MirOptions:
     return mir_options(
         Options(
-            OperatorOptions(
-                fadd=FAddOptions(),
-                fmul=FMulOptions(),
-                fdivsqrt=FDivsqrtOptions(),
-                fmul_ilog2=FMulILog2Options(),
-                filog2=FILog2Options(),
-                fcmp=FCmpOptions(),
+            operator=OperatorOptions(
+                fadd=lean.fadd(),
+                fmul=lean.fmul(),
+                fdivsqrt=lean.fdivsqrt(),
+                fmul_ilog2=lean.fmul_ilog2(),
+                filog2=lean.filog2(),
+                fcmp=lean.fcmp(),
             ),
             ffmt=FMT,
+            wmultiplier=18,
         )
     )
 
@@ -178,11 +170,11 @@ def test_safe_algebraic_err_pc(sim: str, case: _Case) -> None:
     gen_dir = REPO_ROOT / "build" / "holoso_gen" / f"err_{case.name}_w{FMT.wexp}_{FMT.wman}"
     gen_dir.mkdir(parents=True, exist_ok=True)
     verilog_path = gen_dir / f"err_{case.name}.v"
-    verilog_path.write_text(generate(lir).verilog)
+    verilog_path.write_text(generate(lir, {}).verilog)
     build_dir = REPO_ROOT / "build" / "cocotb" / sim / f"err_{case.name}_w{FMT.wexp}_{FMT.wman}"
     vectors = [
         {
-            "bits": [FMT.encode(value) for value in vector.values],
+            "bits": [FMT.encode(value).bits for value in vector.values],
             "err_latched": vector.err_latched,
             "label": f"{case.name}{vector.values}",
         }
@@ -191,8 +183,7 @@ def test_safe_algebraic_err_pc(sim: str, case: _Case) -> None:
 
     runner = get_runner(sim)
     runner.build(
-        sources=[verilog_path, *sources()],
-        includes=[HDL_DIR],
+        sources=[verilog_path],
         hdl_toplevel=f"err_{case.name}",
         build_args=build_args(sim),
         build_dir=str(build_dir),

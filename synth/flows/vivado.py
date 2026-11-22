@@ -1,20 +1,23 @@
+import dataclasses
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
+from holoso import Options
+
 from .._detect import find_tool, require_tool
 from .._synth import CommandSpec, OocDesign, ResourceUse, SourceFile, SynthArtifact, SynthReport, run_logged
-from .._flow_id import DeviceClass, FlowId
+from .._flow_id import DeviceClass, FlowId, SpeedGrade
 from ._flow import Flow
 
 _TCL = "run_vivado.tcl"
-_DEFINES = "holoso_defines.v"
 _XDC = "ooc.xdc"
 _LOG = "vivado_run.log"  # our captured stdout; Vivado writes its own vivado.log in the same dir
 _UTIL = "utilization.rpt"
 _TIMING = "worst_path.rpt"
+_ROUTE = "route_status.rpt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,8 +25,10 @@ class XilinxPart:
     name: str = "xc7a35tcsg324-1"
 
     @classmethod
-    def of(cls, device_class: DeviceClass) -> Self:
-        return cls("xc7a100tcsg324-1") if device_class is DeviceClass.LARGE else cls()
+    def of(cls, device_class: DeviceClass, speed_grade: SpeedGrade) -> Self:
+        size = 100 if device_class is DeviceClass.LARGE else 35
+        grade = {SpeedGrade.SLOWEST: 1, SpeedGrade.MIDDLE: 2, SpeedGrade.FASTEST: 3}[speed_grade]
+        return cls(f"xc7a{size}tcsg324-{grade}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,12 +40,25 @@ class VivadoArtix7Flow(Flow):
     def available(self) -> bool:
         return find_tool("vivado") is not None
 
+    def attributed(self, options: Options) -> Options:
+        # Vivado keeps a `case` ROM in LUT logic (5-10 percent of a large machine) unless its read register carries the
+        # attribute, and so it does the exp2 and log2 tables; every other tool decides by its own cost model.
+        rom = {"rom_style": "block"}
+        operator = options.operator
+        fexp2, flog2 = operator.fexp2, operator.flog2
+        return dataclasses.replace(
+            options,
+            ucode_rom_attrs=options.ucode_rom_attrs or rom,
+            operator=dataclasses.replace(
+                operator,
+                fexp2=fexp2 if fexp2 is None or fexp2.rom_attrs else dataclasses.replace(fexp2, rom_attrs=rom),
+                flog2=flog2 if flog2 is None or flog2.rom_attrs else dataclasses.replace(flog2, rom_attrs=rom),
+            ),
+        )
+
     def prepare(self, design: OocDesign) -> SynthArtifact:
         top = design.top
-        # Vivado keeps a `case` ROM in LUT logic (5-10 percent of a large machine) unless its read register carries the
-        # attribute; every other tool decides by its own cost model.
-        defines = SourceFile(Path(_DEFINES), '`define HOLOSO_ATTRIBUTE_ROM (* rom_style = "block" *)\n')
-        src = [defines, *design.files]
+        src = design.files
         verilog_paths = [source.path for source in src]
 
         period_ns = 1000.0 / self.target_frequency_MHz
@@ -75,6 +93,7 @@ def _tcl(top: str, part: str, verilog_paths: list[Path]) -> str:
             "opt_design -directive Default",
             "place_design -directive Default",
             "route_design -directive Default -tns_cleanup",
+            f"report_route_status -file {_ROUTE}",
             f"report_utilization -file {_UTIL}",
             f"report_timing -delay_type max -max_paths 1 -nworst 1 -file {_TIMING}",
             "",
@@ -103,6 +122,13 @@ def _parse_utilization(text: str) -> dict[str, ResourceUse]:
 
 
 def _parse(flow: VivadoArtix7Flow, directory: Path) -> SynthReport:
+    # The timing report covers a partly routed design too, so a route the router gave up on is checked for itself.
+    route = (directory / _ROUTE).read_text(errors="replace")
+    unrouted = [int(n) for n in re.findall(r"# of (?:unrouted|nets with routing errors)[^:]*:\s*(\d+)", route)]
+    if not unrouted:
+        raise RuntimeError(f"Vivado route status report had no net counts; see {directory / _ROUTE}")
+    if any(unrouted):
+        raise RuntimeError(f"Vivado did not route the design completely; see {directory / _ROUTE}")
     timing = (directory / _TIMING).read_text(errors="replace")
     slack_match = re.search(r"Slack\s*\((?:MET|VIOLATED)\)\s*:\s*(-?[0-9.]+)\s*ns", timing)
     if not slack_match:
@@ -121,5 +147,5 @@ def _parse(flow: VivadoArtix7Flow, directory: Path) -> SynthReport:
         slack_ns=slack_ns,
         resources=resources,
         artifact_dir=directory,
-        logs=[directory / _LOG, directory / _TIMING, directory / _UTIL],
+        logs=[directory / _LOG, directory / _TIMING, directory / _UTIL, directory / _ROUTE],
     )

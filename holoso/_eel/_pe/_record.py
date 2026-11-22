@@ -1,8 +1,9 @@
 """
 Record classes: admissibility and field annotations. Admissibility is the
 structural-construction contract, not input validation: construction never runs host code, so a dataclass
-feature that makes construction RUN code (a user `__init__`, `__post_init__`, an `InitVar`, a
-`default_factory`) must refuse rather than silently diverge from the host. The generated-method detector is
+feature that makes construction RUN code (a user `__new__` or `__init__`, `__post_init__`, an `InitVar`, a
+`default_factory`) must refuse rather than silently diverge from the host, and so must a class whose overridden
+attribute lookup makes a field READ run code. The generated-method detector is
 the `"<string>"` co_filename dataclasses exec()s its methods from; a user `__init__` surviving under
 `init=True` carries a real filename, and `init=False` leaves object's C-level `__init__` with no `__code__`.
 """
@@ -12,6 +13,7 @@ import functools
 import inspect
 
 from .._annotations import unaliased
+from ._state import READ_PROTOCOLS, overridden_protocol
 
 
 def inadmissible_reason(cls: type) -> str | None:
@@ -28,6 +30,11 @@ def inadmissible_reason(cls: type) -> str | None:
         return f"the dataclass {name} defines its own __init__, which the compiler cannot run"
     if hasattr(cls, "__post_init__"):
         return f"the dataclass {name} defines __post_init__, which the compiler cannot run"
+    if cls.__new__ is not object.__new__:
+        return f"the dataclass {name} defines __new__, which the compiler cannot run"
+    protocol = overridden_protocol(cls, READ_PROTOCOLS)
+    if protocol is not None:
+        return f"the dataclass {name} overrides {protocol}, so reading its fields runs host code"
     for field in dataclasses.fields(cls):
         if field.default_factory is not dataclasses.MISSING:
             return f"the field {name}.{field.name} uses default_factory, which the compiler cannot run"

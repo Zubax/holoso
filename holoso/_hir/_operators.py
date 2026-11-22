@@ -414,7 +414,7 @@ class FloatHypot(Operator):
     arity: int
 
     def __post_init__(self) -> None:
-        assert self.arity >= 1
+        assert self.arity >= 0
 
     @property
     def signature(self) -> Signature:
